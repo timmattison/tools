@@ -61,8 +61,8 @@ pub struct FirstCycle {
 
 impl FirstCycle {
     /// Counts one update of the worker. An [`Update::Runs`] is a good fetch,
-    /// also when it holds no run. An [`Update::Suspect`] is a read too,
-    /// because the repository answered. An [`Update::Failed`] records the
+    /// also when it holds no run. An [`Update::Suspect`] and an
+    /// [`Update::SuspectSweep`] are reads too, because the repository answered. An [`Update::Failed`] records the
     /// repository and its error. An [`Update::Repos`] replaces the failed
     /// owners with the owners whose list failed. It skips an owner whose
     /// list was cut or suspect, because the list succeeded and the owner was read. Every
@@ -81,7 +81,9 @@ impl FirstCycle {
                     })
                     .collect();
             }
-            Update::Runs { .. } | Update::Suspect { .. } => self.read_a_repository = true,
+            Update::Runs { .. } | Update::Suspect { .. } | Update::SuspectSweep { .. } => {
+                self.read_a_repository = true;
+            }
             Update::Jobs { .. } | Update::JobsFailed { .. } | Update::CycleDone { .. } => {}
         }
     }

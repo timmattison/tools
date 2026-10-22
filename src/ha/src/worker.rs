@@ -29,7 +29,9 @@
 //! runs. A run that the sweep leaves out, and that is still active, makes the
 //! sweep suspect. The worker then repeats the sweep on the next cycle. It
 //! also repeats a sweep that failed, and a due sweep that a failed read of the
-//! recent answer skipped.
+//! recent answer skipped. A suspect sweep does not throw away a good recent
+//! answer. The worker then merges the recent answer with the last good sweep and
+//! sends [`Update::SuspectSweep`], so new runs show while the sweep stays wrong.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -87,12 +89,24 @@ pub enum Update {
         /// The error of the fetch.
         error: SourceError,
     },
-    /// The answer for one repository was suspect. The board keeps the last
-    /// good runs of the repository.
+    /// The recent answer for one repository was suspect. The board keeps the
+    /// last good runs of the repository.
     Suspect {
         /// The repository whose answer was suspect.
         repo: RepoName,
         /// Why the worker does not trust the answer.
+        reason: Suspicion,
+    },
+    /// The recent answer of one repository was good, but its sweep for active
+    /// runs was suspect. The runs are the recent answer and the runs of the last
+    /// good sweep that it lacks. The board shows them with the stale mark,
+    /// because the runs of the last good sweep can be old.
+    SuspectSweep {
+        /// The repository whose sweep was suspect.
+        repo: RepoName,
+        /// The runs to show: the recent answer and the runs of the last good sweep.
+        runs: Vec<Run>,
+        /// Why the worker does not trust the sweep.
         reason: Suspicion,
     },
     /// The jobs of one run. The worker sends them for a run that the screen
@@ -252,7 +266,8 @@ struct State {
     created_answers: Mutex<HashMap<RepoName, Vec<Run>>>,
     /// The runs whose jobs the screen shows now (the last `WatchJobs`).
     watched: BTreeSet<RunKey>,
-    /// The facts of each run of the last good answer, for each repository.
+    /// The facts of each run of the last shown runs, for each repository. A good
+    /// fetch and a fetch with a suspect sweep replace the entry.
     facts: Mutex<HashMap<RepoName, HashMap<RunId, RunFacts>>>,
     /// For each run with a job fetch, the facts of the run at that fetch. The
     /// mark is active when the run or one of its jobs was active, or when the
@@ -512,16 +527,17 @@ struct Fetch<'a> {
     /// The last good created answer of each repository. A good answer replaces
     /// the entry of its repository. No thread holds this lock during a call.
     created_answers: &'a Mutex<HashMap<RepoName, Vec<Run>>>,
-    /// The facts of the runs of each repository. A good fetch replaces the
-    /// entry of its repository. No thread holds this lock during a call.
+    /// The facts of the runs of each repository. A good fetch and a fetch with a
+    /// suspect sweep replace the entry of their repository. No thread holds this lock during a call.
     facts: &'a Mutex<HashMap<RepoName, HashMap<RunId, RunFacts>>>,
 }
 
 /// What the fetch of one repository gives.
 enum Fetched {
-    /// The runs to show: the recent answer and the runs of the last sweep.
-    Good(Vec<Run>),
-    /// GitHub answered with success, but `ha` does not trust the answer.
+    /// The recent answer is good. The runs are the recent answer and the runs of
+    /// the last good sweep. The suspicion is set when the sweep was suspect.
+    Good(Vec<Run>, Option<Suspicion>),
+    /// GitHub answered with success, but `ha` does not trust the recent answer.
     Suspect(Suspicion),
     /// A request failed.
     Failed(SourceError),
@@ -543,11 +559,14 @@ enum Fetched {
 /// keeps the last good data of its query, and the function tells the source to
 /// forget the cached pages of that query, so the next cycle asks GitHub again.
 /// A suspect sweep also marks the sweep of the repository as stale, and a good
-/// sweep clears the mark. A suspect answer of either query gives
-/// [`Fetched::Suspect`]. When both are suspect, the result holds the
-/// suspicion of the recent answer. A good result holds every run of the recent
-/// answer. It also holds each run of the last good sweep that the recent answer
-/// lacks. Those runs started before the window and still run.
+/// sweep clears the mark. A suspect recent answer gives [`Fetched::Suspect`],
+/// also when the sweep is suspect too, and the result then holds the suspicion
+/// of the recent answer. Otherwise the function stores the recent answer as the
+/// last good one and builds the runs. They are every run of the recent
+/// answer, and each run of the last good sweep that the recent answer lacks.
+/// Those runs started before the window and still run. A good sweep gives
+/// [`Fetched::Good`] with these runs and no suspicion. A suspect sweep gives
+/// [`Fetched::Good`] with the same runs and the suspicion of the sweep.
 fn fetch_repo<S: Source>(source: &S, repo: &RepoName, fetch: &Fetch<'_>) -> Fetched {
     let query = RunQuery::CreatedSince(fetch.since);
     let list = match source.runs_of(repo, query) {
@@ -608,7 +627,7 @@ fn fetch_repo<S: Source>(source: &S, repo: &RepoName, fetch: &Fetch<'_>) -> Fetc
                 .insert(repo.clone(), active.runs);
         }
     }
-    if let Some(suspicion) = created_suspicion.or(sweep_suspicion) {
+    if let Some(suspicion) = created_suspicion {
         return Fetched::Suspect(suspicion);
     }
     let mut runs = list.runs;
@@ -626,7 +645,7 @@ fn fetch_repo<S: Source>(source: &S, repo: &RepoName, fetch: &Fetch<'_>) -> Fetc
     {
         runs.extend(swept.iter().filter(|run| !known.contains(&run.id)).cloned());
     }
-    Fetched::Good(runs)
+    Fetched::Good(runs, sweep_suspicion)
 }
 
 /// The direct read of the newest run of one repository. The source answers at
@@ -767,9 +786,11 @@ fn suspicion_of_sweep<S: Source>(
 /// Fetches the runs of every repository with a pool of threads.
 ///
 /// After a good fetch the function stores the facts of the runs of that
-/// repository and sends [`Update::Runs`]. A failed fetch keeps the old facts and
-/// sends [`Update::Failed`]. A suspect fetch keeps the old facts too and sends
-/// [`Update::Suspect`].
+/// repository and sends [`Update::Runs`]. A fetch with a suspect sweep stores
+/// the facts of its runs the same way and sends [`Update::SuspectSweep`],
+/// because the screen shows these runs. A failed fetch keeps the old facts and
+/// sends [`Update::Failed`]. A suspect recent answer keeps the old facts too and
+/// sends [`Update::Suspect`].
 fn fetch_all<S: Source>(
     source: &S,
     repos: &BTreeSet<RepoName>,
@@ -779,16 +800,23 @@ fn fetch_all<S: Source>(
     let repos: Vec<&RepoName> = repos.iter().collect();
     run_pool(&repos, updates, |repo| {
         match fetch_repo(source, repo, fetch) {
-            Fetched::Good(runs) => {
+            Fetched::Good(runs, sweep_suspicion) => {
                 let facts = runs.iter().map(|run| (run.id, RunFacts::of(run))).collect();
                 fetch
                     .facts
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .insert((*repo).clone(), facts);
-                Update::Runs {
-                    repo: (*repo).clone(),
-                    runs,
+                match sweep_suspicion {
+                    Some(reason) => Update::SuspectSweep {
+                        repo: (*repo).clone(),
+                        runs,
+                        reason,
+                    },
+                    None => Update::Runs {
+                        repo: (*repo).clone(),
+                        runs,
+                    },
                 }
             }
             Fetched::Suspect(reason) => Update::Suspect {
@@ -2981,6 +3009,7 @@ mod tests {
             .filter(|update| match update {
                 Update::Runs { repo: r, .. }
                 | Update::Suspect { repo: r, .. }
+                | Update::SuspectSweep { repo: r, .. }
                 | Update::Failed { repo: r, .. } => *r == repo("acme/a"),
                 _ => false,
             })
@@ -3302,7 +3331,7 @@ mod tests {
         assert!(
             matches!(
                 answers.as_slice(),
-                [Update::Suspect {
+                [Update::SuspectSweep {
                     reason: Suspicion::LeftOut(Item::Run(RunId(1))),
                     ..
                 }]
@@ -3327,7 +3356,7 @@ mod tests {
         assert!(
             matches!(
                 answers.as_slice(),
-                [Update::Suspect {
+                [Update::SuspectSweep {
                     reason: Suspicion::NewestLeftOut(RunId(9)),
                     ..
                 }]
@@ -3544,7 +3573,7 @@ mod tests {
     /// The runs that one update carries, when it carries runs.
     fn runs_of_update(update: &Update) -> Option<&[Run]> {
         match update {
-            Update::Runs { runs, .. } => Some(runs),
+            Update::Runs { runs, .. } | Update::SuspectSweep { runs, .. } => Some(runs),
             _ => None,
         }
     }
@@ -3552,7 +3581,7 @@ mod tests {
     /// The suspicion that one update carries, when it carries one.
     fn suspicion_of_update(update: &Update) -> Option<&Suspicion> {
         match update {
-            Update::Suspect { reason, .. } => Some(reason),
+            Update::Suspect { reason, .. } | Update::SuspectSweep { reason, .. } => Some(reason),
             _ => None,
         }
     }
@@ -3585,9 +3614,10 @@ mod tests {
         ids.sort_unstable();
         assert_eq!(ids, vec![1, 5, 6], "{second:?}");
         assert!(
-            second.iter().filter_map(suspicion_of_update).any(|reason| {
-                *reason == Suspicion::LeftOut(Item::Run(RunId(1)))
-            }),
+            second
+                .iter()
+                .filter_map(suspicion_of_update)
+                .any(|reason| { *reason == Suspicion::LeftOut(Item::Run(RunId(1))) }),
             "{second:?}"
         );
     }
@@ -3606,7 +3636,7 @@ mod tests {
         assert!(
             matches!(
                 answers.as_slice(),
-                [Update::Suspect {
+                [Update::SuspectSweep {
                     reason: Suspicion::LeftOut(Item::Run(RunId(1))),
                     ..
                 }]
