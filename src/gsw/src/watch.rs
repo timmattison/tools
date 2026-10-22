@@ -9553,6 +9553,17 @@ mod push_loop_tests {
     }
 
     #[test]
+    fn g_with_only_the_pull_request_command_runs_it_alone() {
+        let (_screen, seen) = run_loop(vec![pr_probe_answered(), press_g(), Event::Quit]);
+        assert_eq!(
+            seen.issue_runs,
+            vec![crate::issue::Steps::new(Some(found_pr_command()), None)
+                .expect("one command is a step")],
+            "a key whose only command is the pull request command must run it alone",
+        );
+    }
+
+    #[test]
     fn a_second_g_while_a_run_is_in_flight_starts_nothing() {
         // A browser opening twice is two tabs nobody asked for.
         let (_screen, seen) = run_loop(vec![probe_answered(), press_g(), press_g(), Event::Quit]);
