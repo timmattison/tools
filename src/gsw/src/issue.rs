@@ -419,6 +419,40 @@ mod run_tests {
     }
 
     #[test]
+    fn the_two_steps_share_one_deadline() {
+        // The first step takes 2 s and fails. The second hangs. A second step
+        // with a deadline of its own cannot return before 2 s + 4 s.
+        let deadline = Duration::from_secs(4);
+        let stub = StubShell::new(
+            "case \"$2\" in\n  ggsp) sleep 2; exit 1 ;;\n  *) echo $$ > <PID_FILE>\n    exec sleep 30 ;;\nesac",
+        );
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let started = Instant::now();
+        let outcome = run_in(
+            stub.as_shell(),
+            &two_steps(),
+            workdir.path(),
+            scratch.path(),
+            deadline,
+        );
+        let elapsed = started.elapsed();
+        let ran_issue_command = steps_run(&stub.runs()).contains(&DEFAULT_ISSUE_COMMAND);
+        if ran_issue_command {
+            kill_now(stub.wait_for_pid());
+        }
+        assert!(
+            elapsed < Duration::from_secs(6),
+            "the press must stop at its own deadline, and it took {elapsed:?}",
+        );
+        let message = outcome.message().expect("a press that hangs must say so");
+        assert!(
+            message.contains("has not finished after 4s"),
+            "the message must name the deadline of the press: {message:?}",
+        );
+    }
+
+    #[test]
     fn a_run_that_worked_leaves_no_message() {
         let stub = StubShell::answering(0);
         let workdir = tempfile::tempdir().expect("tempdir");
