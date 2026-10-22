@@ -81,8 +81,11 @@ pub fn first_left_out<T: Listed>(
     in_range: impl Fn(&T) -> bool,
     read: impl FnMut(&T) -> Presence,
 ) -> Option<Suspicion> {
-    let _ = (last_good, answer, in_range, read);
-    None
+    let _ = (in_range, read);
+    last_good
+        .iter()
+        .find(|item| !answer.iter().any(|held| held.item() == item.item()))
+        .map(|item| Suspicion::LeftOut(item.item()))
 }
 
 #[cfg(test)]
