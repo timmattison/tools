@@ -2961,6 +2961,18 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_stale_repository_cell_no_wider_than_the_mark_shows_what_fit_makes() {
+        let name = "Lock-Free-Labs/expert-witness";
+        for (width, expected) in [(0, ""), (1, "…"), (2, "… "), (3, "\u{1F4A4} ")] {
+            assert_eq!(
+                fit_repo(name, true, width),
+                expected,
+                "a stale cell of width {width}"
+            );
+        }
+    }
+
     fn display_width(text: &str) -> usize {
         unicode_width::UnicodeWidthStr::width(text)
     }
