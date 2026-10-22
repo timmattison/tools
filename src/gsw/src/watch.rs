@@ -9753,7 +9753,7 @@ mod push_loop_tests {
             press_g(),
             Event::IssueFinished {
                 generation: Generation::default(),
-                outcome: crate::issue::IssueOutcome::new("ggs", true, &[], "exit status: 0"),
+                outcome: crate::issue::IssueOutcome::opened(),
             },
             press_g(),
             Event::Quit,
@@ -9775,9 +9775,8 @@ mod push_loop_tests {
             press_g(),
             Event::IssueFinished {
                 generation: Generation::default(),
-                outcome: crate::issue::IssueOutcome::new(
+                outcome: crate::issue::IssueOutcome::failed(
                     "ggs",
-                    false,
                     &["branch main names no issue".to_string()],
                     "exit status: 2",
                 ),
@@ -9798,7 +9797,7 @@ mod push_loop_tests {
             press_g(),
             Event::IssueFinished {
                 generation: Generation::default(),
-                outcome: crate::issue::IssueOutcome::new("ggs", true, &[], "exit status: 0"),
+                outcome: crate::issue::IssueOutcome::opened(),
             },
             Event::Quit,
         ]);
@@ -11437,9 +11436,8 @@ mod push_loop_tests {
     fn issue_failed_in(generation: Generation) -> Event {
         Event::IssueFinished {
             generation,
-            outcome: crate::issue::IssueOutcome::new(
+            outcome: crate::issue::IssueOutcome::failed(
                 "ggs",
-                false,
                 &[ISSUE_REFUSAL.to_string()],
                 "exit status: 2",
             ),

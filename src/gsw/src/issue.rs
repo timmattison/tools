@@ -133,18 +133,22 @@ pub(crate) struct IssueOutcome {
 }
 
 impl IssueOutcome {
-    /// The outcome of a run of `name` that wrote `lines` and ended the way
-    /// `status` reads.
+    /// The outcome of a press that opened a page.
+    ///
+    /// It says nothing, because the browser is the answer.
+    pub(crate) const fn opened() -> Self {
+        Self { message: None }
+    }
+
+    /// The outcome of a step of `name` that failed. The step wrote `lines`
+    /// and ended the way `status` reads.
     ///
     /// A failure says the last line that has text in it. That text comes from
     /// another program: `ggs` refuses with exit status 2 on a branch that
     /// names no issue, and that refusal is the whole reason the key did
     /// nothing. A failure that wrote nothing has only the status left to
     /// report, and a blank row under the frame would read as success.
-    pub(crate) fn new(name: &str, success: bool, lines: &[String], status: &str) -> Self {
-        if success {
-            return Self { message: None };
-        }
+    pub(crate) fn failed(name: &str, lines: &[String], status: &str) -> Self {
         Self {
             message: Some(
                 last_with_text(lines.iter().map(String::as_str))
@@ -234,13 +238,13 @@ fn run_in(
     // waits for zero, so it reports "still running" at once.
     let left = || deadline.saturating_sub(started.elapsed());
     let mut last = match run_step(shell, &steps.first, workdir, scratch, left(), deadline) {
-        StepEnd::Opened => return IssueOutcome { message: None },
+        StepEnd::Opened => return IssueOutcome::opened(),
         StepEnd::Failed(outcome) => outcome,
         StepEnd::StillRunning(outcome) => return outcome,
     };
     if let Some(then) = &steps.then {
         match run_step(shell, then, workdir, scratch, left(), deadline) {
-            StepEnd::Opened => return IssueOutcome { message: None },
+            StepEnd::Opened => return IssueOutcome::opened(),
             StepEnd::Failed(outcome) | StepEnd::StillRunning(outcome) => last = outcome,
         }
     }
@@ -322,7 +326,7 @@ fn run_step(
     match end {
         Ok(RunEnd::Exited(status)) if status.success() => StepEnd::Opened,
         Ok(RunEnd::Exited(status)) => {
-            StepEnd::Failed(IssueOutcome::new(name, false, &lines, &status.to_string()))
+            StepEnd::Failed(IssueOutcome::failed(name, &lines, &status.to_string()))
         }
         // A command that said why before it stopped answering is worth
         // showing, and the timeout is worth saying either way.
@@ -348,7 +352,7 @@ mod outcome_tests {
     #[test]
     fn a_run_that_worked_says_nothing() {
         // The browser is the answer.
-        let outcome = IssueOutcome::new("ggs", true, &lines("opened\n"), "exit status: 0");
+        let outcome = IssueOutcome::opened();
         assert_eq!(outcome.message(), None);
     }
 
@@ -356,9 +360,8 @@ mod outcome_tests {
     fn a_run_that_failed_says_the_last_line_the_child_wrote() {
         // `ggs` refuses on a branch that names no issue, and that refusal is
         // the whole reason the key did nothing.
-        let outcome = IssueOutcome::new(
+        let outcome = IssueOutcome::failed(
             "ggs",
-            false,
             &lines("looking\nbranch main names no issue\n"),
             "exit status: 2",
         );
@@ -367,14 +370,14 @@ mod outcome_tests {
 
     #[test]
     fn a_run_that_failed_ignores_the_empty_lines_after_its_last_word() {
-        let outcome = IssueOutcome::new("ggs", false, &lines("no issue\n\n   \n"), "exit: 2");
+        let outcome = IssueOutcome::failed("ggs", &lines("no issue\n\n   \n"), "exit: 2");
         assert_eq!(outcome.message(), Some("no issue"));
     }
 
     #[test]
     fn a_run_that_failed_in_silence_names_the_exit_status() {
         // A blank row under the frame reads as success.
-        let outcome = IssueOutcome::new("ggs", false, &[], "exit status: 2");
+        let outcome = IssueOutcome::failed("ggs", &[], "exit status: 2");
         assert_eq!(outcome.message(), Some("ggs failed (exit status: 2)"));
     }
 }
