@@ -1204,6 +1204,31 @@ mod tests {
     }
 
     #[test]
+    fn the_same_name_in_other_letter_case_is_listable() {
+        let stub = Stub::new("cat \"$dir/repo.out\"");
+        stub.file("repo.out", &ok_output(&repo_json("O/R", false)));
+        assert_eq!(stub.source().repo_is_listable(&repo("o/r")), Ok(true));
+    }
+
+    #[test]
+    fn a_server_error_is_an_error_and_a_bad_body_is_a_bad_response() {
+        let stub = Stub::new("cat \"$dir/repo.out\"");
+        stub.file(
+            "repo.out",
+            &http_output("HTTP/2.0 500 Server Error", "{\"message\":\"oops\"}"),
+        );
+        assert!(matches!(
+            stub.source().repo_is_listable(&repo("o/r")),
+            Err(SourceError::Http { status: 500, .. })
+        ));
+        stub.file("repo.out", &ok_output("[]"));
+        assert!(matches!(
+            stub.source().repo_is_listable(&repo("o/r")),
+            Err(SourceError::BadResponse(_))
+        ));
+    }
+
+    #[test]
     fn a_created_since_query_asks_for_one_hour_aligned_page() {
         let stub = Stub::new("cat \"$dir/page1.out\"");
         stub.file("page1.out", &ok_output(RUNS_JSON));
