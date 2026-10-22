@@ -16,6 +16,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::board::{Board, Row, Section};
 use crate::cancel::Confirm;
 use crate::job::{Job, RunnerName};
+use crate::queue::{EntryState, Outcome};
 use crate::run::{Run, RunState};
 use crate::settings::format_duration_setting;
 use crate::status::{OwnerProblem, Status, MESSAGE_LIFETIME};
@@ -289,6 +290,19 @@ fn marker(state: RunState) -> &'static str {
         RunState::Skipped => "💨",
         RunState::Other => " ",
     }
+}
+
+/// The marker and the word of a merge queue entry in the state `state`.
+fn entry_look(state: EntryState) -> (&'static str, &'static str) {
+    let _ = state;
+    (" ", "")
+}
+
+/// The marker and the word of a pull request that left the merge queue with
+/// `outcome`.
+fn departure_look(outcome: Outcome) -> (&'static str, &'static str) {
+    let _ = outcome;
+    (" ", "")
 }
 
 /// The time from one instant to a later one. A clock that runs behind makes
@@ -1089,6 +1103,10 @@ pub fn format_elapsed(d: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::collections::BTreeSet;
+
+    use crate::queue::{Departure, PullNumber, QueueEntry};
 
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
@@ -4782,5 +4800,309 @@ mod tests {
             let buffer = render_with(width, 16, &mut board, &loaded());
             assert_eq!(cyan_columns(&buffer, 2), Vec::<u16>::new(), "width {width}");
         }
+    }
+
+    /// An entry of the merge queue of `rust-lang/cargo`.
+    fn queue_entry(
+        pull: u64,
+        position: u32,
+        state: EntryState,
+        branch: &str,
+        title: &str,
+        enqueued: &str,
+    ) -> QueueEntry {
+        QueueEntry {
+            repo: repo("rust-lang/cargo"),
+            pull: PullNumber(pull),
+            title: title.to_owned(),
+            branch: branch.to_owned(),
+            position,
+            state,
+            enqueued_at: at(enqueued),
+            url: format!("https://github.com/rust-lang/cargo/pull/{pull}"),
+        }
+    }
+
+    /// A departure from the merge queue of `rust-lang/cargo`.
+    fn departure(
+        pull: u64,
+        outcome: Outcome,
+        branch: &str,
+        title: &str,
+        enqueued: Option<&str>,
+        left: &str,
+    ) -> Departure {
+        Departure {
+            repo: repo("rust-lang/cargo"),
+            pull: PullNumber(pull),
+            title: title.to_owned(),
+            branch: branch.to_owned(),
+            outcome,
+            enqueued_at: enqueued.map(at),
+            left_at: at(left),
+            url: format!("https://github.com/rust-lang/cargo/pull/{pull}"),
+        }
+    }
+
+    /// A board with two queue entries, three departures, and one running run.
+    fn queue_frame_board() -> Board {
+        let cargo = repo("rust-lang/cargo");
+        let mut board = Board::new(Duration::from_hours(8));
+        board.set_queues(&BTreeSet::from([cargo.clone()]));
+        board.set_queue(
+            &cargo,
+            Ok(vec![
+                queue_entry(
+                    16012,
+                    1,
+                    EntryState::AwaitingChecks,
+                    "fix-lockfile",
+                    "Fix the lockfile",
+                    "2026-10-14T11:55:00Z",
+                ),
+                queue_entry(
+                    16020,
+                    2,
+                    EntryState::Queued,
+                    "issue-577",
+                    "Add the flag",
+                    "2026-10-14T11:58:57Z",
+                ),
+            ]),
+            Ok(vec![
+                departure(
+                    16001,
+                    Outcome::Merged,
+                    "bump-serde",
+                    "Bump serde",
+                    Some("2026-10-14T10:00:00Z"),
+                    "2026-10-14T10:12:40Z",
+                ),
+                departure(
+                    15998,
+                    Outcome::Failed,
+                    "",
+                    "Remove the thing",
+                    Some("2026-10-14T09:00:00Z"),
+                    "2026-10-14T09:08:02Z",
+                ),
+                departure(
+                    15990,
+                    Outcome::Removed,
+                    "old-branch",
+                    "Old work",
+                    None,
+                    "2026-10-14T08:00:00Z",
+                ),
+            ]),
+        );
+        board.replace(
+            cargo,
+            vec![run(
+                39_149_840_084,
+                "rust-lang/cargo",
+                "CI",
+                "gh-readonly-queue/master/pr-16012",
+                "Merge group",
+                RunState::Running,
+                "2026-10-14T11:55:30Z",
+                "2026-10-14T11:59:00Z",
+            )],
+            now(),
+        );
+        board
+    }
+
+    /// One merge queue row as the render writes it at 120 columns.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a golden line states every cell"
+    )]
+    fn queue_golden(
+        marker: &str,
+        word: &str,
+        pull: u64,
+        branch: &str,
+        title: &str,
+        started: &str,
+        time: &str,
+    ) -> String {
+        let number = format!("#{pull}");
+        format!(
+            "{marker} {repo:<18} {word:<8} {number:>ID_WIDTH$} {branch:<12} {title:<40} {started:<11} {time:<7} {marker}",
+            repo = "rust-lang/cargo"
+        )
+    }
+
+    #[test]
+    fn a_frame_with_a_merge_queue_shows_the_queue_and_the_history_above_the_runs() {
+        let mut board = queue_frame_board();
+        let text = lines(&render_with(120, 14, &mut board, &loaded()));
+        assert_eq!(
+            text[1..9],
+            [
+                "Merge queue · 2".to_owned(),
+                queue_golden(
+                    "🏃",
+                    "checks",
+                    16012,
+                    "fix-lockfile",
+                    "Fix the lockfile",
+                    "11:55:00",
+                    "5m 00s"
+                ),
+                queue_golden(
+                    "⏳",
+                    "waiting",
+                    16020,
+                    "issue-577",
+                    "Add the flag",
+                    "11:58:57",
+                    "1m 03s"
+                ),
+                "Merge history · Last 8h · 1 merged · 1 failed · 1 removed".to_owned(),
+                queue_golden(
+                    "✅",
+                    "merged",
+                    16001,
+                    "bump-serde",
+                    "Bump serde",
+                    "10:00:00",
+                    "12m 40s"
+                ),
+                queue_golden(
+                    "❌",
+                    "failed",
+                    15998,
+                    "",
+                    "Remove the thing",
+                    "09:00:00",
+                    "8m 02s"
+                ),
+                queue_golden("🪦", "removed", 15990, "old-branch", "Old work", "", ""),
+                "Running · 1".to_owned(),
+            ]
+        );
+        assert!(text[9].starts_with("🏃 rust-lang/cargo"), "{:?}", text[9]);
+    }
+
+    #[test]
+    fn the_merge_headers_give_no_counts_before_the_first_refresh_ends() {
+        let mut board = queue_frame_board();
+        let text = lines(&render_with(120, 14, &mut board, &Status::default()));
+        assert_eq!(text[1], "Merge queue");
+        assert_eq!(text[4], "Merge history · Last 8h");
+    }
+
+    #[test]
+    fn empty_merge_sections_say_so_and_say_loading_before_the_first_refresh_ends() {
+        let mut board = Board::new(Duration::from_hours(8));
+        board.set_queues(&BTreeSet::from([repo("rust-lang/cargo")]));
+        let text = lines(&render_with(80, 12, &mut board, &loaded()));
+        assert_eq!(
+            text[1..5],
+            [
+                "Merge queue · 0",
+                "   No pull requests in the merge queue.",
+                "Merge history · Last 8h · 0 merged · 0 failed · 0 removed",
+                "   No pull request left the merge queue in the last 8h.",
+            ]
+        );
+        let text = lines(&render_with(80, 12, &mut board, &Status::default()));
+        assert_eq!(text[2], "   Loading…");
+        assert_eq!(text[4], "   Loading…");
+    }
+
+    #[test]
+    fn each_entry_state_has_its_marker_and_its_word() {
+        let states = [
+            EntryState::Queued,
+            EntryState::AwaitingChecks,
+            EntryState::Mergeable,
+            EntryState::Locked,
+            EntryState::Unmergeable,
+            EntryState::Other,
+        ];
+        assert_eq!(
+            states.map(entry_look),
+            [
+                ("⏳", "waiting"),
+                ("🏃", "checks"),
+                ("✅", "ready"),
+                ("🔒", "merging"),
+                ("❌", "blocked"),
+                (" ", ""),
+            ]
+        );
+    }
+
+    #[test]
+    fn each_outcome_has_its_marker_and_its_word() {
+        let outcomes = [Outcome::Merged, Outcome::Failed, Outcome::Removed];
+        assert_eq!(
+            outcomes.map(departure_look),
+            [("✅", "merged"), ("❌", "failed"), ("🪦", "removed")]
+        );
+    }
+
+    #[test]
+    fn each_merge_marker_is_two_columns_and_each_word_fits_the_workflow_cell() {
+        let states = [
+            EntryState::Queued,
+            EntryState::AwaitingChecks,
+            EntryState::Mergeable,
+            EntryState::Locked,
+            EntryState::Unmergeable,
+        ];
+        let outcomes = [Outcome::Merged, Outcome::Failed, Outcome::Removed];
+        let looks = states
+            .map(entry_look)
+            .into_iter()
+            .chain(outcomes.map(departure_look));
+        for (marker, word) in looks {
+            assert_eq!(text_width(marker), MARKER_WIDTH, "{marker}");
+            assert_eq!(marker.chars().count(), 1, "{marker} is one code point");
+            assert!(!word.is_empty(), "{marker} has a word");
+            assert!(word.len() <= MAX_WORKFLOW_WIDTH, "{word}");
+        }
+    }
+
+    #[test]
+    fn the_pull_request_number_ends_in_the_column_of_the_run_id() {
+        let mut board = queue_frame_board();
+        let text = lines(&render_with(120, 14, &mut board, &loaded()));
+        let run_end = last_digit_column(&text[9], "39149840084");
+        assert!(run_end.is_some(), "{:?}", text[9]);
+        for (y, digits) in [(2, "16012"), (3, "16020"), (5, "16001"), (7, "15990")] {
+            assert_eq!(last_digit_column(&text[y], digits), run_end, "{:?}", text[y]);
+        }
+    }
+
+    #[test]
+    fn the_selected_queue_row_is_reversed_across_the_full_width() {
+        let mut board = queue_frame_board();
+        let buffer = render_with(120, 14, &mut board, &loaded());
+        let reversed = |x: u16, y: u16| buffer[(x, y)].modifier.contains(Modifier::REVERSED);
+        assert!(reversed(0, 2), "the marker of the selected entry");
+        assert!(reversed(60, 2), "the middle of the selected entry");
+        assert!(reversed(118, 2), "the right marker of the selected entry");
+        for y in [1_u16, 3, 4, 5, 9] {
+            assert!(!reversed(60, y), "line {y}");
+        }
+    }
+
+    #[test]
+    fn the_status_line_names_a_failed_check_for_merge_queues() {
+        let status = Status {
+            queue_error: Some("GitHub refused the GraphQL query: API rate limit exceeded".to_owned()),
+            ..loaded()
+        };
+        let line = status_line(120, &status);
+        assert!(
+            line.starts_with(
+                "⚠ merge queues: GitHub refused the GraphQL query: API rate limit exceeded"
+            ),
+            "{line}"
+        );
     }
 }
