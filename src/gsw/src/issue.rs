@@ -393,6 +393,32 @@ mod run_tests {
     }
 
     #[test]
+    fn a_pull_request_command_still_running_at_the_deadline_starts_no_second_step() {
+        let stub = StubShell::new(
+            "case \"$2\" in\n  ggsp) echo $$ > <PID_FILE>\n    exec sleep 30 ;;\n  *) exit 0 ;;\nesac",
+        );
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let outcome = run_in(
+            stub.as_shell(),
+            &two_steps(),
+            workdir.path(),
+            scratch.path(),
+            HANG_DEADLINE,
+        );
+        assert_eq!(
+            steps_run(&stub.runs()),
+            [PR_COMMAND],
+            "a step that is still running must not hand the press to the next step",
+        );
+        assert_eq!(
+            outcome.message(),
+            Some(format!("ggsp has not finished after {}s", HANG_DEADLINE.as_secs()).as_str()),
+        );
+        kill_now(stub.wait_for_pid());
+    }
+
+    #[test]
     fn a_run_that_worked_leaves_no_message() {
         let stub = StubShell::answering(0);
         let workdir = tempfile::tempdir().expect("tempdir");
