@@ -158,6 +158,22 @@ pub(crate) fn run(shell: &OsStr, steps: &Steps, workdir: &Path) -> IssueOutcome 
 
 /// Run `steps` in `workdir`, with the two files of each run in `scratch`, and
 /// stop waiting after `deadline`.
+///
+/// The steps run in order, and these four rules decide what a step means:
+///
+/// 1. **One press keeps one deadline.** Each step gets what is left of
+///    `deadline`. Where nothing is left, the next step still starts, with a
+///    wait of zero, and it reports "still running" at once.
+/// 2. A step that exits 0 completes the press. The outcome has no message,
+///    and later steps do not run.
+/// 3. A step that exits non-zero, or that cannot start, hands the press to
+///    the next step. After the last step, the outcome is the outcome of the
+///    last step that ran. The words of an earlier step never reach the
+///    message.
+/// 4. A step that is still running at the deadline ends the press. The next
+///    step does not start, because two commands that open a page at the same
+///    time is worse than one that is slow. The message names that step and
+///    the whole deadline of the press.
 fn run_in(
     shell: &OsStr,
     steps: &Steps,
@@ -165,7 +181,30 @@ fn run_in(
     scratch: &Path,
     deadline: Duration,
 ) -> IssueOutcome {
-    run_step(shell, &steps.first, workdir, scratch, deadline)
+    let mut last = match run_step(shell, &steps.first, workdir, scratch, deadline) {
+        StepEnd::Opened => return IssueOutcome { message: None },
+        StepEnd::Failed(outcome) => outcome,
+        StepEnd::StillRunning(outcome) => return outcome,
+    };
+    if let Some(then) = &steps.then {
+        match run_step(shell, then, workdir, scratch, deadline) {
+            StepEnd::Opened => return IssueOutcome { message: None },
+            StepEnd::Failed(outcome) | StepEnd::StillRunning(outcome) => last = outcome,
+        }
+    }
+    last
+}
+
+/// How one step of a press ended.
+enum StepEnd {
+    /// The command exited 0, so the page is open.
+    Opened,
+    /// The command exited non-zero, or it could not start. The outcome holds
+    /// what to say if no later step opens the page.
+    Failed(IssueOutcome),
+    /// The command was still running at the deadline. The outcome holds the
+    /// timeout, and the press ends here.
+    StillRunning(IssueOutcome),
 }
 
 /// Run `command` in `workdir`, with the two files of the run in `scratch`, and
@@ -198,13 +237,15 @@ fn run_step(
     workdir: &Path,
     scratch: &Path,
     deadline: Duration,
-) -> IssueOutcome {
+) -> StepEnd {
     let name = command.name();
     // The shell is gone, it cannot be started, there is nowhere to put what it
     // writes, or it cannot be asked about. Rare, and worth saying plainly:
     // every other failure here is the child's own words.
-    let cannot_run = |error: std::io::Error| IssueOutcome {
-        message: Some(format!("cannot run {name}: {error}")),
+    let cannot_run = |error: std::io::Error| {
+        StepEnd::Failed(IssueOutcome {
+            message: Some(format!("cannot run {name}: {error}")),
+        })
     };
     let run = match start_run(run_command(shell, command, workdir), scratch) {
         Ok(run) => run,
@@ -223,8 +264,9 @@ fn run_step(
     lines.append(&mut reasons);
 
     match end {
+        Ok(RunEnd::Exited(status)) if status.success() => StepEnd::Opened,
         Ok(RunEnd::Exited(status)) => {
-            IssueOutcome::new(name, status.success(), &lines, &status.to_string())
+            StepEnd::Failed(IssueOutcome::new(name, false, &lines, &status.to_string()))
         }
         // A command that said why before it stopped answering is worth
         // showing, and the timeout is worth saying either way.
@@ -232,7 +274,7 @@ fn run_step(
             std::thread::spawn(move || {
                 let _ = child.wait();
             });
-            IssueOutcome::unfinished(name, &lines, deadline)
+            StepEnd::StillRunning(IssueOutcome::unfinished(name, &lines, deadline))
         }
         Err(error) => cannot_run(error),
     }
