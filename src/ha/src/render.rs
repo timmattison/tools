@@ -16,7 +16,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::board::{Board, Row, Section};
 use crate::cancel::Confirm;
 use crate::job::{Job, RunnerName};
-use crate::queue::{EntryState, Outcome};
+use crate::queue::{Departure, EntryState, Outcome, PullNumber, QueueEntry};
 use crate::run::{Run, RunState};
 use crate::settings::format_duration_setting;
 use crate::status::{OwnerProblem, Status, MESSAGE_LIFETIME};
@@ -293,16 +293,43 @@ fn marker(state: RunState) -> &'static str {
 }
 
 /// The marker and the word of a merge queue entry in the state `state`.
+///
+/// The word stands in the workflow cell and fits in [`MAX_WORKFLOW_WIDTH`]
+/// columns. A pull request has no workflow, and the word says what the entry
+/// waits for. The markers follow those of a run: `⏳` waits, `🏃` runs its
+/// checks, `✅` passed its checks, and `❌` cannot merge. `🔒` (U+1F512, LOCK)
+/// is the one new marker: GitHub merges the entry now, and its state is
+/// `LOCKED`. It is one code point of East Asian Width `W`, as each marker of
+/// [`marker`] is. A state that GitHub does not document has a blank marker and
+/// no word.
 fn entry_look(state: EntryState) -> (&'static str, &'static str) {
-    let _ = state;
-    (" ", "")
+    match state {
+        EntryState::Queued => ("⏳", "waiting"),
+        EntryState::AwaitingChecks => ("🏃", "checks"),
+        EntryState::Mergeable => ("✅", "ready"),
+        EntryState::Locked => ("🔒", "merging"),
+        EntryState::Unmergeable => ("❌", "blocked"),
+        EntryState::Other => (" ", ""),
+    }
 }
 
 /// The marker and the word of a pull request that left the merge queue with
 /// `outcome`.
+///
+/// The markers are those of a finished run: a merge passed (`✅`), a removal
+/// by the queue failed (`❌`), and a removal by a person cancelled the merge
+/// (`🪦`).
 fn departure_look(outcome: Outcome) -> (&'static str, &'static str) {
-    let _ = outcome;
-    (" ", "")
+    match outcome {
+        Outcome::Merged => ("✅", "merged"),
+        Outcome::Failed => ("❌", "failed"),
+        Outcome::Removed => ("🪦", "removed"),
+    }
+}
+
+/// The text of a pull request number in the ID part, for example `#16012`.
+fn pull_text(pull: PullNumber) -> String {
+    format!("#{}", pull.0)
 }
 
 /// The time from one instant to a later one. A clock that runs behind makes
@@ -356,6 +383,72 @@ where
         [&repo, &run.workflow, &run.branch, &run.title],
         &run.id.0.to_string(),
         &format_started(run.started_at, now, tz),
+        &time,
+    )
+}
+
+/// The line of one pull request in a merge queue.
+///
+/// The row uses the columns of a run row. The workflow cell holds the word of
+/// the state of the entry, and the ID part holds the number of the pull
+/// request. The started cell is the time that the pull request joined the
+/// queue, and the time cell is how long it has waited until `now`.
+fn entry_line<Tz: TimeZone>(
+    entry: &QueueEntry,
+    now: DateTime<Utc>,
+    tz: &Tz,
+    widths: Widths,
+) -> String
+where
+    Tz::Offset: Display,
+{
+    let (marker, word) = entry_look(entry.state);
+    cells(
+        widths,
+        marker,
+        [&entry.repo.to_string(), word, &entry.branch, &entry.title],
+        &pull_text(entry.pull),
+        &format_started(entry.enqueued_at, now, tz),
+        &format_elapsed(span(entry.enqueued_at, now)),
+    )
+}
+
+/// The line of one pull request that left a merge queue.
+///
+/// The row uses the columns of a run row. The workflow cell holds the word of
+/// the outcome, and the ID part holds the number of the pull request. The
+/// started cell is the time that the pull request joined the queue, and the
+/// time cell is how long it stayed in the queue. Both cells are empty when
+/// the time that it joined is not known.
+fn departure_line<Tz: TimeZone>(
+    departure: &Departure,
+    now: DateTime<Utc>,
+    tz: &Tz,
+    widths: Widths,
+) -> String
+where
+    Tz::Offset: Display,
+{
+    let (marker, word) = departure_look(departure.outcome);
+    let started = departure
+        .enqueued_at
+        .map(|at| format_started(at, now, tz))
+        .unwrap_or_default();
+    let time = departure
+        .enqueued_at
+        .map(|at| format_elapsed(span(at, departure.left_at)))
+        .unwrap_or_default();
+    cells(
+        widths,
+        marker,
+        [
+            &departure.repo.to_string(),
+            word,
+            &departure.branch,
+            &departure.title,
+        ],
+        &pull_text(departure.pull),
+        &started,
         &time,
     )
 }
@@ -482,7 +575,12 @@ fn header_line(
         (Section::Recent, true) => {
             format!("Last {window} · {passed} passed · {failed} failed · {cancelled} cancelled")
         }
-        (Section::Queue | Section::History, _) => String::new(),
+        (Section::Queue, false) => "Merge queue".to_owned(),
+        (Section::Queue, true) => format!("Merge queue · {count}"),
+        (Section::History, false) => format!("Merge history · Last {window}"),
+        (Section::History, true) => format!(
+            "Merge history · Last {window} · {passed} merged · {failed} failed · {cancelled} removed"
+        ),
     }
 }
 
@@ -501,16 +599,25 @@ fn empty_line(section: Section, window: Duration, loaded: bool) -> String {
             "No runs finished in the last {}.",
             format_duration_setting(window)
         )),
-        Section::Queue | Section::History => String::new(),
+        Section::Queue => in_repo_column("No pull requests in the merge queue."),
+        Section::History => in_repo_column(&format!(
+            "No pull request left the merge queue in the last {}.",
+            format_duration_setting(window)
+        )),
     }
 }
+
+/// The name that the status line gives to a failed check for merge queues. A
+/// check covers many repositories, thus it names none of them.
+const QUEUE_CHECK_NAME: &str = "merge queues";
 
 /// The first part of the status line, or `None` when there is nothing to say.
 ///
 /// A live message wins over the errors. A message that is
 /// [`MESSAGE_LIFETIME`] old or older is absent, thus the errors show. The
-/// errors come from the board (one for each repository) and from the status
-/// (one for each owner). The text names the first and counts the rest.
+/// errors come from the board (one for the runs and one for the merge queue
+/// of each repository) and from the status (one for each owner, and one for
+/// the check for merge queues). The text names the first and counts the rest.
 fn lead(board: &Board, status: &Status, now: DateTime<Utc>) -> Option<String> {
     if let Some(message) = status.message_at(now) {
         return Some(message.text.clone());
@@ -525,6 +632,12 @@ fn lead(board: &Board, status: &Status, now: DateTime<Utc>) -> Option<String> {
             .owner_errors
             .iter()
             .map(|(owner, problem)| (owner.to_string(), problem.to_string())),
+    );
+    errors.extend(
+        status
+            .queue_error
+            .iter()
+            .map(|error| (QUEUE_CHECK_NAME.to_owned(), error.clone())),
     );
     if let Some((name, error)) = errors.first() {
         let more = match errors.len() - 1 {
@@ -841,7 +954,19 @@ pub fn draw<Tz: TimeZone>(
                 let y = put_line(buffer, index + 1, &line);
                 reverse_if(*selected, buffer, area, y);
             }
-            Row::Entry { .. } | Row::Departure { .. } => {}
+            Row::Entry { entry, selected } => {
+                let line = entry_line(entry, now, tz, widths);
+                let y = put(buffer, index + 1, &line, Style::default());
+                reverse_if(*selected, buffer, area, y);
+            }
+            Row::Departure {
+                departure,
+                selected,
+            } => {
+                let line = departure_line(departure, now, tz, widths);
+                let y = put(buffer, index + 1, &line, Style::default());
+                reverse_if(*selected, buffer, area, y);
+            }
             Row::JobsLoading => put_status_row(buffer, index + 1, JOBS_LOADING),
             Row::NoJobs => put_status_row(buffer, index + 1, NO_JOBS),
             Row::JobsError(error) => {
@@ -4914,10 +5039,6 @@ mod tests {
     }
 
     /// One merge queue row as the render writes it at 120 columns.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "a golden line states every cell"
-    )]
     fn queue_golden(
         marker: &str,
         word: &str,
@@ -5074,7 +5195,12 @@ mod tests {
         let run_end = last_digit_column(&text[9], "39149840084");
         assert!(run_end.is_some(), "{:?}", text[9]);
         for (y, digits) in [(2, "16012"), (3, "16020"), (5, "16001"), (7, "15990")] {
-            assert_eq!(last_digit_column(&text[y], digits), run_end, "{:?}", text[y]);
+            assert_eq!(
+                last_digit_column(&text[y], digits),
+                run_end,
+                "{:?}",
+                text[y]
+            );
         }
     }
 
@@ -5094,7 +5220,9 @@ mod tests {
     #[test]
     fn the_status_line_names_a_failed_check_for_merge_queues() {
         let status = Status {
-            queue_error: Some("GitHub refused the GraphQL query: API rate limit exceeded".to_owned()),
+            queue_error: Some(
+                "GitHub refused the GraphQL query: API rate limit exceeded".to_owned(),
+            ),
             ..loaded()
         };
         let line = status_line(120, &status);
