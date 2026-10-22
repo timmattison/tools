@@ -47,27 +47,28 @@ pub enum Verdict {
 /// This type holds the one definition of "the cycle read no target".
 /// A good fetch that finds zero runs is a success. A failed target is a
 /// repository whose fetch failed or an owner whose list failed. An owner
-/// list that GitHub cut is a warning and does not count as a failure.
+/// list that GitHub cut is a warning and does not count as a failure. A suspect
+/// owner list succeeded, thus it does not count either.
 #[derive(Debug, Default)]
 pub struct FirstCycle {
     /// Set when one repository fetch succeeded.
     read_a_repository: bool,
     /// The error of each repository whose fetch failed.
     failed_repositories: BTreeMap<RepoName, SourceError>,
-    /// The error of each owner whose list failed. A cut list is not here.
+    /// The error of each owner whose list failed. A cut or suspect list is not here.
     failed_owners: BTreeMap<OwnerName, SourceError>,
 }
 
 impl FirstCycle {
     /// Counts one update of the worker. An [`Update::Runs`] is a good fetch,
-    /// also when it holds no run. An [`Update::Failed`] records the
+    /// also when it holds no run. An [`Update::Suspect`] and an
+    /// [`Update::SuspectSweep`] are reads too, because the repository answered. An [`Update::Failed`] records the
     /// repository and its error. An [`Update::Repos`] replaces the failed
     /// owners with the owners whose list failed. It skips an owner whose
-    /// list was cut, because a cut list is a warning, not a failure. Every
+    /// list was cut or suspect, because the list succeeded and the owner was read. Every
     /// other update changes nothing.
     pub fn note(&mut self, update: &Update) {
         match update {
-            Update::Runs { .. } => self.read_a_repository = true,
             Update::Failed { repo, error } => {
                 self.failed_repositories.insert(repo.clone(), error.clone());
             }
@@ -76,9 +77,12 @@ impl FirstCycle {
                     .iter()
                     .filter_map(|(owner, problem)| match problem {
                         OwnerProblem::Failed(error) => Some((owner.clone(), error.clone())),
-                        OwnerProblem::Cut(_) => None,
+                        OwnerProblem::Cut(_) | OwnerProblem::Suspect(_) => None,
                     })
                     .collect();
+            }
+            Update::Runs { .. } | Update::Suspect { .. } | Update::SuspectSweep { .. } => {
+                self.read_a_repository = true;
             }
             Update::Jobs { .. } | Update::JobsFailed { .. } | Update::CycleDone { .. } => {}
         }
@@ -159,6 +163,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::suspect::{Item, Suspicion};
 
     fn repo(name: &str) -> RepoName {
         RepoName::parse(name).unwrap()
@@ -243,10 +248,57 @@ mod tests {
     }
 
     #[test]
+    fn a_suspect_owner_list_is_not_a_failure() {
+        let mut cycle = FirstCycle::default();
+        cycle.note(&Update::Repos {
+            repos: BTreeSet::new(),
+            listed_at: BTreeMap::new(),
+            owner_errors: vec![(
+                OwnerName::parse("acme").unwrap(),
+                OwnerProblem::Suspect(Suspicion::LeftOut(Item::Repo(repo("acme/a")))),
+            )],
+        });
+        cycle.note(&failed("zzz/r"));
+        assert!(cycle.verdict(None).is_err(), "the failed repository counts");
+        let mut only_suspect = FirstCycle::default();
+        only_suspect.note(&Update::Repos {
+            repos: BTreeSet::new(),
+            listed_at: BTreeMap::new(),
+            owner_errors: vec![(
+                OwnerName::parse("acme").unwrap(),
+                OwnerProblem::Suspect(Suspicion::LeftOut(Item::Repo(repo("acme/a")))),
+            )],
+        });
+        assert_eq!(only_suspect.verdict(None), Ok(Verdict::Read));
+    }
+
+    #[test]
+    fn a_suspect_answer_is_a_read_also_when_another_repository_failed() {
+        let mut cycle = FirstCycle::default();
+        cycle.note(&failed("acme/b"));
+        cycle.note(&Update::Suspect {
+            repo: repo("acme/a"),
+            reason: Suspicion::LeftOut(Item::Run(crate::run::RunId(7))),
+        });
+        assert_eq!(cycle.verdict(None), Ok(Verdict::Read));
+    }
+
+    #[test]
+    fn a_suspect_answer_alone_is_a_read() {
+        let mut cycle = FirstCycle::default();
+        cycle.note(&Update::Suspect {
+            repo: repo("acme/a"),
+            reason: Suspicion::LeftOut(Item::Run(crate::run::RunId(7))),
+        });
+        assert_eq!(cycle.verdict(None), Ok(Verdict::Read));
+    }
+
+    #[test]
     fn a_failed_repository_comes_before_a_failed_owner() {
         let mut cycle = FirstCycle::default();
         cycle.note(&Update::Repos {
             repos: BTreeSet::new(),
+            listed_at: std::collections::BTreeMap::new(),
             owner_errors: vec![
                 (
                     OwnerName::parse("aaa").unwrap(),

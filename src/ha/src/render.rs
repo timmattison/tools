@@ -18,7 +18,14 @@ use crate::cancel::Confirm;
 use crate::job::{Job, RunnerName};
 use crate::run::{Run, RunState};
 use crate::settings::format_duration_setting;
-use crate::status::{Status, MESSAGE_LIFETIME};
+use crate::status::{OwnerProblem, Status, MESSAGE_LIFETIME};
+
+/// The mark before the repository name of a stale run row: the sleeping
+/// symbol and one space. The rows of a repository whose last read failed or was
+/// suspect are the last good runs. After a suspect sweep, the rows are the recent
+/// runs and the runs of the last good sweep. The mark shows that they can be old
+/// (issue #599). It stands inside the repository cell, thus no other cell moves.
+const STALE_MARK: &str = "\u{1F4A4} ";
 
 /// The width of the marker column. Each marker is one emoji of 2 columns, or a
 /// blank of 2 columns.
@@ -306,10 +313,12 @@ where
 }
 
 /// The line of one run. `state` is the state that the row shows, not the state
-/// that GitHub reports. It sets the marker and the time cells.
+/// that GitHub reports. It sets the marker and the time cells. A stale run
+/// has the [`STALE_MARK`] before its repository name.
 fn run_line<Tz: TimeZone>(
     run: &Run,
     state: RunState,
+    is_stale: bool,
     now: DateTime<Utc>,
     tz: &Tz,
     widths: Widths,
@@ -322,15 +331,15 @@ where
     } else {
         format_elapsed(span(run.started_at, run.updated_at))
     };
+    let repo = if is_stale {
+        format!("{STALE_MARK}{}", run.repo)
+    } else {
+        run.repo.to_string()
+    };
     cells(
         widths,
         marker(state),
-        [
-            &run.repo.to_string(),
-            &run.workflow,
-            &run.branch,
-            &run.title,
-        ],
+        [&repo, &run.workflow, &run.branch, &run.title],
         &run.id.0.to_string(),
         &format_started(run.started_at, now, tz),
         &time,
@@ -532,6 +541,8 @@ fn message_color(age: Duration) -> Color {
     Color::Indexed(MESSAGE_START_GRAY - step)
 }
 
+/// The text of the refresh slot before the first cycle ends.
+const LOADING: &str = "loading…";
 /// The text before the age of the last refresh.
 const REFRESH_AGE_PREFIX: &str = "updated ";
 /// The text after the age of the last refresh.
@@ -555,8 +566,91 @@ fn refresh_age(last_refresh: DateTime<Utc>, now: DateTime<Utc>) -> String {
     )
 }
 
-/// The left part of the status line: the lead, the refresh, the rate limit,
-/// and the key hints.
+/// The word after the mark that starts the stale part of the status line.
+const STALE_WORD: &str = "stale";
+/// The text between the word and the time of the stale part.
+const STALE_SINCE: &str = " since ";
+/// The separator of the counts in the stale part.
+const STALE_COUNT_SEPARATOR: &str = ", ";
+/// The name of one stale repository, and of many.
+const REPO_NOUN: (&str, &str) = ("repo", "repos");
+/// The name of one stale owner, and of many.
+const OWNER_NOUN: (&str, &str) = ("owner", "owners");
+
+/// Writes a count and its noun, for example `1 repo` or `2 repos`.
+fn counted(count: usize, (one, many): (&str, &str)) -> String {
+    format!("{count} {}", if count == 1 { one } else { many })
+}
+
+/// The time of the stale part: the clock for today, the date and the clock
+/// before. A day starts and ends at midnight in the time zone `tz`.
+fn format_stale_since<Tz: TimeZone>(since: DateTime<Utc>, now: DateTime<Utc>, tz: &Tz) -> String
+where
+    Tz::Offset: Display,
+{
+    let local = since.with_timezone(tz);
+    let format = if local.date_naive() == now.with_timezone(tz).date_naive() {
+        "%H:%M"
+    } else {
+        "%m-%d %H:%M"
+    };
+    local.format(format).to_string()
+}
+
+/// The stale part of the status line, or `None` when no target is stale.
+///
+/// A stale target is a repository whose last read failed or was suspect, or an
+/// owner whose last list failed or was suspect. A cut owner list is not stale.
+/// The text counts the stale targets and says since when they are stale, for
+/// example `💤 stale since 11:42 (2 repos, 1 owner)`. The time is the earliest
+/// last good read or list among the stale targets, in the time zone `tz`. When
+/// no stale target has such a time, the text has no time. The part does not
+/// depend on a live message.
+fn stale_part<Tz: TimeZone>(
+    board: &Board,
+    status: &Status,
+    now: DateTime<Utc>,
+    tz: &Tz,
+) -> Option<String>
+where
+    Tz::Offset: Display,
+{
+    let repos = board.stale();
+    let owners: Vec<Option<DateTime<Utc>>> = status
+        .owner_errors
+        .iter()
+        .filter(|(_, problem)| !matches!(problem, OwnerProblem::Cut(_)))
+        .map(|(owner, _)| status.owner_listed_at.get(owner).copied())
+        .collect();
+    let since = repos
+        .iter()
+        .map(|(_, at)| *at)
+        .chain(owners.iter().copied())
+        .flatten()
+        .min();
+    let counts: Vec<String> = [(repos.len(), REPO_NOUN), (owners.len(), OWNER_NOUN)]
+        .into_iter()
+        .filter(|(count, _)| *count > 0)
+        .map(|(count, noun)| counted(count, noun))
+        .collect();
+    if counts.is_empty() {
+        return None;
+    }
+    let since = since.map_or_else(String::new, |at| {
+        format!("{STALE_SINCE}{}", format_stale_since(at, now, tz))
+    });
+    Some(format!(
+        "{STALE_MARK}{STALE_WORD}{since} ({})",
+        counts.join(STALE_COUNT_SEPARATOR)
+    ))
+}
+
+/// The left part of the status line: the lead, the refresh or stale part, the
+/// rate limit, and the key hints.
+///
+/// The slot of the refresh shows the [`stale_part`] when any target is stale.
+/// Else it shows the age of the last refresh, or `loading…`. A live message
+/// replaces the lead only, thus it never hides the stale part.
 ///
 /// With `hints` false, the key hints and the separator before them are absent.
 /// The box of the cancel prompt names its own keys, thus the line drops the hints.
@@ -575,10 +669,12 @@ where
     Tz::Offset: Display,
 {
     let mut parts: Vec<String> = lead(board, status, now).into_iter().collect();
-    parts.push(match status.last_refresh {
-        Some(at) => refresh_age(at, now),
-        None => "loading…".to_owned(),
-    });
+    parts.push(
+        stale_part(board, status, now, tz).unwrap_or_else(|| match status.last_refresh {
+            Some(at) => refresh_age(at, now),
+            None => LOADING.to_owned(),
+        }),
+    );
     if let Some(rate) = status.rate {
         parts.push(match status.backoff_until {
             Some(until) => format!(
@@ -714,8 +810,9 @@ pub fn draw<Tz: TimeZone>(
                 run,
                 state,
                 selected,
+                stale,
             } => {
-                let line = run_line(run, *state, now, tz, widths);
+                let line = run_line(run, *state, *stale, now, tz, widths);
                 let y = put(buffer, index + 1, &line, Style::default());
                 reverse_if(*selected, buffer, area, y);
             }
@@ -1042,6 +1139,7 @@ mod tests {
             title: title.to_owned(),
             state,
             started_at: at(started),
+            created_at: at(started),
             updated_at: at(updated),
             url: format!("https://github.com/{repo_text}/actions/runs/{id}"),
         }
@@ -1074,6 +1172,7 @@ mod tests {
                     "2026-10-14T09:10:05Z",
                 ),
             ],
+            now(),
         );
         board.replace(
             repo("acme/widgets"),
@@ -1099,6 +1198,7 @@ mod tests {
                     "2026-10-14T04:30:00Z",
                 ),
             ],
+            now(),
         );
         board
     }
@@ -1176,6 +1276,7 @@ mod tests {
                 "2026-10-14T11:45:30Z",
                 "2026-10-14T11:59:00Z",
             )],
+            now(),
         );
         board.replace(
             repo("acme/widgets"),
@@ -1189,6 +1290,7 @@ mod tests {
                 "2026-10-14T09:00:00Z",
                 "2026-10-14T09:10:05Z",
             )],
+            now(),
         );
         board.expand(now());
         board.set_jobs(
@@ -1283,6 +1385,7 @@ mod tests {
                 "2026-10-14T11:45:30Z",
                 "2026-10-14T11:59:00Z",
             )],
+            now(),
         );
         let text = lines(&render_with(120, 10, &mut board, &loaded()));
         let branch = header_column(&text, "BRANCH");
@@ -1309,6 +1412,7 @@ mod tests {
                     "2026-10-14T11:45:30Z",
                     "2026-10-14T11:59:00Z",
                 )],
+                now(),
             );
             let text = lines(&render_with(width, 8, &mut board, &loaded()));
             assert!(
@@ -1349,6 +1453,7 @@ mod tests {
                     "2026-10-14T11:45:30Z",
                     "2026-10-14T11:59:00Z",
                 )],
+                now(),
             );
             let text = lines(&render_with(width, 8, &mut board, &loaded()));
             assert!(
@@ -1403,6 +1508,7 @@ mod tests {
                     "2026-10-14T11:59:00Z",
                 ),
             ],
+            now(),
         );
         let text = lines(&render_with(120, 8, &mut board, &loaded()));
         let (short, long) = (&text[2], &text[3]);
@@ -1465,6 +1571,7 @@ mod tests {
                         "2026-10-14T11:59:00Z",
                     ),
                 ],
+                now(),
             );
             let text = lines(&render_with(width, 8, &mut board, &loaded()));
             let (short, long) = (&text[2], &text[3]);
@@ -1522,6 +1629,7 @@ mod tests {
                         "2026-10-14T11:59:00Z",
                     ),
                 ],
+                now(),
             );
             let text = lines(&render_with(width, 8, &mut board, &loaded()));
             let (short, long) = (&text[2], &text[3]);
@@ -1592,6 +1700,7 @@ mod tests {
                 "2026-10-14T11:45:30Z",
                 "2026-10-14T11:59:00Z",
             )],
+            now(),
         );
         let text = lines(&render_with(120, 8, &mut board, &Status::default()));
         assert_eq!(text[1], "Running");
@@ -1742,6 +1851,7 @@ mod tests {
                 finished(3, RunState::Cancelled, "2026-10-14T10:00:00Z"),
                 finished(4, RunState::Cancelled, "2026-10-14T11:00:00Z"),
             ],
+            now(),
         );
         let text = lines(&render_with(120, 10, &mut board, &loaded()));
         assert_eq!(text[3], "Last 8h · 1 passed · 1 failed · 2 cancelled");
@@ -1802,6 +1912,7 @@ mod tests {
                     "2026-10-13T14:59:00Z",
                 ),
             ],
+            now(),
         );
         let tokyo = chrono::FixedOffset::east_opt(9 * 3_600).expect("nine hours is valid");
         let in_tokyo = lines(&render_in(120, 8, &mut board, &Status::default(), &tokyo));
@@ -1829,6 +1940,7 @@ mod tests {
                 "2026-10-13T16:00:00Z",
                 "2026-10-13T16:00:00Z",
             )],
+            now(),
         );
         // 16:00 UTC on 10-13 is 01:00 on 10-14 at +09:00, and now is 21:00 on 10-14 there.
         let tokyo = chrono::FixedOffset::east_opt(9 * 3_600).expect("nine hours is valid");
@@ -1859,6 +1971,7 @@ mod tests {
                 "2026-10-14T10:45:30Z",
                 "2026-10-14T11:59:59Z",
             )],
+            now(),
         );
         let text = lines(&render_with(120, 8, &mut board, &Status::default()));
         assert_eq!(time_cells(&text, 2), "1h 14m");
@@ -1879,6 +1992,7 @@ mod tests {
                 "2026-10-14T10:00:00Z",
                 "2026-10-14T10:03:07Z",
             )],
+            now(),
         );
         let text = lines(&render_with(120, 8, &mut board, &Status::default()));
         assert_eq!(time_cells(&text, 4), "3m 07s");
@@ -1996,6 +2110,7 @@ mod tests {
                 "2026-10-14T11:45:30Z",
                 "2026-10-14T11:59:00Z",
             )],
+            now(),
         );
         board.expand(now());
         board.set_jobs(
@@ -2057,6 +2172,7 @@ mod tests {
                 "2026-10-14T11:45:30Z",
                 "2026-10-14T11:59:00Z",
             )],
+            now(),
         );
         board.expand(now());
         board.set_jobs(
@@ -2166,6 +2282,7 @@ mod tests {
                 "2026-10-14T11:45:30Z",
                 "2026-10-14T11:59:00Z",
             )],
+            now(),
         );
         board.expand(now());
         board.set_jobs(
@@ -2446,10 +2563,64 @@ mod tests {
                     "2026-10-14T12:02:00Z",
                 ),
             ],
+            now(),
         );
         let text = lines(&render_with(120, 8, &mut board, &Status::default()));
         assert_eq!(time_cells(&text, 2), "0s");
         assert_eq!(time_cells(&text, 4), "0s");
+    }
+
+    /// The display column where `needle` starts in `line`.
+    fn column_of(line: &str, needle: &str) -> usize {
+        let (before, _) = line.split_once(needle).expect("the text is in the line");
+        display_width(before)
+    }
+
+    /// A board with one run of `acme/widgets`.
+    fn one_run_board() -> Board {
+        let mut board = Board::new(Duration::from_hours(8));
+        board.replace(
+            repo("acme/widgets"),
+            vec![run(
+                4_242,
+                "acme/widgets",
+                "CI",
+                "main",
+                "Fix the thing",
+                RunState::Running,
+                "2026-10-14T11:45:30Z",
+                "2026-10-14T11:59:00Z",
+            )],
+            now(),
+        );
+        board
+    }
+
+    /// The line of the one run of `one_run_board`.
+    fn run_text(board: &mut Board) -> String {
+        lines(&render_with(120, 8, board, &loaded()))
+            .into_iter()
+            .find(|line| line.contains("4242"))
+            .expect("the run row shows")
+    }
+
+    #[test]
+    fn a_stale_run_row_starts_its_repo_cell_with_the_sleeping_mark() {
+        let fresh = run_text(&mut one_run_board());
+        let mut stale_board = one_run_board();
+        stale_board.fail(repo("acme/widgets"), "HTTP 500".to_owned());
+        let stale = run_text(&mut stale_board);
+
+        assert!(!fresh.contains('\u{1F4A4}'));
+        assert!(stale.contains("\u{1F4A4} acme/widgets"), "{stale}");
+        for cell in ["4242", "11:45:30", "14m 30s", "CI", "main", "Fix the thing"] {
+            assert_eq!(
+                column_of(&stale, cell),
+                column_of(&fresh, cell),
+                "the cell {cell} moved: {stale}"
+            );
+        }
+        assert_eq!(display_width(&stale), display_width(&fresh));
     }
 
     fn display_width(text: &str) -> usize {
@@ -2603,6 +2774,7 @@ mod tests {
                     "2026-10-14T11:45:30Z",
                     "2026-10-14T11:45:30Z",
                 )],
+                now(),
             );
             board.expand(now());
             board.set_jobs(RunId(1), three_jobs());
@@ -2793,6 +2965,7 @@ mod tests {
                     "2026-10-14T11:45:30Z",
                     "2026-10-14T11:45:30Z",
                 )],
+                now(),
             );
             let text = lines(&render_with(w, 6, &mut board, &loaded()));
             let row = &text[2];
@@ -2828,6 +3001,7 @@ mod tests {
                 "2026-10-14T11:55:00Z",
                 "2026-10-14T11:55:00Z",
             )],
+            now(),
         );
         let text = lines(&render_with(68, 6, &mut board, &Status::default()));
         // 68 - 42 = 26 columns for the text: 6, 4, 5, and 11.
@@ -2874,6 +3048,7 @@ mod tests {
                     "2026-10-14T11:53:00Z",
                 ),
             ],
+            now(),
         );
         let text = lines(&render_with(68, 7, &mut board, &Status::default()));
         assert_eq!(
@@ -2909,6 +3084,7 @@ mod tests {
                 "2026-10-14T11:55:00Z",
                 "2026-10-14T11:55:00Z",
             )],
+            now(),
         );
         let narrow = lines(&render_with(80, 6, &mut board, &Status::default()));
         let wide = lines(&render_with(160, 6, &mut board, &Status::default()));
@@ -2947,7 +3123,7 @@ mod tests {
                 )
             })
             .collect();
-        board.replace(repo("a/x"), runs);
+        board.replace(repo("a/x"), runs, now());
         for _ in 0..9 {
             board.select_next(now());
         }
@@ -3428,6 +3604,12 @@ mod tests {
 
     const HINTS_TAIL: &str = "loading…  ·  ↑↓ select  →← jobs  ⏎ open  c cancel  r refresh  q quit";
 
+    /// The tail of a status line whose board has stale repositories that
+    /// never had a good read: the stale part with `counts`, and the hints.
+    fn stale_tail(counts: &str) -> String {
+        format!("\u{1F4A4} stale ({counts})  ·  {KEY_HINTS}")
+    }
+
     /// The mark at the right end of the status line during a refresh.
     const MARK: &str = "refreshing…";
 
@@ -3444,7 +3626,10 @@ mod tests {
         board.fail(repo("owner/x"), "HTTP 404".to_owned());
         assert_eq!(
             status_line_of(&mut board, &Status::default()),
-            format!("⚠ owner/x: HTTP 404 (+1 more)  ·  {HINTS_TAIL}")
+            format!(
+                "⚠ owner/x: HTTP 404 (+1 more)  ·  {}",
+                stale_tail("2 repos")
+            )
         );
     }
 
@@ -3454,7 +3639,7 @@ mod tests {
         board.fail(repo("owner/x"), "HTTP 404".to_owned());
         assert_eq!(
             status_line_of(&mut board, &Status::default()),
-            format!("⚠ owner/x: HTTP 404  ·  {HINTS_TAIL}")
+            format!("⚠ owner/x: HTTP 404  ·  {}", stale_tail("1 repo"))
         );
     }
 
@@ -3471,7 +3656,7 @@ mod tests {
         };
         assert_eq!(
             status_line_of(&mut board, &status),
-            format!("⚠ owner/x: HTTP 404 (+1 more)  ·  {HINTS_TAIL}")
+            format!("⚠ owner/x: HTTP 404 (+1 more)  ·  {}", stale_tail("1 repo"))
         );
         let mut empty = Board::new(Duration::from_hours(8));
         assert_eq!(
@@ -3486,7 +3671,7 @@ mod tests {
         board.fail(repo("owner/x"), "HTTP 404".to_owned());
         let status = Status {
             message: Some(Message {
-                text: "could not open a browser: https://example.com/run/1".to_owned(),
+                text: "could not open a browser".to_owned(),
                 posted_at: now(),
             }),
             refreshing: true,
@@ -3495,7 +3680,8 @@ mod tests {
         assert_eq!(
             status_line_of(&mut board, &status),
             with_mark(&format!(
-                "could not open a browser: https://example.com/run/1  ·  {HINTS_TAIL}"
+                "could not open a browser  ·  {}",
+                stale_tail("1 repo")
             ))
         );
     }
@@ -3509,6 +3695,164 @@ mod tests {
             }),
             ..Status::default()
         }
+    }
+
+    /// The stale part of the status line of `board` and `status`, in UTC.
+    fn stale_text(board: &Board, status: &Status) -> Option<String> {
+        stale_part(board, status, now(), &utc())
+    }
+
+    /// A board whose repositories `reads` had a good read at the given time
+    /// and then failed.
+    fn board_stale_since(reads: &[(&str, &str)]) -> Board {
+        let mut board = Board::new(Duration::from_hours(8));
+        for (name, time) in reads {
+            board.replace(repo(name), Vec::new(), at(time));
+            board.fail(repo(name), "HTTP 500".to_owned());
+        }
+        board
+    }
+
+    fn owner(text: &str) -> OwnerName {
+        OwnerName::parse(text).expect("the test owner is valid")
+    }
+
+    #[test]
+    fn no_stale_target_gives_no_stale_part() {
+        let board = Board::new(Duration::from_hours(8));
+        assert_eq!(stale_text(&board, &Status::default()), None);
+    }
+
+    #[test]
+    fn a_stale_repository_names_the_time_of_its_last_good_read() {
+        let board = board_stale_since(&[("acme/a", "2026-10-14T11:42:10Z")]);
+        assert_eq!(
+            stale_text(&board, &Status::default()).as_deref(),
+            Some("\u{1F4A4} stale since 11:42 (1 repo)")
+        );
+    }
+
+    #[test]
+    fn two_stale_repositories_give_the_earlier_time_and_the_count() {
+        let board = board_stale_since(&[
+            ("acme/a", "2026-10-14T11:50:00Z"),
+            ("acme/b", "2026-10-14T11:42:00Z"),
+        ]);
+        assert_eq!(
+            stale_text(&board, &Status::default()).as_deref(),
+            Some("\u{1F4A4} stale since 11:42 (2 repos)")
+        );
+    }
+
+    #[test]
+    fn the_time_shows_in_the_time_zone_of_the_screen() {
+        let board = board_stale_since(&[("acme/a", "2026-10-14T11:42:00Z")]);
+        let tokyo = chrono::FixedOffset::east_opt(9 * 3_600).expect("nine hours is valid");
+        assert_eq!(
+            stale_part(&board, &Status::default(), now(), &tokyo).as_deref(),
+            Some("\u{1F4A4} stale since 20:42 (1 repo)")
+        );
+    }
+
+    #[test]
+    fn a_last_good_read_on_an_earlier_day_shows_the_date() {
+        let board = board_stale_since(&[("acme/a", "2026-10-13T23:59:00Z")]);
+        assert_eq!(
+            stale_text(&board, &Status::default()).as_deref(),
+            Some("\u{1F4A4} stale since 10-13 23:59 (1 repo)")
+        );
+    }
+
+    #[test]
+    fn a_stale_repository_without_a_good_read_has_no_time() {
+        let mut board = Board::new(Duration::from_hours(8));
+        board.fail(repo("acme/a"), "HTTP 500".to_owned());
+        assert_eq!(
+            stale_text(&board, &Status::default()).as_deref(),
+            Some("\u{1F4A4} stale (1 repo)")
+        );
+    }
+
+    #[test]
+    fn a_failed_or_suspect_owner_counts_with_the_time_of_its_last_list() {
+        let board = Board::new(Duration::from_hours(8));
+        let status = Status {
+            owner_errors: vec![
+                (
+                    owner("acme"),
+                    OwnerProblem::Failed(crate::github::SourceError::Failed("boom".to_owned())),
+                ),
+                (
+                    owner("zeta"),
+                    OwnerProblem::Suspect(crate::suspect::Suspicion::LeftOut(
+                        crate::suspect::Item::Repo(repo("zeta/x")),
+                    )),
+                ),
+            ],
+            owner_listed_at: std::collections::BTreeMap::from([
+                (owner("acme"), at("2026-10-14T11:30:00Z")),
+                (owner("zeta"), at("2026-10-14T11:20:00Z")),
+            ]),
+            ..Status::default()
+        };
+        assert_eq!(
+            stale_text(&board, &status).as_deref(),
+            Some("\u{1F4A4} stale since 11:20 (2 owners)")
+        );
+    }
+
+    #[test]
+    fn a_cut_owner_is_not_stale() {
+        let board = Board::new(Duration::from_hours(8));
+        let status = Status {
+            owner_errors: vec![(owner("acme"), OwnerProblem::Cut("too many".to_owned()))],
+            ..Status::default()
+        };
+        assert_eq!(stale_text(&board, &status), None);
+    }
+
+    #[test]
+    fn a_stale_owner_and_a_stale_repository_give_both_counts() {
+        let board = board_stale_since(&[("acme/a", "2026-10-14T11:42:00Z")]);
+        let status = Status {
+            owner_errors: vec![(
+                owner("acme"),
+                OwnerProblem::Failed(crate::github::SourceError::Failed("boom".to_owned())),
+            )],
+            ..Status::default()
+        };
+        assert_eq!(
+            stale_text(&board, &status).as_deref(),
+            Some("\u{1F4A4} stale since 11:42 (1 repo, 1 owner)")
+        );
+    }
+
+    #[test]
+    fn the_stale_part_takes_the_place_of_the_refresh_age() {
+        let board_status = Status {
+            last_refresh: Some(now()),
+            ..Status::default()
+        };
+        let mut board = board_stale_since(&[("acme/a", "2026-10-14T11:42:00Z")]);
+        let line = status_line_of(&mut board, &board_status);
+        assert!(
+            line.contains("\u{1F4A4} stale since 11:42 (1 repo)"),
+            "{line:?}"
+        );
+        assert!(!line.contains("updated"), "{line:?}");
+        assert!(!line.contains("loading"), "{line:?}");
+    }
+
+    #[test]
+    fn a_live_message_does_not_hide_the_stale_part() {
+        let mut board = board_stale_since(&[("acme/a", "2026-10-14T11:42:00Z")]);
+        let status = status_with_message_aged("could not open a browser", 1);
+        let line = status_line_of(&mut board, &status);
+        assert!(line.contains("could not open a browser"), "{line:?}");
+        assert!(
+            line.contains("\u{1F4A4} stale since 11:42 (1 repo)"),
+            "{line:?}"
+        );
     }
 
     #[test]
@@ -3563,7 +3907,7 @@ mod tests {
         board.fail(repo("owner/x"), "HTTP 404".to_owned());
         assert_eq!(
             status_line_of(&mut board, &status),
-            with_mark(&format!("⚠ owner/x: HTTP 404  ·  {HINTS_TAIL}"))
+            with_mark(&format!("⚠ owner/x: HTTP 404  ·  {}", stale_tail("1 repo")))
         );
     }
 
@@ -3709,6 +4053,7 @@ mod tests {
                 "2026-10-14T10:00:00Z",
                 "2026-10-14T10:05:00Z",
             )],
+            now(),
         );
         board.expand(now());
         // The order is by name: `a-cancelled` comes before `b-other`.
@@ -3824,6 +4169,7 @@ mod tests {
                     )
                 })
                 .collect(),
+            now(),
         );
         board.expand(now());
         // The order is by name, thus the names state the order of the rows.
@@ -4007,7 +4353,7 @@ mod tests {
                     "2026-10-14T11:00:00Z",
                     "2026-10-14T11:30:00Z",
                 );
-                let line = run_line(&run, state, now(), &utc(), widths);
+                let line = run_line(&run, state, false, now(), &utc(), widths);
                 assert_eq!(display_width(&line), usize::from(w), "{state:?}: {line:?}");
             }
             for (id, state) in MARKER_JOB_STATES {
@@ -4063,6 +4409,7 @@ mod tests {
                 "2026-10-14T11:45:30Z",
                 "2026-10-14T11:59:00Z",
             )],
+            now(),
         );
         board.expand(now());
         board.set_jobs(

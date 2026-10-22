@@ -228,16 +228,22 @@ where
                 first_cycle.note(&update);
             }
             match update {
-                Update::Runs { repo, runs } => self.board.replace(repo, runs),
+                Update::Runs { repo, runs } => self.board.replace(repo, runs, (self.now)()),
                 Update::Failed { repo, error } => self.board.fail(repo, error.to_string()),
+                Update::Suspect { repo, reason } => self.board.fail(repo, reason.to_string()),
+                Update::SuspectSweep { repo, runs, reason } => {
+                    self.board.replace_stale(repo, runs, reason.to_string());
+                }
                 Update::Jobs { run, jobs } => self.board.set_jobs(run, jobs),
                 Update::JobsFailed { run, error } => self.board.fail_jobs(run, error),
                 Update::Repos {
                     repos,
                     owner_errors,
+                    listed_at,
                 } => {
                     self.board.keep_only(&repos);
                     self.status.owner_errors = owner_errors;
+                    self.status.owner_listed_at = listed_at;
                 }
                 Update::CycleDone {
                     finished_at,
@@ -543,6 +549,7 @@ mod tests {
             title: format!("run {id}"),
             state: RunState::Running,
             started_at: now() - chrono::Duration::minutes(started),
+            created_at: now() - chrono::Duration::minutes(started),
             updated_at: now(),
             url: format!("https://example.test/runs/{id}"),
         }
@@ -787,6 +794,35 @@ mod tests {
     }
 
     #[test]
+    fn a_suspect_answer_keeps_the_runs_and_shows_the_reason() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        channels
+            .updates
+            .send(Update::Suspect {
+                repo: repo(),
+                reason: crate::suspect::Suspicion::LeftOut(crate::suspect::Item::Run(RunId(7))),
+            })
+            .unwrap();
+        let opener = opener(true);
+        let (result, frame) = run_app(
+            &opener,
+            &channels,
+            vec![press(KeyCode::Char('x')), press(KeyCode::Char('q'))],
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert!(
+            frame.iter().any(|line| line.contains("run 1")),
+            "the run stays: {frame:?}"
+        );
+        let status_line = frame.last().unwrap();
+        assert!(
+            status_line.contains("acme/widgets: GitHub left out run 7"),
+            "{status_line:?}"
+        );
+    }
+
+    #[test]
     fn enter_on_an_empty_board_opens_nothing() {
         let opener = opener(false);
         let (result, _) = run_app(
@@ -818,6 +854,191 @@ mod tests {
 
     fn quit() -> Vec<Event> {
         vec![press(KeyCode::Char('q'))]
+    }
+
+    /// The lines of the frame that show a run row of `acme/widgets`.
+    fn run_rows(frame: &[String]) -> Vec<&String> {
+        frame
+            .iter()
+            .filter(|line| line.contains("acme/widgets") && line.contains(" main "))
+            .collect()
+    }
+
+    #[test]
+    fn a_failed_read_marks_every_run_row_of_its_repository_as_stale() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5), active_run(2, 4)]);
+        channels
+            .updates
+            .send(Update::Failed {
+                repo: repo(),
+                error: SourceError::Failed("boom".to_owned()),
+            })
+            .unwrap();
+        let (result, frame) = run_app(&opener(false), &channels, quit());
+        assert!(result.is_ok(), "{result:?}");
+        let rows = run_rows(&frame);
+        assert_eq!(rows.len(), 2, "{frame:?}");
+        assert!(rows.iter().all(|row| row.contains('\u{1F4A4}')), "{rows:?}");
+    }
+
+    #[test]
+    fn a_suspect_read_marks_every_run_row_of_its_repository_as_stale() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5), active_run(2, 4)]);
+        channels
+            .updates
+            .send(Update::Suspect {
+                repo: repo(),
+                reason: crate::suspect::Suspicion::LeftOut(crate::suspect::Item::Run(RunId(9))),
+            })
+            .unwrap();
+        let (result, frame) = run_app(&opener(false), &channels, quit());
+        assert!(result.is_ok(), "{result:?}");
+        let rows = run_rows(&frame);
+        assert_eq!(rows.len(), 2, "{frame:?}");
+        assert!(rows.iter().all(|row| row.contains('\u{1F4A4}')), "{rows:?}");
+    }
+
+    #[test]
+    fn a_good_read_after_a_failure_clears_the_stale_mark() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        channels
+            .updates
+            .send(Update::Failed {
+                repo: repo(),
+                error: SourceError::Failed("boom".to_owned()),
+            })
+            .unwrap();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        let (result, frame) = run_app(&opener(false), &channels, quit());
+        assert!(result.is_ok(), "{result:?}");
+        let rows = run_rows(&frame);
+        assert_eq!(rows.len(), 1, "{frame:?}");
+        assert!(!rows[0].contains('\u{1F4A4}'), "{rows:?}");
+    }
+
+    /// The status line of the last frame, after `quit`.
+    fn status_line_after(channels: &Channels, status: Status) -> String {
+        let (result, frame) = run_app_from(status, &opener(false), channels, quit());
+        assert!(result.is_ok(), "{result:?}");
+        frame.last().unwrap().clone()
+    }
+
+    fn failed_update() -> Update {
+        Update::Failed {
+            repo: repo(),
+            error: SourceError::Failed("boom".to_owned()),
+        }
+    }
+
+    #[test]
+    fn a_repository_read_well_and_then_failed_shows_since_when_it_is_stale() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        channels.updates.send(failed_update()).unwrap();
+        let line = status_line_after(&channels, Status::default());
+        assert!(
+            line.contains("\u{1F4A4} stale since 12:00 (1 repo)"),
+            "{line:?}"
+        );
+    }
+
+    #[test]
+    fn a_suspect_sweep_shows_its_runs_with_the_stale_mark_and_the_time_of_the_last_good_read() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        channels
+            .updates
+            .send(Update::SuspectSweep {
+                repo: repo(),
+                runs: vec![active_run(1, 5), active_run(2, 4)],
+                reason: crate::suspect::Suspicion::LeftOut(crate::suspect::Item::Run(RunId(9))),
+            })
+            .unwrap();
+        let (result, frame) = run_app(&opener(false), &channels, quit());
+        assert!(result.is_ok(), "{result:?}");
+        let rows = run_rows(&frame);
+        assert_eq!(rows.len(), 2, "{frame:?}");
+        assert!(rows.iter().all(|row| row.contains('\u{1F4A4}')), "{rows:?}");
+        let line = frame.last().unwrap();
+        assert!(line.contains("stale since 12:00"), "{line:?}");
+    }
+
+    #[test]
+    fn a_cycle_in_which_each_fetch_fails_does_not_say_updated() {
+        let channels = channels();
+        let cycle_done = || Update::CycleDone {
+            finished_at: now(),
+            rate: None,
+            backoff_until: None,
+        };
+        send_runs(&channels, vec![active_run(1, 5)]);
+        channels.updates.send(cycle_done()).unwrap();
+        channels.updates.send(failed_update()).unwrap();
+        channels.updates.send(cycle_done()).unwrap();
+        let line = status_line_after(&channels, Status::default());
+        assert!(!line.contains("updated 0s ago"), "{line:?}");
+        assert!(
+            line.contains("\u{1F4A4} stale since 12:00 (1 repo)"),
+            "{line:?}"
+        );
+    }
+
+    #[test]
+    fn a_live_message_and_the_stale_part_show_together() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        channels.updates.send(failed_update()).unwrap();
+        let status = Status {
+            message: Some(Message {
+                text: "GitHub is cancelling run 1".to_owned(),
+                posted_at: now(),
+            }),
+            ..Status::default()
+        };
+        let line = status_line_after(&channels, status);
+        assert!(line.contains("GitHub is cancelling run 1"), "{line:?}");
+        assert!(
+            line.contains("\u{1F4A4} stale since 12:00 (1 repo)"),
+            "{line:?}"
+        );
+    }
+
+    #[test]
+    fn the_stale_part_goes_away_after_a_good_read() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        channels.updates.send(failed_update()).unwrap();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        let line = status_line_after(&channels, Status::default());
+        assert!(!line.contains('\u{1F4A4}'), "{line:?}");
+    }
+
+    #[test]
+    fn a_stale_owner_shows_the_time_of_its_last_good_list() {
+        let channels = channels();
+        let acme = OwnerName::parse("acme").unwrap();
+        channels
+            .updates
+            .send(Update::Repos {
+                repos: std::collections::BTreeSet::new(),
+                listed_at: std::collections::BTreeMap::from([(
+                    acme.clone(),
+                    now() - chrono::Duration::minutes(18),
+                )]),
+                owner_errors: vec![(
+                    acme,
+                    OwnerProblem::Failed(SourceError::Failed("boom".to_owned())),
+                )],
+            })
+            .unwrap();
+        let line = status_line_after(&channels, Status::default());
+        assert!(
+            line.contains("\u{1F4A4} stale since 11:42 (1 owner)"),
+            "{line:?}"
+        );
     }
 
     #[test]
@@ -936,6 +1157,7 @@ mod tests {
         let updates = [
             Update::Repos {
                 repos: BTreeSet::from([a.clone(), b.clone()]),
+                listed_at: std::collections::BTreeMap::new(),
                 owner_errors: vec![],
             },
             Update::Failed {
@@ -1037,6 +1259,7 @@ mod tests {
         let updates = [
             Update::Repos {
                 repos: BTreeSet::from([a.clone(), b.clone()]),
+                listed_at: std::collections::BTreeMap::new(),
                 owner_errors: vec![],
             },
             Update::Runs {
@@ -1095,6 +1318,7 @@ mod tests {
         let updates = [
             Update::Repos {
                 repos: BTreeSet::from([a.clone(), b.clone()]),
+                listed_at: std::collections::BTreeMap::new(),
                 owner_errors: vec![],
             },
             Update::Failed {
@@ -1135,6 +1359,7 @@ mod tests {
         let updates = [
             Update::Repos {
                 repos: BTreeSet::from([a.clone(), b.clone(), c.clone()]),
+                listed_at: std::collections::BTreeMap::new(),
                 owner_errors: vec![],
             },
             Update::Failed {
@@ -1175,6 +1400,7 @@ mod tests {
         let updates = [
             Update::Repos {
                 repos: BTreeSet::new(),
+                listed_at: std::collections::BTreeMap::new(),
                 owner_errors: vec![(
                     OwnerName::parse("acme").unwrap(),
                     OwnerProblem::Failed(SourceError::Failed(message.to_owned())),
@@ -1199,6 +1425,7 @@ mod tests {
         let updates = [
             Update::Repos {
                 repos: BTreeSet::new(),
+                listed_at: std::collections::BTreeMap::new(),
                 owner_errors: vec![],
             },
             cycle_done(),
@@ -1229,6 +1456,7 @@ mod tests {
         let updates = [
             Update::Repos {
                 repos: BTreeSet::from([a.clone()]),
+                listed_at: std::collections::BTreeMap::new(),
                 owner_errors: vec![(
                     OwnerName::parse("acme").unwrap(),
                     OwnerProblem::Cut(cut.warning().unwrap()),
@@ -1258,6 +1486,7 @@ mod tests {
         let updates = [
             Update::Repos {
                 repos: BTreeSet::from([x.clone()]),
+                listed_at: std::collections::BTreeMap::new(),
                 owner_errors: vec![(
                     OwnerName::parse("acme").unwrap(),
                     OwnerProblem::Failed(SourceError::Failed("boom".to_owned())),
@@ -1289,6 +1518,7 @@ mod tests {
             .updates
             .send(Update::Repos {
                 repos: std::collections::BTreeSet::new(),
+                listed_at: std::collections::BTreeMap::new(),
                 owner_errors: Vec::new(),
             })
             .unwrap();
@@ -1307,6 +1537,7 @@ mod tests {
             .updates
             .send(Update::Repos {
                 repos: std::collections::BTreeSet::new(),
+                listed_at: std::collections::BTreeMap::new(),
                 owner_errors: vec![(
                     OwnerName::parse("acme").unwrap(),
                     OwnerProblem::Cut("no such owner".to_owned()),
@@ -1762,6 +1993,7 @@ mod tests {
             key(KeyCode::Right),
             Step::Send(Update::Repos {
                 repos: std::collections::BTreeSet::new(),
+                listed_at: std::collections::BTreeMap::new(),
                 owner_errors: Vec::new(),
             }),
             Step::Idle,

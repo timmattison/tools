@@ -206,6 +206,7 @@ mod tests {
             title: "fix(ha): show the run ID".to_owned(),
             state: crate::run::RunState::Running,
             started_at: time,
+            created_at: time,
             updated_at: time,
             url: String::new(),
         };

@@ -19,5 +19,6 @@ pub mod render;
 pub mod run;
 pub mod settings;
 pub mod status;
+pub mod suspect;
 pub mod target;
 pub mod worker;

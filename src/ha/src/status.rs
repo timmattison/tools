@@ -1,11 +1,13 @@
 //! What the status line of `ha` shows: the last refresh, the rate limit of
 //! the GitHub API, and the errors that are not about one repository.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 
 use crate::github::SourceError;
+use crate::suspect::Suspicion;
 use crate::target::OwnerName;
 
 /// The core rate limit of the GitHub API, as the last response stated it.
@@ -51,15 +53,20 @@ pub enum OwnerProblem {
     /// GitHub has more repositories for the owner than `ha` watches. The text
     /// says so. A cut list is a warning, not a failure.
     Cut(String),
+    /// The list succeeded, but `ha` does not trust it. The owner keeps its
+    /// last good list.
+    Suspect(Suspicion),
 }
 
 impl std::fmt::Display for OwnerProblem {
     /// Writes the text that the status line shows: the error of a failed list,
-    /// or the warning of a cut list.
+    /// the warning of a cut list, or the
+    /// suspicion about a list.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Failed(error) => write!(f, "{error}"),
             Self::Cut(text) => f.write_str(text),
+            Self::Suspect(suspicion) => write!(f, "{suspicion}"),
         }
     }
 }
@@ -75,9 +82,12 @@ pub struct Status {
     pub rate: Option<RateLimit>,
     /// When the worker stops to slow down. `Some` while it slows down.
     pub backoff_until: Option<DateTime<Utc>>,
-    /// The owners whose repository list failed or was cut, with the problem of
+    /// The owners whose repository list failed, was cut, or was suspect, with the problem of
     /// each. The status line shows the text of the problem.
     pub owner_errors: Vec<(OwnerName, OwnerProblem)>,
+    /// The time of the last good list of each owner that has one. The status
+    /// line uses it to say since when an owner is stale.
+    pub owner_listed_at: BTreeMap<OwnerName, DateTime<Utc>>,
     /// A one-off message, for example the address after a failed open. It
     /// fades out over [`MESSAGE_LIFETIME`], then leaves. A key press removes
     /// it sooner. Read it with [`Status::message_at`].

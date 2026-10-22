@@ -84,6 +84,33 @@ struct RunJson {
     html_url: String,
 }
 
+/// The JSON body of one repository. Only the fields that `ha` reads are here.
+#[derive(Deserialize)]
+struct RepoBody {
+    full_name: String,
+    archived: bool,
+}
+
+/// Maps one JSON run to a [`Run`] of `repo`.
+///
+/// Both the list of runs and the read of one run use this mapping.
+fn run_of(json: RunJson, repo: &RepoName) -> Run {
+    let workflow = json.name.unwrap_or_default();
+    let status = json.status.unwrap_or_default();
+    Run {
+        id: RunId(json.id),
+        repo: repo.clone(),
+        state: RunState::from_github(&status, json.conclusion.as_deref()),
+        title: json.display_title.unwrap_or_else(|| workflow.clone()),
+        workflow,
+        branch: json.head_branch.unwrap_or_default(),
+        started_at: json.run_started_at.unwrap_or(json.created_at),
+        created_at: json.created_at,
+        updated_at: json.updated_at,
+        url: json.html_url,
+    }
+}
+
 /// Maps the JSON body of one page of runs to a [`Page`].
 ///
 /// `Run::repo` is `repo`, the repository that the request named.
@@ -93,21 +120,7 @@ fn parse_runs(body: &str, repo: &RepoName) -> Result<Page, SourceError> {
     let runs = parsed
         .workflow_runs
         .into_iter()
-        .map(|json| {
-            let workflow = json.name.unwrap_or_default();
-            let status = json.status.unwrap_or_default();
-            Run {
-                id: RunId(json.id),
-                repo: repo.clone(),
-                state: RunState::from_github(&status, json.conclusion.as_deref()),
-                title: json.display_title.unwrap_or_else(|| workflow.clone()),
-                workflow,
-                branch: json.head_branch.unwrap_or_default(),
-                started_at: json.run_started_at.unwrap_or(json.created_at),
-                updated_at: json.updated_at,
-                url: json.html_url,
-            }
-        })
+        .map(|json| run_of(json, repo))
         .collect();
     Ok(Page {
         total_count: parsed.total_count,
@@ -184,8 +197,8 @@ fn parse_jobs(body: &str) -> Result<JobsPage, SourceError> {
 pub enum RunQuery {
     /// Every run created at or after the start of the UTC hour of this time.
     CreatedSince(DateTime<Utc>),
-    /// Every run that is in progress, in the queue, or waiting (for an approval
-    /// or for another run of its concurrency group).
+    /// Every run that is in progress, in the queue, requested, or waiting (for
+    /// an approval or for another run of its concurrency group).
     Active,
 }
 
@@ -196,9 +209,11 @@ pub enum RunQuery {
 ///   to 30 days.
 /// - `pending` is a run that waits for another run of its concurrency group. It
 ///   waits as long as that run lasts.
+/// - `requested` is a run that GitHub created and has not queued yet.
 ///
-/// `requested` is not here, because a run stays in it for seconds only.
-const ACTIVE_STATUSES: [&str; 4] = ["in_progress", "queued", "waiting", "pending"];
+/// The list holds each status that `RunState::is_active` calls active, thus the
+/// probe of an empty sweep and the sweep agree.
+const ACTIVE_STATUSES: [&str; 5] = ["in_progress", "queued", "waiting", "pending", "requested"];
 
 /// The most repositories of one owner that `ha` watches.
 pub const REPO_LIMIT: usize = 1000;
@@ -222,6 +237,16 @@ impl RepoList {
     }
 }
 
+/// The runs of one repository, as `Source::runs_of` lists them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunList {
+    /// The runs that the query matches, at most `MAX_PAGES` pages of each fetch.
+    pub runs: Vec<Run>,
+    /// True when a fetch read `MAX_PAGES` pages and the last page was full, so
+    /// `runs` can lack runs that GitHub holds.
+    pub cut: bool,
+}
+
 /// Where `ha` gets its data. `GhSource` is the real one.
 pub trait Source: Send + Sync {
     /// Lists the repositories of an owner. Archived repositories are left out.
@@ -234,10 +259,14 @@ pub trait Source: Send + Sync {
 
     /// Lists the workflow runs of a repository that match `query`.
     ///
+    /// A fetch stops after `MAX_PAGES` pages. When the last page was full, the
+    /// list comes back cut, and `RunList::cut` says so. For `RunQuery::Active`,
+    /// the list is cut when the fetch of any of the statuses was cut.
+    ///
     /// # Errors
     ///
     /// Returns a [`SourceError`] when a page of runs cannot be fetched.
-    fn runs_of(&self, repo: &RepoName, query: RunQuery) -> Result<Vec<Run>, SourceError>;
+    fn runs_of(&self, repo: &RepoName, query: RunQuery) -> Result<RunList, SourceError>;
 
     /// Lists the jobs of the latest attempt of one workflow run, in the order
     /// that GitHub gives them.
@@ -258,6 +287,48 @@ pub trait Source: Send + Sync {
     /// pages of every run whose jobs the worker ever fetched, which includes
     /// each run that was active.
     fn forget_jobs(&self, repo: &RepoName, run: RunId);
+
+    /// Tells if `repo` is still a repository that `repos_of` lists: it exists,
+    /// it is not archived, and it still has this name.
+    ///
+    /// A repository that GitHub renamed or moved is not listable under its old
+    /// name, although GitHub redirects the request. The comparison of the names
+    /// ignores the case of the letters.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`SourceError`] when the answer is neither a repository nor a
+    /// `404`.
+    fn repo_is_listable(&self, repo: &RepoName) -> Result<bool, SourceError>;
+
+    /// Reads one workflow run of a repository, with no cache.
+    ///
+    /// `Ok(None)` means that GitHub has no such run (`404`). The run has the
+    /// same fields as a run of `runs_of`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`SourceError`] when the answer is neither a run nor a `404`.
+    fn run(&self, repo: &RepoName, run: RunId) -> Result<Option<Run>, SourceError>;
+
+    /// Reads the newest run of a repository, whatever its age or state.
+    ///
+    /// The request asks for one run, and it uses the `ETag` cache. `Ok(None)`
+    /// means that the repository has no run.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`SourceError`] when the page cannot be fetched.
+    fn newest_run(&self, repo: &RepoName) -> Result<Option<Run>, SourceError>;
+
+    /// Tells the source that the worker doubts the answers of `query` for a
+    /// repository.
+    ///
+    /// A source that keeps a cache removes the cached pages of that query. The
+    /// next request for them then asks GitHub for a whole answer, and a `304`
+    /// cannot repeat a bad answer. The cached page of `newest_run` and the
+    /// cached pages of jobs stay.
+    fn forget_runs(&self, repo: &RepoName, query: RunQuery);
 
     /// The rate limit that the last response stated. `None` before any response.
     fn rate_limit(&self) -> Option<RateLimit>;
@@ -458,23 +529,32 @@ impl GhSource {
     /// The fetch goes on while the last page was full and the count so far is
     /// below `total_count`. It stops after `MAX_PAGES` pages. A run that moves
     /// from one page to the next between two requests is kept once.
+    ///
+    /// The list is cut when the fetch read `MAX_PAGES` pages and the last page
+    /// was full, whatever `total_count` says. GitHub gives a filtered query
+    /// 1,000 results at most, and it can state a `total_count` of 1,000 when
+    /// more runs match. A list of exactly 1,000 runs is thus also cut. That
+    /// costs nothing, because a cut list only stops the worker from asking
+    /// about runs older than its oldest run.
     fn all_runs(
         &self,
         repo: &RepoName,
         family: &str,
         filter: &str,
-    ) -> Result<Vec<Run>, SourceError> {
+    ) -> Result<RunList, SourceError> {
         let mut runs = Vec::new();
+        let mut cut = false;
         for number in 1..=MAX_PAGES {
             let page = self.runs_page(repo, family, filter, number)?;
             let full = page.runs.len() >= PAGE_SIZE;
             runs.extend(page.runs);
+            cut = full && number == MAX_PAGES;
             if !full || (runs.len() as u64) >= page.total_count {
                 break;
             }
         }
         keep_first_of_each_id(&mut runs, |run| run.id);
-        Ok(runs)
+        Ok(RunList { runs, cut })
     }
 
     /// The `ETag` cache. The guard lives for one statement. A poisoned lock still
@@ -556,7 +636,7 @@ impl Source for GhSource {
         Ok(RepoList { repos, cut })
     }
 
-    fn runs_of(&self, repo: &RepoName, query: RunQuery) -> Result<Vec<Run>, SourceError> {
+    fn runs_of(&self, repo: &RepoName, query: RunQuery) -> Result<RunList, SourceError> {
         match query {
             RunQuery::CreatedSince(since) => {
                 let filter = format!("created=%3E%3D{}", hour_start(since));
@@ -564,13 +644,16 @@ impl Source for GhSource {
             }
             RunQuery::Active => {
                 let mut runs = Vec::new();
+                let mut cut = false;
                 for status in ACTIVE_STATUSES {
-                    runs.extend(self.all_runs(repo, status, &format!("status={status}"))?);
+                    let list = self.all_runs(repo, status, &format!("status={status}"))?;
+                    cut |= list.cut;
+                    runs.extend(list.runs);
                 }
                 // A run can change state between the requests, and then two
                 // lists hold it. Keep the first one.
                 keep_first_of_each_id(&mut runs, |run| run.id);
-                Ok(runs)
+                Ok(RunList { runs, cut })
             }
         }
     }
@@ -592,6 +675,61 @@ impl Source for GhSource {
     fn forget_jobs(&self, repo: &RepoName, run: RunId) {
         let prefix = format!("{repo}#jobs/{}#", run.0);
         self.lock_etags().retain(|key, _| !key.starts_with(&prefix));
+    }
+
+    fn repo_is_listable(&self, repo: &RepoName) -> Result<bool, SourceError> {
+        let path = format!("repos/{}/{}", repo.owner(), repo.name());
+        match self.request(&path, None) {
+            Ok(response) => {
+                let body: RepoBody = serde_json::from_str(&response.body)
+                    .map_err(|error| SourceError::BadResponse(error.to_string()))?;
+                Ok(!body.archived && body.full_name.eq_ignore_ascii_case(&repo.to_string()))
+            }
+            Err(SourceError::Http { status: 404, .. }) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn run(&self, repo: &RepoName, run: RunId) -> Result<Option<Run>, SourceError> {
+        let path = format!(
+            "repos/{}/{}/actions/runs/{}",
+            repo.owner(),
+            repo.name(),
+            run.0
+        );
+        match self.request(&path, None) {
+            Ok(response) => {
+                let json: RunJson = serde_json::from_str(&response.body)
+                    .map_err(|error| SourceError::BadResponse(error.to_string()))?;
+                Ok(Some(run_of(json, repo)))
+            }
+            Err(SourceError::Http { status: 404, .. }) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn newest_run(&self, repo: &RepoName) -> Result<Option<Run>, SourceError> {
+        let path = format!(
+            "repos/{}/{}/actions/runs?per_page=1",
+            repo.owner(),
+            repo.name()
+        );
+        let key = format!("{repo}#newest#1");
+        let page = self.cached_get(&key, &path, |body| parse_runs(body, repo))?;
+        Ok(page.runs.into_iter().next())
+    }
+
+    fn forget_runs(&self, repo: &RepoName, query: RunQuery) {
+        // The prefix ends with `#`, thus `o/r` does not match `o/r2`.
+        let prefixes: Vec<String> = match query {
+            RunQuery::CreatedSince(_) => vec![format!("{repo}#created#")],
+            RunQuery::Active => ACTIVE_STATUSES
+                .iter()
+                .map(|status| format!("{repo}#{status}#"))
+                .collect(),
+        };
+        self.lock_etags()
+            .retain(|key, _| !prefixes.iter().any(|prefix| key.starts_with(prefix)));
     }
 
     fn rate_limit(&self) -> Option<RateLimit> {
@@ -891,6 +1029,7 @@ mod tests {
                     title: "Fix the thing".to_owned(),
                     state: RunState::Failed,
                     started_at: time("2026-09-24T21:56:49Z"),
+                    created_at: time("2026-09-24T21:50:00Z"),
                     updated_at: time("2026-09-24T21:57:56Z"),
                     url: "https://github.com/timmattison/tools/actions/runs/36064582280".to_owned(),
                 },
@@ -902,6 +1041,7 @@ mod tests {
                     title: "Release".to_owned(),
                     state: RunState::Running,
                     started_at: time("2026-09-25T01:02:03Z"),
+                    created_at: time("2026-09-25T01:02:03Z"),
                     updated_at: time("2026-09-25T01:03:00Z"),
                     url: "https://github.com/timmattison/tools/actions/runs/7".to_owned(),
                 },
@@ -1132,13 +1272,136 @@ mod tests {
         }
     }
 
+    /// The body that GitHub gives for one repository.
+    fn repo_json(full_name: &str, archived: bool) -> String {
+        format!("{{\"id\":1,\"full_name\":\"{full_name}\",\"archived\":{archived}}}")
+    }
+
+    #[test]
+    fn a_listable_repository_is_listable_and_the_request_names_it() {
+        let stub = Stub::new("cat \"$dir/repo.out\"");
+        stub.file("repo.out", &ok_output(&repo_json("o/r", false)));
+        let listable = stub.source().repo_is_listable(&repo("o/r"));
+        assert_eq!(listable, Ok(true));
+        assert_eq!(stub.requests(), [["api", "-i", "repos/o/r"]]);
+    }
+
+    #[test]
+    fn a_missing_repository_is_not_listable() {
+        let stub = Stub::new("cat \"$dir/repo.out\"");
+        stub.file(
+            "repo.out",
+            &http_output("HTTP/2.0 404 Not Found", "{\"message\":\"Not Found\"}"),
+        );
+        assert_eq!(stub.source().repo_is_listable(&repo("o/r")), Ok(false));
+    }
+
+    #[test]
+    fn an_archived_repository_is_not_listable() {
+        let stub = Stub::new("cat \"$dir/repo.out\"");
+        stub.file("repo.out", &ok_output(&repo_json("o/r", true)));
+        assert_eq!(stub.source().repo_is_listable(&repo("o/r")), Ok(false));
+    }
+
+    #[test]
+    fn a_renamed_or_moved_repository_is_not_listable_under_its_old_name() {
+        let stub = Stub::new("cat \"$dir/repo.out\"");
+        stub.file("repo.out", &ok_output(&repo_json("new-owner/r2", false)));
+        assert_eq!(stub.source().repo_is_listable(&repo("o/r")), Ok(false));
+    }
+
+    #[test]
+    fn the_same_name_in_other_letter_case_is_listable() {
+        let stub = Stub::new("cat \"$dir/repo.out\"");
+        stub.file("repo.out", &ok_output(&repo_json("O/R", false)));
+        assert_eq!(stub.source().repo_is_listable(&repo("o/r")), Ok(true));
+    }
+
+    #[test]
+    fn a_server_error_is_an_error_and_a_bad_body_is_a_bad_response() {
+        let stub = Stub::new("cat \"$dir/repo.out\"");
+        stub.file(
+            "repo.out",
+            &http_output("HTTP/2.0 500 Server Error", "{\"message\":\"oops\"}"),
+        );
+        assert!(matches!(
+            stub.source().repo_is_listable(&repo("o/r")),
+            Err(SourceError::Http { status: 500, .. })
+        ));
+        stub.file("repo.out", &ok_output("[]"));
+        assert!(matches!(
+            stub.source().repo_is_listable(&repo("o/r")),
+            Err(SourceError::BadResponse(_))
+        ));
+    }
+
+    /// The body that GitHub gives for one run. `created_at` differs from `run_started_at`.
+    const RUN_JSON: &str = r#"{"id":42,"run_number":9,"name":"CI","display_title":"Fix it","head_branch":"main",
+        "status":"in_progress","conclusion":null,"run_started_at":"2026-09-24T21:56:49Z",
+        "created_at":"2026-09-24T21:50:00Z","updated_at":"2026-09-24T21:57:56Z",
+        "html_url":"https://github.com/o/r/actions/runs/42"}"#;
+
+    #[test]
+    fn a_direct_read_of_a_run_names_the_run_and_maps_the_fields() {
+        let stub = Stub::new("cat \"$dir/run.out\"");
+        stub.file("run.out", &ok_output(RUN_JSON));
+        let run = stub.source().run(&repo("o/r"), RunId(42));
+        assert_eq!(
+            stub.requests(),
+            [["api", "-i", "repos/o/r/actions/runs/42"]]
+        );
+        assert_eq!(
+            run,
+            Ok(Some(Run {
+                id: RunId(42),
+                repo: repo("o/r"),
+                workflow: "CI".to_owned(),
+                branch: "main".to_owned(),
+                title: "Fix it".to_owned(),
+                state: RunState::Running,
+                started_at: time("2026-09-24T21:56:49Z"),
+                created_at: time("2026-09-24T21:50:00Z"),
+                updated_at: time("2026-09-24T21:57:56Z"),
+                url: "https://github.com/o/r/actions/runs/42".to_owned(),
+            }))
+        );
+    }
+
+    #[test]
+    fn a_direct_read_of_a_missing_run_is_none() {
+        let stub = Stub::new("cat \"$dir/run.out\"");
+        stub.file(
+            "run.out",
+            &http_output("HTTP/2.0 404 Not Found", "{\"message\":\"Not Found\"}"),
+        );
+        assert_eq!(stub.source().run(&repo("o/r"), RunId(42)), Ok(None));
+    }
+
+    #[test]
+    fn a_direct_read_of_a_run_with_a_server_error_or_a_bad_body_is_an_error() {
+        let stub = Stub::new("cat \"$dir/run.out\"");
+        stub.file(
+            "run.out",
+            &http_output("HTTP/2.0 500 Server Error", "{\"message\":\"oops\"}"),
+        );
+        assert!(matches!(
+            stub.source().run(&repo("o/r"), RunId(42)),
+            Err(SourceError::Http { status: 500, .. })
+        ));
+        stub.file("run.out", &ok_output("[]"));
+        assert!(matches!(
+            stub.source().run(&repo("o/r"), RunId(42)),
+            Err(SourceError::BadResponse(_))
+        ));
+    }
+
     #[test]
     fn a_created_since_query_asks_for_one_hour_aligned_page() {
         let stub = Stub::new("cat \"$dir/page1.out\"");
         stub.file("page1.out", &ok_output(RUNS_JSON));
         let tools = repo("timmattison/tools");
         let query = RunQuery::CreatedSince(time("2026-09-24T21:56:49Z"));
-        let runs = stub.source().runs_of(&tools, query).expect("runs");
+        let runs = stub.source().runs_of(&tools, query).expect("runs").runs;
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0].id, RunId(36_064_582_280));
         assert_eq!(
@@ -1184,7 +1447,8 @@ mod tests {
         let runs = stub
             .source()
             .runs_of(&repo("o/r"), since_query())
-            .expect("runs");
+            .expect("runs")
+            .runs;
         assert_eq!(runs.len(), 150);
         assert_eq!(runs[149].id, RunId(150));
         assert_eq!(stub.requests().len(), 2);
@@ -1198,7 +1462,8 @@ mod tests {
         let runs = stub
             .source()
             .runs_of(&repo("o/r"), since_query())
-            .expect("runs");
+            .expect("runs")
+            .runs;
         assert_eq!(runs.len(), 149);
         assert_eq!(runs.iter().filter(|run| run.id == RunId(100)).count(), 1);
         assert_eq!(stub.requests().len(), 2);
@@ -1212,7 +1477,8 @@ mod tests {
         let runs = stub
             .source()
             .runs_of(&repo("o/r"), since_query())
-            .expect("runs");
+            .expect("runs")
+            .runs;
         assert_eq!(runs.len(), 99);
         assert_eq!(stub.requests().len(), 1);
     }
@@ -1225,7 +1491,8 @@ mod tests {
         let runs = stub
             .source()
             .runs_of(&repo("o/r"), since_query())
-            .expect("runs");
+            .expect("runs")
+            .runs;
         assert_eq!(runs.len(), 100);
         assert_eq!(stub.requests().len(), 1);
     }
@@ -1248,11 +1515,92 @@ mod tests {
         let runs = stub
             .source()
             .runs_of(&repo("o/r"), since_query())
-            .expect("runs");
+            .expect("runs")
+            .runs;
         assert_eq!(runs.len(), 1000);
         assert_eq!(stub.requests().len(), 10);
         let last = stub.requests().pop().expect("a request");
         assert!(last[2].contains("&page=10&"), "{last:?}");
+    }
+
+    /// A stub `gh` that answers each of the ten pages of the query from `page<N>.out`.
+    fn ten_page_cases(filter_text: &str) -> String {
+        let lines: Vec<String> = (1..=10)
+            .map(|page| format!("  *'&page={page}&{filter_text}'*) cat \"$dir/page{page}.out\";;"))
+            .collect();
+        format!("case \"$*\" in\n{}\n esac", lines.join("\n"))
+    }
+
+    #[test]
+    fn ten_full_pages_give_a_cut_list_and_a_short_last_page_does_not() {
+        let stub = Stub::new(&ten_page_cases(""));
+        for page in 1..=10_u64 {
+            stub.file(
+                &format!("page{page}.out"),
+                &ok_output(&runs_json(5000, (page - 1) * 100 + 1, 100)),
+            );
+        }
+        let cut = stub.source().runs_of(&repo("o/r"), since_query());
+        assert_eq!(
+            cut.map(|list| (list.runs.len(), list.cut)),
+            Ok((1000, true))
+        );
+
+        let stub = Stub::new(&ten_page_cases(""));
+        for page in 1..=10_u64 {
+            let count = if page == 10 { 99 } else { 100 };
+            stub.file(
+                &format!("page{page}.out"),
+                &ok_output(&runs_json(5000, (page - 1) * 100 + 1, count)),
+            );
+        }
+        let whole = stub.source().runs_of(&repo("o/r"), since_query());
+        assert_eq!(
+            whole.map(|list| (list.runs.len(), list.cut)),
+            Ok((999, false))
+        );
+    }
+
+    /// GitHub gives a filtered query 1,000 results at most, and it can state a
+    /// `total_count` of 1,000 when more runs match. Ten full pages are thus
+    /// cut, also when the count of the runs reaches `total_count`.
+    #[test]
+    fn ten_full_pages_are_cut_also_when_the_total_count_is_1000() {
+        let stub = Stub::new(&ten_page_cases(""));
+        for page in 1..=10_u64 {
+            stub.file(
+                &format!("page{page}.out"),
+                &ok_output(&runs_json(1000, (page - 1) * 100 + 1, 100)),
+            );
+        }
+        let list = stub.source().runs_of(&repo("o/r"), since_query());
+        assert_eq!(
+            list.map(|list| (list.runs.len(), list.cut)),
+            Ok((1000, true))
+        );
+    }
+
+    #[test]
+    fn an_active_list_is_cut_when_one_status_is_cut() {
+        let stub = Stub::new(&format!(
+            "case \"$*\" in\n  *'status=queued'*) cat \"$dir/empty.out\";;\n  *'status=waiting'*) cat \"$dir/empty.out\";;\n  *'status=pending'*) cat \"$dir/empty.out\";;\n  *'status=requested'*) cat \"$dir/empty.out\";;\n{}\n esac",
+            (1..=10)
+                .map(|page| format!("  *'&page={page}&status=in_progress'*) cat \"$dir/page{page}.out\";;"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+        stub.file("empty.out", &ok_output(&runs_json(0, 1, 0)));
+        for page in 1..=10_u64 {
+            stub.file(
+                &format!("page{page}.out"),
+                &ok_output(&runs_json(5000, (page - 1) * 100 + 1, 100)),
+            );
+        }
+        let list = stub
+            .source()
+            .runs_of(&repo("o/r"), RunQuery::Active)
+            .expect("runs");
+        assert_eq!((list.runs.len(), list.cut), (1000, true));
     }
 
     /// A jobs body with `count` jobs numbered from `first_id`, and `total` as the count.
@@ -1427,9 +1775,54 @@ mod tests {
         let source = stub.source();
         let tools = repo("timmattison/tools");
         let first = source.runs_of(&tools, since_query());
-        assert_eq!(first.as_ref().map(Vec::len), Ok(2));
+        assert_eq!(first.as_ref().map(|list| list.runs.len()), Ok(2));
         let later = RunQuery::CreatedSince(time("2026-09-24T21:59:59Z"));
         let second = source.runs_of(&tools, later);
+        assert_eq!(second, first);
+        let requests = stub.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[1][..4],
+            ["api", "-i", "-H", "If-None-Match: W/\"4c00158b\""]
+        );
+        assert_eq!(requests[1][4], requests[0][2]);
+    }
+
+    #[test]
+    fn the_newest_run_is_the_first_run_of_a_page_of_one() {
+        let stub = Stub::new("cat \"$dir/page1.out\"");
+        stub.file("page1.out", &ok_output(RUNS_JSON));
+        let newest = stub.source().newest_run(&repo("timmattison/tools"));
+        assert_eq!(
+            stub.requests(),
+            [[
+                "api",
+                "-i",
+                "repos/timmattison/tools/actions/runs?per_page=1"
+            ]]
+        );
+        assert_eq!(
+            newest.map(|run| run.map(|run| run.id)),
+            Ok(Some(RunId(36_064_582_280)))
+        );
+    }
+
+    #[test]
+    fn a_repository_with_no_runs_has_no_newest_run() {
+        let stub = Stub::new("cat \"$dir/page1.out\"");
+        stub.file("page1.out", &ok_output(&runs_json(0, 1, 0)));
+        assert_eq!(stub.source().newest_run(&repo("o/r")), Ok(None));
+    }
+
+    #[test]
+    fn a_second_read_of_the_newest_run_sends_the_etag_and_reuses_the_run_on_304() {
+        let stub = Stub::new(ETAG_CASES);
+        stub.file("page1.out", &ok_output(RUNS_JSON));
+        stub.file("not-modified.out", NOT_MODIFIED);
+        let source = stub.source();
+        let first = source.newest_run(&repo("timmattison/tools"));
+        assert!(matches!(first, Ok(Some(_))), "{first:?}");
+        let second = source.newest_run(&repo("timmattison/tools"));
         assert_eq!(second, first);
         let requests = stub.requests();
         assert_eq!(requests.len(), 2);
@@ -1557,6 +1950,110 @@ mod tests {
         source.jobs_of(&repo("o/r"), RunId(42)).expect("jobs");
         source.forget_jobs(&repo("o/r"), RunId(42));
         assert_eq!(cache_keys(&source), ["o/r#jobs/43#1"]);
+    }
+
+    /// The `If-None-Match` header of each request, in order. `None` for a request with no such header.
+    fn conditions(stub: &Stub) -> Vec<Option<String>> {
+        stub.requests()
+            .iter()
+            .map(|call| {
+                call.iter()
+                    .find(|argument| argument.starts_with("If-None-Match"))
+                    .cloned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_cached_page_of_an_empty_answer_sends_its_etag_again() {
+        let stub = Stub::new(ETAG_CASES);
+        stub.file("page1.out", &ok_output(&runs_json(0, 1, 0)));
+        stub.file("not-modified.out", NOT_MODIFIED);
+        let source = stub.source();
+        source.runs_of(&repo("o/r"), since_query()).expect("runs");
+        source.runs_of(&repo("o/r"), since_query()).expect("runs");
+        assert_eq!(
+            conditions(&stub),
+            [None, Some("If-None-Match: W/\"4c00158b\"".to_owned())]
+        );
+    }
+
+    #[test]
+    fn forget_runs_makes_the_next_request_for_the_page_unconditional() {
+        let stub = Stub::new(ETAG_CASES);
+        stub.file("page1.out", &ok_output(&runs_json(0, 1, 0)));
+        stub.file("not-modified.out", NOT_MODIFIED);
+        let source = stub.source();
+        source.runs_of(&repo("o/r"), since_query()).expect("runs");
+        source.forget_runs(&repo("o/r"), since_query());
+        source.runs_of(&repo("o/r"), since_query()).expect("runs");
+        assert_eq!(conditions(&stub), [None, None]);
+    }
+
+    /// A stub that answers a jobs request from `jobs.out` and any other request from `page1.out`.
+    const JOBS_AND_RUNS_CASES: &str = "case \"$*\" in
+  *'/jobs?'*) cat \"$dir/jobs.out\";;
+  *) cat \"$dir/page1.out\";;
+ esac";
+
+    /// A source whose cache holds a page of each kind for `o/r` and `o/r2`.
+    fn source_with_every_kind_of_page(stub: &Stub) -> GhSource {
+        stub.file("page1.out", &ok_output(&runs_json(0, 1, 0)));
+        stub.file("jobs.out", &ok_output(&active_jobs_json()));
+        let source = stub.source();
+        for name in ["o/r", "o/r2"] {
+            source.runs_of(&repo(name), since_query()).expect("runs");
+            source.runs_of(&repo(name), RunQuery::Active).expect("runs");
+        }
+        source.newest_run(&repo("o/r")).expect("newest");
+        source.jobs_of(&repo("o/r"), RunId(42)).expect("jobs");
+        source
+    }
+
+    #[test]
+    fn forget_runs_for_created_drops_only_the_created_pages_of_that_repository() {
+        let stub = Stub::new(JOBS_AND_RUNS_CASES);
+        let source = source_with_every_kind_of_page(&stub);
+        source.forget_runs(&repo("o/r"), since_query());
+        assert_eq!(
+            cache_keys(&source),
+            [
+                "o/r#in_progress#1",
+                "o/r#jobs/42#1",
+                "o/r#newest#1",
+                "o/r#pending#1",
+                "o/r#queued#1",
+                "o/r#requested#1",
+                "o/r#waiting#1",
+                "o/r2#created#1",
+                "o/r2#in_progress#1",
+                "o/r2#pending#1",
+                "o/r2#queued#1",
+                "o/r2#requested#1",
+                "o/r2#waiting#1",
+            ]
+        );
+    }
+
+    #[test]
+    fn forget_runs_for_active_drops_only_the_status_pages_of_that_repository() {
+        let stub = Stub::new(JOBS_AND_RUNS_CASES);
+        let source = source_with_every_kind_of_page(&stub);
+        source.forget_runs(&repo("o/r"), RunQuery::Active);
+        assert_eq!(
+            cache_keys(&source),
+            [
+                "o/r#created#1",
+                "o/r#jobs/42#1",
+                "o/r#newest#1",
+                "o/r2#created#1",
+                "o/r2#in_progress#1",
+                "o/r2#pending#1",
+                "o/r2#queued#1",
+                "o/r2#requested#1",
+                "o/r2#waiting#1",
+            ]
+        );
     }
 
     #[test]
@@ -1746,18 +2243,21 @@ mod tests {
   *status=queued*) cat \"$dir/page2.out\";;
   *status=waiting*) cat \"$dir/page3.out\";;
   *status=pending*) cat \"$dir/page4.out\";;
+  *status=requested*) cat \"$dir/page5.out\";;
  esac",
         );
         stub.file("page1.out", &ok_output(&runs_json(2, 1, 2)));
         stub.file("page2.out", &ok_output(&runs_json(2, 2, 2)));
         stub.file("page3.out", &ok_output(&runs_json(2, 3, 2)));
         stub.file("page4.out", &ok_output(&runs_json(2, 4, 2)));
+        stub.file("page5.out", &ok_output(&runs_json(2, 5, 2)));
         let runs = stub
             .source()
             .runs_of(&repo("o/r"), RunQuery::Active)
-            .expect("runs");
+            .expect("runs")
+            .runs;
         let ids: Vec<u64> = runs.iter().map(|run| run.id.0).collect();
-        assert_eq!(ids, [1, 2, 3, 4, 5]);
+        assert_eq!(ids, [1, 2, 3, 4, 5, 6]);
         let paths: Vec<String> = stub
             .requests()
             .into_iter()
@@ -1770,8 +2270,36 @@ mod tests {
                 "repos/o/r/actions/runs?per_page=100&page=1&status=queued",
                 "repos/o/r/actions/runs?per_page=100&page=1&status=waiting",
                 "repos/o/r/actions/runs?per_page=100&page=1&status=pending",
+                "repos/o/r/actions/runs?per_page=100&page=1&status=requested",
             ]
         );
+    }
+
+    #[test]
+    fn the_sweep_asks_for_each_status_that_ha_calls_active() {
+        const DOCUMENTED_STATUSES: [&str; 14] = [
+            "requested",
+            "queued",
+            "in_progress",
+            "waiting",
+            "pending",
+            "completed",
+            "action_required",
+            "cancelled",
+            "failure",
+            "neutral",
+            "skipped",
+            "stale",
+            "success",
+            "timed_out",
+        ];
+        for status in DOCUMENTED_STATUSES {
+            assert_eq!(
+                RunState::from_github(status, None).is_active(),
+                ACTIVE_STATUSES.contains(&status),
+                "the sweep and the probe disagree about the status {status}"
+            );
+        }
     }
 
     #[test]
@@ -1792,7 +2320,8 @@ mod tests {
         let runs = stub
             .source()
             .runs_of(&repo("o/r"), RunQuery::Active)
-            .expect("runs");
+            .expect("runs")
+            .runs;
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].id.0, 42);
         assert_eq!(runs[0].state, RunState::Queued);
