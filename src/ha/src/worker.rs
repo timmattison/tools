@@ -19,6 +19,11 @@
 //! Each active run costs one more jobs request on each cycle. An `ETag` 304
 //! answer makes that request free. Job requests and run requests share the
 //! [`CONCURRENCY`] limit and the rate limit backoff.
+//!
+//! GitHub can answer with success and still leave runs out. The worker keeps
+//! the last good created answer of each repository. A run that the new answer
+//! leaves out, and that still exists, makes the answer suspect. The worker
+//! then keeps the last good runs and sends [`Update::Suspect`].
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,7 +33,7 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 
-use crate::github::{RepoList, RunQuery, Source, SourceError};
+use crate::github::{RepoList, RunList, RunQuery, Source, SourceError};
 use crate::job::Job;
 use crate::run::{Run, RunId};
 use crate::settings::Settings;
@@ -227,6 +232,9 @@ struct State {
     sweep_cadence: Cadence,
     /// The active runs of the last good sweep, for each repository.
     sweeps: Mutex<HashMap<RepoName, Vec<Run>>>,
+    /// The last good created answer of each repository. No thread holds this
+    /// lock during a call of the source.
+    created_answers: Mutex<HashMap<RepoName, Vec<Run>>>,
     /// The runs whose jobs the screen shows now (the last `WatchJobs`).
     watched: BTreeSet<RunKey>,
     /// The facts of each run of the last good answer, for each repository.
@@ -249,6 +257,7 @@ impl State {
             owner_errors: BTreeMap::new(),
             sweep_cadence: Cadence::new(slow),
             sweeps: Mutex::new(HashMap::new()),
+            created_answers: Mutex::new(HashMap::new()),
             watched: BTreeSet::new(),
             facts: Mutex::new(HashMap::new()),
             job_marks: Mutex::new(HashMap::new()),
@@ -408,8 +417,8 @@ fn apply_command(
 /// runs, and the runs with a mark, when the list of runs holds the run), and
 /// reports the end of the cycle. A mark whose run left the list of runs is
 /// removed. The reconcile at the end of the job fetch then tells the source to
-/// forget the pages of each run whose mark went away. A failed repository
-/// fetch keeps its old facts, thus its marks stay. Returns how long to wait
+/// forget the pages of each run whose mark went away. A failed or suspect
+/// repository fetch keeps its old facts, thus its marks stay. Returns how long to wait
 /// before the next one, and whether the worker waits for a rate limit reset.
 fn cycle<S: Source>(
     source: &S,
@@ -428,10 +437,16 @@ fn cycle<S: Source>(
         .get_mut()
         .unwrap_or_else(PoisonError::into_inner)
         .retain(|repo, _| repos.contains(repo));
+    state
+        .created_answers
+        .get_mut()
+        .unwrap_or_else(PoisonError::into_inner)
+        .retain(|repo, _| repos.contains(repo));
     let fetch = Fetch {
         since: window_start(settings.window),
         sweep_due,
         sweeps: &state.sweeps,
+        created_answers: &state.created_answers,
         facts: &state.facts,
     };
     fetch_all(source, &repos, &fetch, updates)?;
@@ -468,32 +483,62 @@ struct Fetch<'a> {
     sweep_due: bool,
     /// The stored sweep results. No thread holds this lock during a call.
     sweeps: &'a Mutex<HashMap<RepoName, Vec<Run>>>,
+    /// The last good created answer of each repository. A good answer replaces
+    /// the entry of its repository. No thread holds this lock during a call.
+    created_answers: &'a Mutex<HashMap<RepoName, Vec<Run>>>,
     /// The facts of the runs of each repository. A good fetch replaces the
     /// entry of its repository. No thread holds this lock during a call.
     facts: &'a Mutex<HashMap<RepoName, HashMap<RunId, RunFacts>>>,
 }
 
+/// What the fetch of one repository gives.
+enum Fetched {
+    /// The runs to show: the recent answer and the runs of the last sweep.
+    Good(Vec<Run>),
+    /// GitHub answered with success, but `ha` does not trust the answer.
+    Suspect(Suspicion),
+    /// A request failed.
+    Failed(SourceError),
+}
+
 /// Fetches the runs of one repository and merges in the last sweep.
 ///
-/// The result holds every run of the recent answer. It also holds each run of
-/// the last sweep that the recent answer lacks. Those runs started before the
-/// window and still run.
-fn fetch_repo<S: Source>(
-    source: &S,
-    repo: &RepoName,
-    fetch: &Fetch<'_>,
-) -> Result<Vec<Run>, SourceError> {
-    let mut runs = source
-        .runs_of(repo, RunQuery::CreatedSince(fetch.since))?
-        .runs;
+/// A good result holds every run of the recent answer. It also holds each run
+/// of the last sweep that the recent answer lacks. Those runs started before
+/// the window and still run. The recent answer goes through
+/// [`suspicion_of_created`]. A suspect answer keeps the last good answer, and
+/// the function tells the source to forget the cached pages of the query, so
+/// the next cycle asks GitHub again. The sweep still runs and its result is
+/// stored, also when the recent answer is suspect. A failed request gives
+/// [`Fetched::Failed`].
+fn fetch_repo<S: Source>(source: &S, repo: &RepoName, fetch: &Fetch<'_>) -> Fetched {
+    let query = RunQuery::CreatedSince(fetch.since);
+    let list = match source.runs_of(repo, query) {
+        Ok(list) => list,
+        Err(error) => return Fetched::Failed(error),
+    };
     if fetch.sweep_due {
-        let active = source.runs_of(repo, RunQuery::Active)?.runs;
-        fetch
-            .sweeps
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(repo.clone(), active);
+        match source.runs_of(repo, RunQuery::Active) {
+            Ok(active) => {
+                fetch
+                    .sweeps
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(repo.clone(), active.runs);
+            }
+            Err(error) => return Fetched::Failed(error),
+        }
     }
+    if let Some(suspicion) = suspicion_of_created(source, repo, fetch, &list) {
+        source.forget_runs(repo, query);
+        return Fetched::Suspect(suspicion);
+    }
+    let mut runs = list.runs;
+    fetch
+        .created_answers
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(repo.clone(), runs.clone());
     let known: HashSet<RunId> = runs.iter().map(|run| run.id).collect();
     if let Some(swept) = fetch
         .sweeps
@@ -503,13 +548,53 @@ fn fetch_repo<S: Source>(
     {
         runs.extend(swept.iter().filter(|run| !known.contains(&run.id)).cloned());
     }
-    Ok(runs)
+    Fetched::Good(runs)
+}
+
+/// Decides whether `ha` trusts a successful created answer of a repository.
+///
+/// Without a last good answer there is nothing to compare. Otherwise the
+/// answer goes through [`first_left_out`]. A run of the last good answer is in
+/// range when it was created since the start of the query. When GitHub cut the
+/// answer, the run must also be as new as the oldest run of the answer, because
+/// a run past the cut is not missing. A run that is in range and missing is
+/// read directly. A run that still exists makes the answer suspect. A failed
+/// read does the same, and a run that is gone does not.
+fn suspicion_of_created<S: Source>(
+    source: &S,
+    repo: &RepoName,
+    fetch: &Fetch<'_>,
+    list: &RunList,
+) -> Option<Suspicion> {
+    let last_good = fetch
+        .created_answers
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(repo)
+        .cloned()?;
+    let oldest = if list.cut {
+        list.runs.iter().map(|run| run.created_at).min()
+    } else {
+        None
+    };
+    first_left_out(
+        &last_good,
+        &list.runs,
+        |run| run.created_at >= fetch.since && oldest.is_none_or(|oldest| run.created_at >= oldest),
+        |run| match source.run(repo, run.id) {
+            Ok(Some(_)) => Presence::InRange,
+            Ok(None) => Presence::Gone,
+            Err(error) => Presence::Unread(error),
+        },
+    )
 }
 
 /// Fetches the runs of every repository with a pool of threads.
 ///
 /// After a good fetch the function stores the facts of the runs of that
-/// repository. A failed fetch keeps the old facts.
+/// repository and sends [`Update::Runs`]. A failed fetch keeps the old facts and
+/// sends [`Update::Failed`]. A suspect fetch keeps the old facts too and sends
+/// [`Update::Suspect`].
 fn fetch_all<S: Source>(
     source: &S,
     repos: &BTreeSet<RepoName>,
@@ -519,7 +604,7 @@ fn fetch_all<S: Source>(
     let repos: Vec<&RepoName> = repos.iter().collect();
     run_pool(&repos, updates, |repo| {
         match fetch_repo(source, repo, fetch) {
-            Ok(runs) => {
+            Fetched::Good(runs) => {
                 let facts = runs.iter().map(|run| (run.id, RunFacts::of(run))).collect();
                 fetch
                     .facts
@@ -531,7 +616,11 @@ fn fetch_all<S: Source>(
                     runs,
                 }
             }
-            Err(error) => Update::Failed {
+            Fetched::Suspect(reason) => Update::Suspect {
+                repo: (*repo).clone(),
+                reason,
+            },
+            Fetched::Failed(error) => Update::Failed {
                 repo: (*repo).clone(),
                 error,
             },
@@ -2817,7 +2906,7 @@ mod tests {
 
         let answers = answers_of_a(&second);
         assert!(
-            matches!(answers.as_slice(), [Update::Runs { runs: got, .. }] if *got == vec![recent.clone()]),
+            matches!(answers.as_slice(), [Update::Runs { runs: got, .. }] if *got == [recent]),
             "{answers:?}"
         );
         assert!(calls_named(&fake, "run").is_empty());
@@ -2849,7 +2938,7 @@ mod tests {
     fn a_failed_direct_read_of_a_left_out_run_is_suspect() {
         let fake = Arc::new(FakeSource::default());
         let runs = three_runs();
-        script_created(&fake, runs.clone());
+        script_created(&fake, runs);
         let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), Duration::ZERO);
         one_cycle(&worker);
 
