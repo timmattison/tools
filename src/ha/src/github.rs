@@ -2268,6 +2268,33 @@ mod tests {
     }
 
     #[test]
+    fn the_sweep_asks_for_each_status_that_ha_calls_active() {
+        const DOCUMENTED_STATUSES: [&str; 14] = [
+            "requested",
+            "queued",
+            "in_progress",
+            "waiting",
+            "pending",
+            "completed",
+            "action_required",
+            "cancelled",
+            "failure",
+            "neutral",
+            "skipped",
+            "stale",
+            "success",
+            "timed_out",
+        ];
+        for status in DOCUMENTED_STATUSES {
+            assert_eq!(
+                RunState::from_github(status, None).is_active(),
+                ACTIVE_STATUSES.contains(&status),
+                "the sweep and the probe disagree about the status {status}"
+            );
+        }
+    }
+
+    #[test]
     fn an_active_query_finds_a_run_that_waits_for_an_approval() {
         let stub = Stub::new(
             "case \"$*\" in
