@@ -12,12 +12,17 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 
 use crate::job::{Job, JobId};
+use crate::queue::{Departure, PullNumber, QueueEntry};
 use crate::run::{keep_first_of_each_id, Run, RunId, RunState};
 use crate::target::RepoName;
 
-/// One of the two lists on the board.
+/// One of the lists on the board.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
+    /// Pull requests in a merge queue.
+    Queue,
+    /// Pull requests that left a merge queue inside the window.
+    History,
     /// Runs that wait or run.
     Active,
     /// Runs that finished inside the window.
@@ -42,6 +47,20 @@ pub enum Row<'a> {
     },
     /// The row that shows an empty section.
     Empty(Section),
+    /// One pull request in a merge queue.
+    Entry {
+        /// The entry of the queue.
+        entry: &'a QueueEntry,
+        /// True for the one row that the selection marks.
+        selected: bool,
+    },
+    /// One time that a pull request left a merge queue.
+    Departure {
+        /// The departure.
+        departure: &'a Departure,
+        /// True for the one row that the selection marks.
+        selected: bool,
+    },
     /// One run.
     Run {
         /// The run.
@@ -129,6 +148,19 @@ pub struct Board {
     jobs: BTreeMap<RunId, Jobs>,
     /// The runs that show their job rows.
     expanded: BTreeSet<RunId>,
+    /// The merge queue of each watched repository that has one.
+    queues: BTreeMap<RepoName, QueueBook>,
+}
+
+/// What the board holds for the merge queue of one repository.
+#[derive(Debug, Default)]
+struct QueueBook {
+    /// The last good entries.
+    entries: Vec<QueueEntry>,
+    /// The last good departures.
+    departures: Vec<Departure>,
+    /// The text of the error of the last read, when it failed.
+    error: Option<String>,
 }
 
 impl Board {
@@ -144,7 +176,37 @@ impl Board {
             offset: 0,
             jobs: BTreeMap::new(),
             expanded: BTreeSet::new(),
+            queues: BTreeMap::new(),
         }
+    }
+
+    /// Keeps the merge queue of each repository of `repos`, and drops the
+    /// merge queue of every other repository. A repository that is new in
+    /// `repos` shows an empty queue until its first answer.
+    pub fn set_queues(&mut self, repos: &BTreeSet<RepoName>) {
+        let _ = repos;
+    }
+
+    /// Stores the merge queue answer of `repo`.
+    ///
+    /// A good list replaces the last one. A failed read keeps the last good
+    /// list and records its error, which [`Board::errors`] gives. When both
+    /// reads succeed, the error goes away. An answer for a repository whose
+    /// queue the board does not hold is dropped.
+    pub fn set_queue(
+        &mut self,
+        repo: &RepoName,
+        entries: Result<Vec<QueueEntry>, String>,
+        departures: Result<Vec<Departure>, String>,
+    ) {
+        let _ = (repo, entries, departures, &self.queues);
+    }
+
+    /// The number of the pull request of the selected row, or `None` when the
+    /// selected row is not a merge queue row.
+    pub fn selected_pull(&mut self, now: DateTime<Utc>) -> Option<PullNumber> {
+        let _ = now;
+        None
     }
 
     /// The time window of the finished runs.
@@ -676,6 +738,7 @@ fn push_jobs<'a>(
 mod tests {
     use super::*;
     use chrono::{Duration as Span, TimeZone};
+    use crate::queue::{EntryState, Outcome};
 
     const HOUR: u64 = 3600;
 
@@ -756,6 +819,21 @@ mod tests {
                     cancelled,
                 } => format!("Header({section:?},{count},{passed},{failed},{cancelled})"),
                 Row::Empty(section) => format!("Empty({section:?})"),
+                Row::Entry { entry, selected } => format!(
+                    "Entry({}#{}){}",
+                    entry.repo,
+                    entry.pull.0,
+                    if *selected { "*" } else { "" }
+                ),
+                Row::Departure {
+                    departure,
+                    selected,
+                } => format!(
+                    "Departure({}#{}){}",
+                    departure.repo,
+                    departure.pull.0,
+                    if *selected { "*" } else { "" }
+                ),
                 Row::Run { run, selected, .. } => {
                     format!("Run({}){}", run.id.0, if *selected { "*" } else { "" })
                 }
@@ -2691,5 +2769,411 @@ mod tests {
         let offsets = offsets_while(&mut board, 4, 4, Board::select_previous);
         assert_eq!(offsets, [7, 7, 7, 6]);
         assert_eq!(selected_text(&mut board).as_deref(), Some("Job(10101)*"));
+    }
+
+    /// An entry of the queue of `repo_text` for pull request `pull` at
+    /// `position`. It joined the queue `minutes` before `now()`.
+    fn queue_entry(repo_text: &str, pull: u64, position: u32, minutes: i64) -> QueueEntry {
+        QueueEntry {
+            repo: repo(repo_text),
+            pull: PullNumber(pull),
+            title: format!("pull {pull}"),
+            branch: format!("issue-{pull}"),
+            position,
+            state: EntryState::Queued,
+            enqueued_at: now() - Span::minutes(minutes),
+            url: format!("https://github.com/{repo_text}/pull/{pull}"),
+        }
+    }
+
+    /// A departure of pull request `pull` from the queue of `repo_text`,
+    /// `minutes` before `now()`. It joined the queue 10 minutes before that.
+    fn departure(repo_text: &str, pull: u64, outcome: Outcome, minutes: i64) -> Departure {
+        Departure {
+            repo: repo(repo_text),
+            pull: PullNumber(pull),
+            title: format!("pull {pull}"),
+            branch: format!("issue-{pull}"),
+            outcome,
+            enqueued_at: Some(now() - Span::minutes(minutes + 10)),
+            left_at: now() - Span::minutes(minutes),
+            url: format!("https://github.com/{repo_text}/pull/{pull}"),
+        }
+    }
+
+    /// A board on which `a/x` has a merge queue with these entries and departures.
+    fn queue_board(entries: Vec<QueueEntry>, departures: Vec<Departure>) -> Board {
+        let mut board = board();
+        board.set_queues(&BTreeSet::from([repo("a/x")]));
+        board.set_queue(&repo("a/x"), Ok(entries), Ok(departures));
+        board
+    }
+
+    /// A board with one entry, one departure, one active run, and one recent run.
+    fn mixed_board() -> Board {
+        let mut board = queue_board(
+            vec![queue_entry("a/x", 7, 1, 3)],
+            vec![departure("a/x", 2, Outcome::Merged, 10)],
+        );
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 5, 1),
+                run(3, "a/x", RunState::Passed, 60, 10),
+            ],
+            now(),
+        );
+        board
+    }
+
+    #[test]
+    fn with_no_merge_queue_the_board_shows_only_the_run_sections() {
+        let mut board = board();
+        board.set_queues(&BTreeSet::new());
+        assert_eq!(
+            shape(&board.rows(now())),
+            [
+                "Header(Active,0,0,0,0)",
+                "Empty(Active)",
+                "Header(Recent,0,0,0,0)",
+                "Empty(Recent)"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_repository_with_a_merge_queue_adds_two_sections_above_the_runs() {
+        let mut board = board();
+        board.set_queues(&BTreeSet::from([repo("a/x")]));
+        assert_eq!(
+            shape(&board.rows(now())),
+            [
+                "Header(Queue,0,0,0,0)",
+                "Empty(Queue)",
+                "Header(History,0,0,0,0)",
+                "Empty(History)",
+                "Header(Active,0,0,0,0)",
+                "Empty(Active)",
+                "Header(Recent,0,0,0,0)",
+                "Empty(Recent)"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_queue_shows_the_entries_of_each_repository_in_queue_order() {
+        let mut board = board();
+        board.set_queues(&BTreeSet::from([repo("a/x"), repo("b/y")]));
+        board.set_queue(
+            &repo("b/y"),
+            Ok(vec![queue_entry("b/y", 9, 1, 5)]),
+            Ok(Vec::new()),
+        );
+        board.set_queue(
+            &repo("a/x"),
+            Ok(vec![queue_entry("a/x", 7, 2, 3), queue_entry("a/x", 8, 1, 4)]),
+            Ok(Vec::new()),
+        );
+        assert_eq!(
+            shape(&board.rows(now()))[..4],
+            [
+                "Header(Queue,3,0,0,0)",
+                "Entry(a/x#8)",
+                "Entry(a/x#7)",
+                "Entry(b/y#9)"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_history_shows_the_departures_of_the_window_newest_first_and_counts_them() {
+        let mut board = queue_board(
+            Vec::new(),
+            vec![
+                departure("a/x", 1, Outcome::Removed, 30),
+                departure("a/x", 2, Outcome::Merged, 10),
+                departure("a/x", 3, Outcome::Merged, 9 * 60),
+                departure("a/x", 4, Outcome::Failed, 20),
+            ],
+        );
+        assert_eq!(
+            shape(&board.rows(now()))[..6],
+            [
+                "Header(Queue,0,0,0,0)",
+                "Empty(Queue)",
+                "Header(History,3,1,1,1)",
+                "Departure(a/x#2)",
+                "Departure(a/x#4)",
+                "Departure(a/x#1)"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_departure_leaves_the_history_when_it_leaves_the_window() {
+        let mut board = queue_board(
+            Vec::new(),
+            vec![departure("a/x", 2, Outcome::Merged, 8 * 60 - 1)],
+        );
+        let shown = |board: &mut Board, at: DateTime<Utc>| {
+            shape(&board.rows(at)).contains(&"Departure(a/x#2)".to_owned())
+        };
+        assert!(shown(&mut board, now()));
+        assert!(!shown(&mut board, now() + Span::minutes(2)));
+    }
+
+    #[test]
+    fn a_failed_entry_read_keeps_the_last_entries_and_lists_its_error() {
+        let mut board = queue_board(vec![queue_entry("a/x", 7, 1, 3)], Vec::new());
+        board.set_queue(&repo("a/x"), Err("boom".to_owned()), Ok(Vec::new()));
+        assert!(shape(&board.rows(now())).contains(&"Entry(a/x#7)".to_owned()));
+        assert_eq!(board.errors(), [(&repo("a/x"), "merge queue: boom")]);
+    }
+
+    #[test]
+    fn a_failed_event_read_keeps_the_last_departures_and_lists_its_error() {
+        let mut board = queue_board(
+            Vec::new(),
+            vec![departure("a/x", 2, Outcome::Merged, 10)],
+        );
+        board.set_queue(&repo("a/x"), Ok(Vec::new()), Err("boom".to_owned()));
+        assert!(shape(&board.rows(now())).contains(&"Departure(a/x#2)".to_owned()));
+        assert_eq!(board.errors(), [(&repo("a/x"), "merge history: boom")]);
+    }
+
+    #[test]
+    fn a_good_answer_clears_the_error_of_the_queue() {
+        let mut board = queue_board(Vec::new(), Vec::new());
+        board.set_queue(&repo("a/x"), Err("boom".to_owned()), Ok(Vec::new()));
+        board.set_queue(&repo("a/x"), Ok(Vec::new()), Ok(Vec::new()));
+        assert!(board.errors().is_empty(), "{:?}", board.errors());
+    }
+
+    #[test]
+    fn the_error_of_a_queue_follows_the_error_of_the_runs_of_its_repository() {
+        let mut board = board();
+        board.set_queues(&BTreeSet::from([repo("a/x"), repo("b/y")]));
+        board.set_queue(&repo("b/y"), Err("late".to_owned()), Ok(Vec::new()));
+        board.set_queue(&repo("a/x"), Err("boom".to_owned()), Ok(Vec::new()));
+        board.fail(repo("a/x"), "runs down".to_owned());
+        assert_eq!(
+            board.errors(),
+            [
+                (&repo("a/x"), "runs down"),
+                (&repo("a/x"), "merge queue: boom"),
+                (&repo("b/y"), "merge queue: late"),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_answer_for_a_repository_with_no_queue_is_dropped() {
+        let mut board = board();
+        board.set_queue(
+            &repo("a/x"),
+            Ok(vec![queue_entry("a/x", 7, 1, 3)]),
+            Err("boom".to_owned()),
+        );
+        assert_eq!(shape(&board.rows(now()))[0], "Header(Active,0,0,0,0)");
+        assert!(board.errors().is_empty());
+    }
+
+    #[test]
+    fn set_queues_drops_the_queue_of_a_repository_that_has_none_now() {
+        let mut board = board();
+        board.set_queues(&BTreeSet::from([repo("a/x"), repo("b/y")]));
+        board.set_queue(
+            &repo("a/x"),
+            Ok(vec![queue_entry("a/x", 7, 1, 3)]),
+            Err("boom".to_owned()),
+        );
+        board.set_queue(
+            &repo("b/y"),
+            Ok(vec![queue_entry("b/y", 9, 1, 3)]),
+            Ok(Vec::new()),
+        );
+        board.set_queues(&BTreeSet::from([repo("b/y")]));
+        assert_eq!(
+            shape(&board.rows(now()))[..2],
+            ["Header(Queue,1,0,0,0)", "Entry(b/y#9)"]
+        );
+        assert!(board.errors().is_empty());
+        board.set_queues(&BTreeSet::new());
+        assert_eq!(shape(&board.rows(now()))[0], "Header(Active,0,0,0,0)");
+    }
+
+    #[test]
+    fn set_queues_keeps_the_answer_of_a_repository_that_still_has_a_queue() {
+        let mut board = queue_board(vec![queue_entry("a/x", 7, 1, 3)], Vec::new());
+        board.set_queues(&BTreeSet::from([repo("a/x"), repo("b/y")]));
+        assert_eq!(
+            shape(&board.rows(now()))[..2],
+            ["Header(Queue,1,0,0,0)", "Entry(a/x#7)"]
+        );
+    }
+
+    #[test]
+    fn keep_only_drops_the_queue_of_a_repository_that_is_not_watched() {
+        let mut board = queue_board(vec![queue_entry("a/x", 7, 1, 3)], Vec::new());
+        board.keep_only(&BTreeSet::from([repo("b/y")]));
+        assert_eq!(shape(&board.rows(now()))[0], "Header(Active,0,0,0,0)");
+    }
+
+    #[test]
+    fn the_first_queue_row_is_selected_at_the_start() {
+        let mut board = mixed_board();
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Entry(a/x#7)*"));
+    }
+
+    #[test]
+    fn up_and_down_move_through_the_queue_the_history_and_the_runs() {
+        let mut board = mixed_board();
+        assert_eq!(
+            walk(&mut board, 4, Board::select_next),
+            [
+                "Entry(a/x#7)*",
+                "Departure(a/x#2)*",
+                "Run(1)*",
+                "Run(3)*",
+                "Run(3)*"
+            ]
+        );
+        assert_eq!(
+            walk(&mut board, 4, Board::select_previous),
+            [
+                "Run(3)*",
+                "Run(1)*",
+                "Departure(a/x#2)*",
+                "Entry(a/x#7)*",
+                "Entry(a/x#7)*"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_address_of_a_queue_row_is_the_page_of_its_pull_request() {
+        let mut board = mixed_board();
+        assert_eq!(
+            board.selected_url(now()).as_deref(),
+            Some("https://github.com/a/x/pull/7")
+        );
+        board.select_next(now());
+        assert_eq!(
+            board.selected_url(now()).as_deref(),
+            Some("https://github.com/a/x/pull/2")
+        );
+    }
+
+    #[test]
+    fn a_queue_row_gives_its_pull_request_and_no_run() {
+        let mut board = mixed_board();
+        assert_eq!(board.selected_pull(now()), Some(PullNumber(7)));
+        assert!(board.selected_target(now()).is_none());
+        board.select_next(now());
+        assert_eq!(board.selected_pull(now()), Some(PullNumber(2)));
+        board.select_next(now());
+        assert_eq!(board.selected_pull(now()), None);
+        assert_eq!(
+            board.selected_target(now()).map(|(run, _)| run.id),
+            Some(RunId(1))
+        );
+    }
+
+    #[test]
+    fn right_on_a_queue_row_expands_nothing() {
+        let mut board = mixed_board();
+        board.expand(now());
+        assert!(board.expanded(now()).is_empty());
+        assert!(!shape(&board.rows(now())).contains(&"JobsLoading".to_owned()));
+    }
+
+    #[test]
+    fn left_on_a_queue_row_collapses_nothing() {
+        let mut board = mixed_board();
+        board.select_next(now());
+        board.select_next(now());
+        board.expand(now());
+        board.select_previous(now());
+        board.collapse(now());
+        assert_eq!(
+            board.expanded(now()),
+            BTreeSet::from([(repo("a/x"), RunId(1))])
+        );
+    }
+
+    #[test]
+    fn the_selection_stays_on_its_pull_request_when_rows_arrive_above_it() {
+        let mut board = queue_board(vec![queue_entry("a/x", 7, 1, 3)], Vec::new());
+        board.set_queue(
+            &repo("a/x"),
+            Ok(vec![queue_entry("a/x", 6, 1, 9), queue_entry("a/x", 7, 2, 3)]),
+            Ok(Vec::new()),
+        );
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Entry(a/x#7)*"));
+    }
+
+    #[test]
+    fn the_selected_departure_stays_selected_through_a_refresh() {
+        let mut board = mixed_board();
+        board.select_next(now());
+        board.set_queue(
+            &repo("a/x"),
+            Ok(Vec::new()),
+            Ok(vec![
+                departure("a/x", 4, Outcome::Failed, 1),
+                departure("a/x", 2, Outcome::Merged, 10),
+            ]),
+        );
+        assert_eq!(
+            selected_text(&mut board).as_deref(),
+            Some("Departure(a/x#2)*")
+        );
+    }
+
+    #[test]
+    fn when_the_selected_entry_leaves_the_queue_the_row_at_its_position_is_selected() {
+        let mut board = queue_board(vec![queue_entry("a/x", 7, 1, 3)], Vec::new());
+        board.set_queue(
+            &repo("a/x"),
+            Ok(Vec::new()),
+            Ok(vec![departure("a/x", 7, Outcome::Merged, 0)]),
+        );
+        assert_eq!(
+            selected_text(&mut board).as_deref(),
+            Some("Departure(a/x#7)*")
+        );
+    }
+
+    #[test]
+    fn the_selected_run_stays_selected_when_a_queue_appears_above_it() {
+        let mut board = four_runs_in_two_sections();
+        board.select_next(now());
+        board.select_next(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(3)*"));
+        board.set_queues(&BTreeSet::from([repo("a/x")]));
+        board.set_queue(
+            &repo("a/x"),
+            Ok(vec![queue_entry("a/x", 7, 1, 3)]),
+            Ok(vec![departure("a/x", 2, Outcome::Merged, 10)]),
+        );
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(3)*"));
+    }
+
+    #[test]
+    fn the_header_of_a_merge_section_stays_in_view_above_its_first_row() {
+        let mut board = mixed_board();
+        let view = board.view(now(), 2);
+        assert_eq!(view.first, 0);
+        assert_eq!(
+            marked(&view.rows),
+            ["Header(Queue,1,0,0,0)", "Entry(a/x#7)*"]
+        );
+        board.select_next(now());
+        let view = board.view(now(), 2);
+        assert_eq!(view.first, 2);
+        assert_eq!(
+            marked(&view.rows),
+            ["Header(History,1,1,0,0)", "Departure(a/x#2)*"]
+        );
     }
 }

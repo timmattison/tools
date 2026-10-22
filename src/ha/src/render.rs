@@ -468,6 +468,7 @@ fn header_line(
         (Section::Recent, true) => {
             format!("Last {window} · {passed} passed · {failed} failed · {cancelled} cancelled")
         }
+        (Section::Queue | Section::History, _) => String::new(),
     }
 }
 
@@ -486,6 +487,7 @@ fn empty_line(section: Section, window: Duration, loaded: bool) -> String {
             "No runs finished in the last {}.",
             format_duration_setting(window)
         )),
+        Section::Queue | Section::History => String::new(),
     }
 }
 
@@ -825,6 +827,7 @@ pub fn draw<Tz: TimeZone>(
                 let y = put_line(buffer, index + 1, &line);
                 reverse_if(*selected, buffer, area, y);
             }
+            Row::Entry { .. } | Row::Departure { .. } => {}
             Row::JobsLoading => put_status_row(buffer, index + 1, JOBS_LOADING),
             Row::NoJobs => put_status_row(buffer, index + 1, NO_JOBS),
             Row::JobsError(error) => {
