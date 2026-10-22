@@ -41,17 +41,18 @@ pub const CONCURRENCY: usize = 8;
 
 /// How often the worker lists the repositories of the owners and sweeps for
 /// active runs. The sweep finds runs that started before the window. An owner
-/// with no good list is listed on every cycle until a list succeeds.
+/// with no good list, and an owner whose last list failed or was suspect, is
+/// listed on every cycle until a good list replaces the problem.
 pub const SLOW_CADENCE: Duration = Duration::from_secs(600);
 
 /// One message from the worker to the screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Update {
-    /// The repositories to watch now, and the owners whose list failed or was cut.
+    /// The repositories to watch now, and the owners whose list failed, was cut, or was suspect.
     Repos {
         /// Every repository to watch, without duplicates.
         repos: BTreeSet<RepoName>,
-        /// The owners whose list failed or was cut, with the problem of each.
+        /// The owners whose list failed, was cut, or was suspect, with the problem of each.
         owner_errors: Vec<(OwnerName, OwnerProblem)>,
         /// When the last good list of each owner that has one was made.
         listed_at: BTreeMap<OwnerName, DateTime<Utc>>,
@@ -201,10 +202,18 @@ impl RunFacts {
     }
 }
 
+/// The last good list of one owner.
+struct OwnerList {
+    repos: Vec<RepoName>,
+    /// When the worker made the list.
+    listed_at: DateTime<Utc>,
+}
+
 /// What the worker keeps from one cycle to the next.
 struct State {
     owner_cadence: Cadence,
-    owner_lists: BTreeMap<OwnerName, Vec<RepoName>>,
+    /// The last good list of each owner, with the time of that list.
+    owner_lists: BTreeMap<OwnerName, OwnerList>,
     /// The problem of each owner whose last list failed or was cut.
     owner_errors: BTreeMap<OwnerName, OwnerProblem>,
     sweep_cadence: Cadence,
@@ -669,7 +678,7 @@ fn run_pool<T: Sync>(
 /// is still listable makes the list suspect. A failed read does the same.
 fn suspicion_of_list<S: Source>(
     source: &S,
-    last_good: Option<&Vec<RepoName>>,
+    last_good: Option<&[RepoName]>,
     list: &RepoList,
 ) -> Option<Suspicion> {
     if list.cut {
@@ -685,6 +694,50 @@ fn suspicion_of_list<S: Source>(
             Err(error) => Presence::Unread(error),
         },
     )
+}
+
+/// Lists one owner and records the result in `state`.
+///
+/// A good list replaces the last good list, with its time, and clears the
+/// problem of the owner (a cut list leaves a [`OwnerProblem::Cut`]). A suspect
+/// list keeps the last good list and its time. A failed list does the same.
+fn list_owner<S: Source>(source: &S, owner: &OwnerName, state: &mut State) {
+    let list = match source.repos_of(owner) {
+        Ok(list) => list,
+        Err(error) => {
+            state
+                .owner_errors
+                .insert(owner.clone(), OwnerProblem::Failed(error));
+            return;
+        }
+    };
+    let last_good = state
+        .owner_lists
+        .get(owner)
+        .map(|last| last.repos.as_slice());
+    if let Some(suspicion) = suspicion_of_list(source, last_good, &list) {
+        state
+            .owner_errors
+            .insert(owner.clone(), OwnerProblem::Suspect(suspicion));
+        return;
+    }
+    match list.warning() {
+        Some(text) => {
+            state
+                .owner_errors
+                .insert(owner.clone(), OwnerProblem::Cut(text));
+        }
+        None => {
+            state.owner_errors.remove(owner);
+        }
+    }
+    state.owner_lists.insert(
+        owner.clone(),
+        OwnerList {
+            repos: list.repos,
+            listed_at: Utc::now(),
+        },
+    );
 }
 
 /// Builds the repository set and sends it when it can have changed.
@@ -723,33 +776,7 @@ fn refresh_repos<S: Source>(
             continue;
         }
         listed = true;
-        match source.repos_of(owner) {
-            Ok(list) => {
-                let suspicion = suspicion_of_list(source, state.owner_lists.get(owner), &list);
-                if let Some(suspicion) = suspicion {
-                    state
-                        .owner_errors
-                        .insert(owner.clone(), OwnerProblem::Suspect(suspicion));
-                    continue;
-                }
-                match list.warning() {
-                    Some(text) => {
-                        state
-                            .owner_errors
-                            .insert(owner.clone(), OwnerProblem::Cut(text));
-                    }
-                    None => {
-                        state.owner_errors.remove(owner);
-                    }
-                }
-                state.owner_lists.insert(owner.clone(), list.repos);
-            }
-            Err(error) => {
-                state
-                    .owner_errors
-                    .insert(owner.clone(), OwnerProblem::Failed(error));
-            }
-        }
+        list_owner(source, owner, state);
     }
     let mut repos = BTreeSet::new();
     for target in &settings.targets {
@@ -758,7 +785,13 @@ fn refresh_repos<S: Source>(
                 repos.insert(repo.clone());
             }
             Target::Owner(owner) => {
-                repos.extend(state.owner_lists.get(owner).into_iter().flatten().cloned());
+                repos.extend(
+                    state
+                        .owner_lists
+                        .get(owner)
+                        .into_iter()
+                        .flat_map(|list| list.repos.iter().cloned()),
+                );
             }
         }
     }
@@ -777,7 +810,11 @@ fn refresh_repos<S: Source>(
         updates
             .send(Update::Repos {
                 repos: repos.clone(),
-                listed_at: std::collections::BTreeMap::new(),
+                listed_at: state
+                    .owner_lists
+                    .iter()
+                    .map(|(owner, list)| (owner.clone(), list.listed_at))
+                    .collect(),
                 owner_errors,
             })
             .map_err(|_| ReceiverGone)?;
@@ -1280,7 +1317,7 @@ mod tests {
 
         let expected: BTreeSet<RepoName> = [repo("acme/a"), repo("acme/b")].into();
         assert_eq!(
-            first[0],
+            untimed(&first[0]),
             Update::Repos {
                 repos: expected.clone(),
                 listed_at: std::collections::BTreeMap::new(),
@@ -1288,7 +1325,7 @@ mod tests {
             }
         );
         assert_eq!(
-            second[0],
+            untimed(&second[0]),
             Update::Repos {
                 repos: expected,
                 listed_at: std::collections::BTreeMap::new(),
@@ -1385,7 +1422,7 @@ mod tests {
         let first = one_cycle(&worker);
 
         assert_eq!(
-            first[0],
+            untimed(&first[0]),
             Update::Repos {
                 repos: [repo("acme/a")].into(),
                 listed_at: std::collections::BTreeMap::new(),
@@ -1431,7 +1468,7 @@ mod tests {
         let third = one_cycle(&worker);
 
         assert_eq!(
-            first[0],
+            untimed(&first[0]),
             Update::Repos {
                 repos: BTreeSet::new(),
                 listed_at: std::collections::BTreeMap::new(),
@@ -1439,7 +1476,7 @@ mod tests {
             }
         );
         assert_eq!(
-            second[0],
+            untimed(&second[0]),
             Update::Repos {
                 repos: [repo("acme/a")].into(),
                 listed_at: std::collections::BTreeMap::new(),
@@ -1475,9 +1512,16 @@ mod tests {
             .insert(owner("acme-a"), Err(failure.clone()));
         let mut cadence = Cadence::new(SLOW_CADENCE);
         cadence.mark(Instant::now());
+        let listed_at = Utc::now();
         let mut state = State {
             owner_cadence: cadence,
-            owner_lists: BTreeMap::from([(owner("acme-b"), vec![repo("acme-b/x")])]),
+            owner_lists: BTreeMap::from([(
+                owner("acme-b"),
+                OwnerList {
+                    repos: vec![repo("acme-b/x")],
+                    listed_at,
+                },
+            )]),
             owner_errors: BTreeMap::from([(
                 owner("acme-b"),
                 OwnerProblem::Cut("old error".to_owned()),
@@ -1499,11 +1543,11 @@ mod tests {
             updates_rx.try_recv(),
             Ok(Update::Repos {
                 repos: BTreeSet::from([repo("acme-b/x")]),
-                listed_at: std::collections::BTreeMap::new(),
                 owner_errors: vec![
                     (owner("acme-a"), OwnerProblem::Failed(failure)),
                     (owner("acme-b"), OwnerProblem::Cut("old error".to_owned())),
-                ]
+                ],
+                listed_at: BTreeMap::from([(owner("acme-b"), listed_at)]),
             })
         );
         assert_eq!(updates_rx.try_recv(), Err(TryRecvError::Empty));
@@ -1515,6 +1559,22 @@ mod tests {
             .map(|(_, name)| name.clone())
             .collect();
         assert_eq!(owner_calls, vec!["acme-a".to_owned()]);
+    }
+
+    /// The update without its list times, which a test cannot state.
+    fn untimed(update: &Update) -> Update {
+        match update {
+            Update::Repos {
+                repos,
+                owner_errors,
+                ..
+            } => Update::Repos {
+                repos: repos.clone(),
+                owner_errors: owner_errors.clone(),
+                listed_at: BTreeMap::new(),
+            },
+            other => other.clone(),
+        }
     }
 
     /// The owners that `fake` listed, in call order.
@@ -1533,7 +1593,13 @@ mod tests {
         cadence.mark(Instant::now());
         State {
             owner_cadence: cadence,
-            owner_lists: BTreeMap::from([(owner("acme"), vec![repo("acme/a"), repo("acme/b")])]),
+            owner_lists: BTreeMap::from([(
+                owner("acme"),
+                OwnerList {
+                    repos: vec![repo("acme/a"), repo("acme/b")],
+                    listed_at: Utc::now(),
+                },
+            )]),
             ..State::new(SLOW_CADENCE)
         }
     }
