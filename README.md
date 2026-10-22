@@ -2174,9 +2174,9 @@ cannot hang the caller. Used by `cwt` and `ha`.
     - `Loading jobs…` shows until the first answer comes, and `No jobs yet` shows when GitHub did
       not make the jobs of the run yet. When a request for the jobs fails, the error shows below
       the last good job rows. The next refresh asks for the jobs again.
-    - More than one run can be expanded at one time. A run stays expanded through each refresh,
-      and also when it moves from the top section to the bottom section. When a run leaves
-      the board, its jobs go too.
+    - More than one run can be expanded at one time. A run stays expanded through each refresh, and
+      also when it moves from "Running" to the section of the finished runs. When a run leaves the
+      board, its jobs go too.
     - The jobs load at once when you expand a run, and then refresh with the board. The jobs of an
       active run refresh with the board also while the run is collapsed, thus Right shows them at
       once. The jobs of a finished run load one time only, until a re-run changes the run. If
