@@ -230,4 +230,20 @@ mod tests {
         assert!(matches!(suspicion, Some(Suspicion::Unread(..))));
         assert_eq!(read_items, [repo("acme/b"), repo("acme/c")]);
     }
+
+    #[test]
+    fn items_and_suspicions_have_their_texts() {
+        let widgets = Item::Repo(repo("acme/widgets"));
+        assert_eq!(Item::Run(RunId(5)).to_string(), "run 5");
+        assert_eq!(widgets.to_string(), "acme/widgets");
+        assert_eq!(
+            Suspicion::LeftOut(Item::Run(RunId(5))).to_string(),
+            "GitHub left out run 5"
+        );
+        let error = SourceError::Failed("boom".to_owned());
+        assert_eq!(
+            Suspicion::Unread(widgets, error).to_string(),
+            "GitHub left out acme/widgets, and ha cannot read it: gh failed: boom"
+        );
+    }
 }
