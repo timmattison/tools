@@ -714,6 +714,7 @@ pub fn draw<Tz: TimeZone>(
                 run,
                 state,
                 selected,
+                stale: _,
             } => {
                 let line = run_line(run, *state, now, tz, widths);
                 let y = put(buffer, index + 1, &line, Style::default());

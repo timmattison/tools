@@ -52,6 +52,10 @@ pub enum Row<'a> {
         state: RunState,
         /// True for the one row that the selection marks.
         selected: bool,
+        /// True when the last read of the repository of the run failed or
+        /// was suspect (issue #599). The run is then the last good one, and
+        /// it can be old.
+        stale: bool,
     },
     /// One job of an expanded run.
     Job {
@@ -608,6 +612,7 @@ fn push_runs<'a>(
             run,
             state: run.state.shown_with_jobs(jobs.iter().map(|job| job.state)),
             selected: here.is_some_and(|selection| selection.job.is_none()),
+            stale: false,
         });
         if view.expanded.contains(&run.id) {
             push_jobs(rows, answer, here.and_then(|selection| selection.job));
@@ -1219,6 +1224,32 @@ mod tests {
 
         board.keep_only(&BTreeSet::from([repo("b/y")]));
         assert!(board.stale().is_empty());
+    }
+
+    #[test]
+    fn the_run_rows_of_a_failed_repository_are_stale() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Running, 5, 1)],
+            now(),
+        );
+        board.replace(
+            repo("b/y"),
+            vec![run(2, "b/y", RunState::Passed, 30, 20)],
+            now(),
+        );
+        board.fail(repo("a/x"), "HTTP 500".to_owned());
+
+        let stale: Vec<(u64, bool)> = board
+            .rows(now())
+            .iter()
+            .filter_map(|row| match row {
+                Row::Run { run, stale, .. } => Some((run.id.0, *stale)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(stale, [(1, true), (2, false)]);
     }
 
     #[test]
