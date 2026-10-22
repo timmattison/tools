@@ -34,11 +34,12 @@
 //! # A marker costs a column
 //!
 //! Each `truncate_*` function marks the cut with `…`, and that marker occupies
-//! one column of the budget. [`truncate_right`] therefore answers a budget of
-//! no columns with the marker alone, which is one column too wide. That answer
-//! is deliberate, and it is the reason [`truncate_to_budget`] stands beside it:
-//! a caller that can be handed a zero calls that one instead, and gets an empty
-//! string.
+//! one column of the budget. [`truncate_right`] and [`truncate_left`]
+//! therefore answer a budget of no columns with the marker alone, which is one
+//! column too wide. That answer is deliberate, and it is the reason
+//! [`truncate_to_budget`] and [`truncate_left_to_budget`] stand beside them: a
+//! caller that can be handed a zero calls one of those instead, and gets an
+//! empty string.
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -98,6 +99,10 @@ pub fn truncate_right(s: &str, max_width: usize) -> String {
 ///
 /// A path carries the part that identifies it at the end, so a path that must
 /// lose columns loses them from the front.
+///
+/// A budget of no columns gives the marker alone, which is one column wider
+/// than the budget. Call [`truncate_left_to_budget`] when the budget can be
+/// zero.
 #[must_use]
 pub fn truncate_left(s: &str, max_width: usize) -> String {
     if UnicodeWidthStr::width(s) <= max_width {
@@ -187,7 +192,11 @@ pub fn truncate_to_budget(s: &str, budget: usize) -> String {
 /// `…` — which would itself be one column too wide.
 #[must_use]
 pub fn truncate_left_to_budget(s: &str, budget: usize) -> String {
-    truncate_left(s, budget)
+    if budget == 0 {
+        String::new()
+    } else {
+        truncate_left(s, budget)
+    }
 }
 
 /// Center `text` within `width` display columns, padding with spaces.
