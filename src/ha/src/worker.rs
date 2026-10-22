@@ -2986,4 +2986,22 @@ mod tests {
             .iter()
             .any(|update| matches!(update, Update::Jobs { run: RunId(1), .. })));
     }
+
+    #[test]
+    fn an_owner_whose_first_list_is_empty_is_listed_again_before_the_cadence() {
+        let fake = Arc::new(FakeSource::default());
+        fake.script().owners.insert(owner("acme"), Ok(Vec::new()));
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme"]), SLOW_CADENCE);
+        let first = one_cycle(&worker);
+        assert!(repos_of_cycle(&first).0.is_empty());
+
+        script_owner(&fake, &["acme/a"]);
+        let second = refresh_now(&worker);
+
+        assert_eq!(
+            repos_of_cycle(&second).0,
+            &BTreeSet::from([repo("acme/a")]),
+            "{second:?}"
+        );
+    }
 }
