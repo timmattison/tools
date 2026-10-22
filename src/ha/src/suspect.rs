@@ -25,8 +25,10 @@ pub enum Item {
 
 impl fmt::Display for Item {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let _ = f;
-        Ok(())
+        match self {
+            Item::Run(id) => write!(f, "run {}", id.0),
+            Item::Repo(repo) => repo.fmt(f),
+        }
     }
 }
 
@@ -63,10 +65,10 @@ pub enum Presence {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Suspicion {
     /// An item that is still in range is not in the answer.
-    #[error("x")]
+    #[error("GitHub left out {0}")]
     LeftOut(Item),
     /// An item is not in the answer, and the read of it failed.
-    #[error("x")]
+    #[error("GitHub left out {0}, and ha cannot read it: {1}")]
     Unread(Item, SourceError),
 }
 
