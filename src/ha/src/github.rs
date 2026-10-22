@@ -620,7 +620,7 @@ impl Source for GhSource {
             Ok(response) => {
                 let body: RepoBody = serde_json::from_str(&response.body)
                     .map_err(|error| SourceError::BadResponse(error.to_string()))?;
-                Ok(!body.archived && body.full_name == repo.to_string())
+                Ok(!body.archived && body.full_name.eq_ignore_ascii_case(&repo.to_string()))
             }
             Err(SourceError::Http { status: 404, .. }) => Ok(false),
             Err(error) => Err(error),
