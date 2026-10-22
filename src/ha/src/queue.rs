@@ -47,8 +47,14 @@ impl EntryState {
     /// This function never fails.
     #[must_use]
     pub fn from_github(state: &str) -> EntryState {
-        let _ = state;
-        EntryState::Other
+        match state {
+            "QUEUED" => EntryState::Queued,
+            "AWAITING_CHECKS" => EntryState::AwaitingChecks,
+            "MERGEABLE" => EntryState::Mergeable,
+            "LOCKED" => EntryState::Locked,
+            "UNMERGEABLE" => EntryState::Unmergeable,
+            _ => EntryState::Other,
+        }
     }
 }
 
@@ -199,9 +205,92 @@ pub struct QueueLog {
 /// Each departure takes the title and the address of the events of its pull
 /// request, and an empty branch.
 #[must_use]
-pub fn read_events(repo: &RepoName, events: Vec<QueueEvent>) -> QueueLog {
-    let _ = (repo, events);
-    QueueLog::default()
+pub fn read_events(repo: &RepoName, mut events: Vec<QueueEvent>) -> QueueLog {
+    events.sort_by_key(|event| (event.at, event.kind.rank()));
+    let mut stays: BTreeMap<PullNumber, Vec<Stay>> = BTreeMap::new();
+    let mut pages: BTreeMap<PullNumber, (String, String)> = BTreeMap::new();
+    for event in events {
+        let list = stays.entry(event.pull).or_default();
+        match event.kind {
+            EventKind::Added => {
+                if !list.last().is_some_and(Stay::is_open) {
+                    list.push(Stay {
+                        start: Some(event.at),
+                        end: None,
+                    });
+                }
+            }
+            EventKind::Removed { by_queue } => {
+                let outcome = if by_queue {
+                    Outcome::Failed
+                } else {
+                    Outcome::Removed
+                };
+                match list.last_mut() {
+                    Some(stay) if stay.is_open() => stay.end = Some((event.at, outcome)),
+                    Some(stay) if by_queue && stay.ended_near(Outcome::Merged, event.at) => {}
+                    _ => list.push(Stay {
+                        start: None,
+                        end: Some((event.at, outcome)),
+                    }),
+                }
+            }
+            EventKind::Merged => match list.last_mut() {
+                Some(stay) if stay.is_open() || stay.ended_near(Outcome::Failed, event.at) => {
+                    stay.end = Some((event.at, Outcome::Merged));
+                }
+                _ => {}
+            },
+        }
+        pages.insert(event.pull, (event.title, event.url));
+    }
+    let mut log = QueueLog::default();
+    for (pull, list) in stays {
+        let (title, url) = pages.remove(&pull).unwrap_or_default();
+        for stay in list {
+            match stay.end {
+                None => {
+                    log.open.insert(pull);
+                }
+                Some((left_at, outcome)) => log.departures.push(Departure {
+                    repo: repo.clone(),
+                    pull,
+                    title: title.clone(),
+                    branch: String::new(),
+                    outcome,
+                    enqueued_at: stay.start,
+                    left_at,
+                    url: url.clone(),
+                }),
+            }
+        }
+    }
+    log.departures
+        .sort_by_key(|departure| (departure.left_at, departure.pull));
+    log
+}
+
+/// One stay of a pull request in the merge queue, as [`read_events`] reads it.
+#[derive(Debug, Clone, Copy)]
+struct Stay {
+    /// When the addition occurred. `None` when the events hold no addition.
+    start: Option<DateTime<Utc>>,
+    /// When and how the stay ended. `None` while the stay is open.
+    end: Option<(DateTime<Utc>, Outcome)>,
+}
+
+impl Stay {
+    /// True while the stay has no end.
+    fn is_open(&self) -> bool {
+        self.end.is_none()
+    }
+
+    /// True when the stay ended with `outcome`, at most [`MERGE_GAP`] away from `at`.
+    fn ended_near(&self, outcome: Outcome, at: DateTime<Utc>) -> bool {
+        self.end.is_some_and(|(end, ended_with)| {
+            ended_with == outcome && (at - end).abs().to_std().is_ok_and(|gap| gap <= MERGE_GAP)
+        })
+    }
 }
 
 #[cfg(test)]
