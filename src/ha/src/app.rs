@@ -236,10 +236,11 @@ where
                 Update::Repos {
                     repos,
                     owner_errors,
-                    listed_at: _,
+                    listed_at,
                 } => {
                     self.board.keep_only(&repos);
                     self.status.owner_errors = owner_errors;
+                    self.status.owner_listed_at = listed_at;
                 }
                 Update::CycleDone {
                     finished_at,
@@ -944,18 +945,21 @@ mod tests {
     #[test]
     fn a_cycle_in_which_each_fetch_fails_does_not_say_updated() {
         let channels = channels();
+        let cycle_done = || Update::CycleDone {
+            finished_at: now(),
+            rate: None,
+            backoff_until: None,
+        };
+        send_runs(&channels, vec![active_run(1, 5)]);
+        channels.updates.send(cycle_done()).unwrap();
         channels.updates.send(failed_update()).unwrap();
-        channels
-            .updates
-            .send(Update::CycleDone {
-                finished_at: now(),
-                rate: None,
-                backoff_until: None,
-            })
-            .unwrap();
+        channels.updates.send(cycle_done()).unwrap();
         let line = status_line_after(&channels, Status::default());
         assert!(!line.contains("updated 0s ago"), "{line:?}");
-        assert!(line.contains("\u{1F4A4} stale (1 repo)"), "{line:?}");
+        assert!(
+            line.contains("\u{1F4A4} stale since 12:00 (1 repo)"),
+            "{line:?}"
+        );
     }
 
     #[test]

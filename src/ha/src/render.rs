@@ -18,7 +18,7 @@ use crate::cancel::Confirm;
 use crate::job::{Job, RunnerName};
 use crate::run::{Run, RunState};
 use crate::settings::format_duration_setting;
-use crate::status::{Status, MESSAGE_LIFETIME};
+use crate::status::{OwnerProblem, Status, MESSAGE_LIFETIME};
 
 /// The mark before the repository name of a stale run row: the sleeping
 /// symbol and one space. The rows of a repository whose last read failed or was
@@ -540,6 +540,8 @@ fn message_color(age: Duration) -> Color {
     Color::Indexed(MESSAGE_START_GRAY - step)
 }
 
+/// The text of the refresh slot before the first cycle ends.
+const LOADING: &str = "loading…";
 /// The text before the age of the last refresh.
 const REFRESH_AGE_PREFIX: &str = "updated ";
 /// The text after the age of the last refresh.
@@ -563,26 +565,91 @@ fn refresh_age(last_refresh: DateTime<Utc>, now: DateTime<Utc>) -> String {
     )
 }
 
+/// The mark and the word that start the stale part of the status line.
+const STALE_WORD: &str = "stale";
+/// The text between the word and the time of the stale part.
+const STALE_SINCE: &str = " since ";
+/// The separator of the counts in the stale part.
+const STALE_COUNT_SEPARATOR: &str = ", ";
+/// The name of one stale repository, and of many.
+const REPO_NOUN: (&str, &str) = ("repo", "repos");
+/// The name of one stale owner, and of many.
+const OWNER_NOUN: (&str, &str) = ("owner", "owners");
+
+/// Writes a count and its noun, for example `1 repo` or `2 repos`.
+fn counted(count: usize, (one, many): (&str, &str)) -> String {
+    format!("{count} {}", if count == 1 { one } else { many })
+}
+
+/// The time of the stale part: the clock for today, the date and the clock
+/// before. A day starts and ends at midnight in the time zone `tz`.
+fn format_stale_since<Tz: TimeZone>(since: DateTime<Utc>, now: DateTime<Utc>, tz: &Tz) -> String
+where
+    Tz::Offset: Display,
+{
+    let local = since.with_timezone(tz);
+    let format = if local.date_naive() == now.with_timezone(tz).date_naive() {
+        "%H:%M"
+    } else {
+        "%m-%d %H:%M"
+    };
+    local.format(format).to_string()
+}
+
 /// The stale part of the status line, or `None` when no target is stale.
 ///
 /// A stale target is a repository whose last read failed or was suspect, or an
 /// owner whose last list failed or was suspect. A cut owner list is not stale.
 /// The text counts the stale targets and says since when they are stale, for
-/// example `💤 stale since 11:42 (2 repos, 1 owner)`.
+/// example `💤 stale since 11:42 (2 repos, 1 owner)`. The time is the earliest
+/// last good read or list among the stale targets, in the time zone `tz`. When
+/// no stale target has such a time, the text has no time. The part does not
+/// depend on a live message.
 fn stale_part<Tz: TimeZone>(
-    _board: &Board,
-    _status: &Status,
-    _now: DateTime<Utc>,
-    _tz: &Tz,
+    board: &Board,
+    status: &Status,
+    now: DateTime<Utc>,
+    tz: &Tz,
 ) -> Option<String>
 where
     Tz::Offset: Display,
 {
-    None
+    let repos = board.stale();
+    let owners: Vec<Option<DateTime<Utc>>> = status
+        .owner_errors
+        .iter()
+        .filter(|(_, problem)| !matches!(problem, OwnerProblem::Cut(_)))
+        .map(|(owner, _)| status.owner_listed_at.get(owner).copied())
+        .collect();
+    let since = repos
+        .iter()
+        .map(|(_, at)| *at)
+        .chain(owners.iter().copied())
+        .flatten()
+        .min();
+    let counts: Vec<String> = [(repos.len(), REPO_NOUN), (owners.len(), OWNER_NOUN)]
+        .into_iter()
+        .filter(|(count, _)| *count > 0)
+        .map(|(count, noun)| counted(count, noun))
+        .collect();
+    if counts.is_empty() {
+        return None;
+    }
+    let since = since.map_or_else(String::new, |at| {
+        format!("{STALE_SINCE}{}", format_stale_since(at, now, tz))
+    });
+    Some(format!(
+        "{STALE_MARK}{STALE_WORD}{since} ({})",
+        counts.join(STALE_COUNT_SEPARATOR)
+    ))
 }
 
-/// The left part of the status line: the lead, the refresh, the rate limit,
-/// and the key hints.
+/// The left part of the status line: the lead, the refresh or stale part, the
+/// rate limit, and the key hints.
+///
+/// The slot of the refresh shows the [`stale_part`] when any target is stale.
+/// Else it shows the age of the last refresh, or `loading…`. A live message
+/// replaces the lead only, thus it never hides the stale part.
 ///
 /// With `hints` false, the key hints and the separator before them are absent.
 /// The box of the cancel prompt names its own keys, thus the line drops the hints.
@@ -601,10 +668,12 @@ where
     Tz::Offset: Display,
 {
     let mut parts: Vec<String> = lead(board, status, now).into_iter().collect();
-    parts.push(match status.last_refresh {
-        Some(at) => refresh_age(at, now),
-        None => "loading…".to_owned(),
-    });
+    parts.push(
+        stale_part(board, status, now, tz).unwrap_or_else(|| match status.last_refresh {
+            Some(at) => refresh_age(at, now),
+            None => LOADING.to_owned(),
+        }),
+    );
     if let Some(rate) = status.rate {
         parts.push(match status.backoff_until {
             Some(until) => format!(
@@ -3534,6 +3603,12 @@ mod tests {
 
     const HINTS_TAIL: &str = "loading…  ·  ↑↓ select  →← jobs  ⏎ open  c cancel  r refresh  q quit";
 
+    /// The tail of a status line whose board has stale repositories that
+    /// never had a good read: the stale part with `counts`, and the hints.
+    fn stale_tail(counts: &str) -> String {
+        format!("\u{1F4A4} stale ({counts})  ·  {KEY_HINTS}")
+    }
+
     /// The mark at the right end of the status line during a refresh.
     const MARK: &str = "refreshing…";
 
@@ -3550,7 +3625,10 @@ mod tests {
         board.fail(repo("owner/x"), "HTTP 404".to_owned());
         assert_eq!(
             status_line_of(&mut board, &Status::default()),
-            format!("⚠ owner/x: HTTP 404 (+1 more)  ·  {HINTS_TAIL}")
+            format!(
+                "⚠ owner/x: HTTP 404 (+1 more)  ·  {}",
+                stale_tail("2 repos")
+            )
         );
     }
 
@@ -3560,7 +3638,7 @@ mod tests {
         board.fail(repo("owner/x"), "HTTP 404".to_owned());
         assert_eq!(
             status_line_of(&mut board, &Status::default()),
-            format!("⚠ owner/x: HTTP 404  ·  {HINTS_TAIL}")
+            format!("⚠ owner/x: HTTP 404  ·  {}", stale_tail("1 repo"))
         );
     }
 
@@ -3577,7 +3655,7 @@ mod tests {
         };
         assert_eq!(
             status_line_of(&mut board, &status),
-            format!("⚠ owner/x: HTTP 404 (+1 more)  ·  {HINTS_TAIL}")
+            format!("⚠ owner/x: HTTP 404 (+1 more)  ·  {}", stale_tail("1 repo"))
         );
         let mut empty = Board::new(Duration::from_hours(8));
         assert_eq!(
@@ -3592,7 +3670,7 @@ mod tests {
         board.fail(repo("owner/x"), "HTTP 404".to_owned());
         let status = Status {
             message: Some(Message {
-                text: "could not open a browser: https://example.com/run/1".to_owned(),
+                text: "could not open a browser".to_owned(),
                 posted_at: now(),
             }),
             refreshing: true,
@@ -3601,7 +3679,8 @@ mod tests {
         assert_eq!(
             status_line_of(&mut board, &status),
             with_mark(&format!(
-                "could not open a browser: https://example.com/run/1  ·  {HINTS_TAIL}"
+                "could not open a browser  ·  {}",
+                stale_tail("1 repo")
             ))
         );
     }
@@ -3827,7 +3906,7 @@ mod tests {
         board.fail(repo("owner/x"), "HTTP 404".to_owned());
         assert_eq!(
             status_line_of(&mut board, &status),
-            with_mark(&format!("⚠ owner/x: HTTP 404  ·  {HINTS_TAIL}"))
+            with_mark(&format!("⚠ owner/x: HTTP 404  ·  {}", stale_tail("1 repo")))
         );
     }
 
