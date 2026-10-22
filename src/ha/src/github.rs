@@ -491,7 +491,8 @@ impl GhSource {
     /// Fetches every page of the runs of `repo` for `filter`.
     ///
     /// The fetch goes on while the last page was full and the count so far is
-    /// below `total_count`. It stops after `MAX_PAGES` pages. A run that moves
+    /// below `total_count`. It stops after `MAX_PAGES` pages, and then the list
+    /// is cut. A run that moves
     /// from one page to the next between two requests is kept once.
     fn all_runs(
         &self,
@@ -500,16 +501,18 @@ impl GhSource {
         filter: &str,
     ) -> Result<RunList, SourceError> {
         let mut runs = Vec::new();
+        let mut cut = true;
         for number in 1..=MAX_PAGES {
             let page = self.runs_page(repo, family, filter, number)?;
             let full = page.runs.len() >= PAGE_SIZE;
             runs.extend(page.runs);
             if !full || (runs.len() as u64) >= page.total_count {
+                cut = false;
                 break;
             }
         }
         keep_first_of_each_id(&mut runs, |run| run.id);
-        Ok(RunList { runs, cut: false })
+        Ok(RunList { runs, cut })
     }
 
     /// The `ETag` cache. The guard lives for one statement. A poisoned lock still
