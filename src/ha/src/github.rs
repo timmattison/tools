@@ -876,7 +876,7 @@ impl Source for GhSource {
         since: DateTime<Utc>,
     ) -> Result<EventList, SourceError> {
         let mut events = Vec::new();
-        let cut_at: Option<DateTime<Utc>> = None;
+        let mut cut_at = None;
         for number in 1..=MAX_PAGES {
             let path = format!(
                 "repos/{}/{}/issues/events?per_page={PAGE_SIZE}&page={number}",
@@ -889,6 +889,9 @@ impl Source for GhSource {
             let past_since = page.oldest.is_none_or(|oldest| oldest < since);
             if page.count < PAGE_SIZE || past_since {
                 break;
+            }
+            if number == MAX_PAGES {
+                cut_at = page.oldest;
             }
         }
         keep_first_of_each_id(&mut events, |(id, _)| *id);

@@ -492,18 +492,38 @@ impl Board {
         (active, recent)
     }
 
-    /// How far back the merge history is whole at `now`, or `None` when it is
-    /// whole for the full window. Scaffold: always `None` for now.
+    /// The oldest time from which the merge history is whole at `now`.
+    ///
+    /// The history of a repository is whole from its own `cut_at` on, thus
+    /// all of them are whole only from the latest `cut_at` on. A history that
+    /// no cut shortened is whole from the start of the window.
+    fn history_start(&self, now: DateTime<Utc>) -> DateTime<Utc> {
+        self.queues
+            .values()
+            .filter_map(|book| book.cut_at)
+            .fold(self.window_start(now), DateTime::max)
+    }
+
+    /// How far back the merge history reaches at `now`, or `None` when it
+    /// reaches the whole window. A page limit of the event read can cut the
+    /// history short of the window. A cut that is older than the start of the
+    /// window falls in the margin of the read and gives `None`.
     #[must_use]
-    pub fn history_reach(&self, _now: DateTime<Utc>) -> Option<Duration> {
-        None
+    pub fn history_reach(&self, now: DateTime<Utc>) -> Option<Duration> {
+        let start = self.history_start(now);
+        if start > self.window_start(now) {
+            (now - start).to_std().ok()
+        } else {
+            None
+        }
     }
 
     /// The entries of all merge queues and the departures that show at `now`.
     ///
     /// The entries are sorted by repository, then by position. A departure
     /// shows while it left the queue inside the window, and the departures
-    /// are sorted newest first.
+    /// are sorted newest first. A departure that is older than the reach of
+    /// the history (see [`Board::history_reach`]) does not show.
     fn queue_sections(&self, now: DateTime<Utc>) -> (Vec<&QueueEntry>, Vec<&Departure>) {
         let mut entries: Vec<&QueueEntry> = self
             .queues
@@ -513,7 +533,7 @@ impl Board {
         entries.sort_by(|left, right| {
             (&left.repo, left.position, left.pull).cmp(&(&right.repo, right.position, right.pull))
         });
-        let oldest = self.window_start(now);
+        let oldest = self.history_start(now);
         let mut departures: Vec<&Departure> = self
             .queues
             .values()
@@ -3296,7 +3316,7 @@ mod tests {
         board
     }
 
-    const TWO_HOURS: Duration = Duration::from_secs(2 * 3600);
+    const TWO_HOURS: Duration = Duration::from_hours(2);
 
     #[test]
     fn the_history_shows_only_the_span_in_which_every_repository_is_whole() {

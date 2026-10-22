@@ -4064,10 +4064,6 @@ mod tests {
     }
 
     /// The entries and the history of the merge queue update of `wanted`.
-    #[expect(
-        clippy::type_complexity,
-        reason = "the pair holds the two fields of the update as they are"
-    )]
     fn queue_of<'a>(
         updates: &'a [Update],
         wanted: &RepoName,

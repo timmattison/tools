@@ -573,6 +573,13 @@ impl Spans {
             None => format_duration_setting(self.window),
         }
     }
+
+    /// The text that names the span of the merge history in a sentence: the
+    /// reach of a cut history, or else the window.
+    fn history_reach_text(self) -> String {
+        self.history_reach
+            .map_or_else(|| format_duration_setting(self.window), format_elapsed)
+    }
 }
 
 /// The line of a section header.
@@ -628,7 +635,7 @@ fn empty_line(section: Section, spans: Spans, loaded: bool) -> String {
         Section::Queue => in_repo_column("No pull requests in the merge queue."),
         Section::History => in_repo_column(&format!(
             "No pull request left the merge queue in the last {}.",
-            format_duration_setting(spans.window)
+            spans.history_reach_text()
         )),
     }
 }

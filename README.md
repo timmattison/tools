@@ -2109,8 +2109,13 @@ cannot hang the caller. Used by `cwt` and `ha`.
     - The branch of a pull request in the history comes from its row in the queue, when `ha` saw
       it there. Else `ha` asks GitHub for the branch one time. When that request fails, the cell
       stays empty, and the next refresh asks again.
-    - The history reads the events of the window and one more hour. A pull request that joined the
-      queue before that has an empty started column and an empty time column.
+    - `ha` reads the events of the window and one more hour. It reads at most 10 pages of 100 issue
+      events of each repository, and the events are of every kind. On a busy repository, 1,000
+      events can span less than the window. On 2026-10-22, one page of 100 events spanned about
+      21 hours on bevyengine/bevy and about 26 hours on rust-lang/rust-clippy. Then the history
+      shows only the span in which the events of each repository are whole, and the header names
+      that span, for example `Merge history · Last 21h 13m of 14d`. A pull request that joined
+      the queue before the events start has an empty started column and an empty time column.
     - `🔒` is the one marker that only the merge queue uses. It is one code point, 2 columns wide,
       as each other marker is.
   - Each marker is one emoji, 2 columns wide. The terminal draws each emoji in its own colors.
@@ -2262,8 +2267,11 @@ cannot hang the caller. Used by `cwt` and `ha`.
     through GraphQL, which has its own budget of 5,000 points each hour. The check for queues is
     one GraphQL query for each 100 repositories, 1 point, at the start and every 10 minutes. A
     repository whose check failed is checked again on the next refresh. On each refresh, `ha`
-    reads the issue events of each repository that has a queue through REST, with the `ETag`. It
-    reads the live queue through GraphQL only while the queue can hold a pull request: the events
+    reads the issue events of each repository that has a queue through REST, with the `ETag`. A
+    page that did not change costs nothing. A new event moves each older event one place down,
+    thus each page changes. A refresh after a new event costs one request for each page that it
+    reads: up to 10 for each repository with a queue, which is 600 requests each hour at a 60
+    second interval. `ha` reads the live queue through GraphQL only while the queue can hold a pull request: the events
     show a pull request that joined and did not leave, the last read held a pull request or
     failed, or the events could not be read. A busy queue thus costs 1 GraphQL point on each
     refresh, and an empty queue costs none. The status line shows the core budget only. A GraphQL
