@@ -3319,6 +3319,53 @@ mod tests {
         );
     }
 
+    /// The message that GitHub gives for a resolver timeout. The error has no
+    /// `type`.
+    const TIMEOUT_MESSAGE: &str = "Something went wrong while executing your query. This may be the result of a timeout, or it could be a GitHub bug.";
+
+    #[test]
+    fn merge_queues_among_with_an_error_that_is_not_not_found_fails_the_batch() {
+        for error in [
+            format!(r#"{{"path":["r1"],"message":"{TIMEOUT_MESSAGE}"}}"#),
+            format!(r#"{{"type":"INTERNAL","path":["r1"],"message":"{TIMEOUT_MESSAGE}"}}"#),
+        ] {
+            let stub = Stub::new("cat \"$dir/check.out\"; exit 1");
+            stub.file(
+                "check.out",
+                &graphql_output(&format!(
+                    r#"{{"data":{{"r0":{{"mergeQueue":{{"url":"https://github.com/o/a/queue/main"}}}},"r1":null}},
+                    "errors":[{error}]}}"#
+                )),
+            );
+            let result = stub
+                .source()
+                .merge_queues_among(&[repo("o/a"), repo("o/b")]);
+            assert_eq!(
+                result,
+                Err(SourceError::Graphql(TIMEOUT_MESSAGE.to_owned())),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn merge_queues_among_counts_a_forbidden_repository_as_one_with_no_queue() {
+        let stub = Stub::new("cat \"$dir/check.out\"; exit 1");
+        stub.file(
+            "check.out",
+            &graphql_output(
+                r#"{"data":{"r0":{"mergeQueue":{"url":"https://github.com/o/a/queue/main"}},"r1":null},
+                "errors":[{"type":"FORBIDDEN","path":["r1"],
+                "message":"Resource protected by organization SAML enforcement. You must grant your OAuth token access to this organization."}]}"#,
+            ),
+        );
+        let found = stub
+            .source()
+            .merge_queues_among(&[repo("o/a"), repo("o/b")])
+            .expect("an answer");
+        assert_eq!(found, BTreeSet::from([repo("o/a")]));
+    }
+
     #[test]
     fn merge_queues_among_no_repository_sends_no_query() {
         let stub = Stub::new("exit 1");
@@ -3403,6 +3450,23 @@ mod tests {
             Err(SourceError::Graphql(
                 "Could not resolve to a Repository with the name 'o/r'.".to_owned()
             ))
+        );
+    }
+
+    #[test]
+    fn queue_entries_of_with_an_error_on_the_merge_queue_fails() {
+        let stub = Stub::new("cat \"$dir/entries.out\"; exit 1");
+        stub.file(
+            "entries.out",
+            &graphql_output(&format!(
+                r#"{{"data":{{"repository":{{"mergeQueue":null}}}},"errors":[{{"path":["repository","mergeQueue"],
+                "message":"{TIMEOUT_MESSAGE}"}}]}}"#
+            )),
+        );
+        let entries = stub.source().queue_entries_of(&repo("o/r"));
+        assert_eq!(
+            entries,
+            Err(SourceError::Graphql(TIMEOUT_MESSAGE.to_owned()))
         );
     }
 
@@ -3739,6 +3803,26 @@ mod tests {
             "{query}"
         );
         assert!(query.contains("p999: pullRequest(number: 999)"), "{query}");
+    }
+
+    #[test]
+    fn pull_branches_of_with_an_error_that_is_not_not_found_fails() {
+        let stub = Stub::new("cat \"$dir/branches.out\"; exit 1");
+        stub.file(
+            "branches.out",
+            &graphql_output(&format!(
+                r#"{{"data":{{"repository":{{"p17051":{{"number":17051,"headRefName":"feature"}},
+                "p999":null}}}},"errors":[{{"path":["repository","p999"],
+                "message":"{TIMEOUT_MESSAGE}"}}]}}"#
+            )),
+        );
+        let result = stub
+            .source()
+            .pull_branches_of(&repo("o/r"), &[PullNumber(17051), PullNumber(999)]);
+        assert_eq!(
+            result,
+            Err(SourceError::Graphql(TIMEOUT_MESSAGE.to_owned()))
+        );
     }
 
     #[test]
