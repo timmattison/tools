@@ -176,7 +176,10 @@ impl Board {
     /// the repository never had one.
     #[must_use]
     pub fn stale(&self) -> Vec<(&RepoName, Option<DateTime<Utc>>)> {
-        Vec::new()
+        self.errors
+            .keys()
+            .map(|repo| (repo, self.read_at.get(repo).copied()))
+            .collect()
     }
 
     /// The error of each failed repository, sorted by repository.
