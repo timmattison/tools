@@ -394,6 +394,7 @@ impl Board {
             self.selected,
             JobView {
                 jobs: &self.jobs,
+                errors: &self.errors,
                 expanded: &self.expanded,
             },
         );
@@ -412,6 +413,7 @@ impl Board {
             self.selected,
             JobView {
                 jobs: &self.jobs,
+                errors: &self.errors,
                 expanded: &self.expanded,
             },
         );
@@ -578,6 +580,8 @@ fn scroll(
 struct JobView<'a> {
     /// The last job answer of each run that the board holds.
     jobs: &'a BTreeMap<RunId, Jobs>,
+    /// The error of each repository whose last read failed or was suspect.
+    errors: &'a BTreeMap<RepoName, String>,
     /// The runs that show their job rows.
     expanded: &'a BTreeSet<RunId>,
 }
@@ -612,7 +616,7 @@ fn push_runs<'a>(
             run,
             state: run.state.shown_with_jobs(jobs.iter().map(|job| job.state)),
             selected: here.is_some_and(|selection| selection.job.is_none()),
-            stale: false,
+            stale: view.errors.contains_key(&run.repo),
         });
         if view.expanded.contains(&run.id) {
             push_jobs(rows, answer, here.and_then(|selection| selection.job));
