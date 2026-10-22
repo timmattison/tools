@@ -1463,6 +1463,16 @@ pub(crate) mod stub_shell {
             PathBuf::from(recorded.trim_end())
         }
 
+        /// The directory of each run, in the order the runs happened, as the
+        /// shell reported them.
+        pub(crate) fn cwds(&self) -> Vec<PathBuf> {
+            std::fs::read_to_string(&self.cwd)
+                .unwrap_or_default()
+                .lines()
+                .map(PathBuf::from)
+                .collect()
+        }
+
         /// What the stub found when it reached for the controlling terminal.
         ///
         /// The read fails where the file is absent, and an absent file means

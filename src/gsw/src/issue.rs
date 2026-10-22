@@ -298,6 +298,58 @@ mod run_tests {
         Steps::new(None, Some(command)).expect("one command is a step")
     }
 
+    /// The command of the pull request in the tests of two steps.
+    ///
+    /// A test-local name: the default of this command belongs to a later slice.
+    const PR_COMMAND: &str = "ggsp";
+
+    /// The press of two steps: the pull request command, then the issue
+    /// command.
+    fn two_steps() -> Steps {
+        let pull_request = ShellCommand::new(Some(PR_COMMAND), DEFAULT_ISSUE_COMMAND)
+            .expect("a name for the pull request command");
+        let issue =
+            ShellCommand::new(None, DEFAULT_ISSUE_COMMAND).expect("the default names a command");
+        Steps::new(Some(pull_request), Some(issue)).expect("two commands are steps")
+    }
+
+    /// The steps that ran, in order, out of every argument the stub recorded.
+    fn steps_run(runs: &str) -> Vec<&str> {
+        runs.lines()
+            .filter(|line| *line == PR_COMMAND || *line == DEFAULT_ISSUE_COMMAND)
+            .collect()
+    }
+
+    #[test]
+    fn a_failed_pull_request_command_hands_the_press_to_the_issue_command() {
+        let stub = StubShell::new(
+            "case \"$2\" in\n  ggsp) echo 'no pull request for this branch' >&2; exit 1 ;;\n  *) exit 0 ;;\nesac",
+        );
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let outcome = run(stub.as_shell(), &two_steps(), workdir.path());
+        assert_eq!(
+            outcome.message(),
+            None,
+            "the issue command opened the page, so the words of the first step must not show",
+        );
+        assert_eq!(
+            steps_run(&stub.runs()),
+            [PR_COMMAND, DEFAULT_ISSUE_COMMAND],
+            "the pull request command runs first and the issue command after it",
+        );
+        let cwds: Vec<_> = stub
+            .cwds()
+            .iter()
+            .map(|dir| std::fs::canonicalize(dir).expect("resolve the path"))
+            .collect();
+        let expected = std::fs::canonicalize(workdir.path()).expect("resolve the path");
+        assert_eq!(
+            cwds,
+            [expected.clone(), expected],
+            "both steps run in the work tree",
+        );
+    }
+
     #[test]
     fn a_run_that_worked_leaves_no_message() {
         let stub = StubShell::answering(0);
