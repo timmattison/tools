@@ -760,6 +760,7 @@ mod tests {
     use crate::github::{RepoList, RunQuery, SourceError};
     use crate::job::Job;
     use crate::run::{RunId, RunState};
+    use crate::suspect::{Item, Suspicion};
     use crate::target::Target;
 
     /// The longest a test waits for one update.
@@ -1471,6 +1472,149 @@ mod tests {
             .map(|(_, name)| name.clone())
             .collect();
         assert_eq!(owner_calls, vec!["acme-a".to_owned()]);
+    }
+
+    /// Asks for a new cycle at once and reads its updates.
+    fn refresh_now(worker: &Worker) -> Vec<Update> {
+        worker
+            .commands
+            .send(Command::RefreshNow)
+            .expect("the worker listens");
+        one_cycle(worker)
+    }
+
+    /// The repository set and the owner problems of the first `Repos` update.
+    fn repos_of_cycle(
+        updates: &[Update],
+    ) -> (&BTreeSet<RepoName>, &Vec<(OwnerName, OwnerProblem)>) {
+        let Some(Update::Repos {
+            repos,
+            owner_errors,
+            ..
+        }) = updates
+            .iter()
+            .find(|update| matches!(update, Update::Repos { .. }))
+        else {
+            panic!("no Repos update: {updates:?}");
+        };
+        (repos, owner_errors)
+    }
+
+    /// Scripts the owner `acme` to list `names`, and each name as listable.
+    fn script_owner(fake: &FakeSource, names: &[&str]) {
+        let repos: Vec<RepoName> = names.iter().map(|name| repo(name)).collect();
+        let mut script = fake.script();
+        for repo in &repos {
+            script.listable.insert(repo.clone(), Ok(true));
+        }
+        script.owners.insert(owner("acme"), Ok(repos));
+    }
+
+    #[test]
+    fn an_empty_list_after_a_good_list_keeps_the_repositories_and_is_suspect() {
+        let fake = Arc::new(FakeSource::default());
+        let names = ["acme/a", "acme/b", "acme/c", "acme/d", "acme/e"];
+        script_owner(&fake, &names);
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme"]), Duration::ZERO);
+        let first = one_cycle(&worker);
+        assert_eq!(repos_of_cycle(&first).0.len(), 5);
+
+        fake.script().owners.insert(owner("acme"), Ok(Vec::new()));
+        fake.script()
+            .created
+            .insert(repo("acme/a"), Ok(vec![run("acme/a", 1)]));
+        let second = refresh_now(&worker);
+
+        let (repos, owner_errors) = repos_of_cycle(&second);
+        let expected: BTreeSet<RepoName> = names.iter().map(|name| repo(name)).collect();
+        assert_eq!(repos, &expected);
+        assert_eq!(
+            owner_errors,
+            &vec![(
+                owner("acme"),
+                OwnerProblem::Suspect(Suspicion::LeftOut(Item::Repo(repo("acme/a"))))
+            )]
+        );
+        assert!(
+            second.iter().any(|update| matches!(
+                update,
+                Update::Runs { repo: r, runs } if *r == repo("acme/a") && runs.len() == 1
+            )),
+            "the runs of the kept repository are fetched: {second:?}"
+        );
+    }
+
+    #[test]
+    fn a_repository_that_a_later_list_drops_and_that_is_gone_leaves_the_set() {
+        let fake = Arc::new(FakeSource::default());
+        script_owner(&fake, &["acme/a", "acme/b"]);
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme"]), Duration::ZERO);
+        one_cycle(&worker);
+
+        fake.script()
+            .owners
+            .insert(owner("acme"), Ok(vec![repo("acme/a")]));
+        fake.script().listable.insert(repo("acme/b"), Ok(false));
+        let second = refresh_now(&worker);
+
+        let (repos, owner_errors) = repos_of_cycle(&second);
+        assert_eq!(repos, &BTreeSet::from([repo("acme/a")]));
+        assert!(owner_errors.is_empty(), "{owner_errors:?}");
+    }
+
+    #[test]
+    fn a_failed_direct_read_of_a_dropped_repository_is_suspect_and_keeps_the_list() {
+        let fake = Arc::new(FakeSource::default());
+        script_owner(&fake, &["acme/a", "acme/b"]);
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme"]), Duration::ZERO);
+        one_cycle(&worker);
+
+        let failure = SourceError::Failed("boom".to_owned());
+        fake.script()
+            .owners
+            .insert(owner("acme"), Ok(vec![repo("acme/a")]));
+        fake.script()
+            .listable
+            .insert(repo("acme/b"), Err(failure.clone()));
+        let second = refresh_now(&worker);
+
+        let (repos, owner_errors) = repos_of_cycle(&second);
+        assert_eq!(repos, &BTreeSet::from([repo("acme/a"), repo("acme/b")]));
+        assert_eq!(
+            owner_errors,
+            &vec![(
+                owner("acme"),
+                OwnerProblem::Suspect(Suspicion::Unread(Item::Repo(repo("acme/b")), failure))
+            )]
+        );
+    }
+
+    #[test]
+    fn a_cut_list_that_drops_a_repository_is_accepted_without_a_direct_read() {
+        let fake = Arc::new(FakeSource::default());
+        script_owner(&fake, &["acme/a", "acme/b"]);
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme"]), Duration::ZERO);
+        one_cycle(&worker);
+
+        fake.script()
+            .owners
+            .insert(owner("acme"), Ok(vec![repo("acme/a")]));
+        fake.script().cut.insert(owner("acme"));
+        let second = refresh_now(&worker);
+
+        let (repos, owner_errors) = repos_of_cycle(&second);
+        assert_eq!(repos, &BTreeSet::from([repo("acme/a")]));
+        assert!(
+            matches!(owner_errors.as_slice(), [(_, OwnerProblem::Cut(_))]),
+            "{owner_errors:?}"
+        );
+        let reads = fake
+            .script()
+            .calls
+            .iter()
+            .filter(|(what, _)| *what == "listable")
+            .count();
+        assert_eq!(reads, 0, "a cut list gives no suspicion");
     }
 
     fn job(id: u64) -> Job {
