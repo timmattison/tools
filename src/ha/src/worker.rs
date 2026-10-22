@@ -3383,6 +3383,37 @@ mod tests {
         );
     }
 
+    /// A failed created read returns before the sweep. When the sweep was due,
+    /// the cycle already used the cadence, thus the sweep must run again on the
+    /// next cycle. Run 1 started before the window and still runs.
+    #[test]
+    fn a_failed_created_read_on_a_due_sweep_repeats_the_sweep_on_the_next_cycle() {
+        let fake = Arc::new(FakeSource::default());
+        script_active(&fake, vec![old_active_run(1)]);
+        fake.script()
+            .created
+            .insert(repo("acme/a"), Err(SourceError::Failed("boom".to_owned())));
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+        let first = one_cycle(&worker);
+        assert!(
+            matches!(answers_of_a(&first).as_slice(), [Update::Failed { .. }]),
+            "{first:?}"
+        );
+
+        script_created(&fake, Vec::new());
+        let second = refresh_now(&worker);
+
+        assert_eq!(calls_named(&fake, "active").len(), 1, "{second:?}");
+        let answers = answers_of_a(&second);
+        assert!(
+            matches!(
+                answers.as_slice(),
+                [Update::Runs { runs, .. }] if runs.iter().any(|run| run.id == RunId(1))
+            ),
+            "{answers:?}"
+        );
+    }
+
     #[test]
     fn when_both_answers_are_suspect_the_created_suspicion_is_reported_and_both_are_forgotten() {
         let fake = Arc::new(FakeSource::default());
