@@ -856,7 +856,7 @@ mod tests {
     fn run_rows(frame: &[String]) -> Vec<&String> {
         frame
             .iter()
-            .filter(|line| line.contains("acme/widgets") && line.contains("run "))
+            .filter(|line| line.contains("acme/widgets") && line.contains(" main "))
             .collect()
     }
 

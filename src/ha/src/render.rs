@@ -20,6 +20,12 @@ use crate::run::{Run, RunState};
 use crate::settings::format_duration_setting;
 use crate::status::{Status, MESSAGE_LIFETIME};
 
+/// The mark before the repository name of a stale run row: the sleeping
+/// symbol and one space. The rows of a repository whose last read failed or was
+/// suspect are the last good runs. The mark shows that they can be old (issue
+/// #599). It stands inside the repository cell, thus no other cell moves.
+const STALE_MARK: &str = "\u{1F4A4} ";
+
 /// The width of the marker column. Each marker is one emoji of 2 columns, or a
 /// blank of 2 columns.
 const MARKER_WIDTH: usize = 2;
@@ -306,10 +312,12 @@ where
 }
 
 /// The line of one run. `state` is the state that the row shows, not the state
-/// that GitHub reports. It sets the marker and the time cells.
+/// that GitHub reports. It sets the marker and the time cells. A stale run
+/// has the [`STALE_MARK`] before its repository name.
 fn run_line<Tz: TimeZone>(
     run: &Run,
     state: RunState,
+    is_stale: bool,
     now: DateTime<Utc>,
     tz: &Tz,
     widths: Widths,
@@ -322,15 +330,15 @@ where
     } else {
         format_elapsed(span(run.started_at, run.updated_at))
     };
+    let repo = if is_stale {
+        format!("{STALE_MARK}{}", run.repo)
+    } else {
+        run.repo.to_string()
+    };
     cells(
         widths,
         marker(state),
-        [
-            &run.repo.to_string(),
-            &run.workflow,
-            &run.branch,
-            &run.title,
-        ],
+        [&repo, &run.workflow, &run.branch, &run.title],
         &run.id.0.to_string(),
         &format_started(run.started_at, now, tz),
         &time,
@@ -714,9 +722,9 @@ pub fn draw<Tz: TimeZone>(
                 run,
                 state,
                 selected,
-                stale: _,
+                stale,
             } => {
-                let line = run_line(run, *state, now, tz, widths);
+                let line = run_line(run, *state, *stale, now, tz, widths);
                 let y = put(buffer, index + 1, &line, Style::default());
                 reverse_if(*selected, buffer, area, y);
             }
@@ -2476,8 +2484,8 @@ mod tests {
 
     /// The display column where `needle` starts in `line`.
     fn column_of(line: &str, needle: &str) -> usize {
-        let byte = line.find(needle).expect("the text is in the line");
-        display_width(&line[..byte])
+        let (before, _) = line.split_once(needle).expect("the text is in the line");
+        display_width(before)
     }
 
     /// A board with one run of `acme/widgets`.
@@ -4089,7 +4097,7 @@ mod tests {
                     "2026-10-14T11:00:00Z",
                     "2026-10-14T11:30:00Z",
                 );
-                let line = run_line(&run, state, now(), &utc(), widths);
+                let line = run_line(&run, state, false, now(), &utc(), widths);
                 assert_eq!(display_width(&line), usize::from(w), "{state:?}: {line:?}");
             }
             for (id, state) in MARKER_JOB_STATES {
