@@ -46,8 +46,11 @@ pub const CONCURRENCY: usize = 8;
 
 /// How often the worker lists the repositories of the owners and sweeps for
 /// active runs. The sweep finds runs that started before the window. An owner
-/// with no good list, and an owner whose last list failed or was suspect, is
-/// listed on every cycle until a good list replaces the problem.
+/// with no good list, an owner whose good list is empty, and an owner whose
+/// last list failed or was suspect, is listed on every cycle until a good
+/// list that holds a repository replaces the problem. An empty list needs
+/// this, because the comparison with the last good list cannot judge a first
+/// empty list.
 pub const SLOW_CADENCE: Duration = Duration::from_secs(600);
 
 /// One message from the worker to the screen.
@@ -842,10 +845,13 @@ fn list_owner<S: Source>(source: &S, owner: &OwnerName, state: &mut State) {
 /// Builds the repository set and sends it when it can have changed.
 ///
 /// When the owner cadence is due, the function lists every owner again. On
-/// every cycle it also lists each owner that has no good list yet, and each
-/// owner whose last list failed or was suspect, so the `r` key tries such an
-/// owner again at once. An owner with a good list, or with a cut list, waits
-/// for the cadence. A successful list goes through [`suspicion_of_list`]. A
+/// every cycle it also lists each owner that has no good list yet, each owner
+/// whose good list is empty, and each owner whose last list failed or was
+/// suspect, so the `r` key tries such an owner again at once. An owner whose
+/// good list is empty can have got a wrong answer: `gh repo list` gave `[]`
+/// with exit 0 about one time in 20, and the comparison cannot judge a first
+/// empty list. An owner with a good list that holds a repository, or with a
+/// cut list, waits for the cadence. A successful list goes through [`suspicion_of_list`]. A
 /// suspect list keeps the last good list of the owner. The function keeps the
 /// last list problem of each owner in `state`, and it clears that problem when
 /// a good list replaces it. It sends [`Update::Repos`] when the cadence is due
@@ -866,7 +872,10 @@ fn refresh_repos<S: Source>(
         let Target::Owner(owner) = target else {
             continue;
         };
-        let needs_a_list = !state.owner_lists.contains_key(owner)
+        let needs_a_list = state
+            .owner_lists
+            .get(owner)
+            .is_none_or(|list| list.repos.is_empty())
             || matches!(
                 state.owner_errors.get(owner),
                 Some(OwnerProblem::Failed(_) | OwnerProblem::Suspect(_))
