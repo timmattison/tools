@@ -550,6 +550,31 @@ const TREE_LAST: &str = "└";
 /// ends. [`empty_line`] puts it in the REPO column.
 const SECTION_LOADING: &str = "Loading…";
 
+/// The spans that the section headers and the empty lines of the history name.
+#[derive(Debug, Clone, Copy)]
+struct Spans {
+    /// The time window of the board.
+    window: Duration,
+    /// How far back the merge history is whole, when a page limit cut it
+    /// short of the window (see [`Board::history_reach`]).
+    history_reach: Option<Duration>,
+}
+
+impl Spans {
+    /// The text that names the span of the merge history: the window, or the
+    /// reach of the history of its part of the window when a cut shortens it.
+    fn history_text(self) -> String {
+        match self.history_reach {
+            Some(reach) => format!(
+                "{} of {}",
+                format_elapsed(reach),
+                format_duration_setting(self.window)
+            ),
+            None => format_duration_setting(self.window),
+        }
+    }
+}
+
 /// The line of a section header.
 ///
 /// A loaded recent header names the counts of passed, failed, and cancelled
@@ -564,10 +589,11 @@ fn header_line(
     passed: usize,
     failed: usize,
     cancelled: usize,
-    window: Duration,
+    spans: Spans,
     loaded: bool,
 ) -> String {
-    let window = format_duration_setting(window);
+    let history = spans.history_text();
+    let window = format_duration_setting(spans.window);
     match (section, loaded) {
         (Section::Active, false) => "Running".to_owned(),
         (Section::Active, true) => format!("Running · {count}"),
@@ -577,9 +603,9 @@ fn header_line(
         }
         (Section::Queue, false) => "Merge queue".to_owned(),
         (Section::Queue, true) => format!("Merge queue · {count}"),
-        (Section::History, false) => format!("Merge history · Last {window}"),
+        (Section::History, false) => format!("Merge history · Last {history}"),
         (Section::History, true) => format!(
-            "Merge history · Last {window} · {passed} merged · {failed} failed · {cancelled} removed"
+            "Merge history · Last {history} · {passed} merged · {failed} failed · {cancelled} removed"
         ),
     }
 }
@@ -589,7 +615,7 @@ fn header_line(
 /// Before the first refresh cycle ends (`loaded` is false), the line is
 /// [`SECTION_LOADING`]. A section that is empty then can still get runs, and
 /// a text that says "no runs" makes a person think that nothing runs.
-fn empty_line(section: Section, window: Duration, loaded: bool) -> String {
+fn empty_line(section: Section, spans: Spans, loaded: bool) -> String {
     if !loaded {
         return in_repo_column(SECTION_LOADING);
     }
@@ -597,12 +623,12 @@ fn empty_line(section: Section, window: Duration, loaded: bool) -> String {
         Section::Active => in_repo_column("No runs in progress or in the queue."),
         Section::Recent => in_repo_column(&format!(
             "No runs finished in the last {}.",
-            format_duration_setting(window)
+            format_duration_setting(spans.window)
         )),
         Section::Queue => in_repo_column("No pull requests in the merge queue."),
         Section::History => in_repo_column(&format!(
             "No pull request left the merge queue in the last {}.",
-            format_duration_setting(window)
+            format_duration_setting(spans.window)
         )),
     }
 }
@@ -910,7 +936,10 @@ pub fn draw<Tz: TimeZone>(
     }
     let widths = Widths::for_width(usize::from(area.width));
     let height = usize::from(area.height).saturating_sub(FIXED_LINES);
-    let window = board.window();
+    let spans = Spans {
+        window: board.window(),
+        history_reach: board.history_reach(now),
+    };
     // The first refresh cycle ended. Until then, the board can miss runs.
     let loaded = status.last_refresh.is_some();
     let bold = Style::default().add_modifier(Modifier::BOLD);
@@ -927,12 +956,12 @@ pub fn draw<Tz: TimeZone>(
                 cancelled,
             } => {
                 let line = header_line(
-                    *section, *count, *passed, *failed, *cancelled, window, loaded,
+                    *section, *count, *passed, *failed, *cancelled, spans, loaded,
                 );
                 put(buffer, index + 1, &line, bold);
             }
             Row::Empty(section) => {
-                let line = empty_line(*section, window, loaded);
+                let line = empty_line(*section, spans, loaded);
                 put(buffer, index + 1, &line, Style::default());
             }
             Row::Run {
@@ -1231,7 +1260,7 @@ mod tests {
 
     use std::collections::BTreeSet;
 
-    use crate::queue::{Departure, PullNumber, QueueEntry};
+    use crate::queue::{Departure, History, PullNumber, QueueEntry};
 
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
@@ -4994,32 +5023,35 @@ mod tests {
                     "2026-10-14T11:58:57Z",
                 ),
             ]),
-            Ok(vec![
-                departure(
-                    16001,
-                    Outcome::Merged,
-                    "bump-serde",
-                    "Bump serde",
-                    Some("2026-10-14T10:00:00Z"),
-                    "2026-10-14T10:12:40Z",
-                ),
-                departure(
-                    15998,
-                    Outcome::Failed,
-                    "",
-                    "Remove the thing",
-                    Some("2026-10-14T09:00:00Z"),
-                    "2026-10-14T09:08:02Z",
-                ),
-                departure(
-                    15990,
-                    Outcome::Removed,
-                    "old-branch",
-                    "Old work",
-                    None,
-                    "2026-10-14T08:00:00Z",
-                ),
-            ]),
+            Ok(History {
+                cut_at: None,
+                departures: vec![
+                    departure(
+                        16001,
+                        Outcome::Merged,
+                        "bump-serde",
+                        "Bump serde",
+                        Some("2026-10-14T10:00:00Z"),
+                        "2026-10-14T10:12:40Z",
+                    ),
+                    departure(
+                        15998,
+                        Outcome::Failed,
+                        "",
+                        "Remove the thing",
+                        Some("2026-10-14T09:00:00Z"),
+                        "2026-10-14T09:08:02Z",
+                    ),
+                    departure(
+                        15990,
+                        Outcome::Removed,
+                        "old-branch",
+                        "Old work",
+                        None,
+                        "2026-10-14T08:00:00Z",
+                    ),
+                ],
+            }),
         );
         board.replace(
             cargo,
@@ -5132,6 +5164,52 @@ mod tests {
         let text = lines(&render_with(80, 12, &mut board, &Status::default()));
         assert_eq!(text[2], "   Loading…");
         assert_eq!(text[4], "   Loading…");
+    }
+
+    /// A board whose merge history of `rust-lang/cargo` the page limit cut
+    /// two hours before `now()`, with these departures.
+    fn cut_history_board(departures: Vec<Departure>) -> Board {
+        let cargo = repo("rust-lang/cargo");
+        let mut board = Board::new(Duration::from_hours(8));
+        board.set_queues(&BTreeSet::from([cargo.clone()]));
+        board.set_queue(
+            &cargo,
+            Ok(Vec::new()),
+            Ok(History {
+                departures,
+                cut_at: Some(at("2026-10-14T10:00:00Z")),
+            }),
+        );
+        board
+    }
+
+    #[test]
+    fn a_cut_history_names_the_span_that_it_reaches_in_its_header() {
+        let mut board = cut_history_board(vec![departure(
+            16001,
+            Outcome::Merged,
+            "bump-serde",
+            "Bump serde",
+            Some("2026-10-14T10:30:00Z"),
+            "2026-10-14T11:00:00Z",
+        )]);
+        let text = lines(&render_with(120, 12, &mut board, &loaded()));
+        assert_eq!(
+            text[3],
+            "Merge history · Last 2h 00m of 8h · 1 merged · 0 failed · 0 removed"
+        );
+        let text = lines(&render_with(120, 12, &mut board, &Status::default()));
+        assert_eq!(text[3], "Merge history · Last 2h 00m of 8h");
+    }
+
+    #[test]
+    fn an_empty_cut_history_names_the_span_that_it_reaches() {
+        let mut board = cut_history_board(Vec::new());
+        let text = lines(&render_with(120, 12, &mut board, &loaded()));
+        assert_eq!(
+            text[4],
+            "   No pull request left the merge queue in the last 2h 00m."
+        );
     }
 
     #[test]

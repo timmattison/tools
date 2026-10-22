@@ -184,6 +184,15 @@ pub struct QueueLog {
     pub departures: Vec<Departure>,
 }
 
+/// The merge history of one repository that the worker read.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct History {
+    /// Each time that a pull request left the queue, the oldest first.
+    pub departures: Vec<Departure>,
+    /// See `EventList::cut_at`. A departure before this time can be missing.
+    pub cut_at: Option<DateTime<Utc>>,
+}
+
 /// Turns the merge queue events of `repo` into the queue log.
 ///
 /// The events can come in any order. The function reads them oldest first,

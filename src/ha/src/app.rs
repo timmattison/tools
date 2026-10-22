@@ -243,11 +243,11 @@ where
                 Update::MergeQueue {
                     repo,
                     entries,
-                    departures,
+                    history,
                 } => self.board.set_queue(
                     &repo,
                     entries.map_err(|error| error.to_string()),
-                    departures.map_err(|error| error.to_string()),
+                    history.map_err(|error| error.to_string()),
                 ),
                 Update::Repos {
                     repos,
@@ -444,7 +444,7 @@ mod tests {
     use super::*;
     use crate::cancel::CancelOutcome;
     use crate::github::{RepoList, SourceError};
-    use crate::queue::{Departure, EntryState, PullNumber, QueueEntry};
+    use crate::queue::{Departure, EntryState, History, PullNumber, QueueEntry};
     use crate::run::{Run, RunId, RunState};
     use crate::status::{OwnerProblem, RateLimit};
     use crate::target::{OwnerName, RepoName};
@@ -2548,7 +2548,10 @@ mod tests {
             .send(Update::MergeQueue {
                 repo: repo(),
                 entries: Ok(entries),
-                departures,
+                history: departures.map(|departures| History {
+                    departures,
+                    cut_at: None,
+                }),
             })
             .unwrap();
     }

@@ -258,6 +258,19 @@ pub struct RunList {
     pub cut: bool,
 }
 
+/// The merge queue events of one repository, as `Source::queue_events_of` lists them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventList {
+    /// The merge queue events, newest first.
+    pub events: Vec<QueueEvent>,
+    /// The time of the oldest event of any kind that the fetch read, when the
+    /// fetch stopped after `MAX_PAGES` full pages that were all newer than
+    /// `since`. The list then holds each merge queue event from that time on
+    /// and lacks the older ones. `None` when the fetch reached `since` or the
+    /// end of the events.
+    pub cut_at: Option<DateTime<Utc>>,
+}
+
 /// Where `ha` gets its data. `GhSource` is the real one.
 pub trait Source: Send + Sync {
     /// Lists the repositories of an owner. Archived repositories are left out.
@@ -365,7 +378,9 @@ pub trait Source: Send + Sync {
 
     /// Lists the merge queue events of the pull requests of `repo`, newest
     /// first. The list reaches back to `since` at least, when GitHub keeps
-    /// events that old.
+    /// events that old, unless the fetch was cut. A fetch stops after
+    /// `MAX_PAGES` pages. When all of them were full and newer than `since`,
+    /// `EventList::cut_at` says where the list stops.
     ///
     /// # Errors
     ///
@@ -374,7 +389,7 @@ pub trait Source: Send + Sync {
         &self,
         repo: &RepoName,
         since: DateTime<Utc>,
-    ) -> Result<Vec<QueueEvent>, SourceError>;
+    ) -> Result<EventList, SourceError>;
 
     /// Gives the head branch of each pull request of `pulls` that GitHub
     /// finds. A pull request that GitHub cannot find (`NOT_FOUND`), or that
@@ -850,15 +865,18 @@ impl Source for GhSource {
 
     /// The fetch reads pages of 100 events, newest first. It goes on while the
     /// last page was full and its oldest event is not older than `since`. It
-    /// stops after `MAX_PAGES` pages. Each page goes through the `ETag` cache.
-    /// An event that moves from one page to the next between two requests is
-    /// kept once.
+    /// stops after `MAX_PAGES` pages. When the last of them was full and not
+    /// older than `since`, the list is cut, and `EventList::cut_at` holds the
+    /// time of the oldest event of that page. Each page goes through the
+    /// `ETag` cache. An event that moves from one page to the next between two
+    /// requests is kept once.
     fn queue_events_of(
         &self,
         repo: &RepoName,
         since: DateTime<Utc>,
-    ) -> Result<Vec<QueueEvent>, SourceError> {
+    ) -> Result<EventList, SourceError> {
         let mut events = Vec::new();
+        let cut_at: Option<DateTime<Utc>> = None;
         for number in 1..=MAX_PAGES {
             let path = format!(
                 "repos/{}/{}/issues/events?per_page={PAGE_SIZE}&page={number}",
@@ -874,7 +892,10 @@ impl Source for GhSource {
             }
         }
         keep_first_of_each_id(&mut events, |(id, _)| *id);
-        Ok(events.into_iter().map(|(_, event)| event).collect())
+        Ok(EventList {
+            events: events.into_iter().map(|(_, event)| event).collect(),
+            cut_at,
+        })
     }
 
     /// The fetch sends one query for each [`BRANCH_BATCH`] pull requests.
@@ -3636,10 +3657,12 @@ mod tests {
             ])),
         );
         let since = time("2026-10-22T08:00:00Z");
-        let events = stub
+        let list = stub
             .source()
             .queue_events_of(&repo("o/r"), since)
             .expect("events");
+        assert_eq!(list.cut_at, None);
+        let events = list.events;
         let event = |pull: u64, at: &str, kind: EventKind| QueueEvent {
             pull: PullNumber(pull),
             title: format!("pull {pull}"),
@@ -3686,7 +3709,8 @@ mod tests {
         let events = stub
             .source()
             .queue_events_of(&repo("o/r"), time("2026-10-22T08:00:00Z"))
-            .expect("events");
+            .expect("events")
+            .events;
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, EventKind::Removed { by_queue: false });
     }
@@ -3709,12 +3733,13 @@ mod tests {
         // The oldest event of the first page is 99 minutes older than the
         // newest one, thus still newer than `since`.
         let since = newest - chrono::TimeDelta::minutes(100);
-        let events = stub
+        let list = stub
             .source()
             .queue_events_of(&repo("o/r"), since)
             .expect("events");
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].pull, PullNumber(9));
+        assert_eq!(list.events.len(), 1);
+        assert_eq!(list.events[0].pull, PullNumber(9));
+        assert_eq!(list.cut_at, None);
         assert_eq!(stub.requests().len(), 2);
     }
 
@@ -3725,10 +3750,42 @@ mod tests {
         stub.file("page1.out", &ok_output(&label_page(300, 100, newest)));
         stub.file("page2.out", &ok_output(&label_page(200, 100, newest)));
         let since = newest - chrono::TimeDelta::minutes(50);
-        stub.source()
+        let list = stub
+            .source()
             .queue_events_of(&repo("o/r"), since)
             .expect("events");
+        assert_eq!(list.cut_at, None);
         assert_eq!(stub.requests().len(), 1);
+    }
+
+    #[test]
+    fn queue_events_of_stops_after_ten_full_pages_newer_than_since_and_says_where() {
+        let stub = job_pages_stub(10);
+        let newest = time("2026-10-22T17:00:00Z");
+        for page in 1..=10_u64 {
+            let first = newest
+                - chrono::TimeDelta::minutes(i64::try_from((page - 1) * 100).expect("small"));
+            stub.file(
+                &format!("page{page}.out"),
+                &ok_output(&label_page(1000 - (page - 1) * 100, 100, first)),
+            );
+        }
+        // The oldest event of page 10 is 999 minutes older than the newest
+        // one, and `since` is far older than that.
+        let since = newest - chrono::TimeDelta::days(14);
+        let list = stub
+            .source()
+            .queue_events_of(&repo("o/r"), since)
+            .expect("events");
+        let requests = stub.requests();
+        assert_eq!(requests.len(), 10, "{requests:?}");
+        assert!(
+            requests[9]
+                .last()
+                .is_some_and(|path| path.ends_with("page=10")),
+            "{requests:?}"
+        );
+        assert_eq!(list.cut_at, Some(newest - chrono::TimeDelta::minutes(999)));
     }
 
     #[test]
@@ -3757,7 +3814,8 @@ mod tests {
         let events = stub
             .source()
             .queue_events_of(&repo("o/r"), time("2026-10-22T08:00:00Z"))
-            .expect("events");
+            .expect("events")
+            .events;
         assert_eq!(events.len(), 1);
         assert_eq!(stub.requests().len(), 2);
     }
@@ -3780,7 +3838,7 @@ mod tests {
         let since = time("2026-10-22T08:00:00Z");
         let first = source.queue_events_of(&repo("o/r"), since).expect("events");
         let second = source.queue_events_of(&repo("o/r"), since).expect("events");
-        assert_eq!(first.len(), 1);
+        assert_eq!(first.events.len(), 1);
         assert_eq!(second, first);
         let requests = stub.requests();
         assert_eq!(requests.len(), 2);

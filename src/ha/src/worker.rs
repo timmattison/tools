@@ -57,7 +57,7 @@ use chrono::{DateTime, Utc};
 
 use crate::github::{RepoList, RunList, RunQuery, Source, SourceError, QUEUE_CHECK_BATCH};
 use crate::job::Job;
-use crate::queue::{read_events, Departure, PullNumber, QueueEntry};
+use crate::queue::{read_events, Departure, History, PullNumber, QueueEntry};
 use crate::run::{Run, RunId};
 use crate::settings::Settings;
 use crate::status::{OwnerProblem, RateLimit};
@@ -163,9 +163,10 @@ pub enum Update {
         /// The pull requests in the queue now, in queue order, or the error
         /// of the read.
         entries: Result<Vec<QueueEntry>, SourceError>,
-        /// Each time that a pull request left the queue, the oldest first, or
-        /// the error of the read of the events.
-        departures: Result<Vec<Departure>, SourceError>,
+        /// The merge history of the repository (each time that a pull request
+        /// left the queue, the oldest first, and where the page limit cut the
+        /// events), or the error of the read of the events.
+        history: Result<History, SourceError>,
     },
     /// A cycle ended.
     CycleDone {
@@ -1315,9 +1316,9 @@ fn fetch_queues<S: Source>(
 /// [`with_branches`]). When both reads succeed, it forgets the branch of each
 /// pull request of `repo` that is no longer an entry or a departure.
 fn fetch_queue<S: Source>(source: &S, repo: &RepoName, fetch: &QueueFetch<'_>) -> Update {
-    let log = source
-        .queue_events_of(repo, fetch.since)
-        .map(|events| read_events(repo, events));
+    let list = source.queue_events_of(repo, fetch.since);
+    let cut_at = list.as_ref().ok().and_then(|list| list.cut_at);
+    let log = list.map(|list| read_events(repo, list.events));
     let open = log.as_ref().map_or(true, |log| !log.open.is_empty());
     let due = open
         || fetch
@@ -1349,12 +1350,15 @@ fn fetch_queue<S: Source>(source: &S, repo: &RepoName, fetch: &QueueFetch<'_>) -
             branches.insert((repo.clone(), entry.pull), entry.branch.clone());
         }
     }
-    let departures = log.map(|log| with_branches(source, repo, log.departures, fetch.branches));
-    if let (Ok(entries), Ok(departures)) = (&entries, &departures) {
+    let history = log.map(|log| History {
+        departures: with_branches(source, repo, log.departures, fetch.branches),
+        cut_at,
+    });
+    if let (Ok(entries), Ok(history)) = (&entries, &history) {
         let shown: BTreeSet<PullNumber> = entries
             .iter()
             .map(|entry| entry.pull)
-            .chain(departures.iter().map(|departure| departure.pull))
+            .chain(history.departures.iter().map(|departure| departure.pull))
             .collect();
         fetch
             .branches
@@ -1365,7 +1369,7 @@ fn fetch_queue<S: Source>(source: &S, repo: &RepoName, fetch: &QueueFetch<'_>) -
     Update::MergeQueue {
         repo: repo.clone(),
         entries,
-        departures,
+        history,
     }
 }
 
@@ -1434,7 +1438,7 @@ mod tests {
     use std::sync::{Arc, Mutex, PoisonError};
 
     use super::*;
-    use crate::github::{RepoList, RunList, RunQuery, SourceError};
+    use crate::github::{EventList, RepoList, RunList, RunQuery, SourceError};
     use crate::job::Job;
     use crate::queue::{EntryState, EventKind, Outcome, PullNumber, QueueEntry, QueueEvent};
     use crate::run::{RunId, RunState};
@@ -1486,6 +1490,9 @@ mod tests {
         /// The merge queue events of each repository. A repository with no
         /// entry here has no event.
         events: HashMap<RepoName, Result<Vec<QueueEvent>, SourceError>>,
+        /// Where the page limit cuts the events of a repository. A repository
+        /// with no entry here has events that are not cut.
+        events_cut: HashMap<RepoName, DateTime<Utc>>,
         /// The `since` of each read of the events, in order.
         events_since: Vec<DateTime<Utc>>,
         /// The head branches that each repository gives. A repository with
@@ -1624,11 +1631,17 @@ mod tests {
             &self,
             repo: &RepoName,
             since: DateTime<Utc>,
-        ) -> Result<Vec<QueueEvent>, SourceError> {
+        ) -> Result<EventList, SourceError> {
             let mut script = self.script();
             script.calls.push(("events", repo.to_string()));
             script.events_since.push(since);
-            script.events.get(repo).cloned().unwrap_or(Ok(Vec::new()))
+            let cut_at = script.events_cut.get(repo).copied();
+            script
+                .events
+                .get(repo)
+                .cloned()
+                .unwrap_or(Ok(Vec::new()))
+                .map(|events| EventList { events, cut_at })
         }
 
         fn pull_branches_of(
@@ -4050,7 +4063,7 @@ mod tests {
             .collect()
     }
 
-    /// The entries and the departures of the merge queue update of `wanted`.
+    /// The entries and the history of the merge queue update of `wanted`.
     #[expect(
         clippy::type_complexity,
         reason = "the pair holds the two fields of the update as they are"
@@ -4060,7 +4073,7 @@ mod tests {
         wanted: &RepoName,
     ) -> (
         &'a Result<Vec<QueueEntry>, SourceError>,
-        &'a Result<Vec<Departure>, SourceError>,
+        &'a Result<History, SourceError>,
     ) {
         updates
             .iter()
@@ -4068,8 +4081,8 @@ mod tests {
                 Update::MergeQueue {
                     repo,
                     entries,
-                    departures,
-                } if repo == wanted => Some((entries, departures)),
+                    history,
+                } if repo == wanted => Some((entries, history)),
                 _ => None,
             })
             .unwrap_or_else(|| panic!("no MergeQueue update for {wanted}: {updates:?}"))
@@ -4081,6 +4094,8 @@ mod tests {
             .1
             .as_ref()
             .expect("good departures")
+            .departures
+            .as_slice()
     }
 
     /// A fake in which `acme/a` has a merge queue.
@@ -4313,6 +4328,43 @@ mod tests {
             2,
             "the third cycle must not read an empty queue again"
         );
+    }
+
+    #[test]
+    fn the_history_carries_the_time_where_the_page_limit_cut_the_events() {
+        let cut = DateTime::from_timestamp(1_792_000_000, 0).expect("a valid time");
+        let fake = fake_with_queue();
+        fake.script()
+            .events
+            .insert(repo("acme/a"), Ok(merge_events(5, 30)));
+        fake.script().events_cut.insert(repo("acme/a"), cut);
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+
+        let updates = one_cycle(&worker);
+
+        let history = queue_of(&updates, &repo("acme/a"))
+            .1
+            .as_ref()
+            .expect("good history");
+        assert_eq!(history.cut_at, Some(cut));
+        assert_eq!(history.departures.len(), 1, "{history:?}");
+    }
+
+    #[test]
+    fn a_history_that_the_page_limit_did_not_cut_has_no_cut_time() {
+        let fake = fake_with_queue();
+        fake.script()
+            .events
+            .insert(repo("acme/a"), Ok(merge_events(5, 30)));
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+
+        let updates = one_cycle(&worker);
+
+        let history = queue_of(&updates, &repo("acme/a"))
+            .1
+            .as_ref()
+            .expect("history");
+        assert_eq!(history.cut_at, None);
     }
 
     #[test]

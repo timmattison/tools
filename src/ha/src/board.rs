@@ -19,7 +19,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 
 use crate::job::{Job, JobId};
-use crate::queue::{Departure, Outcome, PullNumber, QueueEntry};
+use crate::queue::{Departure, History, Outcome, PullNumber, QueueEntry};
 use crate::run::{keep_first_of_each_id, Run, RunId, RunState};
 use crate::target::RepoName;
 
@@ -269,6 +269,8 @@ struct QueueBook {
     entries: Vec<QueueEntry>,
     /// The last good departures.
     departures: Vec<Departure>,
+    /// The `cut_at` of the last good history.
+    cut_at: Option<DateTime<Utc>>,
     /// The text of the error of the last answer, when a read of it failed.
     error: Option<String>,
 }
@@ -374,7 +376,7 @@ impl Board {
         &mut self,
         repo: &RepoName,
         entries: Result<Vec<QueueEntry>, String>,
-        departures: Result<Vec<Departure>, String>,
+        history: Result<History, String>,
     ) {
         let Some(book) = self.queues.get_mut(repo) else {
             return;
@@ -386,8 +388,11 @@ impl Board {
                 error.get_or_insert(format!("{QUEUE_ERROR_PREFIX}{text}"));
             }
         }
-        match departures {
-            Ok(departures) => book.departures = departures,
+        match history {
+            Ok(history) => {
+                book.departures = history.departures;
+                book.cut_at = history.cut_at;
+            }
             Err(text) => {
                 error.get_or_insert(format!("{HISTORY_ERROR_PREFIX}{text}"));
             }
@@ -485,6 +490,13 @@ impl Board {
             .collect();
         recent.sort_by_key(|run| std::cmp::Reverse((run.updated_at, run.id)));
         (active, recent)
+    }
+
+    /// How far back the merge history is whole at `now`, or `None` when it is
+    /// whole for the full window. Scaffold: always `None` for now.
+    #[must_use]
+    pub fn history_reach(&self, _now: DateTime<Utc>) -> Option<Duration> {
+        None
     }
 
     /// The entries of all merge queues and the departures that show at `now`.
@@ -3084,11 +3096,19 @@ mod tests {
         }
     }
 
+    /// A history that the page limit did not cut.
+    fn whole(departures: Vec<Departure>) -> History {
+        History {
+            departures,
+            cut_at: None,
+        }
+    }
+
     /// A board on which `a/x` has a merge queue with these entries and departures.
     fn queue_board(entries: Vec<QueueEntry>, departures: Vec<Departure>) -> Board {
         let mut board = board();
         board.set_queues(&BTreeSet::from([repo("a/x")]));
-        board.set_queue(&repo("a/x"), Ok(entries), Ok(departures));
+        board.set_queue(&repo("a/x"), Ok(entries), Ok(whole(departures)));
         board
     }
 
@@ -3150,7 +3170,7 @@ mod tests {
         board.set_queue(
             &repo("b/y"),
             Ok(vec![queue_entry("b/y", 9, 1, 5)]),
-            Ok(Vec::new()),
+            Ok(History::default()),
         );
         board.set_queue(
             &repo("a/x"),
@@ -3158,7 +3178,7 @@ mod tests {
                 queue_entry("a/x", 7, 2, 3),
                 queue_entry("a/x", 8, 1, 4),
             ]),
-            Ok(Vec::new()),
+            Ok(History::default()),
         );
         assert_eq!(
             shape(&board.rows(now()))[..4],
@@ -3211,7 +3231,7 @@ mod tests {
     #[test]
     fn a_failed_entry_read_keeps_the_last_entries_and_lists_its_error() {
         let mut board = queue_board(vec![queue_entry("a/x", 7, 1, 3)], Vec::new());
-        board.set_queue(&repo("a/x"), Err("boom".to_owned()), Ok(Vec::new()));
+        board.set_queue(&repo("a/x"), Err("boom".to_owned()), Ok(History::default()));
         assert!(shape(&board.rows(now())).contains(&"Entry(a/x#7)".to_owned()));
         assert_eq!(board.errors(), [(&repo("a/x"), "merge queue: boom")]);
     }
@@ -3227,8 +3247,8 @@ mod tests {
     #[test]
     fn a_good_answer_clears_the_error_of_the_queue() {
         let mut board = queue_board(Vec::new(), Vec::new());
-        board.set_queue(&repo("a/x"), Err("boom".to_owned()), Ok(Vec::new()));
-        board.set_queue(&repo("a/x"), Ok(Vec::new()), Ok(Vec::new()));
+        board.set_queue(&repo("a/x"), Err("boom".to_owned()), Ok(History::default()));
+        board.set_queue(&repo("a/x"), Ok(Vec::new()), Ok(History::default()));
         assert!(board.errors().is_empty(), "{:?}", board.errors());
     }
 
@@ -3236,8 +3256,8 @@ mod tests {
     fn the_error_of_a_queue_follows_the_error_of_the_runs_of_its_repository() {
         let mut board = board();
         board.set_queues(&BTreeSet::from([repo("a/x"), repo("b/y")]));
-        board.set_queue(&repo("b/y"), Err("late".to_owned()), Ok(Vec::new()));
-        board.set_queue(&repo("a/x"), Err("boom".to_owned()), Ok(Vec::new()));
+        board.set_queue(&repo("b/y"), Err("late".to_owned()), Ok(History::default()));
+        board.set_queue(&repo("a/x"), Err("boom".to_owned()), Ok(History::default()));
         board.fail(repo("a/x"), "runs down".to_owned());
         assert_eq!(
             board.errors(),
@@ -3261,6 +3281,89 @@ mod tests {
         assert!(board.errors().is_empty());
     }
 
+    /// A history of `departures` that the page limit cut `minutes` before `now()`.
+    fn cut(departures: Vec<Departure>, minutes: i64) -> History {
+        History {
+            departures,
+            cut_at: Some(now() - Span::minutes(minutes)),
+        }
+    }
+
+    /// A board with a queue for `a/x` and `b/y`.
+    fn two_queue_board() -> Board {
+        let mut board = board();
+        board.set_queues(&BTreeSet::from([repo("a/x"), repo("b/y")]));
+        board
+    }
+
+    const TWO_HOURS: Duration = Duration::from_secs(2 * 3600);
+
+    #[test]
+    fn the_history_shows_only_the_span_in_which_every_repository_is_whole() {
+        let mut board = two_queue_board();
+        board.set_queue(
+            &repo("a/x"),
+            Ok(Vec::new()),
+            Ok(cut(vec![departure("a/x", 1, Outcome::Merged, 90)], 120)),
+        );
+        board.set_queue(
+            &repo("b/y"),
+            Ok(Vec::new()),
+            Ok(whole(vec![
+                departure("b/y", 2, Outcome::Failed, 60),
+                departure("b/y", 3, Outcome::Merged, 180),
+            ])),
+        );
+        assert_eq!(
+            shape(&board.rows(now()))[2..5],
+            [
+                "Header(History,2,1,1,0)",
+                "Departure(b/y#2)",
+                "Departure(a/x#1)"
+            ]
+        );
+        assert_eq!(board.history_reach(now()), Some(TWO_HOURS));
+    }
+
+    #[test]
+    fn a_history_that_no_page_limit_cut_has_no_reach() {
+        let board = queue_board(Vec::new(), vec![departure("a/x", 1, Outcome::Merged, 10)]);
+        assert_eq!(board.history_reach(now()), None);
+    }
+
+    #[test]
+    fn a_cut_older_than_the_window_start_hides_nothing_and_gives_no_reach() {
+        let mut board = queue_board(Vec::new(), Vec::new());
+        board.set_queue(
+            &repo("a/x"),
+            Ok(Vec::new()),
+            Ok(cut(
+                vec![departure("a/x", 1, Outcome::Merged, 8 * 60 - 1)],
+                9 * 60,
+            )),
+        );
+        assert_eq!(board.history_reach(now()), None);
+        assert!(shape(&board.rows(now())).contains(&"Departure(a/x#1)".to_owned()));
+    }
+
+    #[test]
+    fn a_failed_event_read_keeps_the_last_cut() {
+        let mut board = queue_board(Vec::new(), Vec::new());
+        board.set_queue(&repo("a/x"), Ok(Vec::new()), Ok(cut(Vec::new(), 120)));
+        board.set_queue(&repo("a/x"), Ok(Vec::new()), Err("boom".to_owned()));
+        assert_eq!(board.history_reach(now()), Some(TWO_HOURS));
+    }
+
+    #[test]
+    fn the_reach_goes_away_with_the_cut_repository() {
+        let mut board = two_queue_board();
+        board.set_queue(&repo("a/x"), Ok(Vec::new()), Ok(cut(Vec::new(), 120)));
+        board.set_queue(&repo("b/y"), Ok(Vec::new()), Ok(History::default()));
+        assert_eq!(board.history_reach(now()), Some(TWO_HOURS));
+        board.set_queues(&BTreeSet::from([repo("b/y")]));
+        assert_eq!(board.history_reach(now()), None);
+    }
+
     #[test]
     fn set_queues_drops_the_queue_of_a_repository_that_has_none_now() {
         let mut board = board();
@@ -3273,7 +3376,7 @@ mod tests {
         board.set_queue(
             &repo("b/y"),
             Ok(vec![queue_entry("b/y", 9, 1, 3)]),
-            Ok(Vec::new()),
+            Ok(History::default()),
         );
         board.set_queues(&BTreeSet::from([repo("b/y")]));
         assert_eq!(
@@ -3394,7 +3497,7 @@ mod tests {
                 queue_entry("a/x", 6, 1, 9),
                 queue_entry("a/x", 7, 2, 3),
             ]),
-            Ok(Vec::new()),
+            Ok(History::default()),
         );
         assert_eq!(selected_text(&mut board).as_deref(), Some("Entry(a/x#7)*"));
     }
@@ -3406,10 +3509,10 @@ mod tests {
         board.set_queue(
             &repo("a/x"),
             Ok(Vec::new()),
-            Ok(vec![
+            Ok(whole(vec![
                 departure("a/x", 4, Outcome::Failed, 1),
                 departure("a/x", 2, Outcome::Merged, 10),
-            ]),
+            ])),
         );
         assert_eq!(
             selected_text(&mut board).as_deref(),
@@ -3428,7 +3531,7 @@ mod tests {
         board.set_queue(
             &repo("a/x"),
             Ok(vec![queue_entry("a/x", 7, 1, 3)]),
-            Ok(vec![departure("a/x", 8, Outcome::Merged, 0)]),
+            Ok(whole(vec![departure("a/x", 8, Outcome::Merged, 0)])),
         );
         assert_eq!(
             selected_text(&mut board).as_deref(),
@@ -3446,7 +3549,7 @@ mod tests {
         board.set_queue(
             &repo("a/x"),
             Ok(vec![queue_entry("a/x", 7, 1, 3)]),
-            Ok(vec![departure("a/x", 2, Outcome::Merged, 10)]),
+            Ok(whole(vec![departure("a/x", 2, Outcome::Merged, 10)])),
         );
         assert_eq!(selected_text(&mut board).as_deref(), Some("Run(3)*"));
     }
