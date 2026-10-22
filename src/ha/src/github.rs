@@ -319,6 +319,15 @@ pub trait Source: Send + Sync {
     /// Returns a [`SourceError`] when the page cannot be fetched.
     fn newest_run(&self, repo: &RepoName) -> Result<Option<Run>, SourceError>;
 
+    /// Tells the source that the worker doubts the answers of `query` for a
+    /// repository.
+    ///
+    /// A source that keeps a cache removes the cached pages of that query. The
+    /// next request for them then asks GitHub for a whole answer, and a `304`
+    /// cannot repeat a bad answer. The cached page of `newest_run` and the
+    /// cached pages of jobs stay.
+    fn forget_runs(&self, repo: &RepoName, query: RunQuery);
+
     /// The rate limit that the last response stated. `None` before any response.
     fn rate_limit(&self) -> Option<RateLimit>;
 }
@@ -700,6 +709,10 @@ impl Source for GhSource {
         let key = format!("{repo}#newest#1");
         let page = self.cached_get(&key, &path, |body| parse_runs(body, repo))?;
         Ok(page.runs.into_iter().next())
+    }
+
+    fn forget_runs(&self, _repo: &RepoName, _query: RunQuery) {
+        // Red stub: a source that keeps every page.
     }
 
     fn rate_limit(&self) -> Option<RateLimit> {
@@ -1901,6 +1914,107 @@ mod tests {
         source.jobs_of(&repo("o/r"), RunId(42)).expect("jobs");
         source.forget_jobs(&repo("o/r"), RunId(42));
         assert_eq!(cache_keys(&source), ["o/r#jobs/43#1"]);
+    }
+
+    /// The `If-None-Match` header of each request, in order. `None` for a request with no such header.
+    fn conditions(stub: &Stub) -> Vec<Option<String>> {
+        stub.requests()
+            .iter()
+            .map(|call| {
+                call.iter()
+                    .find(|argument| argument.starts_with("If-None-Match"))
+                    .cloned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_cached_page_of_an_empty_answer_sends_its_etag_again() {
+        let stub = Stub::new(ETAG_CASES);
+        stub.file("page1.out", &ok_output(&runs_json(0, 1, 0)));
+        stub.file("not-modified.out", NOT_MODIFIED);
+        let source = stub.source();
+        source.runs_of(&repo("o/r"), since_query()).expect("runs");
+        source.runs_of(&repo("o/r"), since_query()).expect("runs");
+        assert_eq!(
+            conditions(&stub),
+            [None, Some("If-None-Match: W/\"4c00158b\"".to_owned())]
+        );
+    }
+
+    #[test]
+    fn forget_runs_makes_the_next_request_for_the_page_unconditional() {
+        let stub = Stub::new(ETAG_CASES);
+        stub.file("page1.out", &ok_output(&runs_json(0, 1, 0)));
+        stub.file("not-modified.out", NOT_MODIFIED);
+        let source = stub.source();
+        source.runs_of(&repo("o/r"), since_query()).expect("runs");
+        source.forget_runs(&repo("o/r"), since_query());
+        source.runs_of(&repo("o/r"), since_query()).expect("runs");
+        assert_eq!(conditions(&stub), [None, None]);
+    }
+
+    /// A stub that answers a jobs request from `jobs.out` and any other request from `page1.out`.
+    const JOBS_AND_RUNS_CASES: &str = "case \"$*\" in
+  *'/jobs?'*) cat \"$dir/jobs.out\";;
+  *) cat \"$dir/page1.out\";;
+ esac";
+
+    /// A source whose cache holds a page of each kind for `o/r` and `o/r2`.
+    fn source_with_every_kind_of_page(stub: &Stub) -> GhSource {
+        stub.file("page1.out", &ok_output(&runs_json(0, 1, 0)));
+        stub.file("jobs.out", &ok_output(&active_jobs_json()));
+        let source = stub.source();
+        for name in ["o/r", "o/r2"] {
+            source.runs_of(&repo(name), since_query()).expect("runs");
+            source.runs_of(&repo(name), RunQuery::Active).expect("runs");
+        }
+        source.newest_run(&repo("o/r")).expect("newest");
+        source.jobs_of(&repo("o/r"), RunId(42)).expect("jobs");
+        source
+    }
+
+    #[test]
+    fn forget_runs_for_created_drops_only_the_created_pages_of_that_repository() {
+        let stub = Stub::new(JOBS_AND_RUNS_CASES);
+        let source = source_with_every_kind_of_page(&stub);
+        source.forget_runs(&repo("o/r"), since_query());
+        assert_eq!(
+            cache_keys(&source),
+            [
+                "o/r#in_progress#1",
+                "o/r#jobs/42#1",
+                "o/r#newest#1",
+                "o/r#pending#1",
+                "o/r#queued#1",
+                "o/r#waiting#1",
+                "o/r2#created#1",
+                "o/r2#in_progress#1",
+                "o/r2#pending#1",
+                "o/r2#queued#1",
+                "o/r2#waiting#1",
+            ]
+        );
+    }
+
+    #[test]
+    fn forget_runs_for_active_drops_only_the_status_pages_of_that_repository() {
+        let stub = Stub::new(JOBS_AND_RUNS_CASES);
+        let source = source_with_every_kind_of_page(&stub);
+        source.forget_runs(&repo("o/r"), RunQuery::Active);
+        assert_eq!(
+            cache_keys(&source),
+            [
+                "o/r#created#1",
+                "o/r#jobs/42#1",
+                "o/r#newest#1",
+                "o/r2#created#1",
+                "o/r2#in_progress#1",
+                "o/r2#pending#1",
+                "o/r2#queued#1",
+                "o/r2#waiting#1",
+            ]
+        );
     }
 
     #[test]

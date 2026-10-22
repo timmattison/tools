@@ -971,6 +971,16 @@ mod tests {
             script.newest.get(repo).cloned().unwrap_or(Ok(None))
         }
 
+        fn forget_runs(&self, repo: &RepoName, query: RunQuery) {
+            let what = match query {
+                RunQuery::CreatedSince(_) => "created",
+                RunQuery::Active => "active",
+            };
+            self.script()
+                .calls
+                .push(("forget-runs", format!("{repo} {what}")));
+        }
+
         fn rate_limit(&self) -> Option<RateLimit> {
             self.script().rate
         }
