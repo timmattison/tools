@@ -52,6 +52,8 @@ pub enum Update {
         repos: BTreeSet<RepoName>,
         /// The owners whose list failed or was cut, with the problem of each.
         owner_errors: Vec<(OwnerName, OwnerProblem)>,
+        /// When the last good list of each owner that has one was made.
+        listed_at: BTreeMap<OwnerName, DateTime<Utc>>,
     },
     /// The runs of one repository.
     Runs {
@@ -732,6 +734,7 @@ fn refresh_repos<S: Source>(
         updates
             .send(Update::Repos {
                 repos: repos.clone(),
+                listed_at: std::collections::BTreeMap::new(),
                 owner_errors,
             })
             .map_err(|_| ReceiverGone)?;
@@ -1035,6 +1038,7 @@ mod tests {
         let Update::Repos {
             repos,
             owner_errors,
+            ..
         } = &updates[0]
         else {
             panic!("the first update is not Repos: {updates:?}");
@@ -1235,6 +1239,7 @@ mod tests {
             first[0],
             Update::Repos {
                 repos: expected.clone(),
+                listed_at: std::collections::BTreeMap::new(),
                 owner_errors: Vec::new()
             }
         );
@@ -1242,6 +1247,7 @@ mod tests {
             second[0],
             Update::Repos {
                 repos: expected,
+                listed_at: std::collections::BTreeMap::new(),
                 owner_errors: vec![(owner("acme"), OwnerProblem::Failed(failure))]
             }
         );
@@ -1338,6 +1344,7 @@ mod tests {
             first[0],
             Update::Repos {
                 repos: [repo("acme/a")].into(),
+                listed_at: std::collections::BTreeMap::new(),
                 owner_errors: vec![(
                     owner("acme"),
                     OwnerProblem::Cut(
@@ -1383,6 +1390,7 @@ mod tests {
             first[0],
             Update::Repos {
                 repos: BTreeSet::new(),
+                listed_at: std::collections::BTreeMap::new(),
                 owner_errors: vec![(owner("acme"), OwnerProblem::Failed(failure))]
             }
         );
@@ -1390,6 +1398,7 @@ mod tests {
             second[0],
             Update::Repos {
                 repos: [repo("acme/a")].into(),
+                listed_at: std::collections::BTreeMap::new(),
                 owner_errors: Vec::new()
             }
         );
@@ -1446,6 +1455,7 @@ mod tests {
             updates_rx.try_recv(),
             Ok(Update::Repos {
                 repos: BTreeSet::from([repo("acme-b/x")]),
+                listed_at: std::collections::BTreeMap::new(),
                 owner_errors: vec![
                     (owner("acme-a"), OwnerProblem::Failed(failure)),
                     (owner("acme-b"), OwnerProblem::Cut("old error".to_owned())),

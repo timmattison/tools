@@ -247,6 +247,7 @@ mod tests {
         let mut cycle = FirstCycle::default();
         cycle.note(&Update::Repos {
             repos: BTreeSet::new(),
+            listed_at: std::collections::BTreeMap::new(),
             owner_errors: vec![
                 (
                     OwnerName::parse("aaa").unwrap(),

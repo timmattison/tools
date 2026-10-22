@@ -235,6 +235,7 @@ where
                 Update::Repos {
                     repos,
                     owner_errors,
+                    listed_at: _,
                 } => {
                     self.board.keep_only(&repos);
                     self.status.owner_errors = owner_errors;
@@ -936,6 +937,7 @@ mod tests {
         let updates = [
             Update::Repos {
                 repos: BTreeSet::from([a.clone(), b.clone()]),
+                listed_at: std::collections::BTreeMap::new(),
                 owner_errors: vec![],
             },
             Update::Failed {
@@ -1037,6 +1039,7 @@ mod tests {
         let updates = [
             Update::Repos {
                 repos: BTreeSet::from([a.clone(), b.clone()]),
+                listed_at: std::collections::BTreeMap::new(),
                 owner_errors: vec![],
             },
             Update::Runs {
@@ -1095,6 +1098,7 @@ mod tests {
         let updates = [
             Update::Repos {
                 repos: BTreeSet::from([a.clone(), b.clone()]),
+                listed_at: std::collections::BTreeMap::new(),
                 owner_errors: vec![],
             },
             Update::Failed {
@@ -1135,6 +1139,7 @@ mod tests {
         let updates = [
             Update::Repos {
                 repos: BTreeSet::from([a.clone(), b.clone(), c.clone()]),
+                listed_at: std::collections::BTreeMap::new(),
                 owner_errors: vec![],
             },
             Update::Failed {
@@ -1175,6 +1180,7 @@ mod tests {
         let updates = [
             Update::Repos {
                 repos: BTreeSet::new(),
+                listed_at: std::collections::BTreeMap::new(),
                 owner_errors: vec![(
                     OwnerName::parse("acme").unwrap(),
                     OwnerProblem::Failed(SourceError::Failed(message.to_owned())),
@@ -1199,6 +1205,7 @@ mod tests {
         let updates = [
             Update::Repos {
                 repos: BTreeSet::new(),
+                listed_at: std::collections::BTreeMap::new(),
                 owner_errors: vec![],
             },
             cycle_done(),
@@ -1229,6 +1236,7 @@ mod tests {
         let updates = [
             Update::Repos {
                 repos: BTreeSet::from([a.clone()]),
+                listed_at: std::collections::BTreeMap::new(),
                 owner_errors: vec![(
                     OwnerName::parse("acme").unwrap(),
                     OwnerProblem::Cut(cut.warning().unwrap()),
@@ -1258,6 +1266,7 @@ mod tests {
         let updates = [
             Update::Repos {
                 repos: BTreeSet::from([x.clone()]),
+                listed_at: std::collections::BTreeMap::new(),
                 owner_errors: vec![(
                     OwnerName::parse("acme").unwrap(),
                     OwnerProblem::Failed(SourceError::Failed("boom".to_owned())),
@@ -1289,6 +1298,7 @@ mod tests {
             .updates
             .send(Update::Repos {
                 repos: std::collections::BTreeSet::new(),
+                listed_at: std::collections::BTreeMap::new(),
                 owner_errors: Vec::new(),
             })
             .unwrap();
@@ -1307,6 +1317,7 @@ mod tests {
             .updates
             .send(Update::Repos {
                 repos: std::collections::BTreeSet::new(),
+                listed_at: std::collections::BTreeMap::new(),
                 owner_errors: vec![(
                     OwnerName::parse("acme").unwrap(),
                     OwnerProblem::Cut("no such owner".to_owned()),
@@ -1762,6 +1773,7 @@ mod tests {
             key(KeyCode::Right),
             Step::Send(Update::Repos {
                 repos: std::collections::BTreeSet::new(),
+                listed_at: std::collections::BTreeMap::new(),
                 owner_errors: Vec::new(),
             }),
             Step::Idle,
