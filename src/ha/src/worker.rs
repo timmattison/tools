@@ -3541,6 +3541,57 @@ mod tests {
         assert!(calls_named(&fake, "run").is_empty());
     }
 
+    /// The runs that one update carries, when it carries runs.
+    fn runs_of_update(update: &Update) -> Option<&[Run]> {
+        match update {
+            Update::Runs { runs, .. } => Some(runs),
+            _ => None,
+        }
+    }
+
+    /// The suspicion that one update carries, when it carries one.
+    fn suspicion_of_update(update: &Update) -> Option<&Suspicion> {
+        match update {
+            Update::Suspect { reason, .. } => Some(reason),
+            _ => None,
+        }
+    }
+
+    /// The status filter gives short answers while the created filter works.
+    /// The good recent answer must still show its new runs, and the runs of the
+    /// last good sweep stay. The suspicion of the sweep is still reported.
+    #[test]
+    fn a_suspect_sweep_with_a_good_created_answer_still_shows_the_new_runs() {
+        let fake = Arc::new(FakeSource::default());
+        let old = old_active_run(1);
+        let five = created_ago(5, 10);
+        script_created(&fake, vec![five.clone()]);
+        script_active(&fake, vec![old.clone()]);
+        script_direct(&fake, std::slice::from_ref(&old));
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), Duration::ZERO);
+        one_cycle(&worker);
+
+        let six = created_ago(6, 2);
+        script_created(&fake, vec![five, six]);
+        script_active(&fake, Vec::new());
+        let second = refresh_now(&worker);
+
+        let mut ids: Vec<u64> = second
+            .iter()
+            .filter_map(runs_of_update)
+            .flatten()
+            .map(|run| run.id.0)
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![1, 5, 6], "{second:?}");
+        assert!(
+            second.iter().filter_map(suspicion_of_update).any(|reason| {
+                *reason == Suspicion::LeftOut(Item::Run(RunId(1)))
+            }),
+            "{second:?}"
+        );
+    }
+
     #[test]
     fn a_run_that_left_the_sweep_and_that_the_created_answer_holds_as_active_is_suspect() {
         let fake = Arc::new(FakeSource::default());
