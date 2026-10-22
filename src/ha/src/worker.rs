@@ -690,11 +690,14 @@ fn suspicion_of_list<S: Source>(
 /// Builds the repository set and sends it when it can have changed.
 ///
 /// When the owner cadence is due, the function lists every owner again. On
-/// every cycle it also lists each owner that has no good list yet, so the `r`
-/// key tries a failed owner again at once. An owner with a good list waits for
-/// the cadence. The function keeps the last list error of each owner in
-/// `state`, and it clears that error when a list succeeds. It sends
-/// [`Update::Repos`] when the cadence is due or when it listed an owner.
+/// every cycle it also lists each owner that has no good list yet, and each
+/// owner whose last list failed or was suspect, so the `r` key tries such an
+/// owner again at once. An owner with a good list, or with a cut list, waits
+/// for the cadence. A successful list goes through [`suspicion_of_list`]. A
+/// suspect list keeps the last good list of the owner. The function keeps the
+/// last list problem of each owner in `state`, and it clears that problem when
+/// a good list replaces it. It sends [`Update::Repos`] when the cadence is due
+/// or when it listed an owner.
 fn refresh_repos<S: Source>(
     source: &S,
     settings: &Settings,
@@ -711,7 +714,12 @@ fn refresh_repos<S: Source>(
         let Target::Owner(owner) = target else {
             continue;
         };
-        if !due && state.owner_lists.contains_key(owner) {
+        let needs_a_list = !state.owner_lists.contains_key(owner)
+            || matches!(
+                state.owner_errors.get(owner),
+                Some(OwnerProblem::Failed(_) | OwnerProblem::Suspect(_))
+            );
+        if !due && !needs_a_list {
             continue;
         }
         listed = true;
