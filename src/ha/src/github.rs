@@ -197,8 +197,8 @@ fn parse_jobs(body: &str) -> Result<JobsPage, SourceError> {
 pub enum RunQuery {
     /// Every run created at or after the start of the UTC hour of this time.
     CreatedSince(DateTime<Utc>),
-    /// Every run that is in progress, in the queue, or waiting (for an approval
-    /// or for another run of its concurrency group).
+    /// Every run that is in progress, in the queue, requested, or waiting (for
+    /// an approval or for another run of its concurrency group).
     Active,
 }
 
@@ -209,9 +209,11 @@ pub enum RunQuery {
 ///   to 30 days.
 /// - `pending` is a run that waits for another run of its concurrency group. It
 ///   waits as long as that run lasts.
+/// - `requested` is a run that GitHub created and has not queued yet.
 ///
-/// `requested` is not here, because a run stays in it for seconds only.
-const ACTIVE_STATUSES: [&str; 4] = ["in_progress", "queued", "waiting", "pending"];
+/// The list holds each status that `RunState::is_active` calls active, thus the
+/// probe of an empty sweep and the sweep agree.
+const ACTIVE_STATUSES: [&str; 5] = ["in_progress", "queued", "waiting", "pending", "requested"];
 
 /// The most repositories of one owner that `ha` watches.
 pub const REPO_LIMIT: usize = 1000;
@@ -1581,7 +1583,7 @@ mod tests {
     #[test]
     fn an_active_list_is_cut_when_one_status_is_cut() {
         let stub = Stub::new(&format!(
-            "case \"$*\" in\n  *'status=queued'*) cat \"$dir/empty.out\";;\n  *'status=waiting'*) cat \"$dir/empty.out\";;\n  *'status=pending'*) cat \"$dir/empty.out\";;\n{}\n esac",
+            "case \"$*\" in\n  *'status=queued'*) cat \"$dir/empty.out\";;\n  *'status=waiting'*) cat \"$dir/empty.out\";;\n  *'status=pending'*) cat \"$dir/empty.out\";;\n  *'status=requested'*) cat \"$dir/empty.out\";;\n{}\n esac",
             (1..=10)
                 .map(|page| format!("  *'&page={page}&status=in_progress'*) cat \"$dir/page{page}.out\";;"))
                 .collect::<Vec<_>>()
@@ -2021,11 +2023,13 @@ mod tests {
                 "o/r#newest#1",
                 "o/r#pending#1",
                 "o/r#queued#1",
+                "o/r#requested#1",
                 "o/r#waiting#1",
                 "o/r2#created#1",
                 "o/r2#in_progress#1",
                 "o/r2#pending#1",
                 "o/r2#queued#1",
+                "o/r2#requested#1",
                 "o/r2#waiting#1",
             ]
         );
@@ -2046,6 +2050,7 @@ mod tests {
                 "o/r2#in_progress#1",
                 "o/r2#pending#1",
                 "o/r2#queued#1",
+                "o/r2#requested#1",
                 "o/r2#waiting#1",
             ]
         );
@@ -2238,19 +2243,21 @@ mod tests {
   *status=queued*) cat \"$dir/page2.out\";;
   *status=waiting*) cat \"$dir/page3.out\";;
   *status=pending*) cat \"$dir/page4.out\";;
+  *status=requested*) cat \"$dir/page5.out\";;
  esac",
         );
         stub.file("page1.out", &ok_output(&runs_json(2, 1, 2)));
         stub.file("page2.out", &ok_output(&runs_json(2, 2, 2)));
         stub.file("page3.out", &ok_output(&runs_json(2, 3, 2)));
         stub.file("page4.out", &ok_output(&runs_json(2, 4, 2)));
+        stub.file("page5.out", &ok_output(&runs_json(2, 5, 2)));
         let runs = stub
             .source()
             .runs_of(&repo("o/r"), RunQuery::Active)
             .expect("runs")
             .runs;
         let ids: Vec<u64> = runs.iter().map(|run| run.id.0).collect();
-        assert_eq!(ids, [1, 2, 3, 4, 5]);
+        assert_eq!(ids, [1, 2, 3, 4, 5, 6]);
         let paths: Vec<String> = stub
             .requests()
             .into_iter()
@@ -2263,6 +2270,7 @@ mod tests {
                 "repos/o/r/actions/runs?per_page=100&page=1&status=queued",
                 "repos/o/r/actions/runs?per_page=100&page=1&status=waiting",
                 "repos/o/r/actions/runs?per_page=100&page=1&status=pending",
+                "repos/o/r/actions/runs?per_page=100&page=1&status=requested",
             ]
         );
     }
