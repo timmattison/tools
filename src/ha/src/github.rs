@@ -2991,6 +2991,7 @@ mod tests {
         );
         let entries = stub.source().queue_entries_of(&repo("o/r"));
         assert_eq!(entries, Ok(Vec::new()));
+        assert_eq!(stub.requests().len(), 1);
     }
 
     #[test]
@@ -3056,6 +3057,7 @@ mod tests {
         let source = stub.source();
         source.runs_of(&repo("o/r"), since_query()).expect("runs");
         source.queue_entries_of(&repo("o/r")).expect("entries");
+        assert_eq!(stub.requests().len(), 2);
         assert_eq!(source.rate_limit(), Some(rate(4866, 1_791_977_652)));
     }
 
