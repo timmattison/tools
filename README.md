@@ -2188,16 +2188,42 @@ cannot hang the caller. Used by `cwt` and `ha`.
     back in `If-None-Match`, and GitHub does not count a `304 Not Modified` answer. The lookback
     of a query starts on the hour, so the request stays the same and its `ETag` can match. The
     repository list of an owner and the sweep for runs older than the lookback refresh every
-    10 minutes. An owner whose list has not yet succeeded is listed again on each refresh, so `r`
-    tries it again at once. On each refresh, `ha` also asks for the jobs of each active run, one
+    10 minutes. An owner with no good list, with an empty list, or whose last list failed or was
+    suspect is listed again on each refresh, so `r` tries it again at once. A failed or suspect
+    sweep runs again on the next refresh. A direct read of a missing run or repository costs one
+    request, and only when a list leaves out an item. The read of the newest run of a repository
+    with an empty list sends the `ETag` too, thus it costs nothing while that run does not change.
+    On each refresh, `ha` also asks for the jobs of each active run, one
     request for each page of 100 jobs, also when the run is collapsed. The requests for jobs also
     send the `ETag`, thus an answer that did not change costs nothing. With 8 active runs at a
     60 s interval, the worst case is 480 more requests each hour. A finished run gets one more
     request for its jobs, and then no more until a re-run changes it.
     At most 8 `gh` children run at the same time, for runs and jobs together. The status line
     shows the remaining budget. When less than 10% remains, `ha` waits until the reset of the budget and says so.
-  - A failure for one repository shows in the status line, and the board keeps the last good runs
-    of that repository.
+  - `ha` does not trust each answer that GitHub gives with success. GitHub can answer a list with
+    success and still give a list that is empty or short. On 2026-10-22, `gh repo list` exited 0
+    with `[]` about one time in 20, and the next call gave the full list. Thus `ha` compares each
+    list with the last good list of the same query:
+    - When a list leaves out a run or a repository that the last good list held, `ha` reads that
+      item directly. When the item is still there, the list is suspect. When GitHub answers `404`,
+      or the run does not match the query now, or the repository is archived or moved, `ha`
+      accepts the shorter list. Thus a deleted run or repository leaves the board.
+    - When a list of runs is empty, `ha` reads the newest run of the repository. When that run
+      matches the query, the empty list is suspect. This covers the first refresh after a start,
+      which has no last good list.
+    - A run created before the lookback is not missing, because the query does not ask for it. A
+      run older than the oldest run of a list that GitHub cut at 1,000 runs is not missing either.
+  - A failed read and a suspect read have the same result. The board keeps the last good runs of
+    the repository, and the status line names the repository and the reason, for example
+    `⚠ acme/widgets: GitHub left out run 39149840084`. The next refresh asks GitHub again with no
+    `If-None-Match`, thus a suspect answer does not come back as a free `304`. A suspect or failed
+    owner list keeps the last good list of the owner.
+  - The run rows of a repository whose last read failed or was suspect show `💤` before the
+    repository name, because those rows are the last good runs and can be old. While a repository
+    or an owner is stale, the status line shows `💤 stale since 11:42 (2 repos, 1 owner)` in place
+    of `updated … ago`. The time is the earliest last good read or list of the stale targets,
+    `11:42` for today and `10-21 11:42` for an earlier day. A status message does not hide this
+    part. The mark and the part go away after the next good read.
   - When the first refresh can read no target, `ha` does not show an empty board. It restores the
     terminal, names each repository and each owner that failed with its error, and stops with exit
     status 1. A repository whose fetch succeeds with no runs is a target that `ha` read. An owner
