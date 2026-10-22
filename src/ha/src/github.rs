@@ -1179,6 +1179,13 @@ mod tests {
     }
 
     #[test]
+    fn an_archived_repository_is_not_listable() {
+        let stub = Stub::new("cat \"$dir/repo.out\"");
+        stub.file("repo.out", &ok_output(&repo_json("o/r", true)));
+        assert_eq!(stub.source().repo_is_listable(&repo("o/r")), Ok(false));
+    }
+
+    #[test]
     fn a_created_since_query_asks_for_one_hour_aligned_page() {
         let stub = Stub::new("cat \"$dir/page1.out\"");
         stub.file("page1.out", &ok_output(RUNS_JSON));
