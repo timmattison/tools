@@ -7,10 +7,16 @@
 //! The cancel of a run is the only request that changes something on GitHub.
 //! Every other request only reads.
 //!
+//! The requests about the merge queue use GraphQL where REST has no answer:
+//! which repositories have a queue, the entries of a queue, and the head
+//! branch of a pull request. The history of a queue comes from the REST issue
+//! events. A GraphQL answer states the GraphQL budget, which is not the core
+//! budget that the status line shows, thus `ha` does not keep it.
+//!
 //! The bounded run of the `gh` child comes from the `runlimit` crate. Its
 //! `run_with_limit` starts a program and kills it when the time limit ends.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsString;
 use std::process::{Command, Output};
 use std::sync::Mutex;
@@ -21,6 +27,7 @@ use runlimit::{run_with_limit, RunFailure};
 use serde::Deserialize;
 
 use crate::job::{Job, JobId, RunnerName};
+use crate::queue::{EntryState, EventKind, PullNumber, QueueEntry, QueueEvent, QUEUE_BOT};
 use crate::run::{keep_first_of_each_id, Run, RunId, RunState};
 use crate::status::RateLimit;
 use crate::target::{OwnerName, RepoName};
@@ -51,6 +58,10 @@ pub enum SourceError {
     /// `gh` printed an answer that `ha` cannot read. The text says why.
     #[error("gh gave an answer that ha cannot read: {0}")]
     BadResponse(String),
+    /// GitHub answered a GraphQL query with an error and without the data
+    /// that `ha` asked for. The text is the message of the first error.
+    #[error("GitHub refused the GraphQL query: {0}")]
+    Graphql(String),
 }
 
 /// One page of workflow runs.
@@ -247,6 +258,19 @@ pub struct RunList {
     pub cut: bool,
 }
 
+/// The merge queue events of one repository, as `Source::queue_events_of` lists them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventList {
+    /// The merge queue events, newest first.
+    pub events: Vec<QueueEvent>,
+    /// The time of the oldest event of any kind that the fetch read, when the
+    /// fetch stopped after `MAX_PAGES` full pages that were all newer than
+    /// `since`. The list then holds each merge queue event from that time on
+    /// and lacks the older ones. `None` when the fetch reached `since` or the
+    /// end of the events.
+    pub cut_at: Option<DateTime<Utc>>,
+}
+
 /// Where `ha` gets its data. `GhSource` is the real one.
 pub trait Source: Send + Sync {
     /// Lists the repositories of an owner. Archived repositories are left out.
@@ -330,9 +354,65 @@ pub trait Source: Send + Sync {
     /// cached pages of jobs stay.
     fn forget_runs(&self, repo: &RepoName, query: RunQuery);
 
+    /// Gives the repositories of `repos` that have a merge queue on their
+    /// default branch.
+    ///
+    /// The list holds at most [`QUEUE_CHECK_BATCH`] repositories, and a
+    /// caller with more splits them. A repository that GitHub cannot find
+    /// (`NOT_FOUND`), and a repository that the token cannot read
+    /// (`FORBIDDEN`), count as ones with no queue. An answer with an error of
+    /// any other type fails the whole call.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`SourceError`] when the check cannot be fetched.
+    fn merge_queues_among(&self, repos: &[RepoName]) -> Result<BTreeSet<RepoName>, SourceError>;
+
+    /// Lists the pull requests in the merge queue of the default branch of
+    /// `repo`, in queue order. A repository with no queue gives an empty list.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`SourceError`] when the entries cannot be fetched.
+    fn queue_entries_of(&self, repo: &RepoName) -> Result<Vec<QueueEntry>, SourceError>;
+
+    /// Lists the merge queue events of the pull requests of `repo`, newest
+    /// first. The list reaches back to `since` at least, when GitHub keeps
+    /// events that old, unless the fetch was cut. A fetch stops after
+    /// `MAX_PAGES` pages. When all of them were full and newer than `since`,
+    /// `EventList::cut_at` says where the list stops.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`SourceError`] when a page of events cannot be fetched.
+    fn queue_events_of(
+        &self,
+        repo: &RepoName,
+        since: DateTime<Utc>,
+    ) -> Result<EventList, SourceError>;
+
+    /// Gives the head branch of each pull request of `pulls` that GitHub
+    /// finds. A pull request that GitHub cannot find (`NOT_FOUND`), or that
+    /// the token cannot read (`FORBIDDEN`), is absent from the map. An answer
+    /// with an error of any other type fails the whole call.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`SourceError`] when the branches cannot be fetched.
+    fn pull_branches_of(
+        &self,
+        repo: &RepoName,
+        pulls: &[PullNumber],
+    ) -> Result<BTreeMap<PullNumber, String>, SourceError>;
+
     /// The rate limit that the last response stated. `None` before any response.
     fn rate_limit(&self) -> Option<RateLimit>;
 }
+
+/// The most repositories that one call of [`Source::merge_queues_among`]
+/// checks. One GraphQL query with 100 repositories costs 1 point of the
+/// GraphQL budget (measured on 2026-10-22).
+pub const QUEUE_CHECK_BATCH: usize = 100;
 
 /// A `Source` that runs the `gh` program.
 ///
@@ -557,6 +637,30 @@ impl GhSource {
         Ok(RunList { runs, cut })
     }
 
+    /// Sends the GraphQL `query` with the string `variables`, and returns the
+    /// body of the answer.
+    ///
+    /// The request is `gh api -i graphql -f query=<query>`, with one
+    /// `-f name=value` for each variable. `gh` exits with status 1 when the
+    /// answer holds an error, also with the status 200. [`GhSource::send`]
+    /// reads the answer from the output, thus such an answer still comes back,
+    /// and the caller reads its errors. The request sends no `If-None-Match`
+    /// header, because GraphQL has no `ETag`.
+    fn graphql(&self, query: &str, variables: &[(&str, &str)]) -> Result<String, SourceError> {
+        let fields: Vec<String> = std::iter::once(format!("query={query}"))
+            .chain(
+                variables
+                    .iter()
+                    .map(|(name, value)| format!("{name}={value}")),
+            )
+            .collect();
+        let mut args = vec!["api", "-i", "graphql"];
+        for field in &fields {
+            args.extend(["-f", field.as_str()]);
+        }
+        Ok(self.send(&args)?.body)
+    }
+
     /// The `ETag` cache. The guard lives for one statement. A poisoned lock still
     /// holds a usable map, thus the poison is ignored.
     fn lock_etags(&self) -> std::sync::MutexGuard<'_, HashMap<String, Cached>> {
@@ -566,7 +670,18 @@ impl GhSource {
     }
 
     /// Merges the rate limit headers of `response` into the stored rate limit.
+    ///
+    /// Only an answer about the core budget counts. An answer whose
+    /// `X-Ratelimit-Resource` header names another budget, for example the
+    /// `graphql` budget of a GraphQL answer, changes nothing. An answer with no
+    /// such header counts as core.
     fn note_rate(&self, response: &Response) {
+        let other_budget = response
+            .header("x-ratelimit-resource")
+            .is_some_and(|resource| !resource.eq_ignore_ascii_case(CORE_RESOURCE));
+        if other_budget {
+            return;
+        }
         if let Some(new) = rate_of(response) {
             let mut stored = self
                 .rate
@@ -732,6 +847,77 @@ impl Source for GhSource {
             .retain(|key, _| !prefixes.iter().any(|prefix| key.starts_with(prefix)));
     }
 
+    fn merge_queues_among(&self, repos: &[RepoName]) -> Result<BTreeSet<RepoName>, SourceError> {
+        if repos.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+        let body = self.graphql(&queue_check_query(repos), &[])?;
+        parse_queue_check(&body, repos)
+    }
+
+    fn queue_entries_of(&self, repo: &RepoName) -> Result<Vec<QueueEntry>, SourceError> {
+        let body = self.graphql(
+            ENTRIES_QUERY,
+            &[("owner", repo.owner().as_str()), ("name", repo.name())],
+        )?;
+        parse_entries(&body, repo)
+    }
+
+    /// The fetch reads pages of 100 events, newest first. It goes on while the
+    /// last page was full and its oldest event is not older than `since`. It
+    /// stops after `MAX_PAGES` pages. When the last of them was full and not
+    /// older than `since`, the list is cut, and `EventList::cut_at` holds the
+    /// time of the oldest event of that page. Each page goes through the
+    /// `ETag` cache. An event that moves from one page to the next between two
+    /// requests is kept once.
+    fn queue_events_of(
+        &self,
+        repo: &RepoName,
+        since: DateTime<Utc>,
+    ) -> Result<EventList, SourceError> {
+        let mut events = Vec::new();
+        let mut cut_at = None;
+        for number in 1..=MAX_PAGES {
+            let path = format!(
+                "repos/{}/{}/issues/events?per_page={PAGE_SIZE}&page={number}",
+                repo.owner(),
+                repo.name()
+            );
+            let key = format!("{repo}#queue-events#{number}");
+            let page = self.cached_get(&key, &path, parse_events)?;
+            events.extend(page.events);
+            let past_since = page.oldest.is_none_or(|oldest| oldest < since);
+            if page.count < PAGE_SIZE || past_since {
+                break;
+            }
+            if number == MAX_PAGES {
+                cut_at = page.oldest;
+            }
+        }
+        keep_first_of_each_id(&mut events, |(id, _)| *id);
+        Ok(EventList {
+            events: events.into_iter().map(|(_, event)| event).collect(),
+            cut_at,
+        })
+    }
+
+    /// The fetch sends one query for each [`BRANCH_BATCH`] pull requests.
+    fn pull_branches_of(
+        &self,
+        repo: &RepoName,
+        pulls: &[PullNumber],
+    ) -> Result<BTreeMap<PullNumber, String>, SourceError> {
+        let mut branches = BTreeMap::new();
+        for batch in pulls.chunks(BRANCH_BATCH) {
+            let body = self.graphql(
+                &branches_query(batch),
+                &[("owner", repo.owner().as_str()), ("name", repo.name())],
+            )?;
+            branches.extend(parse_branches(&body)?);
+        }
+        Ok(branches)
+    }
+
     fn rate_limit(&self) -> Option<RateLimit> {
         *self
             .rate
@@ -804,6 +990,361 @@ fn parse_repos(json: &str) -> Result<Vec<RepoName>, SourceError> {
                 .map_err(|error| SourceError::BadResponse(error.to_string()))
         })
         .collect()
+}
+
+/// The value of the header `X-Ratelimit-Resource` for the core budget of the
+/// REST API.
+const CORE_RESOURCE: &str = "core";
+
+/// The most pull requests that one query of [`branches_query`] names.
+const BRANCH_BATCH: usize = 100;
+
+/// The query for the first 100 entries of the merge queue of the default
+/// branch of the repository `$owner/$name`. A queue with more entries shows
+/// its first 100. The text has no line break, because each argument of `gh`
+/// is one line in the logs of the tests.
+const ENTRIES_QUERY: &str = "query($owner: String!, $name: String!) { \
+    repository(owner: $owner, name: $name) { mergeQueue { entries(first: 100) { nodes { \
+    position state enqueuedAt pullRequest { number title url headRefName } } } } } }";
+
+/// Writes `text` as a GraphQL string literal. A JSON string literal is also a
+/// GraphQL string literal.
+fn graphql_string(text: &str) -> String {
+    serde_json::Value::String(text.to_owned()).to_string()
+}
+
+/// The query that asks each repository of `repos` for its merge queue.
+///
+/// The alias of the repository at index `i` is `r<i>`, thus an error for one
+/// repository names its alias, and the answers of the others stay.
+fn queue_check_query(repos: &[RepoName]) -> String {
+    let aliases: Vec<String> = repos
+        .iter()
+        .enumerate()
+        .map(|(index, repo)| {
+            format!(
+                "r{index}: repository(owner: {}, name: {}) {{ mergeQueue {{ url }} }}",
+                graphql_string(repo.owner().as_str()),
+                graphql_string(repo.name())
+            )
+        })
+        .collect();
+    format!("query {{ {} }}", aliases.join(" "))
+}
+
+/// The query that asks the repository `$owner/$name` for the head branch of
+/// each pull request of `pulls`. The alias of a pull request is `p<number>`.
+fn branches_query(pulls: &[PullNumber]) -> String {
+    let aliases: Vec<String> = pulls
+        .iter()
+        .map(|pull| {
+            format!(
+                "p{0}: pullRequest(number: {0}) {{ number headRefName }}",
+                pull.0
+            )
+        })
+        .collect();
+    format!(
+        "query($owner: String!, $name: String!) {{ repository(owner: $owner, name: $name) {{ {} }} }}",
+        aliases.join(" ")
+    )
+}
+
+/// The body of a GraphQL answer, as GitHub writes it. GitHub can give data and
+/// errors together: an error for one alias leaves the data of the others.
+#[derive(Deserialize)]
+struct GraphqlBody<T> {
+    data: Option<T>,
+    errors: Option<Vec<GraphqlError>>,
+}
+
+/// The error types that a retry does not fix: GitHub cannot find the object
+/// (`NOT_FOUND`), or the token cannot read it (`FORBIDDEN`). [`graphql_data`]
+/// lets an answer with only such errors pass. An error of another type, or
+/// an error with no type, fails the read.
+const SETTLED_ERROR_TYPES: [&str; 2] = ["NOT_FOUND", "FORBIDDEN"];
+
+/// One element of `errors`. Only the fields that `ha` reads are here.
+#[derive(Deserialize)]
+struct GraphqlError {
+    message: String,
+    /// The error type that GitHub gives. Some errors have none, for example
+    /// the message for a timeout of the resolver.
+    #[serde(rename = "type")]
+    kind: Option<String>,
+}
+
+impl GraphqlError {
+    /// Whether a retry does not fix this error. See [`SETTLED_ERROR_TYPES`].
+    fn is_settled(&self) -> bool {
+        self.kind
+            .as_deref()
+            .is_some_and(|kind| SETTLED_ERROR_TYPES.contains(&kind))
+    }
+}
+
+/// The data of a GraphQL answer, and the message of its first error. Every
+/// error of the answer is of a settled type, see [`SETTLED_ERROR_TYPES`].
+struct GraphqlAnswer<T> {
+    data: T,
+    first_error: Option<String>,
+}
+
+/// Reads a GraphQL answer.
+///
+/// An answer with an error of a type that is not in [`SETTLED_ERROR_TYPES`],
+/// or with an error that has no type, fails with the message of the first such
+/// error. This holds also when the answer has data, because GitHub gives `null`
+/// for a field that failed, and a `null` is then not an answer. The caller
+/// keeps its last good answer and asks again. An answer with no data gives the
+/// error of [`missing`].
+fn graphql_data<T: serde::de::DeserializeOwned>(
+    body: &str,
+) -> Result<GraphqlAnswer<T>, SourceError> {
+    let parsed: GraphqlBody<T> =
+        serde_json::from_str(body).map_err(|error| SourceError::BadResponse(error.to_string()))?;
+    let errors: Vec<GraphqlError> = parsed.errors.into_iter().flatten().collect();
+    if let Some(unsettled) = errors.iter().find(|error| !error.is_settled()) {
+        return Err(SourceError::Graphql(unsettled.message.clone()));
+    }
+    let first_error = errors.into_iter().next().map(|error| error.message);
+    match parsed.data {
+        Some(data) => Ok(GraphqlAnswer { data, first_error }),
+        None => Err(missing(first_error, "data")),
+    }
+}
+
+/// The error for a GraphQL answer that lacks `what`: the first error of the
+/// answer, or a bad response when the answer has no error.
+fn missing(first_error: Option<String>, what: &str) -> SourceError {
+    first_error.map_or_else(
+        || SourceError::BadResponse(format!("the answer has no {what}")),
+        SourceError::Graphql,
+    )
+}
+
+/// The answer for one repository of [`queue_check_query`].
+#[derive(Deserialize)]
+struct QueueCheckJson {
+    #[serde(rename = "mergeQueue")]
+    merge_queue: Option<serde::de::IgnoredAny>,
+}
+
+/// Maps the answer of [`queue_check_query`] for `repos` to the repositories
+/// that have a merge queue. A repository whose alias is `null` or absent has
+/// none. [`graphql_data`] has already failed the answer when a `null` comes
+/// from an error that a retry can fix, thus a `null` here means that GitHub
+/// cannot find the repository or the token cannot read it.
+fn parse_queue_check(body: &str, repos: &[RepoName]) -> Result<BTreeSet<RepoName>, SourceError> {
+    let answer: GraphqlAnswer<HashMap<String, Option<QueueCheckJson>>> = graphql_data(body)?;
+    Ok(repos
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| {
+            answer.data.get(&format!("r{index}")).is_some_and(|check| {
+                check
+                    .as_ref()
+                    .is_some_and(|check| check.merge_queue.is_some())
+            })
+        })
+        .map(|(_, repo)| repo.clone())
+        .collect())
+}
+
+/// The data of the answer of [`ENTRIES_QUERY`].
+#[derive(Deserialize)]
+struct EntriesData {
+    repository: Option<EntriesRepoJson>,
+}
+
+/// The repository of [`EntriesData`].
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EntriesRepoJson {
+    merge_queue: Option<MergeQueueJson>,
+}
+
+/// The merge queue of [`EntriesRepoJson`].
+#[derive(Deserialize)]
+struct MergeQueueJson {
+    entries: EntryNodes,
+}
+
+/// The entries of [`MergeQueueJson`]. GraphQL can give `null` for a node.
+#[derive(Deserialize)]
+struct EntryNodes {
+    nodes: Vec<Option<EntryJson>>,
+}
+
+/// One entry of the merge queue. Only the fields that `ha` reads are here.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EntryJson {
+    position: u32,
+    state: String,
+    enqueued_at: DateTime<Utc>,
+    pull_request: Option<EntryPullJson>,
+}
+
+/// The pull request of [`EntryJson`].
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EntryPullJson {
+    number: u64,
+    title: String,
+    url: String,
+    head_ref_name: String,
+}
+
+/// Maps the answer of [`ENTRIES_QUERY`] to the entries of the queue of
+/// `repo`, sorted by position.
+///
+/// A repository with no queue gives an empty list. An entry with no pull
+/// request is left out. A repository that GitHub cannot find gives the error
+/// of [`missing`]. An error on the merge queue, other than `NOT_FOUND` or
+/// `FORBIDDEN`, fails in [`graphql_data`], thus it never reads as a repository
+/// with no queue.
+fn parse_entries(body: &str, repo: &RepoName) -> Result<Vec<QueueEntry>, SourceError> {
+    let answer: GraphqlAnswer<EntriesData> = graphql_data(body)?;
+    let repository = answer
+        .data
+        .repository
+        .ok_or_else(|| missing(answer.first_error, "repository"))?;
+    let Some(queue) = repository.merge_queue else {
+        return Ok(Vec::new());
+    };
+    let mut entries: Vec<QueueEntry> = queue
+        .entries
+        .nodes
+        .into_iter()
+        .flatten()
+        .filter_map(|node| {
+            let pull = node.pull_request?;
+            Some(QueueEntry {
+                repo: repo.clone(),
+                pull: PullNumber(pull.number),
+                title: pull.title,
+                branch: pull.head_ref_name,
+                position: node.position,
+                state: EntryState::from_github(&node.state),
+                enqueued_at: node.enqueued_at,
+                url: pull.url,
+            })
+        })
+        .collect();
+    entries.sort_by_key(|entry| (entry.position, entry.pull));
+    Ok(entries)
+}
+
+/// One issue event, as the REST API writes it. Only the fields that `ha`
+/// reads are here.
+#[derive(Deserialize)]
+struct EventJson {
+    id: u64,
+    event: String,
+    created_at: DateTime<Utc>,
+    actor: Option<ActorJson>,
+    issue: Option<EventIssueJson>,
+}
+
+/// The actor of [`EventJson`]. GitHub gives `null` for a deleted account.
+#[derive(Deserialize)]
+struct ActorJson {
+    login: String,
+}
+
+/// The issue of [`EventJson`]. For a pull request, the issue is the pull
+/// request.
+#[derive(Deserialize)]
+struct EventIssueJson {
+    number: u64,
+    title: Option<String>,
+    html_url: Option<String>,
+}
+
+/// One page of issue events.
+struct EventsPage {
+    /// The number of events on the page, of every kind.
+    count: usize,
+    /// The time of the oldest event on the page. `None` for an empty page.
+    oldest: Option<DateTime<Utc>>,
+    /// The merge queue events of the page, each one with its event ID.
+    events: Vec<(u64, QueueEvent)>,
+}
+
+/// Maps one page of issue events to an [`EventsPage`].
+///
+/// The page keeps the events `added_to_merge_queue`,
+/// `removed_from_merge_queue`, and `merged`. A removal by [`QUEUE_BOT`] is a
+/// removal by the queue. A removal with no actor is not.
+fn parse_events(body: &str) -> Result<EventsPage, SourceError> {
+    let parsed: Vec<EventJson> =
+        serde_json::from_str(body).map_err(|error| SourceError::BadResponse(error.to_string()))?;
+    let count = parsed.len();
+    let oldest = parsed.iter().map(|event| event.created_at).min();
+    let events = parsed
+        .into_iter()
+        .filter_map(|json| {
+            let kind = match json.event.as_str() {
+                "added_to_merge_queue" => EventKind::Added,
+                "removed_from_merge_queue" => EventKind::Removed {
+                    by_queue: json
+                        .actor
+                        .as_ref()
+                        .is_some_and(|actor| actor.login == QUEUE_BOT),
+                },
+                "merged" => EventKind::Merged,
+                _ => return None,
+            };
+            let issue = json.issue?;
+            Some((
+                json.id,
+                QueueEvent {
+                    pull: PullNumber(issue.number),
+                    title: issue.title.unwrap_or_default(),
+                    url: issue.html_url.unwrap_or_default(),
+                    at: json.created_at,
+                    kind,
+                },
+            ))
+        })
+        .collect();
+    Ok(EventsPage {
+        count,
+        oldest,
+        events,
+    })
+}
+
+/// The data of the answer of [`branches_query`].
+#[derive(Deserialize)]
+struct BranchesData {
+    repository: Option<HashMap<String, Option<BranchJson>>>,
+}
+
+/// One pull request of [`BranchesData`].
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BranchJson {
+    number: u64,
+    head_ref_name: String,
+}
+
+/// Maps the answer of [`branches_query`] to the head branch of each pull
+/// request that GitHub found. A pull request that GitHub cannot find, or that
+/// the token cannot read, is absent. [`graphql_data`] fails the answer for an
+/// error of another type.
+fn parse_branches(body: &str) -> Result<BTreeMap<PullNumber, String>, SourceError> {
+    let answer: GraphqlAnswer<BranchesData> = graphql_data(body)?;
+    let repository = answer
+        .data
+        .repository
+        .ok_or_else(|| missing(answer.first_error, "repository"))?;
+    Ok(repository
+        .into_values()
+        .flatten()
+        .map(|branch| (PullNumber(branch.number), branch.head_ref_name))
+        .collect())
 }
 
 /// The error for a run of `gh` that printed no HTTP status line.
@@ -2767,5 +3308,646 @@ mod tests {
         assert!(requests[2]
             .iter()
             .any(|arg| arg.starts_with("If-None-Match: ")));
+    }
+
+    /// The output of `gh api -i graphql` for a `200`. The headers state the
+    /// GraphQL budget, as GitHub does.
+    fn graphql_output(body: &str) -> String {
+        format!(
+            "HTTP/2.0 200 OK\n\
+             X-Ratelimit-Limit: 5000\r\n\
+             X-Ratelimit-Remaining: 4983\r\n\
+             X-Ratelimit-Reset: 1792695483\r\n\
+             X-Ratelimit-Resource: graphql\r\n\
+             \r\n{body}"
+        )
+    }
+
+    /// The value of the `-f` field `name` of one request, or `None`.
+    fn field<'a>(request: &'a [String], name: &str) -> Option<&'a str> {
+        let prefix = format!("{name}=");
+        request
+            .windows(2)
+            .filter(|pair| pair[0] == "-f")
+            .find_map(|pair| pair[1].strip_prefix(&prefix))
+    }
+
+    #[test]
+    fn merge_queues_among_asks_one_query_and_gives_the_repositories_with_a_queue() {
+        let stub = Stub::new("cat \"$dir/check.out\"");
+        stub.file(
+            "check.out",
+            &graphql_output(
+                r#"{"data":{"r0":{"mergeQueue":{"url":"https://github.com/o/a/queue/main"}},
+                "r1":{"mergeQueue":null},"r2":null},
+                "errors":[{"type":"NOT_FOUND","path":["r2"],
+                "message":"Could not resolve to a Repository with the name 'o/gone'."}]}"#,
+            ),
+        );
+        let repos = [repo("o/a"), repo("o/b"), repo("o/gone")];
+        let found = stub.source().merge_queues_among(&repos).expect("an answer");
+        assert_eq!(found, BTreeSet::from([repo("o/a")]));
+        let requests = stub.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0][..3], ["api", "-i", "graphql"]);
+        let query = field(&requests[0], "query").expect("a query");
+        assert!(
+            query.contains(r#"r0: repository(owner: "o", name: "a") { mergeQueue { url } }"#),
+            "{query}"
+        );
+        assert!(
+            query.contains(r#"r2: repository(owner: "o", name: "gone")"#),
+            "{query}"
+        );
+    }
+
+    #[test]
+    fn merge_queues_among_with_no_data_is_the_graphql_error() {
+        let stub = Stub::new("cat \"$dir/check.out\"; echo 'gh: limit' >&2; exit 1");
+        stub.file(
+            "check.out",
+            &graphql_output(
+                r#"{"data":null,"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded"}]}"#,
+            ),
+        );
+        let result = stub.source().merge_queues_among(&[repo("o/a")]);
+        assert_eq!(
+            result,
+            Err(SourceError::Graphql("API rate limit exceeded".to_owned()))
+        );
+    }
+
+    /// The message that GitHub gives for a resolver timeout. The error has no
+    /// `type`.
+    const TIMEOUT_MESSAGE: &str = "Something went wrong while executing your query. This may be the result of a timeout, or it could be a GitHub bug.";
+
+    #[test]
+    fn merge_queues_among_with_an_error_that_is_not_not_found_fails_the_batch() {
+        for error in [
+            format!(r#"{{"path":["r1"],"message":"{TIMEOUT_MESSAGE}"}}"#),
+            format!(r#"{{"type":"INTERNAL","path":["r1"],"message":"{TIMEOUT_MESSAGE}"}}"#),
+        ] {
+            let stub = Stub::new("cat \"$dir/check.out\"; exit 1");
+            stub.file(
+                "check.out",
+                &graphql_output(&format!(
+                    r#"{{"data":{{"r0":{{"mergeQueue":{{"url":"https://github.com/o/a/queue/main"}}}},"r1":null}},
+                    "errors":[{error}]}}"#
+                )),
+            );
+            let result = stub
+                .source()
+                .merge_queues_among(&[repo("o/a"), repo("o/b")]);
+            assert_eq!(
+                result,
+                Err(SourceError::Graphql(TIMEOUT_MESSAGE.to_owned())),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn merge_queues_among_counts_a_forbidden_repository_as_one_with_no_queue() {
+        let stub = Stub::new("cat \"$dir/check.out\"; exit 1");
+        stub.file(
+            "check.out",
+            &graphql_output(
+                r#"{"data":{"r0":{"mergeQueue":{"url":"https://github.com/o/a/queue/main"}},"r1":null},
+                "errors":[{"type":"FORBIDDEN","path":["r1"],
+                "message":"Resource protected by organization SAML enforcement. You must grant your OAuth token access to this organization."}]}"#,
+            ),
+        );
+        let found = stub
+            .source()
+            .merge_queues_among(&[repo("o/a"), repo("o/b")])
+            .expect("an answer");
+        assert_eq!(found, BTreeSet::from([repo("o/a")]));
+    }
+
+    #[test]
+    fn merge_queues_among_no_repository_sends_no_query() {
+        let stub = Stub::new("exit 1");
+        assert_eq!(stub.source().merge_queues_among(&[]), Ok(BTreeSet::new()));
+        assert!(stub.requests().is_empty());
+    }
+
+    const ENTRIES_JSON: &str = r#"{"data":{"repository":{"mergeQueue":{"entries":{"nodes":[
+        {"position":2,"state":"QUEUED","enqueuedAt":"2026-10-22T17:00:00Z",
+         "pullRequest":{"number":17060,"title":"Second","url":"https://github.com/rust-lang/rust-clippy/pull/17060","headRefName":"second"}},
+        {"position":1,"state":"AWAITING_CHECKS","enqueuedAt":"2026-10-22T16:57:18Z",
+         "pullRequest":{"number":17051,"title":"First","url":"https://github.com/rust-lang/rust-clippy/pull/17051","headRefName":"target-feature-unsafety"}},
+        null,
+        {"position":3,"state":"MERGEABLE","enqueuedAt":"2026-10-22T17:01:00Z","pullRequest":null}]}}}}}"#;
+
+    #[test]
+    fn queue_entries_of_gives_the_entries_in_queue_order() {
+        let stub = Stub::new("cat \"$dir/entries.out\"");
+        stub.file("entries.out", &graphql_output(ENTRIES_JSON));
+        let clippy = repo("rust-lang/rust-clippy");
+        let entries = stub.source().queue_entries_of(&clippy).expect("entries");
+        assert_eq!(
+            entries,
+            [
+                QueueEntry {
+                    repo: clippy.clone(),
+                    pull: PullNumber(17051),
+                    title: "First".to_owned(),
+                    branch: "target-feature-unsafety".to_owned(),
+                    position: 1,
+                    state: EntryState::AwaitingChecks,
+                    enqueued_at: time("2026-10-22T16:57:18Z"),
+                    url: "https://github.com/rust-lang/rust-clippy/pull/17051".to_owned(),
+                },
+                QueueEntry {
+                    repo: clippy,
+                    pull: PullNumber(17060),
+                    title: "Second".to_owned(),
+                    branch: "second".to_owned(),
+                    position: 2,
+                    state: EntryState::Queued,
+                    enqueued_at: time("2026-10-22T17:00:00Z"),
+                    url: "https://github.com/rust-lang/rust-clippy/pull/17060".to_owned(),
+                },
+            ]
+        );
+        let requests = stub.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0][..3], ["api", "-i", "graphql"]);
+        assert_eq!(field(&requests[0], "owner"), Some("rust-lang"));
+        assert_eq!(field(&requests[0], "name"), Some("rust-clippy"));
+        let query = field(&requests[0], "query").expect("a query");
+        assert!(query.contains("mergeQueue"), "{query}");
+        assert!(query.contains("entries(first: 100)"), "{query}");
+    }
+
+    #[test]
+    fn a_repository_with_no_queue_gives_no_entries() {
+        let stub = Stub::new("cat \"$dir/entries.out\"");
+        stub.file(
+            "entries.out",
+            &graphql_output(r#"{"data":{"repository":{"mergeQueue":null}}}"#),
+        );
+        let entries = stub.source().queue_entries_of(&repo("o/r"));
+        assert_eq!(entries, Ok(Vec::new()));
+        assert_eq!(stub.requests().len(), 1);
+    }
+
+    #[test]
+    fn a_repository_that_graphql_cannot_find_is_the_graphql_error() {
+        let stub = Stub::new("cat \"$dir/entries.out\"; exit 1");
+        stub.file(
+            "entries.out",
+            &graphql_output(
+                r#"{"data":{"repository":null},"errors":[{"type":"NOT_FOUND","path":["repository"],
+                "message":"Could not resolve to a Repository with the name 'o/r'."}]}"#,
+            ),
+        );
+        let entries = stub.source().queue_entries_of(&repo("o/r"));
+        assert_eq!(
+            entries,
+            Err(SourceError::Graphql(
+                "Could not resolve to a Repository with the name 'o/r'.".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn queue_entries_of_with_an_error_on_the_merge_queue_fails() {
+        let stub = Stub::new("cat \"$dir/entries.out\"; exit 1");
+        stub.file(
+            "entries.out",
+            &graphql_output(&format!(
+                r#"{{"data":{{"repository":{{"mergeQueue":null}}}},"errors":[{{"path":["repository","mergeQueue"],
+                "message":"{TIMEOUT_MESSAGE}"}}]}}"#
+            )),
+        );
+        let entries = stub.source().queue_entries_of(&repo("o/r"));
+        assert_eq!(
+            entries,
+            Err(SourceError::Graphql(TIMEOUT_MESSAGE.to_owned()))
+        );
+    }
+
+    #[test]
+    fn a_graphql_answer_with_no_data_and_no_error_is_a_bad_response() {
+        let stub = Stub::new("cat \"$dir/entries.out\"");
+        stub.file("entries.out", &graphql_output("{}"));
+        let entries = stub.source().queue_entries_of(&repo("o/r"));
+        assert!(
+            matches!(entries, Err(SourceError::BadResponse(_))),
+            "{entries:?}"
+        );
+    }
+
+    #[test]
+    fn a_graphql_status_of_400_or_more_is_an_http_error() {
+        let stub = Stub::new("cat \"$dir/entries.out\"; exit 1");
+        stub.file(
+            "entries.out",
+            &http_output("HTTP/2.0 502 Bad Gateway", r#"{"message":"Server Error"}"#),
+        );
+        let entries = stub.source().queue_entries_of(&repo("o/r"));
+        assert_eq!(
+            entries,
+            Err(SourceError::Http {
+                status: 502,
+                message: "Server Error".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn a_graphql_answer_does_not_change_the_rate_limit() {
+        let stub = Stub::new(
+            "case \"$*\" in
+  *graphql*) cat \"$dir/entries.out\";;
+  *) cat \"$dir/page1.out\";;
+ esac",
+        );
+        stub.file("page1.out", &ok_output(RUNS_JSON));
+        stub.file("entries.out", &graphql_output(ENTRIES_JSON));
+        let source = stub.source();
+        source.runs_of(&repo("o/r"), since_query()).expect("runs");
+        source.queue_entries_of(&repo("o/r")).expect("entries");
+        assert_eq!(stub.requests().len(), 2);
+        assert_eq!(source.rate_limit(), Some(rate(4866, 1_791_977_652)));
+    }
+
+    #[test]
+    fn an_answer_that_names_the_core_budget_changes_the_rate_limit() {
+        let stub = Stub::new("cat \"$dir/page1.out\"");
+        stub.file(
+            "page1.out",
+            &rated_output(RUNS_JSON, 4321, 1_791_977_652)
+                .replace("\r\n\r\n", "\r\nX-Ratelimit-Resource: core\r\n\r\n"),
+        );
+        let source = stub.source();
+        source.runs_of(&repo("o/r"), since_query()).expect("runs");
+        assert_eq!(source.rate_limit(), Some(rate(4321, 1_791_977_652)));
+    }
+
+    /// One issue event: its ID, its kind, its time, the login of its actor
+    /// (`None` for a deleted account), and the number of its pull request.
+    type EventRow<'a> = (u64, &'a str, &'a str, Option<&'a str>, u64);
+
+    /// A page of issue events, in the order given.
+    fn events_json(events: &[EventRow<'_>]) -> String {
+        let items: Vec<String> = events
+            .iter()
+            .map(|(id, kind, at, actor, number)| {
+                let actor = actor.map_or_else(
+                    || "null".to_owned(),
+                    |login| format!(r#"{{"login":"{login}"}}"#),
+                );
+                format!(
+                    r#"{{"id":{id},"event":"{kind}","created_at":"{at}","actor":{actor},
+                    "issue":{{"number":{number},"title":"pull {number}",
+                    "html_url":"https://github.com/o/r/pull/{number}",
+                    "pull_request":{{"merged_at":null}}}}}}"#
+                )
+            })
+            .collect();
+        format!("[{}]", items.join(","))
+    }
+
+    /// A page of `count` labeled events with the IDs `last_id` down to
+    /// `last_id - count + 1`. Each event is one minute older than the one
+    /// before it, from `newest`.
+    fn label_page(last_id: u64, count: u64, newest: DateTime<Utc>) -> String {
+        let rows: Vec<(u64, String)> = (0..count)
+            .map(|index| {
+                let minutes = i64::try_from(index).expect("a small index");
+                let at = newest - chrono::TimeDelta::minutes(minutes);
+                (last_id - index, at.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+            })
+            .collect();
+        let events: Vec<EventRow<'_>> = rows
+            .iter()
+            .map(|(id, at)| (*id, "labeled", at.as_str(), Some("someone"), 1))
+            .collect();
+        events_json(&events)
+    }
+
+    #[test]
+    fn queue_events_of_reads_the_merge_queue_events_of_pull_requests() {
+        let stub = job_pages_stub(1);
+        stub.file(
+            "page1.out",
+            &ok_output(&events_json(&[
+                (5, "merged", "2026-10-22T17:03:45Z", Some("blyxyas"), 17051),
+                (
+                    4,
+                    "removed_from_merge_queue",
+                    "2026-10-22T17:03:44Z",
+                    Some("github-merge-queue[bot]"),
+                    17051,
+                ),
+                (3, "labeled", "2026-10-22T17:00:00Z", Some("blyxyas"), 17051),
+                (
+                    2,
+                    "removed_from_merge_queue",
+                    "2026-10-22T16:59:00Z",
+                    Some("blyxyas"),
+                    17000,
+                ),
+                (
+                    1,
+                    "added_to_merge_queue",
+                    "2026-10-22T16:57:18Z",
+                    Some("blyxyas"),
+                    17051,
+                ),
+            ])),
+        );
+        let since = time("2026-10-22T08:00:00Z");
+        let list = stub
+            .source()
+            .queue_events_of(&repo("o/r"), since)
+            .expect("events");
+        assert_eq!(list.cut_at, None);
+        let events = list.events;
+        let event = |pull: u64, at: &str, kind: EventKind| QueueEvent {
+            pull: PullNumber(pull),
+            title: format!("pull {pull}"),
+            url: format!("https://github.com/o/r/pull/{pull}"),
+            at: time(at),
+            kind,
+        };
+        assert_eq!(
+            events,
+            [
+                event(17051, "2026-10-22T17:03:45Z", EventKind::Merged),
+                event(
+                    17051,
+                    "2026-10-22T17:03:44Z",
+                    EventKind::Removed { by_queue: true }
+                ),
+                event(
+                    17000,
+                    "2026-10-22T16:59:00Z",
+                    EventKind::Removed { by_queue: false }
+                ),
+                event(17051, "2026-10-22T16:57:18Z", EventKind::Added),
+            ]
+        );
+        assert_eq!(
+            stub.requests(),
+            [["api", "-i", "repos/o/r/issues/events?per_page=100&page=1"]]
+        );
+    }
+
+    #[test]
+    fn a_removal_with_no_actor_is_not_by_the_queue() {
+        let stub = job_pages_stub(1);
+        stub.file(
+            "page1.out",
+            &ok_output(&events_json(&[(
+                1,
+                "removed_from_merge_queue",
+                "2026-10-22T16:59:00Z",
+                None,
+                7,
+            )])),
+        );
+        let events = stub
+            .source()
+            .queue_events_of(&repo("o/r"), time("2026-10-22T08:00:00Z"))
+            .expect("events")
+            .events;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, EventKind::Removed { by_queue: false });
+    }
+
+    #[test]
+    fn queue_events_of_reads_the_next_page_while_a_full_page_is_newer_than_since() {
+        let stub = job_pages_stub(2);
+        let newest = time("2026-10-22T17:00:00Z");
+        stub.file("page1.out", &ok_output(&label_page(300, 100, newest)));
+        stub.file(
+            "page2.out",
+            &ok_output(&events_json(&[(
+                200,
+                "added_to_merge_queue",
+                "2026-10-22T14:00:00Z",
+                Some("someone"),
+                9,
+            )])),
+        );
+        // The oldest event of the first page is 99 minutes older than the
+        // newest one, thus still newer than `since`.
+        let since = newest - chrono::TimeDelta::minutes(100);
+        let list = stub
+            .source()
+            .queue_events_of(&repo("o/r"), since)
+            .expect("events");
+        assert_eq!(list.events.len(), 1);
+        assert_eq!(list.events[0].pull, PullNumber(9));
+        assert_eq!(list.cut_at, None);
+        assert_eq!(stub.requests().len(), 2);
+    }
+
+    #[test]
+    fn queue_events_of_stops_at_a_page_that_reaches_past_since() {
+        let stub = job_pages_stub(2);
+        let newest = time("2026-10-22T17:00:00Z");
+        stub.file("page1.out", &ok_output(&label_page(300, 100, newest)));
+        stub.file("page2.out", &ok_output(&label_page(200, 100, newest)));
+        let since = newest - chrono::TimeDelta::minutes(50);
+        let list = stub
+            .source()
+            .queue_events_of(&repo("o/r"), since)
+            .expect("events");
+        assert_eq!(list.cut_at, None);
+        assert_eq!(stub.requests().len(), 1);
+    }
+
+    #[test]
+    fn queue_events_of_stops_after_ten_full_pages_newer_than_since_and_says_where() {
+        let stub = job_pages_stub(10);
+        let newest = time("2026-10-22T17:00:00Z");
+        for page in 1..=10_u64 {
+            let first = newest
+                - chrono::TimeDelta::minutes(i64::try_from((page - 1) * 100).expect("small"));
+            stub.file(
+                &format!("page{page}.out"),
+                &ok_output(&label_page(1000 - (page - 1) * 100, 100, first)),
+            );
+        }
+        // The oldest event of page 10 is 999 minutes older than the newest
+        // one, and `since` is far older than that.
+        let since = newest - chrono::TimeDelta::days(14);
+        let list = stub
+            .source()
+            .queue_events_of(&repo("o/r"), since)
+            .expect("events");
+        let requests = stub.requests();
+        assert_eq!(requests.len(), 10, "{requests:?}");
+        assert!(
+            requests[9]
+                .last()
+                .is_some_and(|path| path.ends_with("page=10")),
+            "{requests:?}"
+        );
+        assert_eq!(list.cut_at, Some(newest - chrono::TimeDelta::minutes(999)));
+    }
+
+    #[test]
+    fn an_event_that_moves_to_the_next_page_shows_once() {
+        let stub = job_pages_stub(2);
+        let mut first: Vec<EventRow<'_>> = (2..=100)
+            .rev()
+            .map(|id| (id + 100, "labeled", "2026-10-22T17:00:00Z", Some("x"), 1))
+            .collect();
+        first.push((
+            101,
+            "added_to_merge_queue",
+            "2026-10-22T17:00:00Z",
+            Some("x"),
+            5,
+        ));
+        let second: Vec<EventRow<'_>> = vec![(
+            101,
+            "added_to_merge_queue",
+            "2026-10-22T17:00:00Z",
+            Some("x"),
+            5,
+        )];
+        stub.file("page1.out", &ok_output(&events_json(&first)));
+        stub.file("page2.out", &ok_output(&events_json(&second)));
+        let events = stub
+            .source()
+            .queue_events_of(&repo("o/r"), time("2026-10-22T08:00:00Z"))
+            .expect("events")
+            .events;
+        assert_eq!(events.len(), 1);
+        assert_eq!(stub.requests().len(), 2);
+    }
+
+    #[test]
+    fn a_second_read_of_the_events_sends_the_etag_and_reuses_the_page() {
+        let stub = Stub::new(ETAG_CASES);
+        stub.file(
+            "page1.out",
+            &ok_output(&events_json(&[(
+                1,
+                "added_to_merge_queue",
+                "2026-10-22T16:57:18Z",
+                Some("x"),
+                3,
+            )])),
+        );
+        stub.file("not-modified.out", NOT_MODIFIED);
+        let source = stub.source();
+        let since = time("2026-10-22T08:00:00Z");
+        let first = source.queue_events_of(&repo("o/r"), since).expect("events");
+        let second = source.queue_events_of(&repo("o/r"), since).expect("events");
+        assert_eq!(first.events.len(), 1);
+        assert_eq!(second, first);
+        let requests = stub.requests();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1]
+            .iter()
+            .any(|arg| arg == "If-None-Match: W/\"4c00158b\""));
+    }
+
+    #[test]
+    fn invalid_events_json_is_a_bad_response() {
+        for body in ["", "not json", "{}", "[{\"id\":1}]"] {
+            let stub = job_pages_stub(1);
+            stub.file("page1.out", &ok_output(body));
+            let result = stub
+                .source()
+                .queue_events_of(&repo("o/r"), time("2026-10-22T08:00:00Z"));
+            assert!(
+                matches!(result, Err(SourceError::BadResponse(_))),
+                "{body:?} gave {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pull_branches_of_asks_one_query_for_the_pull_requests() {
+        let stub = Stub::new("cat \"$dir/branches.out\"; exit 1");
+        stub.file(
+            "branches.out",
+            &graphql_output(
+                r#"{"data":{"repository":{"p17051":{"number":17051,"headRefName":"target-feature-unsafety"},
+                "p999":null}},"errors":[{"type":"NOT_FOUND","path":["repository","p999"],
+                "message":"Could not resolve to a PullRequest with the number of 999."}]}"#,
+            ),
+        );
+        let branches = stub
+            .source()
+            .pull_branches_of(
+                &repo("rust-lang/rust-clippy"),
+                &[PullNumber(17051), PullNumber(999)],
+            )
+            .expect("branches");
+        assert_eq!(
+            branches,
+            BTreeMap::from([(PullNumber(17051), "target-feature-unsafety".to_owned())])
+        );
+        let requests = stub.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0][..3], ["api", "-i", "graphql"]);
+        assert_eq!(field(&requests[0], "owner"), Some("rust-lang"));
+        assert_eq!(field(&requests[0], "name"), Some("rust-clippy"));
+        let query = field(&requests[0], "query").expect("a query");
+        assert!(
+            query.contains("p17051: pullRequest(number: 17051) { number headRefName }"),
+            "{query}"
+        );
+        assert!(query.contains("p999: pullRequest(number: 999)"), "{query}");
+    }
+
+    #[test]
+    fn pull_branches_of_with_an_error_that_is_not_not_found_fails() {
+        let stub = Stub::new("cat \"$dir/branches.out\"; exit 1");
+        stub.file(
+            "branches.out",
+            &graphql_output(&format!(
+                r#"{{"data":{{"repository":{{"p17051":{{"number":17051,"headRefName":"feature"}},
+                "p999":null}}}},"errors":[{{"path":["repository","p999"],
+                "message":"{TIMEOUT_MESSAGE}"}}]}}"#
+            )),
+        );
+        let result = stub
+            .source()
+            .pull_branches_of(&repo("o/r"), &[PullNumber(17051), PullNumber(999)]);
+        assert_eq!(
+            result,
+            Err(SourceError::Graphql(TIMEOUT_MESSAGE.to_owned()))
+        );
+    }
+
+    #[test]
+    fn pull_branches_of_no_pull_request_sends_no_query() {
+        let stub = Stub::new("exit 1");
+        let branches = stub.source().pull_branches_of(&repo("o/r"), &[]);
+        assert_eq!(branches, Ok(BTreeMap::new()));
+        assert!(stub.requests().is_empty());
+    }
+
+    #[test]
+    fn pull_branches_of_splits_a_long_list_into_queries_of_100() {
+        let stub = Stub::new("cat \"$dir/branches.out\"");
+        stub.file(
+            "branches.out",
+            &graphql_output(r#"{"data":{"repository":{}}}"#),
+        );
+        let pulls: Vec<PullNumber> = (1..=150).map(PullNumber).collect();
+        stub.source()
+            .pull_branches_of(&repo("o/r"), &pulls)
+            .expect("branches");
+        let requests = stub.requests();
+        assert_eq!(requests.len(), 2);
+        let aliases = |request: &[String]| {
+            field(request, "query")
+                .expect("a query")
+                .matches(": pullRequest(")
+                .count()
+        };
+        assert_eq!(aliases(&requests[0]), 100);
+        assert_eq!(aliases(&requests[1]), 50);
     }
 }

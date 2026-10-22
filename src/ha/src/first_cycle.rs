@@ -84,7 +84,11 @@ impl FirstCycle {
             Update::Runs { .. } | Update::Suspect { .. } | Update::SuspectSweep { .. } => {
                 self.read_a_repository = true;
             }
-            Update::Jobs { .. } | Update::JobsFailed { .. } | Update::CycleDone { .. } => {}
+            Update::Jobs { .. }
+            | Update::JobsFailed { .. }
+            | Update::MergeQueues { .. }
+            | Update::MergeQueue { .. }
+            | Update::CycleDone { .. } => {}
         }
     }
 

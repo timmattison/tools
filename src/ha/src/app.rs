@@ -236,6 +236,19 @@ where
                 }
                 Update::Jobs { run, jobs } => self.board.set_jobs(run, jobs),
                 Update::JobsFailed { run, error } => self.board.fail_jobs(run, error),
+                Update::MergeQueues { repos, error } => {
+                    self.board.set_queues(&repos);
+                    self.status.queue_error = error.map(|error| error.to_string());
+                }
+                Update::MergeQueue {
+                    repo,
+                    entries,
+                    history,
+                } => self.board.set_queue(
+                    &repo,
+                    entries.map_err(|error| error.to_string()),
+                    history.map_err(|error| error.to_string()),
+                ),
                 Update::Repos {
                     repos,
                     owner_errors,
@@ -285,10 +298,12 @@ where
     /// Acts on one key press. Each key press removes the status message
     /// first. The `Enter` key can then post a new one. `Right` expands the
     /// run of the highlighted row. `Left` collapses that run, also from a job
-    /// row. `Enter` opens the highlighted run or job.
+    /// row. On a pull request row, `Right` and `Left` do nothing. `Enter`
+    /// opens the highlighted pull request, run, or job.
     ///
     /// `c` opens a box that asks to cancel the run of the highlighted row.
-    /// On a finished run it posts that there is nothing to cancel instead.
+    /// On a finished run, and on a pull request row, it posts that there is
+    /// nothing to cancel instead.
     /// While the box shows, it takes every key. `y` cancels the run that the
     /// box names, Ctrl-C quits, and every other key closes the box and does
     /// nothing more. Thus `q`, `Esc`, and `Enter` do not quit, open, or move
@@ -352,9 +367,17 @@ where
     /// Opens the box that asks to cancel the highlighted run, or posts that a
     /// finished run has nothing to cancel. The box keeps a copy of what it
     /// shows, thus a later refresh does not change the run that `y` cancels.
-    /// On a job row it names the run of the job.
+    /// On a job row it names the run of the job. On a pull request row it
+    /// posts that a pull request is not a run.
     fn ask_to_cancel(&mut self) {
         let now = (self.now)();
+        if let Some(pull) = self.board.selected_pull(now) {
+            self.post(format!(
+                "pull request #{} is not a run: there is nothing to cancel",
+                pull.0
+            ));
+            return;
+        }
         let target = self.board.selected_target(now).map(|(run, job)| {
             if run.state.is_active() {
                 Ok(Confirm::new(run, job))
@@ -421,6 +444,7 @@ mod tests {
     use super::*;
     use crate::cancel::CancelOutcome;
     use crate::github::{RepoList, SourceError};
+    use crate::queue::{Departure, EntryState, History, PullNumber, QueueEntry};
     use crate::run::{Run, RunId, RunState};
     use crate::status::{OwnerProblem, RateLimit};
     use crate::target::{OwnerName, RepoName};
@@ -2487,5 +2511,164 @@ mod tests {
         assert!(result.is_ok(), "{result:?}");
         let frame = lines(terminal.backend().0.buffer());
         assert!(!frame.iter().any(|l| l.contains(SHELL_TEXT)), "{frame:#?}");
+    }
+
+    /// An entry of the merge queue of `acme/widgets` for pull request `pull`.
+    fn queue_entry(pull: u64) -> QueueEntry {
+        QueueEntry {
+            repo: repo(),
+            pull: PullNumber(pull),
+            title: format!("pull {pull}"),
+            branch: format!("issue-{pull}"),
+            position: 1,
+            state: EntryState::AwaitingChecks,
+            enqueued_at: now() - chrono::Duration::minutes(3),
+            url: format!("https://github.com/acme/widgets/pull/{pull}"),
+        }
+    }
+
+    /// The update that gives `acme/widgets` a merge queue, with no error.
+    fn queues_of_repo() -> Update {
+        Update::MergeQueues {
+            repos: BTreeSet::from([repo()]),
+            error: None,
+        }
+    }
+
+    /// Sends the updates that give `acme/widgets` a merge queue with these
+    /// entries and departures.
+    fn send_queue(
+        channels: &Channels,
+        entries: Vec<QueueEntry>,
+        departures: Result<Vec<Departure>, SourceError>,
+    ) {
+        channels.updates.send(queues_of_repo()).unwrap();
+        channels
+            .updates
+            .send(Update::MergeQueue {
+                repo: repo(),
+                entries: Ok(entries),
+                history: departures.map(|departures| History {
+                    departures,
+                    cut_at: None,
+                }),
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn the_merge_queue_updates_show_the_queue_above_the_runs() {
+        let channels = channels();
+        send_queue(&channels, vec![queue_entry(7)], Ok(Vec::new()));
+        send_runs(&channels, vec![active_run(1, 5)]);
+        let (result, frame) = run_app(&opener(false), &channels, quit());
+        assert!(result.is_ok(), "{result:?}");
+        assert!(frame[1].starts_with("Merge queue"), "{frame:#?}");
+        assert!(frame[2].contains("#7"), "{frame:#?}");
+        let running = frame.iter().position(|line| line.starts_with("Running"));
+        assert!(running > Some(2), "{frame:#?}");
+    }
+
+    #[test]
+    fn a_failed_read_of_the_merge_history_shows_on_the_status_line() {
+        let channels = channels();
+        send_queue(
+            &channels,
+            Vec::new(),
+            Err(SourceError::Failed("boom".to_owned())),
+        );
+        let (_, frame) = run_app(&opener(false), &channels, quit());
+        let status_line = frame.last().unwrap();
+        assert!(
+            status_line.contains("acme/widgets: merge history: gh failed: boom"),
+            "{status_line:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_check_for_merge_queues_shows_until_a_check_succeeds() {
+        let channels = channels();
+        let failed = Update::MergeQueues {
+            repos: BTreeSet::new(),
+            error: Some(SourceError::Failed("boom".to_owned())),
+        };
+        let (with_error, _) = run_steps(
+            &channels,
+            vec![
+                Step::Send(failed.clone()),
+                Step::Idle,
+                key(KeyCode::Char('q')),
+            ],
+        );
+        assert!(
+            with_error[11].contains("merge queues: gh failed: boom"),
+            "{:?}",
+            with_error[11]
+        );
+        let (cleared, _) = run_steps(
+            &channels,
+            vec![
+                Step::Send(failed),
+                Step::Idle,
+                Step::Send(queues_of_repo()),
+                Step::Idle,
+                key(KeyCode::Char('q')),
+            ],
+        );
+        assert!(!cleared[11].contains("merge queues"), "{:?}", cleared[11]);
+        assert!(cleared[1].starts_with("Merge queue"), "{cleared:#?}");
+    }
+
+    #[test]
+    fn enter_on_a_pull_request_row_opens_the_pull_request() {
+        let channels = channels();
+        send_queue(&channels, vec![queue_entry(7)], Ok(Vec::new()));
+        send_runs(&channels, vec![active_run(1, 5)]);
+        let opener = opener(false);
+        let (result, _) = run_app(
+            &opener,
+            &channels,
+            vec![press(KeyCode::Enter), press(KeyCode::Char('q'))],
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(
+            *opener.urls.borrow(),
+            ["https://github.com/acme/widgets/pull/7"]
+        );
+    }
+
+    #[test]
+    fn c_on_a_pull_request_row_says_that_it_is_not_a_run_and_shows_no_box() {
+        let channels = channels();
+        send_queue(&channels, vec![queue_entry(7)], Ok(Vec::new()));
+        let (_, frame) = run_app_with(
+            Status::default(),
+            &opener(false),
+            &canceller(),
+            &channels,
+            vec![press(KeyCode::Char('c'))],
+        );
+        assert!(!shows_box(&frame), "{frame:?}");
+        assert!(
+            frame[11].contains("pull request #7 is not a run: there is nothing to cancel"),
+            "{:?}",
+            frame[11]
+        );
+    }
+
+    #[test]
+    fn y_after_c_on_a_pull_request_row_cancels_nothing() {
+        let channels = channels();
+        send_queue(&channels, vec![queue_entry(7)], Ok(Vec::new()));
+        send_runs(&channels, vec![active_run(1, 5)]);
+        let canceller = canceller();
+        let _ = run_app_with(
+            Status::default(),
+            &opener(false),
+            &canceller,
+            &channels,
+            vec![press(KeyCode::Char('c')), press(KeyCode::Char('y'))],
+        );
+        assert!(canceller.cancels.borrow().is_empty());
     }
 }

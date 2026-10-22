@@ -16,6 +16,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::board::{Board, Row, Section};
 use crate::cancel::Confirm;
 use crate::job::{Job, RunnerName};
+use crate::queue::{Departure, EntryState, Outcome, PullNumber, QueueEntry};
 use crate::run::{Run, RunState};
 use crate::settings::format_duration_setting;
 use crate::status::{OwnerProblem, Status, MESSAGE_LIFETIME};
@@ -291,6 +292,46 @@ fn marker(state: RunState) -> &'static str {
     }
 }
 
+/// The marker and the word of a merge queue entry in the state `state`.
+///
+/// The word stands in the workflow cell and fits in [`MAX_WORKFLOW_WIDTH`]
+/// columns. A pull request has no workflow, and the word says what the entry
+/// waits for. The markers follow those of a run: `⏳` waits, `🏃` runs its
+/// checks, `✅` passed its checks, and `❌` cannot merge. `🔒` (U+1F512, LOCK)
+/// is the one new marker: GitHub merges the entry now, and its state is
+/// `LOCKED`. It is one code point of East Asian Width `W`, as each marker of
+/// [`marker`] is. A state that GitHub does not document has a blank marker and
+/// no word.
+fn entry_look(state: EntryState) -> (&'static str, &'static str) {
+    match state {
+        EntryState::Queued => ("⏳", "waiting"),
+        EntryState::AwaitingChecks => ("🏃", "checks"),
+        EntryState::Mergeable => ("✅", "ready"),
+        EntryState::Locked => ("🔒", "merging"),
+        EntryState::Unmergeable => ("❌", "blocked"),
+        EntryState::Other => (" ", ""),
+    }
+}
+
+/// The marker and the word of a pull request that left the merge queue with
+/// `outcome`.
+///
+/// The markers are those of a finished run: a merge passed (`✅`), a removal
+/// by the queue failed (`❌`), and a removal by a person cancelled the merge
+/// (`🪦`).
+fn departure_look(outcome: Outcome) -> (&'static str, &'static str) {
+    match outcome {
+        Outcome::Merged => ("✅", "merged"),
+        Outcome::Failed => ("❌", "failed"),
+        Outcome::Removed => ("🪦", "removed"),
+    }
+}
+
+/// The text of a pull request number in the ID part, for example `#16012`.
+fn pull_text(pull: PullNumber) -> String {
+    format!("#{}", pull.0)
+}
+
 /// The time from one instant to a later one. A clock that runs behind makes
 /// a negative span, and that gives zero.
 fn span(from: DateTime<Utc>, to: DateTime<Utc>) -> Duration {
@@ -342,6 +383,72 @@ where
         [&repo, &run.workflow, &run.branch, &run.title],
         &run.id.0.to_string(),
         &format_started(run.started_at, now, tz),
+        &time,
+    )
+}
+
+/// The line of one pull request in a merge queue.
+///
+/// The row uses the columns of a run row. The workflow cell holds the word of
+/// the state of the entry, and the ID part holds the number of the pull
+/// request. The started cell is the time that the pull request joined the
+/// queue, and the time cell is how long it has waited until `now`.
+fn entry_line<Tz: TimeZone>(
+    entry: &QueueEntry,
+    now: DateTime<Utc>,
+    tz: &Tz,
+    widths: Widths,
+) -> String
+where
+    Tz::Offset: Display,
+{
+    let (marker, word) = entry_look(entry.state);
+    cells(
+        widths,
+        marker,
+        [&entry.repo.to_string(), word, &entry.branch, &entry.title],
+        &pull_text(entry.pull),
+        &format_started(entry.enqueued_at, now, tz),
+        &format_elapsed(span(entry.enqueued_at, now)),
+    )
+}
+
+/// The line of one pull request that left a merge queue.
+///
+/// The row uses the columns of a run row. The workflow cell holds the word of
+/// the outcome, and the ID part holds the number of the pull request. The
+/// started cell is the time that the pull request joined the queue, and the
+/// time cell is how long it stayed in the queue. Both cells are empty when
+/// the time that it joined is not known.
+fn departure_line<Tz: TimeZone>(
+    departure: &Departure,
+    now: DateTime<Utc>,
+    tz: &Tz,
+    widths: Widths,
+) -> String
+where
+    Tz::Offset: Display,
+{
+    let (marker, word) = departure_look(departure.outcome);
+    let started = departure
+        .enqueued_at
+        .map(|at| format_started(at, now, tz))
+        .unwrap_or_default();
+    let time = departure
+        .enqueued_at
+        .map(|at| format_elapsed(span(at, departure.left_at)))
+        .unwrap_or_default();
+    cells(
+        widths,
+        marker,
+        [
+            &departure.repo.to_string(),
+            word,
+            &departure.branch,
+            &departure.title,
+        ],
+        &pull_text(departure.pull),
+        &started,
         &time,
     )
 }
@@ -443,6 +550,38 @@ const TREE_LAST: &str = "└";
 /// ends. [`empty_line`] puts it in the REPO column.
 const SECTION_LOADING: &str = "Loading…";
 
+/// The spans that the section headers and the empty lines of the history name.
+#[derive(Debug, Clone, Copy)]
+struct Spans {
+    /// The time window of the board.
+    window: Duration,
+    /// How far back the merge history is whole, when a page limit cut it
+    /// short of the window (see [`Board::history_reach`]).
+    history_reach: Option<Duration>,
+}
+
+impl Spans {
+    /// The text that names the span of the merge history: the window, or the
+    /// reach of the history of its part of the window when a cut shortens it.
+    fn history_text(self) -> String {
+        match self.history_reach {
+            Some(reach) => format!(
+                "{} of {}",
+                format_elapsed(reach),
+                format_duration_setting(self.window)
+            ),
+            None => format_duration_setting(self.window),
+        }
+    }
+
+    /// The text that names the span of the merge history in a sentence: the
+    /// reach of a cut history, or else the window.
+    fn history_reach_text(self) -> String {
+        self.history_reach
+            .map_or_else(|| format_duration_setting(self.window), format_elapsed)
+    }
+}
+
 /// The line of a section header.
 ///
 /// A loaded recent header names the counts of passed, failed, and cancelled
@@ -457,10 +596,11 @@ fn header_line(
     passed: usize,
     failed: usize,
     cancelled: usize,
-    window: Duration,
+    spans: Spans,
     loaded: bool,
 ) -> String {
-    let window = format_duration_setting(window);
+    let history = spans.history_text();
+    let window = format_duration_setting(spans.window);
     match (section, loaded) {
         (Section::Active, false) => "Running".to_owned(),
         (Section::Active, true) => format!("Running · {count}"),
@@ -468,6 +608,12 @@ fn header_line(
         (Section::Recent, true) => {
             format!("Last {window} · {passed} passed · {failed} failed · {cancelled} cancelled")
         }
+        (Section::Queue, false) => "Merge queue".to_owned(),
+        (Section::Queue, true) => format!("Merge queue · {count}"),
+        (Section::History, false) => format!("Merge history · Last {history}"),
+        (Section::History, true) => format!(
+            "Merge history · Last {history} · {passed} merged · {failed} failed · {cancelled} removed"
+        ),
     }
 }
 
@@ -476,7 +622,7 @@ fn header_line(
 /// Before the first refresh cycle ends (`loaded` is false), the line is
 /// [`SECTION_LOADING`]. A section that is empty then can still get runs, and
 /// a text that says "no runs" makes a person think that nothing runs.
-fn empty_line(section: Section, window: Duration, loaded: bool) -> String {
+fn empty_line(section: Section, spans: Spans, loaded: bool) -> String {
     if !loaded {
         return in_repo_column(SECTION_LOADING);
     }
@@ -484,17 +630,27 @@ fn empty_line(section: Section, window: Duration, loaded: bool) -> String {
         Section::Active => in_repo_column("No runs in progress or in the queue."),
         Section::Recent => in_repo_column(&format!(
             "No runs finished in the last {}.",
-            format_duration_setting(window)
+            format_duration_setting(spans.window)
+        )),
+        Section::Queue => in_repo_column("No pull requests in the merge queue."),
+        Section::History => in_repo_column(&format!(
+            "No pull request left the merge queue in the last {}.",
+            spans.history_reach_text()
         )),
     }
 }
+
+/// The name that the status line gives to a failed check for merge queues. A
+/// check covers many repositories, thus it names none of them.
+const QUEUE_CHECK_NAME: &str = "merge queues";
 
 /// The first part of the status line, or `None` when there is nothing to say.
 ///
 /// A live message wins over the errors. A message that is
 /// [`MESSAGE_LIFETIME`] old or older is absent, thus the errors show. The
-/// errors come from the board (one for each repository) and from the status
-/// (one for each owner). The text names the first and counts the rest.
+/// errors come from the board (one for the runs and one for the merge queue
+/// of each repository) and from the status (one for each owner, and one for
+/// the check for merge queues). The text names the first and counts the rest.
 fn lead(board: &Board, status: &Status, now: DateTime<Utc>) -> Option<String> {
     if let Some(message) = status.message_at(now) {
         return Some(message.text.clone());
@@ -509,6 +665,12 @@ fn lead(board: &Board, status: &Status, now: DateTime<Utc>) -> Option<String> {
             .owner_errors
             .iter()
             .map(|(owner, problem)| (owner.to_string(), problem.to_string())),
+    );
+    errors.extend(
+        status
+            .queue_error
+            .iter()
+            .map(|error| (QUEUE_CHECK_NAME.to_owned(), error.clone())),
     );
     if let Some((name, error)) = errors.first() {
         let more = match errors.len() - 1 {
@@ -781,7 +943,10 @@ pub fn draw<Tz: TimeZone>(
     }
     let widths = Widths::for_width(usize::from(area.width));
     let height = usize::from(area.height).saturating_sub(FIXED_LINES);
-    let window = board.window();
+    let spans = Spans {
+        window: board.window(),
+        history_reach: board.history_reach(now),
+    };
     // The first refresh cycle ended. Until then, the board can miss runs.
     let loaded = status.last_refresh.is_some();
     let bold = Style::default().add_modifier(Modifier::BOLD);
@@ -798,12 +963,12 @@ pub fn draw<Tz: TimeZone>(
                 cancelled,
             } => {
                 let line = header_line(
-                    *section, *count, *passed, *failed, *cancelled, window, loaded,
+                    *section, *count, *passed, *failed, *cancelled, spans, loaded,
                 );
                 put(buffer, index + 1, &line, bold);
             }
             Row::Empty(section) => {
-                let line = empty_line(*section, window, loaded);
+                let line = empty_line(*section, spans, loaded);
                 put(buffer, index + 1, &line, Style::default());
             }
             Row::Run {
@@ -823,6 +988,19 @@ pub fn draw<Tz: TimeZone>(
             } => {
                 let line = job_line(job, *last, now, tz, widths);
                 let y = put_line(buffer, index + 1, &line);
+                reverse_if(*selected, buffer, area, y);
+            }
+            Row::Entry { entry, selected } => {
+                let line = entry_line(entry, now, tz, widths);
+                let y = put(buffer, index + 1, &line, Style::default());
+                reverse_if(*selected, buffer, area, y);
+            }
+            Row::Departure {
+                departure,
+                selected,
+            } => {
+                let line = departure_line(departure, now, tz, widths);
+                let y = put(buffer, index + 1, &line, Style::default());
                 reverse_if(*selected, buffer, area, y);
             }
             Row::JobsLoading => put_status_row(buffer, index + 1, JOBS_LOADING),
@@ -1086,6 +1264,10 @@ pub fn format_elapsed(d: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::collections::BTreeSet;
+
+    use crate::queue::{Departure, History, PullNumber, QueueEntry};
 
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
@@ -4779,5 +4961,361 @@ mod tests {
             let buffer = render_with(width, 16, &mut board, &loaded());
             assert_eq!(cyan_columns(&buffer, 2), Vec::<u16>::new(), "width {width}");
         }
+    }
+
+    /// An entry of the merge queue of `rust-lang/cargo`.
+    fn queue_entry(
+        pull: u64,
+        position: u32,
+        state: EntryState,
+        branch: &str,
+        title: &str,
+        enqueued: &str,
+    ) -> QueueEntry {
+        QueueEntry {
+            repo: repo("rust-lang/cargo"),
+            pull: PullNumber(pull),
+            title: title.to_owned(),
+            branch: branch.to_owned(),
+            position,
+            state,
+            enqueued_at: at(enqueued),
+            url: format!("https://github.com/rust-lang/cargo/pull/{pull}"),
+        }
+    }
+
+    /// A departure from the merge queue of `rust-lang/cargo`.
+    fn departure(
+        pull: u64,
+        outcome: Outcome,
+        branch: &str,
+        title: &str,
+        enqueued: Option<&str>,
+        left: &str,
+    ) -> Departure {
+        Departure {
+            repo: repo("rust-lang/cargo"),
+            pull: PullNumber(pull),
+            title: title.to_owned(),
+            branch: branch.to_owned(),
+            outcome,
+            enqueued_at: enqueued.map(at),
+            left_at: at(left),
+            url: format!("https://github.com/rust-lang/cargo/pull/{pull}"),
+        }
+    }
+
+    /// A board with two queue entries, three departures, and one running run.
+    fn queue_frame_board() -> Board {
+        let cargo = repo("rust-lang/cargo");
+        let mut board = Board::new(Duration::from_hours(8));
+        board.set_queues(&BTreeSet::from([cargo.clone()]));
+        board.set_queue(
+            &cargo,
+            Ok(vec![
+                queue_entry(
+                    16012,
+                    1,
+                    EntryState::AwaitingChecks,
+                    "fix-lockfile",
+                    "Fix the lockfile",
+                    "2026-10-14T11:55:00Z",
+                ),
+                queue_entry(
+                    16020,
+                    2,
+                    EntryState::Queued,
+                    "issue-577",
+                    "Add the flag",
+                    "2026-10-14T11:58:57Z",
+                ),
+            ]),
+            Ok(History {
+                cut_at: None,
+                departures: vec![
+                    departure(
+                        16001,
+                        Outcome::Merged,
+                        "bump-serde",
+                        "Bump serde",
+                        Some("2026-10-14T10:00:00Z"),
+                        "2026-10-14T10:12:40Z",
+                    ),
+                    departure(
+                        15998,
+                        Outcome::Failed,
+                        "",
+                        "Remove the thing",
+                        Some("2026-10-14T09:00:00Z"),
+                        "2026-10-14T09:08:02Z",
+                    ),
+                    departure(
+                        15990,
+                        Outcome::Removed,
+                        "old-branch",
+                        "Old work",
+                        None,
+                        "2026-10-14T08:00:00Z",
+                    ),
+                ],
+            }),
+        );
+        board.replace(
+            cargo,
+            vec![run(
+                39_149_840_084,
+                "rust-lang/cargo",
+                "CI",
+                "gh-readonly-queue/master/pr-16012",
+                "Merge group",
+                RunState::Running,
+                "2026-10-14T11:55:30Z",
+                "2026-10-14T11:59:00Z",
+            )],
+            now(),
+        );
+        board
+    }
+
+    /// One merge queue row as the render writes it at 120 columns.
+    fn queue_golden(
+        marker: &str,
+        word: &str,
+        pull: u64,
+        branch: &str,
+        title: &str,
+        started: &str,
+        time: &str,
+    ) -> String {
+        let number = format!("#{pull}");
+        format!(
+            "{marker} {repo:<18} {word:<8} {number:>ID_WIDTH$} {branch:<12} {title:<40} {started:<11} {time:<7} {marker}",
+            repo = "rust-lang/cargo"
+        )
+    }
+
+    #[test]
+    fn a_frame_with_a_merge_queue_shows_the_queue_and_the_history_above_the_runs() {
+        let mut board = queue_frame_board();
+        let text = lines(&render_with(120, 14, &mut board, &loaded()));
+        assert_eq!(
+            text[1..9],
+            [
+                "Merge queue · 2".to_owned(),
+                queue_golden(
+                    "🏃",
+                    "checks",
+                    16012,
+                    "fix-lockfile",
+                    "Fix the lockfile",
+                    "11:55:00",
+                    "5m 00s"
+                ),
+                queue_golden(
+                    "⏳",
+                    "waiting",
+                    16020,
+                    "issue-577",
+                    "Add the flag",
+                    "11:58:57",
+                    "1m 03s"
+                ),
+                "Merge history · Last 8h · 1 merged · 1 failed · 1 removed".to_owned(),
+                queue_golden(
+                    "✅",
+                    "merged",
+                    16001,
+                    "bump-serde",
+                    "Bump serde",
+                    "10:00:00",
+                    "12m 40s"
+                ),
+                queue_golden(
+                    "❌",
+                    "failed",
+                    15998,
+                    "",
+                    "Remove the thing",
+                    "09:00:00",
+                    "8m 02s"
+                ),
+                queue_golden("🪦", "removed", 15990, "old-branch", "Old work", "", ""),
+                "Running · 1".to_owned(),
+            ]
+        );
+        assert!(text[9].starts_with("🏃 rust-lang/cargo"), "{:?}", text[9]);
+    }
+
+    #[test]
+    fn the_merge_headers_give_no_counts_before_the_first_refresh_ends() {
+        let mut board = queue_frame_board();
+        let text = lines(&render_with(120, 14, &mut board, &Status::default()));
+        assert_eq!(text[1], "Merge queue");
+        assert_eq!(text[4], "Merge history · Last 8h");
+    }
+
+    #[test]
+    fn empty_merge_sections_say_so_and_say_loading_before_the_first_refresh_ends() {
+        let mut board = Board::new(Duration::from_hours(8));
+        board.set_queues(&BTreeSet::from([repo("rust-lang/cargo")]));
+        let text = lines(&render_with(80, 12, &mut board, &loaded()));
+        assert_eq!(
+            text[1..5],
+            [
+                "Merge queue · 0",
+                "   No pull requests in the merge queue.",
+                "Merge history · Last 8h · 0 merged · 0 failed · 0 removed",
+                "   No pull request left the merge queue in the last 8h.",
+            ]
+        );
+        let text = lines(&render_with(80, 12, &mut board, &Status::default()));
+        assert_eq!(text[2], "   Loading…");
+        assert_eq!(text[4], "   Loading…");
+    }
+
+    /// A board whose merge history of `rust-lang/cargo` the page limit cut
+    /// two hours before `now()`, with these departures.
+    fn cut_history_board(departures: Vec<Departure>) -> Board {
+        let cargo = repo("rust-lang/cargo");
+        let mut board = Board::new(Duration::from_hours(8));
+        board.set_queues(&BTreeSet::from([cargo.clone()]));
+        board.set_queue(
+            &cargo,
+            Ok(Vec::new()),
+            Ok(History {
+                departures,
+                cut_at: Some(at("2026-10-14T10:00:00Z")),
+            }),
+        );
+        board
+    }
+
+    #[test]
+    fn a_cut_history_names_the_span_that_it_reaches_in_its_header() {
+        let mut board = cut_history_board(vec![departure(
+            16001,
+            Outcome::Merged,
+            "bump-serde",
+            "Bump serde",
+            Some("2026-10-14T10:30:00Z"),
+            "2026-10-14T11:00:00Z",
+        )]);
+        let text = lines(&render_with(120, 12, &mut board, &loaded()));
+        assert_eq!(
+            text[3],
+            "Merge history · Last 2h 00m of 8h · 1 merged · 0 failed · 0 removed"
+        );
+        let text = lines(&render_with(120, 12, &mut board, &Status::default()));
+        assert_eq!(text[3], "Merge history · Last 2h 00m of 8h");
+    }
+
+    #[test]
+    fn an_empty_cut_history_names_the_span_that_it_reaches() {
+        let mut board = cut_history_board(Vec::new());
+        let text = lines(&render_with(120, 12, &mut board, &loaded()));
+        assert_eq!(
+            text[4],
+            "   No pull request left the merge queue in the last 2h 00m."
+        );
+    }
+
+    #[test]
+    fn each_entry_state_has_its_marker_and_its_word() {
+        let states = [
+            EntryState::Queued,
+            EntryState::AwaitingChecks,
+            EntryState::Mergeable,
+            EntryState::Locked,
+            EntryState::Unmergeable,
+            EntryState::Other,
+        ];
+        assert_eq!(
+            states.map(entry_look),
+            [
+                ("⏳", "waiting"),
+                ("🏃", "checks"),
+                ("✅", "ready"),
+                ("🔒", "merging"),
+                ("❌", "blocked"),
+                (" ", ""),
+            ]
+        );
+    }
+
+    #[test]
+    fn each_outcome_has_its_marker_and_its_word() {
+        let outcomes = [Outcome::Merged, Outcome::Failed, Outcome::Removed];
+        assert_eq!(
+            outcomes.map(departure_look),
+            [("✅", "merged"), ("❌", "failed"), ("🪦", "removed")]
+        );
+    }
+
+    #[test]
+    fn each_merge_marker_is_two_columns_and_each_word_fits_the_workflow_cell() {
+        let states = [
+            EntryState::Queued,
+            EntryState::AwaitingChecks,
+            EntryState::Mergeable,
+            EntryState::Locked,
+            EntryState::Unmergeable,
+        ];
+        let outcomes = [Outcome::Merged, Outcome::Failed, Outcome::Removed];
+        let looks = states
+            .map(entry_look)
+            .into_iter()
+            .chain(outcomes.map(departure_look));
+        for (marker, word) in looks {
+            assert_eq!(text_width(marker), MARKER_WIDTH, "{marker}");
+            assert_eq!(marker.chars().count(), 1, "{marker} is one code point");
+            assert!(!word.is_empty(), "{marker} has a word");
+            assert!(word.len() <= MAX_WORKFLOW_WIDTH, "{word}");
+        }
+    }
+
+    #[test]
+    fn the_pull_request_number_ends_in_the_column_of_the_run_id() {
+        let mut board = queue_frame_board();
+        let text = lines(&render_with(120, 14, &mut board, &loaded()));
+        let run_end = last_digit_column(&text[9], "39149840084");
+        assert!(run_end.is_some(), "{:?}", text[9]);
+        for (y, digits) in [(2, "16012"), (3, "16020"), (5, "16001"), (7, "15990")] {
+            assert_eq!(
+                last_digit_column(&text[y], digits),
+                run_end,
+                "{:?}",
+                text[y]
+            );
+        }
+    }
+
+    #[test]
+    fn the_selected_queue_row_is_reversed_across_the_full_width() {
+        let mut board = queue_frame_board();
+        let buffer = render_with(120, 14, &mut board, &loaded());
+        let reversed = |x: u16, y: u16| buffer[(x, y)].modifier.contains(Modifier::REVERSED);
+        assert!(reversed(0, 2), "the marker of the selected entry");
+        assert!(reversed(60, 2), "the middle of the selected entry");
+        assert!(reversed(118, 2), "the right marker of the selected entry");
+        for y in [1_u16, 3, 4, 5, 9] {
+            assert!(!reversed(60, y), "line {y}");
+        }
+    }
+
+    #[test]
+    fn the_status_line_names_a_failed_check_for_merge_queues() {
+        let status = Status {
+            queue_error: Some(
+                "GitHub refused the GraphQL query: API rate limit exceeded".to_owned(),
+            ),
+            ..loaded()
+        };
+        let line = status_line(120, &status);
+        assert!(
+            line.starts_with(
+                "⚠ merge queues: GitHub refused the GraphQL query: API rate limit exceeded"
+            ),
+            "{line}"
+        );
     }
 }

@@ -2067,8 +2067,9 @@ cannot hang the caller. Used by `cwt` and `ha`.
 - ha (hot actions)
   - Shows the GitHub Actions workflow runs of many repositories and owners in one terminal view
     that refreshes itself. The GitHub web interface and `gh run list` show one repository at a
-    time, and `gh run list` does not refresh.
-  - The top section, "Running", shows the active runs, the oldest first. `🏃` is a run that has a
+    time, and `gh run list` does not refresh. When a repository has a merge queue, the view also
+    shows the pull requests in the queue and the pull requests that left it.
+  - The section "Running" shows the active runs, the oldest first. `🏃` is a run that has a
     job in progress. `⏳` is a run that waits and has no job in progress: its jobs wait for a
     runner, for an approval, or for another run. GitHub reports a run as queued
     while one of its jobs waits for a runner, also when other jobs of the run are in progress.
@@ -2080,6 +2081,43 @@ cannot hang the caller. Used by `cwt` and `ha`.
     in the last 8 hours, the newest first, with how long each run took. A run that timed out or
     that failed to start counts as failed. The header counts the three apart, for example
     `Last 8h · 3 passed · 1 failed · 2 cancelled`. A skipped run does not show.
+  - When a watched repository has a merge queue, two more sections stand above "Running". `ha`
+    asks GitHub which repositories have a queue at the start and every 10 minutes. When no watched
+    repository has a queue, the board does not change. GitHub gives a merge queue only to a
+    repository that an organization owns, and a private repository also needs GitHub Enterprise
+    Cloud.
+    - "Merge queue" shows the pull requests in the queue of the default branch of each repository,
+      in queue order. A pull request has no workflow, thus the `WORKFLOW` cell shows what the entry
+      waits for: `⏳ waiting` for its turn, `🏃 checks` while the checks of its merge group run,
+      `✅ ready` when its checks passed, `🔒 merging` while GitHub merges it, and `❌ blocked` when
+      it cannot merge and GitHub removes it soon. The ID column shows the number of the pull
+      request, for example `#16012`, and the numbers end in the column of the run IDs. The started
+      column shows when the pull request joined the queue, and the time column shows how long it
+      has waited. That time increases each second.
+    - "Merge history" shows the pull requests that left a queue in the window, the newest first:
+      `✅ merged`, `❌ failed` when the queue removed it (for example its checks failed, or a merge
+      conflict), and `🪦 removed` when a person removed it. The time column shows how long it
+      stayed in the queue. The header counts the three apart, for example
+      `Merge history · Last 8h · 5 merged · 1 failed · 0 removed`. A pull request that left the
+      queue two times has two rows.
+    - These rows show no workflow runs and no jobs. The runs of a merge group show in "Running"
+      and in "Last 8h", on a branch that starts with `gh-readonly-queue/`.
+    - When the queue merges a pull request, `github-merge-queue[bot]` removes it from the queue, and
+      GitHub writes the `merged` event in the same second or the next second. `ha` reads the two
+      events as one merge. A merge more than 60 seconds after a removal by the queue, or after a
+      removal by a person, did not come through the queue, and the history does not show it.
+    - The branch of a pull request in the history comes from its row in the queue, when `ha` saw
+      it there. Else `ha` asks GitHub for the branch one time. When that request fails, the cell
+      stays empty, and the next refresh asks again.
+    - `ha` reads the events of the window and one more hour. It reads at most 10 pages of 100 issue
+      events of each repository, and the events are of every kind. On a busy repository, 1,000
+      events can span less than the window. On 2026-10-22, one page of 100 events spanned about
+      21 hours on bevyengine/bevy and about 26 hours on rust-lang/rust-clippy. Then the history
+      shows only the span in which the events of each repository are whole, and the header names
+      that span, for example `Merge history · Last 21h 13m of 14d`. A pull request that joined
+      the queue before the events start has an empty started column and an empty time column.
+    - `🔒` is the one marker that only the merge queue uses. It is one code point, 2 columns wide,
+      as each other marker is.
   - Each marker is one emoji, 2 columns wide. The terminal draws each emoji in its own colors.
     `🪦` is from Unicode 13 (2020), thus a terminal with an older emoji font can show it as a box.
     macOS 11 and later has it.
@@ -2136,20 +2174,23 @@ cannot hang the caller. Used by `cwt` and `ha`.
     - `Loading jobs…` shows until the first answer comes, and `No jobs yet` shows when GitHub did
       not make the jobs of the run yet. When a request for the jobs fails, the error shows below
       the last good job rows. The next refresh asks for the jobs again.
-    - More than one run can be expanded at one time. A run stays expanded through each refresh,
-      and also when it moves from the top section to the bottom section. When a run leaves
-      the board, its jobs go too.
+    - More than one run can be expanded at one time. A run stays expanded through each refresh, and
+      also when it moves from "Running" to the section of the finished runs. When a run leaves the
+      board, its jobs go too.
     - The jobs load at once when you expand a run, and then refresh with the board. The jobs of an
       active run refresh with the board also while the run is collapsed, thus Right shows them at
       once. The jobs of a finished run load one time only, until a re-run changes the run. If
       GitHub still shows an active job in a finished run, the jobs of that run refresh with the
       board until each job finishes. Left removes the job rows, and the board keeps the jobs.
-  - Keys: Up and Down move the highlight through the run rows and through the job rows of the
-    expanded runs. They skip the `Loading jobs…`, `No jobs yet`, and error rows. Right expands the
-    jobs of the highlighted run. Left collapses them, also from a job row, and the highlight goes
-    back to the run row. Right on a job row does nothing. Enter opens the highlighted run or job
-    in the browser, and `ha` keeps running. The page of a job shows its log. A job that has no
-    address opens the page of its run. The highlight stays on the same job through each refresh.
+  - Keys: Up and Down move the highlight through the pull request rows, the run rows, and the job
+    rows of the expanded runs. They skip the `Loading jobs…`, `No jobs yet`, and error rows. Right
+    expands the jobs of the highlighted run. Left collapses them, also from a job row, and the
+    highlight goes back to the run row. Right on a job row does nothing, and Right and Left on a
+    pull request row do nothing. Enter opens the highlighted pull request, run, or job in the
+    browser, and `ha` keeps running. The page of a job shows its log. A job that has no address
+    opens the page of its run. The highlight stays on the same job through each refresh. It also
+    stays on the same pull request. When a pull request leaves the queue, the highlight stays at
+    the same position.
     When a re-run gives the jobs new IDs, the highlight stays at the same position, thus on the
     job of the same name in most re-runs. When no browser opens, the status line shows the URL
     and then the reason, for example a `BROWSER` command that this host does not have, for 30
@@ -2170,6 +2211,8 @@ cannot hang the caller. Used by `cwt` and `ha`.
       GitHub finishes the cancel, the run moves to the bottom section with `🪦`, and the highlight
       stays on it.
     - On a finished run, `c` shows no box. The status line says that there is nothing to cancel.
+      On a pull request row, `c` also shows no box, and the status line says that a pull request
+      is not a run.
     - When no box shows, `q`, Esc, or Ctrl-C quits and gives back the terminal.
   - Enter runs the command that `BROWSER` names when that variable is set and not empty. Thus a
     forwarder that sets `BROWSER`, for example the opener of mosh-rs, opens the page on your local
@@ -2220,6 +2263,19 @@ cannot hang the caller. Used by `cwt` and `ha`.
     request for its jobs, and then no more until a re-run changes it.
     At most 8 `gh` children run at the same time, for runs and jobs together. The status line
     shows the remaining budget. When less than 10% remains, `ha` waits until the reset of the budget and says so.
+  - Merge queue budget: GitHub gives the live queue and the head branch of a pull request only
+    through GraphQL, which has its own budget of 5,000 points each hour. The check for queues is
+    one GraphQL query for each 100 repositories, 1 point, at the start and every 10 minutes. A
+    repository whose check failed is checked again on the next refresh. On each refresh, `ha`
+    reads the issue events of each repository that has a queue through REST, with the `ETag`. A
+    page that did not change costs nothing. A new event moves each older event one place down,
+    thus each page changes. A refresh after a new event costs one request for each page that it
+    reads: up to 10 for each repository with a queue, which is 600 requests each hour at a 60
+    second interval. `ha` reads the live queue through GraphQL only while the queue can hold a pull request: the events
+    show a pull request that joined and did not leave, the last read held a pull request or
+    failed, or the events could not be read. A busy queue thus costs 1 GraphQL point on each
+    refresh, and an empty queue costs none. The status line shows the core budget only. A GraphQL
+    answer does not change it.
   - `ha` does not trust each answer that GitHub gives with success. GitHub can answer a list with
     success and still give a list that is empty or short. On 2026-10-22, `gh repo list` exited 0
     with `[]` about one time in 20, and the next call gave the full list. Thus `ha` compares each
@@ -2231,6 +2287,9 @@ cannot hang the caller. Used by `cwt` and `ha`.
     - When a list of runs is empty, `ha` reads the newest run of the repository. When that run
       matches the query, the empty list is suspect. This covers the first refresh after a start,
       which has no last good list.
+    - A GraphQL answer that holds an error of another type than `NOT_FOUND` or `FORBIDDEN` counts
+      as a failed read, also when it holds data, because GitHub gives `null` for a field that
+      failed.
     - A run created before the lookback is not missing, because the query does not ask for it. A
       run older than the oldest run of a list that GitHub cut at 1,000 runs is not missing either.
   - A failed read and a suspect read of the recent runs have the same result. The board keeps the
@@ -2250,6 +2309,9 @@ cannot hang the caller. Used by `cwt` and `ha`.
     `11:42` for today and `10-21 11:42` for an earlier day. After a suspect sweep, the time stays
     the time of the last read in which both answers were good. A status message does not hide this
     part. The mark and the part go away after the next good read.
+  - A failed read of a merge queue shows after the name of its repository as `merge queue: …` (the
+    entries) or `merge history: …` (the events), and the board keeps the last good rows. A failed
+    check for queues shows as `merge queues: …`.
   - When the first refresh can read no target, `ha` does not show an empty board. It restores the
     terminal, names each repository and each owner that failed with its error, and stops with exit
     status 1. A repository whose fetch succeeds with no runs is a target that `ha` read. An owner

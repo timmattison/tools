@@ -88,6 +88,8 @@ pub struct Status {
     /// The time of the last good list of each owner that has one. The status
     /// line uses it to say since when an owner is stale.
     pub owner_listed_at: BTreeMap<OwnerName, DateTime<Utc>>,
+    /// The error of the last check for merge queues, when a check failed.
+    pub queue_error: Option<String>,
     /// A one-off message, for example the address after a failed open. It
     /// fades out over [`MESSAGE_LIFETIME`], then leaves. A key press removes
     /// it sooner. Read it with [`Status::message_at`].
