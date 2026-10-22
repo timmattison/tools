@@ -156,10 +156,27 @@ impl Board {
     /// Stores the runs of one repository and clears the error of that repository.
     /// `read_at` is the time of this good read. A repeated run ID keeps its
     /// first run only.
-    pub fn replace(&mut self, repo: RepoName, mut runs: Vec<Run>, read_at: DateTime<Utc>) {
-        keep_first_of_each_id(&mut runs, |run| run.id);
+    pub fn replace(&mut self, repo: RepoName, runs: Vec<Run>, read_at: DateTime<Utc>) {
         self.errors.remove(&repo);
         self.read_at.insert(repo.clone(), read_at);
+        self.store_runs(repo, runs);
+    }
+
+    /// Stores the runs of one repository and records an error for it, and keeps
+    /// the read time of the repository. The runs are the good recent answer and
+    /// the runs of the last good sweep, which can be old. Thus the repository
+    /// is stale: the rows show the stale mark, and the stale time stays the
+    /// time of the last read in which both answers were good. A new read time
+    /// would hide how old the sweep part is. A repeated run ID keeps its first
+    /// run only.
+    pub fn replace_stale(&mut self, repo: RepoName, runs: Vec<Run>, error: String) {
+        self.errors.insert(repo.clone(), error);
+        self.store_runs(repo, runs);
+    }
+
+    /// Stores the runs of one repository. A repeated run ID keeps its first run only.
+    fn store_runs(&mut self, repo: RepoName, mut runs: Vec<Run>) {
+        keep_first_of_each_id(&mut runs, |run| run.id);
         self.runs.insert(repo, runs);
     }
 
@@ -1227,6 +1244,35 @@ mod tests {
         assert_eq!(board.stale()[0].0.to_string(), "a/x");
 
         board.keep_only(&BTreeSet::from([repo("b/y")]));
+        assert!(board.stale().is_empty());
+    }
+
+    #[test]
+    fn replace_stale_stores_the_runs_and_the_error_and_keeps_the_read_time() {
+        let t1 = now() - Span::minutes(30);
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Running, 5, 1)],
+            t1,
+        );
+        board.replace_stale(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 5, 1),
+                run(2, "a/x", RunState::Running, 4, 1),
+                run(2, "a/x", RunState::Running, 4, 1),
+            ],
+            "GitHub left out run 9".to_owned(),
+        );
+
+        let shown = shape(&board.rows(now()));
+        let run_rows: Vec<&String> = shown.iter().filter(|row| row.starts_with("Run(")).collect();
+        assert_eq!(run_rows, ["Run(1)", "Run(2)"], "{shown:?}");
+        assert_eq!(board.stale(), [(&repo("a/x"), Some(t1))]);
+        assert_eq!(board.errors()[0].1, "GitHub left out run 9");
+
+        board.replace(repo("a/x"), Vec::new(), now());
         assert!(board.stale().is_empty());
     }
 

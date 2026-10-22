@@ -22,8 +22,9 @@ use crate::status::{OwnerProblem, Status, MESSAGE_LIFETIME};
 
 /// The mark before the repository name of a stale run row: the sleeping
 /// symbol and one space. The rows of a repository whose last read failed or was
-/// suspect are the last good runs. The mark shows that they can be old (issue
-/// #599). It stands inside the repository cell, thus no other cell moves.
+/// suspect are the last good runs. After a suspect sweep, the rows are the recent
+/// runs and the runs of the last good sweep. The mark shows that they can be old
+/// (issue #599). It stands inside the repository cell, thus no other cell moves.
 const STALE_MARK: &str = "\u{1F4A4} ";
 
 /// The width of the marker column. Each marker is one emoji of 2 columns, or a

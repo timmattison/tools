@@ -2214,16 +2214,22 @@ cannot hang the caller. Used by `cwt` and `ha`.
       which has no last good list.
     - A run created before the lookback is not missing, because the query does not ask for it. A
       run older than the oldest run of a list that GitHub cut at 1,000 runs is not missing either.
-  - A failed read and a suspect read have the same result. The board keeps the last good runs of
-    the repository, and the status line names the repository and the reason, for example
-    `⚠ acme/widgets: GitHub left out run 39149840084`. The next refresh asks GitHub again with no
+  - A failed read and a suspect read of the recent runs have the same result. The board keeps the
+    last good runs of the repository, and the status line names the repository and the reason, for
+    example `⚠ acme/widgets: GitHub left out run 39149840084`. A suspect sweep for active runs
+    does not throw away a good recent answer. The board then shows the recent runs and the active
+    runs of the last good sweep, and the status line names the reason. The sweep runs again on
+    the next refresh. The next refresh asks GitHub again with no
     `If-None-Match`, thus a suspect answer does not come back as a free `304`. A suspect or failed
     owner list keeps the last good list of the owner.
   - The run rows of a repository whose last read failed or was suspect show `💤` before the
-    repository name, because those rows are the last good runs and can be old. While a repository
+    repository name, because those rows are the last good runs and can be old. After a suspect
+    sweep with a good recent answer, the rows are the recent runs and the runs of the last good
+    sweep, and they show the mark too. While a repository
     or an owner is stale, the status line shows `💤 stale since 11:42 (2 repos, 1 owner)` in place
     of `updated … ago`. The time is the earliest last good read or list of the stale targets,
-    `11:42` for today and `10-21 11:42` for an earlier day. A status message does not hide this
+    `11:42` for today and `10-21 11:42` for an earlier day. After a suspect sweep, the time stays
+    the time of the last read in which both answers were good. A status message does not hide this
     part. The mark and the part go away after the next good read.
   - When the first refresh can read no target, `ha` does not show an empty board. It restores the
     terminal, names each repository and each owner that failed with its error, and stops with exit
