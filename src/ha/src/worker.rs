@@ -38,7 +38,7 @@ use crate::job::Job;
 use crate::run::{Run, RunId};
 use crate::settings::Settings;
 use crate::status::{OwnerProblem, RateLimit};
-use crate::suspect::{first_left_out, Presence, Suspicion};
+use crate::suspect::{first_left_out, newest_left_out, Presence, Suspicion};
 use crate::target::{OwnerName, RepoName, Target};
 
 /// How many repositories the worker fetches at the same time.
@@ -532,7 +532,8 @@ fn fetch_repo<S: Source>(source: &S, repo: &RepoName, fetch: &Fetch<'_>) -> Fetc
             Err(error) => return Fetched::Failed(error),
         }
     }
-    if let Some(suspicion) = suspicion_of_created(source, repo, fetch, &list) {
+    let mut newest = NewestRun::new(source, repo);
+    if let Some(suspicion) = suspicion_of_created(source, repo, fetch, &list, &mut newest) {
         source.forget_runs(repo, query);
         return Fetched::Suspect(suspicion);
     }
@@ -554,10 +555,41 @@ fn fetch_repo<S: Source>(source: &S, repo: &RepoName, fetch: &Fetch<'_>) -> Fetc
     Fetched::Good(runs)
 }
 
+/// The direct read of the newest run of one repository. The source answers at
+/// most one time in each cycle, because the probe of the created answer and the
+/// probe of the sweep share the answer.
+struct NewestRun<'a, S: Source> {
+    source: &'a S,
+    repo: &'a RepoName,
+    /// The answer of the one read, after the first use.
+    answer: Option<Result<Option<Run>, SourceError>>,
+}
+
+impl<'a, S: Source> NewestRun<'a, S> {
+    fn new(source: &'a S, repo: &'a RepoName) -> Self {
+        NewestRun {
+            source,
+            repo,
+            answer: None,
+        }
+    }
+
+    /// Judges the newest run with [`newest_left_out`]. The first call reads the
+    /// source. Each later call uses the same answer.
+    fn suspicion(&mut self, matches: impl Fn(&Run) -> bool) -> Option<Suspicion> {
+        let source = self.source;
+        let repo = self.repo;
+        let answer = self.answer.get_or_insert_with(|| source.newest_run(repo));
+        newest_left_out(answer.clone(), matches)
+    }
+}
+
 /// Decides whether `ha` trusts a successful created answer of a repository.
 ///
-/// Without a last good answer there is nothing to compare. Otherwise the
-/// answer goes through [`first_left_out`]. A run of the last good answer is in
+/// An empty answer goes through the probe first: the newest run of the
+/// repository must not be a run that the query matches. Without a last good
+/// answer there is nothing more to compare. Otherwise the answer goes through
+/// [`first_left_out`]. A run of the last good answer is in
 /// range when it was created since the start of the query. When GitHub cut the
 /// answer, the run must also be as new as the oldest run of the answer, because
 /// a run past the cut is not missing. A run that is in range and missing is
@@ -568,7 +600,13 @@ fn suspicion_of_created<S: Source>(
     repo: &RepoName,
     fetch: &Fetch<'_>,
     list: &RunList,
+    newest: &mut NewestRun<'_, S>,
 ) -> Option<Suspicion> {
+    if list.runs.is_empty() {
+        if let Some(suspicion) = newest.suspicion(|run| run.created_at >= fetch.since) {
+            return Some(suspicion);
+        }
+    }
     let last_good = fetch
         .created_answers
         .lock()
