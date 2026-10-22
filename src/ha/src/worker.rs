@@ -860,6 +860,9 @@ mod tests {
         active: HashMap<RepoName, Result<Vec<Run>, SourceError>>,
         /// The jobs of each run. A run with no entry has no jobs.
         jobs: HashMap<RunId, Result<Vec<Job>, SourceError>>,
+        /// The answer of `newest_run` for each repository. A repository with no
+        /// entry has no run.
+        newest: HashMap<RepoName, Result<Option<Run>, SourceError>>,
         /// The answer of `run` for each run. A run with no entry is gone.
         direct: HashMap<RunId, Result<Option<Run>, SourceError>>,
         /// The answer of `repo_is_listable` for each repository. A repository
@@ -960,6 +963,12 @@ mod tests {
             let mut script = self.script();
             script.calls.push(("run", run.0.to_string()));
             script.direct.get(&run).cloned().unwrap_or(Ok(None))
+        }
+
+        fn newest_run(&self, repo: &RepoName) -> Result<Option<Run>, SourceError> {
+            let mut script = self.script();
+            script.calls.push(("newest", repo.to_string()));
+            script.newest.get(repo).cloned().unwrap_or(Ok(None))
         }
 
         fn rate_limit(&self) -> Option<RateLimit> {

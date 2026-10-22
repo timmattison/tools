@@ -309,6 +309,16 @@ pub trait Source: Send + Sync {
     /// Returns a [`SourceError`] when the answer is neither a run nor a `404`.
     fn run(&self, repo: &RepoName, run: RunId) -> Result<Option<Run>, SourceError>;
 
+    /// Reads the newest run of a repository, whatever its age or state.
+    ///
+    /// The request asks for one run, and it uses the `ETag` cache. `Ok(None)`
+    /// means that the repository has no run.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`SourceError`] when the page cannot be fetched.
+    fn newest_run(&self, repo: &RepoName) -> Result<Option<Run>, SourceError>;
+
     /// The rate limit that the last response stated. `None` before any response.
     fn rate_limit(&self) -> Option<RateLimit>;
 }
@@ -679,6 +689,11 @@ impl Source for GhSource {
             Err(SourceError::Http { status: 404, .. }) => Ok(None),
             Err(error) => Err(error),
         }
+    }
+
+    fn newest_run(&self, _repo: &RepoName) -> Result<Option<Run>, SourceError> {
+        // Red stub: the answer of a source that knows no run.
+        Ok(None)
     }
 
     fn rate_limit(&self) -> Option<RateLimit> {
@@ -1708,6 +1723,51 @@ mod tests {
         assert_eq!(first.as_ref().map(|list| list.runs.len()), Ok(2));
         let later = RunQuery::CreatedSince(time("2026-09-24T21:59:59Z"));
         let second = source.runs_of(&tools, later);
+        assert_eq!(second, first);
+        let requests = stub.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[1][..4],
+            ["api", "-i", "-H", "If-None-Match: W/\"4c00158b\""]
+        );
+        assert_eq!(requests[1][4], requests[0][2]);
+    }
+
+    #[test]
+    fn the_newest_run_is_the_first_run_of_a_page_of_one() {
+        let stub = Stub::new("cat \"$dir/page1.out\"");
+        stub.file("page1.out", &ok_output(RUNS_JSON));
+        let newest = stub.source().newest_run(&repo("timmattison/tools"));
+        assert_eq!(
+            stub.requests(),
+            [[
+                "api",
+                "-i",
+                "repos/timmattison/tools/actions/runs?per_page=1"
+            ]]
+        );
+        assert_eq!(
+            newest.map(|run| run.map(|run| run.id)),
+            Ok(Some(RunId(36_064_582_280)))
+        );
+    }
+
+    #[test]
+    fn a_repository_with_no_runs_has_no_newest_run() {
+        let stub = Stub::new("cat \"$dir/page1.out\"");
+        stub.file("page1.out", &ok_output(&runs_json(0, 1, 0)));
+        assert_eq!(stub.source().newest_run(&repo("o/r")), Ok(None));
+    }
+
+    #[test]
+    fn a_second_read_of_the_newest_run_sends_the_etag_and_reuses_the_run_on_304() {
+        let stub = Stub::new(ETAG_CASES);
+        stub.file("page1.out", &ok_output(RUNS_JSON));
+        stub.file("not-modified.out", NOT_MODIFIED);
+        let source = stub.source();
+        let first = source.newest_run(&repo("timmattison/tools"));
+        assert!(matches!(first, Ok(Some(_))), "{first:?}");
+        let second = source.newest_run(&repo("timmattison/tools"));
         assert_eq!(second, first);
         let requests = stub.requests();
         assert_eq!(requests.len(), 2);
