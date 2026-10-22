@@ -945,6 +945,27 @@ mod tests {
     }
 
     #[test]
+    fn a_suspect_sweep_shows_its_runs_with_the_stale_mark_and_the_time_of_the_last_good_read() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        channels
+            .updates
+            .send(Update::SuspectSweep {
+                repo: repo(),
+                runs: vec![active_run(1, 5), active_run(2, 4)],
+                reason: crate::suspect::Suspicion::LeftOut(crate::suspect::Item::Run(RunId(9))),
+            })
+            .unwrap();
+        let (result, frame) = run_app(&opener(false), &channels, quit());
+        assert!(result.is_ok(), "{result:?}");
+        let rows = run_rows(&frame);
+        assert_eq!(rows.len(), 2, "{frame:?}");
+        assert!(rows.iter().all(|row| row.contains('\u{1F4A4}')), "{rows:?}");
+        let line = frame.last().unwrap();
+        assert!(line.contains("stale since 12:00"), "{line:?}");
+    }
+
+    #[test]
     fn a_cycle_in_which_each_fetch_fails_does_not_say_updated() {
         let channels = channels();
         let cycle_done = || Update::CycleDone {
