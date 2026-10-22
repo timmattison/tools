@@ -47,14 +47,15 @@ pub enum Verdict {
 /// This type holds the one definition of "the cycle read no target".
 /// A good fetch that finds zero runs is a success. A failed target is a
 /// repository whose fetch failed or an owner whose list failed. An owner
-/// list that GitHub cut is a warning and does not count as a failure.
+/// list that GitHub cut is a warning and does not count as a failure. A suspect
+/// owner list succeeded, thus it does not count either.
 #[derive(Debug, Default)]
 pub struct FirstCycle {
     /// Set when one repository fetch succeeded.
     read_a_repository: bool,
     /// The error of each repository whose fetch failed.
     failed_repositories: BTreeMap<RepoName, SourceError>,
-    /// The error of each owner whose list failed. A cut list is not here.
+    /// The error of each owner whose list failed. A cut or suspect list is not here.
     failed_owners: BTreeMap<OwnerName, SourceError>,
 }
 
@@ -63,7 +64,7 @@ impl FirstCycle {
     /// also when it holds no run. An [`Update::Failed`] records the
     /// repository and its error. An [`Update::Repos`] replaces the failed
     /// owners with the owners whose list failed. It skips an owner whose
-    /// list was cut, because a cut list is a warning, not a failure. Every
+    /// list was cut or suspect, because the list succeeded and the owner was read. Every
     /// other update changes nothing.
     pub fn note(&mut self, update: &Update) {
         match update {
@@ -76,10 +77,7 @@ impl FirstCycle {
                     .iter()
                     .filter_map(|(owner, problem)| match problem {
                         OwnerProblem::Failed(error) => Some((owner.clone(), error.clone())),
-                        OwnerProblem::Suspect(suspicion) => {
-                            Some((owner.clone(), SourceError::Failed(suspicion.to_string())))
-                        }
-                        OwnerProblem::Cut(_) => None,
+                        OwnerProblem::Cut(_) | OwnerProblem::Suspect(_) => None,
                     })
                     .collect();
             }
