@@ -18,13 +18,13 @@ use std::time::{Duration, Instant};
 
 use crate::shell::{last_with_text, run_command, start_run, OutputStream, RunEnd, ShellCommand};
 
-/// The variable that holds the command `G` runs.
+/// The variable that holds the command `G` runs second, where the first step fails.
 ///
 /// The value is a whole command line, so it can carry arguments. See
 /// [`ShellCommand`] for what gsw does with each part of it.
 pub(crate) const ISSUE_COMMAND_ENV: &str = "GSW_ISSUE_COMMAND";
 
-/// The command `G` runs when the environment names none.
+/// The command `G` runs second when the environment names none.
 ///
 /// This repository ships no `ggs`. It is a shell function that the user
 /// supplies, and it is the default here because it is the name that the plans
@@ -122,7 +122,7 @@ impl Steps {
     }
 }
 
-/// What a finished run of the issue command leaves under the frame.
+/// What a finished press of `G` leaves under the frame.
 ///
 /// `None` is a run that worked. The browser is the answer, and a monitor that
 /// also posted a line would spend a row of the frame saying what the user is

@@ -793,7 +793,7 @@ enum Event {
     /// cannot be started, and a shell that never answers all send nothing, so
     /// the key stays unbound and silent.
     IssueCommandFound(crate::issue::Page, crate::shell::ShellCommand),
-    /// A run of the issue command has finished, either way.
+    /// A press of `G` has finished, either way.
     IssueFinished {
         /// The generation that [`LoopHooks::start_issue`] was given for this
         /// run: the generation of the worktree where the run started.
@@ -2774,8 +2774,8 @@ struct LoopHooks<
     /// [`Event::BaseUpdateFinished`]; tests record the command and decide for
     /// themselves when, or whether, the outcome arrives.
     start_base_update: StartBaseUpdate,
-    /// Start a run of the issue command in the worktree on the screen at the
-    /// press. Production spawns a thread that runs it and sends the outcome
+    /// Start the steps of a press of `G` in the worktree on the screen at the
+    /// press. Production spawns a thread that runs them and sends the outcome
     /// back as [`Event::IssueFinished`], with the [`Generation`] it was given;
     /// tests record the command and decide for themselves when the outcome
     /// arrives.
@@ -8671,7 +8671,7 @@ mod push_loop_tests {
         /// The worktree each of those started in, in the order of
         /// [`Seen::base_updates`].
         base_update_paths: Vec<WorktreePath>,
-        /// The worktree and the generation of each run of the issue command,
+        /// The worktree and the generation of each press of `G`,
         /// in the order of [`Seen::issue_runs`].
         issue_paths: Vec<(WorktreePath, Generation)>,
         /// The worktree and the generation of each run of `m`, in order.
@@ -11430,7 +11430,7 @@ mod push_loop_tests {
     /// The last line that [`issue_failed_in`] reports.
     const ISSUE_REFUSAL: &str = "branch main names no issue";
 
-    /// The outcome of a run of the issue command that failed, with the
+    /// The outcome of a press of `G` that failed, with the
     /// generation `generation`, as the loop receives it. Its line waits for a
     /// key.
     fn issue_failed_in(generation: Generation) -> Event {
