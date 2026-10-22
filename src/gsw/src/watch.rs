@@ -1015,7 +1015,8 @@ impl IssueRun {
         if self.running {
             return IssuePress::Nothing;
         }
-        let Some(steps) = crate::issue::Steps::new(None, self.issue.clone()) else {
+        let Some(steps) = crate::issue::Steps::new(self.pull_request.clone(), self.issue.clone())
+        else {
             return IssuePress::Nothing;
         };
         if self.session == crate::remote::Session::Local || self.armed.is_armed(now) {
