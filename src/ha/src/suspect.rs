@@ -7,6 +7,13 @@
 //! `ha` reads that item directly. When the item is still there and still
 //! matches the query, the answer is suspect. This module is the one place that
 //! decides this, thus every list that `ha` reads goes through it.
+//!
+//! A second rule covers an empty answer. An empty answer has no item to
+//! compare, and the first answer after a start has no last good answer. Then
+//! `ha` reads the newest run of the repository directly. When that run matches
+//! the query that gave the empty answer, GitHub left it out, and the answer is
+//! suspect. A failed read of the newest run makes the answer suspect too.
+//! [`newest_left_out`] holds this rule.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -71,6 +78,12 @@ pub enum Suspicion {
     /// An item is not in the answer, and the read of it failed.
     #[error("GitHub left out {0}, and ha cannot read it: {1}")]
     Unread(Item, SourceError),
+    /// An answer is empty, and the newest run of the repository matches its query.
+    #[error("GitHub listed no runs, but run {} matches", .0.0)]
+    NewestLeftOut(RunId),
+    /// An answer is empty, and the read of the newest run failed.
+    #[error("GitHub listed no runs, and ha cannot read the newest run: {0}")]
+    NewestUnread(SourceError),
 }
 
 /// The one rule. Walks `last_good` in order. Skips each item that `answer` holds
@@ -97,6 +110,18 @@ pub fn first_left_out<T: Listed>(
             Presence::Gone => {}
         }
     }
+    None
+}
+
+/// The probe rule for an empty answer. `newest` is the direct read of the
+/// newest run of the repository. A run that `matches` the query of the empty
+/// answer gives [`Suspicion::NewestLeftOut`]. A run that does not match, and no
+/// run at all, give `None`. A failed read gives [`Suspicion::NewestUnread`].
+pub fn newest_left_out(
+    newest: Result<Option<Run>, SourceError>,
+    matches: impl Fn(&Run) -> bool,
+) -> Option<Suspicion> {
+    let _ = (newest, matches);
     None
 }
 
@@ -249,6 +274,54 @@ mod tests {
         assert_eq!(
             Suspicion::Unread(widgets, error).to_string(),
             "GitHub left out acme/widgets, and ha cannot read it: gh failed: boom"
+        );
+    }
+
+    fn run_created_at(id: u64, seconds: i64) -> Run {
+        let at = chrono::DateTime::UNIX_EPOCH + chrono::TimeDelta::seconds(seconds);
+        Run {
+            created_at: at,
+            ..run(id)
+        }
+    }
+
+    fn created_since_100(run: &Run) -> bool {
+        run.created_at >= chrono::DateTime::UNIX_EPOCH + chrono::TimeDelta::seconds(100)
+    }
+
+    #[test]
+    fn a_newest_run_that_matches_is_a_suspicion() {
+        let suspicion = newest_left_out(Ok(Some(run_created_at(7, 200))), created_since_100);
+        assert_eq!(suspicion, Some(Suspicion::NewestLeftOut(RunId(7))));
+    }
+
+    #[test]
+    fn a_newest_run_that_does_not_match_is_not_a_suspicion() {
+        let suspicion = newest_left_out(Ok(Some(run_created_at(7, 50))), created_since_100);
+        assert_eq!(suspicion, None);
+    }
+
+    #[test]
+    fn no_newest_run_is_not_a_suspicion() {
+        assert_eq!(newest_left_out(Ok(None), created_since_100), None);
+    }
+
+    #[test]
+    fn a_failed_read_of_the_newest_run_is_a_suspicion_with_its_error() {
+        let error = SourceError::Failed("boom".to_owned());
+        let suspicion = newest_left_out(Err(error.clone()), created_since_100);
+        assert_eq!(suspicion, Some(Suspicion::NewestUnread(error)));
+    }
+
+    #[test]
+    fn the_probe_suspicions_have_their_texts() {
+        assert_eq!(
+            Suspicion::NewestLeftOut(RunId(7)).to_string(),
+            "GitHub listed no runs, but run 7 matches"
+        );
+        assert_eq!(
+            Suspicion::NewestUnread(SourceError::Failed("boom".to_owned())).to_string(),
+            "GitHub listed no runs, and ha cannot read the newest run: gh failed: boom"
         );
     }
 }
