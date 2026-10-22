@@ -2172,6 +2172,38 @@ mod probe_tests {
     }
 
     #[test]
+    fn an_empty_pr_variable_starts_no_shell_for_it_and_g_keeps_the_issue_command() {
+        let stub = StubShell::answering(0);
+        let (words, answers) = probed(&values(Some(""), None, Some(""), Some("")), &stub);
+        assert_eq!(
+            words,
+            [crate::issue::DEFAULT_ISSUE_COMMAND],
+            "an empty GSW_PR_COMMAND must start no shell for ggsp",
+        );
+        assert_eq!(
+            answers,
+            ["G Issue ggs"],
+            "G must keep the issue command, and the pull request page must send no answer",
+        );
+    }
+
+    #[test]
+    fn a_pr_variable_with_a_name_in_it_probes_that_command() {
+        let stub = StubShell::answering(0);
+        let (words, answers) = probed(&values(Some("myprs"), None, Some(""), Some("")), &stub);
+        assert_eq!(
+            words,
+            [crate::issue::DEFAULT_ISSUE_COMMAND, "myprs"],
+            "GSW_PR_COMMAND must name the command that the first step of G asks about",
+        );
+        assert_eq!(
+            answers,
+            ["G Issue ggs", "G PullRequest myprs"],
+            "the answer for myprs must reach the page of the pull request",
+        );
+    }
+
+    #[test]
     fn an_empty_variable_starts_no_shell_for_its_own_key_alone() {
         // The one way to say "do not do this at all" on a public repository
         // whose defaults name one person's shell functions. It must cost
