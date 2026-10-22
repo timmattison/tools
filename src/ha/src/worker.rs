@@ -3346,6 +3346,34 @@ mod tests {
         );
     }
 
+    /// A failed sweep leaves the stored sweep old. The next cycle merges that
+    /// old sweep into a good answer, thus the sweep must run again at once,
+    /// the same as a suspect sweep.
+    #[test]
+    fn a_failed_sweep_is_repeated_on_the_next_cycle_and_a_good_sweep_waits_for_the_cadence() {
+        let fake = Arc::new(FakeSource::default());
+        fake.script()
+            .active
+            .insert(repo("acme/a"), Err(SourceError::Failed("boom".to_owned())));
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+        let first = one_cycle(&worker);
+        assert!(
+            matches!(answers_of_a(&first).as_slice(), [Update::Failed { .. }]),
+            "{first:?}"
+        );
+
+        script_active(&fake, Vec::new());
+        let second = refresh_now(&worker);
+        assert_eq!(calls_named(&fake, "active").len(), 2, "{second:?}");
+
+        refresh_now(&worker);
+        assert_eq!(
+            calls_named(&fake, "active").len(),
+            2,
+            "a good sweep clears the mark"
+        );
+    }
+
     #[test]
     fn when_both_answers_are_suspect_the_created_suspicion_is_reported_and_both_are_forgotten() {
         let fake = Arc::new(FakeSource::default());
