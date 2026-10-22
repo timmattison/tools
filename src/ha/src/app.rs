@@ -236,7 +236,19 @@ where
                 }
                 Update::Jobs { run, jobs } => self.board.set_jobs(run, jobs),
                 Update::JobsFailed { run, error } => self.board.fail_jobs(run, error),
-                Update::MergeQueues { .. } | Update::MergeQueue { .. } => {}
+                Update::MergeQueues { repos, error } => {
+                    self.board.set_queues(&repos);
+                    self.status.queue_error = error.map(|error| error.to_string());
+                }
+                Update::MergeQueue {
+                    repo,
+                    entries,
+                    departures,
+                } => self.board.set_queue(
+                    &repo,
+                    entries.map_err(|error| error.to_string()),
+                    departures.map_err(|error| error.to_string()),
+                ),
                 Update::Repos {
                     repos,
                     owner_errors,
@@ -286,10 +298,12 @@ where
     /// Acts on one key press. Each key press removes the status message
     /// first. The `Enter` key can then post a new one. `Right` expands the
     /// run of the highlighted row. `Left` collapses that run, also from a job
-    /// row. `Enter` opens the highlighted run or job.
+    /// row. On a pull request row, `Right` and `Left` do nothing. `Enter`
+    /// opens the highlighted pull request, run, or job.
     ///
     /// `c` opens a box that asks to cancel the run of the highlighted row.
-    /// On a finished run it posts that there is nothing to cancel instead.
+    /// On a finished run, and on a pull request row, it posts that there is
+    /// nothing to cancel instead.
     /// While the box shows, it takes every key. `y` cancels the run that the
     /// box names, Ctrl-C quits, and every other key closes the box and does
     /// nothing more. Thus `q`, `Esc`, and `Enter` do not quit, open, or move
@@ -353,9 +367,17 @@ where
     /// Opens the box that asks to cancel the highlighted run, or posts that a
     /// finished run has nothing to cancel. The box keeps a copy of what it
     /// shows, thus a later refresh does not change the run that `y` cancels.
-    /// On a job row it names the run of the job.
+    /// On a job row it names the run of the job. On a pull request row it
+    /// posts that a pull request is not a run.
     fn ask_to_cancel(&mut self) {
         let now = (self.now)();
+        if let Some(pull) = self.board.selected_pull(now) {
+            self.post(format!(
+                "pull request #{} is not a run: there is nothing to cancel",
+                pull.0
+            ));
+            return;
+        }
         let target = self.board.selected_target(now).map(|(run, job)| {
             if run.state.is_active() {
                 Ok(Confirm::new(run, job))
@@ -422,10 +444,10 @@ mod tests {
     use super::*;
     use crate::cancel::CancelOutcome;
     use crate::github::{RepoList, SourceError};
+    use crate::queue::{Departure, EntryState, PullNumber, QueueEntry};
     use crate::run::{Run, RunId, RunState};
     use crate::status::{OwnerProblem, RateLimit};
     use crate::target::{OwnerName, RepoName};
-    use crate::queue::{Departure, EntryState, PullNumber, QueueEntry};
     use crate::worker::{Command, Update};
 
     /// Gives the events of a script, then an error, so a loop that does not
@@ -2569,7 +2591,11 @@ mod tests {
         };
         let (with_error, _) = run_steps(
             &channels,
-            vec![Step::Send(failed.clone()), Step::Idle],
+            vec![
+                Step::Send(failed.clone()),
+                Step::Idle,
+                key(KeyCode::Char('q')),
+            ],
         );
         assert!(
             with_error[11].contains("merge queues: gh failed: boom"),
@@ -2578,7 +2604,13 @@ mod tests {
         );
         let (cleared, _) = run_steps(
             &channels,
-            vec![Step::Send(failed), Step::Idle, Step::Send(queues_of_repo()), Step::Idle],
+            vec![
+                Step::Send(failed),
+                Step::Idle,
+                Step::Send(queues_of_repo()),
+                Step::Idle,
+                key(KeyCode::Char('q')),
+            ],
         );
         assert!(!cleared[11].contains("merge queues"), "{:?}", cleared[11]);
         assert!(cleared[1].starts_with("Merge queue"), "{cleared:#?}");
