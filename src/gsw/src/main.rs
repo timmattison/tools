@@ -63,8 +63,9 @@ mod worktrees;
                   it renders once and exits.\n\n\
                   Watch-mode keys: q or Ctrl-C quits, r refreshes now, p pushes the current \
                   branch after a confirmation that names what it will do — a branch not yet on \
-                  the remote is confirmed as creating one — G opens the issue the branch \
-                  names, R rebases the branch onto the base and pushes it, M merges the base \
+                  the remote is confirmed as creating one — G opens the pull request of the \
+                  branch, or the issue the branch names when there is no pull request, R \
+                  rebases the branch onto the base and pushes it, M merges the base \
                   into the branch and pushes it, m measures a rebase and a merge against the \
                   default branch, and the arrow keys move the watch between the worktrees of \
                   the repository. \
@@ -74,20 +75,27 @@ mod worktrees;
                   you state on purpose, and the check that reads the branch gets none either. \
                   So a gsw started from inside a git hook still pushes the repository on the \
                   screen. p never force-pushes.\n\n\
-                  G runs one command in your own interactive shell, with the work tree as its \
-                  current directory. GSW_ISSUE_COMMAND holds that command and it defaults to \
-                  `ggs`; set it to an empty string to turn the key off. The value is a whole \
-                  command line, so it can carry arguments — `gh issue view --web` works. gsw \
-                  asks your shell about the first word and runs the whole line, so the first \
-                  word is what has to exist and the shell reads the rest the way it reads \
-                  arguments at a prompt. The command is usually a shell function, so gsw asks \
-                  your shell once at startup whether it exists. Where it does not, G does \
-                  nothing and says nothing, the way an unbound key does — and a function you \
-                  add to your rc file after gsw started needs a restart. A run that works opens a browser and costs the frame no row; a run \
-                  that fails puts the last line it wrote under the frame, where it waits for a \
-                  key. A run gets a minute: after that gsw stops waiting, says so under the \
-                  frame, and gives the key back — the command itself keeps running, because it \
-                  is yours, and it can be the process that holds the browser open.\n\n\
+                  G runs up to two commands in your own interactive shell, with the work tree \
+                  as their current directory. GSW_PR_COMMAND holds the command that runs \
+                  first, and it defaults to `ggsp`. GSW_ISSUE_COMMAND holds the command that \
+                  runs only when the first one fails, and it defaults to `ggs`. So G opens the \
+                  pull request of the branch, and the issue when the branch has no pull \
+                  request. Set a variable to an empty string to remove its step, and set both \
+                  to turn the key off. Each value is a whole command line, so it can carry \
+                  arguments — `gh issue view --web` works. gsw asks your shell about the first \
+                  word and runs the whole line, so the first word is what has to exist and the \
+                  shell reads the rest the way it reads arguments at a prompt. Each command is \
+                  usually a shell function, so gsw asks your shell once at startup whether \
+                  each one exists. Where only one exists, G runs that one alone. Where neither \
+                  exists, G does nothing and says nothing, the way an unbound key does — and a \
+                  function you add to your rc file after gsw started needs a restart. A press \
+                  that opens a page costs the frame no row, and the failure of the first step \
+                  shows nothing. A press where both steps fail puts the last line of the issue \
+                  command under the frame, where it waits for a key. A press gets a minute, \
+                  and its two steps share it: after that gsw stops waiting, says so under the \
+                  frame, starts no second step, and gives the key back — the command itself \
+                  keeps running, because it is yours, and it can be the process that holds \
+                  the browser open.\n\n\
                   m measures what grind and grime measure, in this process: a rebase of HEAD \
                   onto the default branch (main, else master) and a merge of that branch into \
                   HEAD. The bottom row says `Running grind and grime against main…` until the \

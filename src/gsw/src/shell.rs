@@ -769,7 +769,7 @@ mod run_tests {
         TTY_REFUSED,
     };
     use super::*;
-    use crate::issue::{run, DEFAULT_ISSUE_COMMAND};
+    use crate::issue::{run, Steps, DEFAULT_ISSUE_COMMAND, DEFAULT_PR_COMMAND};
     use std::path::PathBuf;
     use std::sync::mpsc::channel;
 
@@ -787,6 +787,12 @@ mod run_tests {
         ShellCommand::new(None, DEFAULT_ISSUE_COMMAND).expect("the default names a command")
     }
 
+    /// A press that found `command` alone, which is the press that each run
+    /// here makes.
+    fn one_step(command: ShellCommand) -> Steps {
+        Steps::new(None, Some(command)).expect("one command is a step")
+    }
+
     #[test]
     fn the_run_names_the_command_with_no_quoting_around_it() {
         // Quoting the word stops a shell from expanding an alias, and an alias
@@ -794,7 +800,7 @@ mod run_tests {
         let stub = StubShell::answering(0);
         let workdir = tempfile::tempdir().expect("tempdir");
         let command = ShellCommand::new(Some("myfunc"), DEFAULT_ISSUE_COMMAND).expect("a name");
-        let _ = run(stub.as_shell(), &command, workdir.path());
+        let _ = run(stub.as_shell(), &one_step(command), workdir.path());
         let runs = stub.runs();
         assert!(
             runs.lines().any(|line| line == "myfunc"),
@@ -811,7 +817,7 @@ mod run_tests {
         let workdir = tempfile::tempdir().expect("tempdir");
         let command =
             ShellCommand::new(Some("gh issue view --web"), DEFAULT_ISSUE_COMMAND).expect("a name");
-        let _ = run(stub.as_shell(), &command, workdir.path());
+        let _ = run(stub.as_shell(), &one_step(command), workdir.path());
         let runs = stub.runs();
         assert!(
             runs.lines().any(|line| line == "gh issue view --web"),
@@ -830,7 +836,11 @@ mod run_tests {
         // its own row.
         let stub = StubShell::new("printf 'partial'\nprintf 'reason\\n' >&2\nexit 2");
         let workdir = tempfile::tempdir().expect("tempdir");
-        let outcome = run(stub.as_shell(), &default_command(), workdir.path());
+        let outcome = run(
+            stub.as_shell(),
+            &one_step(default_command()),
+            workdir.path(),
+        );
         assert_eq!(
             outcome.message(),
             Some("reason"),
@@ -847,7 +857,11 @@ mod run_tests {
         // of its own, where it costs the reason nothing.
         let stub = StubShell::new("printf '\\346\\227'\nprintf 'reason\\n' >&2\nexit 2");
         let workdir = tempfile::tempdir().expect("tempdir");
-        let outcome = run(stub.as_shell(), &default_command(), workdir.path());
+        let outcome = run(
+            stub.as_shell(),
+            &one_step(default_command()),
+            workdir.path(),
+        );
         let message = outcome.message();
         assert_eq!(
             message,
@@ -881,7 +895,11 @@ mod run_tests {
 
         let stub = StubShell::probing_the_terminal();
         let workdir = tempfile::tempdir().expect("tempdir");
-        let outcome = run(stub.as_shell(), &default_command(), workdir.path());
+        let outcome = run(
+            stub.as_shell(),
+            &one_step(default_command()),
+            workdir.path(),
+        );
         assert_eq!(
             outcome.message(),
             None,
@@ -901,7 +919,11 @@ mod run_tests {
         // remote of the directory it runs in.
         let stub = StubShell::answering(0);
         let workdir = tempfile::tempdir().expect("tempdir");
-        let _ = run(stub.as_shell(), &default_command(), workdir.path());
+        let _ = run(
+            stub.as_shell(),
+            &one_step(default_command()),
+            workdir.path(),
+        );
         assert_eq!(resolved(&stub.cwd()), resolved(workdir.path()));
     }
 
@@ -922,7 +944,7 @@ mod run_tests {
         let dir = workdir.path().to_path_buf();
         let (tx, rx) = channel();
         std::thread::spawn(move || {
-            let outcome = run(&shell, &default_command(), &dir);
+            let outcome = run(&shell, &one_step(default_command()), &dir);
             let _ = tx.send(outcome);
         });
         let outcome = rx
@@ -995,18 +1017,40 @@ mod run_tests {
         }
 
         let probe_stub = StubShell::answering(0);
-        let run_stub = StubShell::answering(0);
+        // The run is a press of two steps, so it starts two children: ggsp
+        // fails and hands the press to ggs.
+        let run_stub = StubShell::new("case \"$2\" in\n  ggsp) exit 1 ;;\n  *) exit 0 ;;\nesac");
         let workdir = tempfile::tempdir().expect("tempdir");
         assert!(
             probe_with_deadline(probe_stub.as_shell(), &default_command(), ANSWER_DEADLINE),
             "the stub answers 0, so the probe must report the command present",
         );
-        let outcome = run(run_stub.as_shell(), &default_command(), workdir.path());
+        let pull_request =
+            ShellCommand::new(None, DEFAULT_PR_COMMAND).expect("the default names a command");
+        let steps = Steps::new(Some(pull_request), Some(default_command()))
+            .expect("two commands are steps");
+        let outcome = run(run_stub.as_shell(), &steps, workdir.path());
         assert_eq!(
             outcome.message(),
             None,
-            "the stub exits 0, so the run must report nothing",
+            "the issue command exits 0, so the run must report nothing",
         );
+        let runs = run_stub.runs();
+        for step in [DEFAULT_PR_COMMAND, DEFAULT_ISSUE_COMMAND] {
+            assert!(
+                runs.lines().any(|line| line == step),
+                "both steps must start a child, and {step} did not: {runs:?}",
+            );
+        }
+        let run_environment = run_stub.environment();
+        for name in gitscratch::USER_INTENT_GIT_ENVIRONMENT {
+            let kept = format!("{name}={}", user_intent_value(name));
+            let held = run_environment.lines().filter(|line| *line == kept).count();
+            assert_eq!(
+                held, 2,
+                "each of the two run children must hold {name}, and {held} did",
+            );
+        }
 
         for (child, stub) in [("probe", &probe_stub), ("run", &run_stub)] {
             let environment = stub.environment();
@@ -1435,6 +1479,16 @@ pub(crate) mod stub_shell {
         pub(crate) fn cwd(&self) -> PathBuf {
             let recorded = std::fs::read_to_string(&self.cwd).expect("the stub must record a cwd");
             PathBuf::from(recorded.trim_end())
+        }
+
+        /// The directory of each run, in the order the runs happened, as the
+        /// shell reported them.
+        pub(crate) fn cwds(&self) -> Vec<PathBuf> {
+            std::fs::read_to_string(&self.cwd)
+                .unwrap_or_default()
+                .lines()
+                .map(PathBuf::from)
+                .collect()
         }
 
         /// What the stub found when it reached for the controlling terminal.

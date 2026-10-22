@@ -690,7 +690,7 @@ enum Event {
     /// name.
     ///
     /// One event for each key, because each key has a probe of its own and the
-    /// three probes answer in whatever order their shells finish. A key is
+    /// four probes answer in whatever order their shells finish. A key is
     /// unbound until its own answer arrives. A shell that says no, a shell
     /// that cannot be started, and a shell that never answers all send
     /// nothing, so that key stays unbound and silent.
@@ -782,18 +782,18 @@ enum Event {
     /// The user closed the open list (Esc or `q`). The watch stays on the
     /// worktree that it showed before the list opened.
     ListClose,
-    /// The user asked for the issue of the branch (`G`).
+    /// The user asked for the pull request or the issue of the branch (`G`).
     ///
     /// Only [`classify_input`] makes one, and it makes one only where the
     /// command exists — so the loop never receives a request it cannot serve.
     IssueRequested,
-    /// The probe found the command, and this is its name.
+    /// The probe of one page found its command, and this is the command.
     ///
     /// Sent only where the command exists. A shell that says no, a shell that
     /// cannot be started, and a shell that never answers all send nothing, so
     /// the key stays unbound and silent.
-    IssueCommandFound(crate::shell::ShellCommand),
-    /// A run of the issue command has finished, either way.
+    IssueCommandFound(crate::issue::Page, crate::shell::ShellCommand),
+    /// A press of `G` has finished, either way.
     IssueFinished {
         /// The generation that [`LoopHooks::start_issue`] was given for this
         /// run: the generation of the worktree where the run started.
@@ -906,13 +906,14 @@ pub(crate) enum Binding {
 /// them: `G`, `R`, and `M`.
 ///
 /// One value rather than three parameters of [`classify_input`], because the
-/// three answers travel together and arrive together: each of the three probes
+/// answers of the keys travel together and arrive together: each of the four probes
 /// answers on the loop's own channel, and the key table reads whatever has
 /// arrived by the press. A fourth such key then adds a field here and moves no
 /// call site.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct CommandKeys {
-    /// Whether `G`, which opens the issue of the branch, has a command.
+    /// Whether `G`, which opens the pull request or the issue of the branch,
+    /// has a command.
     issue: Binding,
     /// Whether `R`, which rebases the branch onto its base, has a command.
     rebase: Binding,
@@ -927,8 +928,8 @@ pub(crate) struct CommandKeys {
 /// arms of one match, and no second question decides between them.
 #[derive(Debug, PartialEq, Eq)]
 enum IssuePress {
-    /// Run this command.
-    Run(crate::shell::ShellCommand),
+    /// Run these commands.
+    Run(crate::issue::Steps),
     /// Put this under the frame, and wait for a second press.
     Ask(String),
     /// Nothing at all.
@@ -938,14 +939,16 @@ enum IssuePress {
 /// The `G` key's own state, for the life of one watch-mode run.
 ///
 /// Four facts, and they are one value because one key reads all of them: the
-/// command the probe found, whether a run of it is in flight, where the person
+/// command each probe found, whether a press of them is in flight, where the person
 /// who reads this screen sits, and whether a message that asks for a second
 /// press stands. None of them is an [`InputMode`], because each changes what
 /// this one key does and changes no other key.
 struct IssueRun {
-    /// The command the probe found. `None` until the probe answers, and
-    /// forever where it found none or where the feature is off.
-    command: Option<crate::shell::ShellCommand>,
+    /// The command the probe of the pull request found. `None` until the probe
+    /// answers, and forever where it found none or where the page is off.
+    pull_request: Option<crate::shell::ShellCommand>,
+    /// The command the probe of the issue found, on the same terms.
+    issue: Option<crate::shell::ShellCommand>,
     /// Whether a run is in flight. One run at a time: a browser opening twice
     /// is two tabs nobody asked for.
     running: bool,
@@ -961,7 +964,8 @@ impl IssueRun {
     /// Nothing found yet, nothing running, and nothing asked.
     fn new(session: crate::remote::Session) -> Self {
         Self {
-            command: None,
+            pull_request: None,
+            issue: None,
             running: false,
             session,
             armed: Arming::new(crate::push::STATUS_LIFETIME),
@@ -969,17 +973,27 @@ impl IssueRun {
     }
 
     /// Whether `G` has a command behind it.
+    ///
+    /// One command of the two is enough. A press with one command runs that
+    /// command alone.
     fn key(&self) -> Binding {
-        if self.command.is_some() {
+        if self.pull_request.is_some() || self.issue.is_some() {
             Binding::Bound
         } else {
             Binding::Unbound
         }
     }
 
-    /// Keep the command the probe found.
-    fn found(&mut self, command: crate::shell::ShellCommand) {
-        self.command = Some(command);
+    /// Keep the command the probe of `page` found.
+    ///
+    /// The arming goes too. An answer changes the steps, and the message on
+    /// the row named the old steps. The next press must ask again.
+    fn found(&mut self, page: crate::issue::Page, command: crate::shell::ShellCommand) {
+        match page {
+            crate::issue::Page::PullRequest => self.pull_request = Some(command),
+            crate::issue::Page::Issue => self.issue = Some(command),
+        }
+        self.armed.disarm();
     }
 
     /// What one press of `G` does now.
@@ -1008,7 +1022,8 @@ impl IssueRun {
         if self.running {
             return IssuePress::Nothing;
         }
-        let Some(command) = self.command.clone() else {
+        let Some(steps) = crate::issue::Steps::new(self.pull_request.clone(), self.issue.clone())
+        else {
             return IssuePress::Nothing;
         };
         if self.session == crate::remote::Session::Local || self.armed.is_armed(now) {
@@ -1017,11 +1032,11 @@ impl IssueRun {
             // the wrong machine, with nobody asked a second time for it.
             self.armed.disarm();
             self.running = true;
-            return IssuePress::Run(command);
+            return IssuePress::Run(steps);
         }
         IssuePress::Ask(format!(
             "remote shell — press G again to run {}",
-            command.name()
+            steps.describe()
         ))
     }
 
@@ -1700,7 +1715,7 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
             paint: |output: &str| paint_output(output),
             clock: Instant::now,
             next_tick: |freshest: Option<Duration>| freshest.and_then(next_tick),
-            start_issue: |command: crate::shell::ShellCommand,
+            start_issue: |steps: crate::issue::Steps,
                           current: &WorktreePath,
                           generation: Generation| {
                 // The run keeps the generation of its press and sends it back
@@ -1710,7 +1725,7 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
                 let finish_tx = issue_tx.clone();
                 let shell = shell.clone();
                 thread::spawn(move || {
-                    let outcome = crate::issue::run(&shell, &command, &workdir);
+                    let outcome = crate::issue::run(&shell, &steps, &workdir);
                     let _ = finish_tx.send(Event::IssueFinished {
                         generation,
                         outcome,
@@ -1896,7 +1911,9 @@ fn resolve_home(handle: &RepoHandle) -> Result<WorktreePath> {
 /// the default name of that key. A field of an empty value turns its own key
 /// off, and [`crate::shell::ShellCommand::new`] is where that rule lives.
 struct CommandValues {
-    /// What [`crate::issue::ISSUE_COMMAND_ENV`] says `G` runs.
+    /// What [`crate::issue::PR_COMMAND_ENV`] says `G` runs first.
+    pull_request: Option<String>,
+    /// What [`crate::issue::ISSUE_COMMAND_ENV`] says `G` runs after it.
     issue: Option<String>,
     /// What [`crate::update::REBASE_COMMAND_ENV`] says `R` runs.
     rebase: Option<String>,
@@ -1908,9 +1925,18 @@ impl CommandValues {
     /// What the environment of this process says.
     fn read() -> Self {
         Self {
-            issue: read_value(crate::issue::ISSUE_COMMAND_ENV),
+            pull_request: read_value(crate::issue::Page::PullRequest.env()),
+            issue: read_value(crate::issue::Page::Issue.env()),
             rebase: read_value(crate::update::BaseUpdate::Rebase.env()),
             merge: read_value(crate::update::BaseUpdate::Merge.env()),
+        }
+    }
+
+    /// What the variable of `page` says `G` runs for it.
+    fn page(&self, page: crate::issue::Page) -> Option<&str> {
+        match page {
+            crate::issue::Page::PullRequest => self.pull_request.as_deref(),
+            crate::issue::Page::Issue => self.issue.as_deref(),
         }
     }
 
@@ -1935,7 +1961,8 @@ fn read_value(name: &str) -> Option<String> {
 /// Ask the shell, once, whether the command of every key that runs one exists,
 /// and report each answer on the loop's own channel.
 ///
-/// **One thread and one shell for each key.** A shell that answered for several
+/// **One thread and one shell for each command.** `G` has two commands, so the
+/// three keys that run commands have four probes. A shell that answered for several
 /// names at once would need its standard output parsed, and an rc file can
 /// print to that output — so the answer of such a shell says as much about the
 /// banner of the user as about the commands. Exit status carries one answer,
@@ -1964,16 +1991,22 @@ fn spawn_command_probes(
     deadline: Duration,
     tx: &Sender<Event>,
 ) -> Vec<thread::JoinHandle<()>> {
-    let issue_tx = tx.clone();
-    let mut probes = vec![spawn_probe(
-        shell,
-        values.issue.as_deref(),
-        crate::issue::DEFAULT_ISSUE_COMMAND,
-        deadline,
-        move |command| {
-            let _ = issue_tx.send(Event::IssueCommandFound(command));
-        },
-    )];
+    // Over the pages, as over the acts below: `G` has two commands, and every
+    // difference between them is a method of `Page`.
+    let mut probes: Vec<_> = crate::issue::Page::ALL
+        .map(|page| {
+            let page_tx = tx.clone();
+            spawn_probe(
+                shell,
+                values.page(page),
+                page.default_command(),
+                deadline,
+                move |command| {
+                    let _ = page_tx.send(Event::IssueCommandFound(page, command));
+                },
+            )
+        })
+        .into();
     // Over the acts rather than over two names, so a third act would be probed
     // here without an edit: every difference between the two is a method of
     // `BaseUpdate`, the variable and the default name among them.
@@ -2030,15 +2063,21 @@ mod probe_tests {
     /// the question the shell was really asked and never on a count of runs.
     const PROBE_PREFIX: &str = "command -v ";
 
-    /// The values of the three variables, as a test states them.
+    /// The values of the four variables, as a test states them.
     ///
     /// `None` is a variable the environment does not set, which is the case
     /// that takes the default name of that key. No test of this module sets a
     /// variable: `cargo test` runs the tests of one binary on many threads, so
     /// a test that set `GSW_REBASE_COMMAND` would change what every sibling
     /// test reads.
-    fn values(issue: Option<&str>, rebase: Option<&str>, merge: Option<&str>) -> CommandValues {
+    fn values(
+        pull_request: Option<&str>,
+        issue: Option<&str>,
+        rebase: Option<&str>,
+        merge: Option<&str>,
+    ) -> CommandValues {
         CommandValues {
+            pull_request: pull_request.map(str::to_string),
             issue: issue.map(str::to_string),
             rebase: rebase.map(str::to_string),
             merge: merge.map(str::to_string),
@@ -2085,9 +2124,13 @@ mod probe_tests {
     /// The key rather than the name of the variant, because the question each
     /// test asks is whether an answer reached the key it belongs to. An answer
     /// that reached the other key would bind `M` to the command that rebases.
+    /// An answer for `G` also names its page, because an answer that reached
+    /// the wrong page would run `ggs` first.
     fn answer(event: &Event) -> String {
         match event {
-            Event::IssueCommandFound(command) => format!("G {}", command.name()),
+            Event::IssueCommandFound(page, command) => {
+                format!("G {page:?} {}", command.name())
+            }
             Event::BaseUpdateCommandFound(update, command) => {
                 format!("{} {}", update.key(), command.name())
             }
@@ -2097,19 +2140,70 @@ mod probe_tests {
 
     #[test]
     fn an_unset_variable_probes_the_default_command_of_its_own_key() {
-        // Three keys, three shells, three questions. A key whose variable the
+        // Four probes, four shells, four questions. A key whose variable the
         // environment never names still asks about the name it falls back on,
         // because that name is what the key runs.
         let stub = StubShell::answering(0);
-        let (words, _) = probed(&values(None, None, None), &stub);
+        let (words, _) = probed(&values(None, None, None, None), &stub);
         assert_eq!(
             words,
             [
                 crate::issue::DEFAULT_ISSUE_COMMAND,
+                crate::issue::DEFAULT_PR_COMMAND,
                 BaseUpdate::Merge.default_command(),
                 BaseUpdate::Rebase.default_command(),
             ],
             "each key must ask the shell about its own default command",
+        );
+    }
+
+    #[test]
+    fn an_unset_pr_variable_probes_ggsp_for_the_first_step_of_g() {
+        // `G` has two probes. The first one asks about the command that runs
+        // first, and its answer must reach the page of the pull request.
+        let stub = StubShell::answering(0);
+        let (words, answers) = probed(&values(None, Some("myissue"), Some(""), Some("")), &stub);
+        assert_eq!(
+            words,
+            [crate::issue::DEFAULT_PR_COMMAND, "myissue"],
+            "an unset GSW_PR_COMMAND must ask about the default command of the pull request",
+        );
+        assert_eq!(
+            answers,
+            ["G Issue myissue", "G PullRequest ggsp"],
+            "the answer for ggsp must reach the page of the pull request",
+        );
+    }
+
+    #[test]
+    fn an_empty_pr_variable_starts_no_shell_for_it_and_g_keeps_the_issue_command() {
+        let stub = StubShell::answering(0);
+        let (words, answers) = probed(&values(Some(""), None, Some(""), Some("")), &stub);
+        assert_eq!(
+            words,
+            [crate::issue::DEFAULT_ISSUE_COMMAND],
+            "an empty GSW_PR_COMMAND must start no shell for ggsp",
+        );
+        assert_eq!(
+            answers,
+            ["G Issue ggs"],
+            "G must keep the issue command, and the pull request page must send no answer",
+        );
+    }
+
+    #[test]
+    fn a_pr_variable_with_a_name_in_it_probes_that_command() {
+        let stub = StubShell::answering(0);
+        let (words, answers) = probed(&values(Some("myprs"), None, Some(""), Some("")), &stub);
+        assert_eq!(
+            words,
+            [crate::issue::DEFAULT_ISSUE_COMMAND, "myprs"],
+            "GSW_PR_COMMAND must name the command that the first step of G asks about",
+        );
+        assert_eq!(
+            answers,
+            ["G Issue ggs", "G PullRequest myprs"],
+            "the answer for myprs must reach the page of the pull request",
         );
     }
 
@@ -2120,18 +2214,19 @@ mod probe_tests {
         // nothing at all — no shell, and so no rc file read — and it must turn
         // off the one key it names and no other.
         let stub = StubShell::answering(0);
-        let (words, answers) = probed(&values(None, Some(""), None), &stub);
+        let (words, answers) = probed(&values(None, None, Some(""), None), &stub);
         assert_eq!(
             words,
             [
                 crate::issue::DEFAULT_ISSUE_COMMAND,
+                crate::issue::DEFAULT_PR_COMMAND,
                 BaseUpdate::Merge.default_command(),
             ],
             "an empty GSW_REBASE_COMMAND must start no shell for R, and leave G and M probing",
         );
         assert_eq!(
             answers,
-            ["G ggs", "M gmp"],
+            ["G Issue ggs", "G PullRequest ggsp", "M gmp"],
             "a key that started no shell must send no answer",
         );
     }
@@ -2142,11 +2237,12 @@ mod probe_tests {
         // person's rc file gives it, and a user who calls it something else
         // must have gsw ask about the name they chose.
         let stub = StubShell::answering(0);
-        let (words, answers) = probed(&values(None, None, Some("mymerge")), &stub);
+        let (words, answers) = probed(&values(None, None, None, Some("mymerge")), &stub);
         assert_eq!(
             words,
             [
                 crate::issue::DEFAULT_ISSUE_COMMAND,
+                crate::issue::DEFAULT_PR_COMMAND,
                 BaseUpdate::Rebase.default_command(),
                 "mymerge",
             ],
@@ -2154,21 +2250,21 @@ mod probe_tests {
         );
         assert_eq!(
             answers,
-            ["G ggs", "M mymerge", "R grp"],
+            ["G Issue ggs", "G PullRequest ggsp", "M mymerge", "R grp"],
             "the answer of M must carry the command the user named",
         );
     }
 
     #[test]
     fn each_answer_arrives_as_the_event_of_its_own_key() {
-        // Three answers on one channel, and each must reach the key it belongs
+        // Four answers on one channel, and each must reach the key it belongs
         // to. An answer that reached the other key would bind `M` to the
         // command that rebases the branch and force-pushes it.
         let stub = StubShell::answering(0);
-        let (_, answers) = probed(&values(None, None, None), &stub);
+        let (_, answers) = probed(&values(None, None, None, None), &stub);
         assert_eq!(
             answers,
-            ["G ggs", "M gmp", "R grp"],
+            ["G Issue ggs", "G PullRequest ggsp", "M gmp", "R grp"],
             "each key must be bound by the answer of its own probe",
         );
     }
@@ -2179,17 +2275,17 @@ mod probe_tests {
         // about how fast a shell answers. A busy machine can hold a stub that
         // exits at once for longer than the bound of a user: a hook run of
         // 2026-10-14 sent no answer at all, and the stubs it started had
-        // recorded all three questions.
+        // recorded all four questions.
         //
         // The stub answers one second after the bound of a user, on a machine
         // of any speed. So this test fails wherever the probes of this module
         // wait only for the bound of a user.
         let late = crate::shell::PROBE_DEADLINE + Duration::from_secs(1);
         let stub = StubShell::new(&format!("sleep {}; exit 0", late.as_secs()));
-        let (_, answers) = probed(&values(None, None, None), &stub);
+        let (_, answers) = probed(&values(None, None, None, None), &stub);
         assert_eq!(
             answers,
-            ["G ggs", "M gmp", "R grp"],
+            ["G Issue ggs", "G PullRequest ggsp", "M gmp", "R grp"],
             "a slow answer must still reach its key. The probes of these tests must wait for a \
              bound of their own, and not for the bound of a user",
         );
@@ -2678,8 +2774,8 @@ struct LoopHooks<
     /// [`Event::BaseUpdateFinished`]; tests record the command and decide for
     /// themselves when, or whether, the outcome arrives.
     start_base_update: StartBaseUpdate,
-    /// Start a run of the issue command in the worktree on the screen at the
-    /// press. Production spawns a thread that runs it and sends the outcome
+    /// Start the steps of a press of `G` in the worktree on the screen at the
+    /// press. Production spawns a thread that runs them and sends the outcome
     /// back as [`Event::IssueFinished`], with the [`Generation`] it was given;
     /// tests record the command and decide for themselves when the outcome
     /// arrives.
@@ -2844,7 +2940,7 @@ where
     Clock: Fn() -> Instant,
     StartPush: FnMut(PushCommand, &WorktreePath),
     StartBaseUpdate: FnMut(crate::update::BaseUpdateCommand, &WorktreePath),
-    StartIssue: FnMut(crate::shell::ShellCommand, &WorktreePath, Generation),
+    StartIssue: FnMut(crate::issue::Steps, &WorktreePath, Generation),
     StartConflicts: FnMut(&WorktreePath, Generation),
     Worktrees: FnMut() -> Vec<WorktreeEntry>,
     Paths: FnMut() -> Vec<WorktreePath>,
@@ -3094,7 +3190,7 @@ where
                 IssuePress::Nothing => {}
             }
         }
-        Event::IssueCommandFound(command) => state.issue.found(command),
+        Event::IssueCommandFound(page, command) => state.issue.found(page, command),
         // The check and the start are one step on the thread of the loop, so
         // a burst of presses starts one run. See [`ConflictsRun`].
         Event::ConflictsRequested => match state.conflicts.press() {
@@ -3329,7 +3425,7 @@ where
     Tick: Fn(Option<Duration>) -> Option<Duration>,
     StartPush: FnMut(PushCommand, &WorktreePath),
     StartBaseUpdate: FnMut(crate::update::BaseUpdateCommand, &WorktreePath),
-    StartIssue: FnMut(crate::shell::ShellCommand, &WorktreePath, Generation),
+    StartIssue: FnMut(crate::issue::Steps, &WorktreePath, Generation),
     StartConflicts: FnMut(&WorktreePath, Generation),
     Worktrees: FnMut() -> Vec<WorktreeEntry>,
     Paths: FnMut() -> Vec<WorktreePath>,
@@ -5829,7 +5925,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -5892,7 +5988,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -5958,7 +6054,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -6026,7 +6122,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -6090,7 +6186,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -6151,7 +6247,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -6214,7 +6310,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -6277,7 +6373,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -6341,7 +6437,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -6411,7 +6507,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -6739,7 +6835,7 @@ mod tests {
                     start_push: |_command: PushCommand, _current: &WorktreePath| {},
                     start_base_update:
                         |_command: crate::update::BaseUpdateCommand, _current: &WorktreePath| {},
-                    start_issue: |_command: crate::shell::ShellCommand,
+                    start_issue: |_steps: crate::issue::Steps,
                                   _current: &WorktreePath,
                                   _generation: Generation| {},
                     start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -7288,7 +7384,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -7359,7 +7455,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -7440,7 +7536,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -7540,7 +7636,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -7644,7 +7740,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -7729,7 +7825,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -7821,7 +7917,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -7912,7 +8008,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -7983,7 +8079,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -8067,7 +8163,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -8175,7 +8271,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -8307,7 +8403,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -8551,8 +8647,9 @@ mod push_loop_tests {
         /// right thing once at the end and a loop that paints it as it happens
         /// leave the same final screen behind.
         paints: Vec<String>,
-        /// Every issue command the loop started a run of, in order.
-        issue_runs: Vec<crate::shell::ShellCommand>,
+        /// The steps of every press of `G` that the loop started a run of, in
+        /// order.
+        issue_runs: Vec<crate::issue::Steps>,
         /// How many measurements the loop started with `m`.
         conflict_runs: usize,
         /// Every worktree the `switch` hook was asked to open, in order,
@@ -8574,7 +8671,7 @@ mod push_loop_tests {
         /// The worktree each of those started in, in the order of
         /// [`Seen::base_updates`].
         base_update_paths: Vec<WorktreePath>,
-        /// The worktree and the generation of each run of the issue command,
+        /// The worktree and the generation of each press of `G`,
         /// in the order of [`Seen::issue_runs`].
         issue_paths: Vec<(WorktreePath, Generation)>,
         /// The worktree and the generation of each run of `m`, in order.
@@ -9100,11 +9197,11 @@ mod push_loop_tests {
                     seen.base_updates.push(command);
                     seen.base_update_paths.push(current.clone());
                 },
-                start_issue: |command: crate::shell::ShellCommand,
+                start_issue: |steps: crate::issue::Steps,
                               current: &WorktreePath,
                               generation: Generation| {
                     let mut seen = seen.borrow_mut();
-                    seen.issue_runs.push(command);
+                    seen.issue_runs.push(steps);
                     seen.issue_paths.push((current.clone(), generation));
                 },
                 start_conflicts: |current: &WorktreePath, generation: Generation| {
@@ -9191,9 +9288,31 @@ mod push_loop_tests {
             .expect("the default names a command")
     }
 
+    /// The steps of a press whose probe found [`found_command`] alone.
+    fn found_steps() -> crate::issue::Steps {
+        crate::issue::Steps::new(None, Some(found_command())).expect("one command is a step")
+    }
+
+    /// The command the probe of the pull request found.
+    fn found_pr_command() -> crate::shell::ShellCommand {
+        crate::shell::ShellCommand::new(None, crate::issue::DEFAULT_PR_COMMAND)
+            .expect("the default names a command")
+    }
+
+    /// The steps of a press whose probes found both commands.
+    fn both_steps() -> crate::issue::Steps {
+        crate::issue::Steps::new(Some(found_pr_command()), Some(found_command()))
+            .expect("two commands are steps")
+    }
+
     /// The probe's answer, as the loop receives it.
     fn probe_answered() -> Event {
-        Event::IssueCommandFound(found_command())
+        Event::IssueCommandFound(crate::issue::Page::Issue, found_command())
+    }
+
+    /// The answer of the probe of the pull request, as the loop receives it.
+    fn pr_probe_answered() -> Event {
+        Event::IssueCommandFound(crate::issue::Page::PullRequest, found_pr_command())
     }
 
     /// One press of `G`.
@@ -9204,7 +9323,7 @@ mod push_loop_tests {
     /// An [`IssueRun`] in `session`, whose probe has answered.
     fn issue_run_in(session: crate::remote::Session) -> IssueRun {
         let mut issue = IssueRun::new(session);
-        issue.found(found_command());
+        issue.found(crate::issue::Page::Issue, found_command());
         issue
     }
 
@@ -9227,8 +9346,19 @@ mod push_loop_tests {
         let mut issue = issue_run_in(crate::remote::Session::Local);
         assert_eq!(
             issue.press(Instant::now()),
-            IssuePress::Run(found_command()),
+            IssuePress::Run(found_steps()),
             "a local shell must run the command on the first press",
+        );
+    }
+
+    #[test]
+    fn a_press_that_found_both_commands_runs_the_pull_request_command_first() {
+        let mut issue = issue_run_in(crate::remote::Session::Local);
+        issue.found(crate::issue::Page::PullRequest, found_pr_command());
+        assert_eq!(
+            issue.press(Instant::now()),
+            IssuePress::Run(both_steps()),
+            "a press must try the pull request command first and the issue command after it",
         );
     }
 
@@ -9244,6 +9374,17 @@ mod push_loop_tests {
     }
 
     #[test]
+    fn a_first_press_on_a_remote_shell_names_both_commands() {
+        let mut issue = issue_run_in(crate::remote::Session::Remote);
+        issue.found(crate::issue::Page::PullRequest, found_pr_command());
+        assert_eq!(
+            issue.press(Instant::now()),
+            IssuePress::Ask("remote shell — press G again to run ggsp, then ggs".to_string()),
+            "the message must name each command the second press can run, in order",
+        );
+    }
+
+    #[test]
     fn a_second_press_on_a_remote_shell_runs_the_command() {
         // The caller arms, because only the row knows whether the words it
         // returned reached the screen. `absorb` makes this pair of calls.
@@ -9253,7 +9394,7 @@ mod push_loop_tests {
         issue.arm(now);
         assert_eq!(
             issue.press(now + Duration::from_secs(1)),
-            IssuePress::Run(found_command()),
+            IssuePress::Run(found_steps()),
             "the second press must run the command the message named",
         );
     }
@@ -9289,6 +9430,22 @@ mod push_loop_tests {
             issue.press(now),
             IssuePress::Ask(SECOND_PRESS_NOTICE.to_string()),
             "a key other than `G` must leave the next press asking",
+        );
+    }
+
+    #[test]
+    fn an_answer_between_two_presses_takes_the_arming_away() {
+        // The message named the steps of the first press. An answer changes
+        // the steps, so the next press must ask again with the new names.
+        let now = Instant::now();
+        let mut issue = issue_run_in(crate::remote::Session::Remote);
+        issue.press(now);
+        issue.arm(now);
+        issue.found(crate::issue::Page::PullRequest, found_pr_command());
+        assert_eq!(
+            issue.press(now + Duration::from_secs(1)),
+            IssuePress::Ask("remote shell — press G again to run ggsp, then ggs".to_string()),
+            "an answer between two presses must leave the next press asking",
         );
     }
 
@@ -9385,12 +9542,52 @@ mod push_loop_tests {
     }
 
     #[test]
+    fn a_second_g_on_a_remote_shell_runs_both_steps() {
+        let (screen, seen) = run_loop_remote(vec![
+            pr_probe_answered(),
+            probe_answered(),
+            press_g(),
+            press_g(),
+            Event::Quit,
+        ]);
+        assert!(
+            strip_ansi(&screen).contains("remote shell — press G again to run ggsp, then ggs"),
+            "the first press must name both commands on the screen, got {screen:?}",
+        );
+        assert_eq!(
+            seen.issue_runs,
+            vec![both_steps()],
+            "the second press must run both steps",
+        );
+    }
+
+    #[test]
+    fn a_probe_answer_between_two_presses_makes_the_second_press_ask_again() {
+        let (screen, seen) = run_loop_remote(vec![
+            probe_answered(),
+            press_g(),
+            pr_probe_answered(),
+            press_g(),
+            Event::Quit,
+        ]);
+        assert!(
+            seen.issue_runs.is_empty(),
+            "the second press must not run a command the notice did not name, got {:?}",
+            seen.issue_runs,
+        );
+        assert!(
+            strip_ansi(&screen).contains("remote shell — press G again to run ggsp, then ggs"),
+            "the second press must ask again with both names, got {screen:?}",
+        );
+    }
+
+    #[test]
     fn a_second_g_on_a_remote_shell_starts_the_run() {
         let (_screen, seen) =
             run_loop_remote(vec![probe_answered(), press_g(), press_g(), Event::Quit]);
         assert_eq!(
             seen.issue_runs,
-            vec![found_command()],
+            vec![found_steps()],
             "the second press must run the command",
         );
     }
@@ -9431,7 +9628,7 @@ mod push_loop_tests {
         );
         assert_eq!(
             seen.issue_runs,
-            vec![found_command()],
+            vec![found_steps()],
             "each press must read the clock once, so the second press runs the command",
         );
     }
@@ -9505,8 +9702,34 @@ mod push_loop_tests {
         let (_screen, seen) = run_loop(vec![probe_answered(), press_g(), Event::Quit]);
         assert_eq!(
             seen.issue_runs,
-            vec![found_command()],
+            vec![found_steps()],
             "the key must run the command the probe found",
+        );
+    }
+
+    #[test]
+    fn g_with_only_the_pull_request_command_runs_it_alone() {
+        let (_screen, seen) = run_loop(vec![pr_probe_answered(), press_g(), Event::Quit]);
+        assert_eq!(
+            seen.issue_runs,
+            vec![crate::issue::Steps::new(Some(found_pr_command()), None)
+                .expect("one command is a step")],
+            "a key whose only command is the pull request command must run it alone",
+        );
+    }
+
+    #[test]
+    fn g_with_both_commands_runs_both_steps_in_order() {
+        let (_screen, seen) = run_loop(vec![
+            pr_probe_answered(),
+            probe_answered(),
+            press_g(),
+            Event::Quit,
+        ]);
+        assert_eq!(
+            seen.issue_runs,
+            vec![both_steps()],
+            "a key with both commands must run the pull request command, then the issue command",
         );
     }
 
@@ -9530,7 +9753,7 @@ mod push_loop_tests {
             press_g(),
             Event::IssueFinished {
                 generation: Generation::default(),
-                outcome: crate::issue::IssueOutcome::new("ggs", true, &[], "exit status: 0"),
+                outcome: crate::issue::IssueOutcome::opened(),
             },
             press_g(),
             Event::Quit,
@@ -9552,9 +9775,8 @@ mod push_loop_tests {
             press_g(),
             Event::IssueFinished {
                 generation: Generation::default(),
-                outcome: crate::issue::IssueOutcome::new(
+                outcome: crate::issue::IssueOutcome::failed(
                     "ggs",
-                    false,
                     &["branch main names no issue".to_string()],
                     "exit status: 2",
                 ),
@@ -9575,7 +9797,7 @@ mod push_loop_tests {
             press_g(),
             Event::IssueFinished {
                 generation: Generation::default(),
-                outcome: crate::issue::IssueOutcome::new("ggs", true, &[], "exit status: 0"),
+                outcome: crate::issue::IssueOutcome::opened(),
             },
             Event::Quit,
         ]);
@@ -9957,7 +10179,7 @@ mod push_loop_tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -10806,10 +11028,10 @@ mod push_loop_tests {
                         |command: crate::update::BaseUpdateCommand, _current: &WorktreePath| {
                             seen.borrow_mut().base_updates.push(command)
                         },
-                    start_issue: |command: crate::shell::ShellCommand,
+                    start_issue: |steps: crate::issue::Steps,
                                   _current: &WorktreePath,
                                   _generation: Generation| {
-                        seen.borrow_mut().issue_runs.push(command);
+                        seen.borrow_mut().issue_runs.push(steps);
                     },
                     start_conflicts: |_current: &WorktreePath, _generation: Generation| {
                         seen.borrow_mut().conflict_runs += 1
@@ -11208,15 +11430,14 @@ mod push_loop_tests {
     /// The last line that [`issue_failed_in`] reports.
     const ISSUE_REFUSAL: &str = "branch main names no issue";
 
-    /// The outcome of a run of the issue command that failed, with the
+    /// The outcome of a press of `G` that failed, with the
     /// generation `generation`, as the loop receives it. Its line waits for a
     /// key.
     fn issue_failed_in(generation: Generation) -> Event {
         Event::IssueFinished {
             generation,
-            outcome: crate::issue::IssueOutcome::new(
+            outcome: crate::issue::IssueOutcome::failed(
                 "ggs",
-                false,
                 &[ISSUE_REFUSAL.to_string()],
                 "exit status: 2",
             ),
@@ -14097,7 +14318,7 @@ mod watched_tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},

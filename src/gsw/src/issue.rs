@@ -1,28 +1,30 @@
-//! Opening the issue that the branch names, from watch mode.
+//! Opening the pull request or the issue of the branch, from watch mode.
 //!
-//! The `G` key of watch mode runs one command in the user's own interactive
-//! shell. That command is usually a shell function, so only a shell can find
-//! it and only a shell can run it. [`crate::shell`] asks the shell both
-//! questions, and it starts the child — for this key and for every other key
-//! that runs a command the user supplies.
+//! The `G` key of watch mode runs up to two commands in the user's own
+//! interactive shell. The command of the pull request runs first. Where it
+//! fails, the command of the issue runs, so a branch with no pull request
+//! still opens its issue. Each command is usually a shell function, so only a
+//! shell can find it and only a shell can run it. [`crate::shell`] asks the
+//! shell both questions, and it starts each child — for this key and for every
+//! other key that runs a command the user supplies.
 //!
-//! What is here is what belongs to `G` alone: the variable that names its
-//! command, the name it falls back on, how long a run gets, and the words a
-//! finished run leaves under the frame.
+//! What is here is what belongs to `G` alone: the variables that name its
+//! commands, the names they fall back on, the order of the steps, how long a
+//! press gets, and the words a finished press leaves under the frame.
 
 use std::ffi::OsStr;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::shell::{last_with_text, run_command, start_run, OutputStream, RunEnd, ShellCommand};
 
-/// The variable that holds the command `G` runs.
+/// The variable that holds the command `G` runs second, where the first step fails.
 ///
 /// The value is a whole command line, so it can carry arguments. See
 /// [`ShellCommand`] for what gsw does with each part of it.
 pub(crate) const ISSUE_COMMAND_ENV: &str = "GSW_ISSUE_COMMAND";
 
-/// The command `G` runs when the environment names none.
+/// The command `G` runs second when the environment names none.
 ///
 /// This repository ships no `ggs`. It is a shell function that the user
 /// supplies, and it is the default here because it is the name that the plans
@@ -30,7 +32,97 @@ pub(crate) const ISSUE_COMMAND_ENV: &str = "GSW_ISSUE_COMMAND";
 /// different one.
 pub(crate) const DEFAULT_ISSUE_COMMAND: &str = "ggs";
 
-/// What a finished run of the issue command leaves under the frame.
+/// The variable that holds the command `G` runs first.
+///
+/// The value is a whole command line, as the value of [`ISSUE_COMMAND_ENV`] is.
+pub(crate) const PR_COMMAND_ENV: &str = "GSW_PR_COMMAND";
+
+/// The command `G` runs first when the environment names none.
+///
+/// Like [`DEFAULT_ISSUE_COMMAND`], this repository ships no `ggsp`. It is a
+/// shell function that the user supplies. [`PR_COMMAND_ENV`] names a different
+/// one.
+pub(crate) const DEFAULT_PR_COMMAND: &str = "ggsp";
+
+/// One of the two pages that `G` can open, in the order a press tries them.
+///
+/// Each page has its own command, its own variable, and its own probe. The
+/// type holds every difference between them, so code that works on both pages
+/// loops over [`Page::ALL`] and names neither page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Page {
+    /// The pull request of the branch. A press tries it first.
+    PullRequest,
+    /// The issue of the branch. A press tries it where the first step fails.
+    Issue,
+}
+
+impl Page {
+    /// Every page, in the order a press tries them.
+    pub(crate) const ALL: [Self; 2] = [Self::PullRequest, Self::Issue];
+
+    /// The variable that holds the command of this page.
+    pub(crate) fn env(self) -> &'static str {
+        match self {
+            Self::PullRequest => PR_COMMAND_ENV,
+            Self::Issue => ISSUE_COMMAND_ENV,
+        }
+    }
+
+    /// The command of this page when the environment names none.
+    pub(crate) fn default_command(self) -> &'static str {
+        match self {
+            Self::PullRequest => DEFAULT_PR_COMMAND,
+            Self::Issue => DEFAULT_ISSUE_COMMAND,
+        }
+    }
+}
+
+/// The commands that one press of `G` runs, in the order it runs them.
+///
+/// The command of the pull request comes first, and the command of the issue
+/// comes second. A press always has one command at least, because a key with
+/// no command is unbound — so the first command is a field and not an
+/// `Option`, and [`Steps::new`] is the one door in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Steps {
+    /// The command that runs first.
+    first: ShellCommand,
+    /// The command that runs where the first one fails, if there is one.
+    then: Option<ShellCommand>,
+}
+
+impl Steps {
+    /// The steps of a press, from the command of the pull request and the
+    /// command of the issue that the probes found.
+    ///
+    /// `None` where the probes found neither command, which is a key with
+    /// nothing behind it.
+    pub(crate) fn new(
+        pull_request: Option<ShellCommand>,
+        issue: Option<ShellCommand>,
+    ) -> Option<Self> {
+        match (pull_request, issue) {
+            (Some(first), then) => Some(Self { first, then }),
+            (None, Some(first)) => Some(Self { first, then: None }),
+            (None, None) => None,
+        }
+    }
+
+    /// The names of the commands, in the order a press runs them: `ggsp, then
+    /// ggs`, or `ggs` alone.
+    ///
+    /// This is what the notice on a remote shell says, so the user reads each
+    /// command that the second press can run before they press.
+    pub(crate) fn describe(&self) -> String {
+        match &self.then {
+            Some(then) => format!("{}, then {}", self.first.name(), then.name()),
+            None => self.first.name().to_string(),
+        }
+    }
+}
+
+/// What a finished press of `G` leaves under the frame.
 ///
 /// `None` is a run that worked. The browser is the answer, and a monitor that
 /// also posted a line would spend a row of the frame saying what the user is
@@ -41,18 +133,22 @@ pub(crate) struct IssueOutcome {
 }
 
 impl IssueOutcome {
-    /// The outcome of a run of `name` that wrote `lines` and ended the way
-    /// `status` reads.
+    /// The outcome of a press that opened a page.
+    ///
+    /// It says nothing, because the browser is the answer.
+    pub(crate) const fn opened() -> Self {
+        Self { message: None }
+    }
+
+    /// The outcome of a step of `name` that failed. The step wrote `lines`
+    /// and ended the way `status` reads.
     ///
     /// A failure says the last line that has text in it. That text comes from
     /// another program: `ggs` refuses with exit status 2 on a branch that
     /// names no issue, and that refusal is the whole reason the key did
     /// nothing. A failure that wrote nothing has only the status left to
     /// report, and a blank row under the frame would read as success.
-    pub(crate) fn new(name: &str, success: bool, lines: &[String], status: &str) -> Self {
-        if success {
-            return Self { message: None };
-        }
+    pub(crate) fn failed(name: &str, lines: &[String], status: &str) -> Self {
         Self {
             message: Some(
                 last_with_text(lines.iter().map(String::as_str))
@@ -105,15 +201,73 @@ impl IssueOutcome {
 /// than a slow fetch and shorter than a session.
 pub(crate) const RUN_DEADLINE: Duration = Duration::from_secs(60);
 
-/// Run `command` in `workdir` and report what to say about it.
+/// Run `steps` in `workdir` and report what to say about them.
 ///
 /// Blocking: the caller runs it on a thread of its own.
-pub(crate) fn run(shell: &OsStr, command: &ShellCommand, workdir: &Path) -> IssueOutcome {
-    run_in(shell, command, workdir, &std::env::temp_dir(), RUN_DEADLINE)
+pub(crate) fn run(shell: &OsStr, steps: &Steps, workdir: &Path) -> IssueOutcome {
+    run_in(shell, steps, workdir, &std::env::temp_dir(), RUN_DEADLINE)
+}
+
+/// Run `steps` in `workdir`, with the two files of each run in `scratch`, and
+/// stop waiting after `deadline`.
+///
+/// The steps run in order, and these four rules decide what a step means:
+///
+/// 1. **One press keeps one deadline.** Each step gets what is left of
+///    `deadline`. Where nothing is left, the next step still starts, with a
+///    wait of zero, and it reports "still running" at once.
+/// 2. A step that exits 0 completes the press. The outcome has no message,
+///    and later steps do not run.
+/// 3. A step that exits non-zero, or that cannot start, hands the press to
+///    the next step. After the last step, the outcome is the outcome of the
+///    last step that ran. The words of an earlier step never reach the
+///    message.
+/// 4. A step that is still running at the deadline ends the press. The next
+///    step does not start, because two commands that open a page at the same
+///    time are worse than one command that is slow. The message names that step and
+///    the whole deadline of the press.
+fn run_in(
+    shell: &OsStr,
+    steps: &Steps,
+    workdir: &Path,
+    scratch: &Path,
+    deadline: Duration,
+) -> IssueOutcome {
+    let started = Instant::now();
+    // `saturating_sub` stops at zero. A step that starts with nothing left
+    // waits for zero, so it reports "still running" at once.
+    let left = || deadline.saturating_sub(started.elapsed());
+    let mut last = match run_step(shell, &steps.first, workdir, scratch, left(), deadline) {
+        StepEnd::Opened => return IssueOutcome::opened(),
+        StepEnd::Failed(outcome) => outcome,
+        StepEnd::StillRunning(outcome) => return outcome,
+    };
+    if let Some(then) = &steps.then {
+        match run_step(shell, then, workdir, scratch, left(), deadline) {
+            StepEnd::Opened => return IssueOutcome::opened(),
+            StepEnd::Failed(outcome) | StepEnd::StillRunning(outcome) => last = outcome,
+        }
+    }
+    last
+}
+
+/// How one step of a press ended.
+enum StepEnd {
+    /// The command exited 0, so the page is open.
+    Opened,
+    /// The command exited non-zero, or it could not start. The outcome holds
+    /// what to say if no later step opens the page.
+    Failed(IssueOutcome),
+    /// The command was still running at the deadline. The outcome holds the
+    /// timeout, and the press ends here.
+    StillRunning(IssueOutcome),
 }
 
 /// Run `command` in `workdir`, with the two files of the run in `scratch`, and
-/// stop waiting after `deadline`.
+/// stop waiting after `wait`.
+///
+/// `deadline` is the deadline of the whole press. A step that is still running
+/// names it in the message, and not the time that was left to it.
 ///
 /// The directory is a parameter so a test can watch it. Production passes
 /// [`std::env::temp_dir`].
@@ -136,19 +290,22 @@ pub(crate) fn run(shell: &OsStr, command: &ShellCommand, workdir: &Path) -> Issu
 /// defunct entry for the life of the session — which is the cost this deadline
 /// exists to avoid. So the child goes to a thread that waits for it. That
 /// thread ends when the child ends, so the child is what bounds it.
-fn run_in(
+fn run_step(
     shell: &OsStr,
     command: &ShellCommand,
     workdir: &Path,
     scratch: &Path,
+    wait: Duration,
     deadline: Duration,
-) -> IssueOutcome {
+) -> StepEnd {
     let name = command.name();
     // The shell is gone, it cannot be started, there is nowhere to put what it
     // writes, or it cannot be asked about. Rare, and worth saying plainly:
     // every other failure here is the child's own words.
-    let cannot_run = |error: std::io::Error| IssueOutcome {
-        message: Some(format!("cannot run {name}: {error}")),
+    let cannot_run = |error: std::io::Error| {
+        StepEnd::Failed(IssueOutcome {
+            message: Some(format!("cannot run {name}: {error}")),
+        })
     };
     let run = match start_run(run_command(shell, command, workdir), scratch) {
         Ok(run) => run,
@@ -160,15 +317,16 @@ fn run_in(
     // did on one stream and why it stopped on the other.
     let mut lines = Vec::new();
     let mut reasons = Vec::new();
-    let end = run.wait(Some(deadline), &mut |stream, line| match stream {
+    let end = run.wait(Some(wait), &mut |stream, line| match stream {
         OutputStream::Stdout => lines.push(line),
         OutputStream::Stderr => reasons.push(line),
     });
     lines.append(&mut reasons);
 
     match end {
+        Ok(RunEnd::Exited(status)) if status.success() => StepEnd::Opened,
         Ok(RunEnd::Exited(status)) => {
-            IssueOutcome::new(name, status.success(), &lines, &status.to_string())
+            StepEnd::Failed(IssueOutcome::failed(name, &lines, &status.to_string()))
         }
         // A command that said why before it stopped answering is worth
         // showing, and the timeout is worth saying either way.
@@ -176,7 +334,7 @@ fn run_in(
             std::thread::spawn(move || {
                 let _ = child.wait();
             });
-            IssueOutcome::unfinished(name, &lines, deadline)
+            StepEnd::StillRunning(IssueOutcome::unfinished(name, &lines, deadline))
         }
         Err(error) => cannot_run(error),
     }
@@ -194,7 +352,7 @@ mod outcome_tests {
     #[test]
     fn a_run_that_worked_says_nothing() {
         // The browser is the answer.
-        let outcome = IssueOutcome::new("ggs", true, &lines("opened\n"), "exit status: 0");
+        let outcome = IssueOutcome::opened();
         assert_eq!(outcome.message(), None);
     }
 
@@ -202,9 +360,8 @@ mod outcome_tests {
     fn a_run_that_failed_says_the_last_line_the_child_wrote() {
         // `ggs` refuses on a branch that names no issue, and that refusal is
         // the whole reason the key did nothing.
-        let outcome = IssueOutcome::new(
+        let outcome = IssueOutcome::failed(
             "ggs",
-            false,
             &lines("looking\nbranch main names no issue\n"),
             "exit status: 2",
         );
@@ -213,14 +370,14 @@ mod outcome_tests {
 
     #[test]
     fn a_run_that_failed_ignores_the_empty_lines_after_its_last_word() {
-        let outcome = IssueOutcome::new("ggs", false, &lines("no issue\n\n   \n"), "exit: 2");
+        let outcome = IssueOutcome::failed("ggs", &lines("no issue\n\n   \n"), "exit: 2");
         assert_eq!(outcome.message(), Some("no issue"));
     }
 
     #[test]
     fn a_run_that_failed_in_silence_names_the_exit_status() {
         // A blank row under the frame reads as success.
-        let outcome = IssueOutcome::new("ggs", false, &[], "exit status: 2");
+        let outcome = IssueOutcome::failed("ggs", &[], "exit status: 2");
         assert_eq!(outcome.message(), Some("ggs failed (exit status: 2)"));
     }
 }
@@ -234,16 +391,159 @@ mod run_tests {
     use std::sync::mpsc::channel;
     use std::time::Instant;
 
-    /// The default command, which is what every test here runs.
-    fn default_command() -> ShellCommand {
-        ShellCommand::new(None, DEFAULT_ISSUE_COMMAND).expect("the default names a command")
+    /// The steps of a press that found the default issue command alone,
+    /// which is what every test here runs.
+    fn default_steps() -> Steps {
+        let command =
+            ShellCommand::new(None, DEFAULT_ISSUE_COMMAND).expect("the default names a command");
+        Steps::new(None, Some(command)).expect("one command is a step")
+    }
+
+    /// The press of two steps: the pull request command, then the issue
+    /// command.
+    fn two_steps() -> Steps {
+        let pull_request =
+            ShellCommand::new(None, DEFAULT_PR_COMMAND).expect("the default names a command");
+        let issue =
+            ShellCommand::new(None, DEFAULT_ISSUE_COMMAND).expect("the default names a command");
+        Steps::new(Some(pull_request), Some(issue)).expect("two commands are steps")
+    }
+
+    /// The steps that ran, in order, out of every argument the stub recorded.
+    fn steps_run(runs: &str) -> Vec<&str> {
+        runs.lines()
+            .filter(|line| *line == DEFAULT_PR_COMMAND || *line == DEFAULT_ISSUE_COMMAND)
+            .collect()
+    }
+
+    #[test]
+    fn a_failed_pull_request_command_hands_the_press_to_the_issue_command() {
+        let stub = StubShell::new(
+            "case \"$2\" in\n  ggsp) echo 'no pull request for this branch' >&2; exit 1 ;;\n  *) exit 0 ;;\nesac",
+        );
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let outcome = run(stub.as_shell(), &two_steps(), workdir.path());
+        assert_eq!(
+            outcome.message(),
+            None,
+            "the issue command opened the page, so the words of the first step must not show",
+        );
+        assert_eq!(
+            steps_run(&stub.runs()),
+            [DEFAULT_PR_COMMAND, DEFAULT_ISSUE_COMMAND],
+            "the pull request command runs first and the issue command after it",
+        );
+        let cwds: Vec<_> = stub
+            .cwds()
+            .iter()
+            .map(|dir| std::fs::canonicalize(dir).expect("resolve the path"))
+            .collect();
+        let expected = std::fs::canonicalize(workdir.path()).expect("resolve the path");
+        assert_eq!(
+            cwds,
+            [expected.clone(), expected],
+            "both steps run in the work tree",
+        );
+    }
+
+    #[test]
+    fn a_pull_request_command_still_running_at_the_deadline_starts_no_second_step() {
+        let stub = StubShell::new(
+            "case \"$2\" in\n  ggsp) echo $$ > <PID_FILE>\n    exec sleep 30 ;;\n  *) exit 0 ;;\nesac",
+        );
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let outcome = run_in(
+            stub.as_shell(),
+            &two_steps(),
+            workdir.path(),
+            scratch.path(),
+            HANG_DEADLINE,
+        );
+        assert_eq!(
+            steps_run(&stub.runs()),
+            [DEFAULT_PR_COMMAND],
+            "a step that is still running must not hand the press to the next step",
+        );
+        assert_eq!(
+            outcome.message(),
+            Some(format!("ggsp has not finished after {}s", HANG_DEADLINE.as_secs()).as_str()),
+        );
+        kill_now(stub.wait_for_pid());
+    }
+
+    #[test]
+    fn the_two_steps_share_one_deadline() {
+        // The first step takes 2 s and fails. The second hangs. A second step
+        // with a deadline of its own cannot return before 2 s + 4 s.
+        let deadline = Duration::from_secs(4);
+        let stub = StubShell::new(
+            "case \"$2\" in\n  ggsp) sleep 2; exit 1 ;;\n  *) echo $$ > <PID_FILE>\n    exec sleep 30 ;;\nesac",
+        );
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let started = Instant::now();
+        let outcome = run_in(
+            stub.as_shell(),
+            &two_steps(),
+            workdir.path(),
+            scratch.path(),
+            deadline,
+        );
+        let elapsed = started.elapsed();
+        let ran_issue_command = steps_run(&stub.runs()).contains(&DEFAULT_ISSUE_COMMAND);
+        if ran_issue_command {
+            kill_now(stub.wait_for_pid());
+        }
+        assert!(
+            elapsed < Duration::from_secs(6),
+            "the press must stop at its own deadline, and it took {elapsed:?}",
+        );
+        let message = outcome.message().expect("a press that hangs must say so");
+        assert!(
+            message.contains("has not finished after 4s"),
+            "the message must name the deadline of the press: {message:?}",
+        );
+    }
+
+    #[test]
+    fn a_pull_request_command_that_opens_the_page_runs_no_issue_command() {
+        let stub = StubShell::answering(0);
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let outcome = run(stub.as_shell(), &two_steps(), workdir.path());
+        assert_eq!(outcome.message(), None, "the browser is the answer");
+        assert_eq!(
+            steps_run(&stub.runs()),
+            [DEFAULT_PR_COMMAND],
+            "a step that exits 0 completes the press",
+        );
+    }
+
+    #[test]
+    fn when_both_steps_fail_the_row_shows_the_last_line_of_the_issue_command() {
+        let stub = StubShell::new(
+            "case \"$2\" in\n  ggsp) echo 'no pull request for this branch' >&2; exit 1 ;;\n  *) echo 'branch main names no issue' >&2; exit 2 ;;\nesac",
+        );
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let outcome = run(stub.as_shell(), &two_steps(), workdir.path());
+        assert_eq!(outcome.message(), Some("branch main names no issue"));
+    }
+
+    #[test]
+    fn when_the_issue_command_fails_in_silence_the_row_names_it_and_not_the_first_step() {
+        let stub = StubShell::new(
+            "case \"$2\" in\n  ggsp) echo 'no pull request for this branch' >&2; exit 1 ;;\n  *) exit 2 ;;\nesac",
+        );
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let outcome = run(stub.as_shell(), &two_steps(), workdir.path());
+        assert_eq!(outcome.message(), Some("ggs failed (exit status: 2)"));
     }
 
     #[test]
     fn a_run_that_worked_leaves_no_message() {
         let stub = StubShell::answering(0);
         let workdir = tempfile::tempdir().expect("tempdir");
-        let outcome = run(stub.as_shell(), &default_command(), workdir.path());
+        let outcome = run(stub.as_shell(), &default_steps(), workdir.path());
         assert_eq!(outcome.message(), None, "the browser is the answer");
         let runs = stub.runs();
         assert!(
@@ -256,7 +556,7 @@ mod run_tests {
     fn a_run_that_failed_puts_what_the_child_said_under_the_frame() {
         let stub = StubShell::new("echo 'branch main names no issue' >&2\nexit 2");
         let workdir = tempfile::tempdir().expect("tempdir");
-        let outcome = run(stub.as_shell(), &default_command(), workdir.path());
+        let outcome = run(stub.as_shell(), &default_steps(), workdir.path());
         assert_eq!(
             outcome.message(),
             Some("branch main names no issue"),
@@ -278,7 +578,7 @@ mod run_tests {
         let started = Instant::now();
         let outcome = run_in(
             stub.as_shell(),
-            &default_command(),
+            &default_steps(),
             workdir.path(),
             scratch.path(),
             HANG_DEADLINE,
@@ -310,7 +610,7 @@ mod run_tests {
         let scratch = tempfile::tempdir().expect("tempdir");
         let outcome = run_in(
             stub.as_shell(),
-            &default_command(),
+            &default_steps(),
             workdir.path(),
             scratch.path(),
             HANG_DEADLINE,
@@ -341,7 +641,7 @@ mod run_tests {
         let scratch = tempfile::tempdir().expect("tempdir");
         let _ = run_in(
             stub.as_shell(),
-            &default_command(),
+            &default_steps(),
             workdir.path(),
             scratch.path(),
             HANG_DEADLINE,
@@ -371,13 +671,7 @@ mod run_tests {
         let scratch_path = scratch.path().to_path_buf();
         let (tx, rx) = channel();
         std::thread::spawn(move || {
-            let outcome = run_in(
-                &shell,
-                &default_command(),
-                &dir,
-                &scratch_path,
-                RUN_DEADLINE,
-            );
+            let outcome = run_in(&shell, &default_steps(), &dir, &scratch_path, RUN_DEADLINE);
             let _ = tx.send(outcome);
         });
 

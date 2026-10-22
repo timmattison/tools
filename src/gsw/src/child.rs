@@ -3,8 +3,8 @@
 //! Watch mode holds the alternate screen in raw mode, and every child it
 //! starts is a program that can try to open the terminal for itself. The rule
 //! is the same for each of them, so it is written once here: a `git push`, the
-//! shell that answers whether the issue command exists, and the run of that
-//! command all pass through this module.
+//! shells that answer whether a command exists, and the runs of those
+//! commands all pass through this module.
 
 use std::ffi::OsStr;
 use std::process::Command;
@@ -94,7 +94,7 @@ const DETACHED_PROCESS: u32 = 0x0000_0008;
 /// **Not covered by any test in this repository.** The Unix half has a runtime
 /// test for each of the three children: the push has
 /// `the_push_child_cannot_open_the_controlling_terminal`, which plants a fake
-/// ssh, and the issue command has
+/// ssh, and the commands of `G` have
 /// `the_probe_child_cannot_open_the_controlling_terminal` and
 /// `the_run_child_cannot_open_the_controlling_terminal`, which plant a stub
 /// shell. Each asserts that the child was refused the terminal. There is no
