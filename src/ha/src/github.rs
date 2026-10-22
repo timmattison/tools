@@ -346,7 +346,9 @@ pub trait Source: Send + Sync {
     ///
     /// The list holds at most [`QUEUE_CHECK_BATCH`] repositories, and a
     /// caller with more splits them. A repository that GitHub cannot find
-    /// counts as one with no queue.
+    /// (`NOT_FOUND`), and a repository that the token cannot read
+    /// (`FORBIDDEN`), count as ones with no queue. An answer with an error of
+    /// any other type fails the whole call.
     ///
     /// # Errors
     ///
@@ -375,7 +377,9 @@ pub trait Source: Send + Sync {
     ) -> Result<Vec<QueueEvent>, SourceError>;
 
     /// Gives the head branch of each pull request of `pulls` that GitHub
-    /// finds. A pull request that GitHub cannot find is absent from the map.
+    /// finds. A pull request that GitHub cannot find (`NOT_FOUND`), or that
+    /// the token cannot read (`FORBIDDEN`), is absent from the map. An answer
+    /// with an error of any other type fails the whole call.
     ///
     /// # Errors
     ///
@@ -1030,13 +1034,33 @@ struct GraphqlBody<T> {
     errors: Option<Vec<GraphqlError>>,
 }
 
-/// One element of `errors`. Only the field that `ha` reads is here.
+/// The error types that a retry does not fix: GitHub cannot find the object
+/// (`NOT_FOUND`), or the token cannot read it (`FORBIDDEN`). [`graphql_data`]
+/// lets an answer with only such errors pass. An error of another type, or
+/// an error with no type, fails the read.
+const SETTLED_ERROR_TYPES: [&str; 2] = ["NOT_FOUND", "FORBIDDEN"];
+
+/// One element of `errors`. Only the fields that `ha` reads are here.
 #[derive(Deserialize)]
 struct GraphqlError {
     message: String,
+    /// The error type that GitHub gives. Some errors have none, for example
+    /// the message for a timeout of the resolver.
+    #[serde(rename = "type")]
+    kind: Option<String>,
 }
 
-/// The data of a GraphQL answer, and the message of its first error.
+impl GraphqlError {
+    /// Whether a retry does not fix this error. See [`SETTLED_ERROR_TYPES`].
+    fn is_settled(&self) -> bool {
+        self.kind
+            .as_deref()
+            .is_some_and(|kind| SETTLED_ERROR_TYPES.contains(&kind))
+    }
+}
+
+/// The data of a GraphQL answer, and the message of its first error. Every
+/// error of the answer is of a settled type, see [`SETTLED_ERROR_TYPES`].
 struct GraphqlAnswer<T> {
     data: T,
     first_error: Option<String>,
@@ -1044,18 +1068,22 @@ struct GraphqlAnswer<T> {
 
 /// Reads a GraphQL answer.
 ///
-/// An answer with no data gives the error of [`missing`].
+/// An answer with an error of a type that is not in [`SETTLED_ERROR_TYPES`],
+/// or with an error that has no type, fails with the message of the first such
+/// error. This holds also when the answer has data, because GitHub gives `null`
+/// for a field that failed, and a `null` is then not an answer. The caller
+/// keeps its last good answer and asks again. An answer with no data gives the
+/// error of [`missing`].
 fn graphql_data<T: serde::de::DeserializeOwned>(
     body: &str,
 ) -> Result<GraphqlAnswer<T>, SourceError> {
     let parsed: GraphqlBody<T> =
         serde_json::from_str(body).map_err(|error| SourceError::BadResponse(error.to_string()))?;
-    let first_error = parsed
-        .errors
-        .into_iter()
-        .flatten()
-        .next()
-        .map(|error| error.message);
+    let errors: Vec<GraphqlError> = parsed.errors.into_iter().flatten().collect();
+    if let Some(unsettled) = errors.iter().find(|error| !error.is_settled()) {
+        return Err(SourceError::Graphql(unsettled.message.clone()));
+    }
+    let first_error = errors.into_iter().next().map(|error| error.message);
     match parsed.data {
         Some(data) => Ok(GraphqlAnswer { data, first_error }),
         None => Err(missing(first_error, "data")),
@@ -1080,7 +1108,9 @@ struct QueueCheckJson {
 
 /// Maps the answer of [`queue_check_query`] for `repos` to the repositories
 /// that have a merge queue. A repository whose alias is `null` or absent has
-/// none.
+/// none. [`graphql_data`] has already failed the answer when a `null` comes
+/// from an error that a retry can fix, thus a `null` here means that GitHub
+/// cannot find the repository or the token cannot read it.
 fn parse_queue_check(body: &str, repos: &[RepoName]) -> Result<BTreeSet<RepoName>, SourceError> {
     let answer: GraphqlAnswer<HashMap<String, Option<QueueCheckJson>>> = graphql_data(body)?;
     Ok(repos
@@ -1147,7 +1177,9 @@ struct EntryPullJson {
 ///
 /// A repository with no queue gives an empty list. An entry with no pull
 /// request is left out. A repository that GitHub cannot find gives the error
-/// of [`missing`].
+/// of [`missing`]. An error on the merge queue, other than `NOT_FOUND` or
+/// `FORBIDDEN`, fails in [`graphql_data`], thus it never reads as a repository
+/// with no queue.
 fn parse_entries(body: &str, repo: &RepoName) -> Result<Vec<QueueEntry>, SourceError> {
     let answer: GraphqlAnswer<EntriesData> = graphql_data(body)?;
     let repository = answer
@@ -1275,7 +1307,9 @@ struct BranchJson {
 }
 
 /// Maps the answer of [`branches_query`] to the head branch of each pull
-/// request that GitHub found.
+/// request that GitHub found. A pull request that GitHub cannot find, or that
+/// the token cannot read, is absent. [`graphql_data`] fails the answer for an
+/// error of another type.
 fn parse_branches(body: &str) -> Result<BTreeMap<PullNumber, String>, SourceError> {
     let answer: GraphqlAnswer<BranchesData> = graphql_data(body)?;
     let repository = answer

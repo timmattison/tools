@@ -2279,6 +2279,9 @@ cannot hang the caller. Used by `cwt` and `ha`.
     - When a list of runs is empty, `ha` reads the newest run of the repository. When that run
       matches the query, the empty list is suspect. This covers the first refresh after a start,
       which has no last good list.
+    - A GraphQL answer that holds an error of another type than `NOT_FOUND` or `FORBIDDEN` counts
+      as a failed read, also when it holds data, because GitHub gives `null` for a field that
+      failed.
     - A run created before the lookback is not missing, because the query does not ask for it. A
       run older than the oldest run of a list that GitHub cut at 1,000 runs is not missing either.
   - A failed read and a suspect read of the recent runs have the same result. The board keeps the
