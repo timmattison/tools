@@ -87,8 +87,10 @@ pub fn first_left_out<T: Listed>(
         if answer.iter().any(|held| held.item() == identity) || !in_range(item) {
             continue;
         }
-        if read(item) == Presence::InRange {
-            return Some(Suspicion::LeftOut(identity));
+        match read(item) {
+            Presence::InRange => return Some(Suspicion::LeftOut(identity)),
+            Presence::Unread(error) => return Some(Suspicion::Unread(identity, error)),
+            Presence::Gone => {}
         }
     }
     None
