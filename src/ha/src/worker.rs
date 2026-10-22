@@ -3505,6 +3505,42 @@ mod tests {
         }
     }
 
+    /// GitHub cuts the sweep at its limit and keeps the newest runs. A run of
+    /// the last good sweep that is older than the oldest run of a cut sweep is
+    /// out of range. The worker does not read it and does not suspect it, also
+    /// when a direct read would find it still active.
+    #[test]
+    fn a_cut_sweep_may_leave_out_a_run_older_than_its_oldest_run() {
+        let fake = Arc::new(FakeSource::default());
+        let old = old_active_run(1);
+        let newer = [
+            Run {
+                state: RunState::Running,
+                ..created_ago(2, 20)
+            },
+            Run {
+                state: RunState::Running,
+                ..created_ago(3, 10)
+            },
+        ];
+        fake.script().cut_runs.insert(repo("acme/a"));
+        script_active(&fake, vec![old.clone(), newer[0].clone(), newer[1].clone()]);
+        script_direct(&fake, std::slice::from_ref(&old));
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), Duration::ZERO);
+        one_cycle(&worker);
+
+        // The second sweep is cut. It holds only runs newer than run 1.
+        script_active(&fake, newer.to_vec());
+        let second = refresh_now(&worker);
+
+        let answers = answers_of_a(&second);
+        assert!(
+            matches!(answers.as_slice(), [Update::Runs { runs, .. }] if runs.len() == 2),
+            "{answers:?}"
+        );
+        assert!(calls_named(&fake, "run").is_empty());
+    }
+
     #[test]
     fn a_run_that_left_the_sweep_and_that_the_created_answer_holds_as_active_is_suspect() {
         let fake = Arc::new(FakeSource::default());
