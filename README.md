@@ -2138,9 +2138,12 @@ cannot hang the caller. Used by `cwt` and `ha`.
     branch name, for example `issue-577`, to find a run. The title gets each column that these
     two limits take from the workflow name and the branch. A short name, such as the workflow
     `CI` or the branch `main`, does not make its cell narrower. Thus the title starts in the same
-    column on each row. A long name keeps its start and ends in `…`, for example `Release builds`
-    becomes `Release…`, and the ID stays whole. The cut is by display width, thus `日本語` and
-    emoji do not break a row. The columns fit the terminal again when its size changes.
+    column on each row. A long repository name keeps its end and starts with `…`, because the end
+    tells the repositories of one owner apart. For example, `Lock-Free-Labs/expert-witness`
+    becomes `…-Labs/expert-witness` at 120 columns. Each other long name keeps its start and ends
+    in `…`, for example `Release builds` becomes `Release…`, and the ID stays whole. The cut is by
+    display width, thus `日本語` and emoji do not break a row. The columns fit the terminal again
+    when its size changes.
   - Right expands the highlighted run, and Left collapses it again. An expanded run shows one row
     for each job of its latest attempt, below the run row. Each job row shows the state marker of
     the job, the same emoji as for a run, the name of the job, its job ID, and when it started, if
