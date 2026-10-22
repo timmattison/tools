@@ -10,7 +10,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Widget};
 use ratatui::Frame;
-use textfit::{pad_right, truncate_to_budget};
+use textfit::{pad_right, truncate_left_to_budget, truncate_to_budget};
 use unicode_width::UnicodeWidthStr;
 
 use crate::board::{Board, Row, Section};
@@ -26,6 +26,8 @@ use crate::status::{OwnerProblem, Status, MESSAGE_LIFETIME};
 /// suspect are the last good runs. After a suspect sweep, the rows are the recent
 /// runs and the runs of the last good sweep. The mark shows that they can be old
 /// (issue #599). It stands inside the repository cell, thus no other cell moves.
+/// The mark stays before the name. The name gets the columns that the mark
+/// leaves, and a name that does not fit keeps its end (see [`fit_repo`]).
 const STALE_MARK: &str = "\u{1F4A4} ";
 
 /// The width of the marker column. Each marker is one emoji of 2 columns, or a
@@ -121,6 +123,26 @@ fn fit(text: &str, width: usize) -> String {
     pad_right(&truncate_to_budget(text, width), width)
 }
 
+/// Cuts a repository name to a column width, then pads it to that width.
+///
+/// A name that does not fit keeps its end and starts with `…`, because the end
+/// of `owner/name` tells repositories apart. A stale row has the [`STALE_MARK`]
+/// before the name. The mark stays, and the name gets the columns that the mark
+/// leaves. A cell of exactly the width of the mark shows the mark and no name.
+/// A cell narrower than the mark shows what [`fit`] makes of the mark and the
+/// name. `textfit` gives an empty cut for a budget of 0.
+fn fit_repo(name: &str, is_stale: bool, width: usize) -> String {
+    let mark_width = text_width(STALE_MARK);
+    if !is_stale {
+        return pad_right(&truncate_left_to_budget(name, width), width);
+    }
+    if width < mark_width {
+        return fit(&format!("{STALE_MARK}{name}"), width);
+    }
+    let cut = truncate_left_to_budget(name, width - mark_width);
+    pad_right(&format!("{STALE_MARK}{cut}"), width)
+}
+
 /// Cuts a text to a column width, then pads it on the left to that width.
 ///
 /// The text must be ASCII, for example the ID `39149840084`, because the padding counts
@@ -138,9 +160,14 @@ fn fit_right(text: &str, width: usize) -> String {
 /// fills it and the left marker cell, thus a row never shows two different
 /// markers. The header line does not come from this function. `header_cells`
 /// builds it.
+///
+/// `texts[0]` is the bare repository name. The repository cell keeps the end of
+/// a name that does not fit, and `is_stale` puts the [`STALE_MARK`] before the
+/// name (see [`fit_repo`]). The other text cells keep their start.
 fn cells(
     widths: Widths,
     marker: &str,
+    is_stale: bool,
     texts: [&str; 4],
     id: &str,
     started: &str,
@@ -149,7 +176,7 @@ fn cells(
     let [repo, workflow, branch, title] = texts;
     [
         pad_right(marker, MARKER_WIDTH),
-        fit(repo, widths.repo),
+        fit_repo(repo, is_stale, widths.repo),
         fit(workflow, widths.workflow),
         fit_right(id, ID_WIDTH),
         fit(branch, widths.branch),
@@ -355,7 +382,8 @@ where
 
 /// The line of one run. `state` is the state that the row shows, not the state
 /// that GitHub reports. It sets the marker and the time cells. A stale run
-/// has the [`STALE_MARK`] before its repository name.
+/// has the [`STALE_MARK`] before its repository name. `cells` puts the mark
+/// there and cuts the name at its start when the name does not fit.
 fn run_line<Tz: TimeZone>(
     run: &Run,
     state: RunState,
@@ -372,15 +400,16 @@ where
     } else {
         format_elapsed(span(run.started_at, run.updated_at))
     };
-    let repo = if is_stale {
-        format!("{STALE_MARK}{}", run.repo)
-    } else {
-        run.repo.to_string()
-    };
     cells(
         widths,
         marker(state),
-        [&repo, &run.workflow, &run.branch, &run.title],
+        is_stale,
+        [
+            &run.repo.to_string(),
+            &run.workflow,
+            &run.branch,
+            &run.title,
+        ],
         &run.id.0.to_string(),
         &format_started(run.started_at, now, tz),
         &time,
@@ -3259,7 +3288,7 @@ mod tests {
     #[test]
     fn the_workflow_and_the_branch_are_capped_and_the_title_gets_the_rest() {
         for w in 80_u16..=200 {
-            let repo_text = format!("Q/{}", "Q".repeat(400));
+            let repo_text = format!("{}/Q", "Q".repeat(400));
             let mut board = Board::new(Duration::from_hours(8));
             board.replace(
                 repo(&repo_text),
@@ -3283,7 +3312,8 @@ mod tests {
             );
             // Each text is too long for its cell, thus the cell holds the letters and `…`.
             let letters = |letter: char| row.chars().filter(|c| *c == letter).count();
-            // The repository cell also holds the slash.
+            // The repository cell keeps its end, thus it also holds `/Q`.
+            // The cell holds `…`, the slash, and the letters, thus the letters are two fewer.
             let widths = (
                 letters('Q') + 2,
                 letters('W') + 1,
@@ -3295,7 +3325,7 @@ mod tests {
     }
 
     #[test]
-    fn long_text_keeps_its_start_and_ends_with_an_ellipsis() {
+    fn a_long_repository_name_keeps_its_end_and_other_long_text_keeps_its_start() {
         let mut board = Board::new(Duration::from_hours(8));
         board.replace(
             repo("timmattison/tools"),
@@ -3315,7 +3345,7 @@ mod tests {
         // 68 - 42 = 26 columns for the text: 7, 4, 5, and 10.
         assert_eq!(
             text[2],
-            "🏃 timmat… Con…            1 feat… A very lo… 11:55:00    5m 00s  🏃"
+            "🏃 …/tools Con…            1 feat… A very lo… 11:55:00    5m 00s  🏃"
         );
     }
 
