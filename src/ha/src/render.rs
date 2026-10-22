@@ -563,6 +563,24 @@ fn refresh_age(last_refresh: DateTime<Utc>, now: DateTime<Utc>) -> String {
     )
 }
 
+/// The stale part of the status line, or `None` when no target is stale.
+///
+/// A stale target is a repository whose last read failed or was suspect, or an
+/// owner whose last list failed or was suspect. A cut owner list is not stale.
+/// The text counts the stale targets and says since when they are stale, for
+/// example `💤 stale since 11:42 (2 repos, 1 owner)`.
+fn stale_part<Tz: TimeZone>(
+    _board: &Board,
+    _status: &Status,
+    _now: DateTime<Utc>,
+    _tz: &Tz,
+) -> Option<String>
+where
+    Tz::Offset: Display,
+{
+    None
+}
+
 /// The left part of the status line: the lead, the refresh, the rate limit,
 /// and the key hints.
 ///
@@ -3597,6 +3615,164 @@ mod tests {
             }),
             ..Status::default()
         }
+    }
+
+    /// The stale part of the status line of `board` and `status`, in UTC.
+    fn stale_text(board: &Board, status: &Status) -> Option<String> {
+        stale_part(board, status, now(), &utc())
+    }
+
+    /// A board whose repositories `reads` had a good read at the given time
+    /// and then failed.
+    fn board_stale_since(reads: &[(&str, &str)]) -> Board {
+        let mut board = Board::new(Duration::from_hours(8));
+        for (name, time) in reads {
+            board.replace(repo(name), Vec::new(), at(time));
+            board.fail(repo(name), "HTTP 500".to_owned());
+        }
+        board
+    }
+
+    fn owner(text: &str) -> OwnerName {
+        OwnerName::parse(text).expect("the test owner is valid")
+    }
+
+    #[test]
+    fn no_stale_target_gives_no_stale_part() {
+        let board = Board::new(Duration::from_hours(8));
+        assert_eq!(stale_text(&board, &Status::default()), None);
+    }
+
+    #[test]
+    fn a_stale_repository_names_the_time_of_its_last_good_read() {
+        let board = board_stale_since(&[("acme/a", "2026-10-14T11:42:10Z")]);
+        assert_eq!(
+            stale_text(&board, &Status::default()).as_deref(),
+            Some("\u{1F4A4} stale since 11:42 (1 repo)")
+        );
+    }
+
+    #[test]
+    fn two_stale_repositories_give_the_earlier_time_and_the_count() {
+        let board = board_stale_since(&[
+            ("acme/a", "2026-10-14T11:50:00Z"),
+            ("acme/b", "2026-10-14T11:42:00Z"),
+        ]);
+        assert_eq!(
+            stale_text(&board, &Status::default()).as_deref(),
+            Some("\u{1F4A4} stale since 11:42 (2 repos)")
+        );
+    }
+
+    #[test]
+    fn the_time_shows_in_the_time_zone_of_the_screen() {
+        let board = board_stale_since(&[("acme/a", "2026-10-14T11:42:00Z")]);
+        let tokyo = chrono::FixedOffset::east_opt(9 * 3_600).expect("nine hours is valid");
+        assert_eq!(
+            stale_part(&board, &Status::default(), now(), &tokyo).as_deref(),
+            Some("\u{1F4A4} stale since 20:42 (1 repo)")
+        );
+    }
+
+    #[test]
+    fn a_last_good_read_on_an_earlier_day_shows_the_date() {
+        let board = board_stale_since(&[("acme/a", "2026-10-13T23:59:00Z")]);
+        assert_eq!(
+            stale_text(&board, &Status::default()).as_deref(),
+            Some("\u{1F4A4} stale since 10-13 23:59 (1 repo)")
+        );
+    }
+
+    #[test]
+    fn a_stale_repository_without_a_good_read_has_no_time() {
+        let mut board = Board::new(Duration::from_hours(8));
+        board.fail(repo("acme/a"), "HTTP 500".to_owned());
+        assert_eq!(
+            stale_text(&board, &Status::default()).as_deref(),
+            Some("\u{1F4A4} stale (1 repo)")
+        );
+    }
+
+    #[test]
+    fn a_failed_or_suspect_owner_counts_with_the_time_of_its_last_list() {
+        let board = Board::new(Duration::from_hours(8));
+        let status = Status {
+            owner_errors: vec![
+                (
+                    owner("acme"),
+                    OwnerProblem::Failed(crate::github::SourceError::Failed("boom".to_owned())),
+                ),
+                (
+                    owner("zeta"),
+                    OwnerProblem::Suspect(crate::suspect::Suspicion::LeftOut(
+                        crate::suspect::Item::Repo(repo("zeta/x")),
+                    )),
+                ),
+            ],
+            owner_listed_at: std::collections::BTreeMap::from([
+                (owner("acme"), at("2026-10-14T11:30:00Z")),
+                (owner("zeta"), at("2026-10-14T11:20:00Z")),
+            ]),
+            ..Status::default()
+        };
+        assert_eq!(
+            stale_text(&board, &status).as_deref(),
+            Some("\u{1F4A4} stale since 11:20 (2 owners)")
+        );
+    }
+
+    #[test]
+    fn a_cut_owner_is_not_stale() {
+        let board = Board::new(Duration::from_hours(8));
+        let status = Status {
+            owner_errors: vec![(owner("acme"), OwnerProblem::Cut("too many".to_owned()))],
+            ..Status::default()
+        };
+        assert_eq!(stale_text(&board, &status), None);
+    }
+
+    #[test]
+    fn a_stale_owner_and_a_stale_repository_give_both_counts() {
+        let board = board_stale_since(&[("acme/a", "2026-10-14T11:42:00Z")]);
+        let status = Status {
+            owner_errors: vec![(
+                owner("acme"),
+                OwnerProblem::Failed(crate::github::SourceError::Failed("boom".to_owned())),
+            )],
+            ..Status::default()
+        };
+        assert_eq!(
+            stale_text(&board, &status).as_deref(),
+            Some("\u{1F4A4} stale since 11:42 (1 repo, 1 owner)")
+        );
+    }
+
+    #[test]
+    fn the_stale_part_takes_the_place_of_the_refresh_age() {
+        let board_status = Status {
+            last_refresh: Some(now()),
+            ..Status::default()
+        };
+        let mut board = board_stale_since(&[("acme/a", "2026-10-14T11:42:00Z")]);
+        let line = status_line_of(&mut board, &board_status);
+        assert!(
+            line.contains("\u{1F4A4} stale since 11:42 (1 repo)"),
+            "{line:?}"
+        );
+        assert!(!line.contains("updated"), "{line:?}");
+        assert!(!line.contains("loading"), "{line:?}");
+    }
+
+    #[test]
+    fn a_live_message_does_not_hide_the_stale_part() {
+        let mut board = board_stale_since(&[("acme/a", "2026-10-14T11:42:00Z")]);
+        let status = status_with_message_aged("could not open a browser", 1);
+        let line = status_line_of(&mut board, &status);
+        assert!(line.contains("could not open a browser"), "{line:?}");
+        assert!(
+            line.contains("\u{1F4A4} stale since 11:42 (1 repo)"),
+            "{line:?}"
+        );
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! What the status line of `ha` shows: the last refresh, the rate limit of
 //! the GitHub API, and the errors that are not about one repository.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -84,6 +85,9 @@ pub struct Status {
     /// The owners whose repository list failed or was cut, with the problem of
     /// each. The status line shows the text of the problem.
     pub owner_errors: Vec<(OwnerName, OwnerProblem)>,
+    /// The time of the last good list of each owner that has one. The status
+    /// line uses it to say since when an owner is stale.
+    pub owner_listed_at: BTreeMap<OwnerName, DateTime<Utc>>,
     /// A one-off message, for example the address after a failed open. It
     /// fades out over [`MESSAGE_LIFETIME`], then leaves. A key press removes
     /// it sooner. Read it with [`Status::message_at`].

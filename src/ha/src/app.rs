@@ -915,6 +915,104 @@ mod tests {
         assert!(!rows[0].contains('\u{1F4A4}'), "{rows:?}");
     }
 
+    /// The status line of the last frame, after `quit`.
+    fn status_line_after(channels: &Channels, status: Status) -> String {
+        let (result, frame) = run_app_from(status, &opener(false), channels, quit());
+        assert!(result.is_ok(), "{result:?}");
+        frame.last().unwrap().clone()
+    }
+
+    fn failed_update() -> Update {
+        Update::Failed {
+            repo: repo(),
+            error: SourceError::Failed("boom".to_owned()),
+        }
+    }
+
+    #[test]
+    fn a_repository_read_well_and_then_failed_shows_since_when_it_is_stale() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        channels.updates.send(failed_update()).unwrap();
+        let line = status_line_after(&channels, Status::default());
+        assert!(
+            line.contains("\u{1F4A4} stale since 12:00 (1 repo)"),
+            "{line:?}"
+        );
+    }
+
+    #[test]
+    fn a_cycle_in_which_each_fetch_fails_does_not_say_updated() {
+        let channels = channels();
+        channels.updates.send(failed_update()).unwrap();
+        channels
+            .updates
+            .send(Update::CycleDone {
+                finished_at: now(),
+                rate: None,
+                backoff_until: None,
+            })
+            .unwrap();
+        let line = status_line_after(&channels, Status::default());
+        assert!(!line.contains("updated 0s ago"), "{line:?}");
+        assert!(line.contains("\u{1F4A4} stale (1 repo)"), "{line:?}");
+    }
+
+    #[test]
+    fn a_live_message_and_the_stale_part_show_together() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        channels.updates.send(failed_update()).unwrap();
+        let status = Status {
+            message: Some(Message {
+                text: "GitHub is cancelling run 1".to_owned(),
+                posted_at: now(),
+            }),
+            ..Status::default()
+        };
+        let line = status_line_after(&channels, status);
+        assert!(line.contains("GitHub is cancelling run 1"), "{line:?}");
+        assert!(
+            line.contains("\u{1F4A4} stale since 12:00 (1 repo)"),
+            "{line:?}"
+        );
+    }
+
+    #[test]
+    fn the_stale_part_goes_away_after_a_good_read() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        channels.updates.send(failed_update()).unwrap();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        let line = status_line_after(&channels, Status::default());
+        assert!(!line.contains('\u{1F4A4}'), "{line:?}");
+    }
+
+    #[test]
+    fn a_stale_owner_shows_the_time_of_its_last_good_list() {
+        let channels = channels();
+        let acme = OwnerName::parse("acme").unwrap();
+        channels
+            .updates
+            .send(Update::Repos {
+                repos: std::collections::BTreeSet::new(),
+                listed_at: std::collections::BTreeMap::from([(
+                    acme.clone(),
+                    now() - chrono::Duration::minutes(18),
+                )]),
+                owner_errors: vec![(
+                    acme,
+                    OwnerProblem::Failed(SourceError::Failed("boom".to_owned())),
+                )],
+            })
+            .unwrap();
+        let line = status_line_after(&channels, Status::default());
+        assert!(
+            line.contains("\u{1F4A4} stale since 11:42 (1 owner)"),
+            "{line:?}"
+        );
+    }
+
     #[test]
     fn a_failed_update_shows_the_error_on_the_status_line() {
         let channels = channels();
