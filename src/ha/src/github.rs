@@ -1197,6 +1197,13 @@ mod tests {
     }
 
     #[test]
+    fn a_renamed_or_moved_repository_is_not_listable_under_its_old_name() {
+        let stub = Stub::new("cat \"$dir/repo.out\"");
+        stub.file("repo.out", &ok_output(&repo_json("new-owner/r2", false)));
+        assert_eq!(stub.source().repo_is_listable(&repo("o/r")), Ok(false));
+    }
+
+    #[test]
     fn a_created_since_query_asks_for_one_hour_aligned_page() {
         let stub = Stub::new("cat \"$dir/page1.out\"");
         stub.file("page1.out", &ok_output(RUNS_JSON));
