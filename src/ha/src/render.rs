@@ -435,6 +435,7 @@ where
     cells(
         widths,
         marker,
+        false,
         [&entry.repo.to_string(), word, &entry.branch, &entry.title],
         &pull_text(entry.pull),
         &format_started(entry.enqueued_at, now, tz),
@@ -470,6 +471,7 @@ where
     cells(
         widths,
         marker,
+        false,
         [
             &departure.repo.to_string(),
             word,
@@ -5171,6 +5173,57 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_queue_row_keeps_the_end_of_a_long_repository_name() {
+        // The cell that a fresh run row gets for this name at this width.
+        const CUT: &str = " …pert-witness ";
+        let name = "Lock-Free-Labs/expert-witness";
+        let entry = QueueEntry {
+            repo: repo(name),
+            ..queue_entry(
+                16012,
+                1,
+                EntryState::AwaitingChecks,
+                "fix-lockfile",
+                "Fix the lockfile",
+                "2026-10-14T11:55:00Z",
+            )
+        };
+        let departure = Departure {
+            repo: repo(name),
+            ..departure(
+                16010,
+                Outcome::Merged,
+                "fix-lockfile",
+                "Fix the lockfile",
+                Some("2026-10-14T11:50:00Z"),
+                "2026-10-14T11:58:00Z",
+            )
+        };
+        let widths = Widths::for_width(90);
+        let lines = [
+            entry_line(&entry, now(), &utc(), widths),
+            departure_line(&departure, now(), &utc(), widths),
+        ];
+        let fresh = run(
+            9,
+            name,
+            "CI",
+            "main",
+            "Fix the thing",
+            RunState::Running,
+            "2026-10-14T11:45:30Z",
+            "2026-10-14T11:59:00Z",
+        );
+        let reference = run_line(&fresh, RunState::Running, false, now(), &utc(), widths);
+        assert!(reference.contains(CUT), "{reference:?}");
+        for line in lines {
+            assert!(line.contains(CUT), "{line:?}");
+            assert!(!line.contains("Lock-Free"), "{line:?}");
+            assert!(!line.contains('\u{1F4A4}'), "{line:?}");
+        }
+    }
+
     /// A departure from the merge queue of `rust-lang/cargo`.
     fn departure(
         pull: u64,
@@ -5275,8 +5328,11 @@ mod tests {
         time: &str,
     ) -> String {
         let number = format!("#{pull}");
+        let widths = Widths::for_width(120);
+        let (repo_width, word_width) = (widths.repo, widths.workflow);
+        let (branch_width, title_width) = (widths.branch, widths.title);
         format!(
-            "{marker} {repo:<18} {word:<8} {number:>ID_WIDTH$} {branch:<12} {title:<40} {started:<11} {time:<7} {marker}",
+            "{marker} {repo:<repo_width$} {word:<word_width$} {number:>ID_WIDTH$} {branch:<branch_width$} {title:<title_width$} {started:<11} {time:<7} {marker}",
             repo = "rust-lang/cargo"
         )
     }
