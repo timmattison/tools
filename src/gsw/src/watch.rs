@@ -1907,7 +1907,9 @@ fn resolve_home(handle: &RepoHandle) -> Result<WorktreePath> {
 /// the default name of that key. A field of an empty value turns its own key
 /// off, and [`crate::shell::ShellCommand::new`] is where that rule lives.
 struct CommandValues {
-    /// What [`crate::issue::ISSUE_COMMAND_ENV`] says `G` runs.
+    /// What [`crate::issue::PR_COMMAND_ENV`] says `G` runs first.
+    pull_request: Option<String>,
+    /// What [`crate::issue::ISSUE_COMMAND_ENV`] says `G` runs after it.
     issue: Option<String>,
     /// What [`crate::update::REBASE_COMMAND_ENV`] says `R` runs.
     rebase: Option<String>,
@@ -1919,6 +1921,7 @@ impl CommandValues {
     /// What the environment of this process says.
     fn read() -> Self {
         Self {
+            pull_request: read_value(crate::issue::PR_COMMAND_ENV),
             issue: read_value(crate::issue::ISSUE_COMMAND_ENV),
             rebase: read_value(crate::update::BaseUpdate::Rebase.env()),
             merge: read_value(crate::update::BaseUpdate::Merge.env()),
@@ -2041,15 +2044,21 @@ mod probe_tests {
     /// the question the shell was really asked and never on a count of runs.
     const PROBE_PREFIX: &str = "command -v ";
 
-    /// The values of the three variables, as a test states them.
+    /// The values of the four variables, as a test states them.
     ///
     /// `None` is a variable the environment does not set, which is the case
     /// that takes the default name of that key. No test of this module sets a
     /// variable: `cargo test` runs the tests of one binary on many threads, so
     /// a test that set `GSW_REBASE_COMMAND` would change what every sibling
     /// test reads.
-    fn values(issue: Option<&str>, rebase: Option<&str>, merge: Option<&str>) -> CommandValues {
+    fn values(
+        pull_request: Option<&str>,
+        issue: Option<&str>,
+        rebase: Option<&str>,
+        merge: Option<&str>,
+    ) -> CommandValues {
         CommandValues {
+            pull_request: pull_request.map(str::to_string),
             issue: issue.map(str::to_string),
             rebase: rebase.map(str::to_string),
             merge: merge.map(str::to_string),
@@ -2096,9 +2105,13 @@ mod probe_tests {
     /// The key rather than the name of the variant, because the question each
     /// test asks is whether an answer reached the key it belongs to. An answer
     /// that reached the other key would bind `M` to the command that rebases.
+    /// An answer for `G` also names its page, because an answer that reached
+    /// the wrong page would run `ggs` first.
     fn answer(event: &Event) -> String {
         match event {
-            Event::IssueCommandFound(_, command) => format!("G {}", command.name()),
+            Event::IssueCommandFound(page, command) => {
+                format!("G {page:?} {}", command.name())
+            }
             Event::BaseUpdateCommandFound(update, command) => {
                 format!("{} {}", update.key(), command.name())
             }
@@ -2108,19 +2121,38 @@ mod probe_tests {
 
     #[test]
     fn an_unset_variable_probes_the_default_command_of_its_own_key() {
-        // Three keys, three shells, three questions. A key whose variable the
+        // Four probes, four shells, four questions. A key whose variable the
         // environment never names still asks about the name it falls back on,
         // because that name is what the key runs.
         let stub = StubShell::answering(0);
-        let (words, _) = probed(&values(None, None, None), &stub);
+        let (words, _) = probed(&values(None, None, None, None), &stub);
         assert_eq!(
             words,
             [
                 crate::issue::DEFAULT_ISSUE_COMMAND,
+                crate::issue::DEFAULT_PR_COMMAND,
                 BaseUpdate::Merge.default_command(),
                 BaseUpdate::Rebase.default_command(),
             ],
             "each key must ask the shell about its own default command",
+        );
+    }
+
+    #[test]
+    fn an_unset_pr_variable_probes_ggsp_for_the_first_step_of_g() {
+        // `G` has two probes. The first one asks about the command that runs
+        // first, and its answer must reach the page of the pull request.
+        let stub = StubShell::answering(0);
+        let (words, answers) = probed(&values(None, Some("myissue"), Some(""), Some("")), &stub);
+        assert_eq!(
+            words,
+            [crate::issue::DEFAULT_PR_COMMAND, "myissue"],
+            "an unset GSW_PR_COMMAND must ask about the default command of the pull request",
+        );
+        assert_eq!(
+            answers,
+            ["G Issue myissue", "G PullRequest ggsp"],
+            "the answer for ggsp must reach the page of the pull request",
         );
     }
 
@@ -2131,18 +2163,19 @@ mod probe_tests {
         // nothing at all — no shell, and so no rc file read — and it must turn
         // off the one key it names and no other.
         let stub = StubShell::answering(0);
-        let (words, answers) = probed(&values(None, Some(""), None), &stub);
+        let (words, answers) = probed(&values(None, None, Some(""), None), &stub);
         assert_eq!(
             words,
             [
                 crate::issue::DEFAULT_ISSUE_COMMAND,
+                crate::issue::DEFAULT_PR_COMMAND,
                 BaseUpdate::Merge.default_command(),
             ],
             "an empty GSW_REBASE_COMMAND must start no shell for R, and leave G and M probing",
         );
         assert_eq!(
             answers,
-            ["G ggs", "M gmp"],
+            ["G Issue ggs", "G PullRequest ggsp", "M gmp"],
             "a key that started no shell must send no answer",
         );
     }
@@ -2153,11 +2186,12 @@ mod probe_tests {
         // person's rc file gives it, and a user who calls it something else
         // must have gsw ask about the name they chose.
         let stub = StubShell::answering(0);
-        let (words, answers) = probed(&values(None, None, Some("mymerge")), &stub);
+        let (words, answers) = probed(&values(None, None, None, Some("mymerge")), &stub);
         assert_eq!(
             words,
             [
                 crate::issue::DEFAULT_ISSUE_COMMAND,
+                crate::issue::DEFAULT_PR_COMMAND,
                 BaseUpdate::Rebase.default_command(),
                 "mymerge",
             ],
@@ -2165,21 +2199,21 @@ mod probe_tests {
         );
         assert_eq!(
             answers,
-            ["G ggs", "M mymerge", "R grp"],
+            ["G Issue ggs", "G PullRequest ggsp", "M mymerge", "R grp"],
             "the answer of M must carry the command the user named",
         );
     }
 
     #[test]
     fn each_answer_arrives_as_the_event_of_its_own_key() {
-        // Three answers on one channel, and each must reach the key it belongs
+        // Four answers on one channel, and each must reach the key it belongs
         // to. An answer that reached the other key would bind `M` to the
         // command that rebases the branch and force-pushes it.
         let stub = StubShell::answering(0);
-        let (_, answers) = probed(&values(None, None, None), &stub);
+        let (_, answers) = probed(&values(None, None, None, None), &stub);
         assert_eq!(
             answers,
-            ["G ggs", "M gmp", "R grp"],
+            ["G Issue ggs", "G PullRequest ggsp", "M gmp", "R grp"],
             "each key must be bound by the answer of its own probe",
         );
     }
@@ -2190,17 +2224,17 @@ mod probe_tests {
         // about how fast a shell answers. A busy machine can hold a stub that
         // exits at once for longer than the bound of a user: a hook run of
         // 2026-10-14 sent no answer at all, and the stubs it started had
-        // recorded all three questions.
+        // recorded all four questions.
         //
         // The stub answers one second after the bound of a user, on a machine
         // of any speed. So this test fails wherever the probes of this module
         // wait only for the bound of a user.
         let late = crate::shell::PROBE_DEADLINE + Duration::from_secs(1);
         let stub = StubShell::new(&format!("sleep {}; exit 0", late.as_secs()));
-        let (_, answers) = probed(&values(None, None, None), &stub);
+        let (_, answers) = probed(&values(None, None, None, None), &stub);
         assert_eq!(
             answers,
-            ["G ggs", "M gmp", "R grp"],
+            ["G Issue ggs", "G PullRequest ggsp", "M gmp", "R grp"],
             "a slow answer must still reach its key. The probes of these tests must wait for a \
              bound of their own, and not for the bound of a user",
         );
