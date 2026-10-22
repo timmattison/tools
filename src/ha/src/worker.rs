@@ -27,7 +27,9 @@
 //! has no run to compare, thus the worker reads the newest run of the
 //! repository one time in each cycle. The same rule judges the sweep for active
 //! runs. A run that the sweep leaves out, and that is still active, makes the
-//! sweep suspect. The worker then repeats the sweep on the next cycle.
+//! sweep suspect. The worker then repeats the sweep on the next cycle. It
+//! also repeats a sweep that failed, and a due sweep that a failed read of the
+//! recent answer skipped.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -50,13 +52,13 @@ pub const CONCURRENCY: usize = 8;
 
 /// How often the worker lists the repositories of the owners and sweeps for
 /// active runs. The sweep finds runs that started before the window. A
-/// repository whose last sweep was suspect is swept again on the next cycle.
-/// An owner
-/// with no good list, an owner whose good list is empty, and an owner whose
-/// last list failed or was suspect, is listed on every cycle until a good
-/// list that holds a repository replaces the problem. An empty list needs
-/// this, because the comparison with the last good list cannot judge a first
-/// empty list.
+/// repository is swept again on the next cycle in three cases: its last sweep
+/// failed, its last sweep was suspect, or a failed recent read skipped its due
+/// sweep. An owner with no good list, an owner whose good list is empty, and
+/// an owner whose last list failed or was suspect, is listed on every cycle
+/// until a good list that holds a repository replaces the problem. An empty
+/// list needs this, because the comparison with the last good list cannot
+/// judge a first empty list.
 pub const SLOW_CADENCE: Duration = Duration::from_secs(600);
 
 /// One message from the worker to the screen.
@@ -531,7 +533,9 @@ enum Fetched {
 /// when the slow cadence is due or when the last sweep of the repository was
 /// stale. A failed request gives [`Fetched::Failed`]. A failed sweep also
 /// marks the sweep of the repository as stale, because the stored sweep is
-/// then old, and the next cycle merges it. Then the function
+/// then old, and the next cycle merges it. A failed recent read on a cycle
+/// with a due sweep marks the sweep as stale too, because the sweep did not
+/// run and the cadence is already used. Then the function
 /// judges each answer in one step of its own. The recent answer goes through
 /// [`suspicion_of_created`], and the sweep goes through
 /// [`suspicion_of_sweep`]. Both steps share one read of the newest run, so the
@@ -548,7 +552,16 @@ fn fetch_repo<S: Source>(source: &S, repo: &RepoName, fetch: &Fetch<'_>) -> Fetc
     let query = RunQuery::CreatedSince(fetch.since);
     let list = match source.runs_of(repo, query) {
         Ok(list) => list,
-        Err(error) => return Fetched::Failed(error),
+        Err(error) => {
+            if fetch.sweep_due {
+                fetch
+                    .stale_sweeps
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(repo.clone());
+            }
+            return Fetched::Failed(error);
+        }
     };
     let sweep_stale = fetch
         .stale_sweeps

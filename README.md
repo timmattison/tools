@@ -2190,7 +2190,8 @@ cannot hang the caller. Used by `cwt` and `ha`.
     repository list of an owner and the sweep for runs older than the lookback refresh every
     10 minutes. An owner with no good list, with an empty list, or whose last list failed or was
     suspect is listed again on each refresh, so `r` tries it again at once. A failed or suspect
-    sweep runs again on the next refresh. A direct read of a missing run or repository costs one
+    sweep, and a due sweep that a failed read of the recent runs skipped, run again on the next
+    refresh. A direct read of a missing run or repository costs one
     request, and only when a list leaves out an item. The read of the newest run of a repository
     with an empty list sends the `ETag` too, thus it costs nothing while that run does not change.
     On each refresh, `ha` also asks for the jobs of each active run, one
