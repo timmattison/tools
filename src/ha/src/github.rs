@@ -691,9 +691,15 @@ impl Source for GhSource {
         }
     }
 
-    fn newest_run(&self, _repo: &RepoName) -> Result<Option<Run>, SourceError> {
-        // Red stub: the answer of a source that knows no run.
-        Ok(None)
+    fn newest_run(&self, repo: &RepoName) -> Result<Option<Run>, SourceError> {
+        let path = format!(
+            "repos/{}/{}/actions/runs?per_page=1",
+            repo.owner(),
+            repo.name()
+        );
+        let key = format!("{repo}#newest#1");
+        let page = self.cached_get(&key, &path, |body| parse_runs(body, repo))?;
+        Ok(page.runs.into_iter().next())
     }
 
     fn rate_limit(&self) -> Option<RateLimit> {
