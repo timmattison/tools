@@ -96,6 +96,21 @@ mod tests {
         RepoName::parse(text).expect("a valid repository")
     }
 
+    fn run(id: u64) -> Run {
+        let time = chrono::DateTime::UNIX_EPOCH;
+        Run {
+            id: RunId(id),
+            repo: repo("acme/a"),
+            workflow: "CI".to_owned(),
+            branch: "main".to_owned(),
+            title: "t".to_owned(),
+            state: crate::run::RunState::Passed,
+            started_at: time,
+            updated_at: time,
+            url: String::new(),
+        }
+    }
+
     #[test]
     fn an_item_that_the_answer_left_out_and_read_finds_in_range_is_a_suspicion() {
         let last_good = [repo("acme/a"), repo("acme/b")];
@@ -105,5 +120,62 @@ mod tests {
             suspicion,
             Some(Suspicion::LeftOut(Item::Repo(repo("acme/b"))))
         );
+    }
+
+    #[test]
+    fn an_item_that_read_finds_gone_is_not_a_suspicion() {
+        let last_good = [repo("acme/a"), repo("acme/b")];
+        let answer = [repo("acme/a")];
+        let suspicion = first_left_out(&last_good, &answer, |_| true, |_| Presence::Gone);
+        assert_eq!(suspicion, None);
+    }
+
+    #[test]
+    fn a_gone_item_does_not_hide_a_later_item_that_is_in_range() {
+        let last_good = [repo("acme/a"), repo("acme/b"), repo("acme/c")];
+        let answer = [repo("acme/a")];
+        let gone = repo("acme/b");
+        let suspicion = first_left_out(
+            &last_good,
+            &answer,
+            |_| true,
+            |item| {
+                if *item == gone {
+                    Presence::Gone
+                } else {
+                    Presence::InRange
+                }
+            },
+        );
+        assert_eq!(
+            suspicion,
+            Some(Suspicion::LeftOut(Item::Repo(repo("acme/c"))))
+        );
+    }
+
+    #[test]
+    fn an_item_that_in_range_refuses_is_never_read() {
+        let last_good = [repo("acme/a"), repo("acme/b")];
+        let answer = [];
+        let mut reads = 0;
+        let suspicion = first_left_out(
+            &last_good,
+            &answer,
+            |_| false,
+            |_| {
+                reads += 1;
+                Presence::InRange
+            },
+        );
+        assert_eq!(suspicion, None);
+        assert_eq!(reads, 0);
+    }
+
+    #[test]
+    fn runs_are_compared_by_their_id() {
+        let last_good = [run(1), run(2)];
+        let answer = [run(2)];
+        let suspicion = first_left_out(&last_good, &answer, |_| true, |_| Presence::InRange);
+        assert_eq!(suspicion, Some(Suspicion::LeftOut(Item::Run(RunId(1)))));
     }
 }
