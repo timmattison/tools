@@ -230,6 +230,16 @@ impl RepoList {
     }
 }
 
+/// The runs of one repository, as `Source::runs_of` lists them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunList {
+    /// The runs that the query matches, at most `MAX_PAGES` pages of each fetch.
+    pub runs: Vec<Run>,
+    /// True when a fetch read `MAX_PAGES` pages and the last page was full, so
+    /// `runs` can lack runs that GitHub holds.
+    pub cut: bool,
+}
+
 /// Where `ha` gets its data. `GhSource` is the real one.
 pub trait Source: Send + Sync {
     /// Lists the repositories of an owner. Archived repositories are left out.
@@ -242,10 +252,14 @@ pub trait Source: Send + Sync {
 
     /// Lists the workflow runs of a repository that match `query`.
     ///
+    /// A fetch stops after `MAX_PAGES` pages. When the last page was full, the
+    /// list comes back cut, and `RunList::cut` says so. For `RunQuery::Active`,
+    /// the list is cut when the fetch of any of the statuses was cut.
+    ///
     /// # Errors
     ///
     /// Returns a [`SourceError`] when a page of runs cannot be fetched.
-    fn runs_of(&self, repo: &RepoName, query: RunQuery) -> Result<Vec<Run>, SourceError>;
+    fn runs_of(&self, repo: &RepoName, query: RunQuery) -> Result<RunList, SourceError>;
 
     /// Lists the jobs of the latest attempt of one workflow run, in the order
     /// that GitHub gives them.
@@ -484,7 +498,7 @@ impl GhSource {
         repo: &RepoName,
         family: &str,
         filter: &str,
-    ) -> Result<Vec<Run>, SourceError> {
+    ) -> Result<RunList, SourceError> {
         let mut runs = Vec::new();
         for number in 1..=MAX_PAGES {
             let page = self.runs_page(repo, family, filter, number)?;
@@ -495,7 +509,7 @@ impl GhSource {
             }
         }
         keep_first_of_each_id(&mut runs, |run| run.id);
-        Ok(runs)
+        Ok(RunList { runs, cut: false })
     }
 
     /// The `ETag` cache. The guard lives for one statement. A poisoned lock still
@@ -577,7 +591,7 @@ impl Source for GhSource {
         Ok(RepoList { repos, cut })
     }
 
-    fn runs_of(&self, repo: &RepoName, query: RunQuery) -> Result<Vec<Run>, SourceError> {
+    fn runs_of(&self, repo: &RepoName, query: RunQuery) -> Result<RunList, SourceError> {
         match query {
             RunQuery::CreatedSince(since) => {
                 let filter = format!("created=%3E%3D{}", hour_start(since));
@@ -585,13 +599,16 @@ impl Source for GhSource {
             }
             RunQuery::Active => {
                 let mut runs = Vec::new();
+                let mut cut = false;
                 for status in ACTIVE_STATUSES {
-                    runs.extend(self.all_runs(repo, status, &format!("status={status}"))?);
+                    let list = self.all_runs(repo, status, &format!("status={status}"))?;
+                    cut |= list.cut;
+                    runs.extend(list.runs);
                 }
                 // A run can change state between the requests, and then two
                 // lists hold it. Keep the first one.
                 keep_first_of_each_id(&mut runs, |run| run.id);
-                Ok(runs)
+                Ok(RunList { runs, cut })
             }
         }
     }
@@ -1237,7 +1254,7 @@ mod tests {
         stub.file("page1.out", &ok_output(RUNS_JSON));
         let tools = repo("timmattison/tools");
         let query = RunQuery::CreatedSince(time("2026-09-24T21:56:49Z"));
-        let runs = stub.source().runs_of(&tools, query).expect("runs");
+        let runs = stub.source().runs_of(&tools, query).expect("runs").runs;
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0].id, RunId(36_064_582_280));
         assert_eq!(
@@ -1283,7 +1300,8 @@ mod tests {
         let runs = stub
             .source()
             .runs_of(&repo("o/r"), since_query())
-            .expect("runs");
+            .expect("runs")
+            .runs;
         assert_eq!(runs.len(), 150);
         assert_eq!(runs[149].id, RunId(150));
         assert_eq!(stub.requests().len(), 2);
@@ -1297,7 +1315,8 @@ mod tests {
         let runs = stub
             .source()
             .runs_of(&repo("o/r"), since_query())
-            .expect("runs");
+            .expect("runs")
+            .runs;
         assert_eq!(runs.len(), 149);
         assert_eq!(runs.iter().filter(|run| run.id == RunId(100)).count(), 1);
         assert_eq!(stub.requests().len(), 2);
@@ -1311,7 +1330,8 @@ mod tests {
         let runs = stub
             .source()
             .runs_of(&repo("o/r"), since_query())
-            .expect("runs");
+            .expect("runs")
+            .runs;
         assert_eq!(runs.len(), 99);
         assert_eq!(stub.requests().len(), 1);
     }
@@ -1324,7 +1344,8 @@ mod tests {
         let runs = stub
             .source()
             .runs_of(&repo("o/r"), since_query())
-            .expect("runs");
+            .expect("runs")
+            .runs;
         assert_eq!(runs.len(), 100);
         assert_eq!(stub.requests().len(), 1);
     }
@@ -1347,11 +1368,73 @@ mod tests {
         let runs = stub
             .source()
             .runs_of(&repo("o/r"), since_query())
-            .expect("runs");
+            .expect("runs")
+            .runs;
         assert_eq!(runs.len(), 1000);
         assert_eq!(stub.requests().len(), 10);
         let last = stub.requests().pop().expect("a request");
         assert!(last[2].contains("&page=10&"), "{last:?}");
+    }
+
+    /// A stub `gh` that answers each of the ten pages of the query from `page<N>.out`.
+    fn ten_page_cases(filter_text: &str) -> String {
+        let lines: Vec<String> = (1..=10)
+            .map(|page| format!("  *'&page={page}&{filter_text}'*) cat \"$dir/page{page}.out\";;"))
+            .collect();
+        format!("case \"$*\" in\n{}\n esac", lines.join("\n"))
+    }
+
+    #[test]
+    fn ten_full_pages_give_a_cut_list_and_a_short_last_page_does_not() {
+        let stub = Stub::new(&ten_page_cases(""));
+        for page in 1..=10_u64 {
+            stub.file(
+                &format!("page{page}.out"),
+                &ok_output(&runs_json(5000, (page - 1) * 100 + 1, 100)),
+            );
+        }
+        let cut = stub.source().runs_of(&repo("o/r"), since_query());
+        assert_eq!(
+            cut.map(|list| (list.runs.len(), list.cut)),
+            Ok((1000, true))
+        );
+
+        let stub = Stub::new(&ten_page_cases(""));
+        for page in 1..=10_u64 {
+            let count = if page == 10 { 99 } else { 100 };
+            stub.file(
+                &format!("page{page}.out"),
+                &ok_output(&runs_json(5000, (page - 1) * 100 + 1, count)),
+            );
+        }
+        let whole = stub.source().runs_of(&repo("o/r"), since_query());
+        assert_eq!(
+            whole.map(|list| (list.runs.len(), list.cut)),
+            Ok((999, false))
+        );
+    }
+
+    #[test]
+    fn an_active_list_is_cut_when_one_status_is_cut() {
+        let stub = Stub::new(&format!(
+            "case \"$*\" in\n  *'status=queued'*) cat \"$dir/empty.out\";;\n  *'status=waiting'*) cat \"$dir/empty.out\";;\n  *'status=pending'*) cat \"$dir/empty.out\";;\n{}\n esac",
+            (1..=10)
+                .map(|page| format!("  *'&page={page}&status=in_progress'*) cat \"$dir/page{page}.out\";;"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+        stub.file("empty.out", &ok_output(&runs_json(0, 1, 0)));
+        for page in 1..=10_u64 {
+            stub.file(
+                &format!("page{page}.out"),
+                &ok_output(&runs_json(5000, (page - 1) * 100 + 1, 100)),
+            );
+        }
+        let list = stub
+            .source()
+            .runs_of(&repo("o/r"), RunQuery::Active)
+            .expect("runs");
+        assert_eq!((list.runs.len(), list.cut), (1000, true));
     }
 
     /// A jobs body with `count` jobs numbered from `first_id`, and `total` as the count.
@@ -1526,7 +1609,7 @@ mod tests {
         let source = stub.source();
         let tools = repo("timmattison/tools");
         let first = source.runs_of(&tools, since_query());
-        assert_eq!(first.as_ref().map(Vec::len), Ok(2));
+        assert_eq!(first.as_ref().map(|list| list.runs.len()), Ok(2));
         let later = RunQuery::CreatedSince(time("2026-09-24T21:59:59Z"));
         let second = source.runs_of(&tools, later);
         assert_eq!(second, first);
@@ -1854,7 +1937,8 @@ mod tests {
         let runs = stub
             .source()
             .runs_of(&repo("o/r"), RunQuery::Active)
-            .expect("runs");
+            .expect("runs")
+            .runs;
         let ids: Vec<u64> = runs.iter().map(|run| run.id.0).collect();
         assert_eq!(ids, [1, 2, 3, 4, 5]);
         let paths: Vec<String> = stub
@@ -1891,7 +1975,8 @@ mod tests {
         let runs = stub
             .source()
             .runs_of(&repo("o/r"), RunQuery::Active)
-            .expect("runs");
+            .expect("runs")
+            .runs;
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].id.0, 42);
         assert_eq!(runs[0].state, RunState::Queued);

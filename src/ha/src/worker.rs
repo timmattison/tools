@@ -475,9 +475,11 @@ fn fetch_repo<S: Source>(
     repo: &RepoName,
     fetch: &Fetch<'_>,
 ) -> Result<Vec<Run>, SourceError> {
-    let mut runs = source.runs_of(repo, RunQuery::CreatedSince(fetch.since))?;
+    let mut runs = source
+        .runs_of(repo, RunQuery::CreatedSince(fetch.since))?
+        .runs;
     if fetch.sweep_due {
-        let active = source.runs_of(repo, RunQuery::Active)?;
+        let active = source.runs_of(repo, RunQuery::Active)?.runs;
         fetch
             .sweeps
             .lock()
@@ -837,7 +839,7 @@ mod tests {
     use std::sync::{Arc, Mutex, PoisonError};
 
     use super::*;
-    use crate::github::{RepoList, RunQuery, SourceError};
+    use crate::github::{RepoList, RunList, RunQuery, SourceError};
     use crate::job::Job;
     use crate::run::{RunId, RunState};
     use crate::suspect::{Item, Suspicion};
@@ -852,6 +854,8 @@ mod tests {
         owners: HashMap<OwnerName, Result<Vec<RepoName>, SourceError>>,
         /// The owners whose list the fake gives as cut.
         cut: std::collections::HashSet<OwnerName>,
+        /// The repositories whose `runs_of` answers the fake gives as cut.
+        cut_runs: std::collections::HashSet<RepoName>,
         created: HashMap<RepoName, Result<Vec<Run>, SourceError>>,
         active: HashMap<RepoName, Result<Vec<Run>, SourceError>>,
         /// The jobs of each run. A run with no entry has no jobs.
@@ -897,7 +901,7 @@ mod tests {
                 .map(|repos| RepoList { repos, cut })
         }
 
-        fn runs_of(&self, repo: &RepoName, query: RunQuery) -> Result<Vec<Run>, SourceError> {
+        fn runs_of(&self, repo: &RepoName, query: RunQuery) -> Result<RunList, SourceError> {
             let mut script = self.script();
             let what = match query {
                 RunQuery::CreatedSince(since) => {
@@ -911,7 +915,12 @@ mod tests {
                 RunQuery::CreatedSince(_) => &script.created,
                 RunQuery::Active => &script.active,
             };
-            let answer = answers.get(repo).cloned().unwrap_or(Ok(Vec::new()));
+            let cut = script.cut_runs.contains(repo);
+            let answer = answers
+                .get(repo)
+                .cloned()
+                .unwrap_or(Ok(Vec::new()))
+                .map(|runs| RunList { runs, cut });
             script.in_flight += 1;
             script.max_in_flight = script.max_in_flight.max(script.in_flight);
             drop(script);
