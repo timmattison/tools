@@ -1921,10 +1921,18 @@ impl CommandValues {
     /// What the environment of this process says.
     fn read() -> Self {
         Self {
-            pull_request: read_value(crate::issue::PR_COMMAND_ENV),
-            issue: read_value(crate::issue::ISSUE_COMMAND_ENV),
+            pull_request: read_value(crate::issue::Page::PullRequest.env()),
+            issue: read_value(crate::issue::Page::Issue.env()),
             rebase: read_value(crate::update::BaseUpdate::Rebase.env()),
             merge: read_value(crate::update::BaseUpdate::Merge.env()),
+        }
+    }
+
+    /// What the variable of `page` says `G` runs for it.
+    fn page(&self, page: crate::issue::Page) -> Option<&str> {
+        match page {
+            crate::issue::Page::PullRequest => self.pull_request.as_deref(),
+            crate::issue::Page::Issue => self.issue.as_deref(),
         }
     }
 
@@ -1949,7 +1957,8 @@ fn read_value(name: &str) -> Option<String> {
 /// Ask the shell, once, whether the command of every key that runs one exists,
 /// and report each answer on the loop's own channel.
 ///
-/// **One thread and one shell for each key.** A shell that answered for several
+/// **One thread and one shell for each command.** `G` has two commands, so the
+/// four keys that run commands have four probes. A shell that answered for several
 /// names at once would need its standard output parsed, and an rc file can
 /// print to that output — so the answer of such a shell says as much about the
 /// banner of the user as about the commands. Exit status carries one answer,
@@ -1978,16 +1987,22 @@ fn spawn_command_probes(
     deadline: Duration,
     tx: &Sender<Event>,
 ) -> Vec<thread::JoinHandle<()>> {
-    let issue_tx = tx.clone();
-    let mut probes = vec![spawn_probe(
-        shell,
-        values.issue.as_deref(),
-        crate::issue::DEFAULT_ISSUE_COMMAND,
-        deadline,
-        move |command| {
-            let _ = issue_tx.send(Event::IssueCommandFound(crate::issue::Page::Issue, command));
-        },
-    )];
+    // Over the pages, as over the acts below: `G` has two commands, and every
+    // difference between them is a method of `Page`.
+    let mut probes: Vec<_> = crate::issue::Page::ALL
+        .map(|page| {
+            let page_tx = tx.clone();
+            spawn_probe(
+                shell,
+                values.page(page),
+                page.default_command(),
+                deadline,
+                move |command| {
+                    let _ = page_tx.send(Event::IssueCommandFound(page, command));
+                },
+            )
+        })
+        .into();
     // Over the acts rather than over two names, so a third act would be probed
     // here without an edit: every difference between the two is a method of
     // `BaseUpdate`, the variable and the default name among them.
