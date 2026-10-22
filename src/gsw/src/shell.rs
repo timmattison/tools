@@ -1017,22 +1017,39 @@ mod run_tests {
         }
 
         let probe_stub = StubShell::answering(0);
-        let run_stub = StubShell::answering(0);
+        // The run is a press of two steps, so it starts two children: ggsp
+        // fails and hands the press to ggs.
+        let run_stub = StubShell::new("case \"$2\" in\n  ggsp) exit 1 ;;\n  *) exit 0 ;;\nesac");
         let workdir = tempfile::tempdir().expect("tempdir");
         assert!(
             probe_with_deadline(probe_stub.as_shell(), &default_command(), ANSWER_DEADLINE),
             "the stub answers 0, so the probe must report the command present",
         );
-        let outcome = run(
-            run_stub.as_shell(),
-            &one_step(default_command()),
-            workdir.path(),
-        );
+        let pull_request = ShellCommand::new(Some("ggsp"), DEFAULT_ISSUE_COMMAND).expect("a name");
+        let steps = Steps::new(Some(pull_request), Some(default_command()))
+            .expect("two commands are steps");
+        let outcome = run(run_stub.as_shell(), &steps, workdir.path());
         assert_eq!(
             outcome.message(),
             None,
-            "the stub exits 0, so the run must report nothing",
+            "the issue command exits 0, so the run must report nothing",
         );
+        let runs = run_stub.runs();
+        for step in ["ggsp", DEFAULT_ISSUE_COMMAND] {
+            assert!(
+                runs.lines().any(|line| line == step),
+                "both steps must start a child, and {step} did not: {runs:?}",
+            );
+        }
+        let run_environment = run_stub.environment();
+        for name in gitscratch::USER_INTENT_GIT_ENVIRONMENT {
+            let kept = format!("{name}={}", user_intent_value(name));
+            let held = run_environment.lines().filter(|line| *line == kept).count();
+            assert_eq!(
+                held, 2,
+                "each of the two run children must hold {name}, and {held} did",
+            );
+        }
 
         for (child, stub) in [("probe", &probe_stub), ("run", &run_stub)] {
             let environment = stub.environment();
