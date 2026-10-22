@@ -772,6 +772,9 @@ mod tests {
         active: HashMap<RepoName, Result<Vec<Run>, SourceError>>,
         /// The jobs of each run. A run with no entry has no jobs.
         jobs: HashMap<RunId, Result<Vec<Job>, SourceError>>,
+        /// The answer of `repo_is_listable` for each repository. A repository
+        /// with no entry is not listable.
+        listable: HashMap<RepoName, Result<bool, SourceError>>,
         calls: Vec<(&'static str, String)>,
         since: Vec<DateTime<Utc>>,
         rate: Option<RateLimit>,
@@ -850,6 +853,12 @@ mod tests {
             let mut script = self.script();
             script.calls.push(("forget", run.0.to_string()));
             script.held.remove(&(repo.clone(), run));
+        }
+
+        fn repo_is_listable(&self, repo: &RepoName) -> Result<bool, SourceError> {
+            let mut script = self.script();
+            script.calls.push(("listable", repo.to_string()));
+            script.listable.get(repo).cloned().unwrap_or(Ok(false))
         }
 
         fn rate_limit(&self) -> Option<RateLimit> {

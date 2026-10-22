@@ -259,6 +259,19 @@ pub trait Source: Send + Sync {
     /// each run that was active.
     fn forget_jobs(&self, repo: &RepoName, run: RunId);
 
+    /// Tells if `repo` is still a repository that `repos_of` lists: it exists,
+    /// it is not archived, and it still has this name.
+    ///
+    /// A repository that GitHub renamed or moved is not listable under its old
+    /// name, although GitHub redirects the request. The comparison of the names
+    /// ignores the case of the letters.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`SourceError`] when the answer is neither a repository nor a
+    /// `404`.
+    fn repo_is_listable(&self, repo: &RepoName) -> Result<bool, SourceError>;
+
     /// The rate limit that the last response stated. `None` before any response.
     fn rate_limit(&self) -> Option<RateLimit>;
 }
@@ -592,6 +605,11 @@ impl Source for GhSource {
     fn forget_jobs(&self, repo: &RepoName, run: RunId) {
         let prefix = format!("{repo}#jobs/{}#", run.0);
         self.lock_etags().retain(|key, _| !key.starts_with(&prefix));
+    }
+
+    fn repo_is_listable(&self, repo: &RepoName) -> Result<bool, SourceError> {
+        let _ = repo;
+        Ok(false)
     }
 
     fn rate_limit(&self) -> Option<RateLimit> {
@@ -1130,6 +1148,20 @@ mod tests {
             }
             calls
         }
+    }
+
+    /// The body that GitHub gives for one repository.
+    fn repo_json(full_name: &str, archived: bool) -> String {
+        format!("{{\"id\":1,\"full_name\":\"{full_name}\",\"archived\":{archived}}}")
+    }
+
+    #[test]
+    fn a_listable_repository_is_listable_and_the_request_names_it() {
+        let stub = Stub::new("cat \"$dir/repo.out\"");
+        stub.file("repo.out", &ok_output(&repo_json("o/r", false)));
+        let listable = stub.source().repo_is_listable(&repo("o/r"));
+        assert_eq!(listable, Ok(true));
+        assert_eq!(stub.requests(), [["api", "-i", "repos/o/r"]]);
     }
 
     #[test]
