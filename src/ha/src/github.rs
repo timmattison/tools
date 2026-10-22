@@ -711,8 +711,17 @@ impl Source for GhSource {
         Ok(page.runs.into_iter().next())
     }
 
-    fn forget_runs(&self, _repo: &RepoName, _query: RunQuery) {
-        // Red stub: a source that keeps every page.
+    fn forget_runs(&self, repo: &RepoName, query: RunQuery) {
+        // The prefix ends with `#`, thus `o/r` does not match `o/r2`.
+        let prefixes: Vec<String> = match query {
+            RunQuery::CreatedSince(_) => vec![format!("{repo}#created#")],
+            RunQuery::Active => ACTIVE_STATUSES
+                .iter()
+                .map(|status| format!("{repo}#{status}#"))
+                .collect(),
+        };
+        self.lock_etags()
+            .retain(|key, _| !prefixes.iter().any(|prefix| key.starts_with(prefix)));
     }
 
     fn rate_limit(&self) -> Option<RateLimit> {
