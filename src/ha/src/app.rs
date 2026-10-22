@@ -230,6 +230,7 @@ where
             match update {
                 Update::Runs { repo, runs } => self.board.replace(repo, runs),
                 Update::Failed { repo, error } => self.board.fail(repo, error.to_string()),
+                Update::Suspect { .. } => {}
                 Update::Jobs { run, jobs } => self.board.set_jobs(run, jobs),
                 Update::JobsFailed { run, error } => self.board.fail_jobs(run, error),
                 Update::Repos {
@@ -784,6 +785,35 @@ mod tests {
         );
         assert!(
             !status_line.contains("could not open a browser"),
+            "{status_line:?}"
+        );
+    }
+
+    #[test]
+    fn a_suspect_answer_keeps_the_runs_and_shows_the_reason() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        channels
+            .updates
+            .send(Update::Suspect {
+                repo: repo(),
+                reason: crate::suspect::Suspicion::LeftOut(crate::suspect::Item::Run(RunId(7))),
+            })
+            .unwrap();
+        let opener = opener(true);
+        let (result, frame) = run_app(
+            &opener,
+            &channels,
+            vec![press(KeyCode::Char('x')), press(KeyCode::Char('q'))],
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert!(
+            frame.iter().any(|line| line.contains("run 1")),
+            "the run stays: {frame:?}"
+        );
+        let status_line = frame.last().unwrap();
+        assert!(
+            status_line.contains("acme/widgets: GitHub left out run 7"),
             "{status_line:?}"
         );
     }

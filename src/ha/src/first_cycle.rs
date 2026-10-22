@@ -81,6 +81,7 @@ impl FirstCycle {
                     })
                     .collect();
             }
+            Update::Suspect { .. } => {}
             Update::Jobs { .. } | Update::JobsFailed { .. } | Update::CycleDone { .. } => {}
         }
     }
@@ -267,6 +268,27 @@ mod tests {
             )],
         });
         assert_eq!(only_suspect.verdict(None), Ok(Verdict::Read));
+    }
+
+    #[test]
+    fn a_suspect_answer_is_a_read_also_when_another_repository_failed() {
+        let mut cycle = FirstCycle::default();
+        cycle.note(&failed("acme/b"));
+        cycle.note(&Update::Suspect {
+            repo: repo("acme/a"),
+            reason: Suspicion::LeftOut(Item::Run(crate::run::RunId(7))),
+        });
+        assert_eq!(cycle.verdict(None), Ok(Verdict::Read));
+    }
+
+    #[test]
+    fn a_suspect_answer_alone_is_a_read() {
+        let mut cycle = FirstCycle::default();
+        cycle.note(&Update::Suspect {
+            repo: repo("acme/a"),
+            reason: Suspicion::LeftOut(Item::Run(crate::run::RunId(7))),
+        });
+        assert_eq!(cycle.verdict(None), Ok(Verdict::Read));
     }
 
     #[test]

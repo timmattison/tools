@@ -71,6 +71,14 @@ pub enum Update {
         /// The error of the fetch.
         error: SourceError,
     },
+    /// The answer for one repository was suspect. The board keeps the last
+    /// good runs of the repository.
+    Suspect {
+        /// The repository whose answer was suspect.
+        repo: RepoName,
+        /// Why the worker does not trust the answer.
+        reason: Suspicion,
+    },
     /// The jobs of one run. The worker sends them for a run that the screen
     /// shows expanded and for every active run.
     Jobs {
