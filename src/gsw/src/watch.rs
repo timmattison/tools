@@ -9289,6 +9289,17 @@ mod push_loop_tests {
     }
 
     #[test]
+    fn a_first_press_on_a_remote_shell_names_both_commands() {
+        let mut issue = issue_run_in(crate::remote::Session::Remote);
+        issue.found(crate::issue::Page::PullRequest, found_pr_command());
+        assert_eq!(
+            issue.press(Instant::now()),
+            IssuePress::Ask("remote shell — press G again to run ggsp, then ggs".to_string()),
+            "the message must name each command the second press can run, in order",
+        );
+    }
+
+    #[test]
     fn a_second_press_on_a_remote_shell_runs_the_command() {
         // The caller arms, because only the row knows whether the words it
         // returned reached the screen. `absorb` makes this pair of calls.
@@ -9430,6 +9441,26 @@ mod push_loop_tests {
     }
 
     #[test]
+    fn a_second_g_on_a_remote_shell_runs_both_steps() {
+        let (screen, seen) = run_loop_remote(vec![
+            pr_probe_answered(),
+            probe_answered(),
+            press_g(),
+            press_g(),
+            Event::Quit,
+        ]);
+        assert!(
+            strip_ansi(&screen).contains("remote shell — press G again to run ggsp, then ggs"),
+            "the first press must name both commands on the screen, got {screen:?}",
+        );
+        assert_eq!(
+            seen.issue_runs,
+            vec![both_steps()],
+            "the second press must run both steps",
+        );
+    }
+
+    #[test]
     fn a_second_g_on_a_remote_shell_starts_the_run() {
         let (_screen, seen) =
             run_loop_remote(vec![probe_answered(), press_g(), press_g(), Event::Quit]);
@@ -9563,6 +9594,21 @@ mod push_loop_tests {
             vec![crate::issue::Steps::new(Some(found_pr_command()), None)
                 .expect("one command is a step")],
             "a key whose only command is the pull request command must run it alone",
+        );
+    }
+
+    #[test]
+    fn g_with_both_commands_runs_both_steps_in_order() {
+        let (_screen, seen) = run_loop(vec![
+            pr_probe_answered(),
+            probe_answered(),
+            press_g(),
+            Event::Quit,
+        ]);
+        assert_eq!(
+            seen.issue_runs,
+            vec![both_steps()],
+            "a key with both commands must run the pull request command, then the issue command",
         );
     }
 
