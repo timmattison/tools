@@ -10,7 +10,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Widget};
 use ratatui::Frame;
-use textfit::{pad_right, truncate_to_budget};
+use textfit::{pad_right, truncate_left_to_budget, truncate_to_budget};
 use unicode_width::UnicodeWidthStr;
 
 use crate::board::{Board, Row, Section};
@@ -26,6 +26,8 @@ use crate::status::{OwnerProblem, Status, MESSAGE_LIFETIME};
 /// suspect are the last good runs. After a suspect sweep, the rows are the recent
 /// runs and the runs of the last good sweep. The mark shows that they can be old
 /// (issue #599). It stands inside the repository cell, thus no other cell moves.
+/// The mark stays before the name. The name gets the columns that the mark
+/// leaves, and a name that does not fit keeps its end (see [`fit_repo`]).
 const STALE_MARK: &str = "\u{1F4A4} ";
 
 /// The width of the marker column. Each marker is one emoji of 2 columns, or a
@@ -92,7 +94,7 @@ struct Widths {
 }
 
 impl Widths {
-    /// Shares the columns that the fixed columns leave over: 24 percent to the
+    /// Shares the columns that the fixed columns leave over: 28 percent to the
     /// repository, 19 percent to the workflow name, 21 percent to the branch,
     /// and the rest to the title.
     ///
@@ -104,7 +106,7 @@ impl Widths {
     /// that is too narrow gives each 0.
     fn for_width(width: usize) -> Widths {
         let room = width.saturating_sub(FIXED_COLUMNS);
-        let repo = room * 24 / 100;
+        let repo = room * 28 / 100;
         let workflow = (room * 19 / 100).min(MAX_WORKFLOW_WIDTH);
         let branch = (room * 21 / 100).min(MAX_BRANCH_WIDTH);
         Widths {
@@ -119,6 +121,26 @@ impl Widths {
 /// Cuts a text to a column width, then pads it to that width.
 fn fit(text: &str, width: usize) -> String {
     pad_right(&truncate_to_budget(text, width), width)
+}
+
+/// Cuts a repository name to a column width, then pads it to that width.
+///
+/// A name that does not fit keeps its end and starts with `…`, because the end
+/// of `owner/name` tells repositories apart. A stale row has the [`STALE_MARK`]
+/// before the name. The mark stays, and the name gets the columns that the mark
+/// leaves. A cell of exactly the width of the mark shows the mark and no name.
+/// A cell narrower than the mark shows what [`fit`] makes of the mark and the
+/// name. `textfit` gives an empty cut for a budget of 0.
+fn fit_repo(name: &str, is_stale: bool, width: usize) -> String {
+    let mark_width = text_width(STALE_MARK);
+    if !is_stale {
+        return pad_right(&truncate_left_to_budget(name, width), width);
+    }
+    if width < mark_width {
+        return fit(&format!("{STALE_MARK}{name}"), width);
+    }
+    let cut = truncate_left_to_budget(name, width - mark_width);
+    pad_right(&format!("{STALE_MARK}{cut}"), width)
 }
 
 /// Cuts a text to a column width, then pads it on the left to that width.
@@ -138,9 +160,14 @@ fn fit_right(text: &str, width: usize) -> String {
 /// fills it and the left marker cell, thus a row never shows two different
 /// markers. The header line does not come from this function. `header_cells`
 /// builds it.
+///
+/// `texts[0]` is the bare repository name. The repository cell keeps the end of
+/// a name that does not fit, and `is_stale` puts the [`STALE_MARK`] before the
+/// name (see [`fit_repo`]). The other text cells keep their start.
 fn cells(
     widths: Widths,
     marker: &str,
+    is_stale: bool,
     texts: [&str; 4],
     id: &str,
     started: &str,
@@ -149,7 +176,7 @@ fn cells(
     let [repo, workflow, branch, title] = texts;
     [
         pad_right(marker, MARKER_WIDTH),
-        fit(repo, widths.repo),
+        fit_repo(repo, is_stale, widths.repo),
         fit(workflow, widths.workflow),
         fit_right(id, ID_WIDTH),
         fit(branch, widths.branch),
@@ -355,7 +382,8 @@ where
 
 /// The line of one run. `state` is the state that the row shows, not the state
 /// that GitHub reports. It sets the marker and the time cells. A stale run
-/// has the [`STALE_MARK`] before its repository name.
+/// has the [`STALE_MARK`] before its repository name. `cells` puts the mark
+/// there and cuts the name at its start when the name does not fit.
 fn run_line<Tz: TimeZone>(
     run: &Run,
     state: RunState,
@@ -372,15 +400,16 @@ where
     } else {
         format_elapsed(span(run.started_at, run.updated_at))
     };
-    let repo = if is_stale {
-        format!("{STALE_MARK}{}", run.repo)
-    } else {
-        run.repo.to_string()
-    };
     cells(
         widths,
         marker(state),
-        [&repo, &run.workflow, &run.branch, &run.title],
+        is_stale,
+        [
+            &run.repo.to_string(),
+            &run.workflow,
+            &run.branch,
+            &run.title,
+        ],
         &run.id.0.to_string(),
         &format_started(run.started_at, now, tz),
         &time,
@@ -406,6 +435,7 @@ where
     cells(
         widths,
         marker,
+        false,
         [&entry.repo.to_string(), word, &entry.branch, &entry.title],
         &pull_text(entry.pull),
         &format_started(entry.enqueued_at, now, tz),
@@ -441,6 +471,7 @@ where
     cells(
         widths,
         marker,
+        false,
         [
             &departure.repo.to_string(),
             word,
@@ -1442,7 +1473,9 @@ mod tests {
     /// These lines are the target example of issue #571, with the two section
     /// headers added. The workflow name is 8 columns wide and the branch is 12
     /// columns wide (issue #577), thus the title has 12 columns more than in
-    /// that example.
+    /// that example. Issue #587 raised the share of the repository to 28
+    /// percent, thus the repository has 21 columns, the text of a job row has
+    /// 30, and the title has 37.
     #[test]
     fn a_frame_of_120_columns_has_the_target_layout_of_issue_571() {
         let mut board = Board::new(Duration::from_hours(8));
@@ -1505,14 +1538,14 @@ mod tests {
         assert_eq!(
             text[0..8],
             [
-                "   REPO               WORKFLOW              BRANCH       TITLE                                    STARTED     TIME",
+                "   REPO                  WORKFLOW              BRANCH       TITLE                                 STARTED     TIME",
                 "Running · 1",
-                "🏃 timmattison/tools  CI        39149840084 main         Fix the thing                            11:45:30    14m 30s 🏃",
-                "✅ ├ build                     107851237794                                                       11:45:40    4m 20s  ✅",
-                "❌ ├ lint                      107851237795                                                       11:46:00    45s     ❌",
-                "🏃 └ test                      107851237796                                                       11:50:10    9m 50s  🏃",
+                "🏃 timmattison/tools     CI        39149840084 main         Fix the thing                         11:45:30    14m 30s 🏃",
+                "✅ ├ build                        107851237794                                                    11:45:40    4m 20s  ✅",
+                "❌ ├ lint                         107851237795                                                    11:46:00    45s     ❌",
+                "🏃 └ test                         107851237796                                                    11:50:10    9m 50s  🏃",
                 "Last 8h · 1 passed · 0 failed · 0 cancelled",
-                "✅ acme/widgets       Release   39149711502 issue-11     Bump deps                                09:00:00    10m 05s ✅",
+                "✅ acme/widgets          Release   39149711502 issue-11     Bump deps                             09:00:00    10m 05s ✅",
             ]
         );
     }
@@ -1524,13 +1557,13 @@ mod tests {
         assert_eq!(
             lines(&buffer),
             [
-                "   REPO               WORKFLOW              BRANCH       TITLE                                    STARTED     TIME",
+                "   REPO                  WORKFLOW              BRANCH       TITLE                                 STARTED     TIME",
                 "Running · 2",
-                "🏃 timmattison/tools  CI                  1 main         Fix the thing                            11:45:30    14m 30s 🏃",
-                "⏳ acme/widgets       Release             2 issue-12     Add release job                          11:58:00    2m 00s  ⏳",
+                "🏃 timmattison/tools     CI                  1 main         Fix the thing                         11:45:30    14m 30s 🏃",
+                "⏳ acme/widgets          Release             2 issue-12     Add release job                       11:58:00    2m 00s  ⏳",
                 "Last 8h · 1 passed · 1 failed · 0 cancelled",
-                "✅ timmattison/tools  CI                  3 main         Bump deps                                09:00:00    10m 05s ✅",
-                "❌ acme/widgets       Release             4 issue-11     Broken build                             10-13 23:50 4h 40m  ❌",
+                "✅ timmattison/tools     CI                  3 main         Bump deps                             09:00:00    10m 05s ✅",
+                "❌ acme/widgets          Release             4 issue-11     Broken build                          10-13 23:50 4h 40m  ❌",
                 "",
                 "",
                 "updated 30s ago      ·  ↑↓ select  →← jobs  ⏎ open  c cancel  r refresh  q quit",
@@ -2237,9 +2270,9 @@ mod tests {
     }
 
     /// The expected line of a job row at 120 columns. The widths follow the
-    /// shares of the 78 columns of room: 18 repository, 8 workflow name, 12
-    /// branch, and 40 title. The text fills 27 columns, the job ID fills 12, and
-    /// the branch and title columns are 53 blank columns. The started and time
+    /// shares of the 78 columns of room: 21 repository, 8 workflow name, 12
+    /// branch, and 37 title. The text fills 30 columns, the job ID fills 12, and
+    /// the branch and title columns are 50 blank columns. The started and time
     /// cells fill 19 columns, and the right marker follows them after one space.
     ///
     /// The marker is an emoji of 2 columns. `format!` pads by characters, thus
@@ -2247,7 +2280,7 @@ mod tests {
     /// 2 spaces.
     fn job_golden(marker: &str, text: &str, id: u64, times: &str) -> String {
         format!(
-            "{marker} {text:<27} {id:>ID_WIDTH$} {blank:<53} {times:<19} {marker}",
+            "{marker} {text:<30} {id:>ID_WIDTH$} {blank:<50} {times:<19} {marker}",
             blank = ""
         )
         .trim_end()
@@ -2261,7 +2294,7 @@ mod tests {
         assert_eq!(
             text[2..6],
             [
-                "🏃 timmattison/tools  CI                  1 main         Fix the thing                            11:45:30    14m 30s 🏃".to_owned(),
+                "🏃 timmattison/tools     CI                  1 main         Fix the thing                         11:45:30    14m 30s 🏃".to_owned(),
                 job_golden("✅", "├ build", 12, "11:45:40    4m 20s"),
                 job_golden("❌", "├ lint", 13, "11:46:00    45s"),
                 job_golden("🏃", "└ test", 11, "11:50:10    9m 50s"),
@@ -2805,6 +2838,141 @@ mod tests {
         assert_eq!(display_width(&stale), display_width(&fresh));
     }
 
+    /// A board with one run of each repository in `repos`. The run IDs are 7001,
+    /// 7002, and so on.
+    fn board_of_repos(repos: &[&str]) -> Board {
+        let mut board = Board::new(Duration::from_hours(8));
+        for (index, name) in repos.iter().enumerate() {
+            board.replace(
+                repo(name),
+                vec![run(
+                    7_001 + index as u64,
+                    name,
+                    "CI",
+                    "main",
+                    "Fix the thing",
+                    RunState::Running,
+                    "2026-10-14T11:45:30Z",
+                    "2026-10-14T11:59:00Z",
+                )],
+                now(),
+            );
+        }
+        board
+    }
+
+    /// The text line of the run with `id`.
+    fn line_of_run(text: &[String], id: u64) -> &str {
+        text.iter()
+            .find(|line| line.contains(&id.to_string()))
+            .expect("the run row shows")
+    }
+
+    #[test]
+    fn a_long_repository_name_keeps_its_end_and_starts_with_an_ellipsis() {
+        let mut board = board_of_repos(&["timmattison/keyboards", "Lock-Free-Labs/expert-witness"]);
+        let text = lines(&render_with(120, 8, &mut board, &loaded()));
+        let whole = line_of_run(&text, 7_001);
+        let cut = line_of_run(&text, 7_002);
+
+        assert!(whole.contains("timmattison/keyboards "), "{whole}");
+        assert!(cut.contains(" …-Labs/expert-witness "), "{cut}");
+        for line in [whole, cut] {
+            for (needle, header) in [("11:45:30", "STARTED"), ("14m 30s", "TIME")] {
+                assert_eq!(
+                    column_of(line, needle),
+                    column_of(&text[0], header),
+                    "{needle} is not under {header}: {line}"
+                );
+            }
+        }
+        assert_eq!(
+            last_digit_column(whole, "7001"),
+            last_digit_column(cut, "7002"),
+            "the run IDs do not end in the same column"
+        );
+    }
+
+    #[test]
+    fn at_100_columns_a_long_repository_name_keeps_its_end() {
+        let mut board = board_of_repos(&["timmattison/megarepo", "timmattison/keyboards"]);
+        let text = lines(&render_with(100, 8, &mut board, &loaded()));
+        assert!(
+            line_of_run(&text, 7_001).contains(" …ttison/megarepo "),
+            "{text:?}"
+        );
+        assert!(
+            line_of_run(&text, 7_002).contains(" …tison/keyboards "),
+            "{text:?}"
+        );
+    }
+
+    #[test]
+    fn a_stale_long_repository_name_keeps_the_mark_and_its_end() {
+        let name = "Lock-Free-Labs/expert-witness";
+        let mut fresh_board = board_of_repos(&[name]);
+        let fresh_text = lines(&render_with(120, 8, &mut fresh_board, &loaded()));
+        let fresh = line_of_run(&fresh_text, 7_001);
+        let mut stale_board = board_of_repos(&[name]);
+        stale_board.fail(repo(name), "HTTP 500".to_owned());
+        let stale_text = lines(&render_with(120, 8, &mut stale_board, &loaded()));
+        let stale = line_of_run(&stale_text, 7_001);
+
+        assert!(stale.contains("\u{1F4A4} …bs/expert-witness "), "{stale}");
+        for cell in ["7001", "11:45:30", "14m 30s", "CI", "main", "Fix the thing"] {
+            assert_eq!(
+                column_of(stale, cell),
+                column_of(fresh, cell),
+                "the cell {cell} moved: {stale}"
+            );
+        }
+        assert_eq!(display_width(stale), display_width(fresh));
+    }
+
+    #[test]
+    fn a_run_line_fills_the_frame_at_every_narrow_repository_cell() {
+        let name = "Lock-Free-Labs/expert-witness";
+        let long = run(
+            9,
+            name,
+            "CI",
+            "main",
+            "Fix the thing",
+            RunState::Running,
+            "2026-10-14T11:45:30Z",
+            "2026-10-14T11:59:00Z",
+        );
+        for frame in 42_usize..=60 {
+            for is_stale in [false, true] {
+                let line = run_line(
+                    &long,
+                    RunState::Running,
+                    is_stale,
+                    now(),
+                    &utc(),
+                    Widths::for_width(frame),
+                );
+                assert_eq!(
+                    display_width(&line),
+                    frame,
+                    "frame {frame}, stale {is_stale}: {line:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_stale_repository_cell_no_wider_than_the_mark_shows_what_fit_makes() {
+        let name = "Lock-Free-Labs/expert-witness";
+        for (width, expected) in [(0, ""), (1, "…"), (2, "… "), (3, "\u{1F4A4} ")] {
+            assert_eq!(
+                fit_repo(name, true, width),
+                expected,
+                "a stale cell of width {width}"
+            );
+        }
+    }
+
     fn display_width(text: &str) -> usize {
         unicode_width::UnicodeWidthStr::width(text)
     }
@@ -3005,135 +3173,136 @@ mod tests {
     /// column is 2 columns wide since issue #581, thus each width has the entry
     /// that the frame one column narrower had before. Since issue #590, the right
     /// marker cell and its space take 3 columns, thus each width has the entry
-    /// that the frame three columns narrower had before.
+    /// that the frame three columns narrower had before. Since issue #587 the
+    /// repository gets 28 percent.
     const TEXT_WIDTHS: [(usize, usize, usize, usize); 121] = [
-        (9, 7, 7, 15),
-        (9, 7, 8, 15),
-        (9, 7, 8, 16),
-        (9, 7, 8, 17),
-        (10, 7, 8, 17),
-        (10, 8, 9, 16),
-        (10, 8, 9, 17),
-        (10, 8, 9, 18),
-        (11, 8, 9, 18),
-        (11, 8, 9, 19),
-        (11, 8, 10, 19),
-        (11, 8, 10, 20),
-        (12, 8, 10, 20),
-        (12, 8, 10, 21),
-        (12, 8, 10, 22),
-        (12, 8, 11, 22),
-        (12, 8, 11, 23),
-        (13, 8, 11, 23),
-        (13, 8, 11, 24),
-        (13, 8, 11, 25),
-        (13, 8, 12, 25),
-        (14, 8, 12, 25),
-        (14, 8, 12, 26),
-        (14, 8, 12, 27),
-        (14, 8, 12, 28),
-        (15, 8, 12, 28),
-        (15, 8, 12, 29),
-        (15, 8, 12, 30),
-        (15, 8, 12, 31),
-        (16, 8, 12, 31),
-        (16, 8, 12, 32),
-        (16, 8, 12, 33),
-        (16, 8, 12, 34),
-        (17, 8, 12, 34),
-        (17, 8, 12, 35),
-        (17, 8, 12, 36),
-        (17, 8, 12, 37),
-        (18, 8, 12, 37),
-        (18, 8, 12, 38),
-        (18, 8, 12, 39),
-        (18, 8, 12, 40),
-        (18, 8, 12, 41),
-        (19, 8, 12, 41),
-        (19, 8, 12, 42),
-        (19, 8, 12, 43),
-        (19, 8, 12, 44),
-        (20, 8, 12, 44),
-        (20, 8, 12, 45),
-        (20, 8, 12, 46),
-        (20, 8, 12, 47),
-        (21, 8, 12, 47),
-        (21, 8, 12, 48),
-        (21, 8, 12, 49),
-        (21, 8, 12, 50),
-        (22, 8, 12, 50),
-        (22, 8, 12, 51),
-        (22, 8, 12, 52),
-        (22, 8, 12, 53),
-        (23, 8, 12, 53),
-        (23, 8, 12, 54),
-        (23, 8, 12, 55),
-        (23, 8, 12, 56),
-        (24, 8, 12, 56),
-        (24, 8, 12, 57),
-        (24, 8, 12, 58),
-        (24, 8, 12, 59),
-        (24, 8, 12, 60),
-        (25, 8, 12, 60),
-        (25, 8, 12, 61),
-        (25, 8, 12, 62),
-        (25, 8, 12, 63),
-        (26, 8, 12, 63),
-        (26, 8, 12, 64),
-        (26, 8, 12, 65),
-        (26, 8, 12, 66),
-        (27, 8, 12, 66),
-        (27, 8, 12, 67),
-        (27, 8, 12, 68),
-        (27, 8, 12, 69),
-        (28, 8, 12, 69),
-        (28, 8, 12, 70),
-        (28, 8, 12, 71),
-        (28, 8, 12, 72),
-        (29, 8, 12, 72),
-        (29, 8, 12, 73),
-        (29, 8, 12, 74),
-        (29, 8, 12, 75),
-        (30, 8, 12, 75),
-        (30, 8, 12, 76),
-        (30, 8, 12, 77),
-        (30, 8, 12, 78),
-        (30, 8, 12, 79),
-        (31, 8, 12, 79),
-        (31, 8, 12, 80),
-        (31, 8, 12, 81),
-        (31, 8, 12, 82),
-        (32, 8, 12, 82),
-        (32, 8, 12, 83),
-        (32, 8, 12, 84),
-        (32, 8, 12, 85),
-        (33, 8, 12, 85),
-        (33, 8, 12, 86),
-        (33, 8, 12, 87),
-        (33, 8, 12, 88),
-        (34, 8, 12, 88),
-        (34, 8, 12, 89),
-        (34, 8, 12, 90),
-        (34, 8, 12, 91),
-        (35, 8, 12, 91),
-        (35, 8, 12, 92),
-        (35, 8, 12, 93),
-        (35, 8, 12, 94),
-        (36, 8, 12, 94),
-        (36, 8, 12, 95),
-        (36, 8, 12, 96),
-        (36, 8, 12, 97),
-        (36, 8, 12, 98),
-        (37, 8, 12, 98),
-        (37, 8, 12, 99),
-        (37, 8, 12, 100),
-        (37, 8, 12, 101),
+        (10, 7, 7, 14),
+        (10, 7, 8, 14),
+        (11, 7, 8, 14),
+        (11, 7, 8, 15),
+        (11, 7, 8, 16),
+        (12, 8, 9, 14),
+        (12, 8, 9, 15),
+        (12, 8, 9, 16),
+        (12, 8, 9, 17),
+        (13, 8, 9, 17),
+        (13, 8, 10, 17),
+        (13, 8, 10, 18),
+        (14, 8, 10, 18),
+        (14, 8, 10, 19),
+        (14, 8, 10, 20),
+        (14, 8, 11, 20),
+        (15, 8, 11, 20),
+        (15, 8, 11, 21),
+        (15, 8, 11, 22),
+        (15, 8, 11, 23),
+        (16, 8, 12, 22),
+        (16, 8, 12, 23),
+        (16, 8, 12, 24),
+        (17, 8, 12, 24),
+        (17, 8, 12, 25),
+        (17, 8, 12, 26),
+        (17, 8, 12, 27),
+        (18, 8, 12, 27),
+        (18, 8, 12, 28),
+        (18, 8, 12, 29),
+        (19, 8, 12, 29),
+        (19, 8, 12, 30),
+        (19, 8, 12, 31),
+        (19, 8, 12, 32),
+        (20, 8, 12, 32),
+        (20, 8, 12, 33),
+        (20, 8, 12, 34),
+        (21, 8, 12, 34),
+        (21, 8, 12, 35),
+        (21, 8, 12, 36),
+        (21, 8, 12, 37),
+        (22, 8, 12, 37),
+        (22, 8, 12, 38),
+        (22, 8, 12, 39),
+        (22, 8, 12, 40),
+        (23, 8, 12, 40),
+        (23, 8, 12, 41),
+        (23, 8, 12, 42),
+        (24, 8, 12, 42),
+        (24, 8, 12, 43),
+        (24, 8, 12, 44),
+        (24, 8, 12, 45),
+        (25, 8, 12, 45),
+        (25, 8, 12, 46),
+        (25, 8, 12, 47),
+        (26, 8, 12, 47),
+        (26, 8, 12, 48),
+        (26, 8, 12, 49),
+        (26, 8, 12, 50),
+        (27, 8, 12, 50),
+        (27, 8, 12, 51),
+        (27, 8, 12, 52),
+        (28, 8, 12, 52),
+        (28, 8, 12, 53),
+        (28, 8, 12, 54),
+        (28, 8, 12, 55),
+        (29, 8, 12, 55),
+        (29, 8, 12, 56),
+        (29, 8, 12, 57),
+        (29, 8, 12, 58),
+        (30, 8, 12, 58),
+        (30, 8, 12, 59),
+        (30, 8, 12, 60),
+        (31, 8, 12, 60),
+        (31, 8, 12, 61),
+        (31, 8, 12, 62),
+        (31, 8, 12, 63),
+        (32, 8, 12, 63),
+        (32, 8, 12, 64),
+        (32, 8, 12, 65),
+        (33, 8, 12, 65),
+        (33, 8, 12, 66),
+        (33, 8, 12, 67),
+        (33, 8, 12, 68),
+        (34, 8, 12, 68),
+        (34, 8, 12, 69),
+        (34, 8, 12, 70),
+        (35, 8, 12, 70),
+        (35, 8, 12, 71),
+        (35, 8, 12, 72),
+        (35, 8, 12, 73),
+        (36, 8, 12, 73),
+        (36, 8, 12, 74),
+        (36, 8, 12, 75),
+        (36, 8, 12, 76),
+        (37, 8, 12, 76),
+        (37, 8, 12, 77),
+        (37, 8, 12, 78),
+        (38, 8, 12, 78),
+        (38, 8, 12, 79),
+        (38, 8, 12, 80),
+        (38, 8, 12, 81),
+        (39, 8, 12, 81),
+        (39, 8, 12, 82),
+        (39, 8, 12, 83),
+        (40, 8, 12, 83),
+        (40, 8, 12, 84),
+        (40, 8, 12, 85),
+        (40, 8, 12, 86),
+        (41, 8, 12, 86),
+        (41, 8, 12, 87),
+        (41, 8, 12, 88),
+        (42, 8, 12, 88),
+        (42, 8, 12, 89),
+        (42, 8, 12, 90),
+        (42, 8, 12, 91),
+        (43, 8, 12, 91),
+        (43, 8, 12, 92),
+        (43, 8, 12, 93),
+        (43, 8, 12, 94),
+        (44, 8, 12, 94),
     ];
 
     #[test]
     fn the_workflow_and_the_branch_are_capped_and_the_title_gets_the_rest() {
         for w in 80_u16..=200 {
-            let repo_text = format!("Q/{}", "Q".repeat(400));
+            let repo_text = format!("{}/Q", "Q".repeat(400));
             let mut board = Board::new(Duration::from_hours(8));
             board.replace(
                 repo(&repo_text),
@@ -3157,7 +3326,8 @@ mod tests {
             );
             // Each text is too long for its cell, thus the cell holds the letters and `…`.
             let letters = |letter: char| row.chars().filter(|c| *c == letter).count();
-            // The repository cell also holds the slash.
+            // The repository cell keeps its end, thus it also holds `/Q`.
+            // The cell holds `…`, the slash, and the letters, thus the letters are two fewer.
             let widths = (
                 letters('Q') + 2,
                 letters('W') + 1,
@@ -3169,7 +3339,7 @@ mod tests {
     }
 
     #[test]
-    fn long_text_keeps_its_start_and_ends_with_an_ellipsis() {
+    fn a_long_repository_name_keeps_its_end_and_other_long_text_keeps_its_start() {
         let mut board = Board::new(Duration::from_hours(8));
         board.replace(
             repo("timmattison/tools"),
@@ -3186,10 +3356,10 @@ mod tests {
             now(),
         );
         let text = lines(&render_with(68, 6, &mut board, &Status::default()));
-        // 68 - 42 = 26 columns for the text: 6, 4, 5, and 11.
+        // 68 - 42 = 26 columns for the text: 7, 4, 5, and 10.
         assert_eq!(
             text[2],
-            "🏃 timma… Con…            1 feat… A very lon… 11:55:00    5m 00s  🏃"
+            "🏃 …/tools Con…            1 feat… A very lo… 11:55:00    5m 00s  🏃"
         );
     }
 
@@ -3235,15 +3405,15 @@ mod tests {
         let text = lines(&render_with(68, 7, &mut board, &Status::default()));
         assert_eq!(
             text[2],
-            "🏃 a/x    CI              1 日本… t           11:51:00    9m 00s  🏃"
+            "🏃 a/x     CI              1 日本… t          11:51:00    9m 00s  🏃"
         );
         assert_eq!(
             text[3],
-            "🏃 a/x    CI              2 café… t           11:52:00    8m 00s  🏃"
+            "🏃 a/x     CI              2 café… t          11:52:00    8m 00s  🏃"
         );
         assert_eq!(
             text[4],
-            "🏃 a/x    CI              3 🎉🎉… t           11:53:00    7m 00s  🏃"
+            "🏃 a/x     CI              3 🎉🎉… t          11:53:00    7m 00s  🏃"
         );
         for line in &text {
             assert!(display_width(line) <= 68, "{line:?} is too wide");
@@ -4661,18 +4831,18 @@ mod tests {
         let mut board = megarepo_board();
         let text = lines(&render_with(160, 16, &mut board, &loaded()));
         let block: Vec<String> = (2..=8)
-            .map(|y| columns(&text[y], 0, 54).trim_end().to_owned())
+            .map(|y| columns(&text[y], 0, 59).trim_end().to_owned())
             .collect();
         assert_eq!(
             block,
             [
-                "🏃 timmattison/megarepo         CI        39450362521",
-                "✅ ├ e2e-plan grwetky1t8721h17t103k8gce0 107851237701",
-                "⏳ ├ e2e-remotesensing (1)               107851237705",
-                "🏃 ├ e2e-remotesensing (2) m1-ts         107851237702",
-                "🏃 ├ e2e-remotesensing (3) mbp           107851237703",
-                "⏳ ├ e2e-remotesensing (4)               107851237704",
-                "🏃 └ sites gr96283qcxw61jpesqnhtrkhwb    107851237706",
+                "🏃 timmattison/megarepo              CI        39450362521",
+                "✅ ├ e2e-plan grwetky1t8721h17t103k8gce0      107851237701",
+                "⏳ ├ e2e-remotesensing (1)                    107851237705",
+                "🏃 ├ e2e-remotesensing (2) m1-ts              107851237702",
+                "🏃 ├ e2e-remotesensing (3) mbp                107851237703",
+                "⏳ ├ e2e-remotesensing (4)                    107851237704",
+                "🏃 └ sites gr96283qcxw61jpesqnhtrkhwb         107851237706",
             ]
         );
         let started = ["11:46:00", "", "11:50:00", "11:51:00", "", "11:52:00"];
@@ -4732,17 +4902,17 @@ mod tests {
         let mut board = megarepo_board();
         let text = lines(&render_with(120, 16, &mut board, &loaded()));
         let block: Vec<String> = (3..=8)
-            .map(|y| columns(&text[y], 0, 44).trim_end().to_owned())
+            .map(|y| columns(&text[y], 0, 47).trim_end().to_owned())
             .collect();
         assert_eq!(
             block,
             [
-                "✅ ├ e2e-plan grwetky1t8721h1… 107851237701",
-                "⏳ ├ e2e-remotesensing (1)     107851237705",
-                "🏃 ├ e2e-remotesensing (2)     107851237702",
-                "🏃 ├ e2e-remotesensing (3) mbp 107851237703",
-                "⏳ ├ e2e-remotesensing (4)     107851237704",
-                "🏃 └ sites gr96283qcxw61jpesq… 107851237706",
+                "✅ ├ e2e-plan grwetky1t8721h17t1… 107851237701",
+                "⏳ ├ e2e-remotesensing (1)        107851237705",
+                "🏃 ├ e2e-remotesensing (2) m1-ts  107851237702",
+                "🏃 ├ e2e-remotesensing (3) mbp    107851237703",
+                "⏳ ├ e2e-remotesensing (4)        107851237704",
+                "🏃 └ sites gr96283qcxw61jpesqnht… 107851237706",
             ]
         );
     }
@@ -4781,27 +4951,27 @@ mod tests {
     /// The time cells of [`passed_job`] in a golden line.
     const PASSED_TIMES: &str = "11:46:00    2m 00s";
 
-    /// A job name of 21 columns. Its text `└ ` plus the name is 23 columns, thus
-    /// the room for a runner name is 3.
-    const ROOM_OF_3_NAME: &str = "abcdefghijklmnopqrstu";
+    /// A job name of 24 columns. Its text `└ ` plus the name is 26 columns, thus
+    /// the room for a runner name in the 30 columns of the cell is 3.
+    const ROOM_OF_3_NAME: &str = "abcdefghijklmnopqrstuvwx";
 
     #[test]
     fn a_long_runner_name_with_fewer_than_4_columns_does_not_show() {
-        // The text `└ Full check list (Linux)` is 25 columns, thus the room is 1.
+        // The text `└ Full check list (Linux 22)` is 28 columns, thus the room is 1.
         let (buffer, row, y) = lone_job_row(
             on(
                 "GitHub Actions 1000001050",
-                passed_job("Full check list (Linux)"),
+                passed_job("Full check list (Linux 22)"),
             ),
             120,
         );
         assert_eq!(
             row,
-            job_golden("✅", "└ Full check list (Linux)", LONE_JOB, PASSED_TIMES)
+            job_golden("✅", "└ Full check list (Linux 22)", LONE_JOB, PASSED_TIMES)
         );
         assert_eq!(cyan_columns(&buffer, y), Vec::<u16>::new());
-        // A name of 21 columns makes a text of 23 columns, thus the room is 3.
-        assert_eq!(display_width(ROOM_OF_3_NAME), 21);
+        // A name of 24 columns makes a text of 26 columns, thus the room is 3.
+        assert_eq!(display_width(ROOM_OF_3_NAME), 24);
         let (buffer, row, y) = lone_job_row(on("m1-ts", passed_job(ROOM_OF_3_NAME)), 120);
         assert_eq!(
             row,
@@ -4883,6 +5053,37 @@ mod tests {
         }
     }
 
+    /// Issue #587 raised the share of the repository to 28 percent. The widths
+    /// of the repository and of the title at four frame widths state it.
+    #[test]
+    fn the_repository_gets_28_percent_of_the_room() {
+        let widths = |w: usize| {
+            let widths = Widths::for_width(w);
+            (widths.repo, widths.title)
+        };
+        assert_eq!(widths(100), (16, 22), "width 100");
+        assert_eq!(widths(120), (21, 37), "width 120");
+        assert_eq!(widths(140), (27, 51), "width 140");
+        assert_eq!(widths(160), (33, 65), "width 160");
+    }
+
+    /// At 120 columns the text cell of a job row is 30 columns since issue
+    /// #587. The runner `m1-ts` of the job `e2e-remotesensing (2)` fits whole.
+    #[test]
+    fn a_runner_name_shows_whole_in_the_wider_text_cell_of_120_columns() {
+        let name = "e2e-remotesensing (2)";
+        let (buffer, row, y) = lone_job_row(on("m1-ts", passed_job(name)), 120);
+        assert!(
+            row.contains(&format!("{name} m1-ts")),
+            "the row does not show the runner: {row:?}"
+        );
+        let start = u16::try_from(display_width(&format!("✅ └ {name} "))).expect("a small column");
+        assert_eq!(
+            cyan_columns(&buffer, y),
+            (start..start + 5).collect::<Vec<u16>>()
+        );
+    }
+
     /// The display column where the run ID `1` of the first run ends at `width`
     /// columns.
     fn run_id_column(width: u16) -> usize {
@@ -4895,9 +5096,9 @@ mod tests {
     fn a_job_name_that_fills_the_cell_shows_no_runner_name() {
         let name = "n".repeat(40);
         let (buffer, row, y) = lone_job_row(on("mbp", passed_job(&name)), 120);
-        // The text is cut to the 27 columns of the cell and ends in `…`.
-        let cut = format!("└ {}…", "n".repeat(24));
-        assert_eq!(display_width(&cut), 27);
+        // The text is cut to the 30 columns of the cell and ends in `…`.
+        let cut = format!("└ {}…", "n".repeat(27));
+        assert_eq!(display_width(&cut), 30);
         assert_eq!(row, job_golden("✅", &cut, LONE_JOB, PASSED_TIMES));
         assert_eq!(cyan_columns(&buffer, y), Vec::<u16>::new());
         assert_eq!(
@@ -4981,6 +5182,57 @@ mod tests {
             state,
             enqueued_at: at(enqueued),
             url: format!("https://github.com/rust-lang/cargo/pull/{pull}"),
+        }
+    }
+
+    #[test]
+    fn a_queue_row_keeps_the_end_of_a_long_repository_name() {
+        // The cell that a fresh run row gets for this name at this width.
+        const CUT: &str = " …pert-witness ";
+        let name = "Lock-Free-Labs/expert-witness";
+        let entry = QueueEntry {
+            repo: repo(name),
+            ..queue_entry(
+                16012,
+                1,
+                EntryState::AwaitingChecks,
+                "fix-lockfile",
+                "Fix the lockfile",
+                "2026-10-14T11:55:00Z",
+            )
+        };
+        let departure = Departure {
+            repo: repo(name),
+            ..departure(
+                16010,
+                Outcome::Merged,
+                "fix-lockfile",
+                "Fix the lockfile",
+                Some("2026-10-14T11:50:00Z"),
+                "2026-10-14T11:58:00Z",
+            )
+        };
+        let widths = Widths::for_width(90);
+        let lines = [
+            entry_line(&entry, now(), &utc(), widths),
+            departure_line(&departure, now(), &utc(), widths),
+        ];
+        let fresh = run(
+            9,
+            name,
+            "CI",
+            "main",
+            "Fix the thing",
+            RunState::Running,
+            "2026-10-14T11:45:30Z",
+            "2026-10-14T11:59:00Z",
+        );
+        let reference = run_line(&fresh, RunState::Running, false, now(), &utc(), widths);
+        assert!(reference.contains(CUT), "{reference:?}");
+        for line in lines {
+            assert!(line.contains(CUT), "{line:?}");
+            assert!(!line.contains("Lock-Free"), "{line:?}");
+            assert!(!line.contains('\u{1F4A4}'), "{line:?}");
         }
     }
 
@@ -5088,8 +5340,11 @@ mod tests {
         time: &str,
     ) -> String {
         let number = format!("#{pull}");
+        let widths = Widths::for_width(120);
+        let (repo_width, word_width) = (widths.repo, widths.workflow);
+        let (branch_width, title_width) = (widths.branch, widths.title);
         format!(
-            "{marker} {repo:<18} {word:<8} {number:>ID_WIDTH$} {branch:<12} {title:<40} {started:<11} {time:<7} {marker}",
+            "{marker} {repo:<repo_width$} {word:<word_width$} {number:>ID_WIDTH$} {branch:<branch_width$} {title:<title_width$} {started:<11} {time:<7} {marker}",
             repo = "rust-lang/cargo"
         )
     }

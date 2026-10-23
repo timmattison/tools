@@ -34,11 +34,12 @@
 //! # A marker costs a column
 //!
 //! Each `truncate_*` function marks the cut with `…`, and that marker occupies
-//! one column of the budget. [`truncate_right`] therefore answers a budget of
-//! no columns with the marker alone, which is one column too wide. That answer
-//! is deliberate, and it is the reason [`truncate_to_budget`] stands beside it:
-//! a caller that can be handed a zero calls that one instead, and gets an empty
-//! string.
+//! one column of the budget. [`truncate_right`] and [`truncate_left`]
+//! therefore answer a budget of no columns with the marker alone, which is one
+//! column too wide. That answer is deliberate, and it is the reason
+//! [`truncate_to_budget`] and [`truncate_left_to_budget`] stand beside them: a
+//! caller that can be handed a zero calls one of those instead, and gets an
+//! empty string.
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -98,6 +99,10 @@ pub fn truncate_right(s: &str, max_width: usize) -> String {
 ///
 /// A path carries the part that identifies it at the end, so a path that must
 /// lose columns loses them from the front.
+///
+/// A budget of no columns gives the marker alone, which is one column wider
+/// than the budget. Call [`truncate_left_to_budget`] when the budget can be
+/// zero.
 #[must_use]
 pub fn truncate_left(s: &str, max_width: usize) -> String {
     if UnicodeWidthStr::width(s) <= max_width {
@@ -180,6 +185,17 @@ pub fn truncate_to_budget(s: &str, budget: usize) -> String {
         String::new()
     } else {
         truncate_right(s, budget)
+    }
+}
+
+/// [`truncate_left`], but a zero budget yields nothing rather than a lone
+/// `…` — which would itself be one column too wide.
+#[must_use]
+pub fn truncate_left_to_budget(s: &str, budget: usize) -> String {
+    if budget == 0 {
+        String::new()
+    } else {
+        truncate_left(s, budget)
     }
 }
 
@@ -274,6 +290,66 @@ mod tests {
             "src/wn/src/main.rs"
         );
         assert_eq!(truncate_left("src/wn/src/main.rs", 10), "…c/main.rs");
+    }
+
+    #[test]
+    fn truncate_left_to_budget_gives_nothing_for_no_columns() {
+        // `truncate_left` gives the marker here, and the marker is one column
+        // wide. That is the whole reason this function stands beside it.
+        assert_eq!(truncate_left("timmattison/tools", 0), "…");
+        assert_eq!(truncate_left_to_budget("timmattison/tools", 0), "");
+        assert_eq!(truncate_left_to_budget("timmattison/tools", 1), "…");
+        assert_eq!(
+            truncate_left_to_budget("timmattison/tools", 17),
+            "timmattison/tools"
+        );
+        assert_eq!(
+            truncate_left_to_budget("timmattison/tools", 30),
+            "timmattison/tools"
+        );
+    }
+
+    #[test]
+    fn truncate_left_to_budget_keeps_the_end_and_never_overflows() {
+        for text in [
+            "Lock-Free-Labs/expert-witness",
+            "日本語テスト",
+            "🎉🎊🎁🎈🎂",
+            "café au lait",
+        ] {
+            let width = UnicodeWidthStr::width(text);
+            for budget in 0..=width + 2 {
+                let cut = truncate_left_to_budget(text, budget);
+                assert!(
+                    UnicodeWidthStr::width(cut.as_str()) <= budget,
+                    "{text:?} at {budget} gave {cut:?} ({} columns)",
+                    UnicodeWidthStr::width(cut.as_str()),
+                );
+                if budget >= width {
+                    assert_eq!(cut, text, "{text:?} fits in {budget} columns");
+                } else if budget > 0 {
+                    let kept = cut
+                        .strip_prefix(ELLIPSIS)
+                        .unwrap_or_else(|| panic!("{text:?} at {budget} gave {cut:?}"));
+                    assert!(
+                        text.ends_with(kept),
+                        "{text:?} at {budget} gave {cut:?}, which is not its end"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn truncate_left_to_budget_never_splits_a_wide_character() {
+        // A budget of 5 holds the marker and two wide characters. A budget of
+        // 4 does not hold the marker and two wide characters, and half of one
+        // is not an answer.
+        assert_eq!(truncate_left_to_budget("日本語テスト", 5), "…スト");
+        assert_eq!(truncate_left_to_budget("日本語テスト", 4), "…ト");
+        assert_eq!(truncate_left_to_budget("🎉🎊🎁🎈🎂", 4), "…🎂");
+        assert_eq!(truncate_left_to_budget("café au lait", 10), "…é au lait");
+        assert_eq!(truncate_left_to_budget("café au lait", 8), "…au lait");
     }
 
     #[test]
