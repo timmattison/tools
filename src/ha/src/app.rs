@@ -392,7 +392,7 @@ where
             (Arrow::Left, false) => self.board.collapse(now),
             (Arrow::Left, true) => self.board.collapse_all(now),
         }
-        self.last_arrow = Some(arrow);
+        self.last_arrow = (!double).then_some(arrow);
         self.sync_watch();
     }
 
