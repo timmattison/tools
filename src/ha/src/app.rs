@@ -106,6 +106,8 @@ pub struct App<'a, O: Opener, C: Canceller, Tz: TimeZone> {
 enum Arrow {
     /// `Right`: it expands.
     Right,
+    /// `Left`: it collapses.
+    Left,
 }
 
 /// Why the event loop ended with an error.
@@ -351,19 +353,11 @@ where
                 Flow::Continue
             }
             KeyCode::Right => {
-                let now = (self.now)();
-                if previous == Some(Arrow::Right) {
-                    self.board.expand_all(now);
-                } else {
-                    self.board.expand(now);
-                }
-                self.last_arrow = Some(Arrow::Right);
-                self.sync_watch();
+                self.press_arrow(Arrow::Right, previous);
                 Flow::Continue
             }
             KeyCode::Left => {
-                self.board.collapse((self.now)());
-                self.sync_watch();
+                self.press_arrow(Arrow::Left, previous);
                 Flow::Continue
             }
             KeyCode::Char('r') => {
@@ -381,6 +375,25 @@ where
             }
             _ => Flow::Continue,
         }
+    }
+
+    /// Acts on one press of `arrow`. `previous` is the arrow of the key press
+    /// before this one, when that key press was an arrow key.
+    ///
+    /// A single press expands or collapses the run of the highlighted row.
+    /// When `previous` is the same arrow, it expands or collapses every run
+    /// that shows.
+    fn press_arrow(&mut self, arrow: Arrow, previous: Option<Arrow>) {
+        let now = (self.now)();
+        let double = previous == Some(arrow);
+        match (arrow, double) {
+            (Arrow::Right, false) => self.board.expand(now),
+            (Arrow::Right, true) => self.board.expand_all(now),
+            (Arrow::Left, false) => self.board.collapse(now),
+            (Arrow::Left, true) => self.board.collapse_all(now),
+        }
+        self.last_arrow = Some(arrow);
+        self.sync_watch();
     }
 
     /// Opens the box that asks to cancel the highlighted run, or posts that a

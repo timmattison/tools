@@ -810,6 +810,14 @@ impl Board {
         }
     }
 
+    /// Collapses every run. The board keeps the job answer of each run, thus
+    /// each run row keeps its marker. On a job row, the selection goes to the
+    /// row of that run.
+    pub fn collapse_all(&mut self, now: DateTime<Utc>) {
+        self.settle(now);
+        self.expanded.clear();
+    }
+
     /// Stores the jobs of `run` when the board holds the run, expanded or not.
     /// A late answer for a run that the board does not hold is dropped.
     ///
