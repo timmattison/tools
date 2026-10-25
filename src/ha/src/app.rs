@@ -95,6 +95,17 @@ pub struct App<'a, O: Opener, C: Canceller, Tz: TimeZone> {
     /// cycle that gives a verdict. A cycle that ends with a spent API budget
     /// gives none, and the tally then starts again for the next cycle.
     first_cycle: Option<FirstCycle>,
+    /// The arrow key of the last key press, when that press can be the first
+    /// press of a double press. It is `None` after a key that is not an arrow
+    /// key.
+    last_arrow: Option<Arrow>,
+}
+
+/// An arrow key that expands or collapses runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Arrow {
+    /// `Right`: it expands.
+    Right,
 }
 
 /// Why the event loop ended with an error.
@@ -136,6 +147,7 @@ where
             watched: BTreeSet::new(),
             confirm: None,
             first_cycle: Some(FirstCycle::default()),
+            last_arrow: None,
         }
     }
 
@@ -309,6 +321,7 @@ where
     /// nothing more. Thus `q`, `Esc`, and `Enter` do not quit, open, or move
     /// anything while the box shows.
     fn handle_key(&mut self, key: KeyEvent) -> Flow {
+        let previous = self.last_arrow.take();
         self.status.message = None;
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         if let Some(confirm) = self.confirm.take() {
@@ -338,7 +351,13 @@ where
                 Flow::Continue
             }
             KeyCode::Right => {
-                self.board.expand((self.now)());
+                let now = (self.now)();
+                if previous == Some(Arrow::Right) {
+                    self.board.expand_all(now);
+                } else {
+                    self.board.expand(now);
+                }
+                self.last_arrow = Some(Arrow::Right);
                 self.sync_watch();
                 Flow::Continue
             }
