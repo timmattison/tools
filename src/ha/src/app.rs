@@ -1894,6 +1894,36 @@ mod tests {
     }
 
     #[test]
+    fn two_fast_lefts_collapse_every_run_and_send_the_empty_set() {
+        let channels = channels();
+        send_runs(
+            &channels,
+            vec![active_run(1, 5), active_run(2, 30), finished_run(3, 10)],
+        );
+        let steps = vec![
+            key(KeyCode::Right),
+            key(KeyCode::Down),
+            key(KeyCode::Right),
+            key(KeyCode::Down),
+            key(KeyCode::Right),
+            key(KeyCode::Left),
+            key(KeyCode::Left),
+            key(KeyCode::Char('q')),
+        ];
+        let (_, commands) = run_steps(&channels, steps);
+        assert_eq!(
+            commands,
+            [
+                watch(&[2]),
+                watch(&[1, 2]),
+                watch(&[1, 2, 3]),
+                watch(&[1, 2]),
+                watch(&[]),
+            ]
+        );
+    }
+
+    #[test]
     fn down_skips_the_loading_row_of_an_expanded_run() {
         let channels = channels();
         send_runs(&channels, vec![active_run(1, 5), active_run(2, 30)]);
