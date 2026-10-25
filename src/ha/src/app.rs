@@ -95,11 +95,15 @@ pub struct App<'a, O: Opener, C: Canceller, Tz: TimeZone> {
     /// cycle that gives a verdict. A cycle that ends with a spent API budget
     /// gives none, and the tally then starts again for the next cycle.
     first_cycle: Option<FirstCycle>,
-    /// The arrow key of the last key press, when that press can be the first
-    /// press of a double press. It is `None` after a key that is not an arrow
-    /// key.
-    last_arrow: Option<Arrow>,
+    /// The arrow key of the last key press and the time of that press, when
+    /// that press can be the first press of a double press. It is `None`
+    /// after a key that is not an arrow key, and after a double press.
+    last_arrow: Option<(Arrow, DateTime<Utc>)>,
 }
+
+/// The longest time between the two presses of a double press of an arrow
+/// key. A second press that comes later is a single press.
+const DOUBLE_PRESS_WINDOW: Duration = Duration::from_millis(500);
 
 /// An arrow key that expands or collapses runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -377,22 +381,29 @@ where
         }
     }
 
-    /// Acts on one press of `arrow`. `previous` is the arrow of the key press
-    /// before this one, when that key press was an arrow key.
+    /// Acts on one press of `arrow`. `previous` is the arrow press before
+    /// this key press, when the key press before this one was an arrow key.
     ///
     /// A single press expands or collapses the run of the highlighted row.
-    /// When `previous` is the same arrow, it expands or collapses every run
-    /// that shows.
-    fn press_arrow(&mut self, arrow: Arrow, previous: Option<Arrow>) {
+    /// When this press is the second press of a double press, it expands or
+    /// collapses every run that shows. A double press is two presses of the
+    /// same arrow key, [`DOUBLE_PRESS_WINDOW`] or less apart. A double press
+    /// ends the count, thus the next press is a single press again.
+    fn press_arrow(&mut self, arrow: Arrow, previous: Option<(Arrow, DateTime<Utc>)>) {
         let now = (self.now)();
-        let double = previous == Some(arrow);
+        let double = previous.is_some_and(|(first, at)| {
+            first == arrow
+                && (now - at)
+                    .to_std()
+                    .is_ok_and(|gap| gap <= DOUBLE_PRESS_WINDOW)
+        });
         match (arrow, double) {
             (Arrow::Right, false) => self.board.expand(now),
             (Arrow::Right, true) => self.board.expand_all(now),
             (Arrow::Left, false) => self.board.collapse(now),
             (Arrow::Left, true) => self.board.collapse_all(now),
         }
-        self.last_arrow = (!double).then_some(arrow);
+        self.last_arrow = (!double).then_some((arrow, now));
         self.sync_watch();
     }
 
