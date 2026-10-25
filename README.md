@@ -2196,12 +2196,11 @@ cannot hang the caller. Used by `cwt` and `ha`.
     highlight goes back to the run row. One press of Right on a job row does nothing, and one
     press of Right or Left on a pull request row does nothing. Two fast presses of Right expand
     every run, and two fast presses of Left collapse every run, also from a pull request row. A
-    held Right or Left does the same, because the terminal sends each repeat as a new press.
-    Enter opens the highlighted pull request, run, or job in the
-    browser, and `ha` keeps running. The page of a job shows its log. A job that has no address
-    opens the page of its run. The highlight stays on the same job through each refresh. It also
-    stays on the same pull request. When a pull request leaves the queue, the highlight stays at
-    the same position.
+    held Right or Left does the same, because the terminal sends each repeat as a new press. Enter
+    opens the highlighted pull request, run, or job in the browser, and `ha` keeps running. The
+    page of a job shows its log. A job that has no address opens the page of its run. The highlight
+    stays on the same job through each refresh. It also stays on the same pull request. When a pull
+    request leaves the queue, the highlight stays at the same position.
     When a re-run gives the jobs new IDs, the highlight stays at the same position, thus on the
     job of the same name in most re-runs. When no browser opens, the status line shows the URL
     and then the reason, for example a `BROWSER` command that this host does not have, for 30
