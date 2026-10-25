@@ -60,7 +60,7 @@ const FIXED_LINES: usize = 2;
 const STATUS_SEPARATOR: &str = "  ·  ";
 /// The key hints at the end of the left part of the status line. The status line
 /// shows them only while no cancel box shows.
-const KEY_HINTS: &str = "↑↓ select  →← jobs  ⏎ open  c cancel  r refresh  q quit";
+const KEY_HINTS: &str = "↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  r refresh  q quit";
 /// The title in the top border of the box of the cancel prompt.
 const PROMPT_TITLE: &str = " Cancel run? ";
 /// The widest outer width of the box of the cancel prompt.
