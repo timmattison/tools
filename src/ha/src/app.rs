@@ -1910,21 +1910,12 @@ mod tests {
         assert_eq!(commands, [watch(&[2]), watch(&[1, 2])]);
     }
 
-    /// A finished run that finished `minutes_ago` minutes before `now`.
-    fn finished_run(id: u64, minutes_ago: i64) -> Run {
-        Run {
-            state: RunState::Passed,
-            updated_at: now() - chrono::Duration::minutes(minutes_ago),
-            ..active_run(id, minutes_ago + 5)
-        }
-    }
-
     #[test]
     fn two_fast_rights_expand_every_run_with_one_command() {
         let channels = channels();
         send_runs(
             &channels,
-            vec![active_run(1, 5), active_run(2, 30), finished_run(3, 10)],
+            vec![active_run(1, 5), active_run(2, 30), passed_run(3)],
         );
         let steps = vec![
             key(KeyCode::Right),
@@ -1940,7 +1931,7 @@ mod tests {
         let channels = channels();
         send_runs(
             &channels,
-            vec![active_run(1, 5), active_run(2, 30), finished_run(3, 10)],
+            vec![active_run(1, 5), active_run(2, 30), passed_run(3)],
         );
         let steps = vec![
             key(KeyCode::Right),
