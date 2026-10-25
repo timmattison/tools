@@ -2136,6 +2136,32 @@ mod tests {
     }
 
     #[test]
+    fn expand_all_keeps_the_highlight_on_its_row() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5), active_run(2, 30)]);
+        let opener = opener(false);
+        let steps = vec![
+            key(KeyCode::Right),
+            Step::Send(Update::Jobs {
+                run: RunId(2),
+                jobs: vec![job_with_url(10, "build")],
+            }),
+            Step::Idle,
+            key(KeyCode::Down),
+            key(KeyCode::Right),
+            key(KeyCode::Right),
+            key(KeyCode::Enter),
+            key(KeyCode::Char('q')),
+        ];
+        let (_, commands) = run_steps_with(&channels, &opener, steps);
+        assert_eq!(commands, [watch(&[2]), watch(&[1, 2])]);
+        assert_eq!(
+            *opener.urls.borrow(),
+            ["https://example.test/runs/1/job/10"]
+        );
+    }
+
+    #[test]
     fn down_skips_the_loading_row_of_an_expanded_run() {
         let channels = channels();
         send_runs(&channels, vec![active_run(1, 5), active_run(2, 30)]);
