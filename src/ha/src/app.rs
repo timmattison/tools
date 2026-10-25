@@ -2024,6 +2024,20 @@ mod tests {
     }
 
     #[test]
+    fn a_second_right_at_501_ms_is_a_single_press() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5), active_run(2, 30)]);
+        let steps = vec![
+            key(KeyCode::Right),
+            Step::Advance(Duration::from_millis(501)),
+            key(KeyCode::Right),
+            key(KeyCode::Char('q')),
+        ];
+        let (_, commands) = run_steps(&channels, steps);
+        assert_eq!(commands, [watch(&[2])]);
+    }
+
+    #[test]
     fn down_skips_the_loading_row_of_an_expanded_run() {
         let channels = channels();
         send_runs(&channels, vec![active_run(1, 5), active_run(2, 30)]);
