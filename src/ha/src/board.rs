@@ -789,6 +789,16 @@ impl Board {
         }
     }
 
+    /// Expands every run that shows at `now`, in the active section and in the
+    /// section of the finished runs. Each run shows its jobs at once when the
+    /// board holds an answer for it. Else it shows a loading row. The selection
+    /// stays on its row. A run that comes to the board later arrives collapsed.
+    pub fn expand_all(&mut self, now: DateTime<Utc>) {
+        self.settle(now);
+        let shown: Vec<RunId> = self.shown_runs(now).iter().map(|run| run.id).collect();
+        self.expanded.extend(shown);
+    }
+
     /// Collapses the run of the selection. The board keeps the job answer of
     /// the run, thus the run row keeps its marker. On a job row, the selection
     /// goes to the row of that run. A run that is not expanded, a pull request
@@ -798,6 +808,14 @@ impl Board {
         if let Some(id) = self.selected.as_ref().and_then(Selection::run) {
             self.expanded.remove(&id);
         }
+    }
+
+    /// Collapses every run. The board keeps the job answer of each run, thus
+    /// each run row keeps its marker. On a job row, the selection goes to the
+    /// row of that run.
+    pub fn collapse_all(&mut self, now: DateTime<Utc>) {
+        self.settle(now);
+        self.expanded.clear();
     }
 
     /// Stores the jobs of `run` when the board holds the run, expanded or not.

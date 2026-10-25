@@ -95,6 +95,23 @@ pub struct App<'a, O: Opener, C: Canceller, Tz: TimeZone> {
     /// cycle that gives a verdict. A cycle that ends with a spent API budget
     /// gives none, and the tally then starts again for the next cycle.
     first_cycle: Option<FirstCycle>,
+    /// The arrow key of the last key press and the time of that press, when
+    /// that press can be the first press of a double press. It is `None`
+    /// after a key that is not an arrow key, and after a double press.
+    last_arrow: Option<(Arrow, DateTime<Utc>)>,
+}
+
+/// The longest time between the two presses of a double press of an arrow
+/// key. A second press that comes later is a single press.
+const DOUBLE_PRESS_WINDOW: Duration = Duration::from_millis(500);
+
+/// An arrow key that expands or collapses runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Arrow {
+    /// `Right`: it expands.
+    Right,
+    /// `Left`: it collapses.
+    Left,
 }
 
 /// Why the event loop ended with an error.
@@ -136,6 +153,7 @@ where
             watched: BTreeSet::new(),
             confirm: None,
             first_cycle: Some(FirstCycle::default()),
+            last_arrow: None,
         }
     }
 
@@ -298,8 +316,13 @@ where
     /// Acts on one key press. Each key press removes the status message
     /// first. The `Enter` key can then post a new one. `Right` expands the
     /// run of the highlighted row. `Left` collapses that run, also from a job
-    /// row. On a pull request row, `Right` and `Left` do nothing. `Enter`
-    /// opens the highlighted pull request, run, or job.
+    /// row. On a pull request row, one press of `Right` or `Left` does
+    /// nothing. Two presses of the same arrow key, [`DOUBLE_PRESS_WINDOW`] or
+    /// less apart and with no other key between them, expand or collapse
+    /// every run that shows, also from a pull request row. The first press
+    /// acts at once, thus one press does not wait. Each other key ends the
+    /// count, and so does a key that closes the box. `Enter` opens the
+    /// highlighted pull request, run, or job.
     ///
     /// `c` opens a box that asks to cancel the run of the highlighted row.
     /// On a finished run, and on a pull request row, it posts that there is
@@ -309,6 +332,7 @@ where
     /// nothing more. Thus `q`, `Esc`, and `Enter` do not quit, open, or move
     /// anything while the box shows.
     fn handle_key(&mut self, key: KeyEvent) -> Flow {
+        let previous = self.last_arrow.take();
         self.status.message = None;
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         if let Some(confirm) = self.confirm.take() {
@@ -338,13 +362,11 @@ where
                 Flow::Continue
             }
             KeyCode::Right => {
-                self.board.expand((self.now)());
-                self.sync_watch();
+                self.press_arrow(Arrow::Right, previous);
                 Flow::Continue
             }
             KeyCode::Left => {
-                self.board.collapse((self.now)());
-                self.sync_watch();
+                self.press_arrow(Arrow::Left, previous);
                 Flow::Continue
             }
             KeyCode::Char('r') => {
@@ -362,6 +384,32 @@ where
             }
             _ => Flow::Continue,
         }
+    }
+
+    /// Acts on one press of `arrow`. `previous` is the arrow press before
+    /// this key press, when the key press before this one was an arrow key.
+    ///
+    /// A single press expands or collapses the run of the highlighted row.
+    /// When this press is the second press of a double press, it expands or
+    /// collapses every run that shows. A double press is two presses of the
+    /// same arrow key, [`DOUBLE_PRESS_WINDOW`] or less apart. A double press
+    /// ends the count, thus the next press is a single press again.
+    fn press_arrow(&mut self, arrow: Arrow, previous: Option<(Arrow, DateTime<Utc>)>) {
+        let now = (self.now)();
+        let double = previous.is_some_and(|(first, at)| {
+            first == arrow
+                && (now - at)
+                    .to_std()
+                    .is_ok_and(|gap| gap <= DOUBLE_PRESS_WINDOW)
+        });
+        match (arrow, double) {
+            (Arrow::Right, false) => self.board.expand(now),
+            (Arrow::Right, true) => self.board.expand_all(now),
+            (Arrow::Left, false) => self.board.collapse(now),
+            (Arrow::Left, true) => self.board.collapse_all(now),
+        }
+        self.last_arrow = (!double).then_some((arrow, now));
+        self.sync_watch();
     }
 
     /// Opens the box that asks to cancel the highlighted run, or posts that a
@@ -1658,26 +1706,37 @@ mod tests {
         Idle,
         /// An update that the worker sends before the next pass.
         Send(Update),
+        /// Moves the clock of the app forward by the duration before the next
+        /// pass.
+        Advance(Duration),
     }
 
-    /// Gives the steps of a script. Each leading `Send` step goes to the
-    /// loop first, so an update can arrive after a key. When the steps end,
-    /// it gives an error, so a loop that does not stop fails and never hangs.
-    struct StepEvents {
+    /// Gives the steps of a script. Each leading `Send` and `Advance` step
+    /// goes to the loop first, so an update can arrive after a key and the
+    /// clock can move between two keys. These steps take no pass of the loop.
+    /// When the steps end, it gives an error, so a loop that does not stop
+    /// fails and never hangs.
+    struct StepEvents<'a> {
         steps: VecDeque<Step>,
         updates: Sender<Update>,
+        clock: &'a std::cell::Cell<DateTime<Utc>>,
     }
 
-    impl Events for StepEvents {
+    impl Events for StepEvents<'_> {
         fn next(&mut self, _timeout: Duration) -> std::io::Result<Option<Event>> {
-            while let Some(Step::Send(_)) = self.steps.front() {
-                if let Some(Step::Send(update)) = self.steps.pop_front() {
-                    self.updates.send(update).unwrap();
+            while let Some(Step::Send(_) | Step::Advance(_)) = self.steps.front() {
+                match self.steps.pop_front() {
+                    Some(Step::Send(update)) => self.updates.send(update).unwrap(),
+                    Some(Step::Advance(by)) => {
+                        self.clock
+                            .set(self.clock.get() + chrono::Duration::from_std(by).unwrap());
+                    }
+                    _ => {}
                 }
             }
             match self.steps.pop_front() {
                 Some(Step::Key(event)) => Ok(Some(event)),
-                Some(Step::Idle | Step::Send(_)) => Ok(None),
+                Some(Step::Idle | Step::Send(_) | Step::Advance(_)) => Ok(None),
                 None => Err(std::io::Error::other("script ended")),
             }
         }
@@ -1718,7 +1777,8 @@ mod tests {
     ) -> (Vec<String>, Vec<Command>) {
         let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
         let tz = FixedOffset::east_opt(0).unwrap();
-        let clock = now;
+        let time = std::cell::Cell::new(now());
+        let clock = || time.get();
         let mut app = App::new(
             Board::new(Duration::from_hours(8)),
             Status::default(),
@@ -1731,6 +1791,7 @@ mod tests {
         let mut events = StepEvents {
             steps: steps.into(),
             updates: channels.updates.clone(),
+            clock: &time,
         };
         let result = app.run(&mut terminal, &mut events);
         assert!(result.is_ok(), "{result:?}");
@@ -1843,6 +1904,271 @@ mod tests {
             key(KeyCode::Right),
             key(KeyCode::Down),
             key(KeyCode::Right),
+            key(KeyCode::Char('q')),
+        ];
+        let (_, commands) = run_steps(&channels, steps);
+        assert_eq!(commands, [watch(&[2]), watch(&[1, 2])]);
+    }
+
+    #[test]
+    fn two_fast_rights_expand_every_run_with_one_command() {
+        let channels = channels();
+        send_runs(
+            &channels,
+            vec![active_run(1, 5), active_run(2, 30), passed_run(3)],
+        );
+        let steps = vec![
+            key(KeyCode::Right),
+            key(KeyCode::Right),
+            key(KeyCode::Char('q')),
+        ];
+        let (_, commands) = run_steps(&channels, steps);
+        assert_eq!(commands, [watch(&[2]), watch(&[1, 2, 3])]);
+    }
+
+    #[test]
+    fn two_fast_lefts_collapse_every_run_and_send_the_empty_set() {
+        let channels = channels();
+        send_runs(
+            &channels,
+            vec![active_run(1, 5), active_run(2, 30), passed_run(3)],
+        );
+        let steps = vec![
+            key(KeyCode::Right),
+            key(KeyCode::Down),
+            key(KeyCode::Right),
+            key(KeyCode::Down),
+            key(KeyCode::Right),
+            key(KeyCode::Left),
+            key(KeyCode::Left),
+            key(KeyCode::Char('q')),
+        ];
+        let (_, commands) = run_steps(&channels, steps);
+        assert_eq!(
+            commands,
+            [
+                watch(&[2]),
+                watch(&[1, 2]),
+                watch(&[1, 2, 3]),
+                watch(&[1, 2]),
+                watch(&[]),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_third_fast_press_is_a_single_press_and_starts_a_new_count() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5), active_run(2, 30)]);
+        let three = vec![active_run(1, 5), active_run(2, 30), active_run(3, 1)];
+        let four = vec![
+            active_run(1, 5),
+            active_run(2, 30),
+            active_run(3, 1),
+            active_run(4, 0),
+        ];
+        let steps = vec![
+            key(KeyCode::Right),
+            key(KeyCode::Right),
+            Step::Send(Update::Runs {
+                repo: repo(),
+                runs: three,
+            }),
+            Step::Idle,
+            key(KeyCode::Right),
+            Step::Send(Update::Runs {
+                repo: repo(),
+                runs: four,
+            }),
+            Step::Idle,
+            key(KeyCode::Right),
+            key(KeyCode::Char('q')),
+        ];
+        let (_, commands) = run_steps(&channels, steps);
+        assert_eq!(
+            commands,
+            [watch(&[2]), watch(&[1, 2]), watch(&[1, 2, 3, 4])]
+        );
+    }
+
+    #[test]
+    fn two_rights_more_than_500_ms_apart_expand_only_the_highlighted_run() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5), active_run(2, 30)]);
+        let steps = vec![
+            key(KeyCode::Right),
+            Step::Advance(Duration::from_secs(2)),
+            key(KeyCode::Right),
+            key(KeyCode::Char('q')),
+        ];
+        let (_, commands) = run_steps(&channels, steps);
+        assert_eq!(commands, [watch(&[2])]);
+    }
+
+    #[test]
+    fn a_second_right_at_exactly_500_ms_is_a_double_press() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5), active_run(2, 30)]);
+        let steps = vec![
+            key(KeyCode::Right),
+            Step::Advance(Duration::from_millis(500)),
+            key(KeyCode::Right),
+            key(KeyCode::Char('q')),
+        ];
+        let (_, commands) = run_steps(&channels, steps);
+        assert_eq!(commands, [watch(&[2]), watch(&[1, 2])]);
+    }
+
+    #[test]
+    fn a_second_right_at_501_ms_is_a_single_press() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5), active_run(2, 30)]);
+        let steps = vec![
+            key(KeyCode::Right),
+            Step::Advance(Duration::from_millis(501)),
+            key(KeyCode::Right),
+            key(KeyCode::Char('q')),
+        ];
+        let (_, commands) = run_steps(&channels, steps);
+        assert_eq!(commands, [watch(&[2])]);
+    }
+
+    #[test]
+    fn right_down_right_is_not_a_double_press() {
+        let channels = channels();
+        send_runs(
+            &channels,
+            vec![active_run(1, 5), active_run(2, 30), active_run(3, 60)],
+        );
+        let steps = vec![
+            key(KeyCode::Right),
+            key(KeyCode::Down),
+            key(KeyCode::Right),
+            key(KeyCode::Char('q')),
+        ];
+        let (_, commands) = run_steps(&channels, steps);
+        assert_eq!(commands, [watch(&[3]), watch(&[2, 3])]);
+    }
+
+    #[test]
+    fn right_then_left_is_not_a_double_press_of_left() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5), active_run(2, 30)]);
+        let steps = vec![
+            key(KeyCode::Right),
+            key(KeyCode::Down),
+            key(KeyCode::Right),
+            key(KeyCode::Up),
+            key(KeyCode::Right),
+            key(KeyCode::Left),
+            key(KeyCode::Char('q')),
+        ];
+        let (_, commands) = run_steps(&channels, steps);
+        assert_eq!(commands, [watch(&[2]), watch(&[1, 2]), watch(&[1])]);
+    }
+
+    #[test]
+    fn left_then_right_is_not_a_double_press_of_right() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5), active_run(2, 30)]);
+        let steps = vec![
+            key(KeyCode::Left),
+            key(KeyCode::Right),
+            key(KeyCode::Char('q')),
+        ];
+        let (_, commands) = run_steps(&channels, steps);
+        assert_eq!(commands, [watch(&[2])]);
+    }
+
+    #[test]
+    fn a_double_press_on_a_pull_request_row_expands_and_collapses_every_run() {
+        let channels = channels();
+        send_queue(&channels, vec![queue_entry(7)], Ok(Vec::new()));
+        send_runs(&channels, vec![active_run(1, 5), active_run(2, 30)]);
+        let opener = opener(false);
+        let steps = vec![
+            key(KeyCode::Right),
+            key(KeyCode::Right),
+            key(KeyCode::Left),
+            key(KeyCode::Left),
+            key(KeyCode::Enter),
+            key(KeyCode::Char('q')),
+        ];
+        let (_, commands) = run_steps_with(&channels, &opener, steps);
+        assert_eq!(commands, [watch(&[1, 2]), watch(&[])]);
+        assert_eq!(
+            *opener.urls.borrow(),
+            ["https://github.com/acme/widgets/pull/7"]
+        );
+    }
+
+    #[test]
+    fn collapse_all_from_a_job_row_moves_the_highlight_to_the_row_of_its_run() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5), active_run(2, 30)]);
+        let opener = opener(false);
+        let steps = vec![
+            key(KeyCode::Right),
+            Step::Send(Update::Jobs {
+                run: RunId(2),
+                jobs: vec![job_with_url(10, "build")],
+            }),
+            Step::Idle,
+            key(KeyCode::Down),
+            key(KeyCode::Down),
+            key(KeyCode::Right),
+            key(KeyCode::Up),
+            key(KeyCode::Left),
+            key(KeyCode::Left),
+            key(KeyCode::Enter),
+            key(KeyCode::Char('q')),
+        ];
+        let (_, commands) = run_steps_with(&channels, &opener, steps);
+        assert_eq!(
+            commands,
+            [watch(&[2]), watch(&[1, 2]), watch(&[1]), watch(&[])]
+        );
+        assert_eq!(*opener.urls.borrow(), ["https://example.test/runs/2"]);
+    }
+
+    #[test]
+    fn expand_all_keeps_the_highlight_on_its_row() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5), active_run(2, 30)]);
+        let opener = opener(false);
+        let steps = vec![
+            key(KeyCode::Right),
+            Step::Send(Update::Jobs {
+                run: RunId(2),
+                jobs: vec![job_with_url(10, "build")],
+            }),
+            Step::Idle,
+            key(KeyCode::Down),
+            key(KeyCode::Right),
+            key(KeyCode::Right),
+            key(KeyCode::Enter),
+            key(KeyCode::Char('q')),
+        ];
+        let (_, commands) = run_steps_with(&channels, &opener, steps);
+        assert_eq!(commands, [watch(&[2]), watch(&[1, 2])]);
+        assert_eq!(
+            *opener.urls.borrow(),
+            ["https://example.test/runs/1/job/10"]
+        );
+    }
+
+    #[test]
+    fn a_run_that_arrives_after_expand_all_arrives_collapsed() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5), active_run(2, 30)]);
+        let steps = vec![
+            key(KeyCode::Right),
+            key(KeyCode::Right),
+            Step::Send(Update::Runs {
+                repo: repo(),
+                runs: vec![active_run(1, 5), active_run(2, 30), active_run(3, 1)],
+            }),
+            Step::Idle,
             key(KeyCode::Char('q')),
         ];
         let (_, commands) = run_steps(&channels, steps);
@@ -2105,7 +2431,8 @@ mod tests {
         ];
         let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
         let tz = FixedOffset::east_opt(0).unwrap();
-        let clock = now;
+        let time = std::cell::Cell::new(now());
+        let clock = || time.get();
         let canceller = canceller();
         let opener = opener(false);
         let mut app = App::new(
@@ -2120,6 +2447,7 @@ mod tests {
         let mut events = StepEvents {
             steps: steps.into(),
             updates: channels.updates.clone(),
+            clock: &time,
         };
         let result = app.run(&mut terminal, &mut events);
         assert_eq!(result.unwrap_err().to_string(), "script ended");

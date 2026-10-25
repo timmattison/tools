@@ -60,7 +60,7 @@ const FIXED_LINES: usize = 2;
 const STATUS_SEPARATOR: &str = "  ·  ";
 /// The key hints at the end of the left part of the status line. The status line
 /// shows them only while no cancel box shows.
-const KEY_HINTS: &str = "↑↓ select  →← jobs  ⏎ open  c cancel  r refresh  q quit";
+const KEY_HINTS: &str = "↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  r refresh  q quit";
 /// The title in the top border of the box of the cancel prompt.
 const PROMPT_TITLE: &str = " Cancel run? ";
 /// The widest outer width of the box of the cancel prompt.
@@ -1566,7 +1566,7 @@ mod tests {
                 "❌ acme/widgets          Release             4 issue-11     Broken build                          10-13 23:50 4h 40m  ❌",
                 "",
                 "",
-                "updated 30s ago      ·  ↑↓ select  →← jobs  ⏎ open  c cancel  r refresh  q quit",
+                "updated 30s ago      ·  ↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  r refresh  q quit",
             ]
         );
     }
@@ -3513,8 +3513,8 @@ mod tests {
     #[test]
     fn the_status_line_says_loading_before_the_first_refresh() {
         assert_eq!(
-            status_line(80, &Status::default()),
-            "loading…  ·  ↑↓ select  →← jobs  ⏎ open  c cancel  r refresh  q quit"
+            status_line(100, &Status::default()),
+            "loading…  ·  ↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  r refresh  q quit"
         );
     }
 
@@ -3525,8 +3525,8 @@ mod tests {
             ..Status::default()
         };
         assert_eq!(
-            status_line(80, &status),
-            "updated 30s ago      ·  ↑↓ select  →← jobs  ⏎ open  c cancel  r refresh  q quit"
+            status_line(100, &status),
+            "updated 30s ago      ·  ↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  r refresh  q quit"
         );
     }
 
@@ -3538,8 +3538,8 @@ mod tests {
             ..Status::default()
         };
         assert_eq!(
-            status_line(100, &status),
-            "updated 30s ago      ·  API 4821/5000  ·  ↑↓ select  →← jobs  ⏎ open  c cancel  r refresh  q quit"
+            status_line(120, &status),
+            "updated 30s ago      ·  API 4821/5000  ·  ↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  r refresh  q quit"
         );
     }
 
@@ -3552,8 +3552,8 @@ mod tests {
             ..Status::default()
         };
         assert_eq!(
-            status_line(120, &status),
-            "updated 30s ago      ·  API low 412/5000, next refresh 12:34  ·  ↑↓ select  →← jobs  ⏎ open  c cancel  r refresh  q quit"
+            status_line(140, &status),
+            "updated 30s ago      ·  API low 412/5000, next refresh 12:34  ·  ↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  r refresh  q quit"
         );
     }
 
@@ -3954,7 +3954,8 @@ mod tests {
         text[7].clone()
     }
 
-    const HINTS_TAIL: &str = "loading…  ·  ↑↓ select  →← jobs  ⏎ open  c cancel  r refresh  q quit";
+    const HINTS_TAIL: &str =
+        "loading…  ·  ↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  r refresh  q quit";
 
     /// The tail of a status line whose board has stale repositories that
     /// never had a good read: the stale part with `counts`, and the hints.
