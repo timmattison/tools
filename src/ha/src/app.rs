@@ -1690,26 +1690,37 @@ mod tests {
         Idle,
         /// An update that the worker sends before the next pass.
         Send(Update),
+        /// Moves the clock of the app forward by the duration before the next
+        /// pass.
+        Advance(Duration),
     }
 
-    /// Gives the steps of a script. Each leading `Send` step goes to the
-    /// loop first, so an update can arrive after a key. When the steps end,
-    /// it gives an error, so a loop that does not stop fails and never hangs.
-    struct StepEvents {
+    /// Gives the steps of a script. Each leading `Send` and `Advance` step
+    /// goes to the loop first, so an update can arrive after a key and the
+    /// clock can move between two keys. These steps take no pass of the loop.
+    /// When the steps end, it gives an error, so a loop that does not stop
+    /// fails and never hangs.
+    struct StepEvents<'a> {
         steps: VecDeque<Step>,
         updates: Sender<Update>,
+        clock: &'a std::cell::Cell<DateTime<Utc>>,
     }
 
-    impl Events for StepEvents {
+    impl Events for StepEvents<'_> {
         fn next(&mut self, _timeout: Duration) -> std::io::Result<Option<Event>> {
-            while let Some(Step::Send(_)) = self.steps.front() {
-                if let Some(Step::Send(update)) = self.steps.pop_front() {
-                    self.updates.send(update).unwrap();
+            while let Some(Step::Send(_) | Step::Advance(_)) = self.steps.front() {
+                match self.steps.pop_front() {
+                    Some(Step::Send(update)) => self.updates.send(update).unwrap(),
+                    Some(Step::Advance(by)) => {
+                        self.clock
+                            .set(self.clock.get() + chrono::Duration::from_std(by).unwrap());
+                    }
+                    _ => {}
                 }
             }
             match self.steps.pop_front() {
                 Some(Step::Key(event)) => Ok(Some(event)),
-                Some(Step::Idle | Step::Send(_)) => Ok(None),
+                Some(Step::Idle | Step::Send(_) | Step::Advance(_)) => Ok(None),
                 None => Err(std::io::Error::other("script ended")),
             }
         }
@@ -1750,7 +1761,8 @@ mod tests {
     ) -> (Vec<String>, Vec<Command>) {
         let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
         let tz = FixedOffset::east_opt(0).unwrap();
-        let clock = now;
+        let time = std::cell::Cell::new(now());
+        let clock = || time.get();
         let mut app = App::new(
             Board::new(Duration::from_hours(8)),
             Status::default(),
@@ -1763,6 +1775,7 @@ mod tests {
         let mut events = StepEvents {
             steps: steps.into(),
             updates: channels.updates.clone(),
+            clock: &time,
         };
         let result = app.run(&mut terminal, &mut events);
         assert!(result.is_ok(), "{result:?}");
@@ -1969,6 +1982,20 @@ mod tests {
             commands,
             [watch(&[2]), watch(&[1, 2]), watch(&[1, 2, 3, 4])]
         );
+    }
+
+    #[test]
+    fn two_rights_more_than_500_ms_apart_expand_only_the_highlighted_run() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5), active_run(2, 30)]);
+        let steps = vec![
+            key(KeyCode::Right),
+            Step::Advance(Duration::from_secs(2)),
+            key(KeyCode::Right),
+            key(KeyCode::Char('q')),
+        ];
+        let (_, commands) = run_steps(&channels, steps);
+        assert_eq!(commands, [watch(&[2])]);
     }
 
     #[test]
@@ -2227,7 +2254,8 @@ mod tests {
         ];
         let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
         let tz = FixedOffset::east_opt(0).unwrap();
-        let clock = now;
+        let time = std::cell::Cell::new(now());
+        let clock = || time.get();
         let canceller = canceller();
         let opener = opener(false);
         let mut app = App::new(
@@ -2242,6 +2270,7 @@ mod tests {
         let mut events = StepEvents {
             steps: steps.into(),
             updates: channels.updates.clone(),
+            clock: &time,
         };
         let result = app.run(&mut terminal, &mut events);
         assert_eq!(result.unwrap_err().to_string(), "script ended");
