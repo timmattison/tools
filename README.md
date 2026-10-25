@@ -2185,11 +2185,19 @@ cannot hang the caller. Used by `cwt` and `ha`.
       once. The jobs of a finished run load one time only, until a re-run changes the run. If
       GitHub still shows an active job in a finished run, the jobs of that run refresh with the
       board until each job finishes. Left removes the job rows, and the board keeps the jobs.
+    - Press Right two times fast, on any row, to expand every run on the board. Press Left two
+      times fast to collapse every run. Two presses are fast when the second press comes 500 ms
+      or less after the first, with no other key between them. The first press acts at once on the
+      highlighted run, and the second press then acts on every run. A third fast press is a single
+      press again. A run that comes to the board later arrives collapsed.
   - Keys: Up and Down move the highlight through the pull request rows, the run rows, and the job
     rows of the expanded runs. They skip the `Loading jobs…`, `No jobs yet`, and error rows. Right
     expands the jobs of the highlighted run. Left collapses them, also from a job row, and the
-    highlight goes back to the run row. Right on a job row does nothing, and Right and Left on a
-    pull request row do nothing. Enter opens the highlighted pull request, run, or job in the
+    highlight goes back to the run row. One press of Right on a job row does nothing, and one
+    press of Right or Left on a pull request row does nothing. Two fast presses of Right expand
+    every run, and two fast presses of Left collapse every run, also from a pull request row. A
+    held Right or Left does the same, because the terminal sends each repeat as a new press.
+    Enter opens the highlighted pull request, run, or job in the
     browser, and `ha` keeps running. The page of a job shows its log. A job that has no address
     opens the page of its run. The highlight stays on the same job through each refresh. It also
     stays on the same pull request. When a pull request leaves the queue, the highlight stays at

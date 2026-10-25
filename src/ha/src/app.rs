@@ -316,8 +316,13 @@ where
     /// Acts on one key press. Each key press removes the status message
     /// first. The `Enter` key can then post a new one. `Right` expands the
     /// run of the highlighted row. `Left` collapses that run, also from a job
-    /// row. On a pull request row, `Right` and `Left` do nothing. `Enter`
-    /// opens the highlighted pull request, run, or job.
+    /// row. On a pull request row, one press of `Right` or `Left` does
+    /// nothing. Two presses of the same arrow key, [`DOUBLE_PRESS_WINDOW`] or
+    /// less apart and with no other key between them, expand or collapse
+    /// every run that shows, also from a pull request row. The first press
+    /// acts at once, thus one press does not wait. Each other key ends the
+    /// count, and so does a key that closes the box. `Enter` opens the
+    /// highlighted pull request, run, or job.
     ///
     /// `c` opens a box that asks to cancel the run of the highlighted row.
     /// On a finished run, and on a pull request row, it posts that there is
