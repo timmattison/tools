@@ -3954,7 +3954,8 @@ mod tests {
         text[7].clone()
     }
 
-    const HINTS_TAIL: &str = "loading…  ·  ↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  r refresh  q quit";
+    const HINTS_TAIL: &str =
+        "loading…  ·  ↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  r refresh  q quit";
 
     /// The tail of a status line whose board has stale repositories that
     /// never had a good read: the stale part with `counts`, and the hints.
