@@ -2085,6 +2085,28 @@ mod tests {
     }
 
     #[test]
+    fn a_double_press_on_a_pull_request_row_expands_and_collapses_every_run() {
+        let channels = channels();
+        send_queue(&channels, vec![queue_entry(7)], Ok(Vec::new()));
+        send_runs(&channels, vec![active_run(1, 5), active_run(2, 30)]);
+        let opener = opener(false);
+        let steps = vec![
+            key(KeyCode::Right),
+            key(KeyCode::Right),
+            key(KeyCode::Left),
+            key(KeyCode::Left),
+            key(KeyCode::Enter),
+            key(KeyCode::Char('q')),
+        ];
+        let (_, commands) = run_steps_with(&channels, &opener, steps);
+        assert_eq!(commands, [watch(&[1, 2]), watch(&[])]);
+        assert_eq!(
+            *opener.urls.borrow(),
+            ["https://github.com/acme/widgets/pull/7"]
+        );
+    }
+
+    #[test]
     fn down_skips_the_loading_row_of_an_expanded_run() {
         let channels = channels();
         send_runs(&channels, vec![active_run(1, 5), active_run(2, 30)]);
