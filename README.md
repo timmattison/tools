@@ -562,7 +562,8 @@ cannot hang the caller. Used by `cwt` and `ha`.
     budget pushes the timed refresh out past the interval, and the countdown shows the longer wait
     rather than promising one it will not keep.
   - Watch-mode keys: `q` or Ctrl-C quits, `r` forces an immediate refresh, `p` pushes the
-    current branch, `G` opens the pull request of the branch (or the issue the branch names when
+    current branch, `P` pushes it without the `pre-push` hook, `G` opens the pull request of the
+    branch (or the issue the branch names when
     there is no pull request), `R` rebases the branch onto the base
     and pushes it, `M` merges the base into the branch and pushes it, `m` measures a rebase and
     a merge against the default branch, and the arrow keys move the watch between the worktrees
@@ -585,6 +586,19 @@ cannot hang the caller. Used by `cwt` and `ha`.
       the remote and refspec. The remote for a new branch is `remote.pushDefault` if set, else the
       only remote whatever it is called, else `origin` — and gsw refuses rather than guess when a
       repository has several remotes and none of them settles it. `p` never force-pushes.
+    - `P` (Shift+p) does the same push with `git push --no-verify`, so the `pre-push` hook of the
+      repository does not run. Use it when you know that the hook is not necessary for one push,
+      and you do not have to leave gsw for a shell. `P` asks first, as `p` does, and its question
+      is yellow and names the skipped hook: `Push 3 commits to origin/my-branch without the
+      pre-push hook?`, or `Create new remote branch origin/my-branch without the pre-push hook?`
+      for a branch that is not on the remote yet, which then gets
+      `git push --no-verify -u <remote> <branch>`. The notice says `Pushing without the pre-push
+      hook…`, and the report says `Pushed 3 commits to origin/my-branch, pre-push hook skipped
+      (12s ago)`, so you can see after the push which kind of push ran. `P` refuses in the same
+      cases as `p`, with the same messages, and a `P` while a run is in flight does nothing. All
+      the other guarantees of `p` stay: the branch check, the detached child, the shed `GIT_`
+      environment, the live window, and no force push. `--no-verify` skips only the local hook.
+      Server-side hooks and branch protection still apply.
     - While the push runs, gsw shows what it says. A `Pushing… (1m12s)` notice reports how long
       the push has taken. Up to six rows under it carry the newest output from git and from any
       `pre-push` hook. The rows are indented and dimmed, because they are another program speaking
@@ -803,7 +817,7 @@ cannot hang the caller. Used by `cwt` and `ha`.
       `Rebasing issue-12 onto main with grp… (1m12s)` notice, and up to six indented rows carrying
       the newest lines. **The run has no deadline**, because a pre-push hook of this workspace
       builds and tests every crate and runs for minutes — the notice counts the time, so a run
-      that hangs shows as a run that hangs. The run holds the row: `p`, `R`, `M`, and `m` do
+      that hangs shows as a run that hangs. The run holds the row: `p`, `P`, `R`, `M`, and `m` do
       nothing until it ends, while `G` still acts. The child gets no terminal, and no `GIT_`
       variable out of gsw's own environment but the six you state on purpose, so your SSH key
       and your identity still reach the push. After that sweep gsw sets `GIT_TERMINAL_PROMPT=0`,
@@ -887,8 +901,8 @@ cannot hang the caller. Used by `cwt` and `ha`.
       next Esc is then a first press again. While the name is bold, Esc only clears the line
       under the frame, as before.
     - A switch walks the new worktree at once and starts the refresh clock again. It moves the
-      filesystem watcher to the new worktree, and `p`, `G`, and `m` then act on the worktree that
-      is on the screen. Every line under the frame goes, because each one described the old
+      filesystem watcher to the new worktree, and `p`, `P`, `G`, and `m` then act on the worktree
+      that is on the screen. Every line under the frame goes, because each one described the old
       worktree. A worktree that gsw cannot open leaves you where you are, and the reason is a
       fading line.
     - The arrow keys do nothing while a push runs or while the push question is up: the push

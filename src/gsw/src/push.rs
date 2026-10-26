@@ -289,19 +289,20 @@ pub(crate) enum PushPrompt {
         question: String,
         /// The keys that answer the question, and what each one does, as
         /// [`confirm_hint`] spells them. It rides with the question because
-        /// three keys ask one now, and each of them binds Enter to an act of
+        /// four keys ask one now, and each of them binds Enter to an act of
         /// its own — so the hint is a fact about the question rather than a
         /// convention the row can hold on its own.
         hint: String,
         /// Whether this question deserves the color of one the user must read
         /// twice.
         ///
-        /// Two acts earn it, and for the same reason. A push that creates a
+        /// Three acts earn it, and for the same reason. A push that creates a
         /// remote branch puts something on a shared remote that nobody has
-        /// seen, and a rebase rewrites every commit of the branch and then
-        /// force-pushes the result. Neither can be allowed to look like the
-        /// routine act beside it, and the color is what carries that in the
-        /// half second before the words are read.
+        /// seen, a rebase rewrites every commit of the branch and then
+        /// force-pushes the result, and a push that skips the hook skips a
+        /// check that the repository asks for. None of them can be allowed to
+        /// look like the routine act beside it, and the color is what carries
+        /// that in the half second before the words are read.
         caution: bool,
         /// The command this question described, and what `y` runs.
         command: Confirmed,
@@ -325,7 +326,90 @@ pub(crate) enum PushPrompt {
     },
 }
 
-/// Decide what pressing `p` does, given the branch state gsw already renders.
+/// How a push treats the repository's `pre-push` hook.
+///
+/// A type and not a `bool`, so a call site says which policy it means. The
+/// policy is about how a push runs and not about which push runs, so
+/// [`PushPlan`] does not carry it. `--no-verify` skips only the local
+/// `pre-push` hook. Server-side hooks and branch protection still apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PushHooks {
+    /// `p`: the push runs the hook, as a plain `git push` does.
+    Run,
+    /// `P`: the push runs `git push --no-verify`, and the hook does not run.
+    Skip,
+}
+
+impl PushHooks {
+    /// The arguments of `git push` for this policy: `push`, then the flag the
+    /// policy needs, then `rest`. The flag sits directly after `push` so it
+    /// cannot be read as the value of another option.
+    fn push_args(self, rest: Vec<String>) -> Vec<String> {
+        let mut args = vec!["push".to_string()];
+        if self == Self::Skip {
+            args.push(NO_VERIFY_FLAG.to_string());
+        }
+        args.extend(rest);
+        args
+    }
+
+    /// What the question adds after the act, so the sentence says the hook
+    /// does not run. Empty for `Run`, which keeps the plain question.
+    fn question_suffix(self) -> &'static str {
+        match self {
+            Self::Run => "",
+            Self::Skip => SKIP_QUESTION_SUFFIX,
+        }
+    }
+
+    /// What the success sentence adds after the act. Empty for `Run`.
+    fn success_suffix(self) -> &'static str {
+        match self {
+            Self::Run => "",
+            Self::Skip => SKIP_SUCCESS_SUFFIX,
+        }
+    }
+
+    /// The act, as [`confirm_hint`] names it under the question.
+    fn hint(self) -> String {
+        match self {
+            Self::Run => confirm_hint(PUSH_VERB),
+            Self::Skip => confirm_hint(SKIP_VERB),
+        }
+    }
+
+    /// What the row says while the push runs, without its age.
+    fn running_notice(self) -> &'static str {
+        match self {
+            Self::Run => RUNNING_NOTICE,
+            Self::Skip => SKIP_RUNNING_NOTICE,
+        }
+    }
+
+    /// Whether the policy alone earns the caution color. A push that skips the
+    /// hook skips a check the repository asks for.
+    fn is_cautious(self) -> bool {
+        self == Self::Skip
+    }
+}
+
+/// The `git push` flag that skips the local `pre-push` hook.
+const NO_VERIFY_FLAG: &str = "--no-verify";
+
+/// What a question says after the act when the hook does not run.
+const SKIP_QUESTION_SUFFIX: &str = " without the pre-push hook";
+
+/// What a success sentence says after the act when the hook did not run.
+const SKIP_SUCCESS_SUFFIX: &str = ", pre-push hook skipped";
+
+/// The verb of the key hint for a push that skips the hook.
+const SKIP_VERB: &str = "push without hook";
+
+/// What a running push says when the hook does not run.
+const SKIP_RUNNING_NOTICE: &str = "Pushing without the pre-push hook…";
+
+/// Decide what pressing `p` or `P` does, given the branch state gsw already
+/// renders.
 ///
 /// The one way into this module. Callers pass what the snapshot holds and get
 /// back either a question with its command or a message — never a plan they
@@ -336,10 +420,18 @@ pub(crate) enum PushPrompt {
 /// upstream is configured *and* its remote-tracking ref resolves. That is
 /// exactly the signal the wording needs: a branch whose remote ref is missing
 /// gets the create wording, because a push really will create it.
+///
+/// `hooks` is the policy for the repository's `pre-push` hook: `p` passes
+/// [`PushHooks::Run`] and `P` passes [`PushHooks::Skip`]. The policy is applied
+/// here and nowhere else. The question, the hint, the caution flag, the running
+/// notice, the success sentence, and the arguments all come from this one
+/// value, so a question that says the hook is skipped cannot run a command that
+/// runs it.
 pub(crate) fn prompt_for(
     branch: &str,
     remote: Option<&str>,
     upstream: Option<&UpstreamStatus>,
+    hooks: PushHooks,
 ) -> PushPrompt {
     // One match, so a plan's wording and the command that carries it out are
     // written side by side. The variants that never push return here, which is
@@ -350,40 +442,49 @@ pub(crate) fn prompt_for(
         // forward, and the sentence has to be the thing that says so — the user
         // reads it in the half second before pressing `y`.
         PushPlan::Create { remote, branch } => {
-            let question = format!("Create new remote branch {remote}/{branch}?");
+            let question = format!(
+                "Create new remote branch {remote}/{branch}{}?",
+                hooks.question_suffix()
+            );
             let success = SuccessReport::Alone {
-                sentence: format!("Created {remote}/{branch}"),
+                sentence: format!("Created {remote}/{branch}{}", hooks.success_suffix()),
             };
             PushPrompt::Confirm {
                 question,
-                hint: confirm_hint(PUSH_VERB),
+                hint: hooks.hint(),
                 caution: true,
                 // `-u` records the new remote branch as the upstream, so the
                 // push after this one is a plain update.
                 command: Confirmed::Push(PushCommand::new(
                     branch.clone(),
-                    vec!["push".to_string(), "-u".to_string(), remote, branch],
+                    hooks.push_args(vec!["-u".to_string(), remote, branch]),
                 )),
-                running_notice: RUNNING_NOTICE.to_string(),
+                running_notice: hooks.running_notice().to_string(),
                 success,
             }
         }
         PushPlan::Update { target, commits } => {
             let unit = if commits == 1 { "commit" } else { "commits" };
             PushPrompt::Confirm {
-                question: format!("Push {commits} {unit} to {target}?"),
-                hint: confirm_hint(PUSH_VERB),
-                caution: false,
+                question: format!(
+                    "Push {commits} {unit} to {target}{}?",
+                    hooks.question_suffix()
+                ),
+                hint: hooks.hint(),
+                caution: hooks.is_cautious(),
                 // Bare `push`: git reads the remote and the refspec out of the
                 // branch config, so a branch tracking something other than the
                 // repository's default remote still goes to the right place.
                 // Which branch's config it reads is decided by HEAD at exec
                 // time, which is why the command carries the branch this
                 // question was written for.
-                command: Confirmed::Push(PushCommand::new(branch, vec!["push".to_string()])),
-                running_notice: RUNNING_NOTICE.to_string(),
+                command: Confirmed::Push(PushCommand::new(branch, hooks.push_args(Vec::new()))),
+                running_notice: hooks.running_notice().to_string(),
                 success: SuccessReport::Alone {
-                    sentence: format!("Pushed {commits} {unit} to {target}"),
+                    sentence: format!(
+                        "Pushed {commits} {unit} to {target}{}",
+                        hooks.success_suffix()
+                    ),
                 },
             }
         }
@@ -828,11 +929,12 @@ pub(crate) struct PushOutcome {
 /// **not** the push's alone, and it owns two other kinds of thing.
 ///
 /// A question of any key comes through one of two doors — [`PushUi::request`]
-/// for `p`, [`PushUi::request_base_update`] for the keys that rebase the branch
-/// onto the base or merge the base into it — and each question carries its own
-/// words: the hint that names what Enter does, the notice its run shows, and
-/// the report it leaves behind. The states below therefore never learn which
-/// key asked, and a third key that asks a question adds no state here.
+/// for `p` and `P`, [`PushUi::request_base_update`] for the keys that rebase
+/// the branch onto the base or merge the base into it — and each question
+/// carries its own words: the hint that names what Enter does, the notice its
+/// run shows, and the report it leaves behind. The states below therefore never
+/// learn which key asked, and a new key that asks a question adds no state
+/// here.
 ///
 /// A message from a feature that asks nothing comes through
 /// [`PushUi::post_error`], [`PushUi::post_notice`] or
@@ -1188,7 +1290,9 @@ impl PushUi {
         }
     }
 
-    /// Handle `p`: work out what a push would do and either ask or explain.
+    /// Handle `p` and `P`: work out what a push would do and either ask or
+    /// explain. `hooks` says whether the `pre-push` hook runs: `p` gives
+    /// [`PushHooks::Run`] and `P` gives [`PushHooks::Skip`].
     ///
     /// Replaces whatever was on screen, so pressing `p` with a stale error up
     /// asks the new question instead of stacking a row under the old one.
@@ -1212,12 +1316,19 @@ impl PushUi {
     /// classified. [`PushUi::overlay`] still drops a question it cannot draw,
     /// but that now covers only the pane resized down while a question is
     /// already up: the render path is the only thing that sees the new size.
-    pub(crate) fn request(&mut self, snapshot: &Snapshot, dims: Dimensions, now: Instant) {
+    pub(crate) fn request(
+        &mut self,
+        snapshot: &Snapshot,
+        dims: Dimensions,
+        now: Instant,
+        hooks: PushHooks,
+    ) {
         self.ask(
             prompt_for(
                 &snapshot.branch,
                 snapshot.push_remote.as_deref(),
                 snapshot.upstream.as_ref(),
+                hooks,
             ),
             dims,
             now,
@@ -1823,8 +1934,9 @@ impl PushUi {
                 ..
             } => {
                 let line = truncate_right(&format!("{question}  {hint}"), width);
-                // Yellow marks the push that puts something new on a shared
-                // remote. The wording says so too — the color is what carries
+                // Yellow marks a question that the user must read twice, for
+                // the acts that the doc of `caution` on `PushPrompt::Confirm`
+                // names. The wording says so too — the color is what carries
                 // it in the half second before the words are read.
                 vec![if *caution {
                     line.yellow().to_string()
@@ -2011,7 +2123,8 @@ impl Overlay {
     }
 }
 
-/// The word every message about a push of gsw's own uses for it.
+/// The word the hint of a push of gsw's own uses for it. A push that skips the
+/// hook uses [`SKIP_VERB`], so Enter promises the act that it runs.
 const PUSH_VERB: &str = "push";
 
 /// The key hint shown with a confirmation, for an act that `verb` names.
@@ -2027,8 +2140,8 @@ const PUSH_VERB: &str = "push";
 /// is looking at the sentence saying so. Off the screen, the binding keeps the
 /// risk and loses the sentence.
 ///
-/// One function rather than one constant for each key, because three keys now
-/// ask a question and three spellings of one convention are three things that
+/// One function rather than one constant for each key, because four keys now
+/// ask a question and four spellings of one convention are four things that
 /// drift apart. The verb is the act of the question the hint goes under, so the
 /// promise names what Enter does here rather than what it does under some other
 /// key.
@@ -2045,8 +2158,9 @@ const WINDOW_INDENT: &str = "  ";
 
 /// What a running push says while the network round trip is in flight.
 ///
-/// The notice of a push alone. Every question carries its own now, because a
-/// rebase that runs for minutes must say on the row which act is running.
+/// The notice of a push that runs the hook. Every question carries its own
+/// now, because a rebase that runs for minutes must say on the row which act
+/// is running, and a push that skips the hook uses [`SKIP_RUNNING_NOTICE`].
 const RUNNING_NOTICE: &str = "Pushing…";
 
 /// How long a status message gsw wrote itself stays under the frame.
@@ -2290,8 +2404,170 @@ mod tests {
             },
         );
         assert_eq!(
-            command(&prompt_for("gsw-push", Some("origin"), None)).args(),
+            command(&prompt_for(
+                "gsw-push",
+                Some("origin"),
+                None,
+                PushHooks::Run
+            ))
+            .args(),
             ["push", "-u", "origin", "gsw-push"],
+        );
+    }
+
+    /// The fields of a confirmable prompt that the policy changes, in one
+    /// tuple so a test compares the whole act at once.
+    fn confirm_parts(prompt: &PushPrompt) -> (&str, &str, bool, &str, &SuccessReport) {
+        match prompt {
+            PushPrompt::Confirm {
+                question,
+                hint,
+                caution,
+                running_notice,
+                success,
+                ..
+            } => (question, hint, *caution, running_notice, success),
+            PushPrompt::Refuse { message } => {
+                panic!("expected a confirmable prompt, got a refusal: {message}")
+            }
+        }
+    }
+
+    fn alone(sentence: &str) -> SuccessReport {
+        SuccessReport::Alone {
+            sentence: sentence.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_skip_update_names_the_skipped_hook_everywhere() {
+        let up = upstream("origin/gsw-push", 3, 0);
+        let prompt = prompt_for("gsw-push", Some("origin"), Some(&up), PushHooks::Skip);
+        let (question, hint, caution, notice, success) = confirm_parts(&prompt);
+        assert_eq!(
+            question,
+            "Push 3 commits to origin/gsw-push without the pre-push hook?"
+        );
+        assert_eq!(hint, confirm_hint("push without hook"));
+        assert_eq!(hint, "[y/Enter = push without hook, n/Esc = cancel]");
+        assert!(
+            caution,
+            "skipping a check the repository asks for earns the color"
+        );
+        assert_eq!(notice, "Pushing without the pre-push hook…");
+        assert_eq!(
+            *success,
+            alone("Pushed 3 commits to origin/gsw-push, pre-push hook skipped")
+        );
+        assert_eq!(command(&prompt).branch(), "gsw-push");
+    }
+
+    #[test]
+    fn a_skip_update_of_one_commit_is_singular() {
+        let up = upstream("origin/gsw-push", 1, 0);
+        let prompt = prompt_for("gsw-push", Some("origin"), Some(&up), PushHooks::Skip);
+        let (question, _, _, _, success) = confirm_parts(&prompt);
+        assert_eq!(
+            question,
+            "Push 1 commit to origin/gsw-push without the pre-push hook?"
+        );
+        assert_eq!(
+            *success,
+            alone("Pushed 1 commit to origin/gsw-push, pre-push hook skipped")
+        );
+    }
+
+    #[test]
+    fn a_skip_create_names_the_skipped_hook_everywhere() {
+        let prompt = prompt_for("gsw-push", Some("origin"), None, PushHooks::Skip);
+        let (question, hint, caution, notice, success) = confirm_parts(&prompt);
+        assert_eq!(
+            question,
+            "Create new remote branch origin/gsw-push without the pre-push hook?"
+        );
+        assert_eq!(hint, "[y/Enter = push without hook, n/Esc = cancel]");
+        assert!(caution);
+        assert_eq!(notice, "Pushing without the pre-push hook…");
+        assert_eq!(
+            *success,
+            alone("Created origin/gsw-push, pre-push hook skipped")
+        );
+        assert_eq!(command(&prompt).branch(), "gsw-push");
+    }
+
+    #[test]
+    fn a_run_push_keeps_its_own_hint_notice_and_report() {
+        // Pins `p` so a later change to the wording of `P` cannot leak into it.
+        let up = upstream("origin/gsw-push", 3, 0);
+        let update = prompt_for("gsw-push", Some("origin"), Some(&up), PushHooks::Run);
+        let (_, hint, caution, notice, success) = confirm_parts(&update);
+        assert_eq!(hint, confirm_hint(PUSH_VERB));
+        assert!(!caution);
+        assert_eq!(notice, RUNNING_NOTICE);
+        assert_eq!(*success, alone("Pushed 3 commits to origin/gsw-push"));
+
+        let create = prompt_for("gsw-push", Some("origin"), None, PushHooks::Run);
+        let (_, hint, caution, notice, success) = confirm_parts(&create);
+        assert_eq!(hint, confirm_hint(PUSH_VERB));
+        assert!(caution);
+        assert_eq!(notice, RUNNING_NOTICE);
+        assert_eq!(*success, alone("Created origin/gsw-push"));
+    }
+
+    #[test]
+    fn the_refusals_do_not_depend_on_the_hook_policy() {
+        for hooks in [PushHooks::Run, PushHooks::Skip] {
+            assert_eq!(
+                prompt_for(
+                    "gsw-push",
+                    Some("origin"),
+                    Some(&upstream("origin/gsw-push", 0, 0)),
+                    hooks
+                ),
+                PushPrompt::Refuse {
+                    message: "origin/gsw-push is already up to date".to_string(),
+                },
+            );
+            assert_eq!(
+                prompt_for(DETACHED_HEAD, Some("origin"), None, hooks),
+                PushPrompt::Refuse {
+                    message: "HEAD is detached — check out a branch to push".to_string(),
+                },
+            );
+            assert_eq!(
+                prompt_for("gsw-push", None, None, hooks),
+                PushPrompt::Refuse {
+                    message: "no remote to push to".to_string(),
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn a_skip_push_carries_no_verify_directly_after_push() {
+        // `P` runs the same push as `p`, and only the flag differs. The flag
+        // sits right after `push`, before `-u`, so it cannot be read as the
+        // value of another option.
+        let up = upstream("origin/gsw-push", 3, 0);
+        assert_eq!(
+            command(&prompt_for(
+                "gsw-push",
+                Some("origin"),
+                Some(&up),
+                PushHooks::Skip
+            ))
+            .args(),
+            ["push", "--no-verify"],
+        );
+        assert_eq!(
+            command(&prompt_for(
+                "gsw-push",
+                Some("origin"),
+                None,
+                PushHooks::Skip
+            ))
+            .args(),
+            ["push", "--no-verify", "-u", "origin", "gsw-push"],
         );
     }
 
@@ -2309,7 +2585,13 @@ mod tests {
             },
         );
         assert_eq!(
-            command(&prompt_for("gsw-push", Some("origin"), Some(&up))).args(),
+            command(&prompt_for(
+                "gsw-push",
+                Some("origin"),
+                Some(&up),
+                PushHooks::Run
+            ))
+            .args(),
             ["push"]
         );
     }
@@ -2394,7 +2676,7 @@ mod tests {
         // A repository whose only remote is not named `origin`. The plan must
         // carry that name through to the command rather than assuming `origin`.
         assert_eq!(
-            command(&prompt_for("gsw-push", Some("fork"), None)).args(),
+            command(&prompt_for("gsw-push", Some("fork"), None, PushHooks::Run)).args(),
             ["push", "-u", "fork", "gsw-push"],
         );
     }
@@ -2405,7 +2687,7 @@ mod tests {
         // remote must not be confirmed with the same sentence as a routine
         // update. The wording names the act, and the flag lets the display
         // layer color it apart.
-        let prompt = prompt_for("gsw-push", Some("origin"), None);
+        let prompt = prompt_for("gsw-push", Some("origin"), None, PushHooks::Run);
         assert_eq!(text(&prompt), "Create new remote branch origin/gsw-push?");
         assert!(
             matches!(prompt, PushPrompt::Confirm { caution: true, .. },),
@@ -2418,7 +2700,7 @@ mod tests {
         // The routine case. It names the target and how much is going, and it
         // is NOT flagged as a create — nothing new appears on the remote.
         let up = upstream("origin/gsw-push", 3, 0);
-        let prompt = prompt_for("gsw-push", Some("origin"), Some(&up));
+        let prompt = prompt_for("gsw-push", Some("origin"), Some(&up), PushHooks::Run);
         assert_eq!(text(&prompt), "Push 3 commits to origin/gsw-push?");
         assert!(
             matches!(prompt, PushPrompt::Confirm { caution: false, .. },),
@@ -2432,7 +2714,12 @@ mod tests {
         // the number right next to it.
         let up = upstream("origin/gsw-push", 1, 0);
         assert_eq!(
-            text(&prompt_for("gsw-push", Some("origin"), Some(&up))),
+            text(&prompt_for(
+                "gsw-push",
+                Some("origin"),
+                Some(&up),
+                PushHooks::Run
+            )),
             "Push 1 commit to origin/gsw-push?",
         );
     }
@@ -2442,7 +2729,7 @@ mod tests {
         // The question, the argument list, and the branch the question named
         // travel together, so what runs on `y` is what the sentence promised —
         // and the runner can still tell whether the repository moved under it.
-        let prompt = prompt_for("gsw-push", Some("origin"), None);
+        let prompt = prompt_for("gsw-push", Some("origin"), None, PushHooks::Run);
         assert_eq!(
             command(&prompt).args(),
             ["push", "-u", "origin", "gsw-push"]
@@ -2457,7 +2744,7 @@ mod tests {
         // carry the branch anyway, or nothing downstream can tell that the
         // checkout changed between the question and the answer.
         let up = upstream("origin/gsw-push", 3, 0);
-        let prompt = prompt_for("gsw-push", Some("origin"), Some(&up));
+        let prompt = prompt_for("gsw-push", Some("origin"), Some(&up), PushHooks::Run);
         assert_eq!(command(&prompt).args(), ["push"]);
         assert_eq!(command(&prompt).branch(), "gsw-push");
     }
@@ -2470,7 +2757,8 @@ mod tests {
             prompt_for(
                 "gsw-push",
                 Some("origin"),
-                Some(&upstream("origin/gsw-push", 0, 0))
+                Some(&upstream("origin/gsw-push", 0, 0)),
+                PushHooks::Run,
             ),
             PushPrompt::Refuse {
                 message: "origin/gsw-push is already up to date".to_string(),
@@ -2483,7 +2771,7 @@ mod tests {
         // The message names the fix, because "cannot push" alone leaves the
         // user guessing at what gsw objected to.
         assert_eq!(
-            prompt_for(DETACHED_HEAD, Some("origin"), None),
+            prompt_for(DETACHED_HEAD, Some("origin"), None, PushHooks::Run),
             PushPrompt::Refuse {
                 message: "HEAD is detached — check out a branch to push".to_string(),
             },
@@ -2493,7 +2781,7 @@ mod tests {
     #[test]
     fn a_repository_with_no_remote_is_refused() {
         assert_eq!(
-            prompt_for("gsw-push", None, None),
+            prompt_for("gsw-push", None, None, PushHooks::Run),
             PushPrompt::Refuse {
                 message: "no remote to push to".to_string(),
             },
@@ -2581,7 +2869,7 @@ mod ui_tests {
     /// A UI with the confirmation already on screen for an untracked branch.
     fn asking() -> PushUi {
         let mut ui = PushUi::new(false);
-        ui.request(&snapshot(None), tall_pane(80), t0());
+        ui.request(&snapshot(None), tall_pane(80), t0(), PushHooks::Run);
         ui
     }
 
@@ -2627,7 +2915,7 @@ mod ui_tests {
     /// A UI with a push already running, confirmed at `now`.
     fn pushing(now: Instant) -> PushUi {
         let mut ui = PushUi::new(false);
-        ui.request(&snapshot(None), tall_pane(80), now);
+        ui.request(&snapshot(None), tall_pane(80), now, PushHooks::Run);
         ui.confirm(now)
             .expect("the confirmation must hand over a command");
         ui
@@ -3875,7 +4163,7 @@ mod ui_tests {
         // The refusal is a message, not a question: the keys must stay normal,
         // so `y` does not answer a prompt that is not there.
         let mut ui = PushUi::new(false);
-        ui.request(&snapshot(tracked(0)), tall_pane(80), t0());
+        ui.request(&snapshot(tracked(0)), tall_pane(80), t0(), PushHooks::Run);
         assert_eq!(ui.mode(), InputMode::Normal);
         assert_eq!(ui.overlay(tall_pane(80), t0()).rows(), 1);
         assert!(ui
@@ -3968,7 +4256,7 @@ mod ui_tests {
     #[test]
     fn a_successful_update_counts_what_it_pushed() {
         let mut ui = PushUi::new(false);
-        ui.request(&snapshot(tracked(3)), tall_pane(80), t0());
+        ui.request(&snapshot(tracked(3)), tall_pane(80), t0(), PushHooks::Run);
         ui.confirm(t0());
         ui.finished(
             PushOutcome {
@@ -4201,6 +4489,7 @@ mod ui_tests {
                 height: 1,
             },
             t0(),
+            PushHooks::Run,
         );
         assert_eq!(
             ui.mode(),
@@ -4293,12 +4582,12 @@ mod ui_tests {
         };
         let refusing = {
             let mut ui = PushUi::new(false);
-            ui.request(&snapshot(tracked(0)), tall_pane(80), t0());
+            ui.request(&snapshot(tracked(0)), tall_pane(80), t0(), PushHooks::Run);
             ui
         };
         let asking_to_update = {
             let mut ui = PushUi::new(false);
-            ui.request(&snapshot(tracked(3)), tall_pane(80), t0());
+            ui.request(&snapshot(tracked(3)), tall_pane(80), t0(), PushHooks::Run);
             ui
         };
         let running = {
@@ -4504,7 +4793,7 @@ mod ui_tests {
         let mut ui = PushUi::new(false);
         let mut snap = snapshot(None);
         snap.branch = "a-branch-name-long-enough-to-need-truncating-on-a-narrow-pane".to_string();
-        ui.request(&snap, tall_pane(80), t0());
+        ui.request(&snap, tall_pane(80), t0(), PushHooks::Run);
         for width in [10, 20, 40] {
             let overlay = ui.overlay(tall_pane(width), t0()).text();
             for line in overlay.lines() {
@@ -4523,7 +4812,7 @@ mod ui_tests {
         let mut ui = PushUi::new(false);
         let mut snap = snapshot(None);
         snap.branch = "日本語のブランチ名-🎉-café".to_string();
-        ui.request(&snap, tall_pane(80), t0());
+        ui.request(&snap, tall_pane(80), t0(), PushHooks::Run);
         for width in 1..40 {
             let overlay = ui.overlay(tall_pane(width), t0()).text();
             for line in overlay.lines() {
@@ -4548,7 +4837,7 @@ mod ui_tests {
             },
             t0(),
         );
-        ui.request(&snapshot(None), tall_pane(80), t0());
+        ui.request(&snapshot(None), tall_pane(80), t0(), PushHooks::Run);
         assert_eq!(ui.mode(), InputMode::Confirm);
         assert_eq!(ui.overlay(tall_pane(80), t0()).rows(), 1);
         assert!(!ui.overlay(tall_pane(120), t0()).text().contains("error:"));
@@ -4572,7 +4861,7 @@ mod ui_tests {
     /// about ageing reads.
     fn pushed_with(truecolor: bool, at: Instant) -> PushUi {
         let mut ui = PushUi::new(truecolor);
-        ui.request(&snapshot(tracked(3)), tall_pane(80), at);
+        ui.request(&snapshot(tracked(3)), tall_pane(80), at, PushHooks::Run);
         ui.confirm(at);
         ui.finished(
             PushOutcome {
@@ -4648,7 +4937,7 @@ mod ui_tests {
         // frame the same row until it does.
         let start = t0();
         let mut ui = PushUi::new(false);
-        ui.request(&snapshot(tracked(0)), tall_pane(80), start);
+        ui.request(&snapshot(tracked(0)), tall_pane(80), start, PushHooks::Run);
 
         let text = ui
             .overlay(tall_pane(80), start + Duration::from_secs(7))
@@ -5107,7 +5396,7 @@ mod ui_tests {
             ),
             (
                 "a press of p",
-                |ui, now| ui.request(&snapshot(None), tall_pane(80), now),
+                |ui, now| ui.request(&snapshot(None), tall_pane(80), now, PushHooks::Run),
                 &push_hint,
             ),
         ];
@@ -5651,6 +5940,94 @@ mod run_tests {
         std::fs::write(&hook, format!("#!/bin/sh\n{body}\n")).expect("write the pre-push hook");
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(HOOK_EXECUTABLE_MODE))
             .expect("make the hook executable");
+    }
+
+    /// The push a confirmation on `feature` would carry, built through
+    /// [`prompt_for`] so the policy reaches git the way a key press sends it.
+    #[cfg(unix)]
+    fn planned_push(hooks: PushHooks) -> PushCommand {
+        match prompt_for("feature", Some("origin"), None, hooks) {
+            PushPrompt::Confirm {
+                command: Confirmed::Push(command),
+                ..
+            } => command,
+            other => panic!("expected a push confirmation, got {other:?}"),
+        }
+    }
+
+    /// The body of the hook that touches `marker` and then fails.
+    ///
+    /// The path goes onto a `/bin/sh` command line, so the quoting rule lives
+    /// in one place rather than in each string that spells a command line.
+    #[cfg(unix)]
+    fn failing_marker_hook_body(marker: &Path) -> String {
+        format!(
+            "touch {}\nexit 1",
+            shellquote::shell_quote(&marker.display().to_string()),
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_skip_push_does_not_run_the_hook_and_a_run_push_does() {
+        // The test builds both commands through `prompt_for`. It proves that
+        // the policy of the question reaches git, and not only that git knows
+        // `--no-verify`.
+        let (origin, clone) = clone_with_feature_branch();
+        let marker_dir = tempfile::tempdir().expect("create the marker directory");
+        let marker = marker_dir.path().join("hook-ran");
+        write_hook(clone.path(), &failing_marker_hook_body(&marker));
+
+        let run = run_quiet(&planned_push(PushHooks::Run), clone.path());
+        assert!(!run.success, "the failing hook must stop a Run push");
+        assert!(marker.exists(), "a Run push must run the hook");
+        assert!(!origin_has_feature(origin.path()));
+
+        std::fs::remove_file(&marker).expect("remove the marker");
+        let skip = run_quiet(&planned_push(PushHooks::Skip), clone.path());
+        assert!(skip.success, "a Skip push failed: {}", skip.output);
+        assert!(!marker.exists(), "a Skip push must not run the hook");
+        assert!(
+            origin_has_feature(origin.path()),
+            "the Skip push must reach the remote",
+        );
+    }
+
+    /// **The marker path goes onto a `/bin/sh` command line, so the shell
+    /// reads every character of it.** A single quote closes the quotation
+    /// early, and `sh` then touches a different file or reads the rest of the
+    /// script as one unterminated word and runs nothing. The Run leg of the
+    /// test above would then fail for the wrong reason, and the `!exists()` of
+    /// its Skip leg would prove nothing.
+    ///
+    /// A temporary directory holds no quote today, so this costs that test
+    /// nothing. It is here because the quoting rule belongs in
+    /// [`shellquote::shell_quote`] rather than in each string that spells a
+    /// command line.
+    #[cfg(unix)]
+    #[test]
+    fn the_failing_marker_hook_touches_the_path_it_was_handed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join("it's-here");
+        let body = failing_marker_hook_body(&marker);
+
+        let status = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&body)
+            .current_dir(dir.path())
+            .status()
+            .expect("run the body of the hook");
+
+        assert_eq!(
+            status.code(),
+            Some(1),
+            "the hook must fail through its own `exit 1`; a shell syntax error gives 2: {status}",
+        );
+        assert!(
+            marker.exists(),
+            "the hook must touch the path it was handed, and a quote the shell read as another \
+             word touches somewhere else",
+        );
     }
 
     #[test]

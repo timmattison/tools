@@ -671,9 +671,14 @@ enum Event {
     /// The user asked to force an immediate refresh (`r`), bypassing the
     /// throttle cooldown.
     ForceRefresh,
-    /// The user asked to push (`p`) — show the confirmation, or say why there
-    /// is nothing to confirm.
-    PushRequested,
+    /// The user asked to push — show the confirmation, or say why there is
+    /// nothing to confirm.
+    ///
+    /// It carries the policy of the `pre-push` hook. `p` asks for a push that
+    /// runs the hook, and `P` asks for one that does not. One event for two
+    /// keys keeps them from drifting apart, for the same reason that
+    /// [`Event::BaseUpdateRequested`] gives.
+    PushRequested(crate::push::PushHooks),
     /// The user asked to bring the branch up to date with its base: `R` for a
     /// rebase onto it, `M` for a merge of it.
     ///
@@ -697,8 +702,9 @@ enum Event {
     BaseUpdateCommandFound(crate::update::BaseUpdate, crate::shell::ShellCommand),
     /// The user said yes to the question on the row (`y` or Enter).
     ///
-    /// It names no act, because the row holds the question of three keys: a
-    /// push, a rebase onto the base, or a merge of the base. What the answer
+    /// It names no act, because the row holds the question of four keys: a
+    /// push (`p`, or `P` without the pre-push hook), a rebase onto the base, or a
+    /// merge of the base. What the answer
     /// starts is what the question described, and
     /// [`crate::push::PushUi::confirm`] is what says which of them that is.
     Confirmed,
@@ -850,8 +856,8 @@ pub(crate) enum InputMode {
     /// of a push, of a rebase onto the base, or of a merge of the base. The
     /// arrow keys never answer it.
     Confirm,
-    /// A command of one of those three keys is running, or the `git switch`
-    /// of the second Esc. `p`, `R`, and `M` are all inert here, so no two of
+    /// A command of one of those four keys is running, or the `git switch`
+    /// of the second Esc. `p`, `P`, `R`, and `M` are all inert here, so no two of
     /// those runs overlap — a rebase and a push of one branch least of all.
     /// The arrow keys are inert too, because the window under the frame
     /// belongs to the worktree that runs the command, and every run that ends
@@ -2552,8 +2558,8 @@ struct LoopState {
     conflicts: ConflictsRun,
     /// The worktree where the user started gsw.
     home: WorktreePath,
-    /// The worktree that the frame shows. The walk, `p`, `R`, `M`, `G`, and
-    /// `m` act on it. It starts at [`LoopState::home`].
+    /// The worktree that the frame shows. The walk, `p`, `P`, `R`, `M`, `G`,
+    /// and `m` act on it. It starts at [`LoopState::home`].
     current: WorktreePath,
     /// How many switches the loop has made. See [`Generation`].
     generation: Generation,
@@ -2573,7 +2579,7 @@ impl LoopState {
     /// about a key the user pressed.
     ///
     /// [`absorb`] calls it when it reads the key, and not at the next frame. So
-    /// a `p`, `G`, or `m` later in the same burst acts on the new worktree, as
+    /// a `p`, `P`, `G`, or `m` later in the same burst acts on the new worktree, as
     /// a `y` after a `p` in one burst reads the new mode.
     fn switch_to(
         &mut self,
@@ -2972,10 +2978,10 @@ where
                 return absorb(action, pending, state, hooks);
             }
         }
-        Event::PushRequested => {
+        Event::PushRequested(policy) => {
             state
                 .ui
-                .request(&state.cache.snapshot, state.cache.dims, clock());
+                .request(&state.cache.snapshot, state.cache.dims, clock(), policy);
         }
         // The question describes the command of the act, so the press reads
         // that command here and the row takes it. The key table makes no
@@ -3305,7 +3311,7 @@ where
 /// displayed (see [`Event::Key`] for why the reader thread must not).
 ///
 /// The loop watches one worktree at a time, the current worktree, and it starts
-/// on `start.home`. The walk, `p`, `R`, `M`, `G`, and `m` act on the current
+/// on `start.home`. The walk, `p`, `P`, `R`, `M`, `G`, and `m` act on the current
 /// worktree. The arrow keys change it through [`LoopState::switch_to`], inside
 /// [`absorb`], so the next key of the same burst already acts on the new
 /// worktree.
@@ -3849,11 +3855,12 @@ fn forward_input(event: CtEvent) -> Option<Event> {
 ///   cannot be quit while it waits on the network is a monitor that has to be
 ///   killed from another pane.
 /// - [`InputMode::Normal`]: `q` quits, `r` forces a refresh, `p` asks to push,
-///   `G` asks for the issue of the branch, `R` asks to rebase the branch onto
-///   its base, `M` asks to merge the base into the branch, and `m` asks to
-///   measure a rebase and a merge against the default branch. Up goes to the
-///   home worktree, Left to the previous worktree, Right to the next worktree,
-///   and Down opens the list of the worktrees. Esc is
+///   `P` asks to push without the `pre-push` hook, `G` asks for the issue of
+///   the branch, `R` asks to rebase the branch onto its base, `M` asks to
+///   merge the base into the branch, and `m` asks to measure a rebase and a
+///   merge against the default branch. Up goes to the home worktree, Left to
+///   the previous worktree, Right to the next worktree, and Down opens the
+///   list of the worktrees. Esc is
 ///   [`Event::ReturnRequested`]. Where the name in the header is red, its first
 ///   press asks for a second one, and the second press goes back to the start
 ///   branch: it moves the watch to the worktree that is on it, or else it runs
@@ -3862,25 +3869,25 @@ fn forward_input(event: CtEvent) -> Option<Event> {
 /// - [`InputMode::Confirm`]: `y` and Enter carry out whatever the question on
 ///   the row asks about — a push, a rebase, or a merge — and `n`, Esc, and `q`
 ///   cancel it. Nothing else acts: with a question on screen, `q` is the answer
-///   "no", not "quit", `r` is not a refresh, `R` and `M` do not ask a second
-///   question, and an arrow key is no answer at all. That is why the mode
-///   exists.
+///   "no", not "quit", `r` is not a refresh, `P` is not an answer, `R` and `M`
+///   do not ask a second question, and an arrow key is no answer at all. That
+///   is why the mode exists.
 /// - [`InputMode::Running`]: `q` quits, `r` refreshes, and `G` still asks for
 ///   the issue — a browser conflicts with nothing any of these runs does. `m`
 ///   still asks to measure during a push, because a measurement is read-only
 ///   for the repository. A rebase, a merge, and the `git switch` of the second
 ///   Esc move HEAD, and a measurement starts from HEAD, so `m` is inert during
-///   those three runs. `p`, `R`, and `M` are inert, so an impatient second
+///   those three runs. `p`, `P`, `R`, and `M` are inert, so an impatient second
 ///   press cannot start an overlapping run: a rebase and a push must not
 ///   overlap, and a base update that runs puts the loop in this same mode. The
 ///   arrow keys are inert too: the window under the frame belongs to the
 ///   worktree that the command runs in, so the watch stays on that worktree.
 /// - [`InputMode::List`]: Up and Down move the cursor, Enter goes to the
 ///   worktree under it, and Esc and `q` close the list. Every other key gives
-///   `None` and does nothing at all: `r` does not walk, `p` does not ask, `G`,
-///   `R`, `M`, and `m` start nothing, and no line leaves the row. The list
-///   takes the pane, so the frame that such a key acts on is not on the
-///   screen.
+///   `None` and does nothing at all: `r` does not walk, `p` and `P` do not
+///   ask, `G`, `R`, `M`, and `m` start nothing, and no line leaves the row.
+///   The list takes the pane, so the frame that such a key acts on is not on
+///   the screen.
 /// - `G`, `R`, and `M` act only where `keys` says each one has a command
 ///   behind it. Where one does not, that key does what any other unbound key
 ///   does, which is the one silent case this feature has.
@@ -3910,7 +3917,15 @@ fn classify_input(key: KeyEvent, mode: InputMode, keys: CommandKeys) -> Option<E
             KeyCode::Char('r') => Event::ForceRefresh,
             // A push already running makes a second request meaningless
             // rather than harmless.
-            KeyCode::Char('p') if mode == InputMode::Normal => Event::PushRequested,
+            KeyCode::Char('p') if mode == InputMode::Normal => {
+                Event::PushRequested(crate::push::PushHooks::Run)
+            }
+            // Matched on the character alone. Some terminals report `P` with
+            // no `SHIFT` modifier, as they do for `G`, `R`, and `M`. It acts
+            // in the normal mode alone, as `p` does.
+            KeyCode::Char('P') if mode == InputMode::Normal => {
+                Event::PushRequested(crate::push::PushHooks::Skip)
+            }
             // A browser opens beside the monitor, so a push in flight is no
             // reason to refuse. With no command behind it the key falls
             // through to `Dismiss`, which is what every unbound key gives.
@@ -4049,6 +4064,7 @@ fn restore_terminal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::push::PushHooks;
     use crate::render::LogEntry;
     use crate::repo::LogStart;
     use crate::testrepo;
@@ -5056,7 +5072,7 @@ mod tests {
         for keys in EVERY_BINDING_COMBINATION {
             assert!(matches!(
                 classify_input(press(KeyCode::Char('p')), InputMode::Normal, keys),
-                Some(Event::PushRequested),
+                Some(Event::PushRequested(PushHooks::Run)),
             ));
             for mode in EVERY_RUN {
                 assert!(matches!(
@@ -5064,6 +5080,36 @@ mod tests {
                     Some(Event::Dismiss),
                 ));
             }
+        }
+    }
+
+    #[test]
+    fn shift_p_asks_to_push_without_the_hook_only_when_nothing_else_is_happening() {
+        // The key that skips the `pre-push` hook. It acts in the normal mode
+        // alone, as `p` does. Some terminals report `P` with no modifier, so
+        // both spellings must give the same event.
+        for keys in EVERY_BINDING_COMBINATION {
+            for modifiers in [KeyModifiers::NONE, KeyModifiers::SHIFT] {
+                let shifted = KeyEvent::new(KeyCode::Char('P'), modifiers);
+                assert!(
+                    matches!(
+                        classify_input(shifted, InputMode::Normal, keys),
+                        Some(Event::PushRequested(PushHooks::Skip)),
+                    ),
+                    "`P` with {modifiers:?} must ask to push without the hook",
+                );
+            }
+            for mode in EVERY_RUN {
+                assert!(matches!(
+                    classify_input(press(KeyCode::Char('P')), mode, keys),
+                    Some(Event::Dismiss),
+                ));
+            }
+            assert!(matches!(
+                classify_input(press(KeyCode::Char('P')), InputMode::Confirm, keys),
+                Some(Event::Dismiss),
+            ));
+            assert!(classify_input(press(KeyCode::Char('P')), InputMode::List, keys).is_none(),);
         }
     }
 
@@ -8574,6 +8620,7 @@ mod push_loop_tests {
     };
     use super::*;
     use crate::conflicts::ConflictsOutcome;
+    use crate::push::PushHooks;
     use crate::push::PushOutcome;
     use colored::Colorize;
     use crossterm::event::{KeyCode, KeyModifiers};
@@ -8622,7 +8669,7 @@ mod push_loop_tests {
     /// behind — the state the loop has to take back off the screen by itself.
     fn pushed_ui(at: Instant) -> PushUi {
         let mut ui = PushUi::new(false);
-        ui.request(&pushable_snapshot(), TEST_DIMS, at);
+        ui.request(&pushable_snapshot(), TEST_DIMS, at, PushHooks::Run);
         ui.confirm(at);
         ui.finished(
             crate::push::PushOutcome {
@@ -9643,7 +9690,7 @@ mod push_loop_tests {
         // for it — which is the exact harm this feature exists to stop.
         let (screen, seen) = run_loop_remote(vec![
             probe_answered(),
-            Event::PushRequested,
+            Event::PushRequested(PushHooks::Run),
             Event::Confirmed,
             press_g(),
             press_g(),
@@ -9923,7 +9970,7 @@ mod push_loop_tests {
     /// A push in flight, and a whole run of `m` inside it.
     fn a_run_during_a_push() -> Vec<Event> {
         vec![
-            Event::PushRequested,
+            Event::PushRequested(PushHooks::Run),
             Event::Confirmed,
             press_m(),
             started_against_main(),
@@ -10263,6 +10310,40 @@ mod push_loop_tests {
         assert_eq!(command.args(), ["push", "-u", "origin", "gsw-push"]);
         // The branch travels with the arguments all the way through the loop:
         // the runner checks it against the checkout before git sees it.
+        assert_eq!(command.branch(), "gsw-push");
+    }
+
+    #[test]
+    fn pressing_shift_p_puts_the_question_without_the_hook_under_the_frame() {
+        // The policy has to reach the question through the loop: the person
+        // reads that the hook is skipped before the person answers.
+        let (displayed, _) = run_loop(vec![key(KeyCode::Char('P')), Event::Quit]);
+        assert!(
+            displayed
+                .contains("Create new remote branch origin/gsw-push without the pre-push hook?"),
+            "the question must name the skipped hook, got {displayed:?}",
+        );
+    }
+
+    #[test]
+    fn confirming_shift_p_starts_the_push_without_the_hook() {
+        // `P` then `y` must run the command the confirmation named, and that
+        // command carries `--no-verify`.
+        let (_, seen) = run_loop(vec![
+            key(KeyCode::Char('P')),
+            key(KeyCode::Char('y')),
+            Event::Quit,
+        ]);
+        let [command] = seen.pushes.as_slice() else {
+            panic!(
+                "one confirmed push must reach the runner, got {:?}",
+                seen.pushes
+            );
+        };
+        assert_eq!(
+            command.args(),
+            ["push", "--no-verify", "-u", "origin", "gsw-push"],
+        );
         assert_eq!(command.branch(), "gsw-push");
     }
 
