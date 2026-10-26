@@ -671,9 +671,14 @@ enum Event {
     /// The user asked to force an immediate refresh (`r`), bypassing the
     /// throttle cooldown.
     ForceRefresh,
-    /// The user asked to push (`p`) — show the confirmation, or say why there
-    /// is nothing to confirm.
-    PushRequested,
+    /// The user asked to push — show the confirmation, or say why there is
+    /// nothing to confirm.
+    ///
+    /// It carries the policy of the `pre-push` hook. `p` asks for a push that
+    /// runs the hook, and `P` asks for one that does not. One event for two
+    /// keys keeps them from drifting apart, for the same reason that
+    /// [`Event::BaseUpdateRequested`] gives.
+    PushRequested(crate::push::PushHooks),
     /// The user asked to bring the branch up to date with its base: `R` for a
     /// rebase onto it, `M` for a merge of it.
     ///
@@ -2972,7 +2977,7 @@ where
                 return absorb(action, pending, state, hooks);
             }
         }
-        Event::PushRequested => {
+        Event::PushRequested(_hooks) => {
             state
                 .ui
                 .request(&state.cache.snapshot, state.cache.dims, clock());
@@ -3910,7 +3915,9 @@ fn classify_input(key: KeyEvent, mode: InputMode, keys: CommandKeys) -> Option<E
             KeyCode::Char('r') => Event::ForceRefresh,
             // A push already running makes a second request meaningless
             // rather than harmless.
-            KeyCode::Char('p') if mode == InputMode::Normal => Event::PushRequested,
+            KeyCode::Char('p') if mode == InputMode::Normal => {
+                Event::PushRequested(crate::push::PushHooks::Run)
+            }
             // A browser opens beside the monitor, so a push in flight is no
             // reason to refuse. With no command behind it the key falls
             // through to `Dismiss`, which is what every unbound key gives.
@@ -4049,6 +4056,7 @@ fn restore_terminal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::push::PushHooks;
     use crate::render::LogEntry;
     use crate::repo::LogStart;
     use crate::testrepo;
@@ -5056,7 +5064,7 @@ mod tests {
         for keys in EVERY_BINDING_COMBINATION {
             assert!(matches!(
                 classify_input(press(KeyCode::Char('p')), InputMode::Normal, keys),
-                Some(Event::PushRequested),
+                Some(Event::PushRequested(PushHooks::Run)),
             ));
             for mode in EVERY_RUN {
                 assert!(matches!(
@@ -5064,6 +5072,38 @@ mod tests {
                     Some(Event::Dismiss),
                 ));
             }
+        }
+    }
+
+    #[test]
+    fn shift_p_asks_to_push_without_the_hook_only_when_nothing_else_is_happening() {
+        // The key that skips the `pre-push` hook. It acts in the normal mode
+        // alone, as `p` does. Some terminals report `P` with no modifier, so
+        // both spellings must give the same event.
+        for keys in EVERY_BINDING_COMBINATION {
+            for modifiers in [KeyModifiers::NONE, KeyModifiers::SHIFT] {
+                let shifted = KeyEvent::new(KeyCode::Char('P'), modifiers);
+                assert!(
+                    matches!(
+                        classify_input(shifted, InputMode::Normal, keys),
+                        Some(Event::PushRequested(PushHooks::Skip)),
+                    ),
+                    "`P` with {modifiers:?} must ask to push without the hook",
+                );
+            }
+            for mode in EVERY_RUN {
+                assert!(matches!(
+                    classify_input(press(KeyCode::Char('P')), mode, keys),
+                    Some(Event::Dismiss),
+                ));
+            }
+            assert!(matches!(
+                classify_input(press(KeyCode::Char('P')), InputMode::Confirm, keys),
+                Some(Event::Dismiss),
+            ));
+            assert!(
+                classify_input(press(KeyCode::Char('P')), InputMode::List, keys).is_none(),
+            );
         }
     }
 
@@ -8574,6 +8614,7 @@ mod push_loop_tests {
     };
     use super::*;
     use crate::conflicts::ConflictsOutcome;
+    use crate::push::PushHooks;
     use crate::push::PushOutcome;
     use colored::Colorize;
     use crossterm::event::{KeyCode, KeyModifiers};
@@ -9643,7 +9684,7 @@ mod push_loop_tests {
         // for it — which is the exact harm this feature exists to stop.
         let (screen, seen) = run_loop_remote(vec![
             probe_answered(),
-            Event::PushRequested,
+            Event::PushRequested(PushHooks::Run),
             Event::Confirmed,
             press_g(),
             press_g(),
@@ -9923,7 +9964,7 @@ mod push_loop_tests {
     /// A push in flight, and a whole run of `m` inside it.
     fn a_run_during_a_push() -> Vec<Event> {
         vec![
-            Event::PushRequested,
+            Event::PushRequested(PushHooks::Run),
             Event::Confirmed,
             press_m(),
             started_against_main(),
