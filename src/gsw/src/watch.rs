@@ -2977,10 +2977,10 @@ where
                 return absorb(action, pending, state, hooks);
             }
         }
-        Event::PushRequested(hooks) => {
+        Event::PushRequested(policy) => {
             state
                 .ui
-                .request(&state.cache.snapshot, state.cache.dims, clock(), hooks);
+                .request(&state.cache.snapshot, state.cache.dims, clock(), policy);
         }
         // The question describes the command of the act, so the press reads
         // that command here and the row takes it. The key table makes no
