@@ -325,6 +325,20 @@ pub(crate) enum PushPrompt {
     },
 }
 
+/// How a push treats the repository's `pre-push` hook.
+///
+/// A type and not a `bool`, so a call site says which policy it means. The
+/// policy is about how a push runs and not about which push runs, so
+/// [`PushPlan`] does not carry it. `--no-verify` skips only the local
+/// `pre-push` hook. Server-side hooks and branch protection still apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PushHooks {
+    /// `p`: the push runs the hook, as a plain `git push` does.
+    Run,
+    /// `P`: the push runs `git push --no-verify`, and the hook does not run.
+    Skip,
+}
+
 /// Decide what pressing `p` does, given the branch state gsw already renders.
 ///
 /// The one way into this module. Callers pass what the snapshot holds and get
@@ -340,6 +354,7 @@ pub(crate) fn prompt_for(
     branch: &str,
     remote: Option<&str>,
     upstream: Option<&UpstreamStatus>,
+    _hooks: PushHooks,
 ) -> PushPrompt {
     // One match, so a plan's wording and the command that carries it out are
     // written side by side. The variants that never push return here, which is
@@ -1218,6 +1233,7 @@ impl PushUi {
                 &snapshot.branch,
                 snapshot.push_remote.as_deref(),
                 snapshot.upstream.as_ref(),
+                PushHooks::Run,
             ),
             dims,
             now,
@@ -2290,8 +2306,42 @@ mod tests {
             },
         );
         assert_eq!(
-            command(&prompt_for("gsw-push", Some("origin"), None)).args(),
+            command(&prompt_for(
+                "gsw-push",
+                Some("origin"),
+                None,
+                PushHooks::Run
+            ))
+            .args(),
             ["push", "-u", "origin", "gsw-push"],
+        );
+    }
+
+    #[test]
+    fn a_skip_push_carries_no_verify_directly_after_push() {
+        // `P` runs the same push as `p`, and only the flag differs. The flag
+        // sits right after `push`, before `-u`, so it cannot be read as the
+        // value of another option.
+        let up = upstream("origin/gsw-push", 3, 0);
+        assert_eq!(
+            command(&prompt_for(
+                "gsw-push",
+                Some("origin"),
+                Some(&up),
+                PushHooks::Skip
+            ))
+            .args(),
+            ["push", "--no-verify"],
+        );
+        assert_eq!(
+            command(&prompt_for(
+                "gsw-push",
+                Some("origin"),
+                None,
+                PushHooks::Skip
+            ))
+            .args(),
+            ["push", "--no-verify", "-u", "origin", "gsw-push"],
         );
     }
 
@@ -2309,7 +2359,13 @@ mod tests {
             },
         );
         assert_eq!(
-            command(&prompt_for("gsw-push", Some("origin"), Some(&up))).args(),
+            command(&prompt_for(
+                "gsw-push",
+                Some("origin"),
+                Some(&up),
+                PushHooks::Run
+            ))
+            .args(),
             ["push"]
         );
     }
@@ -2394,7 +2450,7 @@ mod tests {
         // A repository whose only remote is not named `origin`. The plan must
         // carry that name through to the command rather than assuming `origin`.
         assert_eq!(
-            command(&prompt_for("gsw-push", Some("fork"), None)).args(),
+            command(&prompt_for("gsw-push", Some("fork"), None, PushHooks::Run)).args(),
             ["push", "-u", "fork", "gsw-push"],
         );
     }
@@ -2405,7 +2461,7 @@ mod tests {
         // remote must not be confirmed with the same sentence as a routine
         // update. The wording names the act, and the flag lets the display
         // layer color it apart.
-        let prompt = prompt_for("gsw-push", Some("origin"), None);
+        let prompt = prompt_for("gsw-push", Some("origin"), None, PushHooks::Run);
         assert_eq!(text(&prompt), "Create new remote branch origin/gsw-push?");
         assert!(
             matches!(prompt, PushPrompt::Confirm { caution: true, .. },),
@@ -2418,7 +2474,7 @@ mod tests {
         // The routine case. It names the target and how much is going, and it
         // is NOT flagged as a create — nothing new appears on the remote.
         let up = upstream("origin/gsw-push", 3, 0);
-        let prompt = prompt_for("gsw-push", Some("origin"), Some(&up));
+        let prompt = prompt_for("gsw-push", Some("origin"), Some(&up), PushHooks::Run);
         assert_eq!(text(&prompt), "Push 3 commits to origin/gsw-push?");
         assert!(
             matches!(prompt, PushPrompt::Confirm { caution: false, .. },),
@@ -2432,7 +2488,12 @@ mod tests {
         // the number right next to it.
         let up = upstream("origin/gsw-push", 1, 0);
         assert_eq!(
-            text(&prompt_for("gsw-push", Some("origin"), Some(&up))),
+            text(&prompt_for(
+                "gsw-push",
+                Some("origin"),
+                Some(&up),
+                PushHooks::Run
+            )),
             "Push 1 commit to origin/gsw-push?",
         );
     }
@@ -2442,7 +2503,7 @@ mod tests {
         // The question, the argument list, and the branch the question named
         // travel together, so what runs on `y` is what the sentence promised —
         // and the runner can still tell whether the repository moved under it.
-        let prompt = prompt_for("gsw-push", Some("origin"), None);
+        let prompt = prompt_for("gsw-push", Some("origin"), None, PushHooks::Run);
         assert_eq!(
             command(&prompt).args(),
             ["push", "-u", "origin", "gsw-push"]
@@ -2457,7 +2518,7 @@ mod tests {
         // carry the branch anyway, or nothing downstream can tell that the
         // checkout changed between the question and the answer.
         let up = upstream("origin/gsw-push", 3, 0);
-        let prompt = prompt_for("gsw-push", Some("origin"), Some(&up));
+        let prompt = prompt_for("gsw-push", Some("origin"), Some(&up), PushHooks::Run);
         assert_eq!(command(&prompt).args(), ["push"]);
         assert_eq!(command(&prompt).branch(), "gsw-push");
     }
@@ -2470,7 +2531,8 @@ mod tests {
             prompt_for(
                 "gsw-push",
                 Some("origin"),
-                Some(&upstream("origin/gsw-push", 0, 0))
+                Some(&upstream("origin/gsw-push", 0, 0)),
+                PushHooks::Run,
             ),
             PushPrompt::Refuse {
                 message: "origin/gsw-push is already up to date".to_string(),
@@ -2483,7 +2545,7 @@ mod tests {
         // The message names the fix, because "cannot push" alone leaves the
         // user guessing at what gsw objected to.
         assert_eq!(
-            prompt_for(DETACHED_HEAD, Some("origin"), None),
+            prompt_for(DETACHED_HEAD, Some("origin"), None, PushHooks::Run),
             PushPrompt::Refuse {
                 message: "HEAD is detached — check out a branch to push".to_string(),
             },
@@ -2493,7 +2555,7 @@ mod tests {
     #[test]
     fn a_repository_with_no_remote_is_refused() {
         assert_eq!(
-            prompt_for("gsw-push", None, None),
+            prompt_for("gsw-push", None, None, PushHooks::Run),
             PushPrompt::Refuse {
                 message: "no remote to push to".to_string(),
             },
@@ -5651,6 +5713,47 @@ mod run_tests {
         std::fs::write(&hook, format!("#!/bin/sh\n{body}\n")).expect("write the pre-push hook");
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(HOOK_EXECUTABLE_MODE))
             .expect("make the hook executable");
+    }
+
+    /// The push a confirmation on `feature` would carry, built through
+    /// [`prompt_for`] so the policy reaches git the way a key press sends it.
+    fn planned_push(hooks: PushHooks) -> PushCommand {
+        match prompt_for("feature", Some("origin"), None, hooks) {
+            PushPrompt::Confirm {
+                command: Confirmed::Push(command),
+                ..
+            } => command,
+            other => panic!("expected a push confirmation, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_skip_push_does_not_run_the_hook_and_a_run_push_does() {
+        // The test builds both commands through `prompt_for`. It proves that
+        // the policy of the question reaches git, and not only that git knows
+        // `--no-verify`.
+        let (origin, clone) = clone_with_feature_branch();
+        let marker_dir = tempfile::tempdir().expect("create the marker directory");
+        let marker = marker_dir.path().join("hook-ran");
+        write_hook(
+            clone.path(),
+            &format!("touch '{}'\nexit 1", marker.display()),
+        );
+
+        let run = run_quiet(&planned_push(PushHooks::Run), clone.path());
+        assert!(!run.success, "the failing hook must stop a Run push");
+        assert!(marker.exists(), "a Run push must run the hook");
+        assert!(!origin_has_feature(origin.path()));
+
+        std::fs::remove_file(&marker).expect("remove the marker");
+        let skip = run_quiet(&planned_push(PushHooks::Skip), clone.path());
+        assert!(skip.success, "a Skip push failed: {}", skip.output);
+        assert!(!marker.exists(), "a Skip push must not run the hook");
+        assert!(
+            origin_has_feature(origin.path()),
+            "the Skip push must reach the remote",
+        );
     }
 
     #[test]
