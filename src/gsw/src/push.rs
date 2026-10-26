@@ -5958,7 +5958,10 @@ mod run_tests {
     /// in one place rather than in each string that spells a command line.
     #[cfg(unix)]
     fn failing_marker_hook_body(marker: &Path) -> String {
-        format!("touch '{}'\nexit 1", marker.display())
+        format!(
+            "touch {}\nexit 1",
+            shellquote::shell_quote(&marker.display().to_string()),
+        )
     }
 
     #[cfg(unix)]
