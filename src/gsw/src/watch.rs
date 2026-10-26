@@ -3854,7 +3854,7 @@ fn forward_input(event: CtEvent) -> Option<Event> {
 ///   cannot be quit while it waits on the network is a monitor that has to be
 ///   killed from another pane.
 /// - [`InputMode::Normal`]: `q` quits, `r` forces a refresh, `p` asks to push,
-///   `G` asks for the issue of the branch, `R` asks to rebase the branch onto
+///   `P` asks to push without the `pre-push` hook, `G` asks for the issue of the branch, `R` asks to rebase the branch onto
 ///   its base, `M` asks to merge the base into the branch, and `m` asks to
 ///   measure a rebase and a merge against the default branch. Up goes to the
 ///   home worktree, Left to the previous worktree, Right to the next worktree,
@@ -3867,22 +3867,22 @@ fn forward_input(event: CtEvent) -> Option<Event> {
 /// - [`InputMode::Confirm`]: `y` and Enter carry out whatever the question on
 ///   the row asks about — a push, a rebase, or a merge — and `n`, Esc, and `q`
 ///   cancel it. Nothing else acts: with a question on screen, `q` is the answer
-///   "no", not "quit", `r` is not a refresh, `R` and `M` do not ask a second
-///   question, and an arrow key is no answer at all. That is why the mode
+///   "no", not "quit", `r` is not a refresh, `P` is not an answer, `R` and `M`
+///   do not ask a second question, and an arrow key is no answer at all. That is why the mode
 ///   exists.
 /// - [`InputMode::Running`]: `q` quits, `r` refreshes, and `G` still asks for
 ///   the issue — a browser conflicts with nothing any of these runs does. `m`
 ///   still asks to measure during a push, because a measurement is read-only
 ///   for the repository. A rebase, a merge, and the `git switch` of the second
 ///   Esc move HEAD, and a measurement starts from HEAD, so `m` is inert during
-///   those three runs. `p`, `R`, and `M` are inert, so an impatient second
+///   those three runs. `p`, `P`, `R`, and `M` are inert, so an impatient second
 ///   press cannot start an overlapping run: a rebase and a push must not
 ///   overlap, and a base update that runs puts the loop in this same mode. The
 ///   arrow keys are inert too: the window under the frame belongs to the
 ///   worktree that the command runs in, so the watch stays on that worktree.
 /// - [`InputMode::List`]: Up and Down move the cursor, Enter goes to the
 ///   worktree under it, and Esc and `q` close the list. Every other key gives
-///   `None` and does nothing at all: `r` does not walk, `p` does not ask, `G`,
+///   `None` and does nothing at all: `r` does not walk, `p` and `P` do not ask, `G`,
 ///   `R`, `M`, and `m` start nothing, and no line leaves the row. The list
 ///   takes the pane, so the frame that such a key acts on is not on the
 ///   screen.
@@ -3917,6 +3917,12 @@ fn classify_input(key: KeyEvent, mode: InputMode, keys: CommandKeys) -> Option<E
             // rather than harmless.
             KeyCode::Char('p') if mode == InputMode::Normal => {
                 Event::PushRequested(crate::push::PushHooks::Run)
+            }
+            // Matched on the character alone. Some terminals report `P` with
+            // no `SHIFT` modifier, as they do for `G`, `R`, and `M`. It acts
+            // in the normal mode alone, as `p` does.
+            KeyCode::Char('P') if mode == InputMode::Normal => {
+                Event::PushRequested(crate::push::PushHooks::Skip)
             }
             // A browser opens beside the monitor, so a push in flight is no
             // reason to refuse. With no command behind it the key falls
@@ -5101,9 +5107,7 @@ mod tests {
                 classify_input(press(KeyCode::Char('P')), InputMode::Confirm, keys),
                 Some(Event::Dismiss),
             ));
-            assert!(
-                classify_input(press(KeyCode::Char('P')), InputMode::List, keys).is_none(),
-            );
+            assert!(classify_input(press(KeyCode::Char('P')), InputMode::List, keys).is_none(),);
         }
     }
 
