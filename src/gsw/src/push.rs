@@ -5942,6 +5942,7 @@ mod run_tests {
 
     /// The push a confirmation on `feature` would carry, built through
     /// [`prompt_for`] so the policy reaches git the way a key press sends it.
+    #[cfg(unix)]
     fn planned_push(hooks: PushHooks) -> PushCommand {
         match prompt_for("feature", Some("origin"), None, hooks) {
             PushPrompt::Confirm {
