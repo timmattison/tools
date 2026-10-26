@@ -3854,11 +3854,12 @@ fn forward_input(event: CtEvent) -> Option<Event> {
 ///   cannot be quit while it waits on the network is a monitor that has to be
 ///   killed from another pane.
 /// - [`InputMode::Normal`]: `q` quits, `r` forces a refresh, `p` asks to push,
-///   `P` asks to push without the `pre-push` hook, `G` asks for the issue of the branch, `R` asks to rebase the branch onto
-///   its base, `M` asks to merge the base into the branch, and `m` asks to
-///   measure a rebase and a merge against the default branch. Up goes to the
-///   home worktree, Left to the previous worktree, Right to the next worktree,
-///   and Down opens the list of the worktrees. Esc is
+///   `P` asks to push without the `pre-push` hook, `G` asks for the issue of
+///   the branch, `R` asks to rebase the branch onto its base, `M` asks to
+///   merge the base into the branch, and `m` asks to measure a rebase and a
+///   merge against the default branch. Up goes to the home worktree, Left to
+///   the previous worktree, Right to the next worktree, and Down opens the
+///   list of the worktrees. Esc is
 ///   [`Event::ReturnRequested`]. Where the name in the header is red, its first
 ///   press asks for a second one, and the second press goes back to the start
 ///   branch: it moves the watch to the worktree that is on it, or else it runs
@@ -3868,8 +3869,8 @@ fn forward_input(event: CtEvent) -> Option<Event> {
 ///   the row asks about — a push, a rebase, or a merge — and `n`, Esc, and `q`
 ///   cancel it. Nothing else acts: with a question on screen, `q` is the answer
 ///   "no", not "quit", `r` is not a refresh, `P` is not an answer, `R` and `M`
-///   do not ask a second question, and an arrow key is no answer at all. That is why the mode
-///   exists.
+///   do not ask a second question, and an arrow key is no answer at all. That
+///   is why the mode exists.
 /// - [`InputMode::Running`]: `q` quits, `r` refreshes, and `G` still asks for
 ///   the issue — a browser conflicts with nothing any of these runs does. `m`
 ///   still asks to measure during a push, because a measurement is read-only
@@ -3882,10 +3883,10 @@ fn forward_input(event: CtEvent) -> Option<Event> {
 ///   worktree that the command runs in, so the watch stays on that worktree.
 /// - [`InputMode::List`]: Up and Down move the cursor, Enter goes to the
 ///   worktree under it, and Esc and `q` close the list. Every other key gives
-///   `None` and does nothing at all: `r` does not walk, `p` and `P` do not ask, `G`,
-///   `R`, `M`, and `m` start nothing, and no line leaves the row. The list
-///   takes the pane, so the frame that such a key acts on is not on the
-///   screen.
+///   `None` and does nothing at all: `r` does not walk, `p` and `P` do not
+///   ask, `G`, `R`, `M`, and `m` start nothing, and no line leaves the row.
+///   The list takes the pane, so the frame that such a key acts on is not on
+///   the screen.
 /// - `G`, `R`, and `M` act only where `keys` says each one has a command
 ///   behind it. Where one does not, that key does what any other unbound key
 ///   does, which is the one silent case this feature has.

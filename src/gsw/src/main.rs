@@ -63,7 +63,9 @@ mod worktrees;
                   it renders once and exits.\n\n\
                   Watch-mode keys: q or Ctrl-C quits, r refreshes now, p pushes the current \
                   branch after a confirmation that names what it will do — a branch not yet on \
-                  the remote is confirmed as creating one — G opens the pull request of the \
+                  the remote is confirmed as creating one — P does the same push with \
+                  --no-verify, so the pre-push hook of the repository does not run, G opens the \
+                  pull request of the \
                   branch, or the issue the branch names when there is no pull request, R \
                   rebases the branch onto the base and pushes it, M merges the base \
                   into the branch and pushes it, m measures a rebase and a merge against the \

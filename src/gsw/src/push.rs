@@ -301,8 +301,8 @@ pub(crate) enum PushPrompt {
         /// seen, a rebase rewrites every commit of the branch and then
         /// force-pushes the result, and a push that skips the hook skips a
         /// check that the repository asks for. None of them can be allowed to
-        /// look like the routine act beside it, and the color is what carries that in the
-        /// half second before the words are read.
+        /// look like the routine act beside it, and the color is what carries
+        /// that in the half second before the words are read.
         caution: bool,
         /// The command this question described, and what `y` runs.
         command: Confirmed,
@@ -408,7 +408,8 @@ const SKIP_VERB: &str = "push without hook";
 /// What a running push says when the hook does not run.
 const SKIP_RUNNING_NOTICE: &str = "Pushing without the pre-push hook…";
 
-/// Decide what pressing `p` does, given the branch state gsw already renders.
+/// Decide what pressing `p` or `P` does, given the branch state gsw already
+/// renders.
 ///
 /// The one way into this module. Callers pass what the snapshot holds and get
 /// back either a question with its command or a message — never a plan they
