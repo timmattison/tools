@@ -296,11 +296,12 @@ pub(crate) enum PushPrompt {
         /// Whether this question deserves the color of one the user must read
         /// twice.
         ///
-        /// Two acts earn it, and for the same reason. A push that creates a
+        /// Three acts earn it, and for the same reason. A push that creates a
         /// remote branch puts something on a shared remote that nobody has
-        /// seen, and a rebase rewrites every commit of the branch and then
-        /// force-pushes the result. Neither can be allowed to look like the
-        /// routine act beside it, and the color is what carries that in the
+        /// seen, a rebase rewrites every commit of the branch and then
+        /// force-pushes the result, and a push that skips the hook skips a
+        /// check that the repository asks for. None of them can be allowed to
+        /// look like the routine act beside it, and the color is what carries that in the
         /// half second before the words are read.
         caution: bool,
         /// The command this question described, and what `y` runs.
@@ -351,10 +352,61 @@ impl PushHooks {
         args.extend(rest);
         args
     }
+
+    /// What the question adds after the act, so the sentence says the hook
+    /// does not run. Empty for `Run`, which keeps the plain question.
+    fn question_suffix(self) -> &'static str {
+        match self {
+            Self::Run => "",
+            Self::Skip => SKIP_QUESTION_SUFFIX,
+        }
+    }
+
+    /// What the success sentence adds after the act. Empty for `Run`.
+    fn success_suffix(self) -> &'static str {
+        match self {
+            Self::Run => "",
+            Self::Skip => SKIP_SUCCESS_SUFFIX,
+        }
+    }
+
+    /// The act, as [`confirm_hint`] names it under the question.
+    fn hint(self) -> String {
+        match self {
+            Self::Run => confirm_hint(PUSH_VERB),
+            Self::Skip => confirm_hint(SKIP_VERB),
+        }
+    }
+
+    /// What the row says while the push runs, without its age.
+    fn running_notice(self) -> &'static str {
+        match self {
+            Self::Run => RUNNING_NOTICE,
+            Self::Skip => SKIP_RUNNING_NOTICE,
+        }
+    }
+
+    /// Whether the policy alone earns the caution color. A push that skips the
+    /// hook skips a check the repository asks for.
+    fn is_cautious(self) -> bool {
+        self == Self::Skip
+    }
 }
 
 /// The `git push` flag that skips the local `pre-push` hook.
 const NO_VERIFY_FLAG: &str = "--no-verify";
+
+/// What a question says after the act when the hook does not run.
+const SKIP_QUESTION_SUFFIX: &str = " without the pre-push hook";
+
+/// What a success sentence says after the act when the hook did not run.
+const SKIP_SUCCESS_SUFFIX: &str = ", pre-push hook skipped";
+
+/// The verb of the key hint for a push that skips the hook.
+const SKIP_VERB: &str = "push without hook";
+
+/// What a running push says when the hook does not run.
+const SKIP_RUNNING_NOTICE: &str = "Pushing without the pre-push hook…";
 
 /// Decide what pressing `p` does, given the branch state gsw already renders.
 ///
@@ -367,6 +419,13 @@ const NO_VERIFY_FLAG: &str = "--no-verify";
 /// upstream is configured *and* its remote-tracking ref resolves. That is
 /// exactly the signal the wording needs: a branch whose remote ref is missing
 /// gets the create wording, because a push really will create it.
+///
+/// `hooks` is the policy for the repository's `pre-push` hook: `p` passes
+/// [`PushHooks::Run`] and `P` passes [`PushHooks::Skip`]. The policy is applied
+/// here and nowhere else. The question, the hint, the caution flag, the running
+/// notice, the success sentence, and the arguments all come from this one
+/// value, so a question that says the hook is skipped cannot run a command that
+/// runs it.
 pub(crate) fn prompt_for(
     branch: &str,
     remote: Option<&str>,
@@ -382,13 +441,16 @@ pub(crate) fn prompt_for(
         // forward, and the sentence has to be the thing that says so — the user
         // reads it in the half second before pressing `y`.
         PushPlan::Create { remote, branch } => {
-            let question = format!("Create new remote branch {remote}/{branch}?");
+            let question = format!(
+                "Create new remote branch {remote}/{branch}{}?",
+                hooks.question_suffix()
+            );
             let success = SuccessReport::Alone {
-                sentence: format!("Created {remote}/{branch}"),
+                sentence: format!("Created {remote}/{branch}{}", hooks.success_suffix()),
             };
             PushPrompt::Confirm {
                 question,
-                hint: confirm_hint(PUSH_VERB),
+                hint: hooks.hint(),
                 caution: true,
                 // `-u` records the new remote branch as the upstream, so the
                 // push after this one is a plain update.
@@ -396,16 +458,19 @@ pub(crate) fn prompt_for(
                     branch.clone(),
                     hooks.push_args(vec!["-u".to_string(), remote, branch]),
                 )),
-                running_notice: RUNNING_NOTICE.to_string(),
+                running_notice: hooks.running_notice().to_string(),
                 success,
             }
         }
         PushPlan::Update { target, commits } => {
             let unit = if commits == 1 { "commit" } else { "commits" };
             PushPrompt::Confirm {
-                question: format!("Push {commits} {unit} to {target}?"),
-                hint: confirm_hint(PUSH_VERB),
-                caution: false,
+                question: format!(
+                    "Push {commits} {unit} to {target}{}?",
+                    hooks.question_suffix()
+                ),
+                hint: hooks.hint(),
+                caution: hooks.is_cautious(),
                 // Bare `push`: git reads the remote and the refspec out of the
                 // branch config, so a branch tracking something other than the
                 // repository's default remote still goes to the right place.
@@ -413,9 +478,12 @@ pub(crate) fn prompt_for(
                 // time, which is why the command carries the branch this
                 // question was written for.
                 command: Confirmed::Push(PushCommand::new(branch, hooks.push_args(Vec::new()))),
-                running_notice: RUNNING_NOTICE.to_string(),
+                running_notice: hooks.running_notice().to_string(),
                 success: SuccessReport::Alone {
-                    sentence: format!("Pushed {commits} {unit} to {target}"),
+                    sentence: format!(
+                        "Pushed {commits} {unit} to {target}{}",
+                        hooks.success_suffix()
+                    ),
                 },
             }
         }
@@ -2044,7 +2112,8 @@ impl Overlay {
     }
 }
 
-/// The word every message about a push of gsw's own uses for it.
+/// The word the hint of a push of gsw's own uses for it. A push that skips the
+/// hook uses [`SKIP_VERB`], so Enter promises the act that it runs.
 const PUSH_VERB: &str = "push";
 
 /// The key hint shown with a confirmation, for an act that `verb` names.
@@ -2078,8 +2147,9 @@ const WINDOW_INDENT: &str = "  ";
 
 /// What a running push says while the network round trip is in flight.
 ///
-/// The notice of a push alone. Every question carries its own now, because a
-/// rebase that runs for minutes must say on the row which act is running.
+/// The notice of a push that runs the hook. Every question carries its own
+/// now, because a rebase that runs for minutes must say on the row which act
+/// is running, and a push that skips the hook uses [`SKIP_RUNNING_NOTICE`].
 const RUNNING_NOTICE: &str = "Pushing…";
 
 /// How long a status message gsw wrote itself stays under the frame.
