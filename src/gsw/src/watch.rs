@@ -10312,6 +10312,40 @@ mod push_loop_tests {
     }
 
     #[test]
+    fn pressing_shift_p_puts_the_question_without_the_hook_under_the_frame() {
+        // The policy has to reach the question through the loop: the person
+        // reads that the hook is skipped before the person answers.
+        let (displayed, _) = run_loop(vec![key(KeyCode::Char('P')), Event::Quit]);
+        assert!(
+            displayed
+                .contains("Create new remote branch origin/gsw-push without the pre-push hook?"),
+            "the question must name the skipped hook, got {displayed:?}",
+        );
+    }
+
+    #[test]
+    fn confirming_shift_p_starts_the_push_without_the_hook() {
+        // `P` then `y` must run the command the confirmation named, and that
+        // command carries `--no-verify`.
+        let (_, seen) = run_loop(vec![
+            key(KeyCode::Char('P')),
+            key(KeyCode::Char('y')),
+            Event::Quit,
+        ]);
+        let [command] = seen.pushes.as_slice() else {
+            panic!(
+                "one confirmed push must reach the runner, got {:?}",
+                seen.pushes
+            );
+        };
+        assert_eq!(
+            command.args(),
+            ["push", "--no-verify", "-u", "origin", "gsw-push"],
+        );
+        assert_eq!(command.branch(), "gsw-push");
+    }
+
+    #[test]
     fn a_lone_y_pushes_nothing() {
         // Without a question on screen, `y` is an ordinary key. It must never
         // reach the push.
