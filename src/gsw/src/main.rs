@@ -133,7 +133,7 @@ mod worktrees;
                   neither command fetches, so the base is your local branch. While the command \
                   runs, its output shows live in the window under the frame that a push uses, \
                   and the notice counts the time. The run has no deadline, because a pre-push \
-                  hook of this workspace runs for minutes. While it runs, p, R, M, and m do \
+                  hook of this workspace runs for minutes. While it runs, p, P, R, M, and m do \
                   nothing, and G still acts. A run that worked leaves the sentence of gsw \
                   and, under it, the last line the command wrote, because grp and gmp report a \
                   push they skipped only there. A run that failed leaves the last lines of the \

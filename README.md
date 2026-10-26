@@ -817,7 +817,7 @@ cannot hang the caller. Used by `cwt` and `ha`.
       `Rebasing issue-12 onto main with grp… (1m12s)` notice, and up to six indented rows carrying
       the newest lines. **The run has no deadline**, because a pre-push hook of this workspace
       builds and tests every crate and runs for minutes — the notice counts the time, so a run
-      that hangs shows as a run that hangs. The run holds the row: `p`, `R`, `M`, and `m` do
+      that hangs shows as a run that hangs. The run holds the row: `p`, `P`, `R`, `M`, and `m` do
       nothing until it ends, while `G` still acts. The child gets no terminal, and no `GIT_`
       variable out of gsw's own environment but the six you state on purpose, so your SSH key
       and your identity still reach the push. After that sweep gsw sets `GIT_TERMINAL_PROMPT=0`,
@@ -901,8 +901,8 @@ cannot hang the caller. Used by `cwt` and `ha`.
       next Esc is then a first press again. While the name is bold, Esc only clears the line
       under the frame, as before.
     - A switch walks the new worktree at once and starts the refresh clock again. It moves the
-      filesystem watcher to the new worktree, and `p`, `G`, and `m` then act on the worktree that
-      is on the screen. Every line under the frame goes, because each one described the old
+      filesystem watcher to the new worktree, and `p`, `P`, `G`, and `m` then act on the worktree
+      that is on the screen. Every line under the frame goes, because each one described the old
       worktree. A worktree that gsw cannot open leaves you where you are, and the reason is a
       fading line.
     - The arrow keys do nothing while a push runs or while the push question is up: the push
