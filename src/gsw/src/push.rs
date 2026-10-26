@@ -339,6 +339,23 @@ pub(crate) enum PushHooks {
     Skip,
 }
 
+impl PushHooks {
+    /// The arguments of `git push` for this policy: `push`, then the flag the
+    /// policy needs, then `rest`. The flag sits directly after `push` so it
+    /// cannot be read as the value of another option.
+    fn push_args(self, rest: Vec<String>) -> Vec<String> {
+        let mut args = vec!["push".to_string()];
+        if self == Self::Skip {
+            args.push(NO_VERIFY_FLAG.to_string());
+        }
+        args.extend(rest);
+        args
+    }
+}
+
+/// The `git push` flag that skips the local `pre-push` hook.
+const NO_VERIFY_FLAG: &str = "--no-verify";
+
 /// Decide what pressing `p` does, given the branch state gsw already renders.
 ///
 /// The one way into this module. Callers pass what the snapshot holds and get
@@ -354,7 +371,7 @@ pub(crate) fn prompt_for(
     branch: &str,
     remote: Option<&str>,
     upstream: Option<&UpstreamStatus>,
-    _hooks: PushHooks,
+    hooks: PushHooks,
 ) -> PushPrompt {
     // One match, so a plan's wording and the command that carries it out are
     // written side by side. The variants that never push return here, which is
@@ -377,7 +394,7 @@ pub(crate) fn prompt_for(
                 // push after this one is a plain update.
                 command: Confirmed::Push(PushCommand::new(
                     branch.clone(),
-                    vec!["push".to_string(), "-u".to_string(), remote, branch],
+                    hooks.push_args(vec!["-u".to_string(), remote, branch]),
                 )),
                 running_notice: RUNNING_NOTICE.to_string(),
                 success,
@@ -395,7 +412,7 @@ pub(crate) fn prompt_for(
                 // Which branch's config it reads is decided by HEAD at exec
                 // time, which is why the command carries the branch this
                 // question was written for.
-                command: Confirmed::Push(PushCommand::new(branch, vec!["push".to_string()])),
+                command: Confirmed::Push(PushCommand::new(branch, hooks.push_args(Vec::new()))),
                 running_notice: RUNNING_NOTICE.to_string(),
                 success: SuccessReport::Alone {
                     sentence: format!("Pushed {commits} {unit} to {target}"),
