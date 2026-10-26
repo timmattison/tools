@@ -2977,10 +2977,10 @@ where
                 return absorb(action, pending, state, hooks);
             }
         }
-        Event::PushRequested(_hooks) => {
+        Event::PushRequested(hooks) => {
             state
                 .ui
-                .request(&state.cache.snapshot, state.cache.dims, clock());
+                .request(&state.cache.snapshot, state.cache.dims, clock(), hooks);
         }
         // The question describes the command of the act, so the press reads
         // that command here and the row takes it. The key table makes no
@@ -8667,7 +8667,7 @@ mod push_loop_tests {
     /// behind — the state the loop has to take back off the screen by itself.
     fn pushed_ui(at: Instant) -> PushUi {
         let mut ui = PushUi::new(false);
-        ui.request(&pushable_snapshot(), TEST_DIMS, at);
+        ui.request(&pushable_snapshot(), TEST_DIMS, at, PushHooks::Run);
         ui.confirm(at);
         ui.finished(
             crate::push::PushOutcome {

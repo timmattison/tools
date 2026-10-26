@@ -1288,7 +1288,9 @@ impl PushUi {
         }
     }
 
-    /// Handle `p`: work out what a push would do and either ask or explain.
+    /// Handle `p` and `P`: work out what a push would do and either ask or
+    /// explain. `hooks` says whether the `pre-push` hook runs: `p` gives
+    /// [`PushHooks::Run`] and `P` gives [`PushHooks::Skip`].
     ///
     /// Replaces whatever was on screen, so pressing `p` with a stale error up
     /// asks the new question instead of stacking a row under the old one.
@@ -1312,13 +1314,19 @@ impl PushUi {
     /// classified. [`PushUi::overlay`] still drops a question it cannot draw,
     /// but that now covers only the pane resized down while a question is
     /// already up: the render path is the only thing that sees the new size.
-    pub(crate) fn request(&mut self, snapshot: &Snapshot, dims: Dimensions, now: Instant) {
+    pub(crate) fn request(
+        &mut self,
+        snapshot: &Snapshot,
+        dims: Dimensions,
+        now: Instant,
+        hooks: PushHooks,
+    ) {
         self.ask(
             prompt_for(
                 &snapshot.branch,
                 snapshot.push_remote.as_deref(),
                 snapshot.upstream.as_ref(),
-                PushHooks::Run,
+                hooks,
             ),
             dims,
             now,
@@ -2858,7 +2866,7 @@ mod ui_tests {
     /// A UI with the confirmation already on screen for an untracked branch.
     fn asking() -> PushUi {
         let mut ui = PushUi::new(false);
-        ui.request(&snapshot(None), tall_pane(80), t0());
+        ui.request(&snapshot(None), tall_pane(80), t0(), PushHooks::Run);
         ui
     }
 
@@ -2904,7 +2912,7 @@ mod ui_tests {
     /// A UI with a push already running, confirmed at `now`.
     fn pushing(now: Instant) -> PushUi {
         let mut ui = PushUi::new(false);
-        ui.request(&snapshot(None), tall_pane(80), now);
+        ui.request(&snapshot(None), tall_pane(80), now, PushHooks::Run);
         ui.confirm(now)
             .expect("the confirmation must hand over a command");
         ui
@@ -4152,7 +4160,7 @@ mod ui_tests {
         // The refusal is a message, not a question: the keys must stay normal,
         // so `y` does not answer a prompt that is not there.
         let mut ui = PushUi::new(false);
-        ui.request(&snapshot(tracked(0)), tall_pane(80), t0());
+        ui.request(&snapshot(tracked(0)), tall_pane(80), t0(), PushHooks::Run);
         assert_eq!(ui.mode(), InputMode::Normal);
         assert_eq!(ui.overlay(tall_pane(80), t0()).rows(), 1);
         assert!(ui
@@ -4245,7 +4253,7 @@ mod ui_tests {
     #[test]
     fn a_successful_update_counts_what_it_pushed() {
         let mut ui = PushUi::new(false);
-        ui.request(&snapshot(tracked(3)), tall_pane(80), t0());
+        ui.request(&snapshot(tracked(3)), tall_pane(80), t0(), PushHooks::Run);
         ui.confirm(t0());
         ui.finished(
             PushOutcome {
@@ -4478,6 +4486,7 @@ mod ui_tests {
                 height: 1,
             },
             t0(),
+            PushHooks::Run,
         );
         assert_eq!(
             ui.mode(),
@@ -4570,12 +4579,12 @@ mod ui_tests {
         };
         let refusing = {
             let mut ui = PushUi::new(false);
-            ui.request(&snapshot(tracked(0)), tall_pane(80), t0());
+            ui.request(&snapshot(tracked(0)), tall_pane(80), t0(), PushHooks::Run);
             ui
         };
         let asking_to_update = {
             let mut ui = PushUi::new(false);
-            ui.request(&snapshot(tracked(3)), tall_pane(80), t0());
+            ui.request(&snapshot(tracked(3)), tall_pane(80), t0(), PushHooks::Run);
             ui
         };
         let running = {
@@ -4781,7 +4790,7 @@ mod ui_tests {
         let mut ui = PushUi::new(false);
         let mut snap = snapshot(None);
         snap.branch = "a-branch-name-long-enough-to-need-truncating-on-a-narrow-pane".to_string();
-        ui.request(&snap, tall_pane(80), t0());
+        ui.request(&snap, tall_pane(80), t0(), PushHooks::Run);
         for width in [10, 20, 40] {
             let overlay = ui.overlay(tall_pane(width), t0()).text();
             for line in overlay.lines() {
@@ -4800,7 +4809,7 @@ mod ui_tests {
         let mut ui = PushUi::new(false);
         let mut snap = snapshot(None);
         snap.branch = "日本語のブランチ名-🎉-café".to_string();
-        ui.request(&snap, tall_pane(80), t0());
+        ui.request(&snap, tall_pane(80), t0(), PushHooks::Run);
         for width in 1..40 {
             let overlay = ui.overlay(tall_pane(width), t0()).text();
             for line in overlay.lines() {
@@ -4825,7 +4834,7 @@ mod ui_tests {
             },
             t0(),
         );
-        ui.request(&snapshot(None), tall_pane(80), t0());
+        ui.request(&snapshot(None), tall_pane(80), t0(), PushHooks::Run);
         assert_eq!(ui.mode(), InputMode::Confirm);
         assert_eq!(ui.overlay(tall_pane(80), t0()).rows(), 1);
         assert!(!ui.overlay(tall_pane(120), t0()).text().contains("error:"));
@@ -4849,7 +4858,7 @@ mod ui_tests {
     /// about ageing reads.
     fn pushed_with(truecolor: bool, at: Instant) -> PushUi {
         let mut ui = PushUi::new(truecolor);
-        ui.request(&snapshot(tracked(3)), tall_pane(80), at);
+        ui.request(&snapshot(tracked(3)), tall_pane(80), at, PushHooks::Run);
         ui.confirm(at);
         ui.finished(
             PushOutcome {
@@ -4925,7 +4934,7 @@ mod ui_tests {
         // frame the same row until it does.
         let start = t0();
         let mut ui = PushUi::new(false);
-        ui.request(&snapshot(tracked(0)), tall_pane(80), start);
+        ui.request(&snapshot(tracked(0)), tall_pane(80), start, PushHooks::Run);
 
         let text = ui
             .overlay(tall_pane(80), start + Duration::from_secs(7))
@@ -5384,7 +5393,7 @@ mod ui_tests {
             ),
             (
                 "a press of p",
-                |ui, now| ui.request(&snapshot(None), tall_pane(80), now),
+                |ui, now| ui.request(&snapshot(None), tall_pane(80), now, PushHooks::Run),
                 &push_hint,
             ),
         ];
