@@ -289,7 +289,7 @@ pub(crate) enum PushPrompt {
         question: String,
         /// The keys that answer the question, and what each one does, as
         /// [`confirm_hint`] spells them. It rides with the question because
-        /// three keys ask one now, and each of them binds Enter to an act of
+        /// four keys ask one now, and each of them binds Enter to an act of
         /// its own — so the hint is a fact about the question rather than a
         /// convention the row can hold on its own.
         hint: String,
@@ -929,11 +929,12 @@ pub(crate) struct PushOutcome {
 /// **not** the push's alone, and it owns two other kinds of thing.
 ///
 /// A question of any key comes through one of two doors — [`PushUi::request`]
-/// for `p`, [`PushUi::request_base_update`] for the keys that rebase the branch
-/// onto the base or merge the base into it — and each question carries its own
-/// words: the hint that names what Enter does, the notice its run shows, and
-/// the report it leaves behind. The states below therefore never learn which
-/// key asked, and a third key that asks a question adds no state here.
+/// for `p` and `P`, [`PushUi::request_base_update`] for the keys that rebase
+/// the branch onto the base or merge the base into it — and each question
+/// carries its own words: the hint that names what Enter does, the notice its
+/// run shows, and the report it leaves behind. The states below therefore never
+/// learn which key asked, and a new key that asks a question adds no state
+/// here.
 ///
 /// A message from a feature that asks nothing comes through
 /// [`PushUi::post_error`], [`PushUi::post_notice`] or
@@ -1933,8 +1934,9 @@ impl PushUi {
                 ..
             } => {
                 let line = truncate_right(&format!("{question}  {hint}"), width);
-                // Yellow marks the push that puts something new on a shared
-                // remote. The wording says so too — the color is what carries
+                // Yellow marks a question that the user must read twice, for
+                // the acts that the doc of `caution` on `PushPrompt::Confirm`
+                // names. The wording says so too — the color is what carries
                 // it in the half second before the words are read.
                 vec![if *caution {
                     line.yellow().to_string()
@@ -2138,8 +2140,8 @@ const PUSH_VERB: &str = "push";
 /// is looking at the sentence saying so. Off the screen, the binding keeps the
 /// risk and loses the sentence.
 ///
-/// One function rather than one constant for each key, because three keys now
-/// ask a question and three spellings of one convention are three things that
+/// One function rather than one constant for each key, because four keys now
+/// ask a question and four spellings of one convention are four things that
 /// drift apart. The verb is the act of the question the hint goes under, so the
 /// promise names what Enter does here rather than what it does under some other
 /// key.

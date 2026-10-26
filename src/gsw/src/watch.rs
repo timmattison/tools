@@ -702,8 +702,9 @@ enum Event {
     BaseUpdateCommandFound(crate::update::BaseUpdate, crate::shell::ShellCommand),
     /// The user said yes to the question on the row (`y` or Enter).
     ///
-    /// It names no act, because the row holds the question of three keys: a
-    /// push, a rebase onto the base, or a merge of the base. What the answer
+    /// It names no act, because the row holds the question of four keys: a
+    /// push (`p`, or `P` without the pre-push hook), a rebase onto the base, or a
+    /// merge of the base. What the answer
     /// starts is what the question described, and
     /// [`crate::push::PushUi::confirm`] is what says which of them that is.
     Confirmed,
@@ -855,8 +856,8 @@ pub(crate) enum InputMode {
     /// of a push, of a rebase onto the base, or of a merge of the base. The
     /// arrow keys never answer it.
     Confirm,
-    /// A command of one of those three keys is running, or the `git switch`
-    /// of the second Esc. `p`, `R`, and `M` are all inert here, so no two of
+    /// A command of one of those four keys is running, or the `git switch`
+    /// of the second Esc. `p`, `P`, `R`, and `M` are all inert here, so no two of
     /// those runs overlap — a rebase and a push of one branch least of all.
     /// The arrow keys are inert too, because the window under the frame
     /// belongs to the worktree that runs the command, and every run that ends
@@ -2557,8 +2558,8 @@ struct LoopState {
     conflicts: ConflictsRun,
     /// The worktree where the user started gsw.
     home: WorktreePath,
-    /// The worktree that the frame shows. The walk, `p`, `R`, `M`, `G`, and
-    /// `m` act on it. It starts at [`LoopState::home`].
+    /// The worktree that the frame shows. The walk, `p`, `P`, `R`, `M`, `G`,
+    /// and `m` act on it. It starts at [`LoopState::home`].
     current: WorktreePath,
     /// How many switches the loop has made. See [`Generation`].
     generation: Generation,
@@ -2578,7 +2579,7 @@ impl LoopState {
     /// about a key the user pressed.
     ///
     /// [`absorb`] calls it when it reads the key, and not at the next frame. So
-    /// a `p`, `G`, or `m` later in the same burst acts on the new worktree, as
+    /// a `p`, `P`, `G`, or `m` later in the same burst acts on the new worktree, as
     /// a `y` after a `p` in one burst reads the new mode.
     fn switch_to(
         &mut self,
@@ -3310,7 +3311,7 @@ where
 /// displayed (see [`Event::Key`] for why the reader thread must not).
 ///
 /// The loop watches one worktree at a time, the current worktree, and it starts
-/// on `start.home`. The walk, `p`, `R`, `M`, `G`, and `m` act on the current
+/// on `start.home`. The walk, `p`, `P`, `R`, `M`, `G`, and `m` act on the current
 /// worktree. The arrow keys change it through [`LoopState::switch_to`], inside
 /// [`absorb`], so the next key of the same burst already acts on the new
 /// worktree.
