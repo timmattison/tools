@@ -5952,6 +5952,15 @@ mod run_tests {
         }
     }
 
+    /// The body of the hook that touches `marker` and then fails.
+    ///
+    /// The path goes onto a `/bin/sh` command line, so the quoting rule lives
+    /// in one place rather than in each string that spells a command line.
+    #[cfg(unix)]
+    fn failing_marker_hook_body(marker: &Path) -> String {
+        format!("touch '{}'\nexit 1", marker.display())
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_skip_push_does_not_run_the_hook_and_a_run_push_does() {
@@ -5961,10 +5970,7 @@ mod run_tests {
         let (origin, clone) = clone_with_feature_branch();
         let marker_dir = tempfile::tempdir().expect("create the marker directory");
         let marker = marker_dir.path().join("hook-ran");
-        write_hook(
-            clone.path(),
-            &format!("touch '{}'\nexit 1", marker.display()),
-        );
+        write_hook(clone.path(), &failing_marker_hook_body(&marker));
 
         let run = run_quiet(&planned_push(PushHooks::Run), clone.path());
         assert!(!run.success, "the failing hook must stop a Run push");
@@ -5978,6 +5984,43 @@ mod run_tests {
         assert!(
             origin_has_feature(origin.path()),
             "the Skip push must reach the remote",
+        );
+    }
+
+    /// **The marker path goes onto a `/bin/sh` command line, so the shell
+    /// reads every character of it.** A single quote closes the quotation
+    /// early, and `sh` then touches a different file or reads the rest of the
+    /// script as one unterminated word and runs nothing. The Run leg of the
+    /// test above would then fail for the wrong reason, and the `!exists()` of
+    /// its Skip leg would prove nothing.
+    ///
+    /// A temporary directory holds no quote today, so this costs that test
+    /// nothing. It is here because the quoting rule belongs in
+    /// [`shellquote::shell_quote`] rather than in each string that spells a
+    /// command line.
+    #[cfg(unix)]
+    #[test]
+    fn the_failing_marker_hook_touches_the_path_it_was_handed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join("it's-here");
+        let body = failing_marker_hook_body(&marker);
+
+        let status = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&body)
+            .current_dir(dir.path())
+            .status()
+            .expect("run the body of the hook");
+
+        assert_eq!(
+            status.code(),
+            Some(1),
+            "the hook must fail through its own `exit 1`; a shell syntax error gives 2: {status}",
+        );
+        assert!(
+            marker.exists(),
+            "the hook must touch the path it was handed, and a quote the shell read as another \
+             word touches somewhere else",
         );
     }
 
