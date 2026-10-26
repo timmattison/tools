@@ -2334,6 +2334,134 @@ mod tests {
         );
     }
 
+    /// The fields of a confirmable prompt that the policy changes, in one
+    /// tuple so a test compares the whole act at once.
+    fn confirm_parts(prompt: &PushPrompt) -> (&str, &str, bool, &str, &SuccessReport) {
+        match prompt {
+            PushPrompt::Confirm {
+                question,
+                hint,
+                caution,
+                running_notice,
+                success,
+                ..
+            } => (question, hint, *caution, running_notice, success),
+            PushPrompt::Refuse { message } => {
+                panic!("expected a confirmable prompt, got a refusal: {message}")
+            }
+        }
+    }
+
+    fn alone(sentence: &str) -> SuccessReport {
+        SuccessReport::Alone {
+            sentence: sentence.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_skip_update_names_the_skipped_hook_everywhere() {
+        let up = upstream("origin/gsw-push", 3, 0);
+        let prompt = prompt_for("gsw-push", Some("origin"), Some(&up), PushHooks::Skip);
+        let (question, hint, caution, notice, success) = confirm_parts(&prompt);
+        assert_eq!(
+            question,
+            "Push 3 commits to origin/gsw-push without the pre-push hook?"
+        );
+        assert_eq!(hint, confirm_hint("push without hook"));
+        assert_eq!(hint, "[y/Enter = push without hook, n/Esc = cancel]");
+        assert!(
+            caution,
+            "skipping a check the repository asks for earns the color"
+        );
+        assert_eq!(notice, "Pushing without the pre-push hook…");
+        assert_eq!(
+            *success,
+            alone("Pushed 3 commits to origin/gsw-push, pre-push hook skipped")
+        );
+        assert_eq!(command(&prompt).branch(), "gsw-push");
+    }
+
+    #[test]
+    fn a_skip_update_of_one_commit_is_singular() {
+        let up = upstream("origin/gsw-push", 1, 0);
+        let prompt = prompt_for("gsw-push", Some("origin"), Some(&up), PushHooks::Skip);
+        let (question, _, _, _, success) = confirm_parts(&prompt);
+        assert_eq!(
+            question,
+            "Push 1 commit to origin/gsw-push without the pre-push hook?"
+        );
+        assert_eq!(
+            *success,
+            alone("Pushed 1 commit to origin/gsw-push, pre-push hook skipped")
+        );
+    }
+
+    #[test]
+    fn a_skip_create_names_the_skipped_hook_everywhere() {
+        let prompt = prompt_for("gsw-push", Some("origin"), None, PushHooks::Skip);
+        let (question, hint, caution, notice, success) = confirm_parts(&prompt);
+        assert_eq!(
+            question,
+            "Create new remote branch origin/gsw-push without the pre-push hook?"
+        );
+        assert_eq!(hint, "[y/Enter = push without hook, n/Esc = cancel]");
+        assert!(caution);
+        assert_eq!(notice, "Pushing without the pre-push hook…");
+        assert_eq!(
+            *success,
+            alone("Created origin/gsw-push, pre-push hook skipped")
+        );
+        assert_eq!(command(&prompt).branch(), "gsw-push");
+    }
+
+    #[test]
+    fn a_run_push_keeps_its_own_hint_notice_and_report() {
+        // Pins `p` so a later change to the wording of `P` cannot leak into it.
+        let up = upstream("origin/gsw-push", 3, 0);
+        let update = prompt_for("gsw-push", Some("origin"), Some(&up), PushHooks::Run);
+        let (_, hint, caution, notice, success) = confirm_parts(&update);
+        assert_eq!(hint, confirm_hint(PUSH_VERB));
+        assert!(!caution);
+        assert_eq!(notice, RUNNING_NOTICE);
+        assert_eq!(*success, alone("Pushed 3 commits to origin/gsw-push"));
+
+        let create = prompt_for("gsw-push", Some("origin"), None, PushHooks::Run);
+        let (_, hint, caution, notice, success) = confirm_parts(&create);
+        assert_eq!(hint, confirm_hint(PUSH_VERB));
+        assert!(caution);
+        assert_eq!(notice, RUNNING_NOTICE);
+        assert_eq!(*success, alone("Created origin/gsw-push"));
+    }
+
+    #[test]
+    fn the_refusals_do_not_depend_on_the_hook_policy() {
+        for hooks in [PushHooks::Run, PushHooks::Skip] {
+            assert_eq!(
+                prompt_for(
+                    "gsw-push",
+                    Some("origin"),
+                    Some(&upstream("origin/gsw-push", 0, 0)),
+                    hooks
+                ),
+                PushPrompt::Refuse {
+                    message: "origin/gsw-push is already up to date".to_string(),
+                },
+            );
+            assert_eq!(
+                prompt_for(DETACHED_HEAD, Some("origin"), None, hooks),
+                PushPrompt::Refuse {
+                    message: "HEAD is detached — check out a branch to push".to_string(),
+                },
+            );
+            assert_eq!(
+                prompt_for("gsw-push", None, None, hooks),
+                PushPrompt::Refuse {
+                    message: "no remote to push to".to_string(),
+                },
+            );
+        }
+    }
+
     #[test]
     fn a_skip_push_carries_no_verify_directly_after_push() {
         // `P` runs the same push as `p`, and only the flag differs. The flag
