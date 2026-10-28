@@ -2683,6 +2683,26 @@ mod tests {
     }
 
     #[test]
+    fn the_names_key_keeps_the_scroll() {
+        // The key changes the text of the hosts and not the rows. The reader
+        // must stay on the rows they scrolled to.
+        let mut screen = tall_table(
+            Some(SCROLL_ROWS),
+            &[&[Command::PageDown], &[Command::Names]],
+        );
+        screen.poll();
+        screen.sink.clear();
+        screen.poll();
+        let lines = painted(&screen.sink);
+
+        assert_eq!(
+            under_the_head(&lines),
+            shown(Some("+5 rows"), 6, 10, Some("+10 rows")),
+            "the same rows stand: {lines:?}"
+        );
+    }
+
+    #[test]
     fn a_window_that_no_probe_measured_leaves_every_row_standing() {
         // A run that cannot measure the terminal knows no height to fit a
         // frame to. It draws the whole frame and lets the terminal decide what
