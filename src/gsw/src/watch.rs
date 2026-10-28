@@ -783,6 +783,10 @@ enum Event {
     ListUp,
     /// The user moved the cursor of the open list one row down (Down).
     ListDown,
+    /// The user moved the cursor of the open list one page up (Page Up).
+    ListPageUp,
+    /// The user moved the cursor of the open list one page down (Page Down).
+    ListPageDown,
     /// The user chose the worktree under the cursor of the open list (Enter).
     ListGo,
     /// The user closed the open list (Esc or `q`). The watch stays on the
@@ -3154,6 +3158,7 @@ where
                 list.down();
             }
         }
+        Event::ListPageUp | Event::ListPageDown => {}
         // Enter closes the list before the switch, so a switch that fails
         // puts its reason on a free row. Enter on the worktree that the frame
         // shows opens nothing, because the frame shows it already.
@@ -5459,6 +5464,8 @@ mod tests {
             Some(Event::OpenList) => "OpenList",
             Some(Event::ListUp) => "ListUp",
             Some(Event::ListDown) => "ListDown",
+            Some(Event::ListPageUp) => "ListPageUp",
+            Some(Event::ListPageDown) => "ListPageDown",
             Some(Event::ListGo) => "ListGo",
             Some(Event::ListClose) => "ListClose",
             Some(Event::Quit) => "Quit",
@@ -5618,7 +5625,6 @@ mod tests {
                 KeyCode::Char('x'),
                 KeyCode::Tab,
                 KeyCode::Backspace,
-                KeyCode::PageDown,
             ] {
                 assert_eq!(
                     meaning(classify_input(press(code), InputMode::List, keys)),
@@ -5631,6 +5637,31 @@ mod tests {
                 "Quit",
                 "Ctrl-C must quit from the list with {keys:?}",
             );
+        }
+    }
+
+    #[test]
+    fn the_page_keys_move_the_list_one_page_and_mean_dismiss_in_every_other_mode() {
+        // The page keys act only in the list. Outside the list they keep the
+        // meaning of today, which is to dismiss the line on the row.
+        for keys in EVERY_BINDING_COMBINATION {
+            for mode in EVERY_MODE {
+                for (code, in_the_list) in [
+                    (KeyCode::PageUp, "ListPageUp"),
+                    (KeyCode::PageDown, "ListPageDown"),
+                ] {
+                    let expected = if matches!(mode, InputMode::List) {
+                        in_the_list
+                    } else {
+                        "Dismiss"
+                    };
+                    assert_eq!(
+                        meaning(classify_input(press(code), mode, keys)),
+                        expected,
+                        "{code:?} in {mode:?} with {keys:?}",
+                    );
+                }
+            }
         }
     }
 
