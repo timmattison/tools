@@ -2110,7 +2110,80 @@ fn log_fork(log: Option<&Path>, record: &fork_log::ForkRecord) {
 }
 
 /// Handles `crap --forks <id>`: print what the fork log knows about the session.
-fn run_forks(_roots: &[UserProjects], _fork_log: Option<&Path>, _session_id: &str) -> ! {
+///
+/// The report names each fork of the session, with `saved` or `not saved`, and
+/// the chain of sessions that it was forked from. A fork is `saved` when
+/// [`find_session_across`] finds its transcript, the same lookup that
+/// `crap --status <fork-id>` uses. The function resumes nothing and writes
+/// nothing. A log that is missing, unreadable, or partly unreadable gives a
+/// warning on stderr, and the report uses the records that could be read. When
+/// the log knows the id and no transcript has it, the function exits with
+/// [`exit_codes::SESSION_NOT_FOUND`].
+fn run_forks(roots: &[UserProjects], fork_log: Option<&Path>, session_id: &str) -> ! {
+    if !is_valid_session_id(session_id) {
+        eprintln!(
+            "{} '{session_id}' is not a valid session id",
+            "Error:".red().bold()
+        );
+        exit(exit_codes::INVALID_SESSION_ID);
+    }
+    let warn = |message: String| eprintln!("{} {message}", "Warning:".yellow().bold());
+    let records = match fork_log {
+        None => {
+            warn(
+                "the data directory of this user is not known, so there is no fork log to read"
+                    .to_string(),
+            );
+            Vec::new()
+        }
+        Some(path) => match fork_log::read_fork_log(path) {
+            Ok(log) => {
+                if log.unreadable_lines > 0 {
+                    warn(format!(
+                        "{} lines of the fork log {} could not be read",
+                        log.unreadable_lines,
+                        path.display()
+                    ));
+                }
+                log.records
+            }
+            Err(err) => {
+                warn(format!(
+                    "could not read the fork log {}: {err}",
+                    path.display()
+                ));
+                Vec::new()
+            }
+        },
+    };
+
+    let forks: Vec<fork_log::ForkLine<'_>> = fork_log::forks_of(&records, session_id)
+        .into_iter()
+        .map(|record| fork_log::ForkLine {
+            record,
+            saved: matches!(
+                find_session_across(roots, &record.fork_id),
+                FoundSession::Found { .. }
+            ),
+        })
+        .collect();
+    let chain = fork_log::source_chain(&records, session_id);
+
+    if forks.is_empty()
+        && chain.links.is_empty()
+        && matches!(
+            find_session_across(roots, session_id),
+            FoundSession::NotFound { .. }
+        )
+    {
+        eprintln!(
+            "{} no Claude session and no fork log line has id '{session_id}'",
+            "Error:".red().bold()
+        );
+        eprint!("{}", format_searched_roots(roots));
+        exit(exit_codes::SESSION_NOT_FOUND);
+    }
+    print!("{}", fork_log::format_log_report(session_id, &forks, &chain));
     exit(0);
 }
 
