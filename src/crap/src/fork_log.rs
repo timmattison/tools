@@ -104,6 +104,41 @@ pub fn append_fork_record(log: &Path, record: &ForkRecord) -> std::io::Result<()
     Ok(())
 }
 
+/// Returns the path of the fork log under a data directory.
+///
+/// The path is `data_dir/crap/forks.jsonl`. The function is pure: the caller
+/// passes the data directory.
+#[must_use]
+pub fn fork_log_path(data_dir: &Path) -> PathBuf {
+    let _ = data_dir;
+    PathBuf::new()
+}
+
+/// Reads the fork log.
+///
+/// A missing file is an empty log. A line that does not parse as a
+/// [`ForkRecord`] (a torn or hand-edited line) is skipped and counted in
+/// [`ForkLog::unreadable_lines`]. Blank lines are ignored and not counted.
+///
+/// # Errors
+///
+/// Returns an error when the file exists and cannot be read.
+pub fn read_fork_log(log: &Path) -> std::io::Result<ForkLog> {
+    let _ = log;
+    Ok(ForkLog {
+        records: vec![ForkRecord {
+            time: String::new(),
+            source_id: String::new(),
+            fork_id: String::new(),
+            source_user: String::new(),
+            source_dir: None,
+            fork_dir: String::new(),
+            kind: ForkKind::Here,
+        }],
+        unreadable_lines: 1,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,5 +254,39 @@ mod tests {
         append_fork_record(&log, &sample("f", ForkKind::Here, None)).unwrap();
         let mode = std::fs::metadata(&log).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn log_path_is_crap_forks_jsonl_under_the_data_dir() {
+        assert_eq!(
+            fork_log_path(Path::new("/d")),
+            Path::new("/d/crap/forks.jsonl")
+        );
+    }
+
+    #[test]
+    fn reading_a_missing_log_gives_an_empty_log() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let log = read_fork_log(&dir.path().join("none.jsonl")).unwrap();
+        assert!(log.records.is_empty());
+        assert_eq!(log.unreadable_lines, 0);
+    }
+
+    #[test]
+    fn reading_skips_and_counts_bad_lines_and_ignores_blank_ones() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join(LOG_FILE_NAME);
+        append_fork_record(&path, &sample("one", ForkKind::Here, None)).unwrap();
+        {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+            file.write_all(b"{\"time\":\"x\",\"sour\n\n   \n{\"not\":\"a record\"}\n")
+                .unwrap();
+        }
+        append_fork_record(&path, &sample("two", ForkKind::ForkAt, Some("/s"))).unwrap();
+        let log = read_fork_log(&path).unwrap();
+        let ids: Vec<&str> = log.records.iter().map(|r| r.fork_id.as_str()).collect();
+        assert_eq!(ids, ["one", "two"]);
+        assert_eq!(log.unreadable_lines, 2);
     }
 }
