@@ -3158,7 +3158,16 @@ where
                 list.down();
             }
         }
-        Event::ListPageUp | Event::ListPageDown => {}
+        Event::ListPageUp => {
+            if let Some(list) = state.ui.list_mut() {
+                list.page_up();
+            }
+        }
+        Event::ListPageDown => {
+            if let Some(list) = state.ui.list_mut() {
+                list.page_down();
+            }
+        }
         // Enter closes the list before the switch, so a switch that fails
         // puts its reason on a free row. Enter on the worktree that the frame
         // shows opens nothing, because the frame shows it already.
