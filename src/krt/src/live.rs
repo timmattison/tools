@@ -2589,6 +2589,26 @@ mod tests {
     }
 
     #[test]
+    fn page_up_after_page_down_shows_the_first_frame_again() {
+        // The top of the path is where a reader starts. One page up from the
+        // second page must land there, with no count line above the rows.
+        let mut screen = tall_table(
+            Some(SCROLL_ROWS),
+            &[&[Command::PageDown], &[Command::PageUp]],
+        );
+        screen.poll();
+        screen.sink.clear();
+        screen.poll();
+        let lines = painted(&screen.sink);
+
+        assert_eq!(
+            under_the_head(&lines),
+            shown(None, 1, 6, Some("+14 rows")),
+            "the first frame stands again: {lines:?}"
+        );
+    }
+
+    #[test]
     fn a_window_that_no_probe_measured_leaves_every_row_standing() {
         // A run that cannot measure the terminal knows no height to fit a
         // frame to. It draws the whole frame and lets the terminal decide what
