@@ -97,7 +97,7 @@ pub(crate) fn classify(key: KeyEvent) -> Option<Command> {
 const PAUSED: &str = "paused";
 
 /// The number of keys that a live table reads.
-const KEY_COUNT: usize = 5;
+const KEY_COUNT: usize = 6;
 
 /// The key that shows the list of the keys, and hides it again.
 ///
@@ -119,6 +119,7 @@ const KEYS: [(&str, &str); KEY_COUNT] = [
     ("p", "hold the table, or let it move"),
     ("n", "show the names, or show the addresses"),
     ("r", "empty the table"),
+    ("PgUp, PgDn", "scroll the rows of the path"),
     (KEY_THAT_LISTS_THE_KEYS, "show these keys, or hide them"),
 ];
 
