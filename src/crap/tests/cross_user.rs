@@ -13,7 +13,7 @@ mod common;
 
 use std::fs;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 
 /// A foreign session id planted under another user's tree.
 const FOREIGN_ID: &str = "11111111-2222-3333-4444-555555555555";

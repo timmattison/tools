@@ -9,7 +9,7 @@
 mod common;
 
 use std::fs;
-use std::process::{Command, Output};
+use std::process::Output;
 
 /// A resolvable original session id, created in every throwaway `HOME`.
 const ORIG: &str = "11111111-2222-3333-4444-555555555555";
