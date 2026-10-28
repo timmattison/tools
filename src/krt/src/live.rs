@@ -1785,6 +1785,13 @@ mod tests {
     /// A scroll needs three: one row between two count lines.
     const TINY_ROWS: u16 = 6;
 
+    /// The number of rows of a window where the list of the keys changes the
+    /// room of the scroll.
+    ///
+    /// Without the list, fourteen lines remain for the rows of the path and
+    /// their count lines. The list takes seven lines, and seven remain.
+    const HELP_SCROLL_ROWS: u16 = 18;
+
     /// The TTL that the destination answered at.
     const TARGET_TTL: u8 = 2;
 
@@ -2757,6 +2764,33 @@ mod tests {
             header_text(&lines).contains("round 2"),
             "and the header counts the round of the pause: {lines:?}"
         );
+    }
+
+    #[test]
+    fn the_help_key_keeps_the_first_row_of_the_scroll() {
+        // The list of the keys takes lines from the rows of the path. The
+        // reader must stay on the rows they scrolled to, and not jump to the
+        // top of the path.
+        let mut screen = tall_table(
+            Some(HELP_SCROLL_ROWS),
+            &[&[Command::PageDown], &[Command::Help]],
+        );
+        screen.sink.clear();
+        screen.poll();
+        let first = under_the_head(&painted(&screen.sink));
+        screen.sink.clear();
+        screen.poll();
+        let second = under_the_head(&painted(&screen.sink));
+
+        assert_eq!(
+            first,
+            shown(Some("+7 rows"), 8, 20, None),
+            "the page down reaches the last full window"
+        );
+        let mut wanted = shown(Some("+7 rows"), 8, 12, Some("+8 rows"));
+        wanted.push(String::new());
+        wanted.extend(HELP_LINES.map(str::to_owned));
+        assert_eq!(second, wanted, "and the list of the keys keeps the first row");
     }
 
     #[test]
