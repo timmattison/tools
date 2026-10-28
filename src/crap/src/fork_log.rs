@@ -9,6 +9,7 @@
 //! environment. A test thus uses a temporary path and never touches the real
 //! log.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 /// Name of the directory under the data directory of the user.
@@ -146,8 +147,11 @@ pub fn read_fork_log(log: &Path) -> std::io::Result<ForkLog> {
 ///
 /// These are the forks of `id` that the log knows.
 #[must_use]
-pub fn forks_of<'a>(_records: &'a [ForkRecord], _id: &str) -> Vec<&'a ForkRecord> {
-    Vec::new()
+pub fn forks_of<'a>(records: &'a [ForkRecord], id: &str) -> Vec<&'a ForkRecord> {
+    records
+        .iter()
+        .filter(|record| record.source_id == id)
+        .collect()
 }
 
 /// The chain of sources of a session, from the session up to the oldest source
@@ -167,11 +171,20 @@ pub struct SourceChain<'a> {
 ///
 /// When two records have the same `fork_id`, the first one in log order wins.
 #[must_use]
-pub fn source_chain<'a>(_records: &'a [ForkRecord], _id: &str) -> SourceChain<'a> {
-    SourceChain {
-        links: Vec::new(),
-        looped_at: None,
+pub fn source_chain<'a>(records: &'a [ForkRecord], id: &str) -> SourceChain<'a> {
+    let mut visited: HashSet<&str> = HashSet::from([id]);
+    let mut links = Vec::new();
+    let mut looped_at = None;
+    let mut current = id;
+    while let Some(record) = records.iter().find(|record| record.fork_id == current) {
+        links.push(record);
+        if !visited.insert(record.source_id.as_str()) {
+            looped_at = Some(record.source_id.clone());
+            break;
+        }
+        current = record.source_id.as_str();
     }
+    SourceChain { links, looped_at }
 }
 
 #[cfg(test)]
