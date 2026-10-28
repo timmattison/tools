@@ -2625,6 +2625,28 @@ mod tests {
     }
 
     #[test]
+    fn the_reset_key_takes_the_scroll_back_to_the_first_row() {
+        // A reset empties the table. The next rounds must show the top of the
+        // path, and a scroll that survived would hide the near hops of a path
+        // that the reader just started to watch again.
+        let mut screen = tall_table(
+            Some(SCROLL_ROWS),
+            &[&[Command::PageDown], &[Command::Reset]],
+        );
+        screen.poll();
+        screen.poll();
+        screen.sink.clear();
+        screen.round(&a_tall_round());
+        let lines = painted(&screen.sink);
+
+        assert_eq!(
+            under_the_head(&lines),
+            shown(None, 1, 6, Some("+14 rows")),
+            "the first frame stands after the reset: {lines:?}"
+        );
+    }
+
+    #[test]
     fn a_window_that_no_probe_measured_leaves_every_row_standing() {
         // A run that cannot measure the terminal knows no height to fit a
         // frame to. It draws the whole frame and lets the terminal decide what
