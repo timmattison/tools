@@ -1327,13 +1327,14 @@ cannot hang the caller. Used by `cwt` and `ha`.
     one row stays on the screen across each move, and Page Up goes back to the page that Page Down
     left. The scroll stops at the first hop and at the last full window. A run that measures no
     terminal draws every line of the frame, and a frame that fits its window does not scroll. The
-    table folds every round that arrives and draws the frame of
-    that fold, so the count of the rounds in its head is the count that the table folded, and the
-    size in that same head is the size the recorded file holds at that draw. The first frame draws
-    at the moment the run takes the terminal, in front of the first round. It counts no round, and
-    its head already names the destination, the address, the source, the period, and the recorded
-    file, so a run of `--interval 2m` says that it started and holds no empty screen for those two
-    minutes.
+    scroll also needs three lines that the head, the column header, the mark of the pause, and the
+    list of the keys leave free. Thus a short window can scroll while `?` hides the list, and not
+    while `?` shows it. The table folds every round that arrives and draws the frame of that fold,
+    so the count of the rounds in its head is the count that the table folded, and the size in that
+    same head is the size the recorded file holds at that draw. The first frame draws at the moment
+    the run takes the terminal, in front of the first round. It counts no round, and its head
+    already names the destination, the address, the source, the period, and the recorded file, so a
+    run of `--interval 2m` says that it started and holds no empty screen for those two minutes.
   - These keys drive the live table. `q` and Ctrl-C stop the run, write the record that closes it,
     give the terminal back, and exit with success. `p` holds the table where it stands, and a
     second press lets it move again. A held table holds the display alone: the file still takes
