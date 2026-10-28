@@ -884,13 +884,19 @@ impl Board {
     /// row. Before the first view, a page is one row. The target is the screen
     /// row of the selection plus one page. The selection goes to the last row
     /// that it can mark at or above the target. A target past the end gives
-    /// the last row. The selection stops on the last row and does not wrap.
+    /// the last row. When no such row lies below the selection, the selection
+    /// moves one row. The selection stops on the last row and does not wrap.
     pub fn select_next_page(&mut self, now: DateTime<Utc>) {
         self.settle(now);
         let page = self.page();
         self.move_selection(now, |index, rows| {
             let target = rows[index] + page;
-            rows.partition_point(|&row| row <= target) - 1
+            let slot = rows.partition_point(|&row| row <= target) - 1;
+            if slot == index {
+                (index + 1).min(rows.len() - 1)
+            } else {
+                slot
+            }
         });
     }
 
