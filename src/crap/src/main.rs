@@ -115,6 +115,8 @@ use comfy_table::{presets::UTF8_FULL, ContentArrangement, Table};
 use serde::Serialize;
 use shellsetup::ShellIntegration;
 
+mod fork_log;
+
 /// Exit codes for the different failure conditions.
 mod exit_codes {
     /// No session file matched the given id.
