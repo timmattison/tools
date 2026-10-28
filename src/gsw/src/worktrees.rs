@@ -354,6 +354,20 @@ impl WorktreeList {
         self.cursor = (self.cursor + 1).min(self.entries.len() - 1);
     }
 
+    /// Move the cursor down one page. A page is one row less than the window
+    /// at the last [`settle`](Self::settle), and at least one row, so the row
+    /// at the edge of the old window stays in view. A list that no settle
+    /// reached moves one row. Page Down on the bottom row does nothing,
+    /// because the list does not wrap.
+    pub(crate) fn page_down(&mut self) {}
+
+    /// Move the cursor up one page. A page is one row less than the window at
+    /// the last [`settle`](Self::settle), and at least one row, so the row at
+    /// the edge of the old window stays in view. A list that no settle
+    /// reached moves one row. Page Up on the top row does nothing, because
+    /// the list does not wrap.
+    pub(crate) fn page_up(&mut self) {}
+
     /// The worktree under the cursor: the worktree that Enter goes to.
     pub(crate) fn selected(&self) -> &WorktreeEntry {
         &self.entries[self.cursor]
@@ -1327,6 +1341,41 @@ mod tests {
     fn settle_and_sketch(list: &mut WorktreeList, rows: usize) -> String {
         list.settle(rows);
         sketch(list, rows)
+    }
+
+    /// A list of ten rows in a pane of four rows. Page Down moves the cursor
+    /// one page, which is three rows, and stops on the bottom row. Page Up
+    /// does the same upward. The old edge row of the window stays in view
+    /// after each key.
+    #[test]
+    fn page_down_and_page_up_move_the_cursor_one_page_and_stop_at_the_ends() {
+        let all = entries(10);
+        let mut list = open_list(&all, 0, 0);
+
+        let mut frames = vec![settle_and_sketch(&mut list, 4)];
+        for _ in 0..4 {
+            list.page_down();
+            frames.push(settle_and_sketch(&mut list, 4));
+        }
+        for _ in 0..4 {
+            list.page_up();
+            frames.push(settle_and_sketch(&mut list, 4));
+        }
+
+        assert_eq!(
+            frames,
+            [
+                ">0⌂ 1 2 3",
+                "0⌂ 1 2 >3",
+                "3 4 5 >6",
+                "6 7 8 >9",
+                "6 7 8 >9",
+                ">6 7 8 9",
+                ">3 4 5 6",
+                ">0⌂ 1 2 3",
+                ">0⌂ 1 2 3",
+            ]
+        );
     }
 
     /// The list marks the row of the home worktree, which Up goes to, and the
