@@ -150,20 +150,44 @@ fn key_lines() -> Vec<String> {
 /// hold.
 const MORE_MARK: &str = "+";
 
-/// The lines of one frame that a window holds, and the number of rows of the
-/// path that reached that frame.
+/// The first row of the path that each page key asks for.
 ///
-/// The count travels with the lines, because a caller that draws an image over
+/// One page is the number of rows that the frame shows, minus one row, and at
+/// least one row. The last row that the frame shows becomes the first row of
+/// the page below, so the reader keeps one row of context across the move.
+///
+/// The two keys measure different frames. Page Down measures the frame that
+/// shows now. Page Up measures the frame that Page Up shows, so Page Up undoes
+/// Page Down: the first row that the frame shows becomes the last row of the
+/// page above. A frame that fits, or a window too short to hold one row between
+/// two count lines, scrolls nowhere, and both keys then ask for the first row.
+///
+/// A row past the last full window is fine for `down`. The next fit clamps it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Pages {
+    /// The first row of the page that Page Up asks for.
+    up: usize,
+    /// The first row of the page that Page Down asks for.
+    down: usize,
+}
+
+/// The lines of one frame that a window holds, the rows of the path that reached
+/// that frame, and the pages that the page keys ask for.
+///
+/// The range travels with the lines, because a caller that draws an image over
 /// one row of the path must draw no image for a row that went out of the frame.
 /// Such an image would stand over the footer of the frame, or over a line of
 /// another frame, and nothing on the screen would say which row it belongs to.
 /// A caller that counted the rows itself would count the rows of the table and
-/// not the rows of the window.
+/// not the rows of the window. The start of the range is the row that the frame
+/// scrolled to, and a caller keeps it as the place of the next frame.
 struct Fitted {
     /// The lines of the frame, head first.
     lines: Vec<String>,
-    /// The number of rows of the path that the frame holds.
-    rows: usize,
+    /// The rows of the path that the frame holds, as indexes into the body.
+    rows: std::ops::Range<usize>,
+    /// The first row of each page that the page keys ask for.
+    pages: Pages,
 }
 
 /// The lines of one frame that fit a window of `rows` rows.
@@ -172,13 +196,16 @@ struct Fitted {
 /// destination, the count of the rounds, the size of the recorded file, and
 /// every column of the table, and the footer holds the mark of the pause and
 /// the list of the keys, which are what a key press of the reader asked for.
-/// The rows of the path take the lines that those two leave, and one line then
-/// says how many rows went out of the frame.
+/// The rows of the path take the lines that those two leave. One line above
+/// them says how many rows went out of the frame at the top, and one line below
+/// them says how many went out at the foot. A line of a count shows only while
+/// its count is more than zero.
 ///
-/// The frame drops the TTLs farthest from the source, which is the end that
-/// `traceroute` and `mtr` drop as well. The numbering of the rows then starts
-/// under the column header and runs down the window, so a reader of a short
-/// frame still reads the hops that answer first.
+/// `first` is the first row of the path that the caller asks for. The frame
+/// starts at the nearest row it can hold: a `first` past the last full window
+/// stops at that window, and the top of the path shows the hops that answer
+/// first, which is the end that `traceroute` and `mtr` show. A frame that fits
+/// ignores `first`, because it has no row to scroll.
 ///
 /// A window that no probe measured holds every line. Such a run knows no height
 /// to fit a frame to, and the terminal decides what it shows.
@@ -187,37 +214,71 @@ struct Fitted {
 /// together. A frame that ran past the foot of the window would scroll the
 /// window by the lines that ran past it, and the head of the frame goes off the
 /// top of an alternate screen that keeps no scrollback.
-fn fitted(head: Vec<String>, body: Vec<String>, footer: Vec<String>, rows: Option<u16>) -> Fitted {
+fn fitted(
+    head: Vec<String>,
+    body: Vec<String>,
+    footer: Vec<String>,
+    rows: Option<u16>,
+    first: usize,
+) -> Fitted {
     let budget = rows.map_or(usize::MAX, usize::from);
     let mut lines = head;
     if lines.len() + body.len() + footer.len() <= budget {
-        let rows = body.len();
+        let rows = 0..body.len();
         lines.extend(body);
         lines.extend(footer);
-        return Fitted { lines, rows };
+        return Fitted {
+            lines,
+            rows,
+            pages: Pages { up: 0, down: 0 },
+        };
     }
-    // The head, the footer, and the one line that counts the rows which went
-    // out of the frame keep their lines. The rows of the path take what is
-    // left.
-    let kept = budget.saturating_sub(lines.len() + footer.len() + 1);
-    let dropped = body.len() - kept.min(body.len());
-    // The count of the rows that reached the frame reads the same number that
-    // the take below reads. The truncate at the foot of this function cuts the
-    // head, the count of the dropped rows, and the footer, and it reaches no
-    // row of the path: a window too short for the head takes no row of the path
-    // at all, because `kept` is then zero.
-    let reached = kept.min(body.len());
-    lines.extend(body.into_iter().take(kept));
+    // The head and the footer keep their lines. The rows of the path and the
+    // lines that count the rows take what is left.
+    let room = budget.saturating_sub(lines.len() + footer.len());
+    // A scroll needs room for one row between two count lines. The frame did
+    // not fit, so the body is longer than the room. At the last first row, one
+    // count line stands above and the rows reach the foot of the window.
+    let scrolls = room >= 3;
+    let last = if scrolls {
+        body.len().saturating_sub(room - 1)
+    } else {
+        0
+    };
+    let first = first.min(last);
+    let end = if first == 0 {
+        room.saturating_sub(1).min(body.len())
+    } else if first == last {
+        body.len()
+    } else {
+        first + room - 2
+    };
     // A table of no row leaves no row out, and a line that counted zero rows
     // would name a table the reader can already see the whole of.
-    if dropped > 0 {
-        lines.push(format!("{MORE_MARK}{}", counted(dropped, ROW)));
+    if first > 0 {
+        lines.push(format!("{MORE_MARK}{}", counted(first, ROW)));
+    }
+    lines.extend(body[first..end].iter().cloned());
+    if end < body.len() {
+        lines.push(format!("{MORE_MARK}{}", counted(body.len() - end, ROW)));
     }
     lines.extend(footer);
+    // The truncate at the foot cuts the head, the count lines, and the footer,
+    // and it reaches no row of the path: a window too short for the head takes
+    // no row of the path at all, because `room` is then zero.
     lines.truncate(budget);
+    let pages = if scrolls {
+        Pages {
+            up: 0,
+            down: first + (end - first).saturating_sub(1).max(1),
+        }
+    } else {
+        Pages { up: 0, down: 0 }
+    };
     Fitted {
         lines,
-        rows: reached,
+        rows: first..end,
+        pages,
     }
 }
 
@@ -417,6 +478,14 @@ struct Drawn {
     /// and reads nothing else. And a narrow terminal that dropped the column
     /// names no place for an image to stand.
     recent: Option<ui::RecentColumn>,
+    /// The rows of the path that the frame shows, as indexes into the rows of
+    /// the table.
+    ///
+    /// The start of the range is the row that the frame scrolled to. The table
+    /// keeps it as the place of the next frame.
+    rows: std::ops::Range<usize>,
+    /// The first row of each page that the page keys ask for.
+    pages: Pages,
 }
 
 /// Writes one image for each row of the path of a frame.
@@ -521,9 +590,11 @@ fn write_images(
 /// walks down the screen one column further to the right for each line of it.
 ///
 /// The frame fits the window of the terminal. A frame of more lines than that
-/// window holds keeps its head and its footer and drops the rows of the highest
-/// TTLs, because a frame that ran past the foot of the window scrolls its own
-/// header line off the top of an alternate screen that keeps no scrollback.
+/// window holds keeps its head and its footer and shows a part of the rows of
+/// the path, because a frame that ran past the foot of the window scrolls its
+/// own header line off the top of an alternate screen that keeps no scrollback.
+/// The part starts at the nearest TTLs, and Page Down and Page Up move it. A
+/// count line above and below the rows says how many rows the frame left out.
 pub(crate) struct Table<W: Write, K: Keys> {
     /// The facts of the run that the header line names.
     facts: RunFacts,
@@ -552,6 +623,13 @@ pub(crate) struct Table<W: Write, K: Keys> {
     named: bool,
     /// Whether the list of the keys stands under the table.
     help: bool,
+    /// The first row of the path that the frame shows.
+    ///
+    /// The page keys move it. Each draw stores back the row that the frame
+    /// really started at, so a key on a frame that fits leaves nothing behind,
+    /// and the reset of the table goes back to the first row without a line of
+    /// its own.
+    first: usize,
     /// Where the frames go.
     sink: W,
     /// Where the commands come from.
@@ -598,6 +676,7 @@ impl<W: Write, K: Keys> Table<W, K> {
             paused: false,
             named: true,
             help: false,
+            first: 0,
             sink,
             keys,
             window,
@@ -623,7 +702,9 @@ impl<W: Write, K: Keys> Table<W, K> {
     /// as a part of the table.
     ///
     /// The lines then fit the window, in the three parts that [`fitted`] takes:
-    /// the head of the frame, the rows of the path, and that footer.
+    /// the head of the frame, the rows of the path, and that footer. The first
+    /// row of the path that the frame shows is the row that the page keys last
+    /// moved to.
     ///
     /// A run that draws the Recent column as an image asks the render for blank
     /// body cells in that column. The block elements are one picture of a hop
@@ -673,7 +754,7 @@ impl<W: Write, K: Keys> Table<W, K> {
         let head: Vec<String> = body
             .drain(..usize::from(rendered.head).min(body.len()))
             .collect();
-        let fitted = fitted(head, body, self.footer(), self.window.rows);
+        let fitted = fitted(head, body, self.footer(), self.window.rows, self.first);
         Drawn {
             lines: fitted.lines,
             head: rendered.head,
@@ -682,9 +763,12 @@ impl<W: Write, K: Keys> Table<W, K> {
             // over a line of another frame, and nothing on the screen would say
             // which row it belongs to.
             recent: rendered.recent.map(|mut recent| {
-                recent.rows.truncate(fitted.rows);
+                recent.rows.truncate(fitted.rows.end);
+                recent.rows.drain(..fitted.rows.start.min(recent.rows.len()));
                 recent
             }),
+            rows: fitted.rows,
+            pages: fitted.pages,
         }
     }
 
@@ -706,6 +790,11 @@ impl<W: Write, K: Keys> Table<W, K> {
     }
 
     /// Acts on one command, and answers whether that command stops the run.
+    ///
+    /// A page key reads the pages of the frame that the fold gives at the
+    /// current first row, and not a copy of an older frame. Two page keys of
+    /// one turn therefore move two pages. The draw that follows the turn stores
+    /// back the row that the frame really starts at.
     fn apply(&mut self, command: Command) -> bool {
         match command {
             Command::Pause => self.paused = !self.paused,
@@ -719,8 +808,10 @@ impl<W: Write, K: Keys> Table<W, K> {
                 self.rounds = 0;
             }
             Command::Help => self.help = !self.help,
-            // The scroll comes in a later commit of issue #613.
-            Command::PageUp | Command::PageDown => {}
+            // The frame of the fold at the current first row names the pages,
+            // so two presses of one turn move two pages.
+            Command::PageUp => self.first = self.drawn().pages.up,
+            Command::PageDown => self.first = self.drawn().pages.down,
             // No field of the table holds the stop. The run loop owns it,
             // because the loop is what closes the recorded file with its `end`
             // record, and a display that stopped the process itself would
@@ -732,11 +823,17 @@ impl<W: Write, K: Keys> Table<W, K> {
 
     /// Puts one frame on the screen, over the frame that stands there.
     ///
+    /// The table keeps the first row of the path that this frame shows. A page
+    /// key on a frame that fits leaves no scroll behind, a reset goes back to
+    /// the first row because the empty table fits, and a frame that clamped a
+    /// row past the last full window holds the last full window.
+    ///
     /// A frame that does not print stops nothing. The recording is the purpose
     /// of the tool, and the frame is one view of it, so a run whose terminal
     /// goes away loses the display and keeps the recording.
     fn draw(&mut self) {
         let drawn = self.drawn();
+        self.first = drawn.rows.start;
         drop(self.paint(&drawn));
     }
 
@@ -2229,7 +2326,7 @@ mod tests {
 
     #[test]
     fn a_frame_that_its_window_holds_whole_keeps_every_row_of_the_path() {
-        let fitted = super::fitted(a_head(), a_body(A_PATH), Vec::new(), Some(A_TALL_WINDOW));
+        let fitted = super::fitted(a_head(), a_body(A_PATH), Vec::new(), Some(A_TALL_WINDOW), 0);
 
         assert_eq!(
             fitted.lines.len(),
@@ -2238,7 +2335,7 @@ mod tests {
             fitted.lines
         );
         assert_eq!(
-            fitted.rows, A_PATH,
+            fitted.rows, 0..A_PATH,
             "and it says that every row of the path reached it"
         );
     }
@@ -2249,10 +2346,10 @@ mod tests {
         // image for a row that went out of the frame. Such an image would stand
         // over the footer of the frame, and nothing on the screen would say
         // which row it belongs to.
-        let fitted = super::fitted(a_head(), a_body(A_PATH), Vec::new(), Some(A_SHORT_WINDOW));
+        let fitted = super::fitted(a_head(), a_body(A_PATH), Vec::new(), Some(A_SHORT_WINDOW), 0);
 
         assert_eq!(
-            fitted.rows, KEPT_ROWS,
+            fitted.rows, 0..KEPT_ROWS,
             "the count names the rows of the path that the window held: {:?}",
             fitted.lines
         );
