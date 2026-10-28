@@ -2732,6 +2732,34 @@ mod tests {
     }
 
     #[test]
+    fn a_page_key_while_the_table_holds_scrolls_the_frame_of_the_fold() {
+        // The pause holds the screen, and a page key still has to draw. The
+        // frame it draws reads the fold, so it names the round that arrived
+        // during the pause.
+        let mut screen = tall_table(
+            Some(SCROLL_ROWS),
+            &[&[Command::Pause], &[Command::PageDown]],
+        );
+        screen.poll();
+        screen.round(&a_tall_round());
+        screen.sink.clear();
+        screen.poll();
+        let lines = painted(&screen.sink);
+
+        let mut wanted = shown(Some("+3 rows"), 4, 6, Some("+14 rows"));
+        wanted.extend(["", PAUSED].map(str::to_owned));
+        assert_eq!(
+            under_the_head(&lines),
+            wanted,
+            "the pause takes two lines, so three rows stand: {lines:?}"
+        );
+        assert!(
+            header_text(&lines).contains("round 2"),
+            "and the header counts the round of the pause: {lines:?}"
+        );
+    }
+
+    #[test]
     fn a_window_that_no_probe_measured_leaves_every_row_standing() {
         // A run that cannot measure the terminal knows no height to fit a
         // frame to. It draws the whole frame and lets the terminal decide what
