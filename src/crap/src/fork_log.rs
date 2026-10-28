@@ -203,8 +203,53 @@ pub struct ForkLine<'a> {
 /// the report is one line that says so. The text has no colors and ends with a
 /// newline.
 #[must_use]
-pub fn format_log_report(_id: &str, _forks: &[ForkLine<'_>], _chain: &SourceChain<'_>) -> String {
-    String::new()
+pub fn format_log_report(id: &str, forks: &[ForkLine<'_>], chain: &SourceChain<'_>) -> String {
+    use std::fmt::Write;
+
+    if forks.is_empty() && chain.links.is_empty() {
+        return format!(
+            "The fork log has no fork of {id}, and {id} is not a fork in the fork log.\n"
+        );
+    }
+    let mut out = String::new();
+    if !forks.is_empty() {
+        let _ = writeln!(out, "Forks of {id} in the fork log:");
+        for fork in forks {
+            let status = if fork.saved { "saved" } else { "not saved" };
+            let _ = writeln!(
+                out,
+                "  {}  {}  {status:<9}  {}",
+                fork.record.fork_id, fork.record.time, fork.record.fork_dir
+            );
+        }
+    }
+    if !chain.links.is_empty() {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        let _ = writeln!(out, "Sources of {id} in the fork log:");
+        for record in &chain.links {
+            let kind = match record.kind {
+                ForkKind::Here => "here",
+                ForkKind::ForkAt => "fork-at",
+            };
+            let _ = writeln!(
+                out,
+                "  {} is a fork of {}, made {} ({kind}) in {}",
+                record.fork_id, record.source_id, record.time, record.fork_dir
+            );
+        }
+        match (&chain.looped_at, chain.links.last()) {
+            (Some(repeated), _) => {
+                let _ = writeln!(out, "  The chain stops: the fork log names {repeated} again.");
+            }
+            (None, Some(last)) => {
+                let _ = writeln!(out, "  {} is not a fork in the fork log.", last.source_id);
+            }
+            (None, None) => {}
+        }
+    }
+    out
 }
 
 #[cfg(test)]
