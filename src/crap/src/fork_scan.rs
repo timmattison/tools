@@ -494,4 +494,38 @@ mod tests {
             .collect();
         assert_eq!(order, expected);
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_transcript_is_counted_and_the_scan_goes_on() {
+        use std::os::unix::fs::PermissionsExt;
+        let tree = Tree::new();
+        let (src, fork) = plant_pair(&tree);
+        let locked = tree.write("-d", "eeeeeeee-0000-4000-8000-000000000008", &source_lines());
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = std::fs::read(&locked).is_ok();
+        let report = scan_for_relatives(tree.root(), SRC, &src).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o644)).unwrap();
+        if readable {
+            return;
+        }
+        assert_eq!(report.unreadable, 1);
+        assert_eq!(report.hits.len(), 1);
+        assert_eq!(report.hits[0].transcript, fork);
+    }
+
+    #[test]
+    fn a_missing_projects_root_gives_no_hits_and_no_error() {
+        let tree = Tree::new();
+        let src = tree.write("-a", SRC, &source_lines());
+        let report = scan_for_relatives(&tree.root().join("absent"), SRC, &src).unwrap();
+        assert_eq!(report, ScanReport::default());
+    }
+
+    #[test]
+    fn a_missing_target_transcript_is_an_error() {
+        let tree = Tree::new();
+        let result = scan_for_relatives(tree.root(), SRC, &tree.root().join("none.jsonl"));
+        assert!(result.is_err());
+    }
 }
