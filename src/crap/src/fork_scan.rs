@@ -22,6 +22,7 @@
 //! fork does not hold. The rule is [`relation`].
 
 use chrono::{DateTime, Utc};
+use rayon::prelude::*;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -137,8 +138,75 @@ pub fn scan_for_relatives(
     target_id: &str,
     target_transcript: &Path,
 ) -> std::io::Result<ScanReport> {
-    let _ = (projects_root, target_id, target_transcript);
-    Ok(ScanReport::default())
+    let _ = target_id;
+    let heads = parse_heads(&std::fs::read(target_transcript)?);
+    let target_uuids: HashSet<String> = heads.iter().filter_map(|h| h.uuid.clone()).collect();
+    if target_uuids.is_empty() {
+        return Ok(ScanReport::default());
+    }
+    let matcher = aho_corasick::AhoCorasick::new(&target_uuids)
+        .expect("a set of strings builds a matcher");
+    let hits = candidates(projects_root)
+        .par_iter()
+        .filter(|path| path.as_path() != target_transcript)
+        .filter_map(|path| {
+            let bytes = std::fs::read(path).ok()?;
+            if !matcher.is_match(&bytes) {
+                return None;
+            }
+            let other = parse_heads(&bytes);
+            let shared: HashSet<String> = other
+                .iter()
+                .filter_map(|h| h.uuid.clone())
+                .filter(|uuid| target_uuids.contains(uuid))
+                .collect();
+            if shared.is_empty() {
+                return None;
+            }
+            Some(ScanHit {
+                session_id: path.file_stem()?.to_string_lossy().into_owned(),
+                transcript: path.clone(),
+                shared: shared.len(),
+                relation: relation(&heads, &other, &shared),
+            })
+        })
+        .collect();
+    Ok(ScanReport {
+        hits,
+        unreadable: 0,
+    })
+}
+
+/// Parses the head of each line of a transcript. A line that does not parse has
+/// no head and is left out.
+fn parse_heads(bytes: &[u8]) -> Vec<LineHead> {
+    bytes
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| serde_json::from_slice::<LineHead>(line).ok())
+        .collect()
+}
+
+/// Lists the transcripts that are one folder deep in `projects_root`.
+fn candidates(projects_root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let Ok(folders) = std::fs::read_dir(projects_root) else {
+        return files;
+    };
+    for folder in folders.flatten() {
+        if !folder.path().is_dir() {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(folder.path()) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "jsonl") {
+                files.push(path);
+            }
+        }
+    }
+    files
 }
 
 /// Formats the report of a scan for the terminal.
