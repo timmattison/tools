@@ -873,10 +873,11 @@ pub(crate) enum InputMode {
     /// [`RunKind`] changes one key: `m` acts in a push and is inert in the
     /// three runs that move HEAD.
     Running(RunKind),
-    /// The list of the worktrees is open. Up and Down move its cursor, Enter
-    /// goes to the worktree under the cursor, and Esc and `q` close it. Every
-    /// other key does nothing at all, because the list takes the pane, and a
-    /// key that acts on the frame acts on a frame that the user cannot see.
+    /// The list of the worktrees is open. Up and Down move its cursor, Page Up
+    /// and Page Down move it one page, Enter goes to the worktree under the
+    /// cursor, and Esc and `q` close it. Every other key does nothing at all,
+    /// because the list takes the pane, and a key that acts on the frame acts
+    /// on a frame that the user cannot see.
     List,
 }
 
