@@ -74,7 +74,33 @@ pub struct ForkLog {
 /// be opened, when the record cannot be serialized, or when the write fails or
 /// is short.
 pub fn append_fork_record(log: &Path, record: &ForkRecord) -> std::io::Result<()> {
-    let _ = (log, record);
+    use std::io::Write;
+
+    if let Some(parent) = log.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut line = serde_json::to_string(record).map_err(std::io::Error::other)?;
+    line.push('\n');
+
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(log)?;
+
+    let written = file.write(line.as_bytes())?;
+    if written != line.len() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::WriteZero,
+            format!(
+                "short write to the fork log: {written} of {} bytes",
+                line.len()
+            ),
+        ));
+    }
     Ok(())
 }
 
