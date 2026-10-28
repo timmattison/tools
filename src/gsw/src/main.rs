@@ -153,8 +153,8 @@ mod worktrees;
                   previous and the next worktree in path order, which is the order of cwt, and \
                   they wrap. Down opens a list of the worktrees: Up and Down move the cursor, \
                   Page Up and Page Down move it one page, Enter goes to the worktree under it, \
-                  and Esc or q closes the list. A page is one row less than the rows that the \
-                  pane shows, so the row at the edge stays in view. While the \
+                  and Esc or q closes the list. A page is one row less than the rows of the \
+                  list that the pane shows, so the row at the edge stays in view. While the \
                   repository has more than one worktree, the header shows the position of the \
                   worktree and marks the home worktree with ⌂. The name in the header is red \
                   while it is not the branch where gsw started, and bold again when it is. A \
