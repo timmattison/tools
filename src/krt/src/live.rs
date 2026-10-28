@@ -42,6 +42,10 @@ pub(crate) enum Command {
     Reset,
     /// Show the list of the keys, or hide it.
     Help,
+    /// Show the page of the rows of the path above the rows that the frame shows.
+    PageUp,
+    /// Show the page of the rows of the path below the rows that the frame shows.
+    PageDown,
 }
 
 /// What one key press means, or nothing.
@@ -711,6 +715,8 @@ impl<W: Write, K: Keys> Table<W, K> {
                 self.rounds = 0;
             }
             Command::Help => self.help = !self.help,
+            // The scroll comes in a later commit of issue #613.
+            Command::PageUp | Command::PageDown => {}
             // No field of the table holds the stop. The run loop owns it,
             // because the loop is what closes the recorded file with its `end`
             // record, and a display that stopped the process itself would
@@ -2760,6 +2766,33 @@ mod tests {
     #[test]
     fn the_question_mark_asks_for_the_help() {
         assert_eq!(classify(press(KeyCode::Char('?'))), Some(Command::Help));
+    }
+
+    #[test]
+    fn the_page_up_key_asks_for_the_page_above() {
+        // A reader of a short window sees only some rows of the path. This key
+        // is how that reader asks for the rows above them.
+        assert_eq!(classify(press(KeyCode::PageUp)), Some(Command::PageUp));
+    }
+
+    #[test]
+    fn the_page_down_key_asks_for_the_page_below() {
+        // The reader who went up needs a key to come back down to the rows
+        // that the frame cut off at its foot.
+        assert_eq!(classify(press(KeyCode::PageDown)), Some(Command::PageDown));
+    }
+
+    #[test]
+    fn a_release_of_a_page_key_asks_for_nothing() {
+        // A kitty terminal and a Windows terminal both report a release. Only a
+        // press acts, or one press of a page key scrolls two pages.
+        for code in [KeyCode::PageUp, KeyCode::PageDown] {
+            let release = KeyEvent {
+                kind: KeyEventKind::Release,
+                ..press(code)
+            };
+            assert_eq!(classify(release), None);
+        }
     }
 
     #[test]
