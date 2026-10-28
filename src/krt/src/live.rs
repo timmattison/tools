@@ -2647,6 +2647,29 @@ mod tests {
     }
 
     #[test]
+    fn a_page_key_on_a_frame_that_fits_leaves_no_scroll_behind() {
+        // A key that did nothing must also leave nothing. A scroll that waited
+        // inside the table would jump the frame the moment the path grew past
+        // the window.
+        let mut screen = table_in(Some(SCROLL_ROWS), &[&[Command::PageDown]]);
+        screen.round(&one_round());
+        let before = painted(&screen.sink);
+        screen.sink.clear();
+        screen.poll();
+        let after = painted(&screen.sink);
+        screen.sink.clear();
+        screen.round(&a_tall_round());
+        let lines = painted(&screen.sink);
+
+        assert_eq!(after, before, "the frame that fits does not move");
+        assert_eq!(
+            under_the_head(&lines),
+            shown(None, 1, 6, Some("+14 rows")),
+            "and the longer path starts at its first row: {lines:?}"
+        );
+    }
+
+    #[test]
     fn a_window_that_no_probe_measured_leaves_every_row_standing() {
         // A run that cannot measure the terminal knows no height to fit a
         // frame to. It draws the whole frame and lets the terminal decide what
