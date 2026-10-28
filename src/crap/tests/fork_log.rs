@@ -129,3 +129,27 @@ fn here_adds_one_line_with_every_field() {
         "time is RFC 3339 in UTC with seconds: {time}"
     );
 }
+
+#[test]
+fn an_unwritable_log_warns_and_the_fork_starts() {
+    let tmp = unique_root("unwritable");
+    let (home, work) = setup_here(tmp.path());
+    // The parent of the log is a regular file, so the directory cannot exist.
+    let log = fork_log_path(&home);
+    let crap_dir = log.parent().unwrap();
+    fs::create_dir_all(crap_dir.parent().unwrap()).unwrap();
+    fs::write(crap_dir, "not a directory").unwrap();
+
+    let output = run_here(&home, &work);
+
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).starts_with(HERE_SENTINEL),
+        "{output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("could not add the fork to the fork log"),
+        "{stderr}"
+    );
+}
