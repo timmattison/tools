@@ -2132,7 +2132,20 @@ fn log_fork(log: Option<&Path>, record: &fork_log::ForkRecord) {
 /// warning on stderr, and the report uses the records that could be read. When
 /// the log knows the id and no transcript has it, the function exits with
 /// [`exit_codes::SESSION_NOT_FOUND`].
-fn run_forks(roots: &[UserProjects], fork_log: Option<&Path>, session_id: &str) -> ! {
+///
+/// With `scan`, the function then reads the transcripts of `projects_dir`, the
+/// own projects tree of the user, and prints each one that shares a `uuid`
+/// value with the transcript of the id (see [`fork_scan`]). It finds forks that
+/// the log does not hold. When no transcript has the id, it says so. A
+/// transcript that cannot be read gives a warning on stderr, and the exit code
+/// stays 0.
+fn run_forks(
+    roots: &[UserProjects],
+    projects_dir: &Path,
+    fork_log: Option<&Path>,
+    session_id: &str,
+    scan: bool,
+) -> ! {
     if !is_valid_session_id(session_id) {
         eprintln!(
             "{} '{session_id}' is not a valid session id",
@@ -2181,13 +2194,11 @@ fn run_forks(roots: &[UserProjects], fork_log: Option<&Path>, session_id: &str) 
         })
         .collect();
     let chain = fork_log::source_chain(&records, session_id);
+    let transcript = find_session_across(roots, session_id);
 
     if forks.is_empty()
         && chain.links.is_empty()
-        && matches!(
-            find_session_across(roots, session_id),
-            FoundSession::NotFound { .. }
-        )
+        && matches!(transcript, FoundSession::NotFound { .. })
     {
         eprintln!(
             "{} no Claude session and no fork log line has id '{session_id}'",
@@ -2200,6 +2211,26 @@ fn run_forks(roots: &[UserProjects], fork_log: Option<&Path>, session_id: &str) 
         "{}",
         fork_log::format_log_report(session_id, &forks, &chain)
     );
+    if scan {
+        println!();
+        match transcript {
+            FoundSession::Found { path, .. } => {
+                match fork_scan::scan_for_relatives(projects_dir, session_id, &path) {
+                    Ok(report) => print!(
+                        "{}",
+                        fork_scan::format_scan_report(session_id, projects_dir, &report)
+                    ),
+                    Err(err) => warn(format!(
+                        "could not read the transcript {}: {err}",
+                        path.display()
+                    )),
+                }
+            }
+            FoundSession::NotFound { .. } => {
+                println!("The scan has nothing to compare: no transcript has id {session_id}.");
+            }
+        }
+    }
     exit(0);
 }
 
@@ -2583,7 +2614,13 @@ fn main() {
 
     if cli.forks {
         let roots = resolve_search_roots(&home, None);
-        run_forks(&roots, fork_log.as_deref(), &session_id);
+        run_forks(
+            &roots,
+            &projects_dir,
+            fork_log.as_deref(),
+            &session_id,
+            cli.scan,
+        );
     }
 
     // Build the search roots (self-first, or one sibling for `--user`); a bad
