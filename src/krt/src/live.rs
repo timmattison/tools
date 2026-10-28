@@ -2553,6 +2553,35 @@ mod tests {
     }
 
     #[test]
+    fn page_up_scrolls_back_by_the_page_that_page_down_took() {
+        // A reader who went too far must come back to the rows they passed.
+        // Page Up undoes Page Down, so the first row of the frame becomes the
+        // last row of the frame above.
+        let mut screen = tall_table(
+            Some(SCROLL_ROWS),
+            &[
+                &[
+                    Command::PageDown,
+                    Command::PageDown,
+                    Command::PageDown,
+                    Command::PageDown,
+                ],
+                &[Command::PageUp],
+            ],
+        );
+        screen.poll();
+        screen.sink.clear();
+        screen.poll();
+        let lines = painted(&screen.sink);
+
+        assert_eq!(
+            under_the_head(&lines),
+            shown(Some("+10 rows"), 11, 15, Some("+5 rows")),
+            "one page up from the last window shows rows 11 to 15: {lines:?}"
+        );
+    }
+
+    #[test]
     fn a_window_that_no_probe_measured_leaves_every_row_standing() {
         // A run that cannot measure the terminal knows no height to fit a
         // frame to. It draws the whole frame and lets the terminal decide what
