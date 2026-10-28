@@ -249,8 +249,33 @@ fn candidates(projects_root: &Path) -> Listing {
 
 /// Formats the report of a scan for the terminal.
 pub fn format_scan_report(id: &str, projects_root: &Path, report: &ScanReport) -> String {
-    let _ = (id, projects_root, report);
-    String::new()
+    let root = projects_root.display();
+    let mut out = String::new();
+    if report.hits.is_empty() {
+        out.push_str(&format!(
+            "The scan of {root} found no transcript that shares a uuid value with {id}.\n"
+        ));
+    } else {
+        out.push_str(&format!(
+            "Transcripts that share uuid values with {id} (scan of {root}):\n"
+        ));
+        for hit in &report.hits {
+            out.push_str(&format!(
+                "  {}  {:<7}  {:>6} shared  {}\n",
+                hit.session_id,
+                hit.relation,
+                hit.shared,
+                hit.transcript.display()
+            ));
+        }
+    }
+    if report.unreadable > 0 {
+        out.push_str(&format!(
+            "  {} transcripts or folders could not be read.\n",
+            report.unreadable
+        ));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -578,8 +603,8 @@ mod tests {
         assert_eq!(
             format_scan_report("src1", Path::new("/p"), &report),
             "Transcripts that share uuid values with src1 (scan of /p):\n\
-             \x20 f7e9  fork           23 shared  /p/-a/f7e9.jsonl\n\
-             \x20 0abc  related         4 shared  /p/-a/0abc.jsonl\n"
+             \x20 f7e9  fork         23 shared  /p/-a/f7e9.jsonl\n\
+             \x20 0abc  related       4 shared  /p/-a/0abc.jsonl\n"
         );
     }
 
