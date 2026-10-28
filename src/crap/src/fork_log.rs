@@ -187,6 +187,26 @@ pub fn source_chain<'a>(records: &'a [ForkRecord], id: &str) -> SourceChain<'a> 
     SourceChain { links, looped_at }
 }
 
+/// One fork of a session, with the answer to "is it saved".
+#[derive(Debug, Clone, Copy)]
+pub struct ForkLine<'a> {
+    /// The log record of the fork.
+    pub record: &'a ForkRecord,
+    /// Whether a transcript of the fork exists now. The caller looks it up.
+    pub saved: bool,
+}
+
+/// Formats the report of `crap --forks <id>`.
+///
+/// The report has a section for the forks of `id` and a section for its chain
+/// of sources. A section with nothing in it does not print. When both are empty,
+/// the report is one line that says so. The text has no colors and ends with a
+/// newline.
+#[must_use]
+pub fn format_log_report(_id: &str, _forks: &[ForkLine<'_>], _chain: &SourceChain<'_>) -> String {
+    String::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,5 +405,97 @@ mod tests {
         let chain = source_chain(&own, "a");
         assert_eq!(chain.links.len(), 1);
         assert_eq!(chain.looped_at.as_deref(), Some("a"));
+    }
+
+    const ID_A: &str = "aaaaaaaa-0000-4000-8000-00000000000a";
+    const ID_B: &str = "bbbbbbbb-0000-4000-8000-00000000000b";
+    const ID_C: &str = "cccccccc-0000-4000-8000-00000000000c";
+
+    fn made(source: &str, fork: &str, kind: ForkKind, dir: &str) -> ForkRecord {
+        let mut record = link(source, fork);
+        record.kind = kind;
+        record.fork_dir = dir.to_string();
+        record
+    }
+
+    #[test]
+    fn report_for_forks_only() {
+        let one = made(ID_A, ID_B, ForkKind::Here, "/w/one");
+        let two = made(ID_A, ID_C, ForkKind::ForkAt, "/w/two");
+        let forks = [
+            ForkLine { record: &one, saved: true },
+            ForkLine { record: &two, saved: false },
+        ];
+        let chain = SourceChain { links: Vec::new(), looped_at: None };
+        assert_eq!(
+            format_log_report(ID_A, &forks, &chain),
+            format!(
+                "Forks of {ID_A} in the fork log:\n\
+                 \x20 {ID_B}  2026-10-28T01:51:22Z  saved      /w/one\n\
+                 \x20 {ID_C}  2026-10-28T01:51:22Z  not saved  /w/two\n"
+            )
+        );
+    }
+
+    #[test]
+    fn report_for_a_chain_only() {
+        let first = made(ID_B, ID_C, ForkKind::ForkAt, "/w/c");
+        let second = made(ID_A, ID_B, ForkKind::Here, "/w/b");
+        let chain = SourceChain { links: vec![&first, &second], looped_at: None };
+        assert_eq!(
+            format_log_report(ID_C, &[], &chain),
+            format!(
+                "Sources of {ID_C} in the fork log:\n\
+                 \x20 {ID_C} is a fork of {ID_B}, made 2026-10-28T01:51:22Z (fork-at) in /w/c\n\
+                 \x20 {ID_B} is a fork of {ID_A}, made 2026-10-28T01:51:22Z (here) in /w/b\n\
+                 \x20 {ID_A} is not a fork in the fork log.\n"
+            )
+        );
+    }
+
+    #[test]
+    fn report_for_both_sections_has_a_blank_line_between() {
+        let child = made(ID_B, ID_C, ForkKind::Here, "/w/c");
+        let parent = made(ID_A, ID_B, ForkKind::Here, "/w/b");
+        let forks = [ForkLine { record: &child, saved: true }];
+        let chain = SourceChain { links: vec![&parent], looped_at: None };
+        assert_eq!(
+            format_log_report(ID_B, &forks, &chain),
+            format!(
+                "Forks of {ID_B} in the fork log:\n\
+                 \x20 {ID_C}  2026-10-28T01:51:22Z  saved      /w/c\n\
+                 \n\
+                 Sources of {ID_B} in the fork log:\n\
+                 \x20 {ID_B} is a fork of {ID_A}, made 2026-10-28T01:51:22Z (here) in /w/b\n\
+                 \x20 {ID_A} is not a fork in the fork log.\n"
+            )
+        );
+    }
+
+    #[test]
+    fn report_for_neither_is_one_line() {
+        let chain = SourceChain { links: Vec::new(), looped_at: None };
+        assert_eq!(
+            format_log_report(ID_A, &[], &chain),
+            format!(
+                "The fork log has no fork of {ID_A}, and {ID_A} is not a fork in the fork log.\n"
+            )
+        );
+    }
+
+    #[test]
+    fn report_for_a_loop_says_where_the_chain_stops() {
+        let first = made(ID_B, ID_A, ForkKind::Here, "/w/a");
+        let second = made(ID_A, ID_B, ForkKind::Here, "/w/b");
+        let chain = SourceChain { links: vec![&first, &second], looped_at: Some(ID_A.to_string()) };
+        assert_eq!(
+            format_log_report(ID_A, &[], &chain),
+            format!(
+                "Sources of {ID_A} in the fork log:\n\
+                 \x20 {ID_A} is a fork of {ID_B}, made 2026-10-28T01:51:22Z (here) in /w/a\n\
+                 \x20 {ID_B} is a fork of {ID_A}, made 2026-10-28T01:51:22Z (here) in /w/b\n\
+                 \x20 The chain stops: the fork log names {ID_A} again.\n"
+            )
+        );
     }
 }
