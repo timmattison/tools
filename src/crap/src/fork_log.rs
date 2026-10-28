@@ -110,8 +110,7 @@ pub fn append_fork_record(log: &Path, record: &ForkRecord) -> std::io::Result<()
 /// passes the data directory.
 #[must_use]
 pub fn fork_log_path(data_dir: &Path) -> PathBuf {
-    let _ = data_dir;
-    PathBuf::new()
+    data_dir.join(LOG_DIR_NAME).join(LOG_FILE_NAME)
 }
 
 /// Reads the fork log.
@@ -124,18 +123,22 @@ pub fn fork_log_path(data_dir: &Path) -> PathBuf {
 ///
 /// Returns an error when the file exists and cannot be read.
 pub fn read_fork_log(log: &Path) -> std::io::Result<ForkLog> {
-    let _ = log;
+    let text = match std::fs::read_to_string(log) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error),
+    };
+    let mut records = Vec::new();
+    let mut unreadable_lines = 0;
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        match serde_json::from_str::<ForkRecord>(line) {
+            Ok(record) => records.push(record),
+            Err(_) => unreadable_lines += 1,
+        }
+    }
     Ok(ForkLog {
-        records: vec![ForkRecord {
-            time: String::new(),
-            source_id: String::new(),
-            fork_id: String::new(),
-            source_user: String::new(),
-            source_dir: None,
-            fork_dir: String::new(),
-            kind: ForkKind::Here,
-        }],
-        unreadable_lines: 1,
+        records,
+        unreadable_lines,
     })
 }
 
