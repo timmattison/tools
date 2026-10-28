@@ -907,9 +907,12 @@ impl Board {
     }
 
     /// Moves the selection one page up. A page is the height of the last view
-    /// minus one row, and at least one row.
+    /// minus one row, and at least one row. Before the first view, a page is
+    /// one row. The selection stops on the first row that it can mark.
     pub fn select_previous_page(&mut self, now: DateTime<Utc>) {
         self.settle(now);
+        let page = self.page();
+        self.move_selection(now, |index, _| index.saturating_sub(page));
     }
 
     /// The number of rows of one page: the height of the last view minus one
