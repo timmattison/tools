@@ -96,7 +96,10 @@ pub(crate) fn classify(key: KeyEvent) -> Option<Command> {
 /// front of them. One word answers that.
 const PAUSED: &str = "paused";
 
-/// The number of keys that a live table reads.
+/// The number of entries of [`KEYS`].
+///
+/// One entry can name two keys that do one thing, as `q` and Ctrl-C do. This
+/// number thus counts the entries and not the keys.
 const KEY_COUNT: usize = 6;
 
 /// The key that shows the list of the keys, and hides it again.

@@ -1334,7 +1334,7 @@ cannot hang the caller. Used by `cwt` and `ha`.
     its head already names the destination, the address, the source, the period, and the recorded
     file, so a run of `--interval 2m` says that it started and holds no empty screen for those two
     minutes.
-  - Six keys drive the live table. `q` and Ctrl-C stop the run, write the record that closes it,
+  - These keys drive the live table. `q` and Ctrl-C stop the run, write the record that closes it,
     give the terminal back, and exit with success. `p` holds the table where it stands, and a
     second press lets it move again. A held table holds the display alone: the file still takes
     every round, and the table still folds every round into its numbers, so the frame that follows
