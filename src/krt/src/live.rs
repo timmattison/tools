@@ -2794,6 +2794,43 @@ mod tests {
     }
 
     #[test]
+    fn hiding_the_list_of_the_keys_stops_the_scroll_at_the_last_full_window() {
+        // The list of the keys gave the scroll a longer reach. When it goes
+        // away, the first row can lie past the last full window, and the frame
+        // must not show a half-empty window.
+        let mut screen = tall_table(
+            Some(HELP_SCROLL_ROWS),
+            &[
+                &[Command::Help],
+                &[
+                    Command::PageDown,
+                    Command::PageDown,
+                    Command::PageDown,
+                    Command::PageDown,
+                ],
+                &[Command::Help],
+            ],
+        );
+        screen.poll();
+        screen.sink.clear();
+        screen.poll();
+        let before = under_the_head(&painted(&screen.sink));
+        screen.sink.clear();
+        screen.poll();
+        let after = under_the_head(&painted(&screen.sink));
+
+        let mut held = shown(Some("+14 rows"), 15, 20, None);
+        held.push(String::new());
+        held.extend(HELP_LINES.map(str::to_owned));
+        assert_eq!(before, held, "four pages down reach the last window");
+        assert_eq!(
+            after,
+            shown(Some("+7 rows"), 8, 20, None),
+            "the new last full window stands"
+        );
+    }
+
+    #[test]
     fn a_window_that_no_probe_measured_leaves_every_row_standing() {
         // A run that cannot measure the terminal knows no height to fit a
         // frame to. It draws the whole frame and lets the terminal decide what
