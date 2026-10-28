@@ -402,4 +402,30 @@ mod tests {
             }]
         );
     }
+
+    #[test]
+    fn a_uuid_only_inside_a_tool_result_string_gives_no_pair() {
+        let tree = Tree::new();
+        let (src, _) = plant_pair(&tree);
+        let wrapped = serde_json::json!({
+            "uuid": uid(95),
+            "toolUseResult": serde_json::json!({ "uuid": uid(1) }).to_string(),
+        });
+        tree.write("-d", "eeeeeeee-0000-4000-8000-000000000005", &[wrapped]);
+        let report = scan_for_relatives(tree.root(), SRC, &src).unwrap();
+        assert_eq!(report.hits.len(), 1, "only the fork is a hit: {report:?}");
+    }
+
+    #[test]
+    fn a_uuid_only_in_a_nested_object_gives_no_pair() {
+        let tree = Tree::new();
+        let (src, _) = plant_pair(&tree);
+        let nested = serde_json::json!({
+            "uuid": uid(96),
+            "toolUseResult": { "uuid": uid(1) },
+        });
+        tree.write("-d", "eeeeeeee-0000-4000-8000-000000000006", &[nested]);
+        let report = scan_for_relatives(tree.root(), SRC, &src).unwrap();
+        assert_eq!(report.hits.len(), 1, "only the fork is a hit: {report:?}");
+    }
 }
