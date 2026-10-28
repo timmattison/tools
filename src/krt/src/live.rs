@@ -2670,6 +2670,19 @@ mod tests {
     }
 
     #[test]
+    fn a_page_key_does_nothing_in_a_window_that_no_probe_measured() {
+        // Such a run draws every line and lets the terminal scroll. A page key
+        // has no frame to move.
+        let mut screen = tall_table(NO_ROWS, &[&[Command::PageDown]]);
+        let before = painted(&screen.sink);
+        screen.sink.clear();
+        screen.poll();
+        let after = painted(&screen.sink);
+
+        assert_eq!(after, before, "the frame does not move");
+    }
+
+    #[test]
     fn a_window_that_no_probe_measured_leaves_every_row_standing() {
         // A run that cannot measure the terminal knows no height to fit a
         // frame to. It draws the whole frame and lets the terminal decide what
