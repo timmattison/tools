@@ -2505,6 +2505,22 @@ mod tests {
     }
 
     #[test]
+    fn two_page_down_keys_of_one_turn_scroll_two_pages() {
+        // A reader who holds the key sends several presses in one turn. Each
+        // press has to move one page, and not the same page twice.
+        let mut screen = tall_table(Some(SCROLL_ROWS), &[&[Command::PageDown, Command::PageDown]]);
+        screen.sink.clear();
+        screen.poll();
+        let lines = painted(&screen.sink);
+
+        assert_eq!(
+            under_the_head(&lines),
+            shown(Some("+9 rows"), 10, 14, Some("+6 rows")),
+            "two pages down show rows 10 to 14: {lines:?}"
+        );
+    }
+
+    #[test]
     fn a_window_that_no_probe_measured_leaves_every_row_standing() {
         // A run that cannot measure the terminal knows no height to fit a
         // frame to. It draws the whole frame and lets the terminal decide what
