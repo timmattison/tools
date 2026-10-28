@@ -2314,6 +2314,44 @@ mod tests {
     }
 
     #[test]
+    fn the_last_full_window_draws_an_image_on_each_of_its_rows() {
+        // The last full window has a count line above and none below. A head
+        // that counted the wrong number of lines there would put the images
+        // of the far hops of the path beside the wrong rows.
+        let mut screen = graphics_table(
+            WIDTH,
+            Some(SCROLL_ROWS),
+            &[&[
+                Command::PageDown,
+                Command::PageDown,
+                Command::PageDown,
+                Command::PageDown,
+            ]],
+        );
+        screen.round(&a_tall_round());
+        screen.sink.clear();
+        screen.poll();
+        let drawn = String::from_utf8_lossy(&screen.sink).into_owned();
+        let lines = painted(&screen.sink);
+
+        assert_eq!(
+            image_count(&screen.sink),
+            6,
+            "one image stands for each of the six rows that the frame shows: {drawn:?}"
+        );
+        for index in 1..=6 {
+            assert!(
+                drawn.contains(&format!("{}{KITTY_IMAGE}", moved_to(&lines, index))),
+                "the image of the row at line {index} under the head stands there: {drawn:?}"
+            );
+        }
+        assert!(
+            !drawn.contains(&moved_to(&lines, 0)),
+            "no image stands on the line that counts the rows above: {drawn:?}"
+        );
+    }
+
+    #[test]
     fn a_frame_whose_terminal_refuses_an_image_prints_its_lines_anyway() {
         // A frame that does not print stops nothing, and one image of a frame
         // is a smaller thing than a frame. The recording is the purpose of the
