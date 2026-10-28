@@ -282,7 +282,10 @@ mod tests {
         append_fork_record(&path, &sample("one", ForkKind::Here, None)).unwrap();
         {
             use std::io::Write;
-            let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
             file.write_all(b"{\"time\":\"x\",\"sour\n\n   \n{\"not\":\"a record\"}\n")
                 .unwrap();
         }
