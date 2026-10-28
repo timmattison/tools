@@ -154,4 +154,70 @@ mod tests {
         assert_eq!(value["kind"], "fork-at");
         assert_eq!(value["source_dir"], "/src");
     }
+
+    fn parse_lines(log: &Path) -> Vec<ForkRecord> {
+        std::fs::read_to_string(log)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn two_appends_give_two_lines_in_order() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let log = dir.path().join(LOG_FILE_NAME);
+        append_fork_record(&log, &sample("first", ForkKind::Here, None)).unwrap();
+        append_fork_record(&log, &sample("second", ForkKind::ForkAt, Some("/s"))).unwrap();
+        let ids: Vec<String> = parse_lines(&log).into_iter().map(|r| r.fork_id).collect();
+        assert_eq!(ids, ["first", "second"]);
+    }
+
+    #[test]
+    fn concurrent_appends_never_mix_lines() {
+        const THREADS: usize = 8;
+        const PER_THREAD: usize = 200;
+        let dir = tempfile::TempDir::new().unwrap();
+        let log = dir.path().join(LOG_FILE_NAME);
+        std::thread::scope(|scope| {
+            for thread in 0..THREADS {
+                let log = &log;
+                scope.spawn(move || {
+                    for n in 0..PER_THREAD {
+                        let mut record = sample(&format!("t{thread}-n{n}"), ForkKind::Here, None);
+                        record.fork_dir = "d".repeat(2_000);
+                        append_fork_record(log, &record).unwrap();
+                    }
+                });
+            }
+        });
+        let records = parse_lines(&log);
+        assert_eq!(records.len(), THREADS * PER_THREAD);
+        let ids: std::collections::HashSet<String> =
+            records.into_iter().map(|r| r.fork_id).collect();
+        let want: std::collections::HashSet<String> = (0..THREADS)
+            .flat_map(|t| (0..PER_THREAD).map(move |n| format!("t{t}-n{n}")))
+            .collect();
+        assert_eq!(ids, want);
+    }
+
+    #[test]
+    fn unwritable_path_gives_an_error() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, "a file, not a directory").unwrap();
+        let log = blocker.join("crap").join(LOG_FILE_NAME);
+        assert!(append_fork_record(&log, &sample("f", ForkKind::Here, None)).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_log_file_has_mode_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        let log = dir.path().join(LOG_FILE_NAME);
+        append_fork_record(&log, &sample("f", ForkKind::Here, None)).unwrap();
+        let mode = std::fs::metadata(&log).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
 }
