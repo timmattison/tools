@@ -168,8 +168,7 @@ fn assert_owner_only_guidance(stderr: &str) {
 fn run_crap(root: &Path, args: &[&str]) -> Output {
     let work = root.join("work");
     fs::create_dir_all(&work).unwrap();
-    Command::new(env!("CARGO_BIN_EXE_crap"))
-        .env("HOME", root.join("home"))
+    common::crap_command(&root.join("home"))
         .current_dir(&work)
         .args(args)
         .output()

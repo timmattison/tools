@@ -69,8 +69,7 @@ fn run_here_planting(tag: &str, extra_args: &[&str], also_plant: &[&str]) -> Out
     let mut args = vec!["--here", ORIG];
     args.extend_from_slice(extra_args);
 
-    Command::new(env!("CARGO_BIN_EXE_crap"))
-        .env("HOME", &home)
+    common::crap_command(&home)
         .current_dir(&work)
         .args(&args)
         .output()
