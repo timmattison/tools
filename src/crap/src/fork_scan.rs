@@ -450,4 +450,43 @@ mod tests {
         let report = scan_for_relatives(tree.root(), SRC, &src).unwrap();
         assert_eq!(report, ScanReport::default());
     }
+
+    #[test]
+    fn counts_the_shared_values_once() {
+        let tree = Tree::new();
+        let src = tree.write("-a", SRC, &source_lines());
+        let mut lines = fork_lines();
+        lines.push(line(&uid(4), "10:00:04", FORK));
+        tree.write("-b", FORK, &lines);
+        let report = scan_for_relatives(tree.root(), SRC, &src).unwrap();
+        assert_eq!(report.hits.len(), 1);
+        assert_eq!(report.hits[0].shared, 3);
+    }
+
+    #[test]
+    fn sorts_hits_by_shared_count_then_session_id() {
+        let tree = Tree::new();
+        let src = tree.write("-a", SRC, &source_lines());
+        let few = |id: &str, n: u32| {
+            let lines: Vec<_> = (1..=n)
+                .map(|k| line(&uid(k), &format!("10:00:0{k}"), id))
+                .collect();
+            tree.write("-b", id, &lines);
+        };
+        few("22222222-0000-4000-8000-000000000000", 2);
+        few("11111111-0000-4000-8000-000000000000", 2);
+        few("33333333-0000-4000-8000-000000000000", 5);
+        few("00000000-0000-4000-8000-000000000000", 1);
+        let report = scan_for_relatives(tree.root(), SRC, &src).unwrap();
+        let order: Vec<(String, usize)> = report
+            .hits
+            .iter()
+            .map(|hit| (hit.session_id.chars().take(8).collect(), hit.shared))
+            .collect();
+        let expected: Vec<(String, usize)> = [("33333333", 5), ("11111111", 2), ("22222222", 2), ("00000000", 1)]
+            .iter()
+            .map(|(id, n)| ((*id).to_string(), *n))
+            .collect();
+        assert_eq!(order, expected);
+    }
 }
