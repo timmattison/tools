@@ -808,6 +808,26 @@ mod tests {
     }
 
     #[test]
+    fn page_up_then_enter_opens_the_run_one_page_up() {
+        let channels = channels();
+        send_runs(&channels, twelve_runs());
+        let opener = opener(false);
+        let (result, _) = run_app(
+            &opener,
+            &channels,
+            vec![
+                press(KeyCode::PageDown),
+                press(KeyCode::PageUp),
+                press(KeyCode::Enter),
+                press(KeyCode::Char('q')),
+            ],
+        );
+        assert!(result.is_ok(), "{result:?}");
+        // Page Down goes to run 10. Page Up goes 9 rows up, to run 1.
+        assert_eq!(*opener.urls.borrow(), ["https://example.test/runs/1"]);
+    }
+
+    #[test]
     fn a_failed_open_shows_the_address_and_the_loop_goes_on() {
         let channels = channels();
         send_runs(&channels, vec![active_run(1, 5)]);
