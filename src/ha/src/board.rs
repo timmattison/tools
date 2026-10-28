@@ -119,6 +119,11 @@ impl Row<'_> {
         )
     }
 
+    /// True for a row that the selection can mark: an item row or a job row.
+    fn is_selectable(&self) -> bool {
+        self.is_item() || matches!(self, Row::Job { .. })
+    }
+
     /// True for the one row that the selection marks.
     fn is_selected(&self) -> bool {
         matches!(
@@ -252,6 +257,8 @@ pub struct Board {
     read_at: BTreeMap<RepoName, DateTime<Utc>>,
     selected: Option<Selection>,
     offset: usize,
+    /// The height in rows of the last view, or 0 before the first view.
+    height: usize,
     /// The last job answer of each run that the board holds. A run in this map
     /// can be expanded or collapsed.
     jobs: BTreeMap<RunId, Jobs>,
@@ -292,6 +299,7 @@ impl Board {
             read_at: BTreeMap::new(),
             selected: None,
             offset: 0,
+            height: 0,
             jobs: BTreeMap::new(),
             expanded: BTreeSet::new(),
             queues: BTreeMap::new(),
@@ -431,6 +439,7 @@ impl Board {
     /// view. A job row keeps only itself.
     pub fn view(&mut self, now: DateTime<Utc>, height: usize) -> View<'_> {
         self.settle(now);
+        self.height = height;
         if height > 0 {
             let rows = self.build_rows(now);
             let selected_row = rows.iter().position(Row::is_selected);
@@ -866,7 +875,29 @@ impl Board {
     /// Moves the selection to the next row: an item row or a job row.
     pub fn select_next(&mut self, now: DateTime<Utc>) {
         self.settle(now);
-        self.move_selection(now, |index, count| (index + 1).min(count - 1));
+        self.move_selection(now, |index, rows| (index + 1).min(rows.len() - 1));
+    }
+
+    /// Moves the selection one page down.
+    ///
+    /// A page is the height of the last view minus one row, and at least one
+    /// row. Before the first view, a page is one row. The target is the screen
+    /// row of the selection plus one page. The selection goes to the last row
+    /// that it can mark at or above the target. A target past the end gives
+    /// the last row. When no such row lies below the selection, the selection
+    /// moves one row. The selection stops on the last row and does not wrap.
+    pub fn select_next_page(&mut self, now: DateTime<Utc>) {
+        self.settle(now);
+        let page = self.page();
+        self.move_selection(now, |index, rows| {
+            let target = rows[index] + page;
+            let slot = rows.partition_point(|&row| row <= target) - 1;
+            if slot == index {
+                (index + 1).min(rows.len() - 1)
+            } else {
+                slot
+            }
+        });
     }
 
     /// Moves the selection to the previous row: an item row or a job row.
@@ -875,18 +906,60 @@ impl Board {
         self.move_selection(now, |index, _| index.saturating_sub(1));
     }
 
+    /// Moves the selection one page up.
+    ///
+    /// A page is the height of the last view minus one row, and at least one
+    /// row. Before the first view, a page is one row. The target is the screen
+    /// row of the selection minus one page. The selection goes to the first
+    /// row that it can mark at or below the target. A target before the start
+    /// gives the first row. When no such row lies above the selection, the
+    /// selection moves one row. The selection stops on the first row and does
+    /// not wrap.
+    pub fn select_previous_page(&mut self, now: DateTime<Utc>) {
+        self.settle(now);
+        let page = self.page();
+        self.move_selection(now, |index, rows| {
+            let target = rows[index].saturating_sub(page);
+            let slot = rows.partition_point(|&row| row < target);
+            if slot == index {
+                index.saturating_sub(1)
+            } else {
+                slot
+            }
+        });
+    }
+
+    /// The number of rows of one page: the height of the last view minus one
+    /// row, and at least one row.
+    fn page(&self) -> usize {
+        self.height.saturating_sub(1).max(1)
+    }
+
     /// Moves the selection to the row at the position that `target` gives.
     ///
-    /// `target` gets the current position and the number of rows that the
-    /// selection can mark. The rows are the item rows and the job rows of the
+    /// `target` gets the current position and the screen row of each row that
+    /// the selection can mark, in order. The screen row is the index in
+    /// `build_rows`. The rows are the item rows and the job rows of the
     /// expanded runs. When the selection is not among them, it stays.
-    fn move_selection(&mut self, now: DateTime<Utc>, target: impl Fn(usize, usize) -> usize) {
+    fn move_selection(&mut self, now: DateTime<Utc>, target: impl Fn(usize, &[usize]) -> usize) {
         let slots = self.selectable_rows(now);
+        let screen_rows: Vec<usize> = self
+            .build_rows(now)
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.is_selectable())
+            .map(|(screen_row, _)| screen_row)
+            .collect();
+        debug_assert_eq!(
+            screen_rows.len(),
+            slots.len(),
+            "each selectable screen row has one slot"
+        );
         let moved = self
             .selected
             .as_ref()
             .and_then(|current| slots.iter().position(|slot| slot == current))
-            .and_then(|index| slots.get(target(index, slots.len())).cloned());
+            .and_then(|index| slots.get(target(index, &screen_rows)).cloned());
         if moved.is_some() {
             self.selected = moved;
         }
@@ -3608,5 +3681,178 @@ mod tests {
             marked(&view.rows),
             ["Header(History,1,1,0,0)", "Departure(a/x#2)*"]
         );
+    }
+
+    /// Page Down from the top row, with no header in the page.
+    #[test]
+    fn select_next_page_highlights_the_row_one_page_down() {
+        let mut board = long_board(10, 0);
+        let rows = shape(&board.rows(now()));
+        assert_eq!(rows[0], "Header(Active,10,0,0,0)");
+        board.view(now(), 4);
+        board.select_next_page(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(4)*"));
+    }
+
+    /// A header inside the page does not count as a row to select. A step of
+    /// two selectable rows would end on `Run(101)`.
+    #[test]
+    fn select_next_page_stops_on_the_last_selectable_row_above_the_target() {
+        let mut board = long_board(3, 3);
+        assert_eq!(
+            shape(&board.rows(now()))[..5],
+            [
+                "Header(Active,3,0,0,0)",
+                "Run(1)",
+                "Run(2)",
+                "Run(3)",
+                "Header(Recent,3,3,0,0)"
+            ]
+        );
+        board.select_next(now());
+        board.view(now(), 3);
+        board.select_next_page(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(3)*"));
+    }
+
+    /// Page 1 from `Run(3)` reaches the header at screen row 4. No selectable
+    /// row lies in between, so the highlight moves one row.
+    #[test]
+    fn select_next_page_moves_one_row_when_no_row_lies_before_the_target() {
+        let mut board = long_board(3, 3);
+        for _ in 0..2 {
+            board.select_next(now());
+        }
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(3)*"));
+        board.view(now(), 2);
+        board.select_next_page(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(101)*"));
+    }
+
+    /// Page Up from `Run(4)`, with no header in the page.
+    #[test]
+    fn select_previous_page_highlights_the_row_one_page_up() {
+        let mut board = long_board(10, 0);
+        for _ in 0..3 {
+            board.select_next(now());
+        }
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(4)*"));
+        board.view(now(), 3);
+        board.select_previous_page(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(2)*"));
+    }
+
+    /// Page 2 up from `Run(102)` at screen row 6 aims at the header at row 4.
+    /// A step of two selectable rows would end on `Run(3)`.
+    #[test]
+    fn select_previous_page_stops_on_the_first_selectable_row_below_the_target() {
+        let mut board = long_board(3, 3);
+        for _ in 0..4 {
+            board.select_next(now());
+        }
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(102)*"));
+        board.view(now(), 3);
+        board.select_previous_page(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(101)*"));
+    }
+
+    /// Page 1 up from `Run(101)` aims at the header at screen row 4. No
+    /// selectable row lies in between, so the highlight moves one row.
+    #[test]
+    fn select_previous_page_moves_one_row_when_no_row_lies_after_the_target() {
+        let mut board = long_board(3, 3);
+        for _ in 0..3 {
+            board.select_next(now());
+        }
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(101)*"));
+        board.view(now(), 2);
+        board.select_previous_page(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(3)*"));
+    }
+
+    #[test]
+    fn select_next_page_stops_on_the_last_selectable_row() {
+        let mut board = long_board(3, 3);
+        board.view(now(), 4);
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            board.select_next_page(now());
+            seen.push(selected_text(&mut board).expect("a selection"));
+        }
+        assert_eq!(seen.last().map(String::as_str), Some("Run(103)*"));
+        assert_eq!(seen[seen.len() - 2], "Run(103)*");
+    }
+
+    #[test]
+    fn select_previous_page_stops_on_the_first_selectable_row() {
+        let mut board = long_board(3, 3);
+        for _ in 0..5 {
+            board.select_next(now());
+        }
+        board.view(now(), 4);
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            board.select_previous_page(now());
+            seen.push(selected_text(&mut board).expect("a selection"));
+        }
+        assert_eq!(seen.last().map(String::as_str), Some("Run(1)*"));
+        assert_eq!(seen[seen.len() - 2], "Run(1)*");
+    }
+
+    /// Run 1 has three jobs. Run 2 has no answer yet, so it shows `JobsLoading`.
+    #[test]
+    fn the_page_keys_move_through_job_rows_and_skip_the_loading_row() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(
+            RunId(1),
+            vec![
+                job(11, RunState::Passed),
+                job(12, RunState::Running),
+                job(13, RunState::Queued),
+            ],
+        );
+        board.select_next(now());
+        board.select_next(now());
+        board.select_next(now());
+        board.select_next(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(2)*"));
+        board.expand(now());
+        assert_eq!(
+            shape(&board.rows(now()))[5..],
+            ["Header(Recent,1,1,0,0)", "Run(2)", "JobsLoading"]
+        );
+        board.view(now(), 4);
+        board.select_previous_page(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Job(12)*"));
+        board.select_previous_page(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(1)*"));
+        board.select_next_page(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("LastJob(13)*"));
+        board.select_next_page(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(2)*"));
+        board.select_next_page(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(2)*"));
+    }
+
+    #[test]
+    fn a_page_key_moves_one_row_before_the_first_view() {
+        let mut board = long_board(10, 0);
+        board.select_next_page(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(2)*"));
+        board.select_next_page(now());
+        board.select_previous_page(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(2)*"));
+    }
+
+    #[test]
+    fn a_page_key_moves_one_row_in_a_view_of_one_row() {
+        let mut board = long_board(10, 0);
+        board.view(now(), 1);
+        board.select_next_page(now());
+        board.select_next_page(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(3)*"));
+        board.select_previous_page(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(2)*"));
     }
 }
