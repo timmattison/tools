@@ -247,6 +247,12 @@ fn candidates(projects_root: &Path) -> Listing {
     listing
 }
 
+/// Formats the report of a scan for the terminal.
+pub fn format_scan_report(id: &str, projects_root: &Path, report: &ScanReport) -> String {
+    let _ = (id, projects_root, report);
+    String::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -552,5 +558,49 @@ mod tests {
         let tree = Tree::new();
         let result = scan_for_relatives(tree.root(), SRC, &tree.root().join("none.jsonl"));
         assert!(result.is_err());
+    }
+
+    fn hit(id: &str, shared: usize, relation: Relation) -> ScanHit {
+        ScanHit {
+            session_id: id.to_string(),
+            transcript: PathBuf::from(format!("/p/-a/{id}.jsonl")),
+            shared,
+            relation,
+        }
+    }
+
+    #[test]
+    fn format_scan_report_lists_each_hit() {
+        let report = ScanReport {
+            hits: vec![hit("f7e9", 23, Relation::Fork), hit("0abc", 4, Relation::Related)],
+            unreadable: 0,
+        };
+        assert_eq!(
+            format_scan_report("src1", Path::new("/p"), &report),
+            "Transcripts that share uuid values with src1 (scan of /p):\n\
+             \x20 f7e9  fork           23 shared  /p/-a/f7e9.jsonl\n\
+             \x20 0abc  related         4 shared  /p/-a/0abc.jsonl\n"
+        );
+    }
+
+    #[test]
+    fn format_scan_report_says_so_when_there_is_no_hit() {
+        assert_eq!(
+            format_scan_report("src1", Path::new("/p"), &ScanReport::default()),
+            "The scan of /p found no transcript that shares a uuid value with src1.\n"
+        );
+    }
+
+    #[test]
+    fn format_scan_report_counts_the_unreadable_files() {
+        let report = ScanReport {
+            hits: Vec::new(),
+            unreadable: 2,
+        };
+        assert_eq!(
+            format_scan_report("src1", Path::new("/p"), &report),
+            "The scan of /p found no transcript that shares a uuid value with src1.\n\
+             \x20 2 transcripts or folders could not be read.\n"
+        );
     }
 }
