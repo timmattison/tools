@@ -906,13 +906,27 @@ impl Board {
         self.move_selection(now, |index, _| index.saturating_sub(1));
     }
 
-    /// Moves the selection one page up. A page is the height of the last view
-    /// minus one row, and at least one row. Before the first view, a page is
-    /// one row. The selection stops on the first row that it can mark.
+    /// Moves the selection one page up.
+    ///
+    /// A page is the height of the last view minus one row, and at least one
+    /// row. Before the first view, a page is one row. The target is the screen
+    /// row of the selection minus one page. The selection goes to the first
+    /// row that it can mark at or below the target. A target before the start
+    /// gives the first row. When no such row lies above the selection, the
+    /// selection moves one row. The selection stops on the first row and does
+    /// not wrap.
     pub fn select_previous_page(&mut self, now: DateTime<Utc>) {
         self.settle(now);
         let page = self.page();
-        self.move_selection(now, |index, _| index.saturating_sub(page));
+        self.move_selection(now, |index, rows| {
+            let target = rows[index].saturating_sub(page);
+            let slot = rows.partition_point(|&row| row < target);
+            if slot == index {
+                index.saturating_sub(1)
+            } else {
+                slot
+            }
+        });
     }
 
     /// The number of rows of one page: the height of the last view minus one
