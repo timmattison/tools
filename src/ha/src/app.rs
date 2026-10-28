@@ -921,6 +921,39 @@ mod tests {
     }
 
     #[test]
+    fn a_page_key_clears_the_message_and_the_error_shows() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        channels
+            .updates
+            .send(Update::Failed {
+                repo: repo(),
+                error: SourceError::Failed("boom".to_owned()),
+            })
+            .unwrap();
+        let opener = opener(true);
+        let (result, frame) = run_app(
+            &opener,
+            &channels,
+            vec![
+                press(KeyCode::Enter),
+                press(KeyCode::PageDown),
+                press(KeyCode::Char('q')),
+            ],
+        );
+        assert!(result.is_ok(), "{result:?}");
+        let status_line = frame.last().unwrap();
+        assert!(
+            status_line.contains("acme/widgets: gh failed: boom"),
+            "{status_line:?}"
+        );
+        assert!(
+            !status_line.contains("could not open a browser"),
+            "{status_line:?}"
+        );
+    }
+
+    #[test]
     fn a_suspect_answer_keeps_the_runs_and_shows_the_reason() {
         let channels = channels();
         send_runs(&channels, vec![active_run(1, 5)]);
@@ -2106,6 +2139,25 @@ mod tests {
     }
 
     #[test]
+    fn right_page_down_right_is_not_a_double_press() {
+        let channels = channels();
+        send_runs(
+            &channels,
+            vec![active_run(1, 5), active_run(2, 30), active_run(3, 60)],
+        );
+        let steps = vec![
+            key(KeyCode::Right),
+            key(KeyCode::PageDown),
+            key(KeyCode::Right),
+            key(KeyCode::Char('q')),
+        ];
+        let (_, commands) = run_steps(&channels, steps);
+        // Page Down moves the highlight to the last row, run 1. A double press
+        // would expand every run at the second Right.
+        assert_eq!(commands, [watch(&[3]), watch(&[1, 3])]);
+    }
+
+    #[test]
     fn right_then_left_is_not_a_double_press_of_left() {
         let channels = channels();
         send_runs(&channels, vec![active_run(1, 5), active_run(2, 30)]);
@@ -2564,6 +2616,8 @@ mod tests {
             press(KeyCode::Char('q')),
             press(KeyCode::Enter),
             press(KeyCode::Down),
+            press(KeyCode::PageDown),
+            press(KeyCode::PageUp),
         ];
         for other in others {
             let (result, frame, cancels, _) = answer_the_box_with(other.clone());
@@ -2581,6 +2635,9 @@ mod tests {
         assert_eq!(urls, ["https://example.test/runs/2"]);
         // After `c` and Down, the Enter that follows opens the first row too.
         let (_, _, _, urls) = answer_the_box_with(press(KeyCode::Down));
+        assert_eq!(urls, ["https://example.test/runs/2"]);
+        // After `c` and Page Down, the Enter that follows opens the first row too.
+        let (_, _, _, urls) = answer_the_box_with(press(KeyCode::PageDown));
         assert_eq!(urls, ["https://example.test/runs/2"]);
     }
 
