@@ -2521,6 +2521,38 @@ mod tests {
     }
 
     #[test]
+    fn page_down_stops_at_the_last_full_window() {
+        // The reader must see the far hops of the path. Past the last full
+        // window the frame would show less than it can, so the scroll stops
+        // there and the count line under the rows goes away.
+        let mut screen = tall_table(
+            Some(SCROLL_ROWS),
+            &[
+                &[
+                    Command::PageDown,
+                    Command::PageDown,
+                    Command::PageDown,
+                    Command::PageDown,
+                ],
+                &[Command::PageDown],
+            ],
+        );
+        screen.sink.clear();
+        screen.poll();
+        let first = under_the_head(&painted(&screen.sink));
+        screen.sink.clear();
+        screen.poll();
+        let second = under_the_head(&painted(&screen.sink));
+
+        assert_eq!(
+            first,
+            shown(Some("+14 rows"), 15, 20, None),
+            "four pages down reach the last full window"
+        );
+        assert_eq!(second, first, "and one more page down holds that window");
+    }
+
+    #[test]
     fn a_window_that_no_probe_measured_leaves_every_row_standing() {
         // A run that cannot measure the terminal knows no height to fit a
         // frame to. It draws the whole frame and lets the terminal decide what
