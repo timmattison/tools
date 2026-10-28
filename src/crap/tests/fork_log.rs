@@ -229,3 +229,72 @@ fn two_forks_at_the_same_time_give_two_complete_lines() {
     assert_eq!(logged.len(), CHILDREN, "every fork id is distinct");
     assert_eq!(logged, printed);
 }
+
+/// The path of the user's `ch` alias, end to end: the real shell function runs
+/// `crap --here`, a fake `claude` takes the fork, and the log holds the line.
+#[cfg(unix)]
+#[test]
+fn ch_through_the_shell_function_logs_the_fork() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    const BASE_PATH: &str = "/usr/bin:/bin";
+    let tmp = unique_root("shell");
+    let root = tmp.path();
+    let (home, work) = setup_here(root);
+
+    // 1. Install the real shell function into the temp home.
+    let setup = common::crap_command(&home)
+        .env_clear()
+        .env("HOME", &home)
+        .env("SHELL", "/bin/bash")
+        .env("PATH", BASE_PATH)
+        .arg("--shell-setup")
+        .output()
+        .expect("crap --shell-setup should run");
+    assert!(setup.status.success(), "{setup:?}");
+    assert!(home.join(".bashrc").is_file(), "{setup:?}");
+
+    // 2. A bin directory with `crap` and a fake `claude` that records argv.
+    let bin = root.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    symlink(env!("CARGO_BIN_EXE_crap"), bin.join("crap")).unwrap();
+    let args_file = root.join("claude_args");
+    let claude = bin.join("claude");
+    fs::write(
+        &claude,
+        format!(
+            "#!/bin/sh\nfor arg in \"$@\"; do printf '%s\\n' \"$arg\"; done > {}\n",
+            shellquote::shell_quote(&args_file.to_string_lossy())
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
+
+    // 3. Run the alias path from `work`.
+    let output = std::process::Command::new("bash")
+        .env_clear()
+        .env("HOME", &home)
+        .env("WORK", &work)
+        .env("PATH", format!("{}:{BASE_PATH}", bin.display()))
+        .args([
+            "-c",
+            "source \"$HOME/.bashrc\" && cd \"$WORK\" && crap --here 11111111-2222-3333-4444-555555555555",
+        ])
+        .output()
+        .expect("bash should run");
+
+    // 4. The fork ran, and the log names its id.
+    assert!(output.status.success(), "{output:?}");
+    let args = fs::read_to_string(&args_file).expect("the fake claude ran");
+    let args: Vec<&str> = args.lines().collect();
+    let at = args
+        .iter()
+        .position(|arg| *arg == "--fork-session")
+        .unwrap_or_else(|| panic!("--fork-session missing: {args:?}"));
+    assert_eq!(args[at + 1], "--session-id", "{args:?}");
+    let fork_id = args[at + 2];
+    let lines = log_lines(&fork_log_path(&home));
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(lines[0]["kind"], "here");
+    assert_eq!(lines[0]["fork_id"], fork_id);
+}
