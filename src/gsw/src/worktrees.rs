@@ -377,9 +377,9 @@ impl WorktreeList {
     }
 
     /// The rows that one page key moves: one row less than the window at the
-    /// last [`settle`](Self::settle).
+    /// last [`settle`](Self::settle), and at least one row.
     fn page(&self) -> usize {
-        self.rows.saturating_sub(1)
+        self.rows.saturating_sub(1).max(1)
     }
 
     /// The worktree under the cursor: the worktree that Enter goes to.
