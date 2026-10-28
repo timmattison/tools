@@ -484,10 +484,10 @@ struct Drawn {
     /// them, when the frame scrolled.
     ///
     /// The count comes off `fitted`, which names the line of the first shown
-    /// row, and not off a constant of this file. A
-    /// narrow window takes the header of a frame onto more than one line, and
-    /// an image that stood on a line this file counted itself would then cover
-    /// the heading of the Recent column.
+    /// row, and not off a constant of this file. A narrow window takes the
+    /// header of a frame onto more than one line, and an image that stood on a
+    /// line this file counted itself would then cover the heading of the Recent
+    /// column.
     head: u16,
     /// The Recent column of the frame, and the history of every row of the path
     /// that reached it.
@@ -509,14 +509,16 @@ struct Drawn {
 
 /// Writes one image for each row of the path of a frame.
 ///
-/// The image of the row at `index` stands over the Recent column of the line
-/// that the row draws in, which is `head` plus that index. When the frame
-/// scrolled, `head` counts the line that counts the rows above, so the image
-/// of the first shown row stands under that line. The cursor moves
-/// there first, and the image carries a placement id of its own:
-/// every image of one frame therefore replaces the image of that same row in
-/// the frame before it, where one id for every row would put the last row of
-/// the frame over the first one.
+/// The image of the row at `index` among the shown rows stands over the Recent
+/// column of the line that the row draws in, which is `head` plus that index.
+/// When the frame scrolled, `head` counts the line that counts the rows above,
+/// so the image of the first shown row stands under that line. The cursor moves
+/// there first.
+///
+/// Each image carries the id of its line among the shown rows, so no two images
+/// of one frame share an id. One id for every row would put the last row of the
+/// frame over the first one. After a scroll, an id thus names a line of the
+/// frame and not a hop.
 ///
 /// The image is as wide as the Recent column and as tall as one line of the
 /// table, in the pixels that the terminal reports for one character cell.
