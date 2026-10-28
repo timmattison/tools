@@ -3657,4 +3657,19 @@ mod tests {
         board.select_next_page(now());
         assert_eq!(selected_text(&mut board).as_deref(), Some("Run(4)*"));
     }
+
+    /// A header inside the page does not count as a row to select. A step of
+    /// two selectable rows would end on `Run(101)`.
+    #[test]
+    fn select_next_page_stops_on_the_last_selectable_row_above_the_target() {
+        let mut board = long_board(3, 3);
+        assert_eq!(
+            shape(&board.rows(now()))[..5],
+            ["Header(Active,3,0,0,0)", "Run(1)", "Run(2)", "Run(3)", "Header(Recent,3,3,0,0)"]
+        );
+        board.select_next(now());
+        board.view(now(), 3);
+        board.select_next_page(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(3)*"));
+    }
 }
