@@ -1704,12 +1704,14 @@ dependencies = [
 name = "crap"
 version = "0.1.0"
 dependencies = [
+ "aho-corasick",
  "buildinfo",
  "chrono",
  "clap",
  "colored",
  "comfy-table",
  "dirs",
+ "rayon",
  "serde",
  "serde_json",
  "shellquote",

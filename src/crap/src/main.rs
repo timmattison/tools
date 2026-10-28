@@ -116,6 +116,7 @@ use serde::Serialize;
 use shellsetup::ShellIntegration;
 
 mod fork_log;
+mod fork_scan;
 
 /// Exit codes for the different failure conditions.
 mod exit_codes {
@@ -1926,6 +1927,17 @@ struct Cli {
     /// and the cross-user resume.
     #[arg(long, conflicts_with_all = ["here", "status", "shell_setup", "user", "force"])]
     forks: bool,
+
+    /// With `--forks`: also read the transcripts of your own tree, then report
+    /// each one that shares a uuid value with the session.
+    ///
+    /// The scan reads every transcript in your own `~/.claude/projects` tree. It
+    /// reports each transcript that shares a top-level `uuid` value with the
+    /// transcript of the id, with the count of shared values and the relation:
+    /// `fork`, `source`, or `related`. It finds forks that are not in the fork
+    /// log. It reads only your own tree, and it skips subagent transcripts.
+    #[arg(long, requires = "forks")]
+    scan: bool,
 
     /// Emit machine-readable JSON instead of human-formatted text.
     ///
