@@ -5848,27 +5848,66 @@ mod tests {
             "the shell matcher must flag a known violation"
         );
 
-        // The real source. `include_str!` is relative to this file, so this is
-        // the very text being compiled.
-        let programs = spawned_programs(include_str!("main.rs"));
+        // The real source: every `.rs` file under `src/`, read at test run
+        // time, so a new module cannot hide a spawn from the guard.
+        fn rust_files(dir: &Path, found: &mut Vec<PathBuf>) {
+            for entry in fs::read_dir(dir).expect("the guard must list the source directory") {
+                let path = entry
+                    .expect("a source directory entry must be readable")
+                    .path();
+                if path.is_dir() {
+                    rust_files(&path, found);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    found.push(path);
+                }
+            }
+        }
+        let source_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        rust_files(&source_dir, &mut files);
+        files.sort();
         assert!(
-            !programs.is_empty(),
-            "the scan found no spawns at all — `crap` does spawn `ps`, so the matcher is broken"
+            !files.is_empty(),
+            "the guard read no source files from {}",
+            source_dir.display()
         );
-
-        const ALLOWED: [&str; 3] = ["ps", "bash", "zsh"];
-        for program in &programs {
+        let names: Vec<String> = files
+            .iter()
+            .filter_map(|file| file.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .collect();
+        for expected in ["main.rs", "fork_log.rs"] {
             assert!(
-                ALLOWED.contains(&program.as_str()),
-                "`crap` spawns `{program}`, which is not in the allowlist {ALLOWED:?}; \
-                 every new spawn must be added here deliberately"
-            );
-            assert!(
-                !escalators.contains(program),
-                "`crap` spawns `{program}`, a privilege-escalation binary; \
-                 `crap` detects and guides, it never escalates itself"
+                names.iter().any(|name| name == expected),
+                "the guard did not read `{expected}`; it read {names:?}"
             );
         }
+
+        const ALLOWED: [&str; 3] = ["ps", "bash", "zsh"];
+        let mut total_spawns = 0;
+        for file in &files {
+            let source = fs::read_to_string(file).expect("a source file must be readable");
+            let programs = spawned_programs(&source);
+            total_spawns += programs.len();
+            for program in &programs {
+                assert!(
+                    ALLOWED.contains(&program.as_str()),
+                    "`{}` spawns `{program}`, which is not in the allowlist {ALLOWED:?}; \
+                     every new spawn must be added here deliberately",
+                    file.display()
+                );
+                assert!(
+                    !escalators.contains(program),
+                    "`{}` spawns `{program}`, a privilege-escalation binary; \
+                     `crap` detects and guides, it never escalates itself",
+                    file.display()
+                );
+            }
+        }
+        assert!(
+            total_spawns > 0,
+            "the scan found no spawns at all — `crap` does spawn `ps`, so the matcher is broken"
+        );
 
         // The shell function installed by `--shell-setup` runs in the user's
         // own shell, so it is held to the same rule.
