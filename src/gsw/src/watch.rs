@@ -3899,9 +3899,9 @@ fn forward_input(event: CtEvent) -> Option<Event> {
 /// - [`InputMode::List`]: Up and Down move the cursor, Page Up and Page Down
 ///   move it one page, Enter goes to the worktree under it, and Esc and `q`
 ///   close the list. Every other key gives `None` and does nothing at all:
-///   `r` does not walk, `p` and `P` do not ask, `G`, `R`, `M`, and `m` start nothing, and no line leaves the row.
-///   The list takes the pane, so the frame that such a key acts on is not on
-///   the screen.
+///   `r` does not walk, `p` and `P` do not ask, `G`, `R`, `M`, and `m` start
+///   nothing, and no line leaves the row. The list takes the pane, so the
+///   frame that such a key acts on is not on the screen.
 /// - `G`, `R`, and `M` act only where `keys` says each one has a command
 ///   behind it. Where one does not, that key does what any other unbound key
 ///   does, which is the one silent case this feature has.
@@ -5661,7 +5661,7 @@ mod tests {
                     (KeyCode::PageUp, "ListPageUp"),
                     (KeyCode::PageDown, "ListPageDown"),
                 ] {
-                    let expected = if matches!(mode, InputMode::List) {
+                    let expected = if mode == InputMode::List {
                         in_the_list
                     } else {
                         "Dismiss"
