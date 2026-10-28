@@ -788,7 +788,9 @@ mod tests {
     /// Twelve active runs. Run 1 is the oldest, thus the first row, and
     /// run 12 is the last row.
     fn twelve_runs() -> Vec<Run> {
-        (1..=12).map(|id| active_run(id, 100 - id as i64)).collect()
+        (1..=12_u8)
+            .map(|id| active_run(u64::from(id), 100 - i64::from(id)))
+            .collect()
     }
 
     #[test]
