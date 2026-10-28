@@ -874,6 +874,12 @@ impl Board {
         self.move_selection(now, |index, rows| (index + 1).min(rows.len() - 1));
     }
 
+    /// Moves the selection one page down. A page is the height of the last
+    /// view minus one row, and at least one row.
+    pub fn select_next_page(&mut self, now: DateTime<Utc>) {
+        self.settle(now);
+    }
+
     /// Moves the selection to the previous row: an item row or a job row.
     pub fn select_previous(&mut self, now: DateTime<Utc>) {
         self.settle(now);
@@ -3626,5 +3632,16 @@ mod tests {
             marked(&view.rows),
             ["Header(History,1,1,0,0)", "Departure(a/x#2)*"]
         );
+    }
+
+    /// Page Down from the top row, with no header in the page.
+    #[test]
+    fn select_next_page_highlights_the_row_one_page_down() {
+        let mut board = long_board(10, 0);
+        let rows = shape(&board.rows(now()));
+        assert_eq!(rows[0], "Header(Active,10,0,0,0)");
+        board.view(now(), 4);
+        board.select_next_page(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(4)*"));
     }
 }
