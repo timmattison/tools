@@ -1394,6 +1394,34 @@ mod tests {
         );
     }
 
+    /// A pane of one row has a page of one row. A list that no settle reached
+    /// moves one row for each page key, because no window of it was on the
+    /// screen yet.
+    #[test]
+    fn a_page_is_at_least_one_row() {
+        let all = entries(10);
+
+        let mut list = open_list(&all, 0, 0);
+        list.settle(1);
+        list.page_down();
+        list.settle(1);
+        assert_eq!(list.selected(), &all[1], "pane of one row, Page Down");
+        list.page_down();
+        list.settle(1);
+        assert_eq!(list.selected(), &all[2], "pane of one row, Page Down");
+        list.page_up();
+        list.settle(1);
+        assert_eq!(list.selected(), &all[1], "pane of one row, Page Up");
+
+        let mut list = open_list(&all, 0, 0);
+        list.page_down();
+        assert_eq!(list.selected(), &all[1], "no settle, Page Down");
+        list.page_down();
+        assert_eq!(list.selected(), &all[2], "no settle, Page Down");
+        list.page_up();
+        assert_eq!(list.selected(), &all[1], "no settle, Page Up");
+    }
+
     /// The list marks the row of the home worktree, which Up goes to, and the
     /// cursor row. A home worktree that is not in the list marks no row.
     #[test]
