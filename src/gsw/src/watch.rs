@@ -3887,10 +3887,10 @@ fn forward_input(event: CtEvent) -> Option<Event> {
 ///   overlap, and a base update that runs puts the loop in this same mode. The
 ///   arrow keys are inert too: the window under the frame belongs to the
 ///   worktree that the command runs in, so the watch stays on that worktree.
-/// - [`InputMode::List`]: Up and Down move the cursor, Enter goes to the
-///   worktree under it, and Esc and `q` close the list. Every other key gives
-///   `None` and does nothing at all: `r` does not walk, `p` and `P` do not
-///   ask, `G`, `R`, `M`, and `m` start nothing, and no line leaves the row.
+/// - [`InputMode::List`]: Up and Down move the cursor, Page Up and Page Down
+///   move it one page, Enter goes to the worktree under it, and Esc and `q`
+///   close the list. Every other key gives `None` and does nothing at all:
+///   `r` does not walk, `p` and `P` do not ask, `G`, `R`, `M`, and `m` start nothing, and no line leaves the row.
 ///   The list takes the pane, so the frame that such a key acts on is not on
 ///   the screen.
 /// - `G`, `R`, and `M` act only where `keys` says each one has a command
@@ -3979,6 +3979,8 @@ fn classify_input(key: KeyEvent, mode: InputMode, keys: CommandKeys) -> Option<E
         InputMode::List => match code {
             KeyCode::Up => Event::ListUp,
             KeyCode::Down => Event::ListDown,
+            KeyCode::PageUp => Event::ListPageUp,
+            KeyCode::PageDown => Event::ListPageDown,
             KeyCode::Enter => Event::ListGo,
             // `q` closes the list, as it answers "no" to the push question.
             KeyCode::Esc | KeyCode::Char('q') => Event::ListClose,
