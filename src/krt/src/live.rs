@@ -1956,11 +1956,15 @@ mod tests {
     /// builds the terminal, so this table needs no terminal of its own.
     ///
     /// The sink comes back empty, for the reason that [`table_at`] states.
-    fn graphics_table(columns: u16, rows: Option<u16>) -> Table<Vec<u8>, FakeKeys> {
+    fn graphics_table(
+        columns: u16,
+        rows: Option<u16>,
+        script: &[&[Command]],
+    ) -> Table<Vec<u8>, FakeKeys> {
         let mut table = Table::new(
             facts_at(temp_path("graphics")),
             Vec::new(),
-            FakeKeys::of(&[]),
+            FakeKeys::of(script),
             Window::new(columns, rows),
             image_look(termgfx::Capabilities::new(
                 termgfx::TerminalType::Kitty,
@@ -2033,7 +2037,7 @@ mod tests {
         // not delete would stack a thousand images over a run of a thousand
         // rounds. The delete stands at the head of the frame, in front of the
         // clear, so nothing of the frame that follows it goes away with it.
-        let mut screen = graphics_table(WIDTH, NO_ROWS);
+        let mut screen = graphics_table(WIDTH, NO_ROWS, &[]);
         screen.round(&one_round());
         let drawn = String::from_utf8_lossy(&screen.sink).into_owned();
 
@@ -2070,7 +2074,7 @@ mod tests {
         //
         // The heading stays, because it names the column and it is no picture of
         // a hop.
-        let mut screen = graphics_table(WIDTH, NO_ROWS);
+        let mut screen = graphics_table(WIDTH, NO_ROWS, &[]);
         screen.round(&one_round());
         let lines = painted(&screen.sink);
 
@@ -2162,7 +2166,7 @@ mod tests {
         // The image of a row stands over the Recent column of that row, and the
         // row at index `i` stands on the line under the head of the frame plus
         // `i`.
-        let mut screen = graphics_table(WIDTH, NO_ROWS);
+        let mut screen = graphics_table(WIDTH, NO_ROWS, &[]);
         screen.round(&a_tall_round());
         let drawn = String::from_utf8_lossy(&screen.sink).into_owned();
         let lines = painted(&screen.sink);
@@ -2217,7 +2221,7 @@ mod tests {
         // wraps such a line, every line under it stands one row lower, and an
         // image that counted the lines of the frame then stands over the
         // heading of the Recent column and never over the last row of the path.
-        let mut screen = graphics_table(WIDTH, NO_ROWS);
+        let mut screen = graphics_table(WIDTH, NO_ROWS, &[]);
         screen.round(&one_round());
         let drawn = String::from_utf8_lossy(&screen.sink).into_owned();
         let lines = painted(&screen.sink);
@@ -2250,7 +2254,7 @@ mod tests {
         // highest TTLs. An image of one of those rows would stand over the line
         // that counts them, or over a line of another frame, and nothing on the
         // screen would say which row it belongs to.
-        let mut screen = graphics_table(WIDTH, Some(SHORT_ROWS));
+        let mut screen = graphics_table(WIDTH, Some(SHORT_ROWS), &[]);
         screen.round(&a_tall_round());
         let drawn = String::from_utf8_lossy(&screen.sink).into_owned();
         let lines = painted(&screen.sink);
@@ -2263,6 +2267,39 @@ mod tests {
         assert!(
             !drawn.contains(&moved_to(&lines, usize::from(LAST_KEPT_TTL))),
             "and no image stands on the line under the last row that the window held: {drawn:?}"
+        );
+    }
+
+    #[test]
+    fn a_scrolled_frame_draws_each_image_on_the_line_of_its_row_and_none_on_a_count_line() {
+        // A scrolled frame shows a count line above the first row of the path.
+        // An image on that line, or on the line of the row above, would show a
+        // history beside the wrong hop, and the reader would trust it.
+        let mut screen = graphics_table(WIDTH, Some(SCROLL_ROWS), &[&[Command::PageDown]]);
+        screen.round(&a_tall_round());
+        screen.sink.clear();
+        screen.poll();
+        let drawn = String::from_utf8_lossy(&screen.sink).into_owned();
+        let lines = painted(&screen.sink);
+
+        assert_eq!(
+            image_count(&screen.sink),
+            5,
+            "one image stands for each row that the frame shows: {drawn:?}"
+        );
+        for index in 0..5 {
+            assert!(
+                drawn.contains(&format!("{}{KITTY_IMAGE}", moved_to(&lines, index + 1))),
+                "the image of the row at index {index} stands under the count line: {drawn:?}"
+            );
+        }
+        assert!(
+            !drawn.contains(&moved_to(&lines, 0)),
+            "no image stands on the line that counts the rows above: {drawn:?}"
+        );
+        assert!(
+            !drawn.contains(&moved_to(&lines, 6)),
+            "and no image stands on the line that counts the rows below: {drawn:?}"
         );
     }
 
@@ -2294,7 +2331,7 @@ mod tests {
         // A narrow terminal drops the Recent column, and a column that no line
         // of the frame holds is a column that no image can stand over. The
         // render says so: it names no place for a column that went away.
-        let mut screen = graphics_table(NO_RECENT_COLUMN, NO_ROWS);
+        let mut screen = graphics_table(NO_RECENT_COLUMN, NO_ROWS, &[]);
         screen.round(&one_round());
         let drawn = String::from_utf8_lossy(&screen.sink).into_owned();
 
