@@ -3721,4 +3721,18 @@ mod tests {
         board.select_previous_page(now());
         assert_eq!(selected_text(&mut board).as_deref(), Some("Run(2)*"));
     }
+
+    /// Page 2 up from `Run(102)` at screen row 6 aims at the header at row 4.
+    /// A step of two selectable rows would end on `Run(3)`.
+    #[test]
+    fn select_previous_page_stops_on_the_first_selectable_row_below_the_target() {
+        let mut board = long_board(3, 3);
+        for _ in 0..4 {
+            board.select_next(now());
+        }
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(102)*"));
+        board.view(now(), 3);
+        board.select_previous_page(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(101)*"));
+    }
 }
