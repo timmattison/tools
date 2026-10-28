@@ -4273,7 +4273,8 @@ function __crap_launch() {
 }
 function crap() {
     # These flags make the binary print to stdout and exit 0 without mutating
-    # the parent shell: --status queries, --help/-h/--version/-V emit
+    # the parent shell: --status queries, --forks prints a report from the fork
+    # log, --help/-h/--version/-V emit
     # informational text, and --shell-setup writes the rc file (not the live
     # shell) and prints activation instructions. Run them straight through so
     # their output reaches the terminal instead of being parsed as a
@@ -4281,7 +4282,7 @@ function crap() {
     # text and mangle it). --shell-setup matters on upgrades, when this very
     # function is already loaded and would otherwise swallow its instructions.
     case " $* " in
-        *" --status "*|*" --help "*|*" -h "*|*" --version "*|*" -V "*|*" --shell-setup "*)
+        *" --status "*|*" --forks "*|*" --help "*|*" -h "*|*" --version "*|*" -V "*|*" --shell-setup "*)
             command crap "$@"; return $? ;;
     esac
     local __crap_out
