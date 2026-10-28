@@ -2609,6 +2609,22 @@ mod tests {
     }
 
     #[test]
+    fn page_up_on_the_first_frame_changes_nothing() {
+        // There is no page above the first rows. The key must leave the frame
+        // as it is and not scroll to a row that does not exist.
+        let mut screen = tall_table(Some(SCROLL_ROWS), &[&[Command::PageUp]]);
+        screen.sink.clear();
+        screen.poll();
+        let lines = painted(&screen.sink);
+
+        assert_eq!(
+            under_the_head(&lines),
+            shown(None, 1, 6, Some("+14 rows")),
+            "the first frame stays: {lines:?}"
+        );
+    }
+
+    #[test]
     fn a_window_that_no_probe_measured_leaves_every_row_standing() {
         // A run that cannot measure the terminal knows no height to fit a
         // frame to. It draws the whole frame and lets the terminal decide what
