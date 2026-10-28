@@ -2205,9 +2205,12 @@ cannot hang the caller. Used by `cwt` and `ha`.
       highlighted run, and the second press then acts on every run. A third fast press is a single
       press again. A run that comes to the board later arrives collapsed.
   - Keys: Up and Down move the highlight through the pull request rows, the run rows, and the job
-    rows of the expanded runs. They skip the `Loading jobs…`, `No jobs yet`, and error rows. Right
-    expands the jobs of the highlighted run. Left collapses them, also from a job row, and the
-    highlight goes back to the run row. One press of Right on a job row does nothing, and one
+    rows of the expanded runs. They skip the `Loading jobs…`, `No jobs yet`, and error rows. Page
+    Down and Page Up move the highlight one page, which is the height of the board area minus one
+    row. They skip the same rows, and they stop on the first and the last row. When the page holds
+    no row that the highlight can go to, they move the highlight one row. Right expands the jobs
+    of the highlighted run. Left collapses them, also from a job row, and the highlight goes back
+    to the run row. One press of Right on a job row does nothing, and one
     press of Right or Left on a pull request row does nothing. Two fast presses of Right expand
     every run, and two fast presses of Left collapse every run, also from a pull request row. A
     held Right or Left does the same, because the terminal sends each repeat as a new press. Enter
