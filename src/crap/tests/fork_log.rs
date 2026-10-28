@@ -480,3 +480,83 @@ fn forks_rejects_an_invalid_id() {
         "{output:?}"
     );
 }
+
+/// Plants a transcript whose lines have the given uuid values and times, with
+/// `session_id` as the session of each line.
+fn plant_lines(home: &Path, folder: &str, id: &str, lines: &[(&str, &str)]) {
+    let dir = home.join(".claude/projects").join(folder);
+    fs::create_dir_all(&dir).unwrap();
+    let mut text = String::new();
+    for (uuid, time) in lines {
+        text.push_str(&format!(
+            "{{\"uuid\":\"{uuid}\",\"timestamp\":\"2026-10-20T{time}Z\",\"sessionId\":\"{id}\"}}\n"
+        ));
+    }
+    fs::write(dir.join(format!("{id}.jsonl")), text).unwrap();
+}
+
+/// The uuid value of line `n` in the scan fixtures.
+fn scan_uuid(n: u32) -> String {
+    format!("99999999-0000-4000-8000-{n:012}")
+}
+
+/// Runs `crap --forks id --scan` with `HOME` set to `home`.
+fn run_forks_scan(home: &Path, id: &str) -> Output {
+    common::crap_command(home)
+        .args(["--forks", id, "--scan"])
+        .output()
+        .expect("crap binary should run")
+}
+
+#[test]
+fn forks_scan_finds_a_fork_that_is_not_in_the_log() {
+    let tmp = unique_root("forks-scan");
+    let home = tmp.path().join("home");
+    let source_lines: Vec<(String, String)> = (1..=6)
+        .map(|n| (scan_uuid(n), format!("10:00:0{n}")))
+        .collect();
+    let source_refs: Vec<(&str, &str)> = source_lines
+        .iter()
+        .map(|(u, t)| (u.as_str(), t.as_str()))
+        .collect();
+    plant_lines(&home, "-a", FORK_A, &source_refs);
+    let fork_lines: Vec<(String, String)> = [
+        (4, "10:00:04"),
+        (5, "10:00:05"),
+        (6, "10:00:06"),
+        (7, "11:00:00"),
+    ]
+    .iter()
+    .map(|(n, t)| (scan_uuid(*n), (*t).to_string()))
+    .collect();
+    let fork_refs: Vec<(&str, &str)> = fork_lines
+        .iter()
+        .map(|(u, t)| (u.as_str(), t.as_str()))
+        .collect();
+    plant_lines(&home, "-b", FORK_B, &fork_refs);
+
+    let output = run_forks_scan(&home, FORK_A);
+    assert!(output.status.success(), "{output:?}");
+    let out = stdout_of(&output);
+    let line = out
+        .lines()
+        .find(|line| line.contains(FORK_B))
+        .unwrap_or_else(|| panic!("no line has the fork: {out}"));
+    assert!(line.contains("fork"), "{line}");
+    assert!(line.contains("3 shared"), "{line}");
+}
+
+#[test]
+fn forks_scan_without_a_transcript_says_so() {
+    let tmp = unique_root("forks-scan-none");
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    plant_log_line(&home, FORK_A, FORK_B, "2026-10-28T01:00:00Z", "/w/b");
+
+    let output = run_forks_scan(&home, FORK_B);
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        stdout_of(&output).contains("The scan has nothing to compare"),
+        "{output:?}"
+    );
+}

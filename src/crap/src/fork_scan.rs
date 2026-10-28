@@ -95,7 +95,10 @@ pub struct ScanReport {
 /// result is [`Relation::Related`]. A line without a `uuid`, or with a
 /// timestamp that does not parse, does not count.
 pub fn relation(target: &[LineHead], other: &[LineHead], shared: &HashSet<String>) -> Relation {
-    match (has_older_lines(target, shared), has_older_lines(other, shared)) {
+    match (
+        has_older_lines(target, shared),
+        has_older_lines(other, shared),
+    ) {
         (true, false) => Relation::Fork,
         (false, true) => Relation::Source,
         _ => Relation::Related,
@@ -144,8 +147,8 @@ pub fn scan_for_relatives(
     if target_uuids.is_empty() {
         return Ok(ScanReport::default());
     }
-    let matcher = aho_corasick::AhoCorasick::new(&target_uuids)
-        .expect("a set of strings builds a matcher");
+    let matcher =
+        aho_corasick::AhoCorasick::new(&target_uuids).expect("a set of strings builds a matcher");
     let unreadable = AtomicUsize::new(0);
     let listing = candidates(projects_root);
     unreadable.fetch_add(listing.unreadable, Ordering::Relaxed);
@@ -332,8 +335,16 @@ mod tests {
 
     #[test]
     fn relation_is_related_when_both_transcripts_start_with_the_shared_lines() {
-        let a = vec![head("u1", "10:00:01"), head("u2", "10:00:02"), head("a", "12:00:00")];
-        let b = vec![head("u1", "10:00:01"), head("u2", "10:00:02"), head("b", "13:00:00")];
+        let a = vec![
+            head("u1", "10:00:01"),
+            head("u2", "10:00:02"),
+            head("a", "12:00:00"),
+        ];
+        let b = vec![
+            head("u1", "10:00:01"),
+            head("u2", "10:00:02"),
+            head("b", "13:00:00"),
+        ];
         let shared = set(&["u1", "u2"]);
         assert_eq!(relation(&a, &b, &shared), Relation::Related);
     }
@@ -426,7 +437,10 @@ mod tests {
         tree.write(
             "-c",
             OTHER,
-            &[line(&uid(90), "09:00:00", OTHER), line(&uid(91), "09:00:01", OTHER)],
+            &[
+                line(&uid(90), "09:00:00", OTHER),
+                line(&uid(91), "09:00:01", OTHER),
+            ],
         );
         (src, fork)
     }
@@ -503,8 +517,11 @@ mod tests {
         std::fs::copy(&src, sub_file).unwrap();
         let link_dir = tree.root().join("-link");
         std::fs::create_dir_all(&link_dir).unwrap();
-        std::os::unix::fs::symlink(&src, link_dir.join("ffffffff-0000-4000-8000-000000000007.jsonl"))
-            .unwrap();
+        std::os::unix::fs::symlink(
+            &src,
+            link_dir.join("ffffffff-0000-4000-8000-000000000007.jsonl"),
+        )
+        .unwrap();
         std::os::unix::fs::symlink(tree.root().join("-a"), tree.root().join("-linked-folder"))
             .unwrap();
         tree.write("-copy", SRC, &source_lines());
@@ -544,10 +561,15 @@ mod tests {
             .iter()
             .map(|hit| (hit.session_id.chars().take(8).collect(), hit.shared))
             .collect();
-        let expected: Vec<(String, usize)> = [("33333333", 5), ("11111111", 2), ("22222222", 2), ("00000000", 1)]
-            .iter()
-            .map(|(id, n)| ((*id).to_string(), *n))
-            .collect();
+        let expected: Vec<(String, usize)> = [
+            ("33333333", 5),
+            ("11111111", 2),
+            ("22222222", 2),
+            ("00000000", 1),
+        ]
+        .iter()
+        .map(|(id, n)| ((*id).to_string(), *n))
+        .collect();
         assert_eq!(order, expected);
     }
 
@@ -557,7 +579,11 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let tree = Tree::new();
         let (src, fork) = plant_pair(&tree);
-        let locked = tree.write("-d", "eeeeeeee-0000-4000-8000-000000000008", &source_lines());
+        let locked = tree.write(
+            "-d",
+            "eeeeeeee-0000-4000-8000-000000000008",
+            &source_lines(),
+        );
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
         let readable = std::fs::read(&locked).is_ok();
         let report = scan_for_relatives(tree.root(), SRC, &src).unwrap();
@@ -597,7 +623,10 @@ mod tests {
     #[test]
     fn format_scan_report_lists_each_hit() {
         let report = ScanReport {
-            hits: vec![hit("f7e9", 23, Relation::Fork), hit("0abc", 4, Relation::Related)],
+            hits: vec![
+                hit("f7e9", 23, Relation::Fork),
+                hit("0abc", 4, Relation::Related),
+            ],
             unreadable: 0,
         };
         assert_eq!(

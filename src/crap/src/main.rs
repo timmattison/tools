@@ -5988,6 +5988,14 @@ mod tests {
     }
 
     #[test]
+    fn cli_scan_needs_forks() {
+        use clap::Parser;
+        assert!(Cli::try_parse_from(["crap", "--scan", SAMPLE_ID]).is_err());
+        let cli = Cli::try_parse_from(["crap", "--forks", SAMPLE_ID, "--scan"]).unwrap();
+        assert!(cli.forks && cli.scan);
+    }
+
+    #[test]
     fn cli_bare_user_is_a_parse_error() {
         use clap::Parser;
         // `--user` requires a NAME; a bare flag is rejected.
