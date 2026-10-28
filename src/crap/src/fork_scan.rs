@@ -217,4 +217,121 @@ mod tests {
         let b = vec![bare("u1")];
         assert_eq!(relation(&a, &b, &set(&["u1"])), Relation::Related);
     }
+
+    /// A fixture tree of transcripts under a temporary projects root.
+    struct Tree {
+        dir: tempfile::TempDir,
+    }
+
+    impl Tree {
+        fn new() -> Self {
+            Self {
+                dir: tempfile::Builder::new()
+                    .prefix("crap-scan-")
+                    .tempdir()
+                    .unwrap(),
+            }
+        }
+
+        fn root(&self) -> &Path {
+            self.dir.path()
+        }
+
+        /// Writes `<root>/<folder>/<id>.jsonl` with one JSON value on each line.
+        fn write(&self, folder: &str, id: &str, lines: &[serde_json::Value]) -> PathBuf {
+            let dir = self.root().join(folder);
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join(format!("{id}.jsonl"));
+            let mut text = String::new();
+            for line in lines {
+                text.push_str(&line.to_string());
+                text.push('\n');
+            }
+            std::fs::write(&path, text).unwrap();
+            path
+        }
+    }
+
+    /// One transcript line with the top-level keys that the scan reads.
+    fn line(uuid: &str, time: &str, session: &str) -> serde_json::Value {
+        serde_json::json!({
+            "uuid": uuid,
+            "timestamp": format!("2026-10-20T{time}Z"),
+            "sessionId": session,
+            "type": "user",
+        })
+    }
+
+    const SRC: &str = "aaaaaaaa-0000-4000-8000-000000000001";
+    const FORK: &str = "bbbbbbbb-0000-4000-8000-000000000002";
+    const OTHER: &str = "cccccccc-0000-4000-8000-000000000003";
+
+    /// The uuid value of line `n` of the fixture pair.
+    fn uid(n: u32) -> String {
+        format!("dddddddd-0000-4000-8000-{n:012}")
+    }
+
+    /// The lines of the source: u1..u6.
+    fn source_lines() -> Vec<serde_json::Value> {
+        (1..=6)
+            .map(|n| line(&uid(n), &format!("10:00:0{n}"), SRC))
+            .collect()
+    }
+
+    /// The lines of the fork: copies of u4..u6, then new lines u7 and u8.
+    fn fork_lines() -> Vec<serde_json::Value> {
+        let mut lines: Vec<_> = (4..=6)
+            .map(|n| line(&uid(n), &format!("10:00:0{n}"), FORK))
+            .collect();
+        lines.push(line(&uid(7), "11:00:00", FORK));
+        lines.push(line(&uid(8), "11:00:01", FORK));
+        lines
+    }
+
+    /// Plants the source, the fork, and an unrelated transcript.
+    fn plant_pair(tree: &Tree) -> (PathBuf, PathBuf) {
+        let src = tree.write("-a", SRC, &source_lines());
+        let fork = tree.write("-b", FORK, &fork_lines());
+        tree.write(
+            "-c",
+            OTHER,
+            &[line(&uid(90), "09:00:00", OTHER), line(&uid(91), "09:00:01", OTHER)],
+        );
+        (src, fork)
+    }
+
+    #[test]
+    fn finds_a_fork_that_shares_uuid_values() {
+        let tree = Tree::new();
+        let (src, fork) = plant_pair(&tree);
+        let report = scan_for_relatives(tree.root(), SRC, &src).unwrap();
+        assert_eq!(
+            report,
+            ScanReport {
+                hits: vec![ScanHit {
+                    session_id: FORK.to_string(),
+                    transcript: fork,
+                    shared: 3,
+                    relation: Relation::Fork,
+                }],
+                unreadable: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn reports_the_source_of_a_fork() {
+        let tree = Tree::new();
+        let (src, fork) = plant_pair(&tree);
+        let report = scan_for_relatives(tree.root(), FORK, &fork).unwrap();
+        assert_eq!(
+            report.hits,
+            vec![ScanHit {
+                session_id: SRC.to_string(),
+                transcript: src,
+                shared: 3,
+                relation: Relation::Source,
+            }]
+        );
+    }
 }
