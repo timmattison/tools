@@ -771,7 +771,9 @@ impl<W: Write, K: Keys> Table<W, K> {
             // which row it belongs to.
             recent: rendered.recent.map(|mut recent| {
                 recent.rows.truncate(fitted.rows.end);
-                recent.rows.drain(..fitted.rows.start.min(recent.rows.len()));
+                recent
+                    .rows
+                    .drain(..fitted.rows.start.min(recent.rows.len()));
                 recent
             }),
             rows: fitted.rows,
@@ -2355,7 +2357,8 @@ mod tests {
             fitted.lines
         );
         assert_eq!(
-            fitted.rows, 0..A_PATH,
+            fitted.rows,
+            0..A_PATH,
             "and it says that every row of the path reached it"
         );
     }
@@ -2366,10 +2369,17 @@ mod tests {
         // image for a row that went out of the frame. Such an image would stand
         // over the footer of the frame, and nothing on the screen would say
         // which row it belongs to.
-        let fitted = super::fitted(a_head(), a_body(A_PATH), Vec::new(), Some(A_SHORT_WINDOW), 0);
+        let fitted = super::fitted(
+            a_head(),
+            a_body(A_PATH),
+            Vec::new(),
+            Some(A_SHORT_WINDOW),
+            0,
+        );
 
         assert_eq!(
-            fitted.rows, 0..KEPT_ROWS,
+            fitted.rows,
+            0..KEPT_ROWS,
             "the count names the rows of the path that the window held: {:?}",
             fitted.lines
         );
@@ -2528,7 +2538,10 @@ mod tests {
     fn two_page_down_keys_of_one_turn_scroll_two_pages() {
         // A reader who holds the key sends several presses in one turn. Each
         // press has to move one page, and not the same page twice.
-        let mut screen = tall_table(Some(SCROLL_ROWS), &[&[Command::PageDown, Command::PageDown]]);
+        let mut screen = tall_table(
+            Some(SCROLL_ROWS),
+            &[&[Command::PageDown, Command::PageDown]],
+        );
         screen.sink.clear();
         screen.poll();
         let lines = painted(&screen.sink);
@@ -2790,7 +2803,10 @@ mod tests {
         let mut wanted = shown(Some("+7 rows"), 8, 12, Some("+8 rows"));
         wanted.push(String::new());
         wanted.extend(HELP_LINES.map(str::to_owned));
-        assert_eq!(second, wanted, "and the list of the keys keeps the first row");
+        assert_eq!(
+            second, wanted,
+            "and the list of the keys keeps the first row"
+        );
     }
 
     #[test]
