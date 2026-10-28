@@ -1639,6 +1639,42 @@ mod tests {
         screen
     }
 
+    /// The number of rows of a window that the scroll tests use.
+    ///
+    /// The head takes four rows (see [`SHORT_ROWS`] for why four), so seven
+    /// lines remain for the rows of the path and their count lines.
+    const SCROLL_ROWS: u16 = 11;
+
+    /// The lines of a frame under its head, in a form that one `assert_eq!`
+    /// compares.
+    ///
+    /// A count line stays as its text. A row of the tall path becomes `row N`
+    /// for its TTL `N`. Any other line, such as the blank line of a footer,
+    /// stays as it is. A test then reads the rows that a frame shows without
+    /// the width of the columns in the way.
+    fn under_the_head(lines: &[String]) -> Vec<String> {
+        lines[head_lines(lines)..]
+            .iter()
+            .map(|line| {
+                (TTL..=TALL_PATH)
+                    .find(|ttl| line.starts_with(&tall_row(*ttl)))
+                    .map_or_else(|| line.clone(), |ttl| format!("row {ttl}"))
+            })
+            .collect()
+    }
+
+    /// The lines that [`under_the_head`] gives for a frame that shows the rows
+    /// `from` to `to` of the tall path, with an optional count line on each
+    /// side.
+    fn shown(above: Option<&str>, from: u8, to: u8, below: Option<&str>) -> Vec<String> {
+        above
+            .map(str::to_owned)
+            .into_iter()
+            .chain((from..=to).map(|ttl| format!("row {ttl}")))
+            .chain(below.map(str::to_owned))
+            .collect()
+    }
+
     /// The TTL that the destination answered at.
     const TARGET_TTL: u8 = 2;
 
@@ -2351,6 +2387,23 @@ mod tests {
             last_lines(&lines, 1),
             [DROPPED_LINE],
             "and one line says how many rows the frame left out: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn page_down_scrolls_the_rows_of_the_path_by_one_page() {
+        // A path that is longer than the window hides its far hops. The reader
+        // has to reach them with a key, and the rows that stood above must
+        // stay counted so the reader knows where in the path the frame is.
+        let mut screen = tall_table(Some(SCROLL_ROWS), &[&[Command::PageDown]]);
+        screen.sink.clear();
+        screen.poll();
+        let lines = painted(&screen.sink);
+
+        assert_eq!(
+            under_the_head(&lines),
+            shown(Some("+5 rows"), 6, 10, Some("+10 rows")),
+            "one page down shows rows 6 to 10: {lines:?}"
         );
     }
 
