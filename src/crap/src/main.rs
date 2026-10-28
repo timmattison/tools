@@ -2184,7 +2184,10 @@ fn run_forks(roots: &[UserProjects], fork_log: Option<&Path>, session_id: &str) 
         eprint!("{}", format_searched_roots(roots));
         exit(exit_codes::SESSION_NOT_FOUND);
     }
-    print!("{}", fork_log::format_log_report(session_id, &forks, &chain));
+    print!(
+        "{}",
+        fork_log::format_log_report(session_id, &forks, &chain)
+    );
     exit(0);
 }
 

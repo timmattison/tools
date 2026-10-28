@@ -457,7 +457,10 @@ fn forks_warns_about_unreadable_log_lines() {
 
     let output = run_forks(&home, FORK_A);
     assert!(output.status.success(), "{output:?}");
-    assert!(stderr_of(&output).contains("could not be read"), "{output:?}");
+    assert!(
+        stderr_of(&output).contains("could not be read"),
+        "{output:?}"
+    );
     assert!(
         stdout_of(&output).contains(&format!("{FORK_B}  2026-10-28T01:00:00Z  saved")),
         "{output:?}"
@@ -472,5 +475,8 @@ fn forks_rejects_an_invalid_id() {
 
     let output = run_forks(&home, "not-a-session-id");
     assert_eq!(output.status.code(), Some(4), "{output:?}");
-    assert!(stderr_of(&output).contains("is not a valid session id"), "{output:?}");
+    assert!(
+        stderr_of(&output).contains("is not a valid session id"),
+        "{output:?}"
+    );
 }

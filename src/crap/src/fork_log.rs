@@ -241,7 +241,10 @@ pub fn format_log_report(id: &str, forks: &[ForkLine<'_>], chain: &SourceChain<'
         }
         match (&chain.looped_at, chain.links.last()) {
             (Some(repeated), _) => {
-                let _ = writeln!(out, "  The chain stops: the fork log names {repeated} again.");
+                let _ = writeln!(
+                    out,
+                    "  The chain stops: the fork log names {repeated} again."
+                );
             }
             (None, Some(last)) => {
                 let _ = writeln!(out, "  {} is not a fork in the fork log.", last.source_id);
@@ -418,7 +421,12 @@ mod tests {
 
     #[test]
     fn forks_of_returns_the_records_with_that_source_in_log_order() {
-        let records = [link("a", "b"), link("x", "y"), link("a", "c"), link("b", "d")];
+        let records = [
+            link("a", "b"),
+            link("x", "y"),
+            link("a", "c"),
+            link("b", "d"),
+        ];
         assert_eq!(fork_ids(&forks_of(&records, "a")), ["b", "c"]);
         assert!(forks_of(&records, "d").is_empty());
     }
@@ -468,10 +476,19 @@ mod tests {
         let one = made(ID_A, ID_B, ForkKind::Here, "/w/one");
         let two = made(ID_A, ID_C, ForkKind::ForkAt, "/w/two");
         let forks = [
-            ForkLine { record: &one, saved: true },
-            ForkLine { record: &two, saved: false },
+            ForkLine {
+                record: &one,
+                saved: true,
+            },
+            ForkLine {
+                record: &two,
+                saved: false,
+            },
         ];
-        let chain = SourceChain { links: Vec::new(), looped_at: None };
+        let chain = SourceChain {
+            links: Vec::new(),
+            looped_at: None,
+        };
         assert_eq!(
             format_log_report(ID_A, &forks, &chain),
             format!(
@@ -486,7 +503,10 @@ mod tests {
     fn report_for_a_chain_only() {
         let first = made(ID_B, ID_C, ForkKind::ForkAt, "/w/c");
         let second = made(ID_A, ID_B, ForkKind::Here, "/w/b");
-        let chain = SourceChain { links: vec![&first, &second], looped_at: None };
+        let chain = SourceChain {
+            links: vec![&first, &second],
+            looped_at: None,
+        };
         assert_eq!(
             format_log_report(ID_C, &[], &chain),
             format!(
@@ -502,8 +522,14 @@ mod tests {
     fn report_for_both_sections_has_a_blank_line_between() {
         let child = made(ID_B, ID_C, ForkKind::Here, "/w/c");
         let parent = made(ID_A, ID_B, ForkKind::Here, "/w/b");
-        let forks = [ForkLine { record: &child, saved: true }];
-        let chain = SourceChain { links: vec![&parent], looped_at: None };
+        let forks = [ForkLine {
+            record: &child,
+            saved: true,
+        }];
+        let chain = SourceChain {
+            links: vec![&parent],
+            looped_at: None,
+        };
         assert_eq!(
             format_log_report(ID_B, &forks, &chain),
             format!(
@@ -519,7 +545,10 @@ mod tests {
 
     #[test]
     fn report_for_neither_is_one_line() {
-        let chain = SourceChain { links: Vec::new(), looped_at: None };
+        let chain = SourceChain {
+            links: Vec::new(),
+            looped_at: None,
+        };
         assert_eq!(
             format_log_report(ID_A, &[], &chain),
             format!(
@@ -532,7 +561,10 @@ mod tests {
     fn report_for_a_loop_says_where_the_chain_stops() {
         let first = made(ID_B, ID_A, ForkKind::Here, "/w/a");
         let second = made(ID_A, ID_B, ForkKind::Here, "/w/b");
-        let chain = SourceChain { links: vec![&first, &second], looped_at: Some(ID_A.to_string()) };
+        let chain = SourceChain {
+            links: vec![&first, &second],
+            looped_at: Some(ID_A.to_string()),
+        };
         assert_eq!(
             format_log_report(ID_A, &[], &chain),
             format!(
