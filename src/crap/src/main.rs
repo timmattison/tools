@@ -5958,6 +5958,15 @@ mod tests {
     }
 
     #[test]
+    fn cli_forks_parses_alone_and_conflicts_with_here_and_status() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["crap", "--forks", SAMPLE_ID]).unwrap();
+        assert!(cli.forks);
+        assert!(Cli::try_parse_from(["crap", "--forks", "--here", SAMPLE_ID]).is_err());
+        assert!(Cli::try_parse_from(["crap", "--forks", "--status", SAMPLE_ID]).is_err());
+    }
+
+    #[test]
     fn cli_bare_user_is_a_parse_error() {
         use clap::Parser;
         // `--user` requires a NAME; a bare flag is rejected.
