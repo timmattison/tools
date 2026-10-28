@@ -142,6 +142,38 @@ pub fn read_fork_log(log: &Path) -> std::io::Result<ForkLog> {
     })
 }
 
+/// The records whose source is the session `id`, in log order.
+///
+/// These are the forks of `id` that the log knows.
+#[must_use]
+pub fn forks_of<'a>(_records: &'a [ForkRecord], _id: &str) -> Vec<&'a ForkRecord> {
+    Vec::new()
+}
+
+/// The chain of sources of a session, from the session up to the oldest source
+/// that the log knows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceChain<'a> {
+    /// The record that made each link, newest first: the first record made the
+    /// session that was asked about, the next record made its source, and so on.
+    pub links: Vec<&'a ForkRecord>,
+    /// The id that the log names a second time, when the chain loops. A
+    /// hand-edited log can hold a loop. It is `None` for a normal chain.
+    pub looped_at: Option<String>,
+}
+
+/// Follows `fork_id` to `source_id` from `id` up, and stops at a session that is
+/// not a fork in the log, or at an id that was already visited.
+///
+/// When two records have the same `fork_id`, the first one in log order wins.
+#[must_use]
+pub fn source_chain<'a>(_records: &'a [ForkRecord], _id: &str) -> SourceChain<'a> {
+    SourceChain {
+        links: Vec::new(),
+        looped_at: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,5 +326,51 @@ mod tests {
         let ids: Vec<&str> = log.records.iter().map(|r| r.fork_id.as_str()).collect();
         assert_eq!(ids, ["one", "two"]);
         assert_eq!(log.unreadable_lines, 2);
+    }
+
+    fn link(source: &str, fork: &str) -> ForkRecord {
+        let mut record = sample(fork, ForkKind::Here, None);
+        record.source_id = source.to_string();
+        record
+    }
+
+    fn fork_ids(records: &[&ForkRecord]) -> Vec<String> {
+        records.iter().map(|r| r.fork_id.clone()).collect()
+    }
+
+    #[test]
+    fn forks_of_returns_the_records_with_that_source_in_log_order() {
+        let records = [link("a", "b"), link("x", "y"), link("a", "c"), link("b", "d")];
+        assert_eq!(fork_ids(&forks_of(&records, "a")), ["b", "c"]);
+        assert!(forks_of(&records, "d").is_empty());
+    }
+
+    #[test]
+    fn source_chain_follows_each_fork_to_its_source() {
+        let records = [link("a", "b"), link("b", "d")];
+        let chain = source_chain(&records, "d");
+        assert_eq!(fork_ids(&chain.links), ["d", "b"]);
+        assert_eq!(chain.looped_at, None);
+        assert!(source_chain(&records, "a").links.is_empty());
+    }
+
+    #[test]
+    fn source_chain_takes_the_first_record_for_a_fork_id() {
+        let records = [link("a", "b"), link("z", "b")];
+        let chain = source_chain(&records, "b");
+        assert_eq!(chain.links.len(), 1);
+        assert_eq!(chain.links[0].source_id, "a");
+    }
+
+    #[test]
+    fn source_chain_ends_on_a_loop_and_names_the_repeated_id() {
+        let records = [link("b", "a"), link("a", "b")];
+        let chain = source_chain(&records, "a");
+        assert_eq!(fork_ids(&chain.links), ["a", "b"]);
+        assert_eq!(chain.looped_at.as_deref(), Some("a"));
+        let own = [link("a", "a")];
+        let chain = source_chain(&own, "a");
+        assert_eq!(chain.links.len(), 1);
+        assert_eq!(chain.looped_at.as_deref(), Some("a"));
     }
 }
