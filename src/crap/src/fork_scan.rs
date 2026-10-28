@@ -25,6 +25,7 @@ use chrono::{DateTime, Utc};
 use rayon::prelude::*;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// How another transcript relates to the target transcript.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,12 +146,19 @@ pub fn scan_for_relatives(
     }
     let matcher = aho_corasick::AhoCorasick::new(&target_uuids)
         .expect("a set of strings builds a matcher");
-    let mut hits: Vec<ScanHit> = candidates(projects_root)
+    let unreadable = AtomicUsize::new(0);
+    let listing = candidates(projects_root);
+    unreadable.fetch_add(listing.unreadable, Ordering::Relaxed);
+    let mut hits: Vec<ScanHit> = listing
+        .files
         .par_iter()
         .filter(|path| path.as_path() != target_transcript)
         .filter(|path| path.file_stem().is_none_or(|stem| stem != target_id))
         .filter_map(|path| {
-            let bytes = std::fs::read(path).ok()?;
+            let Ok(bytes) = std::fs::read(path) else {
+                unreadable.fetch_add(1, Ordering::Relaxed);
+                return None;
+            };
             if !matcher.is_match(&bytes) {
                 return None;
             }
@@ -178,7 +186,7 @@ pub fn scan_for_relatives(
     });
     Ok(ScanReport {
         hits,
-        unreadable: 0,
+        unreadable: unreadable.into_inner(),
     })
 }
 
@@ -191,11 +199,33 @@ fn parse_heads(bytes: &[u8]) -> Vec<LineHead> {
         .collect()
 }
 
+/// The transcripts that the scan reads, and the count of places it could not list.
+struct Listing {
+    /// The transcript files, one folder deep in the projects root.
+    files: Vec<PathBuf>,
+    /// The count of the root or of folders that could not be listed.
+    unreadable: usize,
+}
+
 /// Lists the transcripts that are one folder deep in `projects_root`.
-fn candidates(projects_root: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    let Ok(folders) = std::fs::read_dir(projects_root) else {
-        return files;
+///
+/// A root that does not exist gives no files and no error. Each other failure to
+/// list the root, or a folder, adds one to the `unreadable` count. A folder that
+/// is a symlink and a file that is a symlink are skipped, and so is each file
+/// that is deeper than one folder, such as a subagent transcript.
+fn candidates(projects_root: &Path) -> Listing {
+    let mut listing = Listing {
+        files: Vec::new(),
+        unreadable: 0,
+    };
+    let folders = match std::fs::read_dir(projects_root) {
+        Ok(folders) => folders,
+        Err(err) => {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                listing.unreadable += 1;
+            }
+            return listing;
+        }
     };
     for folder in folders.flatten() {
         // `file_type` does not follow a symlink, so a linked folder is skipped.
@@ -203,23 +233,18 @@ fn candidates(projects_root: &Path) -> Vec<PathBuf> {
             continue;
         }
         let Ok(entries) = std::fs::read_dir(folder.path()) else {
+            listing.unreadable += 1;
             continue;
         };
         for entry in entries.flatten() {
             let path = entry.path();
             let is_file = entry.file_type().is_ok_and(|kind| kind.is_file());
             if is_file && path.extension().is_some_and(|ext| ext == "jsonl") {
-                files.push(path);
+                listing.files.push(path);
             }
         }
     }
-    files
-}
-
-/// Formats the report of a scan for the terminal.
-pub fn format_scan_report(id: &str, projects_root: &Path, report: &ScanReport) -> String {
-    let _ = (id, projects_root, report);
-    String::new()
+    listing
 }
 
 #[cfg(test)]
