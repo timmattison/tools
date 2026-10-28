@@ -470,7 +470,9 @@ pub(crate) struct Graphics {
 struct Drawn {
     /// The lines of the frame, head first.
     lines: Vec<String>,
-    /// The number of lines of the frame that stand above the rows of the path.
+    /// The number of lines of the frame that stand above the first row of the
+    /// path that the frame shows. The count line above those rows is one of
+    /// them, when the frame scrolled.
     ///
     /// The count comes off the render and not off a constant of this file. A
     /// narrow window takes the header of a frame onto more than one line, and
@@ -498,7 +500,9 @@ struct Drawn {
 /// Writes one image for each row of the path of a frame.
 ///
 /// The image of the row at `index` stands over the Recent column of the line
-/// that the row draws in, which is `head` plus that index. The cursor moves
+/// that the row draws in, which is `head` plus that index. When the frame
+/// scrolled, `head` counts the line that counts the rows above, so the image
+/// of the first shown row stands under that line. The cursor moves
 /// there first, and the image carries a placement id of its own:
 /// every image of one frame therefore replaces the image of that same row in
 /// the frame before it, where one id for every row would put the last row of
@@ -517,8 +521,9 @@ struct Drawn {
 /// * `graphics` - The terminal, and the pixel size of one character cell.
 /// * `recent` - Where the Recent column stands, and the history of every row of
 ///   the path that reached the frame.
-/// * `head` - The number of lines of the frame that stand above the rows of the
-///   path, which the render of that frame answered.
+/// * `head` - The number of lines of the frame that stand above the first row
+///   of the path that the frame shows. The render answered the lines of the
+///   head, and the count line above the rows is one more when it shows.
 /// * `window_rows` - The number of rows that the window of the terminal holds,
 ///   and `None` for a window that no probe measured. A line at or past that
 ///   count stands under the foot of the window, and an image there would scroll
@@ -764,7 +769,12 @@ impl<W: Write, K: Keys> Table<W, K> {
         let fitted = fitted(head, body, self.footer(), self.window.rows, self.first);
         Drawn {
             lines: fitted.lines,
-            head: rendered.head,
+            // The count line above the rows shows exactly when the frame
+            // scrolled past the first row. It stands between the head and the
+            // first shown row, so an image counts it as a line of the head.
+            head: rendered
+                .head
+                .saturating_add(u16::from(fitted.rows.start > 0)),
             // A row that went out of the frame draws no image. Such an image
             // would stand over the line that counts the rows which went out, or
             // over a line of another frame, and nothing on the screen would say
