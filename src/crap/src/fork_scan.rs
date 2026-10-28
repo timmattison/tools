@@ -138,7 +138,6 @@ pub fn scan_for_relatives(
     target_id: &str,
     target_transcript: &Path,
 ) -> std::io::Result<ScanReport> {
-    let _ = target_id;
     let heads = parse_heads(&std::fs::read(target_transcript)?);
     let target_uuids: HashSet<String> = heads.iter().filter_map(|h| h.uuid.clone()).collect();
     if target_uuids.is_empty() {
@@ -149,6 +148,7 @@ pub fn scan_for_relatives(
     let hits = candidates(projects_root)
         .par_iter()
         .filter(|path| path.as_path() != target_transcript)
+        .filter(|path| path.file_stem().is_none_or(|stem| stem != target_id))
         .filter_map(|path| {
             let bytes = std::fs::read(path).ok()?;
             if !matcher.is_match(&bytes) {
@@ -193,7 +193,8 @@ fn candidates(projects_root: &Path) -> Vec<PathBuf> {
         return files;
     };
     for folder in folders.flatten() {
-        if !folder.path().is_dir() {
+        // `file_type` does not follow a symlink, so a linked folder is skipped.
+        if !folder.file_type().is_ok_and(|kind| kind.is_dir()) {
             continue;
         }
         let Ok(entries) = std::fs::read_dir(folder.path()) else {
@@ -201,7 +202,8 @@ fn candidates(projects_root: &Path) -> Vec<PathBuf> {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().is_some_and(|ext| ext == "jsonl") {
+            let is_file = entry.file_type().is_ok_and(|kind| kind.is_file());
+            if is_file && path.extension().is_some_and(|ext| ext == "jsonl") {
                 files.push(path);
             }
         }
