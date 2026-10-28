@@ -428,4 +428,24 @@ mod tests {
         let report = scan_for_relatives(tree.root(), SRC, &src).unwrap();
         assert_eq!(report.hits.len(), 1, "only the fork is a hit: {report:?}");
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn skips_subagent_transcripts_symlinks_and_copies_of_the_same_session() {
+        let tree = Tree::new();
+        let src = tree.write("-a", SRC, &source_lines());
+        let sub = tree.root().join("-a").join(SRC).join("subagents");
+        std::fs::create_dir_all(&sub).unwrap();
+        let sub_file = sub.join("agent-1.jsonl");
+        std::fs::copy(&src, sub_file).unwrap();
+        let link_dir = tree.root().join("-link");
+        std::fs::create_dir_all(&link_dir).unwrap();
+        std::os::unix::fs::symlink(&src, link_dir.join("ffffffff-0000-4000-8000-000000000007.jsonl"))
+            .unwrap();
+        std::os::unix::fs::symlink(tree.root().join("-a"), tree.root().join("-linked-folder"))
+            .unwrap();
+        tree.write("-copy", SRC, &source_lines());
+        let report = scan_for_relatives(tree.root(), SRC, &src).unwrap();
+        assert_eq!(report, ScanReport::default());
+    }
 }
