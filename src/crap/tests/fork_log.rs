@@ -153,3 +153,43 @@ fn an_unwritable_log_warns_and_the_fork_starts() {
         "{stderr}"
     );
 }
+
+#[test]
+fn cross_user_fork_adds_a_fork_at_line() {
+    let tmp = unique_root("fork-at");
+    let root = tmp.path();
+    let shared = root.join("shared-cwd");
+    fs::create_dir_all(&shared).unwrap();
+    let shared_text = shared.to_string_lossy().into_owned();
+    plant(
+        &root.join("other/.claude/projects"),
+        "-proj",
+        ORIG,
+        &shared_text,
+    );
+    let home = root.join("home");
+    fs::create_dir_all(home.join(".claude/projects")).unwrap();
+    let work = root.join("work");
+    fs::create_dir_all(&work).unwrap();
+
+    let output = common::crap_command(&home)
+        .current_dir(&work)
+        .args([ORIG, "--user", "other"])
+        .output()
+        .expect("crap binary should run");
+    assert!(output.status.success(), "{output:?}");
+
+    let lines = log_lines(&fork_log_path(&home));
+    assert_eq!(lines.len(), 1, "exactly one line: {lines:?}");
+    let line = &lines[0];
+    assert_eq!(line["kind"], "fork-at");
+    assert_eq!(line["source_id"], ORIG);
+    assert_eq!(line["source_user"], "other");
+    assert_eq!(line["source_dir"], shared_text.as_str());
+    assert_eq!(line["fork_dir"], shared_text.as_str());
+    assert_eq!(line["fork_id"], wire_fork_id(&output));
+    assert!(
+        !fork_log_path(&root.join("other")).exists(),
+        "nothing writes under the other user"
+    );
+}
