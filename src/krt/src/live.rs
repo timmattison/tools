@@ -1779,6 +1779,12 @@ mod tests {
             .collect()
     }
 
+    /// The number of rows of a window with no room for a scroll.
+    ///
+    /// The head takes four rows, so two lines remain for the rows of the path.
+    /// A scroll needs three: one row between two count lines.
+    const TINY_ROWS: u16 = 6;
+
     /// The TTL that the destination answered at.
     const TARGET_TTL: u8 = 2;
 
@@ -2699,6 +2705,29 @@ mod tests {
             under_the_head(&lines),
             shown(Some("+5 rows"), 6, 10, Some("+10 rows")),
             "the same rows stand: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_window_too_short_for_a_scroll_ignores_the_page_keys() {
+        // A scroll needs one row between two count lines. A window that has
+        // less room than that must keep its frame inside the window, and not
+        // draw count lines that cover the head.
+        let mut screen = tall_table(Some(TINY_ROWS), &[&[Command::PageDown]]);
+        let before = painted(&screen.sink);
+        screen.sink.clear();
+        screen.poll();
+        let after = painted(&screen.sink);
+
+        assert_eq!(after, before, "the frame does not move: {after:?}");
+        assert!(
+            after.len() <= usize::from(TINY_ROWS),
+            "and it stands inside the {TINY_ROWS} rows of the window: {after:?}"
+        );
+        assert_eq!(
+            under_the_head(&after),
+            shown(None, 1, 1, Some("+19 rows")),
+            "one row and one count line stand: {after:?}"
         );
     }
 
