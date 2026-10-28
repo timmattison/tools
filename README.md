@@ -1320,22 +1320,30 @@ cannot hang the caller. Used by `cwt` and `ha`.
     run stands leaves the frame at the size it started with. A frame taller than that window keeps
     its head, its column header, the mark of the pause, and the list of the keys. The rows of the
     path take the lines that those leave, first hop first, and one line under the last row of them
-    counts the rows that went out of the frame, as in `+12 rows`. A run that measures no terminal
-    draws every line of the frame. The table folds every round that arrives and draws the frame of
+    counts the rows that went out of the frame, as in `+12 rows`. Page Down and Page Up scroll the
+    rows of the path by one page, and the head and the footer stay where they stand. While rows are
+    above the window, one line above the first row counts them in the same form, so the TTL of each
+    row tells which side each count is on. One page is the rows that the frame shows, less one, so
+    one row stays on the screen across each move, and Page Up goes back to the page that Page Down
+    left. The scroll stops at the first hop and at the last full window. A run that measures no
+    terminal draws every line of the frame, and a frame that fits its window does not scroll. The
+    table folds every round that arrives and draws the frame of
     that fold, so the count of the rounds in its head is the count that the table folded, and the
     size in that same head is the size the recorded file holds at that draw. The first frame draws
     at the moment the run takes the terminal, in front of the first round. It counts no round, and
     its head already names the destination, the address, the source, the period, and the recorded
     file, so a run of `--interval 2m` says that it started and holds no empty screen for those two
     minutes.
-  - Five keys drive the live table. `q` and Ctrl-C stop the run, write the record that closes it,
+  - Six keys drive the live table. `q` and Ctrl-C stop the run, write the record that closes it,
     give the terminal back, and exit with success. `p` holds the table where it stands, and a
     second press lets it move again. A held table holds the display alone: the file still takes
     every round, and the table still folds every round into its numbers, so the frame that follows
     the pause holds every round of that pause. `n` shows the names of the hosts, and a second press
     shows the raw addresses. `r` empties the table and counts its rounds from zero, and it touches
-    neither the recorded file nor the count of the rounds that the closing record carries. `?`
-    shows the list of the keys under the table, and a second press hides it.
+    neither the recorded file nor the count of the rounds that the closing record carries. After
+    `r`, the frame shows the first hop again. Page Up and Page Down scroll the rows of the path one
+    page, and they also act while `p` holds the table. `n` and `?` keep the scroll. `?` shows the list of
+    the keys under the table, and a second press hides it.
   - Ctrl-C reaches the live table as a key and not as a signal. The table holds the terminal in raw
     mode, which clears `ISIG`, so the terminal sends the byte to `krt` and the process takes no
     `SIGINT`. A run that draws no table keeps the signal handler of the platform.
