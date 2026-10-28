@@ -878,13 +878,20 @@ impl Board {
         self.move_selection(now, |index, rows| (index + 1).min(rows.len() - 1));
     }
 
-    /// Moves the selection one page down. A page is the height of the last
-    /// view minus one row, and at least one row. Before the first view, a page
-    /// is one row. The selection stops on the last row that it can mark.
+    /// Moves the selection one page down.
+    ///
+    /// A page is the height of the last view minus one row, and at least one
+    /// row. Before the first view, a page is one row. The target is the screen
+    /// row of the selection plus one page. The selection goes to the last row
+    /// that it can mark at or above the target. A target past the end gives
+    /// the last row. The selection stops on the last row and does not wrap.
     pub fn select_next_page(&mut self, now: DateTime<Utc>) {
         self.settle(now);
         let page = self.page();
-        self.move_selection(now, |index, rows| (index + page).min(rows.len() - 1));
+        self.move_selection(now, |index, rows| {
+            let target = rows[index] + page;
+            rows.partition_point(|&row| row <= target) - 1
+        });
     }
 
     /// Moves the selection to the previous row: an item row or a job row.
