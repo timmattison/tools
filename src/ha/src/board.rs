@@ -3679,4 +3679,18 @@ mod tests {
         board.select_next_page(now());
         assert_eq!(selected_text(&mut board).as_deref(), Some("Run(3)*"));
     }
+
+    /// Page 1 from `Run(3)` reaches the header at screen row 4. No selectable
+    /// row lies in between, so the highlight moves one row.
+    #[test]
+    fn select_next_page_moves_one_row_when_no_row_lies_before_the_target() {
+        let mut board = long_board(3, 3);
+        for _ in 0..2 {
+            board.select_next(now());
+        }
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(3)*"));
+        board.view(now(), 2);
+        board.select_next_page(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(101)*"));
+    }
 }
