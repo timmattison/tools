@@ -298,3 +298,179 @@ fn ch_through_the_shell_function_logs_the_fork() {
     assert_eq!(lines[0]["kind"], "here");
     assert_eq!(lines[0]["fork_id"], fork_id);
 }
+
+const FORK_A: &str = "aaaaaaaa-0000-4000-8000-00000000000a";
+const FORK_B: &str = "bbbbbbbb-0000-4000-8000-00000000000b";
+const FORK_C: &str = "cccccccc-0000-4000-8000-00000000000c";
+const FORK_D: &str = "dddddddd-0000-4000-8000-00000000000d";
+
+/// Plants a transcript for `id` in a project folder of `home`.
+fn plant_in(home: &Path, id: &str) {
+    plant(&home.join(".claude/projects"), "-p", id, "/x");
+}
+
+/// Writes one fork log line into the log of `home`, after any lines there.
+fn plant_log_line(home: &Path, source: &str, fork: &str, time: &str, dir: &str) {
+    use std::io::Write;
+    let log = fork_log_path(home);
+    fs::create_dir_all(log.parent().unwrap()).unwrap();
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log)
+        .unwrap();
+    writeln!(
+        file,
+        "{{\"time\":\"{time}\",\"source_id\":\"{source}\",\"fork_id\":\"{fork}\",\
+         \"source_user\":\"home\",\"source_dir\":\"/x\",\"fork_dir\":\"{dir}\",\"kind\":\"here\"}}"
+    )
+    .unwrap();
+}
+
+/// Runs `crap --forks id` with `HOME` set to `home`.
+fn run_forks(home: &Path, id: &str) -> Output {
+    common::crap_command(home)
+        .args(["--forks", id])
+        .output()
+        .expect("crap binary should run")
+}
+
+/// The standard output of `output` as text.
+fn stdout_of(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// The standard error of `output` as text.
+fn stderr_of(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+#[test]
+fn forks_lists_each_fork_with_saved_or_not_saved() {
+    let tmp = unique_root("forks-list");
+    let home = tmp.path().join("home");
+    plant_in(&home, FORK_A);
+    plant_in(&home, FORK_B);
+    plant_log_line(&home, FORK_A, FORK_B, "2026-10-28T01:00:00Z", "/w/b");
+    plant_log_line(&home, FORK_A, FORK_C, "2026-10-28T02:00:00Z", "/w/c");
+
+    let output = run_forks(&home, FORK_A);
+    assert!(output.status.success(), "{output:?}");
+    let out = stdout_of(&output);
+    assert!(
+        out.contains(&format!(
+            "{FORK_B}  2026-10-28T01:00:00Z  saved      /w/b\n"
+        )),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!(
+            "{FORK_C}  2026-10-28T02:00:00Z  not saved  /w/c\n"
+        )),
+        "{out}"
+    );
+    assert!(!out.contains("Sources of"), "{out}");
+}
+
+#[test]
+fn forks_shows_the_chain_of_sources() {
+    let tmp = unique_root("forks-chain");
+    let home = tmp.path().join("home");
+    plant_in(&home, FORK_A);
+    plant_log_line(&home, FORK_A, FORK_B, "2026-10-28T01:00:00Z", "/w/b");
+    plant_log_line(&home, FORK_B, FORK_D, "2026-10-28T02:00:00Z", "/w/d");
+
+    let output = run_forks(&home, FORK_D);
+    assert!(output.status.success(), "{output:?}");
+    let out = stdout_of(&output);
+    let want = format!(
+        "Sources of {FORK_D} in the fork log:\n\
+         \x20 {FORK_D} is a fork of {FORK_B}, made 2026-10-28T02:00:00Z (here) in /w/d\n\
+         \x20 {FORK_B} is a fork of {FORK_A}, made 2026-10-28T01:00:00Z (here) in /w/b\n\
+         \x20 {FORK_A} is not a fork in the fork log.\n"
+    );
+    assert_eq!(out, want);
+}
+
+#[test]
+fn forks_shows_both_sections_for_a_source_that_is_a_fork() {
+    let tmp = unique_root("forks-both");
+    let home = tmp.path().join("home");
+    plant_log_line(&home, FORK_A, FORK_B, "2026-10-28T01:00:00Z", "/w/b");
+    plant_log_line(&home, FORK_B, FORK_D, "2026-10-28T02:00:00Z", "/w/d");
+    plant_in(&home, FORK_D);
+
+    let output = run_forks(&home, FORK_B);
+    assert!(output.status.success(), "{output:?}");
+    let out = stdout_of(&output);
+    let want = format!(
+        "Forks of {FORK_B} in the fork log:\n\
+         \x20 {FORK_D}  2026-10-28T02:00:00Z  saved      /w/d\n\
+         \n\
+         Sources of {FORK_B} in the fork log:\n\
+         \x20 {FORK_B} is a fork of {FORK_A}, made 2026-10-28T01:00:00Z (here) in /w/b\n\
+         \x20 {FORK_A} is not a fork in the fork log.\n"
+    );
+    assert_eq!(out, want);
+}
+
+#[test]
+fn forks_of_an_unknown_id_exits_not_found() {
+    let tmp = unique_root("forks-unknown");
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+
+    let output = run_forks(&home, FORK_A);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(
+        stderr_of(&output).contains("no Claude session and no fork log line has id"),
+        "{output:?}"
+    );
+}
+
+#[test]
+fn forks_of_a_session_with_no_forks_says_so() {
+    let tmp = unique_root("forks-none");
+    let home = tmp.path().join("home");
+    plant_in(&home, FORK_A);
+
+    let output = run_forks(&home, FORK_A);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        stdout_of(&output),
+        format!(
+            "The fork log has no fork of {FORK_A}, and {FORK_A} is not a fork in the fork log.\n"
+        )
+    );
+}
+
+#[test]
+fn forks_warns_about_unreadable_log_lines() {
+    let tmp = unique_root("forks-torn");
+    let home = tmp.path().join("home");
+    plant_in(&home, FORK_A);
+    plant_in(&home, FORK_B);
+    let log = fork_log_path(&home);
+    fs::create_dir_all(log.parent().unwrap()).unwrap();
+    fs::write(&log, "{\"time\":\"2026-10-28T00:00:00Z\",\"sour\n").unwrap();
+    plant_log_line(&home, FORK_A, FORK_B, "2026-10-28T01:00:00Z", "/w/b");
+
+    let output = run_forks(&home, FORK_A);
+    assert!(output.status.success(), "{output:?}");
+    assert!(stderr_of(&output).contains("could not be read"), "{output:?}");
+    assert!(
+        stdout_of(&output).contains(&format!("{FORK_B}  2026-10-28T01:00:00Z  saved")),
+        "{output:?}"
+    );
+}
+
+#[test]
+fn forks_rejects_an_invalid_id() {
+    let tmp = unique_root("forks-invalid");
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+
+    let output = run_forks(&home, "not-a-session-id");
+    assert_eq!(output.status.code(), Some(4), "{output:?}");
+    assert!(stderr_of(&output).contains("is not a valid session id"), "{output:?}");
+}

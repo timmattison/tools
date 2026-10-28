@@ -1917,6 +1917,15 @@ struct Cli {
     #[arg(long)]
     status: bool,
 
+    /// Show what the fork log of `crap` knows about the session, then exit.
+    ///
+    /// The report lists each fork of the session, with `saved` or `not saved`,
+    /// and the chain of sessions that it was forked from. It resumes nothing and
+    /// writes nothing. The log has only the forks that `crap` started: `--here`
+    /// and the cross-user resume.
+    #[arg(long, conflicts_with_all = ["here", "status", "shell_setup", "user", "force"])]
+    forks: bool,
+
     /// Emit machine-readable JSON instead of human-formatted text.
     ///
     /// Only valid with `--status`. With a session id it prints one object;
@@ -2098,6 +2107,11 @@ fn log_fork(log: Option<&Path>, record: &fork_log::ForkRecord) {
             }
         }
     }
+}
+
+/// Handles `crap --forks <id>`: print what the fork log knows about the session.
+fn run_forks(_roots: &[UserProjects], _fork_log: Option<&Path>, _session_id: &str) -> ! {
+    exit(0);
 }
 
 /// Returns the time of now in RFC 3339 and UTC, to the second, for a fork
@@ -2474,16 +2488,21 @@ fn main() {
         .session_id
         .expect("session id is required without --shell-setup or --status");
 
+    // The one place that reads the environment for the fork log, like
+    // `self_projects` for the home layout.
+    let fork_log = dirs::data_dir().map(|data| fork_log::fork_log_path(&data));
+
+    if cli.forks {
+        let roots = resolve_search_roots(&home, None);
+        run_forks(&roots, fork_log.as_deref(), &session_id);
+    }
+
     // Build the search roots (self-first, or one sibling for `--user`); a bad
     // `--user` exits here, before either `run_here` or `run_resume`, so
     // `--here --user <ghost>` rejects for free. Both `--here` and the default
     // resume search the same roots, so a cross-user source is reachable either
     // way.
     let roots = resolve_search_roots(&home, cli.user.as_deref());
-
-    // The one place that reads the environment for the fork log, like
-    // `self_projects` for the home layout.
-    let fork_log = dirs::data_dir().map(|data| fork_log::fork_log_path(&data));
 
     if cli.here {
         run_here(
