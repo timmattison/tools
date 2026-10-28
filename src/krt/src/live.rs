@@ -1575,16 +1575,16 @@ mod tests {
     /// The number of rows of the window of a common terminal.
     ///
     /// The head and the tall path take every one of these 24 rows. The pause
-    /// and the list of the keys take eight lines more, so a frame that carries
+    /// and the list of the keys take nine lines more, so a frame that carries
     /// both of them runs past the foot of this window.
     const WINDOW_ROWS: u16 = 24;
 
     /// The line that closes the rows of that crowded frame.
     ///
-    /// The head takes four rows, the pause and the list of the keys take eight,
-    /// and this line takes one, so eleven of the twenty rows of the path stand
-    /// and nine go out of the frame.
-    const CROWDED_LINE: &str = "+9 rows";
+    /// The head takes four rows, the pause and the list of the keys take nine,
+    /// and this line takes one, so ten of the twenty rows of the path stand
+    /// and ten go out of the frame.
+    const CROWDED_LINE: &str = "+10 rows";
 
     /// The mark that opens the line which counts the rows that a frame left
     /// out.
@@ -1741,12 +1741,13 @@ mod tests {
     /// one table of pairs. That is on purpose, as the word of the pause is: a
     /// test that read the table of the module would agree with every list the
     /// module ever holds, and this list is what a reader of the screen sees.
-    const HELP_LINES: [&str; 5] = [
-        "q, Ctrl-C  stop the run",
-        "p          hold the table, or let it move",
-        "n          show the names, or show the addresses",
-        "r          empty the table",
-        "?          show these keys, or hide them",
+    const HELP_LINES: [&str; 6] = [
+        "q, Ctrl-C   stop the run",
+        "p           hold the table, or let it move",
+        "n           show the names, or show the addresses",
+        "r           empty the table",
+        "PgUp, PgDn  scroll the rows of the path",
+        "?           show these keys, or hide them",
     ];
 
     /// The pixel size of one character cell of the terminal that the tests of
