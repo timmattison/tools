@@ -4564,7 +4564,7 @@ mod tests {
         // the parent shell, and each must reach the terminal rather than being
         // parsed as a "<session-id>\n<dir>" resume target.
         assert!(SHELL_CODE.contains(
-            r#"*" --status "*|*" --help "*|*" -h "*|*" --version "*|*" -V "*|*" --shell-setup "*)"#
+            r#"*" --status "*|*" --forks "*|*" --help "*|*" -h "*|*" --version "*|*" -V "*|*" --shell-setup "*)"#
         ));
         assert!(SHELL_CODE.contains(r#"command crap "$@"; return $?"#));
     }
@@ -4700,6 +4700,7 @@ mod tests {
             case \" $* \" in\n\
             \x20 *\" --help \"*|*\" -h \"*) printf 'CRAP_HELP_MARKER\\nUsage: crap\\nmore\\n'; exit 0 ;;\n\
             \x20 *\" --version \"*|*\" -V \"*) printf 'CRAP_VERSION_MARKER 0.1.0\\n'; exit 0 ;;\n\
+            \x20 *\" --forks \"*) printf 'CRAP_FORKS_MARKER\\n'; exit 0 ;;\n\
             \x20 *\" --shell-setup \"*) printf 'CRAP_SETUP_MARKER\\nTo activate, run:\\n  source ~/.zshrc\\n'; exit 0 ;;\n\
             esac\n\
             printf 'session-xyz\\n/tmp/crap-resume-dir\\n'\n";
@@ -4744,6 +4745,10 @@ mod tests {
             ("--version", "CRAP_VERSION_MARKER"),
             ("-V", "CRAP_VERSION_MARKER"),
             ("--shell-setup", "CRAP_SETUP_MARKER"),
+            (
+                "--forks 33333333-4444-5555-6666-777777777777",
+                "CRAP_FORKS_MARKER",
+            ),
         ] {
             let (stdout, claude_called) = run_shell_function(args);
             assert!(
