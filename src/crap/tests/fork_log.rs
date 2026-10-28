@@ -193,3 +193,39 @@ fn cross_user_fork_adds_a_fork_at_line() {
         "nothing writes under the other user"
     );
 }
+
+#[test]
+fn two_forks_at_the_same_time_give_two_complete_lines() {
+    const CHILDREN: usize = 8;
+    let tmp = unique_root("parallel");
+    let (home, work) = setup_here(tmp.path());
+
+    let children: Vec<_> = (0..CHILDREN)
+        .map(|_| {
+            common::crap_command(&home)
+                .current_dir(&work)
+                .args(["--here", ORIG])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("crap binary should start")
+        })
+        .collect();
+    let outputs: Vec<Output> = children
+        .into_iter()
+        .map(|child| child.wait_with_output().unwrap())
+        .collect();
+    for output in &outputs {
+        assert!(output.status.success(), "{output:?}");
+    }
+
+    let lines = log_lines(&fork_log_path(&home));
+    assert_eq!(lines.len(), CHILDREN, "{lines:?}");
+    let logged: std::collections::BTreeSet<String> = lines
+        .iter()
+        .map(|line| line["fork_id"].as_str().unwrap().to_string())
+        .collect();
+    let printed: std::collections::BTreeSet<String> = outputs.iter().map(wire_fork_id).collect();
+    assert_eq!(logged.len(), CHILDREN, "every fork id is distinct");
+    assert_eq!(logged, printed);
+}
