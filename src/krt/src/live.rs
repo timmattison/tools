@@ -57,6 +57,7 @@ pub(crate) enum Command {
 ///   that ignored it would need a second terminal to stop.
 /// - `p` holds the display, `n` turns the names on or off, `r` empties the
 ///   table of the display, and `?` shows the list of the keys.
+/// - Page Up and Page Down scroll the rows of the path by one page.
 /// - Every other key means nothing.
 pub(crate) fn classify(key: KeyEvent) -> Option<Command> {
     let KeyEvent {
@@ -82,6 +83,8 @@ pub(crate) fn classify(key: KeyEvent) -> Option<Command> {
         KeyCode::Char('n') => Some(Command::Names),
         KeyCode::Char('r') => Some(Command::Reset),
         KeyCode::Char('?') => Some(Command::Help),
+        KeyCode::PageUp => Some(Command::PageUp),
+        KeyCode::PageDown => Some(Command::PageDown),
         _ => None,
     }
 }
