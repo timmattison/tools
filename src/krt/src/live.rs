@@ -186,6 +186,11 @@ struct Fitted {
     lines: Vec<String>,
     /// The rows of the path that the frame holds, as indexes into the body.
     rows: std::ops::Range<usize>,
+    /// The index in `lines` of the line that holds the first shown row.
+    ///
+    /// An image of that row stands on this line. A caller reads it here so that
+    /// it does not count the lines of the head itself.
+    top: usize,
     /// The first row of each page that the page keys ask for.
     pages: Pages,
 }
@@ -225,11 +230,13 @@ fn fitted(
     let mut lines = head;
     if lines.len() + body.len() + footer.len() <= budget {
         let rows = 0..body.len();
+        let top = lines.len();
         lines.extend(body);
         lines.extend(footer);
         return Fitted {
             lines,
             rows,
+            top,
             pages: Pages { up: 0, down: 0 },
         };
     }
@@ -258,6 +265,7 @@ fn fitted(
     if first > 0 {
         lines.push(format!("{MORE_MARK}{}", counted(first, ROW)));
     }
+    let top = lines.len();
     lines.extend(body[first..end].iter().cloned());
     if end < body.len() {
         lines.push(format!("{MORE_MARK}{}", counted(body.len() - end, ROW)));
@@ -285,6 +293,7 @@ fn fitted(
     Fitted {
         lines,
         rows: first..end,
+        top,
         pages,
     }
 }
@@ -474,7 +483,8 @@ struct Drawn {
     /// path that the frame shows. The count line above those rows is one of
     /// them, when the frame scrolled.
     ///
-    /// The count comes off the render and not off a constant of this file. A
+    /// The count comes off `fitted`, which names the line of the first shown
+    /// row, and not off a constant of this file. A
     /// narrow window takes the header of a frame onto more than one line, and
     /// an image that stood on a line this file counted itself would then cover
     /// the heading of the Recent column.
@@ -522,8 +532,8 @@ struct Drawn {
 /// * `recent` - Where the Recent column stands, and the history of every row of
 ///   the path that reached the frame.
 /// * `head` - The number of lines of the frame that stand above the first row
-///   of the path that the frame shows. The render answered the lines of the
-///   head, and the count line above the rows is one more when it shows.
+///   of the path that the frame shows. `fitted` names that line, and the count
+///   line above the rows is one of the lines above it when it shows.
 /// * `window_rows` - The number of rows that the window of the terminal holds,
 ///   and `None` for a window that no probe measured. A line at or past that
 ///   count stands under the foot of the window, and an image there would scroll
@@ -769,12 +779,10 @@ impl<W: Write, K: Keys> Table<W, K> {
         let fitted = fitted(head, body, self.footer(), self.window.rows, self.first);
         Drawn {
             lines: fitted.lines,
-            // The count line above the rows shows exactly when the frame
-            // scrolled past the first row. It stands between the head and the
-            // first shown row, so an image counts it as a line of the head.
-            head: rendered
-                .head
-                .saturating_add(u16::from(fitted.rows.start > 0)),
+            // The head of the images is the line that `fitted` names for the
+            // first shown row. Any line above that row, a count line included,
+            // is a line of the head for an image.
+            head: u16::try_from(fitted.top).unwrap_or(u16::MAX),
             // A row that went out of the frame draws no image. Such an image
             // would stand over the line that counts the rows which went out, or
             // over a line of another frame, and nothing on the screen would say
@@ -2446,6 +2454,29 @@ mod tests {
             0..A_PATH,
             "and it says that every row of the path reached it"
         );
+    }
+
+    #[test]
+    fn the_top_of_a_fit_is_the_line_of_the_first_shown_row() {
+        // A frame that fits, a frame at the first row that scrolls, and a frame
+        // scrolled past the first row with a count line above it.
+        for (window, first) in [
+            (A_TALL_WINDOW, 0),
+            (A_SHORT_WINDOW, 0),
+            (A_SHORT_WINDOW, 3),
+            (A_SHORT_WINDOW, A_PATH),
+        ] {
+            let body = a_body(A_PATH);
+            let fitted = super::fitted(a_head(), body.clone(), Vec::new(), Some(window), first);
+
+            assert_eq!(
+                fitted.lines[fitted.top],
+                body[fitted.rows.start],
+                "the line at top is the first shown row of {:?} at window {window}, first {first}: {:?}",
+                fitted.rows,
+                fitted.lines
+            );
+        }
     }
 
     #[test]
