@@ -906,6 +906,12 @@ impl Board {
         self.move_selection(now, |index, _| index.saturating_sub(1));
     }
 
+    /// Moves the selection one page up. A page is the height of the last view
+    /// minus one row, and at least one row.
+    pub fn select_previous_page(&mut self, now: DateTime<Utc>) {
+        self.settle(now);
+    }
+
     /// The number of rows of one page: the height of the last view minus one
     /// row, and at least one row.
     fn page(&self) -> usize {
@@ -3698,5 +3704,18 @@ mod tests {
         board.view(now(), 2);
         board.select_next_page(now());
         assert_eq!(selected_text(&mut board).as_deref(), Some("Run(101)*"));
+    }
+
+    /// Page Up from `Run(4)`, with no header in the page.
+    #[test]
+    fn select_previous_page_highlights_the_row_one_page_up() {
+        let mut board = long_board(10, 0);
+        for _ in 0..3 {
+            board.select_next(now());
+        }
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(4)*"));
+        board.view(now(), 3);
+        board.select_previous_page(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(2)*"));
     }
 }
