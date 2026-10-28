@@ -269,7 +269,14 @@ fn fitted(
     lines.truncate(budget);
     let pages = if scrolls {
         Pages {
-            up: 0,
+            // The page above is a middle page of room - 2 rows, or the top
+            // page of room - 1 rows. The first row of this frame becomes the
+            // last row of that page, and the move is one row at least.
+            up: if first < room - 1 {
+                0
+            } else {
+                first - (room - 3).max(1)
+            },
             down: first + (end - first).saturating_sub(1).max(1),
         }
     } else {
