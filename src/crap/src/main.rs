@@ -195,27 +195,48 @@ fn is_valid_session_id(id: &str) -> bool {
     })
 }
 
+/// Returns the `cwd` of one transcript line, or `None` when the line has none.
+///
+/// A line has a usable `cwd` when it is a JSON object with a non-empty string
+/// `cwd`. Blank lines, non-JSON lines, and a `cwd` that is `null`, empty, or
+/// not a string give `None`.
+fn cwd_of_line(line: &str) -> Option<String> {
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+    let value = serde_json::from_str::<serde_json::Value>(line).ok()?;
+    value
+        .get("cwd")
+        .and_then(serde_json::Value::as_str)
+        .filter(|cwd| !cwd.is_empty())
+        .map(str::to_string)
+}
+
 /// Extracts the first non-empty `cwd` value from Claude session JSONL contents.
 ///
 /// Each line is an independent JSON object; the early bookkeeping lines often
 /// carry `"cwd": null`, so the first line with a non-empty string `cwd` wins.
 /// Non-JSON lines are skipped. Returns `None` if no usable `cwd` is present.
 fn extract_cwd(contents: &str) -> Option<String> {
-    for line in contents.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        if let Some(cwd) = value.get("cwd").and_then(serde_json::Value::as_str) {
-            if !cwd.is_empty() {
-                return Some(cwd.to_string());
-            }
-        }
-    }
-    None
+    contents.lines().find_map(cwd_of_line)
+}
+
+/// Reads the first non-empty `cwd` that the transcript at `transcript` records.
+///
+/// The rule per line is the one of [`extract_cwd`] ([`cwd_of_line`]). The
+/// function reads line by line and stops at the first hit, because a
+/// transcript can reach tens of megabytes and the `cwd` is near its start.
+/// Returns `None` when the file cannot be opened or read, or when it records
+/// no `cwd`.
+fn recorded_cwd(transcript: &Path) -> Option<String> {
+    use std::io::BufRead;
+
+    let file = std::fs::File::open(transcript).ok()?;
+    std::io::BufReader::new(file)
+        .lines()
+        .map_while(Result::ok)
+        .find_map(|line| cwd_of_line(&line))
 }
 
 /// Locates `<session_id>.jsonl` inside any immediate subdirectory of
@@ -1026,6 +1047,18 @@ enum HereResolveError {
     Io(std::io::Error),
 }
 
+/// What [`resolve_here_import`] found and did for one `--here` fork.
+#[derive(Debug, PartialEq, Eq)]
+struct HereImport {
+    /// The symlink or copy to clean up afterwards, or `None` when the session
+    /// is already resolvable from the current directory (no import needed).
+    link: Option<PathBuf>,
+    /// The transcript that the fork reads, in the tree where it was found.
+    source_transcript: PathBuf,
+    /// The account that owns the tree where the transcript was found.
+    source_user: String,
+}
+
 /// Validates `session_id`, locates its transcript across `roots`, and imports it
 /// into `pwd`'s project folder under `dest_projects_dir` so `claude --resume`
 /// will find it from there.
@@ -1037,8 +1070,9 @@ enum HereResolveError {
 /// `dest_projects_dir` is always the current user's tree, so every write lands
 /// under the current user's home even when the source is foreign.
 ///
-/// Returns the path of the symlink or copy to clean up afterwards, or `None`
-/// when the session is already resolvable from `pwd` (no import needed).
+/// Returns a [`HereImport`]: the path of the symlink or copy to clean up
+/// afterwards (`None` when the session is already resolvable from `pwd`), and
+/// the transcript and owner of the source.
 ///
 /// # Errors
 ///
@@ -1048,7 +1082,7 @@ fn resolve_here_import(
     dest_projects_dir: &Path,
     pwd: &Path,
     session_id: &str,
-) -> Result<Option<PathBuf>, HereResolveError> {
+) -> Result<HereImport, HereResolveError> {
     if !is_valid_session_id(session_id) {
         return Err(HereResolveError::InvalidSessionId);
     }
@@ -1066,7 +1100,13 @@ fn resolve_here_import(
     } else {
         ImportMode::Copy
     };
-    prepare_import(dest_projects_dir, &path, pwd, session_id, mode).map_err(HereResolveError::Io)
+    let link = prepare_import(dest_projects_dir, &path, pwd, session_id, mode)
+        .map_err(HereResolveError::Io)?;
+    Ok(HereImport {
+        link,
+        source_transcript: path,
+        source_user: root.user,
+    })
 }
 
 /// The id of the fork that `--here` and the cross-user resume make.
@@ -1974,13 +2014,15 @@ fn exit_session_not_found(session_id: &str, roots: &[UserProjects], skipped: &[S
 /// sibling's tree when `--user` was given). A same-user hit is symlinked; a
 /// cross-user hit is copied into `dest_projects_dir` (always the current user's
 /// tree). Either way `--here` stays in the current directory and forks, so a
-/// live original is never blocked or corrupted.
+/// live original is never blocked or corrupted. Each fork adds one line to the
+/// fork log at `fork_log` (see [`log_fork`]) before the output is printed.
 fn run_here(
     roots: &[UserProjects],
     dest_projects_dir: &Path,
     session_id: &str,
     new_session_id: Option<&str>,
     force: bool,
+    fork_log: Option<&Path>,
 ) -> ! {
     let Ok(pwd) = std::env::current_dir() else {
         eprintln!(
@@ -1999,10 +2041,22 @@ fn run_here(
     abort_if_session_live(session_id, true, force);
 
     match resolve_here_import(roots, dest_projects_dir, &pwd, session_id) {
-        Ok(link) => {
+        Ok(import) => {
+            log_fork(
+                fork_log,
+                &fork_log::ForkRecord {
+                    time: fork_time_now(),
+                    source_id: session_id.to_string(),
+                    fork_id: fork_id.as_str().to_string(),
+                    source_user: import.source_user,
+                    source_dir: recorded_cwd(&import.source_transcript),
+                    fork_dir: pwd.to_string_lossy().into_owned(),
+                    kind: fork_log::ForkKind::Here,
+                },
+            );
             print!(
                 "{}",
-                format_here_output(session_id, &fork_id, link.as_deref())
+                format_here_output(session_id, &fork_id, import.link.as_deref())
             );
             exit(0);
         }
@@ -2024,6 +2078,32 @@ fn run_here(
             exit(exit_codes::HERE_LINK_ERROR);
         }
     }
+}
+
+/// Adds `record` to the fork log at `log`, or shows a warning on stderr.
+/// The log must not stop a fork, so a failure never changes the exit status.
+fn log_fork(log: Option<&Path>, record: &fork_log::ForkRecord) {
+    match log {
+        None => eprintln!(
+            "{} the data directory of this user is not known, so the fork is not in the fork log",
+            "Warning:".yellow().bold()
+        ),
+        Some(path) => {
+            if let Err(err) = fork_log::append_fork_record(path, record) {
+                eprintln!(
+                    "{} could not add the fork to the fork log {}: {err}",
+                    "Warning:".yellow().bold(),
+                    path.display()
+                );
+            }
+        }
+    }
+}
+
+/// Returns the time of now in RFC 3339 and UTC, to the second, for a fork
+/// record. Example: `2026-10-28T01:51:22Z`.
+fn fork_time_now() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 /// Handles `crap --status <id> [--user <name>]`: print the session's state to
@@ -2223,6 +2303,7 @@ fn run_resume(
     dest_projects_dir: &Path,
     session_id: &str,
     force: bool,
+    fork_log: Option<&Path>,
 ) -> ! {
     if !is_valid_session_id(session_id) {
         eprintln!(
@@ -2265,6 +2346,18 @@ fn run_resume(
     let fork_id = fork_id_or_exit(dest_projects_dir, None);
     match prepare_import(dest_projects_dir, &path, &dir, session_id, ImportMode::Copy) {
         Ok(link) => {
+            log_fork(
+                fork_log,
+                &fork_log::ForkRecord {
+                    time: fork_time_now(),
+                    source_id: session_id.to_string(),
+                    fork_id: fork_id.as_str().to_string(),
+                    source_user: root.user,
+                    source_dir: Some(dir.to_string_lossy().into_owned()),
+                    fork_dir: dir.to_string_lossy().into_owned(),
+                    kind: fork_log::ForkKind::ForkAt,
+                },
+            );
             print!(
                 "{}",
                 format_fork_at_output(session_id, &fork_id, link.as_deref(), &dir)
@@ -2388,6 +2481,10 @@ fn main() {
     // way.
     let roots = resolve_search_roots(&home, cli.user.as_deref());
 
+    // The one place that reads the environment for the fork log, like
+    // `self_projects` for the home layout.
+    let fork_log = dirs::data_dir().map(|data| fork_log::fork_log_path(&data));
+
     if cli.here {
         run_here(
             &roots,
@@ -2395,10 +2492,17 @@ fn main() {
             &session_id,
             cli.new_session_id.as_deref(),
             cli.force,
+            fork_log.as_deref(),
         );
     }
 
-    run_resume(&roots, &projects_dir, &session_id, cli.force);
+    run_resume(
+        &roots,
+        &projects_dir,
+        &session_id,
+        cli.force,
+        fork_log.as_deref(),
+    );
 }
 
 #[cfg(test)]
@@ -2617,6 +2721,31 @@ mod tests {
     fn extract_cwd_skips_non_json_and_missing_or_empty() {
         let contents = "not json at all\n{\"foo\":1}\n{\"cwd\":\"\"}\n";
         assert_eq!(extract_cwd(contents), None);
+    }
+
+    #[test]
+    fn recorded_cwd_first_non_empty_cwd_wins_over_earlier_null_and_empty() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("t.jsonl");
+        let contents = format!(
+            "{}{}{}{}{}",
+            "{\"cwd\":null}\n",
+            "{\"cwd\":\"\"}\n",
+            "not json\n",
+            cwd_line("/first"),
+            cwd_line("/second"),
+        );
+        fs::write(&file, contents).unwrap();
+        assert_eq!(recorded_cwd(&file).as_deref(), Some("/first"));
+    }
+
+    #[test]
+    fn recorded_cwd_is_none_without_a_cwd_or_a_file() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("t.jsonl");
+        fs::write(&file, "{\"foo\":1}\n{\"cwd\":null}\n").unwrap();
+        assert_eq!(recorded_cwd(&file), None);
+        assert_eq!(recorded_cwd(&dir.path().join("missing.jsonl")), None);
     }
 
     #[test]
@@ -4100,14 +4229,16 @@ mod tests {
         let original = orig.join(format!("{SAMPLE_ID}.jsonl"));
         fs::write(&original, "{}\n").unwrap();
 
-        let link = resolve_here_import(
+        let import = resolve_here_import(
             &self_root(projects),
             projects,
             Path::new("/Volumes/x/here"),
             SAMPLE_ID,
         )
-        .expect("ok")
-        .expect("a symlink should be created");
+        .expect("ok");
+        assert_eq!(import.source_user, "me");
+        assert_eq!(import.source_transcript, original);
+        let link = import.link.expect("a symlink should be created");
         assert_eq!(
             link,
             projects
@@ -4146,9 +4277,10 @@ mod tests {
             is_self: false,
         }];
         let pwd = Path::new("/Volumes/x/here");
-        let link = resolve_here_import(&roots, &dest, pwd, SAMPLE_ID)
-            .expect("ok")
-            .expect("a copy should be created");
+        let import = resolve_here_import(&roots, &dest, pwd, SAMPLE_ID).expect("ok");
+        assert_eq!(import.source_user, "them");
+        assert_eq!(import.source_transcript, source);
+        let link = import.link.expect("a copy should be created");
 
         // The import lands in OUR tree, at pwd's encoded project folder.
         assert_eq!(
@@ -4190,7 +4322,8 @@ mod tests {
                 Path::new("/Volumes/x/here"),
                 SAMPLE_ID
             )
-            .expect("ok"),
+            .expect("ok")
+            .link,
             None
         );
     }

@@ -1705,6 +1705,7 @@ name = "crap"
 version = "0.1.0"
 dependencies = [
  "buildinfo",
+ "chrono",
  "clap",
  "colored",
  "comfy-table",

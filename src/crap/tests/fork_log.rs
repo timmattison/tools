@@ -108,6 +108,9 @@ fn here_adds_one_line_with_every_field() {
     assert_eq!(line.as_object().unwrap().len(), 7, "seven keys: {line}");
     assert_eq!(line["source_id"], ORIG);
     assert_eq!(line["fork_id"], wire_fork_id(&output));
+    assert!(common::is_generated_fork_id(
+        line["fork_id"].as_str().unwrap()
+    ));
     assert_eq!(line["source_user"], "home");
     assert_eq!(line["source_dir"], "/x/orig");
     assert_eq!(
