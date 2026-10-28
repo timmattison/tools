@@ -119,6 +119,11 @@ impl Row<'_> {
         )
     }
 
+    /// True for a row that the selection can mark: an item row or a job row.
+    fn is_selectable(&self) -> bool {
+        self.is_item() || matches!(self, Row::Job { .. })
+    }
+
     /// True for the one row that the selection marks.
     fn is_selected(&self) -> bool {
         matches!(
@@ -866,7 +871,7 @@ impl Board {
     /// Moves the selection to the next row: an item row or a job row.
     pub fn select_next(&mut self, now: DateTime<Utc>) {
         self.settle(now);
-        self.move_selection(now, |index, count| (index + 1).min(count - 1));
+        self.move_selection(now, |index, rows| (index + 1).min(rows.len() - 1));
     }
 
     /// Moves the selection to the previous row: an item row or a job row.
@@ -877,16 +882,29 @@ impl Board {
 
     /// Moves the selection to the row at the position that `target` gives.
     ///
-    /// `target` gets the current position and the number of rows that the
-    /// selection can mark. The rows are the item rows and the job rows of the
+    /// `target` gets the current position and the screen row of each row that
+    /// the selection can mark, in order. The screen row is the index in
+    /// `build_rows`. The rows are the item rows and the job rows of the
     /// expanded runs. When the selection is not among them, it stays.
-    fn move_selection(&mut self, now: DateTime<Utc>, target: impl Fn(usize, usize) -> usize) {
+    fn move_selection(&mut self, now: DateTime<Utc>, target: impl Fn(usize, &[usize]) -> usize) {
         let slots = self.selectable_rows(now);
+        let screen_rows: Vec<usize> = self
+            .build_rows(now)
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.is_selectable())
+            .map(|(screen_row, _)| screen_row)
+            .collect();
+        debug_assert_eq!(
+            screen_rows.len(),
+            slots.len(),
+            "each selectable screen row has one slot"
+        );
         let moved = self
             .selected
             .as_ref()
             .and_then(|current| slots.iter().position(|slot| slot == current))
-            .and_then(|index| slots.get(target(index, slots.len())).cloned());
+            .and_then(|index| slots.get(target(index, &screen_rows)).cloned());
         if moved.is_some() {
             self.selected = moved;
         }
