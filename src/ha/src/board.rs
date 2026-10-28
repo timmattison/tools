@@ -257,6 +257,8 @@ pub struct Board {
     read_at: BTreeMap<RepoName, DateTime<Utc>>,
     selected: Option<Selection>,
     offset: usize,
+    /// The height in rows of the last view, or 0 before the first view.
+    height: usize,
     /// The last job answer of each run that the board holds. A run in this map
     /// can be expanded or collapsed.
     jobs: BTreeMap<RunId, Jobs>,
@@ -297,6 +299,7 @@ impl Board {
             read_at: BTreeMap::new(),
             selected: None,
             offset: 0,
+            height: 0,
             jobs: BTreeMap::new(),
             expanded: BTreeSet::new(),
             queues: BTreeMap::new(),
@@ -436,6 +439,7 @@ impl Board {
     /// view. A job row keeps only itself.
     pub fn view(&mut self, now: DateTime<Utc>, height: usize) -> View<'_> {
         self.settle(now);
+        self.height = height;
         if height > 0 {
             let rows = self.build_rows(now);
             let selected_row = rows.iter().position(Row::is_selected);
@@ -875,15 +879,24 @@ impl Board {
     }
 
     /// Moves the selection one page down. A page is the height of the last
-    /// view minus one row, and at least one row.
+    /// view minus one row, and at least one row. Before the first view, a page
+    /// is one row. The selection stops on the last row that it can mark.
     pub fn select_next_page(&mut self, now: DateTime<Utc>) {
         self.settle(now);
+        let page = self.page();
+        self.move_selection(now, |index, rows| (index + page).min(rows.len() - 1));
     }
 
     /// Moves the selection to the previous row: an item row or a job row.
     pub fn select_previous(&mut self, now: DateTime<Utc>) {
         self.settle(now);
         self.move_selection(now, |index, _| index.saturating_sub(1));
+    }
+
+    /// The number of rows of one page: the height of the last view minus one
+    /// row, and at least one row.
+    fn page(&self) -> usize {
+        self.height.saturating_sub(1).max(1)
     }
 
     /// Moves the selection to the row at the position that `target` gives.
