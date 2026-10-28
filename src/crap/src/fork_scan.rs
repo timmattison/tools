@@ -145,7 +145,7 @@ pub fn scan_for_relatives(
     }
     let matcher = aho_corasick::AhoCorasick::new(&target_uuids)
         .expect("a set of strings builds a matcher");
-    let hits = candidates(projects_root)
+    let mut hits: Vec<ScanHit> = candidates(projects_root)
         .par_iter()
         .filter(|path| path.as_path() != target_transcript)
         .filter(|path| path.file_stem().is_none_or(|stem| stem != target_id))
@@ -171,6 +171,11 @@ pub fn scan_for_relatives(
             })
         })
         .collect();
+    hits.sort_by(|a, b| {
+        b.shared
+            .cmp(&a.shared)
+            .then_with(|| a.session_id.cmp(&b.session_id))
+    });
     Ok(ScanReport {
         hits,
         unreadable: 0,
