@@ -12740,6 +12740,13 @@ mod push_loop_tests {
         height: 5,
     };
 
+    /// A pane with room for the head of a frame, four rows of the list, and
+    /// the hint.
+    const FOUR_ROWS_FOR_THE_LIST: Dimensions = Dimensions {
+        width: 80,
+        height: 7,
+    };
+
     #[test]
     fn a_list_longer_than_the_pane_scrolls_only_as_far_as_the_cursor_needs() {
         // Six worktrees in a pane of two list rows. The window follows the
@@ -12805,6 +12812,48 @@ mod push_loop_tests {
             seen.switches.is_empty(),
             "a move of the cursor must not switch, got {:?}",
             seen.switches,
+        );
+        assert_eq!(
+            seen.listings, 1,
+            "only the Down that opens the list reads it",
+        );
+    }
+
+    #[test]
+    fn page_down_and_page_up_move_the_cursor_one_page_and_enter_goes_to_the_row_under_it() {
+        // The frame does not change while the cursor moves. A page is one row
+        // less than the window that the user saw. The cursor stops on the
+        // bottom row of the list, and Enter goes to the row under the cursor.
+        let names = [ALPHA, BRAVO, CHARLIE, "delta", "echo", "foxtrot"];
+        let (paints, seen) = paints_of(
+            Setup {
+                dims: FOUR_ROWS_FOR_THE_LIST,
+                measured: FOUR_ROWS_FOR_THE_LIST,
+                ..in_world(World::of(&names, ALPHA))
+            },
+            vec![
+                vec![key(KeyCode::Down)],
+                vec![key(KeyCode::PageDown)],
+                vec![key(KeyCode::PageDown)],
+                vec![key(KeyCode::PageDown)],
+                vec![key(KeyCode::PageUp)],
+                vec![key(KeyCode::Enter), Event::Quit],
+            ],
+        );
+        assert_eq!(
+            paints,
+            [
+                format!("LIST {ALPHA}: >{ALPHA}⌂ {BRAVO} {CHARLIE} delta"),
+                format!("LIST {ALPHA}: {ALPHA}⌂ {BRAVO} {CHARLIE} >delta"),
+                format!("LIST {ALPHA}: {CHARLIE} delta echo >foxtrot"),
+                format!("LIST {ALPHA}: >{CHARLIE} delta echo foxtrot"),
+                format!("FRAME {CHARLIE}"),
+            ],
+        );
+        assert_eq!(
+            seen.switches,
+            vec![worktree(CHARLIE)],
+            "Enter after a page key goes to the worktree under the cursor",
         );
         assert_eq!(
             seen.listings, 1,
