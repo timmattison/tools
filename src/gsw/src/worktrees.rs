@@ -302,6 +302,9 @@ pub(crate) struct WorktreeList {
     /// The first row of the window at the last [`settle`](Self::settle).
     /// Always a row of `entries`.
     top: usize,
+    /// The height of the window at the last [`settle`](Self::settle), and 0
+    /// before the first settle.
+    rows: usize,
     /// The worktree where the user started gsw. The list marks its row.
     home: WorktreePath,
 }
@@ -339,6 +342,7 @@ impl WorktreeList {
             entries,
             cursor,
             top: 0,
+            rows: 0,
             home,
         })
     }
@@ -359,14 +363,24 @@ impl WorktreeList {
     /// at the edge of the old window stays in view. A list that no settle
     /// reached moves one row. Page Down on the bottom row does nothing,
     /// because the list does not wrap.
-    pub(crate) fn page_down(&mut self) {}
+    pub(crate) fn page_down(&mut self) {
+        self.cursor = (self.cursor + self.page()).min(self.entries.len() - 1);
+    }
 
     /// Move the cursor up one page. A page is one row less than the window at
     /// the last [`settle`](Self::settle), and at least one row, so the row at
     /// the edge of the old window stays in view. A list that no settle
     /// reached moves one row. Page Up on the top row does nothing, because
     /// the list does not wrap.
-    pub(crate) fn page_up(&mut self) {}
+    pub(crate) fn page_up(&mut self) {
+        self.cursor = self.cursor.saturating_sub(self.page());
+    }
+
+    /// The rows that one page key moves: one row less than the window at the
+    /// last [`settle`](Self::settle).
+    fn page(&self) -> usize {
+        self.rows.saturating_sub(1)
+    }
 
     /// The worktree under the cursor: the worktree that Enter goes to.
     pub(crate) fn selected(&self) -> &WorktreeEntry {
@@ -396,13 +410,15 @@ impl WorktreeList {
 
     /// Store the scroll offset that `window(rows)` uses, so the next move
     /// starts from the window that the user saw. The loop calls it before
-    /// each frame of the list.
+    /// each frame of the list. It also keeps the height of the window, so
+    /// that a page key moves one page of the window that the user saw.
     ///
     /// Minimal movement: the window moves only when the cursor leaves it, and
     /// then only as far as the cursor went. It never leaves empty rows at the
     /// bottom when the list is longer than the pane.
     pub(crate) fn settle(&mut self, rows: usize) {
         self.top = self.offset(rows);
+        self.rows = rows;
     }
 
     /// The first row of the window for a pane of `rows` rows: the stored
