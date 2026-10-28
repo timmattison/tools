@@ -321,7 +321,8 @@ where
     /// less apart and with no other key between them, expand or collapse
     /// every run that shows, also from a pull request row. The first press
     /// acts at once, thus one press does not wait. Each other key ends the
-    /// count, and so does a key that closes the box. `Enter` opens the
+    /// count, and so does a key that closes the box. `Page Down` moves the
+    /// highlight one page down. `Enter` opens the
     /// highlighted pull request, run, or job.
     ///
     /// `c` opens a box that asks to cancel the run of the highlighted row.
@@ -359,6 +360,10 @@ where
             }
             KeyCode::Down => {
                 self.board.select_next((self.now)());
+                Flow::Continue
+            }
+            KeyCode::PageDown => {
+                self.board.select_next_page((self.now)());
                 Flow::Continue
             }
             KeyCode::Right => {
