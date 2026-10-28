@@ -776,6 +776,32 @@ mod tests {
         assert_eq!(*opener.urls.borrow(), ["https://example.test/runs/1"]);
     }
 
+    /// Twelve active runs. Run 1 is the oldest, thus the first row, and
+    /// run 12 is the last row.
+    fn twelve_runs() -> Vec<Run> {
+        (1..=12).map(|id| active_run(id, 100 - id as i64)).collect()
+    }
+
+    #[test]
+    fn page_down_then_enter_opens_the_run_one_page_down() {
+        let channels = channels();
+        send_runs(&channels, twelve_runs());
+        let opener = opener(false);
+        let (result, _) = run_app(
+            &opener,
+            &channels,
+            vec![
+                press(KeyCode::PageDown),
+                press(KeyCode::Enter),
+                press(KeyCode::Char('q')),
+            ],
+        );
+        assert!(result.is_ok(), "{result:?}");
+        // The board area is 10 rows, thus one page is 9 rows. The header is
+        // row 0 and run 1 is row 1, thus the highlight goes to row 10.
+        assert_eq!(*opener.urls.borrow(), ["https://example.test/runs/10"]);
+    }
+
     #[test]
     fn a_failed_open_shows_the_address_and_the_loop_goes_on() {
         let channels = channels();
