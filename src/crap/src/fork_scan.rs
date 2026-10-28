@@ -21,6 +21,7 @@
 //! and then adds new lines. The source of the fork can have older lines that the
 //! fork does not hold. The rule is [`relation`].
 
+use chrono::{DateTime, Utc};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -92,8 +93,38 @@ pub struct ScanReport {
 /// result is [`Relation::Related`]. A line without a `uuid`, or with a
 /// timestamp that does not parse, does not count.
 pub fn relation(target: &[LineHead], other: &[LineHead], shared: &HashSet<String>) -> Relation {
-    let _ = (target, other, shared);
-    Relation::Related
+    match (has_older_lines(target, shared), has_older_lines(other, shared)) {
+        (true, false) => Relation::Fork,
+        (false, true) => Relation::Source,
+        _ => Relation::Related,
+    }
+}
+
+/// Parses an RFC 3339 timestamp to UTC. A value that does not parse gives `None`.
+fn parse_time(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|time| time.with_timezone(&Utc))
+}
+
+/// Tells whether `heads` has a line that is not shared and is older than the
+/// first shared line.
+fn has_older_lines(heads: &[LineHead], shared: &HashSet<String>) -> bool {
+    let timed = || {
+        heads.iter().filter_map(|head| {
+            let uuid = head.uuid.as_deref()?;
+            let time = parse_time(head.timestamp.as_deref()?)?;
+            Some((uuid, time))
+        })
+    };
+    let Some(first_shared) = timed()
+        .filter(|(uuid, _)| shared.contains(*uuid))
+        .map(|(_, time)| time)
+        .min()
+    else {
+        return false;
+    };
+    timed().any(|(uuid, time)| !shared.contains(uuid) && time < first_shared)
 }
 
 /// Scans `projects_root` for transcripts that share `uuid` values with the target.
