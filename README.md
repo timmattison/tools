@@ -4236,6 +4236,73 @@ crap --status --json | jq -r '.[] | select(.state == "waiting-for-user") | .sess
 
 `started` and `last` are `null` when the transcript records no timestamps.
 
+### Find the forks of a session: `--forks`
+
+Each fork that `crap` starts adds one line to a fork log. That is each `crap --here <id>` (an alias such as `ch` for `crap --here` too) and each cross-user resume. Claude Code records no link between a fork and its source, so without the log you cannot find which sessions came from a session, or which session a fork came from.
+
+The log is `forks.jsonl` in the `crap` directory of your data directory: `~/Library/Application Support/crap/forks.jsonl` on macOS, and `$XDG_DATA_HOME/crap/forks.jsonl` (else `~/.local/share/crap/forks.jsonl`) on Linux. Each line is one JSON object:
+
+```json
+{"time":"2026-10-28T01:51:22Z","source_id":"57570685-2d64-4431-8ab6-c021a12fa1af","fork_id":"9f8e7d6c-5b4a-4210-8edc-ba9876543210","source_user":"me","source_dir":"/Users/me/code/app","fork_dir":"/Users/me/code/app-worktrees/issue-7","kind":"here"}
+```
+
+- `time`: when `crap` started the fork, in RFC 3339 and UTC.
+- `source_id`: the session that was forked. `fork_id`: the new session.
+- `source_user`: the account that owns the source transcript.
+- `source_dir`: the directory that the source transcript records, or `null` when it records none.
+- `fork_dir`: the directory where the fork runs.
+- `kind`: `here` for `--here`, and `fork-at` for a cross-user resume.
+
+A cross-user fork writes to your own log, never into the other home. If `crap` cannot write the log, it shows a warning and starts the fork, because the log must not stop a resume. `crap` writes each line with one `write` call in append mode, so two forks at the same time cannot mix their lines. `crap` writes the line before Claude starts, but Claude writes the fork transcript only after your first new input. Thus the log can name a fork that has no transcript.
+
+To read the log for one session:
+
+```bash
+crap --forks 9f8e7d6c-5b4a-4210-8edc-ba9876543210
+```
+
+```text
+Forks of 9f8e7d6c-5b4a-4210-8edc-ba9876543210 in the fork log:
+  3c2b1a09-8f7e-4d6c-9b5a-4f3e2d1c0b9a  2026-10-28T03:00:41Z  not saved  /Users/me/code/app-worktrees/issue-8
+
+Sources of 9f8e7d6c-5b4a-4210-8edc-ba9876543210 in the fork log:
+  9f8e7d6c-5b4a-4210-8edc-ba9876543210 is a fork of 57570685-2d64-4431-8ab6-c021a12fa1af, made 2026-10-28T01:51:22Z (here) in /Users/me/code/app-worktrees/issue-7
+  57570685-2d64-4431-8ab6-c021a12fa1af is not a fork in the fork log.
+```
+
+- If the session is a source, the report lists each fork with its time, `saved` or `not saved`, and its directory. `saved` means that `crap --status <fork-id>` finds the fork transcript, so `crap <fork-id>` can resume the fork.
+- If the session is a fork, the report shows its source, then the source of that source, up to a session that is not a fork.
+- If the session is both, the report shows both sections.
+
+`--forks` resumes nothing and writes nothing. It exits `1` when no transcript and no line of the log has the id. If a line of the log cannot be read, `--forks` shows a warning and uses the other lines.
+
+#### Find forks that are not in the log: `--scan`
+
+The log has only the forks that `crap` started after the log existed. Older forks, and forks that another tool made (for example `claude --fork-session` without `crap`), have no line. `--scan` finds them in the transcripts:
+
+```bash
+crap --forks 4cf057cc-eaa4-4e2b-b10d-60f031d545bd --scan
+```
+
+```text
+The fork log has no fork of 4cf057cc-eaa4-4e2b-b10d-60f031d545bd, and 4cf057cc-eaa4-4e2b-b10d-60f031d545bd is not a fork in the fork log.
+
+Transcripts that share uuid values with 4cf057cc-eaa4-4e2b-b10d-60f031d545bd (scan of /Users/me/.claude/projects):
+  f7e903d0-5884-42c6-ae33-20a8763e5083  fork         23 shared  /Users/me/.claude/projects/-Users-me/f7e903d0-5884-42c6-ae33-20a8763e5083.jsonl
+```
+
+When Claude forks a session, it copies lines of the session into the new transcript, and each copied line keeps its `uuid`. The scan reads the `uuid` values of the transcript of the id. Then it reads each transcript in your own `~/.claude/projects` tree, skips the subagent transcripts, and reports each transcript that has one or more of those values. The relation column shows the direction:
+
+- `fork`: the other transcript is a fork of the id. The id has lines older than the first shared line, and the other transcript has none.
+- `source`: the other transcript is the source of the id.
+- `related`: the two transcripts share lines, but the data does not show the direction. For example, a fork of a session that never compacted copies every line, so neither transcript has older lines.
+
+The scan parses each line as JSON and reads only the top-level `uuid` key. Thus a transcript that holds a `uuid` value only in a tool result (the output of a `cat` of another transcript, for example) is not a pair. For speed, the scan first finds the files that hold one of the values as text, and then parses only those files. On 2026-10-28, a scan of 24 GB of transcripts took 26 seconds.
+
+The scan reads only your own tree. A cross-user fork removes its copy of the foreign transcript when Claude writes the fork, so the scan cannot find the source of a cross-user fork. The log has that source.
+
+If you installed the shell function before `--forks` existed, run `crap --shell-setup` again. The old function does not send `--forks` to the binary, so it reads the report as a resume target and stops at the `cd`. Until you run the setup again, `command crap --forks <id>` works.
+
 ### Options
 
 - `[SESSION_ID]`: The Claude session id to resume (optional with `--status`, which then lists every session for the current directory). The lookup is **self-first** — your own tree first, then, only on a miss, every sibling home that has run Claude — so an id belonging to another account is found and forked automatically, with no flag
@@ -4244,6 +4311,8 @@ crap --status --json | jq -r '.[] | select(.state == "waiting-for-user") | .sess
 - `--user <name>`: Resume another user's session from a specific account — **not required** for a cross-user resume, since the no-flag path already falls back on its own; reach for it when you want to force one account in particular. `<name>` is resolved as a sibling of your home (`<home>/../<name>` — `/Users/<name>` on macOS, `/home/<name>` on Linux), and only that user's `~/.claude/projects` tree is searched (your own is skipped, so `--user` also disambiguates an id on purpose). The foreign transcript is copied into your own tree and resumed as a fork (fresh id) at its original directory — or in the current directory instead when combined with `--here` — the original is only ever read. Naming your own account is a same-user hit and resumes in place
 - `--status`: Print the session's conversational state (`waiting-for-user`, `busy`, `awaiting-assistant`, or `empty`; or `<status> (live, pid <pid>)` when open elsewhere) and exit, without resuming. With no id, lists every session for the current directory with its state and start/last times
 - `--json`: With `--status`, emit JSON instead of text (one object for an id, an array for the directory listing)
+- `--forks`: Show what the fork log knows about the session — each fork of it, with `saved` or `not saved`, and the chain of sessions it was forked from — and exit, without resuming
+- `--scan`: With `--forks`, also read every transcript in your own `~/.claude/projects` tree and report each one that shares a top-level `uuid` value with the session, with the count and the relation (`fork`, `source`, or `related`)
 - `--shell-setup`: Add the `crap` shell function to your ~/.zshrc or ~/.bashrc
 
 ### Shell Integration
@@ -4376,12 +4445,12 @@ The function always resumes a fork with `--resume <session-id> --fork-session --
 
 After the cleanup, the function prints `Resume this fork with: crap <new-id>`. It prints this line only when `crap --status <new-id>` finds the fork. Claude saves the fork only after your first new input. Thus, if you exit a fork at once, the function prints no line.
 
-The function sends `--status`, `--help`, `-h`, `--version`, `-V`, and `--shell-setup` directly to the binary. These flags do not change the parent shell, and their output must go to the terminal. The function forwards `"$@"`, so flags such as `--force` and `--here` get to the binary. Both paths start Claude through `__crap_launch`, so the launcher choice is in one place. The `eval` in `__crap_launch` is intentional. A shell does not expand an alias in a function body that it parsed before the alias existed. `eval` parses the launcher text when the function runs, so an alias that `CRAP_LAUNCHER` names expands, and the flags of a launcher become separate words. The `command crap` calls get to the binary, not to the function of the same name.
+The function sends `--status`, `--forks`, `--help`, `-h`, `--version`, `-V`, and `--shell-setup` directly to the binary. These flags do not change the parent shell, and their output must go to the terminal. The function forwards `"$@"`, so flags such as `--force` and `--here` get to the binary. Both paths start Claude through `__crap_launch`, so the launcher choice is in one place. The `eval` in `__crap_launch` is intentional. A shell does not expand an alias in a function body that it parsed before the alias existed. `eval` parses the launcher text when the function runs, so an alias that `CRAP_LAUNCHER` names expands, and the flags of a launcher become separate words. The `command crap` calls get to the binary, not to the function of the same name.
 
 ### Exit Codes
 
 - `0`: Success
-- `1`: No session found with that id
+- `1`: No session found with that id (for `--forks`: no transcript and no line of the fork log has that id)
 - `2`: Session has no recorded working directory
 - `3`: The session's original directory no longer exists
 - `4`: Invalid session id

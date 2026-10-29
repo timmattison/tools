@@ -45,6 +45,26 @@
 //! That per-directory listing is inherently the current user's, so it stays
 //! current-user-only and ignores `--user`.
 //!
+//! Each fork that `crap` starts adds one line to a fork log: `forks.jsonl` in
+//! the `crap` directory of the data directory of the current user (see
+//! [`fork_log`]). That is each `--here` fork and each cross-user resume. The
+//! binary writes the line immediately before it prints the fork output, so
+//! the line names the source, the fork id, the account that owns the source,
+//! both directories, and the kind of fork. Claude Code records no link between
+//! a fork and its source, so the log is the only record of a fork that `crap`
+//! made. A cross-user fork writes to the log of the current user, never into
+//! the other home. If the log cannot be written, `crap` shows a warning and
+//! continues the fork.
+//!
+//! With `--forks <id>`, it resumes nothing: it reads the log and lists each
+//! fork of the session, with `saved` or `not saved` (the lookup of
+//! `--status <fork-id>`), and the chain of sources up to a session that is not
+//! a fork. `--scan` adds the forks that the log does not have: older forks,
+//! and forks that another tool made. Claude keeps the `uuid` of each line that
+//! it copies into a fork, so the scan reads every transcript in the tree of
+//! the current user and reports each one that shares a top-level `uuid` with
+//! the session (see [`fork_scan`]).
+//!
 //! A session that belongs to another account is found automatically, with no
 //! flag at all: `crap <id>` searches your own tree first (the fast path,
 //! unchanged) and, only on a miss, falls back to scanning every sibling home
@@ -1925,6 +1945,10 @@ struct Cli {
     /// and the chain of sessions that it was forked from. It resumes nothing and
     /// writes nothing. The log has only the forks that `crap` started: `--here`
     /// and the cross-user resume.
+    ///
+    /// Each such fork adds one JSON line to `forks.jsonl` in the `crap`
+    /// directory of your data directory: `~/Library/Application Support/crap`
+    /// on macOS, `$XDG_DATA_HOME/crap` (else `~/.local/share/crap`) on Linux.
     #[arg(long, conflicts_with_all = ["here", "status", "shell_setup", "user", "force"])]
     forks: bool,
 
