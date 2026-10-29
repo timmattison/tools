@@ -379,7 +379,7 @@ fn value_name<T: ValueEnum>(value: &T) -> String {
 // The help names the `?` key and no other key of the live table, because
 // `live::KEYS` is the one list that says what a key does and a doc comment of
 // `clap` is a string literal that reads that list at no time. A help page that
-// named all five keys would be a second list of them, and the second list
+// named every key would be a second list of them, and the second list
 // drifts. One key name opens the first list from inside the table, and
 // `live::tests::the_long_help_names_the_key_that_lists_the_keys` holds that
 // name and the list together.
