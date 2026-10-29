@@ -783,6 +783,10 @@ enum Event {
     ListUp,
     /// The user moved the cursor of the open list one row down (Down).
     ListDown,
+    /// The user moved the cursor of the open list one page up (Page Up).
+    ListPageUp,
+    /// The user moved the cursor of the open list one page down (Page Down).
+    ListPageDown,
     /// The user chose the worktree under the cursor of the open list (Enter).
     ListGo,
     /// The user closed the open list (Esc or `q`). The watch stays on the
@@ -869,10 +873,11 @@ pub(crate) enum InputMode {
     /// [`RunKind`] changes one key: `m` acts in a push and is inert in the
     /// three runs that move HEAD.
     Running(RunKind),
-    /// The list of the worktrees is open. Up and Down move its cursor, Enter
-    /// goes to the worktree under the cursor, and Esc and `q` close it. Every
-    /// other key does nothing at all, because the list takes the pane, and a
-    /// key that acts on the frame acts on a frame that the user cannot see.
+    /// The list of the worktrees is open. Up and Down move its cursor, Page Up
+    /// and Page Down move it one page, Enter goes to the worktree under the
+    /// cursor, and Esc and `q` close it. Every other key does nothing at all,
+    /// because the list takes the pane, and a key that acts on the frame acts
+    /// on a frame that the user cannot see.
     List,
 }
 
@@ -3154,6 +3159,16 @@ where
                 list.down();
             }
         }
+        Event::ListPageUp => {
+            if let Some(list) = state.ui.list_mut() {
+                list.page_up();
+            }
+        }
+        Event::ListPageDown => {
+            if let Some(list) = state.ui.list_mut() {
+                list.page_down();
+            }
+        }
         // Enter closes the list before the switch, so a switch that fails
         // puts its reason on a free row. Enter on the worktree that the frame
         // shows opens nothing, because the frame shows it already.
@@ -3882,12 +3897,12 @@ fn forward_input(event: CtEvent) -> Option<Event> {
 ///   overlap, and a base update that runs puts the loop in this same mode. The
 ///   arrow keys are inert too: the window under the frame belongs to the
 ///   worktree that the command runs in, so the watch stays on that worktree.
-/// - [`InputMode::List`]: Up and Down move the cursor, Enter goes to the
-///   worktree under it, and Esc and `q` close the list. Every other key gives
-///   `None` and does nothing at all: `r` does not walk, `p` and `P` do not
-///   ask, `G`, `R`, `M`, and `m` start nothing, and no line leaves the row.
-///   The list takes the pane, so the frame that such a key acts on is not on
-///   the screen.
+/// - [`InputMode::List`]: Up and Down move the cursor, Page Up and Page Down
+///   move it one page, Enter goes to the worktree under it, and Esc and `q`
+///   close the list. Every other key gives `None` and does nothing at all:
+///   `r` does not walk, `p` and `P` do not ask, `G`, `R`, `M`, and `m` start
+///   nothing, and no line leaves the row. The list takes the pane, so the
+///   frame that such a key acts on is not on the screen.
 /// - `G`, `R`, and `M` act only where `keys` says each one has a command
 ///   behind it. Where one does not, that key does what any other unbound key
 ///   does, which is the one silent case this feature has.
@@ -3974,6 +3989,8 @@ fn classify_input(key: KeyEvent, mode: InputMode, keys: CommandKeys) -> Option<E
         InputMode::List => match code {
             KeyCode::Up => Event::ListUp,
             KeyCode::Down => Event::ListDown,
+            KeyCode::PageUp => Event::ListPageUp,
+            KeyCode::PageDown => Event::ListPageDown,
             KeyCode::Enter => Event::ListGo,
             // `q` closes the list, as it answers "no" to the push question.
             KeyCode::Esc | KeyCode::Char('q') => Event::ListClose,
@@ -5459,6 +5476,8 @@ mod tests {
             Some(Event::OpenList) => "OpenList",
             Some(Event::ListUp) => "ListUp",
             Some(Event::ListDown) => "ListDown",
+            Some(Event::ListPageUp) => "ListPageUp",
+            Some(Event::ListPageDown) => "ListPageDown",
             Some(Event::ListGo) => "ListGo",
             Some(Event::ListClose) => "ListClose",
             Some(Event::Quit) => "Quit",
@@ -5618,7 +5637,6 @@ mod tests {
                 KeyCode::Char('x'),
                 KeyCode::Tab,
                 KeyCode::Backspace,
-                KeyCode::PageDown,
             ] {
                 assert_eq!(
                     meaning(classify_input(press(code), InputMode::List, keys)),
@@ -5631,6 +5649,31 @@ mod tests {
                 "Quit",
                 "Ctrl-C must quit from the list with {keys:?}",
             );
+        }
+    }
+
+    #[test]
+    fn the_page_keys_move_the_list_one_page_and_mean_dismiss_in_every_other_mode() {
+        // The page keys act only in the list. Outside the list they keep the
+        // meaning of today, which is to dismiss the line on the row.
+        for keys in EVERY_BINDING_COMBINATION {
+            for mode in EVERY_MODE {
+                for (code, in_the_list) in [
+                    (KeyCode::PageUp, "ListPageUp"),
+                    (KeyCode::PageDown, "ListPageDown"),
+                ] {
+                    let expected = if mode == InputMode::List {
+                        in_the_list
+                    } else {
+                        "Dismiss"
+                    };
+                    assert_eq!(
+                        meaning(classify_input(press(code), mode, keys)),
+                        expected,
+                        "{code:?} in {mode:?} with {keys:?}",
+                    );
+                }
+            }
         }
     }
 
@@ -12707,6 +12750,13 @@ mod push_loop_tests {
         height: 5,
     };
 
+    /// A pane with room for the head of a frame, four rows of the list, and
+    /// the hint.
+    const FOUR_ROWS_FOR_THE_LIST: Dimensions = Dimensions {
+        width: 80,
+        height: 7,
+    };
+
     #[test]
     fn a_list_longer_than_the_pane_scrolls_only_as_far_as_the_cursor_needs() {
         // Six worktrees in a pane of two list rows. The window follows the
@@ -12772,6 +12822,48 @@ mod push_loop_tests {
             seen.switches.is_empty(),
             "a move of the cursor must not switch, got {:?}",
             seen.switches,
+        );
+        assert_eq!(
+            seen.listings, 1,
+            "only the Down that opens the list reads it",
+        );
+    }
+
+    #[test]
+    fn page_down_and_page_up_move_the_cursor_one_page_and_enter_goes_to_the_row_under_it() {
+        // The frame does not change while the cursor moves. A page is one row
+        // less than the window that the user saw. The cursor stops on the
+        // bottom row of the list, and Enter goes to the row under the cursor.
+        let names = [ALPHA, BRAVO, CHARLIE, "delta", "echo", "foxtrot"];
+        let (paints, seen) = paints_of(
+            Setup {
+                dims: FOUR_ROWS_FOR_THE_LIST,
+                measured: FOUR_ROWS_FOR_THE_LIST,
+                ..in_world(World::of(&names, ALPHA))
+            },
+            vec![
+                vec![key(KeyCode::Down)],
+                vec![key(KeyCode::PageDown)],
+                vec![key(KeyCode::PageDown)],
+                vec![key(KeyCode::PageDown)],
+                vec![key(KeyCode::PageUp)],
+                vec![key(KeyCode::Enter), Event::Quit],
+            ],
+        );
+        assert_eq!(
+            paints,
+            [
+                format!("LIST {ALPHA}: >{ALPHA}⌂ {BRAVO} {CHARLIE} delta"),
+                format!("LIST {ALPHA}: {ALPHA}⌂ {BRAVO} {CHARLIE} >delta"),
+                format!("LIST {ALPHA}: {CHARLIE} delta echo >foxtrot"),
+                format!("LIST {ALPHA}: >{CHARLIE} delta echo foxtrot"),
+                format!("FRAME {CHARLIE}"),
+            ],
+        );
+        assert_eq!(
+            seen.switches,
+            vec![worktree(CHARLIE)],
+            "Enter after a page key goes to the worktree under the cursor",
         );
         assert_eq!(
             seen.listings, 1,

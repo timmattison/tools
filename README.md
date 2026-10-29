@@ -861,12 +861,14 @@ cannot hang the caller. Used by `cwt` and `ha`.
     started gsw is the **home worktree**.
     - Up goes to the home worktree. Left and Right go to the previous and the next worktree in
       path order, which is the order of `cwt`, and they wrap as `cwt -p` and `cwt -f` do. Down
-      opens a list of the worktrees. In the list, Up and Down move the cursor, Enter goes to the
-      worktree under the cursor, and Esc or `q` closes the list and leaves you where you were.
-      Nothing else acts while the list is open, except Ctrl-C. The list opens on the worktree
-      that is on the screen, marks the home worktree with `⌂`, and scrolls when it is longer than
-      the pane. The frame does not change while the cursor moves: gsw walks a worktree only after
-      Enter.
+      opens a list of the worktrees. In the list, Up and Down move the cursor, Page Up and Page
+      Down move it one page, Enter goes to the worktree under the cursor, and Esc or `q` closes
+      the list and leaves you where you were. A page is one row less than the rows of the list
+      that the pane shows, so the row at the edge of the old page stays in view, and the cursor
+      stops on the first and the last row. Nothing else acts while the list is open, except Ctrl-C.
+      The list opens on the worktree that is on the screen, marks the home worktree with `⌂`, and
+      scrolls when it is longer than the pane. The frame does not change while the cursor moves:
+      gsw walks a worktree only after Enter.
     - A worktree whose directory is gone is not in the list, and neither is a bare main
       repository: gsw cannot show either one. A worktree whose HEAD gsw cannot read is in the list
       with `?` in place of a branch. gsw reads the list again at each press, in its own process
