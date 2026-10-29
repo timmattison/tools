@@ -136,7 +136,10 @@ fn has_older_lines(heads: &[LineHead], shared: &HashSet<String>) -> bool {
 ///
 /// # Errors
 ///
-/// Returns the error when `target_transcript` cannot be read.
+/// Returns the error when `target_transcript` cannot be read. Also returns an
+/// error when the search for its `uuid` values cannot be built. The
+/// `aho-corasick` crate refuses a set of patterns that is larger than its size
+/// limits, and a real transcript is far below those limits.
 pub fn scan_for_relatives(
     projects_root: &Path,
     target_id: &str,
@@ -147,8 +150,11 @@ pub fn scan_for_relatives(
     if target_uuids.is_empty() {
         return Ok(ScanReport::default());
     }
-    let matcher =
-        aho_corasick::AhoCorasick::new(&target_uuids).expect("a set of strings builds a matcher");
+    let matcher = aho_corasick::AhoCorasick::new(&target_uuids).map_err(|err| {
+        std::io::Error::other(format!(
+            "could not build the search for its uuid values: {err}"
+        ))
+    })?;
     let unreadable = AtomicUsize::new(0);
     let listing = candidates(projects_root);
     unreadable.fetch_add(listing.unreadable, Ordering::Relaxed);

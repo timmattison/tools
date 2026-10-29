@@ -2245,7 +2245,7 @@ fn run_forks(
                         fork_scan::format_scan_report(session_id, projects_dir, &report)
                     ),
                     Err(err) => warn(format!(
-                        "could not read the transcript {}: {err}",
+                        "the scan stopped at the transcript {}: {err}",
                         path.display()
                     )),
                 }
