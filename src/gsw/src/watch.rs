@@ -5143,6 +5143,20 @@ mod tests {
             .filter(|keys| keys.issue == Binding::Unbound)
     }
 
+    /// The combinations in which `T` has a command behind it.
+    fn tab_bound() -> impl Iterator<Item = CommandKeys> {
+        EVERY_BINDING_COMBINATION
+            .into_iter()
+            .filter(|keys| keys.tab == Binding::Bound)
+    }
+
+    /// The combinations in which `T` has none.
+    fn tab_unbound() -> impl Iterator<Item = CommandKeys> {
+        EVERY_BINDING_COMBINATION
+            .into_iter()
+            .filter(|keys| keys.tab == Binding::Unbound)
+    }
+
     /// Every mode a key can arrive in.
     const EVERY_MODE: [InputMode; 6] = [
         InputMode::Normal,
@@ -5370,6 +5384,133 @@ mod tests {
                     classify_input(g_release, mode, keys).is_none(),
                     "a release of `G` must be ignored in {mode:?} with {keys:?}",
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn t_asks_for_the_tab_title_while_the_monitor_and_every_run_run() {
+        // The tab-title key. A tab title changes nothing in the repository, so
+        // no run in flight is a reason to refuse it. Some terminals report the
+        // shift of a capital letter, so both spellings must act.
+        for mode in [InputMode::Normal].into_iter().chain(EVERY_RUN) {
+            for keys in tab_bound() {
+                for modifiers in [KeyModifiers::NONE, KeyModifiers::SHIFT] {
+                    assert_eq!(
+                        meaning(classify_input(
+                            KeyEvent::new(KeyCode::Char('T'), modifiers),
+                            mode,
+                            keys
+                        )),
+                        "TabRequested",
+                        "`T` must ask for the tab title in {mode:?} with {keys:?} and {modifiers:?}",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn t_does_nothing_while_the_confirmation_is_up() {
+        // That mode owns the answer to a question. No new key may trap the
+        // user in it.
+        for keys in tab_bound() {
+            assert_eq!(
+                meaning(classify_input(
+                    press(KeyCode::Char('T')),
+                    InputMode::Confirm,
+                    keys
+                )),
+                "Dismiss",
+                "`T` must not answer the question with {keys:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn t_does_nothing_while_the_list_is_open() {
+        // The list takes the pane, so a key that starts a run has no frame to
+        // act on.
+        for keys in tab_bound() {
+            assert_eq!(
+                meaning(classify_input(
+                    press(KeyCode::Char('T')),
+                    InputMode::List,
+                    keys
+                )),
+                "nothing",
+                "`T` must start nothing in the list with {keys:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn t_does_nothing_where_the_command_does_not_exist() {
+        // Silence belongs to this case only, and it is the silence of an
+        // unbound key rather than a code path of its own.
+        for mode in EVERY_MODE {
+            for keys in tab_unbound() {
+                assert_eq!(
+                    meaning(classify_input(press(KeyCode::Char('T')), mode, keys)),
+                    unbound(mode),
+                    "`T` must do nothing in {mode:?} with no command behind it, with {keys:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lowercase_t_stays_unbound() {
+        // The user asked for `T`. A shifted key and an unshifted one are two
+        // keys, and only one of them was asked for.
+        for mode in EVERY_MODE {
+            for keys in EVERY_BINDING_COMBINATION {
+                assert_eq!(
+                    meaning(classify_input(press(KeyCode::Char('t')), mode, keys)),
+                    unbound(mode),
+                    "`t` must stay unbound in {mode:?} with {keys:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_release_of_t_is_ignored() {
+        // Only a press acts, and the new key is no exception.
+        let t_release = KeyEvent {
+            kind: KeyEventKind::Release,
+            ..press(KeyCode::Char('T'))
+        };
+        for mode in EVERY_MODE {
+            for keys in EVERY_BINDING_COMBINATION {
+                assert!(
+                    classify_input(t_release, mode, keys).is_none(),
+                    "a release of `T` must be ignored in {mode:?} with {keys:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn t_moves_no_other_key() {
+        // A new key must move no old one. Flip only the binding of `T`, and
+        // every other key must mean what it meant before.
+        for mode in EVERY_MODE {
+            for keys in EVERY_BINDING_COMBINATION {
+                let flipped = CommandKeys {
+                    tab: match keys.tab {
+                        Binding::Bound => Binding::Unbound,
+                        Binding::Unbound => Binding::Bound,
+                    },
+                    ..keys
+                };
+                for c in ['G', 'R', 'M', 'p', 'P', 'm', 'q', 'r'] {
+                    assert_eq!(
+                        meaning(classify_input(press(KeyCode::Char(c)), mode, keys)),
+                        meaning(classify_input(press(KeyCode::Char(c)), mode, flipped)),
+                        "`{c}` must mean the same in {mode:?} whether `T` is bound or not, with {keys:?}",
+                    );
+                }
             }
         }
     }
@@ -5646,6 +5787,7 @@ mod tests {
             Some(Event::Confirmed) => "Confirmed",
             Some(Event::Cancelled) => "Cancelled",
             Some(Event::BaseUpdateRequested(update)) => asks_for(update),
+            Some(Event::TabRequested) => "TabRequested",
             Some(_) => "another event",
             None => "nothing",
         }
