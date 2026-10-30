@@ -3429,8 +3429,21 @@ mod tests {
         assert_eq!(fs::read_link(&created[0]).unwrap(), original);
     }
 
+    /// How many times the copy race test runs the whole race. One round fails
+    /// only some of the time at a 1 us clock, so the test runs enough rounds to
+    /// fail every time.
+    const COPY_RACE_ROUNDS: usize = 20;
+
     #[test]
     fn concurrent_copy_imports_never_show_a_partial_copy() {
+        for round in 0..COPY_RACE_ROUNDS {
+            copy_race_round(round);
+        }
+    }
+
+    /// Runs one race of `RACE_THREADS` copy imports against a reader thread, in
+    /// its own temporary directory.
+    fn copy_race_round(round: usize) {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::{Arc, Barrier};
 
@@ -3482,22 +3495,32 @@ mod tests {
 
         assert!(
             partial.is_empty(),
-            "a reader saw partial lengths: {partial:?}"
+            "round {round}: a reader saw partial lengths: {partial:?}"
         );
         for result in &results {
-            assert!(result.is_ok(), "every import must succeed: {result:?}");
+            assert!(
+                result.is_ok(),
+                "round {round}: every import must succeed: {result:?}"
+            );
         }
         let created = results
             .into_iter()
             .filter(|r| matches!(r, Ok(Some(_))))
             .count();
-        assert_eq!(created, 1, "exactly one run creates the file");
+        assert_eq!(
+            created, 1,
+            "round {round}: exactly one run creates the file"
+        );
         assert_eq!(fs::read(&link).unwrap(), bytes.as_bytes());
         let names: Vec<_> = fs::read_dir(&folder)
             .unwrap()
             .map(|e| e.unwrap().file_name())
             .collect();
-        assert_eq!(names.len(), 1, "no temporary file may remain: {names:?}");
+        assert_eq!(
+            names.len(),
+            1,
+            "round {round}: no temporary file may remain: {names:?}"
+        );
     }
 
     #[test]
