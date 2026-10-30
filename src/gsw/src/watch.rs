@@ -2023,7 +2023,7 @@ fn read_value(name: &str) -> Option<String> {
 /// and report each answer on the loop's own channel.
 ///
 /// **One thread and one shell for each command.** `G` has two commands, so the
-/// three keys that run commands have four probes. A shell that answered for several
+/// four keys that run commands have five probes. A shell that answered for several
 /// names at once would need its standard output parsed, and an rc file can
 /// print to that output — so the answer of such a shell says as much about the
 /// banner of the user as about the commands. Exit status carries one answer,
@@ -2083,6 +2083,17 @@ fn spawn_command_probes(
             },
         )
     }));
+    // `T` has one command, so it has one probe and no iteration.
+    let tab_tx = tx.clone();
+    probes.push(spawn_probe(
+        shell,
+        values.tab.as_deref(),
+        crate::tab::DEFAULT_TAB_COMMAND,
+        deadline,
+        move |command| {
+            let _ = tab_tx.send(Event::TabCommandFound(command));
+        },
+    ));
     probes
 }
 
