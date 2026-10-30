@@ -2152,10 +2152,13 @@ fn log_fork(log: Option<&Path>, record: &fork_log::ForkRecord) {
 /// the chain of sessions that it was forked from. A fork is `saved` when
 /// [`find_session_across`] finds its transcript, the same lookup that
 /// `crap --status <fork-id>` uses. The function resumes nothing and writes
-/// nothing. A log that is missing, unreadable, or partly unreadable gives a
-/// warning on stderr, and the report uses the records that could be read. When
-/// the log knows the id and no transcript has it, the function exits with
-/// [`exit_codes::SESSION_NOT_FOUND`].
+/// nothing. Three cases give a warning on stderr: the data directory is not
+/// known, the log cannot be read, and some lines of the log cannot be read. A
+/// log file that does not exist is an empty log and gives no warning. The
+/// report uses the records that could be read. When the log does not know the
+/// id (no fork and no source) and no transcript has the id, the function exits
+/// with [`exit_codes::SESSION_NOT_FOUND`]. When the log knows the id, the
+/// report prints and the exit code is 0, also when no transcript has the id.
 ///
 /// With `scan`, the function then reads the transcripts of `projects_dir`, the
 /// own projects tree of the user, and prints each one that shares a `uuid`
