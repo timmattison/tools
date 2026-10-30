@@ -1134,6 +1134,22 @@ impl TabRun {
         self.command = Some(command);
     }
 
+    /// Take the key for one run, and return the command to run.
+    ///
+    /// `None` where a run is in flight, and where no command exists: the
+    /// silence of an unbound key. `T` asks no question first, because `stp`
+    /// changes a tab title only and never the repository. It has no second
+    /// press on a remote shell, because the rename goes through the zellij
+    /// server and is correct for a remote client too.
+    fn press(&mut self) -> Option<crate::shell::ShellCommand> {
+        if self.running {
+            return None;
+        }
+        let command = self.command.clone()?;
+        self.running = true;
+        Some(command)
+    }
+
     /// A run has ended, so `T` means something again.
     fn finished(&mut self) {
         self.running = false;
@@ -3080,9 +3096,10 @@ enum Flow {
 ///
 /// `state` is everything the loop changes, in one value. Its cache comes whole,
 /// and not as its snapshot and its pane, because the two always come from the
-/// one cache. Its `issue` and `conflicts` are the state of the two keys that
-/// start work off this thread, one run of each at a time. Its current worktree
-/// is where the push, the issue key, and `m` do their work.
+/// one cache. Its `issue`, `tab`, and `conflicts` are the state of the three
+/// keys that start work off this thread (`G`, `T`, and `m`), one run of each
+/// at a time. Its current worktree is where the push, `G`, `T`, and `m` do
+/// their work.
 #[expect(
     clippy::type_complexity,
     reason = "the loop takes one generic for each of its eighteen hooks, so each hook stays \
@@ -3401,16 +3418,22 @@ where
         }
         Event::IssueCommandFound(page, command) => state.issue.found(page, command),
         Event::TabCommandFound(command) => state.tab.found(command),
-        // A press of `T` starts a run in slice 3 of issue #620. The key is bound already, so the press is read and does nothing.
-        Event::TabRequested => {}
+        // `T` asks nothing first: a tab title is not the repository. The
+        // check and the start are one step on the thread of the loop, so a
+        // burst of presses starts one run.
+        Event::TabRequested => {
+            if let Some(command) = state.tab.press() {
+                (hooks.start_tab)(command, &state.current, state.generation);
+            }
+        }
         // The check and the start are one step on the thread of the loop, so
         // a burst of presses starts one run. See [`ConflictsRun`].
         Event::ConflictsRequested => match state.conflicts.press() {
             ConflictsPress::Start => (hooks.start_conflicts)(&state.current, state.generation),
             ConflictsPress::Nothing => {}
         },
-        // A run continues after a switch, in the worktree where it started. An
-        // event of such a run describes a worktree that the frame no longer
+        // A run of `G`, `T`, or `m` continues after a switch, in the worktree
+        // where it started. An event of such a run describes a worktree that the frame no longer
         // shows, and a line under the frame must describe the worktree in the
         // frame. So it posts nothing. An outcome still frees its key, because
         // one run at a time is a rule for the whole process, and that run has
@@ -3421,6 +3444,9 @@ where
         }
         Event::IssueFinished { generation, .. } if state.is_stale(generation) => {
             state.issue.finished();
+        }
+        Event::TabFinished { generation, .. } if state.is_stale(generation) => {
+            state.tab.finished();
         }
         // A run that a rebase, a merge, or the `git switch` of the second Esc
         // overlapped measured the branch before HEAD moved. Its line reaches
@@ -3447,7 +3473,6 @@ where
             // stands on where the line landed.
             let _ = state.ui.post_notice(outcome.line(), clock());
         }
-        Event::TabFinished { .. } => state.tab.finished(),
         Event::IssueFinished { outcome, .. } => {
             state.issue.finished();
             // A run that worked says nothing: the browser is the answer. A run
@@ -3455,6 +3480,20 @@ where
             // waits for a key the way git's error text does.
             if let Some(message) = outcome.message() {
                 state.ui.post_error(message.to_string());
+            }
+        }
+        Event::TabFinished { outcome, .. } => {
+            state.tab.finished();
+            // A run that worked can say what it did, and that is gsw's report
+            // of a key the user pressed, so it fades. A run that failed says
+            // why in the words of another program, so it waits for a key the
+            // way the error text of git does.
+            match outcome {
+                crate::tab::TabOutcome::Worked(Some(line)) => {
+                    let _ = state.ui.post_notice(line, clock());
+                }
+                crate::tab::TabOutcome::Worked(None) => {}
+                crate::tab::TabOutcome::Failed(line) => state.ui.post_error(line),
             }
         }
         // **A walk on every outcome, and not on success alone.** A command
