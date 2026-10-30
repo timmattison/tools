@@ -1011,6 +1011,9 @@ enum ImportMode {
 /// untouched: a session id is a UUID, so a file there can only be this very
 /// session, and clobbering it would never be correct.
 ///
+/// Runs that import the same session at the same moment all succeed, and only
+/// one of them creates the file. The others get `None`.
+///
 /// # Errors
 ///
 /// Returns the underlying [`std::io::Error`] if the project folder cannot be
@@ -1037,16 +1040,43 @@ fn prepare_import(
     match mode {
         ImportMode::Symlink => {
             #[cfg(unix)]
-            std::os::unix::fs::symlink(source_jsonl, &link_path)?;
+            let made = std::os::unix::fs::symlink(source_jsonl, &link_path);
             #[cfg(not(unix))]
-            std::os::windows::fs::symlink_file(source_jsonl, &link_path)?;
+            let made = std::os::windows::fs::symlink_file(source_jsonl, &link_path);
+            placed_or_lost_race(made, link_path)
         }
         ImportMode::Copy => {
-            std::fs::copy(source_jsonl, &link_path)?;
+            // Copy to a name that no transcript listing reads, then hard-link it
+            // into place. `hard_link` never replaces a file, so the target
+            // appears complete and at most once.
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos());
+            let temporary = folder.join(format!(
+                ".{session_id}.jsonl.{}-{nanos}.tmp",
+                std::process::id()
+            ));
+            let linked = std::fs::copy(source_jsonl, &temporary)
+                .and_then(|_| std::fs::hard_link(&temporary, &link_path));
+            // Best effort: the target no longer needs the temporary name.
+            let _ = std::fs::remove_file(&temporary);
+            placed_or_lost_race(linked, link_path)
         }
     }
+}
 
-    Ok(Some(link_path))
+/// Turns the result of placing the import into the return value of
+/// [`prepare_import`]. `AlreadyExists` means that another run placed the file
+/// first, so this run has nothing to create and nothing to clean up.
+fn placed_or_lost_race(
+    placed: std::io::Result<()>,
+    link_path: PathBuf,
+) -> std::io::Result<Option<PathBuf>> {
+    match placed {
+        Ok(()) => Ok(Some(link_path)),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
+        Err(err) => Err(err),
+    }
 }
 
 /// Why `--here` could not place a session under the current directory.
