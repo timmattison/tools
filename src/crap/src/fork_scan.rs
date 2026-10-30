@@ -279,8 +279,13 @@ pub fn format_scan_report(id: &str, projects_root: &Path, report: &ScanReport) -
         }
     }
     if report.unreadable > 0 {
+        let noun = if report.unreadable == 1 {
+            "transcript or folder"
+        } else {
+            "transcripts or folders"
+        };
         out.push_str(&format!(
-            "  {} transcripts or folders could not be read.\n",
+            "  {} {noun} could not be read.\n",
             report.unreadable
         ));
     }

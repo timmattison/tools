@@ -2222,8 +2222,13 @@ fn run_forks(
         Some(path) => match fork_log::read_fork_log(path) {
             Ok(log) => {
                 if log.unreadable_lines > 0 {
+                    let noun = if log.unreadable_lines == 1 {
+                        "line"
+                    } else {
+                        "lines"
+                    };
                     warn(format!(
-                        "{} lines of the fork log {} could not be read",
+                        "{} {noun} of the fork log {} could not be read",
                         log.unreadable_lines,
                         path.display()
                     ));
