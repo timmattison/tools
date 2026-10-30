@@ -195,7 +195,7 @@ fn cross_user_fork_adds_a_fork_at_line() {
 }
 
 #[test]
-fn two_forks_at_the_same_time_give_two_complete_lines() {
+fn concurrent_forks_give_one_complete_line_each() {
     const CHILDREN: usize = 8;
     let tmp = unique_root("parallel");
     let (home, work) = setup_here(tmp.path());
