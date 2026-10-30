@@ -16,7 +16,7 @@
 //! that cannot start are the same for every key, so they live here. Each key
 //! keeps its variable, its default name, its deadline, and the rest of its
 //! words. `G` keeps those in [`crate::issue`], and `T` keeps them in
-//! `crate::tab`.
+//! [`crate::tab`].
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
