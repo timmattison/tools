@@ -4017,7 +4017,7 @@ fn forward_input(event: CtEvent) -> Option<Event> {
 ///   killed from another pane.
 /// - [`InputMode::Normal`]: `q` quits, `r` forces a refresh, `p` asks to push,
 ///   `P` asks to push without the `pre-push` hook, `G` asks for the issue of
-///   the branch, `R` asks to rebase the branch onto its base, `M` asks to
+///   the branch, `T` runs the tab-title command, `R` asks to rebase the branch onto its base, `M` asks to
 ///   merge the base into the branch, and `m` asks to measure a rebase and a
 ///   merge against the default branch. Up goes to the home worktree, Left to
 ///   the previous worktree, Right to the next worktree, and Down opens the
@@ -4033,9 +4033,9 @@ fn forward_input(event: CtEvent) -> Option<Event> {
 ///   "no", not "quit", `r` is not a refresh, `P` is not an answer, `R` and `M`
 ///   do not ask a second question, and an arrow key is no answer at all. That
 ///   is why the mode exists.
-/// - [`InputMode::Running`]: `q` quits, `r` refreshes, and `G` still asks for
-///   the issue — a browser conflicts with nothing any of these runs does. `m`
-///   still asks to measure during a push, because a measurement is read-only
+/// - [`InputMode::Running`]: `q` quits, `r` refreshes, and `G` and `T` still act
+///   — a browser and a tab title conflict with nothing any of these runs does.
+///   `m` still asks to measure during a push, because a measurement is read-only
 ///   for the repository. A rebase, a merge, and the `git switch` of the second
 ///   Esc move HEAD, and a measurement starts from HEAD, so `m` is inert during
 ///   those three runs. `p`, `P`, `R`, and `M` are inert, so an impatient second
@@ -4046,10 +4046,10 @@ fn forward_input(event: CtEvent) -> Option<Event> {
 /// - [`InputMode::List`]: Up and Down move the cursor, Page Up and Page Down
 ///   move it one page, Enter goes to the worktree under it, and Esc and `q`
 ///   close the list. Every other key gives `None` and does nothing at all:
-///   `r` does not walk, `p` and `P` do not ask, `G`, `R`, `M`, and `m` start
+///   `r` does not walk, `p` and `P` do not ask, `G`, `R`, `M`, `T`, and `m` start
 ///   nothing, and no line leaves the row. The list takes the pane, so the
 ///   frame that such a key acts on is not on the screen.
-/// - `G`, `R`, and `M` act only where `keys` says each one has a command
+/// - `G`, `R`, `M`, and `T` act only where `keys` says each one has a command
 ///   behind it. Where one does not, that key does what any other unbound key
 ///   does, which is the one silent case this feature has.
 /// - Every other press in the three other modes is [`Event::Dismiss`], which
@@ -4091,6 +4091,11 @@ fn classify_input(key: KeyEvent, mode: InputMode, keys: CommandKeys) -> Option<E
             // reason to refuse. With no command behind it the key falls
             // through to `Dismiss`, which is what every unbound key gives.
             KeyCode::Char('G') if keys.issue == Binding::Bound => Event::IssueRequested,
+            // A tab title changes nothing in the repository, so a run in
+            // flight is no reason to refuse it, as it is none for `G`. With no
+            // command behind it the key falls through to `Dismiss`, which is
+            // what every unbound key gives.
+            KeyCode::Char('T') if keys.tab == Binding::Bound => Event::TabRequested,
             // A rebase and a push must not overlap, and a base update that
             // runs puts the loop in `Running` — so these two keys act in the
             // normal mode alone, as `p` does. With no command behind one of
