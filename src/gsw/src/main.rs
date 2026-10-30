@@ -34,6 +34,9 @@ mod repo;
 /// The shell that runs a command the user supplies, for every key that runs one.
 mod shell;
 mod snapshot;
+/// Putting the number of the pull request of the branch on the tab title, through a
+/// command the user supplies, for the `T` key.
+mod tab;
 /// Shared git fixtures for the unit tests. Test-only: it shells out to `git` to
 /// build throwaway repositories, which the shipped binary never does.
 #[cfg(test)]
