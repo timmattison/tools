@@ -12,9 +12,11 @@
 //! the first word alone. The run carries the whole line, because the rest of it
 //! is the user's own arguments.
 //!
-//! What belongs to one key stays with that key: its variable, its default name,
-//! its deadline, and the words it leaves under the frame. `G` keeps those in
-//! [`crate::issue`].
+//! The words that report a run that failed, a run past its deadline, and a run
+//! that cannot start are the same for every key, so they live here. Each key
+//! keeps its variable, its default name, its deadline, and the rest of its
+//! words. `G` keeps those in [`crate::issue`], and `T` keeps them in
+//! `crate::tab`.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
@@ -650,6 +652,132 @@ impl RunInFlight {
             on_line(OutputStream::Stderr, line);
         }
     }
+}
+
+/// How a run that [`run_until`] waited for ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Ended {
+    /// The command exited with this status.
+    Exited(ExitStatus),
+    /// The command was still running at the deadline. A thread of its own waits for it.
+    StillRunning,
+}
+
+/// What [`run_until`] gives back: how the run ended, and every line the command wrote.
+#[derive(Debug)]
+pub(crate) struct Ran {
+    /// How the run ended.
+    pub(crate) ended: Ended,
+    /// Every line the command wrote: standard output first, then standard
+    /// error, whatever order the lines arrived in.
+    pub(crate) lines: Vec<String>,
+}
+
+/// Run `command` in `workdir`, with the two files of the run in `scratch`, and
+/// stop waiting after `wait`.
+///
+/// Every key that runs a command the user supplies starts its run here, so the
+/// rules of a run are written once. The key keeps the words it leaves under
+/// the frame.
+///
+/// The directory is a parameter so a test can watch it. Production passes
+/// [`std::env::temp_dir`].
+///
+/// **At the deadline gsw stops waiting, and it kills nothing.** This is the one
+/// place where a run and the probe part company, and the reason is whose
+/// process it is. The probe's child is gsw's own question, so gsw ends that
+/// child and the whole process group under it. This child is the user's own
+/// command, and a command that holds a browser in the foreground is the shape
+/// this deadline exists for. `xdg-open`, which the `G` key runs, does it. To
+/// kill that process group is to close the page the user asked gsw to open.
+///
+/// The user's rc file is bounded already, one layer up: the probe runs
+/// `$SHELL -ic 'command -v <name>'`, which loads that same rc file under
+/// [`PROBE_DEADLINE`]. So a run that hangs hangs in the command, and the
+/// command is the user's to end.
+///
+/// The child still has to be reaped. A dropped [`std::process::Child`] is
+/// neither killed nor waited for, and a child nobody waits for stays as a
+/// defunct entry for the life of the session, which is the cost this deadline
+/// exists to avoid. So the child goes to a thread that waits for it. That
+/// thread ends when the child ends, so the child is what bounds it.
+///
+/// # Errors
+///
+/// The shell cannot start, there is nowhere to put what it writes, or the
+/// child cannot be asked about. Every other failure is the child's own words.
+pub(crate) fn run_until(
+    shell: &OsStr,
+    command: &ShellCommand,
+    workdir: &Path,
+    scratch: &Path,
+    wait: Duration,
+) -> std::io::Result<Ran> {
+    let run = start_run(run_command(shell, command, workdir), scratch)?;
+
+    // Standard output first, then standard error, whatever order the lines
+    // arrived in. That is the order a refusal reads in: a command says what it
+    // did on one stream and why it stopped on the other.
+    let mut lines = Vec::new();
+    let mut reasons = Vec::new();
+    let end = run.wait(Some(wait), &mut |stream, line| match stream {
+        OutputStream::Stdout => lines.push(line),
+        OutputStream::Stderr => reasons.push(line),
+    })?;
+    lines.append(&mut reasons);
+
+    let ended = match end {
+        RunEnd::Exited(status) => Ended::Exited(status),
+        RunEnd::StillRunning(mut child) => {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            Ended::StillRunning
+        }
+    };
+    Ok(Ran { ended, lines })
+}
+
+/// The line to put under the frame for a run of `name` that failed. The run
+/// wrote `lines` and ended the way `status` reads.
+///
+/// A failure says the last line that has text in it. That text comes from
+/// another program: `ggs` refuses with exit status 2 on a branch that names no
+/// issue, and that refusal is the whole reason the key did nothing. A failure
+/// that wrote nothing has only the status left to report, and a blank row
+/// under the frame would read as success.
+pub(crate) fn failure_line(name: &str, lines: &[String], status: &str) -> String {
+    last_with_text(lines.iter().map(String::as_str))
+        .unwrap_or_else(|| format!("{name} failed ({status})"))
+}
+
+/// The line to put under the frame for a run of `name` that `lines` came from
+/// and that was still running at `deadline`.
+///
+/// The line names the timeout every time, because the timeout is the thing the
+/// user cannot see: the run goes on, the key is free again, and the command did
+/// not finish. A row that said only what the command wrote would read as a run
+/// that stopped.
+///
+/// A command that said why before it stopped answering keeps its words, after
+/// the timeout. `gh` reports a login it needs and then waits for an answer
+/// nobody can give it, and that report is the whole reason the run went
+/// nowhere.
+pub(crate) fn unfinished_line(name: &str, lines: &[String], deadline: Duration) -> String {
+    let waited = format!("{name} has not finished after {}s", deadline.as_secs());
+    match last_with_text(lines.iter().map(String::as_str)) {
+        Some(said) => format!("{waited}: {said}"),
+        None => waited,
+    }
+}
+
+/// The line to put under the frame for a run of `name` that could not start.
+///
+/// The shell is gone, it cannot be started, there is nowhere to put what it
+/// writes, or it cannot be asked about. That is rare, and worth saying
+/// plainly: every other failure is the child's own words.
+pub(crate) fn cannot_run_line(name: &str, error: &std::io::Error) -> String {
+    format!("cannot run {name}: {error}")
 }
 
 /// One stream of a run: the file the child writes to, and the handle gsw reads
