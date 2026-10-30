@@ -2222,7 +2222,7 @@ mod probe_tests {
     /// because each test here is about which key an answer reaches, and never
     /// about how fast this machine starts a shell.
     ///
-    /// Sorted, because three shells answer in whatever order they finish. What
+    /// Sorted, because the shells answer in whatever order they finish. What
     /// each test here is about is which questions were asked, and never which
     /// of them was asked first.
     fn probed(values: &CommandValues, stub: &StubShell) -> (Vec<String>, Vec<String>) {
