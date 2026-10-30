@@ -542,8 +542,17 @@ fn forks_scan_finds_a_fork_that_is_not_in_the_log() {
         .lines()
         .find(|line| line.contains(FORK_B))
         .unwrap_or_else(|| panic!("no line has the fork: {out}"));
-    assert!(line.contains("fork"), "{line}");
-    assert!(line.contains("3 shared"), "{line}");
+    // Check the columns, not substrings: the path at the end of the line is
+    // under a temporary folder whose name holds "fork".
+    let fields: Vec<&str> = line.split_whitespace().collect();
+    let transcript = home
+        .join(".claude/projects/-b")
+        .join(format!("{FORK_B}.jsonl"));
+    assert_eq!(
+        fields,
+        [FORK_B, "fork", "3", "shared", transcript.to_str().unwrap()],
+        "whole output: {out}"
+    );
 }
 
 #[test]
