@@ -458,6 +458,11 @@ fn forks_warns_about_unreadable_log_lines() {
     let output = run_forks(&home, FORK_A);
     assert!(output.status.success(), "{output:?}");
     assert!(
+        stderr_of(&output).contains("1 line of the fork log "),
+        "{output:?}"
+    );
+    assert!(!stderr_of(&output).contains("1 lines"), "{output:?}");
+    assert!(
         stderr_of(&output).contains("could not be read"),
         "{output:?}"
     );

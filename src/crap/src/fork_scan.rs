@@ -663,4 +663,17 @@ mod tests {
              \x20 2 transcripts or folders could not be read.\n"
         );
     }
+
+    #[test]
+    fn format_scan_report_names_one_unreadable_file_in_the_singular() {
+        let report = ScanReport {
+            hits: Vec::new(),
+            unreadable: 1,
+        };
+        assert_eq!(
+            format_scan_report("src1", Path::new("/p"), &report),
+            "The scan of /p found no transcript that shares a uuid value with src1.\n\
+             \x20 1 transcript or folder could not be read.\n"
+        );
+    }
 }
