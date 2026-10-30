@@ -3350,6 +3350,121 @@ mod tests {
         );
     }
 
+    /// How many threads import the same session at the same moment.
+    const RACE_THREADS: usize = 8;
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_symlink_imports_all_succeed_and_one_creates_the_link() {
+        use std::sync::{Arc, Barrier};
+
+        let dir = tempdir().unwrap();
+        let projects = dir.path().to_path_buf();
+        let orig = projects.join("-orig");
+        fs::create_dir_all(&orig).unwrap();
+        let original = orig.join(format!("{SAMPLE_ID}.jsonl"));
+        fs::write(&original, "{}\n").unwrap();
+
+        let target = PathBuf::from("/Volumes/x/race-here");
+        let barrier = Arc::new(Barrier::new(RACE_THREADS));
+        let handles: Vec<_> = (0..RACE_THREADS)
+            .map(|_| {
+                let (projects, original, target) =
+                    (projects.clone(), original.clone(), target.clone());
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    prepare_import(
+                        &projects,
+                        &original,
+                        &target,
+                        SAMPLE_ID,
+                        ImportMode::Symlink,
+                    )
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        for result in &results {
+            assert!(result.is_ok(), "every import must succeed: {result:?}");
+        }
+        let created: Vec<_> = results.into_iter().filter_map(|r| r.unwrap()).collect();
+        assert_eq!(created.len(), 1, "exactly one run creates the link");
+        assert_eq!(fs::read_link(&created[0]).unwrap(), original);
+    }
+
+    #[test]
+    fn concurrent_copy_imports_never_show_a_partial_copy() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Barrier};
+
+        let dir = tempdir().unwrap();
+        let projects = dir.path().join("dest/.claude/projects");
+        fs::create_dir_all(&projects).unwrap();
+        let src_dir = dir.path().join("other/.claude/projects/-orig");
+        fs::create_dir_all(&src_dir).unwrap();
+        let source = src_dir.join(format!("{SAMPLE_ID}.jsonl"));
+        let line = "{\"type\":\"user\",\"cwd\":\"/work\",\"text\":\"0123456789abcdef\"}\n";
+        let bytes = line.repeat((4 * 1024 * 1024) / line.len());
+        fs::write(&source, &bytes).unwrap();
+
+        let target = PathBuf::from("/Volumes/x/race-copy");
+        let folder = projects.join(encode_project_dir(&target));
+        let link = folder.join(format!("{SAMPLE_ID}.jsonl"));
+
+        let finished = Arc::new(AtomicBool::new(false));
+        let reader = {
+            let (link, finished) = (link.clone(), Arc::clone(&finished));
+            let expected = bytes.len();
+            std::thread::spawn(move || {
+                let mut partial = Vec::new();
+                while !finished.load(Ordering::Acquire) {
+                    if let Ok(seen) = fs::read(&link) {
+                        if seen.len() != expected {
+                            partial.push(seen.len());
+                        }
+                    }
+                }
+                partial
+            })
+        };
+
+        let barrier = Arc::new(Barrier::new(RACE_THREADS));
+        let handles: Vec<_> = (0..RACE_THREADS)
+            .map(|_| {
+                let (projects, source, target) = (projects.clone(), source.clone(), target.clone());
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    prepare_import(&projects, &source, &target, SAMPLE_ID, ImportMode::Copy)
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        finished.store(true, Ordering::Release);
+        let partial = reader.join().unwrap();
+
+        assert!(
+            partial.is_empty(),
+            "a reader saw partial lengths: {partial:?}"
+        );
+        for result in &results {
+            assert!(result.is_ok(), "every import must succeed: {result:?}");
+        }
+        let created = results
+            .into_iter()
+            .filter(|r| matches!(r, Ok(Some(_))))
+            .count();
+        assert_eq!(created, 1, "exactly one run creates the file");
+        assert_eq!(fs::read(&link).unwrap(), bytes.as_bytes());
+        let names: Vec<_> = fs::read_dir(&folder)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names.len(), 1, "no temporary file may remain: {names:?}");
+    }
+
     #[test]
     fn find_session_file_locates_jsonl_in_project_subdir() {
         let dir = tempdir().unwrap();
