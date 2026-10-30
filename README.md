@@ -564,7 +564,8 @@ cannot hang the caller. Used by `cwt` and `ha`.
   - Watch-mode keys: `q` or Ctrl-C quits, `r` forces an immediate refresh, `p` pushes the
     current branch, `P` pushes it without the `pre-push` hook, `G` opens the pull request of the
     branch (or the issue the branch names when
-    there is no pull request), `R` rebases the branch onto the base
+    there is no pull request), `T` puts the number of the pull request of the branch on the
+    zellij tab title, `R` rebases the branch onto the base
     and pushes it, `M` merges the base into the branch and pushes it, `m` measures a rebase and
     a merge against the default branch, and the arrow keys move the watch between the worktrees
     of the repository. Ctrl-C quits from anywhere, including while a push is in flight.
@@ -782,7 +783,7 @@ cannot hang the caller. Used by `cwt` and `ha`.
       repository whose base is `master`. **A command that replaces `grp` or `gmp` must therefore
       take the base as its last argument.**
     - **Where the command does not exist, the key does nothing and says nothing** — the way `G`
-      does, and the way an unbound key does. gsw asks your shell about each of the three commands
+      does, and the way an unbound key does. gsw asks your shell about the command of each key
       once, at startup, so a function you add to your rc file after gsw started needs a restart.
     - Each key asks first, and the question names the act, the branch, the base, how far behind it
       is, and the command: `Rebase issue-12 onto main (5 commits behind), then push with grp?`, or
@@ -856,6 +857,45 @@ cannot hang the caller. Used by `cwt` and `ha`.
     - Every outcome walks the repository at once, and not success alone: a command that failed can
       have changed the branch before it failed, and a walk during the run can have drawn the
       `⚠ rebase` row of a rebase that gsw then aborted. Only a walk puts the header right again.
+  - `T` puts the number of the open pull request of the branch at the front of the zellij tab
+    title, and keeps the rest of the title. As with `G`, the work is not gsw's own: `T` runs one
+    command that you supply, in your own interactive shell, with the worktree on the screen as
+    its current directory.
+    - `GSW_TAB_COMMAND` holds the command, and it defaults to `stp`. This repository ships no
+      `stp`. It is a shell function of one person: it finds the open pull request of the branch
+      with `gh`, and it renames the tab with `zellij action rename-tab-by-id`. Set the variable to
+      an empty string to turn the key off, and gsw then asks no shell about it.
+    - **The value is a whole command line**, as the value of `GSW_ISSUE_COMMAND` is, and gsw adds
+      no argument to it. gsw asks your shell about the first word at startup, with the commands of
+      the other keys, and runs the whole line. Where the command does not exist, `T` does nothing
+      and says nothing, the way `G` does.
+    - `T` asks nothing first, because a tab title is not the repository. Unlike `G`, it asks for no
+      second press on a remote shell, because the rename goes through the zellij server and is
+      correct for a remote client too.
+    - One run at a time: `T` does nothing while a run of `T` is in flight. It acts while a push,
+      `R`, or `M` runs, as `G` does, and it does nothing while a question is up or the list is
+      open.
+    - A run that worked puts the last line the command wrote under the frame, where it fades after
+      a minute. `stp` writes `stp: the tab already starts with 57` there when the tab already
+      carries the number, and it writes its notice about a follow-up pull request there too. A
+      run that wrote nothing posts nothing. A run that failed puts its last line under the frame
+      in red, where it waits for a key. The refusals of `stp` explain themselves: no pull request,
+      two or more follow-up pull requests, or no `gh`.
+    - A press gets a minute, as a press of `G` does. After that, gsw stops waiting, says
+      `stp has not finished after 60s` under the frame, and gives the key back. The command keeps
+      running, because it is yours.
+    - A press that started before a move to another worktree posts nothing when it ends, because
+      a line under the frame describes the worktree in the frame. The tab still changes.
+    - The child keeps `ZELLIJ`, `ZELLIJ_PANE_ID`, and `ZELLIJ_SESSION_NAME` from the environment of
+      gsw, because gsw removes only the `GIT_` variables. So `stp` finds the tab that holds the
+      gsw pane.
+    - **Zellij only.** In tmux and in a bare terminal, `st` sets the title with an escape sequence
+      on its standard output. gsw reads that output from a file and removes every escape sequence
+      from it, so the title does not change, and gsw does not forward the sequence. In a bare
+      terminal `stp` refuses, because a new shell cannot read the title of the terminal.
+    - **The worktree on the screen gives the number.** The tab is always the tab of the gsw pane.
+      So after Left or Right moves the watch to another worktree, `T` puts the number of the pull
+      request of that worktree on the tab of gsw.
   - The arrow keys move the watch between the worktrees of the repository: the main worktree and
     every linked worktree, such as the ones `nwt` makes for each issue. The worktree where you
     started gsw is the **home worktree**.

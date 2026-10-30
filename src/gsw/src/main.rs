@@ -34,6 +34,9 @@ mod repo;
 /// The shell that runs a command the user supplies, for every key that runs one.
 mod shell;
 mod snapshot;
+/// Putting the number of the pull request of the branch on the tab title, through a
+/// command the user supplies, for the `T` key.
+mod tab;
 /// Shared git fixtures for the unit tests. Test-only: it shells out to `git` to
 /// build throwaway repositories, which the shipped binary never does.
 #[cfg(test)]
@@ -66,7 +69,8 @@ mod worktrees;
                   the remote is confirmed as creating one — P does the same push with \
                   --no-verify, so the pre-push hook of the repository does not run, G opens the \
                   pull request of the \
-                  branch, or the issue the branch names when there is no pull request, R \
+                  branch, or the issue the branch names when there is no pull request, T puts \
+                  the number of the pull request of the branch on the zellij tab title, R \
                   rebases the branch onto the base and pushes it, M merges the base \
                   into the branch and pushes it, m measures a rebase and a merge against the \
                   default branch, and the arrow keys move the watch between the worktrees of \
@@ -98,6 +102,28 @@ mod worktrees;
                   frame, starts no second step, and gives the key back — the command itself \
                   keeps running, because it is yours, and it can be the process that holds \
                   the browser open.\n\n\
+                  T runs one command in your own interactive shell, with the worktree on the \
+                  screen as its current directory. GSW_TAB_COMMAND holds the command, and it \
+                  defaults to `stp`: a shell function that puts the number of the open pull \
+                  request of the branch at the front of the zellij tab title, and keeps the \
+                  rest of the title. This repository ships no `stp`. The value is a whole \
+                  command line, as the value of GSW_ISSUE_COMMAND is, and gsw adds no argument \
+                  to it. Set it to an empty string to turn the key off, and gsw then asks no \
+                  shell about it. Where the command does not exist, T does nothing and says \
+                  nothing, the way G does. T asks nothing first, because a tab title is not the \
+                  repository, and it asks for no second press on a remote shell, because the \
+                  rename goes through the zellij server. One run at a time: T does nothing \
+                  while a run of T is in flight, and it acts while a push, R, or M runs, as G \
+                  does. A run that worked puts the last line the command wrote under the frame, \
+                  where it fades after a minute, and a run that wrote nothing posts nothing. A \
+                  run that failed puts its last line under the frame in red, where it waits for \
+                  a key. A press gets a minute: after that gsw stops waiting, says so under the \
+                  frame, and gives the key back. Two limits apply. T works in zellij only: in \
+                  tmux and in a bare terminal the title changes through an escape sequence on \
+                  the standard output of the command, and gsw reads that output and does not \
+                  forward the sequence. And the worktree on the screen gives the number, but \
+                  the tab is always the tab of the gsw pane: after Left or Right moves the \
+                  watch, T puts the number of that worktree on the tab of gsw.\n\n\
                   m measures what grind and grime measure, in this process: a rebase of HEAD \
                   onto the default branch (main, else master) and a merge of that branch into \
                   HEAD. The bottom row says `Running grind and grime against main…` until the \

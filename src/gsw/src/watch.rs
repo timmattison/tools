@@ -695,7 +695,7 @@ enum Event {
     /// name.
     ///
     /// One event for each key, because each key has a probe of its own and the
-    /// four probes answer in whatever order their shells finish. A key is
+    /// five probes answer in whatever order their shells finish. A key is
     /// unbound until its own answer arrives. A shell that says no, a shell
     /// that cannot be started, and a shell that never answers all send
     /// nothing, so that key stays unbound and silent.
@@ -811,6 +811,25 @@ enum Event {
         /// What the run did.
         outcome: crate::issue::IssueOutcome,
     },
+    /// The user asked to run the tab-title command (`T`).
+    ///
+    /// Only [`classify_input`] makes one, and it makes one only where the
+    /// command exists — so the loop never receives a request it cannot serve.
+    TabRequested,
+    /// The probe of `T` found its command, and this is the command.
+    ///
+    /// Sent only where the command exists. A shell that says no, a shell that
+    /// cannot be started, and a shell that never answers all send nothing, so
+    /// the key stays unbound and silent.
+    TabCommandFound(crate::shell::ShellCommand),
+    /// A press of `T` has finished, either way.
+    TabFinished {
+        /// The generation that [`LoopHooks::start_tab`] was given for this
+        /// run: the generation of the worktree where the run started.
+        generation: Generation,
+        /// What the run did.
+        outcome: crate::tab::TabOutcome,
+    },
     /// The user asked to measure a rebase and a merge against the default
     /// branch (`m`).
     ///
@@ -913,14 +932,14 @@ pub(crate) enum Binding {
     Unbound,
 }
 
-/// Which of the three keys that run a command of the user have one behind
-/// them: `G`, `R`, and `M`.
+/// Which of the four keys that run a command of the user have one behind
+/// them: `G`, `R`, `M`, and `T`.
 ///
-/// One value rather than three parameters of [`classify_input`], because the
-/// answers of the keys travel together and arrive together: each of the four probes
-/// answers on the loop's own channel, and the key table reads whatever has
-/// arrived by the press. A fourth such key then adds a field here and moves no
-/// call site.
+/// One value rather than four parameters of [`classify_input`], because the
+/// answers of the keys travel together and arrive together: each of the five
+/// probes answers on the loop's own channel, and the key table reads whatever
+/// has arrived by the press. A fifth such key then adds a field here and moves
+/// no call site.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct CommandKeys {
     /// Whether `G`, which opens the pull request or the issue of the branch,
@@ -930,6 +949,8 @@ pub(crate) struct CommandKeys {
     rebase: Binding,
     /// Whether `M`, which merges the base into the branch, has a command.
     merge: Binding,
+    /// Whether `T`, which runs the tab-title command, has a command.
+    tab: Binding,
 }
 
 /// What one press of `G` does.
@@ -1076,6 +1097,65 @@ impl IssueRun {
     }
 }
 
+/// The `T` key's own state, for the life of one watch-mode run.
+///
+/// Two facts: the command the probe found, and whether a run is in flight. It
+/// is a value of its own, beside [`IssueRun`], because `T` changes no other
+/// key and no other key changes `T`.
+struct TabRun {
+    /// The command the probe found. `None` until the probe answers, and forever
+    /// where it found none or where the key is off.
+    command: Option<crate::shell::ShellCommand>,
+    /// Whether a run is in flight. One run at a time, because two runs of
+    /// `stp` race to rename one tab.
+    running: bool,
+}
+
+impl TabRun {
+    /// The probe has not answered, so `T` does not act.
+    const fn new() -> Self {
+        Self {
+            command: None,
+            running: false,
+        }
+    }
+
+    /// Whether `T` has a command behind it.
+    fn key(&self) -> Binding {
+        if self.command.is_some() {
+            Binding::Bound
+        } else {
+            Binding::Unbound
+        }
+    }
+
+    /// Keep the command the probe found.
+    fn found(&mut self, command: crate::shell::ShellCommand) {
+        self.command = Some(command);
+    }
+
+    /// Take the key for one run, and return the command to run.
+    ///
+    /// `None` where a run is in flight, and where no command exists: the
+    /// silence of an unbound key. `T` asks no question first, because `stp`
+    /// changes a tab title only and never the repository. It has no second
+    /// press on a remote shell, because the rename goes through the zellij
+    /// server and is correct for a remote client too.
+    fn press(&mut self) -> Option<crate::shell::ShellCommand> {
+        if self.running {
+            return None;
+        }
+        let command = self.command.clone()?;
+        self.running = true;
+        Some(command)
+    }
+
+    /// A run has ended, so `T` means something again.
+    fn finished(&mut self) {
+        self.running = false;
+    }
+}
+
 /// The command behind each of the two keys that bring the branch up to date
 /// with its base.
 ///
@@ -1130,13 +1210,15 @@ impl BaseUpdateCommands {
         }
     }
 
-    /// Which of the three keys that run a command of the user have one, with
-    /// the answer for `G` from [`IssueRun::key`].
-    fn keys(&self, issue: Binding) -> CommandKeys {
+    /// Which of the four keys that run a command of the user have one, with
+    /// the answer for `G` from [`IssueRun::key`] and the answer for `T` from
+    /// [`TabRun::key`].
+    fn keys(&self, issue: Binding, tab: Binding) -> CommandKeys {
         CommandKeys {
             issue,
             rebase: self.binding(crate::update::BaseUpdate::Rebase),
             merge: self.binding(crate::update::BaseUpdate::Merge),
+            tab,
         }
     }
 }
@@ -1221,7 +1303,7 @@ impl ConflictsRun {
 /// How many times the loop has switched the worktree it watches: a stamp on
 /// the work that the loop starts.
 ///
-/// A run of `G` or `m` continues after a switch, in the worktree where it
+/// A run of `G`, `T`, or `m` continues after a switch, in the worktree where it
 /// started, so its outcome can arrive when the frame shows another worktree.
 /// A line under the frame must describe the worktree in the frame. So each run
 /// keeps the generation of its press, its events carry that generation back,
@@ -1631,6 +1713,7 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
     // the command, and both must ask the same shell.
     let shell = crate::shell::user_shell();
     let issue_tx = tx.clone();
+    let tab_tx = tx.clone();
     // The environment is read here, once, and the values go on from there. The
     // handles are dropped, which detaches the threads: the loop waits for no
     // probe.
@@ -1738,6 +1821,23 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
                 thread::spawn(move || {
                     let outcome = crate::issue::run(&shell, &steps, &workdir);
                     let _ = finish_tx.send(Event::IssueFinished {
+                        generation,
+                        outcome,
+                    });
+                });
+            },
+            start_tab: |command: crate::shell::ShellCommand,
+                        current: &WorktreePath,
+                        generation: Generation| {
+                // The run keeps the generation of its press and sends it back
+                // with the outcome, so the loop knows an outcome that arrives
+                // after a switch.
+                let workdir = current.as_path().to_path_buf();
+                let finish_tx = tab_tx.clone();
+                let shell = shell.clone();
+                thread::spawn(move || {
+                    let outcome = crate::tab::run(&shell, &command, &workdir);
+                    let _ = finish_tx.send(Event::TabFinished {
                         generation,
                         outcome,
                     });
@@ -1930,6 +2030,8 @@ struct CommandValues {
     rebase: Option<String>,
     /// What [`crate::update::MERGE_COMMAND_ENV`] says `M` runs.
     merge: Option<String>,
+    /// What [`crate::tab::TAB_COMMAND_ENV`] says `T` runs.
+    tab: Option<String>,
 }
 
 impl CommandValues {
@@ -1940,6 +2042,7 @@ impl CommandValues {
             issue: read_value(crate::issue::Page::Issue.env()),
             rebase: read_value(crate::update::BaseUpdate::Rebase.env()),
             merge: read_value(crate::update::BaseUpdate::Merge.env()),
+            tab: read_value(crate::tab::TAB_COMMAND_ENV),
         }
     }
 
@@ -1973,11 +2076,11 @@ fn read_value(name: &str) -> Option<String> {
 /// and report each answer on the loop's own channel.
 ///
 /// **One thread and one shell for each command.** `G` has two commands, so the
-/// three keys that run commands have four probes. A shell that answered for several
-/// names at once would need its standard output parsed, and an rc file can
-/// print to that output — so the answer of such a shell says as much about the
-/// banner of the user as about the commands. Exit status carries one answer,
-/// which is why each name gets a shell of its own.
+/// four keys that run commands have five probes. A shell that answered for
+/// several names at once would need its standard output parsed, and an rc file
+/// can print to that output — so the answer of such a shell says as much about
+/// the banner of the user as about the commands. Exit status carries one
+/// answer, which is why each name gets a shell of its own.
 ///
 /// On threads of their own, because an interactive shell reads an rc file and
 /// an rc file is somebody else's code: it can take a second, and it can take
@@ -2033,6 +2136,17 @@ fn spawn_command_probes(
             },
         )
     }));
+    // `T` has one command, so it has one probe and no iteration.
+    let tab_tx = tx.clone();
+    probes.push(spawn_probe(
+        shell,
+        values.tab.as_deref(),
+        crate::tab::DEFAULT_TAB_COMMAND,
+        deadline,
+        move |command| {
+            let _ = tab_tx.send(Event::TabCommandFound(command));
+        },
+    ));
     probes
 }
 
@@ -2074,7 +2188,7 @@ mod probe_tests {
     /// the question the shell was really asked and never on a count of runs.
     const PROBE_PREFIX: &str = "command -v ";
 
-    /// The values of the four variables, as a test states them.
+    /// The values of the five variables, as a test states them.
     ///
     /// `None` is a variable the environment does not set, which is the case
     /// that takes the default name of that key. No test of this module sets a
@@ -2086,12 +2200,14 @@ mod probe_tests {
         issue: Option<&str>,
         rebase: Option<&str>,
         merge: Option<&str>,
+        tab: Option<&str>,
     ) -> CommandValues {
         CommandValues {
             pull_request: pull_request.map(str::to_string),
             issue: issue.map(str::to_string),
             rebase: rebase.map(str::to_string),
             merge: merge.map(str::to_string),
+            tab: tab.map(str::to_string),
         }
     }
 
@@ -2106,7 +2222,7 @@ mod probe_tests {
     /// because each test here is about which key an answer reaches, and never
     /// about how fast this machine starts a shell.
     ///
-    /// Sorted, because three shells answer in whatever order they finish. What
+    /// Sorted, because the shells answer in whatever order they finish. What
     /// each test here is about is which questions were asked, and never which
     /// of them was asked first.
     fn probed(values: &CommandValues, stub: &StubShell) -> (Vec<String>, Vec<String>) {
@@ -2145,17 +2261,18 @@ mod probe_tests {
             Event::BaseUpdateCommandFound(update, command) => {
                 format!("{} {}", update.key(), command.name())
             }
+            Event::TabCommandFound(command) => format!("T {}", command.name()),
             _ => "another event".to_string(),
         }
     }
 
     #[test]
     fn an_unset_variable_probes_the_default_command_of_its_own_key() {
-        // Four probes, four shells, four questions. A key whose variable the
+        // Five probes, five shells, five questions. A key whose variable the
         // environment never names still asks about the name it falls back on,
         // because that name is what the key runs.
         let stub = StubShell::answering(0);
-        let (words, _) = probed(&values(None, None, None, None), &stub);
+        let (words, _) = probed(&values(None, None, None, None, None), &stub);
         assert_eq!(
             words,
             [
@@ -2163,6 +2280,7 @@ mod probe_tests {
                 crate::issue::DEFAULT_PR_COMMAND,
                 BaseUpdate::Merge.default_command(),
                 BaseUpdate::Rebase.default_command(),
+                crate::tab::DEFAULT_TAB_COMMAND,
             ],
             "each key must ask the shell about its own default command",
         );
@@ -2173,7 +2291,10 @@ mod probe_tests {
         // `G` has two probes. The first one asks about the command that runs
         // first, and its answer must reach the page of the pull request.
         let stub = StubShell::answering(0);
-        let (words, answers) = probed(&values(None, Some("myissue"), Some(""), Some("")), &stub);
+        let (words, answers) = probed(
+            &values(None, Some("myissue"), Some(""), Some(""), Some("")),
+            &stub,
+        );
         assert_eq!(
             words,
             [crate::issue::DEFAULT_PR_COMMAND, "myissue"],
@@ -2189,7 +2310,7 @@ mod probe_tests {
     #[test]
     fn an_empty_pr_variable_starts_no_shell_for_it_and_g_keeps_the_issue_command() {
         let stub = StubShell::answering(0);
-        let (words, answers) = probed(&values(Some(""), None, Some(""), Some("")), &stub);
+        let (words, answers) = probed(&values(Some(""), None, Some(""), Some(""), Some("")), &stub);
         assert_eq!(
             words,
             [crate::issue::DEFAULT_ISSUE_COMMAND],
@@ -2205,7 +2326,10 @@ mod probe_tests {
     #[test]
     fn a_pr_variable_with_a_name_in_it_probes_that_command() {
         let stub = StubShell::answering(0);
-        let (words, answers) = probed(&values(Some("myprs"), None, Some(""), Some("")), &stub);
+        let (words, answers) = probed(
+            &values(Some("myprs"), None, Some(""), Some(""), Some("")),
+            &stub,
+        );
         assert_eq!(
             words,
             [crate::issue::DEFAULT_ISSUE_COMMAND, "myprs"],
@@ -2225,7 +2349,7 @@ mod probe_tests {
         // nothing at all — no shell, and so no rc file read — and it must turn
         // off the one key it names and no other.
         let stub = StubShell::answering(0);
-        let (words, answers) = probed(&values(None, None, Some(""), None), &stub);
+        let (words, answers) = probed(&values(None, None, Some(""), None, Some("")), &stub);
         assert_eq!(
             words,
             [
@@ -2248,7 +2372,7 @@ mod probe_tests {
         // person's rc file gives it, and a user who calls it something else
         // must have gsw ask about the name they chose.
         let stub = StubShell::answering(0);
-        let (words, answers) = probed(&values(None, None, None, Some("mymerge")), &stub);
+        let (words, answers) = probed(&values(None, None, None, Some("mymerge"), Some("")), &stub);
         assert_eq!(
             words,
             [
@@ -2268,15 +2392,83 @@ mod probe_tests {
 
     #[test]
     fn each_answer_arrives_as_the_event_of_its_own_key() {
-        // Four answers on one channel, and each must reach the key it belongs
+        // Five answers on one channel, and each must reach the key it belongs
         // to. An answer that reached the other key would bind `M` to the
         // command that rebases the branch and force-pushes it.
         let stub = StubShell::answering(0);
-        let (_, answers) = probed(&values(None, None, None, None), &stub);
+        let (_, answers) = probed(&values(None, None, None, None, None), &stub);
+        assert_eq!(
+            answers,
+            [
+                "G Issue ggs",
+                "G PullRequest ggsp",
+                "M gmp",
+                "R grp",
+                "T stp"
+            ],
+            "each key must be bound by the answer of its own probe",
+        );
+    }
+
+    #[test]
+    fn an_unset_tab_variable_probes_stp_for_t() {
+        // `T` has one command. An unset variable takes the default name, as it
+        // does for the other keys.
+        let stub = StubShell::answering(0);
+        let (words, answers) = probed(&values(Some(""), Some(""), Some(""), Some(""), None), &stub);
+        assert_eq!(
+            words,
+            [crate::tab::DEFAULT_TAB_COMMAND],
+            "an unset GSW_TAB_COMMAND must ask about the default command of T",
+        );
+        assert_eq!(
+            answers,
+            ["T stp"],
+            "the answer for stp must reach the key T",
+        );
+    }
+
+    #[test]
+    fn an_empty_tab_variable_starts_no_shell_for_t_and_leaves_the_other_keys_probing() {
+        // The empty value is the one way to turn `T` off. It must cost no
+        // shell, and so no rc file read, and it must turn off no other key.
+        let stub = StubShell::answering(0);
+        let (words, answers) = probed(&values(None, None, None, None, Some("")), &stub);
+        assert_eq!(
+            words,
+            [
+                crate::issue::DEFAULT_ISSUE_COMMAND,
+                crate::issue::DEFAULT_PR_COMMAND,
+                BaseUpdate::Merge.default_command(),
+                BaseUpdate::Rebase.default_command(),
+            ],
+            "an empty GSW_TAB_COMMAND must start no shell for T, and leave the other keys probing",
+        );
         assert_eq!(
             answers,
             ["G Issue ggs", "G PullRequest ggsp", "M gmp", "R grp"],
-            "each key must be bound by the answer of its own probe",
+            "a key that started no shell must send no answer",
+        );
+    }
+
+    #[test]
+    fn a_tab_variable_with_a_name_in_it_probes_that_command() {
+        // The probe asks about the first word. The answer carries the whole
+        // line, because the whole line is what `T` runs.
+        let stub = StubShell::answering(0);
+        let (words, answers) = probed(
+            &values(Some(""), Some(""), Some(""), Some(""), Some("mytab --here")),
+            &stub,
+        );
+        assert_eq!(
+            words,
+            ["mytab"],
+            "GSW_TAB_COMMAND must name the command that T asks about",
+        );
+        assert_eq!(
+            answers,
+            ["T mytab --here"],
+            "the answer of T must carry the whole line the user wrote",
         );
     }
 
@@ -2293,7 +2485,7 @@ mod probe_tests {
         // wait only for the bound of a user.
         let late = crate::shell::PROBE_DEADLINE + Duration::from_secs(1);
         let stub = StubShell::new(&format!("sleep {}; exit 0", late.as_secs()));
-        let (_, answers) = probed(&values(None, None, None, None), &stub);
+        let (_, answers) = probed(&values(None, None, None, None, Some("")), &stub);
         assert_eq!(
             answers,
             ["G Issue ggs", "G PullRequest ggsp", "M gmp", "R grp"],
@@ -2557,6 +2749,8 @@ struct LoopState {
     ui: PushUi,
     /// The state of the `G` key.
     issue: IssueRun,
+    /// The state of the `T` key.
+    tab: TabRun,
     /// The commands behind the `R` and `M` keys.
     base_updates: BaseUpdateCommands,
     /// The state of the `m` key.
@@ -2564,7 +2758,7 @@ struct LoopState {
     /// The worktree where the user started gsw.
     home: WorktreePath,
     /// The worktree that the frame shows. The walk, `p`, `P`, `R`, `M`, `G`,
-    /// and `m` act on it. It starts at [`LoopState::home`].
+    /// `T`, and `m` act on it. It starts at [`LoopState::home`].
     current: WorktreePath,
     /// How many switches the loop has made. See [`Generation`].
     generation: Generation,
@@ -2735,6 +2929,7 @@ struct LoopHooks<
     StartPush,
     StartBaseUpdate,
     StartIssue,
+    StartTab,
     StartConflicts,
     Worktrees,
     Paths,
@@ -2791,6 +2986,12 @@ struct LoopHooks<
     /// tests record the command and decide for themselves when the outcome
     /// arrives.
     start_issue: StartIssue,
+    /// Start the tab-title command of a press of `T` in the worktree on the
+    /// screen at the press. Production spawns a thread that runs it and sends
+    /// the outcome back as [`Event::TabFinished`], with the [`Generation`] it
+    /// was given. Tests record the command and decide for themselves when the
+    /// outcome arrives.
+    start_tab: StartTab,
     /// Start a measurement of a rebase and a merge against the default branch,
     /// in the worktree on the screen at the press. Production starts it on a
     /// thread of its own, which sends the branch back as
@@ -2895,14 +3096,15 @@ enum Flow {
 ///
 /// `state` is everything the loop changes, in one value. Its cache comes whole,
 /// and not as its snapshot and its pane, because the two always come from the
-/// one cache. Its `issue` and `conflicts` are the state of the two keys that
-/// start work off this thread, one run of each at a time. Its current worktree
-/// is where the push, the issue key, and `m` do their work.
+/// one cache. Its `issue`, `tab`, and `conflicts` are the state of the three
+/// keys that start work off this thread (`G`, `T`, and `m`), one run of each
+/// at a time. Its current worktree is where the push, `G`, `T`, and `m` do
+/// their work.
 #[expect(
     clippy::type_complexity,
-    reason = "the loop takes one generic for each of its seventeen hooks, so each hook stays \
+    reason = "the loop takes one generic for each of its eighteen hooks, so each hook stays \
               a plain closure that a test replaces with a fake. A type alias spells the same \
-              seventeen generics, and the borrow of the whole value keeps every call of \
+              eighteen generics, and the borrow of the whole value keeps every call of \
               absorb the same"
 )]
 fn absorb<
@@ -2917,6 +3119,7 @@ fn absorb<
     StartPush,
     StartBaseUpdate,
     StartIssue,
+    StartTab,
     StartConflicts,
     Worktrees,
     Paths,
@@ -2939,6 +3142,7 @@ fn absorb<
         StartPush,
         StartBaseUpdate,
         StartIssue,
+        StartTab,
         StartConflicts,
         Worktrees,
         Paths,
@@ -2952,6 +3156,7 @@ where
     StartPush: FnMut(PushCommand, &WorktreePath),
     StartBaseUpdate: FnMut(crate::update::BaseUpdateCommand, &WorktreePath),
     StartIssue: FnMut(crate::issue::Steps, &WorktreePath, Generation),
+    StartTab: FnMut(crate::shell::ShellCommand, &WorktreePath, Generation),
     StartConflicts: FnMut(&WorktreePath, Generation),
     Worktrees: FnMut() -> Vec<WorktreeEntry>,
     Paths: FnMut() -> Vec<WorktreePath>,
@@ -2966,7 +3171,7 @@ where
         Event::Resize => pending.resize = true,
         Event::ForceRefresh => pending.force = true,
         Event::Key(key) => {
-            let keys = state.base_updates.keys(state.issue.key());
+            let keys = state.base_updates.keys(state.issue.key(), state.tab.key());
             if let Some(action) = classify_input(key, state.ui.mode(), keys) {
                 // Every key but `G` takes the arming away. The message that
                 // asks for the second press is the armed state, and this key
@@ -3212,24 +3417,36 @@ where
             }
         }
         Event::IssueCommandFound(page, command) => state.issue.found(page, command),
+        Event::TabCommandFound(command) => state.tab.found(command),
+        // `T` asks nothing first: a tab title is not the repository. The
+        // check and the start are one step on the thread of the loop, so a
+        // burst of presses starts one run.
+        Event::TabRequested => {
+            if let Some(command) = state.tab.press() {
+                (hooks.start_tab)(command, &state.current, state.generation);
+            }
+        }
         // The check and the start are one step on the thread of the loop, so
         // a burst of presses starts one run. See [`ConflictsRun`].
         Event::ConflictsRequested => match state.conflicts.press() {
             ConflictsPress::Start => (hooks.start_conflicts)(&state.current, state.generation),
             ConflictsPress::Nothing => {}
         },
-        // A run continues after a switch, in the worktree where it started. An
-        // event of such a run describes a worktree that the frame no longer
-        // shows, and a line under the frame must describe the worktree in the
-        // frame. So it posts nothing. An outcome still frees its key, because
-        // one run at a time is a rule for the whole process, and that run has
-        // ended.
+        // A run of `G`, `T`, or `m` continues after a switch, in the worktree
+        // where it started. An event of such a run describes a worktree that
+        // the frame no longer shows, and a line under the frame must describe
+        // the worktree in the frame. So it posts nothing. An outcome still
+        // frees its key, because one run at a time is a rule for the whole
+        // process, and that run has ended.
         Event::ConflictsStarted { generation, .. } if state.is_stale(generation) => {}
         Event::ConflictsFinished { generation, .. } if state.is_stale(generation) => {
             state.conflicts.finished();
         }
         Event::IssueFinished { generation, .. } if state.is_stale(generation) => {
             state.issue.finished();
+        }
+        Event::TabFinished { generation, .. } if state.is_stale(generation) => {
+            state.tab.finished();
         }
         // A run that a rebase, a merge, or the `git switch` of the second Esc
         // overlapped measured the branch before HEAD moved. Its line reaches
@@ -3263,6 +3480,20 @@ where
             // waits for a key the way git's error text does.
             if let Some(message) = outcome.message() {
                 state.ui.post_error(message.to_string());
+            }
+        }
+        Event::TabFinished { outcome, .. } => {
+            state.tab.finished();
+            // A run that worked can say what it did, and that is gsw's report
+            // of a key the user pressed, so it fades. A run that failed says
+            // why in the words of another program, so it waits for a key the
+            // way the error text of git does.
+            match outcome {
+                crate::tab::TabOutcome::Worked(Some(line)) => {
+                    let _ = state.ui.post_notice(line, clock());
+                }
+                crate::tab::TabOutcome::Worked(None) => {}
+                crate::tab::TabOutcome::Failed(line) => state.ui.post_error(line),
             }
         }
         // **A walk on every outcome, and not on success alone.** A command
@@ -3388,9 +3619,9 @@ where
 /// loop goes back to the home worktree ([`LoopState::return_home_if_gone`]).
 #[expect(
     clippy::type_complexity,
-    reason = "the loop takes one generic for each of its seventeen hooks, so each hook stays \
+    reason = "the loop takes one generic for each of its eighteen hooks, so each hook stays \
               a plain closure that a test replaces with a fake. A type alias spells the same \
-              seventeen generics, as the expectation on absorb says"
+              eighteen generics, as the expectation on absorb says"
 )]
 fn event_loop<
     Collect,
@@ -3404,6 +3635,7 @@ fn event_loop<
     StartPush,
     StartBaseUpdate,
     StartIssue,
+    StartTab,
     StartConflicts,
     Worktrees,
     Paths,
@@ -3427,6 +3659,7 @@ fn event_loop<
         StartPush,
         StartBaseUpdate,
         StartIssue,
+        StartTab,
         StartConflicts,
         Worktrees,
         Paths,
@@ -3447,6 +3680,7 @@ where
     StartPush: FnMut(PushCommand, &WorktreePath),
     StartBaseUpdate: FnMut(crate::update::BaseUpdateCommand, &WorktreePath),
     StartIssue: FnMut(crate::issue::Steps, &WorktreePath, Generation),
+    StartTab: FnMut(crate::shell::ShellCommand, &WorktreePath, Generation),
     StartConflicts: FnMut(&WorktreePath, Generation),
     Worktrees: FnMut() -> Vec<WorktreeEntry>,
     Paths: FnMut() -> Vec<WorktreePath>,
@@ -3471,6 +3705,8 @@ where
         // The probe answers on the loop's own channel, so the key is unbound
         // until it does and the loop never waits for it.
         issue: IssueRun::new(session),
+        // `T` answers on the same channel, on the same terms.
+        tab: TabRun::new(),
         // One probe for each of the two keys, on the same terms.
         base_updates: BaseUpdateCommands::new(),
         // The loop owns the state of `m`, and the thread that measures never
@@ -3871,11 +4107,11 @@ fn forward_input(event: CtEvent) -> Option<Event> {
 ///   killed from another pane.
 /// - [`InputMode::Normal`]: `q` quits, `r` forces a refresh, `p` asks to push,
 ///   `P` asks to push without the `pre-push` hook, `G` asks for the issue of
-///   the branch, `R` asks to rebase the branch onto its base, `M` asks to
-///   merge the base into the branch, and `m` asks to measure a rebase and a
-///   merge against the default branch. Up goes to the home worktree, Left to
-///   the previous worktree, Right to the next worktree, and Down opens the
-///   list of the worktrees. Esc is
+///   the branch, `T` runs the tab-title command, `R` asks to rebase the branch
+///   onto its base, `M` asks to merge the base into the branch, and `m` asks to
+///   measure a rebase and a merge against the default branch. Up goes to the
+///   home worktree, Left to the previous worktree, Right to the next worktree,
+///   and Down opens the list of the worktrees. Esc is
 ///   [`Event::ReturnRequested`]. Where the name in the header is red, its first
 ///   press asks for a second one, and the second press goes back to the start
 ///   branch: it moves the watch to the worktree that is on it, or else it runs
@@ -3887,9 +4123,9 @@ fn forward_input(event: CtEvent) -> Option<Event> {
 ///   "no", not "quit", `r` is not a refresh, `P` is not an answer, `R` and `M`
 ///   do not ask a second question, and an arrow key is no answer at all. That
 ///   is why the mode exists.
-/// - [`InputMode::Running`]: `q` quits, `r` refreshes, and `G` still asks for
-///   the issue — a browser conflicts with nothing any of these runs does. `m`
-///   still asks to measure during a push, because a measurement is read-only
+/// - [`InputMode::Running`]: `q` quits, `r` refreshes, and `G` and `T` still act
+///   — a browser and a tab title conflict with nothing any of these runs does.
+///   `m` still asks to measure during a push, because a measurement is read-only
 ///   for the repository. A rebase, a merge, and the `git switch` of the second
 ///   Esc move HEAD, and a measurement starts from HEAD, so `m` is inert during
 ///   those three runs. `p`, `P`, `R`, and `M` are inert, so an impatient second
@@ -3900,10 +4136,10 @@ fn forward_input(event: CtEvent) -> Option<Event> {
 /// - [`InputMode::List`]: Up and Down move the cursor, Page Up and Page Down
 ///   move it one page, Enter goes to the worktree under it, and Esc and `q`
 ///   close the list. Every other key gives `None` and does nothing at all:
-///   `r` does not walk, `p` and `P` do not ask, `G`, `R`, `M`, and `m` start
+///   `r` does not walk, `p` and `P` do not ask, `G`, `R`, `M`, `T`, and `m` start
 ///   nothing, and no line leaves the row. The list takes the pane, so the
 ///   frame that such a key acts on is not on the screen.
-/// - `G`, `R`, and `M` act only where `keys` says each one has a command
+/// - `G`, `R`, `M`, and `T` act only where `keys` says each one has a command
 ///   behind it. Where one does not, that key does what any other unbound key
 ///   does, which is the one silent case this feature has.
 /// - Every other press in the three other modes is [`Event::Dismiss`], which
@@ -3945,6 +4181,11 @@ fn classify_input(key: KeyEvent, mode: InputMode, keys: CommandKeys) -> Option<E
             // reason to refuse. With no command behind it the key falls
             // through to `Dismiss`, which is what every unbound key gives.
             KeyCode::Char('G') if keys.issue == Binding::Bound => Event::IssueRequested,
+            // A tab title changes nothing in the repository, so a run in
+            // flight is no reason to refuse it, as it is none for `G`. With no
+            // command behind it the key falls through to `Dismiss`, which is
+            // what every unbound key gives.
+            KeyCode::Char('T') if keys.tab == Binding::Bound => Event::TabRequested,
             // A rebase and a push must not overlap, and a base update that
             // runs puts the loop in `Running` — so these two keys act in the
             // normal mode alone, as `p` does. With no command behind one of
@@ -4940,32 +5181,46 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
-    /// One combination of the three bindings, as [`classify_input`] reads it.
-    const fn bindings(issue: Binding, rebase: Binding, merge: Binding) -> CommandKeys {
+    /// One combination of the four bindings, as [`classify_input`] reads it.
+    const fn bindings(
+        issue: Binding,
+        rebase: Binding,
+        merge: Binding,
+        tab: Binding,
+    ) -> CommandKeys {
         CommandKeys {
             issue,
             rebase,
             merge,
+            tab,
         }
     }
 
-    /// Every combination of the three bindings, all eight of them.
+    /// Every combination of the four bindings, all sixteen of them.
     ///
     /// Every old key means the same thing under each of them: a new key must
-    /// move no old one. Three keys read this value and each reads one field of
+    /// move no old one. Four keys read this value and each reads one field of
     /// it, so a combination left out here is a pair of keys nobody holds
     /// against each other.
-    const EVERY_BINDING_COMBINATION: [CommandKeys; 8] = {
+    const EVERY_BINDING_COMBINATION: [CommandKeys; 16] = {
         use Binding::{Bound, Unbound};
         [
-            bindings(Unbound, Unbound, Unbound),
-            bindings(Unbound, Unbound, Bound),
-            bindings(Unbound, Bound, Unbound),
-            bindings(Unbound, Bound, Bound),
-            bindings(Bound, Unbound, Unbound),
-            bindings(Bound, Unbound, Bound),
-            bindings(Bound, Bound, Unbound),
-            bindings(Bound, Bound, Bound),
+            bindings(Unbound, Unbound, Unbound, Unbound),
+            bindings(Unbound, Unbound, Unbound, Bound),
+            bindings(Unbound, Unbound, Bound, Unbound),
+            bindings(Unbound, Unbound, Bound, Bound),
+            bindings(Unbound, Bound, Unbound, Unbound),
+            bindings(Unbound, Bound, Unbound, Bound),
+            bindings(Unbound, Bound, Bound, Unbound),
+            bindings(Unbound, Bound, Bound, Bound),
+            bindings(Bound, Unbound, Unbound, Unbound),
+            bindings(Bound, Unbound, Unbound, Bound),
+            bindings(Bound, Unbound, Bound, Unbound),
+            bindings(Bound, Unbound, Bound, Bound),
+            bindings(Bound, Bound, Unbound, Unbound),
+            bindings(Bound, Bound, Unbound, Bound),
+            bindings(Bound, Bound, Bound, Unbound),
+            bindings(Bound, Bound, Bound, Bound),
         ]
     };
 
@@ -4981,6 +5236,20 @@ mod tests {
         EVERY_BINDING_COMBINATION
             .into_iter()
             .filter(|keys| keys.issue == Binding::Unbound)
+    }
+
+    /// The combinations in which `T` has a command behind it.
+    fn tab_bound() -> impl Iterator<Item = CommandKeys> {
+        EVERY_BINDING_COMBINATION
+            .into_iter()
+            .filter(|keys| keys.tab == Binding::Bound)
+    }
+
+    /// The combinations in which `T` has none.
+    fn tab_unbound() -> impl Iterator<Item = CommandKeys> {
+        EVERY_BINDING_COMBINATION
+            .into_iter()
+            .filter(|keys| keys.tab == Binding::Unbound)
     }
 
     /// Every mode a key can arrive in.
@@ -5210,6 +5479,133 @@ mod tests {
                     classify_input(g_release, mode, keys).is_none(),
                     "a release of `G` must be ignored in {mode:?} with {keys:?}",
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn t_asks_for_the_tab_title_while_the_monitor_and_every_run_run() {
+        // The tab-title key. A tab title changes nothing in the repository, so
+        // no run in flight is a reason to refuse it. Some terminals report the
+        // shift of a capital letter, so both spellings must act.
+        for mode in [InputMode::Normal].into_iter().chain(EVERY_RUN) {
+            for keys in tab_bound() {
+                for modifiers in [KeyModifiers::NONE, KeyModifiers::SHIFT] {
+                    assert_eq!(
+                        meaning(classify_input(
+                            KeyEvent::new(KeyCode::Char('T'), modifiers),
+                            mode,
+                            keys
+                        )),
+                        "TabRequested",
+                        "`T` must ask for the tab title in {mode:?} with {keys:?} and {modifiers:?}",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn t_does_nothing_while_the_confirmation_is_up() {
+        // That mode owns the answer to a question. No new key may trap the
+        // user in it.
+        for keys in tab_bound() {
+            assert_eq!(
+                meaning(classify_input(
+                    press(KeyCode::Char('T')),
+                    InputMode::Confirm,
+                    keys
+                )),
+                "Dismiss",
+                "`T` must not answer the question with {keys:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn t_does_nothing_while_the_list_is_open() {
+        // The list takes the pane, so a key that starts a run has no frame to
+        // act on.
+        for keys in tab_bound() {
+            assert_eq!(
+                meaning(classify_input(
+                    press(KeyCode::Char('T')),
+                    InputMode::List,
+                    keys
+                )),
+                "nothing",
+                "`T` must start nothing in the list with {keys:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn t_does_nothing_where_the_command_does_not_exist() {
+        // Silence belongs to this case only, and it is the silence of an
+        // unbound key rather than a code path of its own.
+        for mode in EVERY_MODE {
+            for keys in tab_unbound() {
+                assert_eq!(
+                    meaning(classify_input(press(KeyCode::Char('T')), mode, keys)),
+                    unbound(mode),
+                    "`T` must do nothing in {mode:?} with no command behind it, with {keys:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lowercase_t_stays_unbound() {
+        // The user asked for `T`. A shifted key and an unshifted one are two
+        // keys, and only one of them was asked for.
+        for mode in EVERY_MODE {
+            for keys in EVERY_BINDING_COMBINATION {
+                assert_eq!(
+                    meaning(classify_input(press(KeyCode::Char('t')), mode, keys)),
+                    unbound(mode),
+                    "`t` must stay unbound in {mode:?} with {keys:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_release_of_t_is_ignored() {
+        // Only a press acts, and the new key is no exception.
+        let t_release = KeyEvent {
+            kind: KeyEventKind::Release,
+            ..press(KeyCode::Char('T'))
+        };
+        for mode in EVERY_MODE {
+            for keys in EVERY_BINDING_COMBINATION {
+                assert!(
+                    classify_input(t_release, mode, keys).is_none(),
+                    "a release of `T` must be ignored in {mode:?} with {keys:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn t_moves_no_other_key() {
+        // A new key must move no old one. Flip only the binding of `T`, and
+        // every other key must mean what it meant before.
+        for mode in EVERY_MODE {
+            for keys in EVERY_BINDING_COMBINATION {
+                let flipped = CommandKeys {
+                    tab: match keys.tab {
+                        Binding::Bound => Binding::Unbound,
+                        Binding::Unbound => Binding::Bound,
+                    },
+                    ..keys
+                };
+                for c in ['G', 'R', 'M', 'p', 'P', 'm', 'q', 'r'] {
+                    assert_eq!(
+                        meaning(classify_input(press(KeyCode::Char(c)), mode, keys)),
+                        meaning(classify_input(press(KeyCode::Char(c)), mode, flipped)),
+                        "`{c}` must mean the same in {mode:?} whether `T` is bound or not, with {keys:?}",
+                    );
+                }
             }
         }
     }
@@ -5486,6 +5882,7 @@ mod tests {
             Some(Event::Confirmed) => "Confirmed",
             Some(Event::Cancelled) => "Cancelled",
             Some(Event::BaseUpdateRequested(update)) => asks_for(update),
+            Some(Event::TabRequested) => "TabRequested",
             Some(_) => "another event",
             None => "nothing",
         }
@@ -5878,6 +6275,14 @@ mod tests {
     /// with no worktree on the start branch. It starts nothing.
     pub(super) fn no_return(_child: std::process::Command) {}
 
+    /// A `start_tab` hook for a test that presses no `T`.
+    pub(super) fn no_tab(
+        _command: crate::shell::ShellCommand,
+        _current: &WorktreePath,
+        _generation: Generation,
+    ) {
+    }
+
     /// A `fetch_log` hook for the loop tests whose log is off. The limit of
     /// such a pane is zero, and no cached log holds fewer commits than zero,
     /// so the loop never calls it. It gives no commit, and a fetch with no
@@ -6014,6 +6419,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -6077,6 +6483,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -6143,6 +6550,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -6211,6 +6619,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -6275,6 +6684,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -6336,6 +6746,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -6399,6 +6810,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -6462,6 +6874,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -6526,6 +6939,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -6596,6 +7010,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -6924,6 +7339,7 @@ mod tests {
                     start_push: |_command: PushCommand, _current: &WorktreePath| {},
                     start_base_update:
                         |_command: crate::update::BaseUpdateCommand, _current: &WorktreePath| {},
+                    start_tab: no_tab,
                     start_issue: |_steps: crate::issue::Steps,
                                   _current: &WorktreePath,
                                   _generation: Generation| {},
@@ -7473,6 +7889,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -7544,6 +7961,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -7625,6 +8043,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -7725,6 +8144,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -7829,6 +8249,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -7914,6 +8335,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -8006,6 +8428,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -8097,6 +8520,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -8168,6 +8592,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -8252,6 +8677,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -8360,6 +8786,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -8492,6 +8919,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -8658,8 +9086,8 @@ mod tests {
 #[cfg(test)]
 mod push_loop_tests {
     use super::tests::{
-        frame, loop_home, no_fetch, no_list, no_return, no_start_branch, no_switch, stepping_clock,
-        timer_off, TEST_DEBOUNCE, TEST_DIMS,
+        frame, loop_home, no_fetch, no_list, no_return, no_start_branch, no_switch, no_tab,
+        stepping_clock, timer_off, TEST_DEBOUNCE, TEST_DIMS,
     };
     use super::*;
     use crate::conflicts::ConflictsOutcome;
@@ -8764,6 +9192,12 @@ mod push_loop_tests {
         /// The worktree and the generation of each press of `G`,
         /// in the order of [`Seen::issue_runs`].
         issue_paths: Vec<(WorktreePath, Generation)>,
+        /// The command of every press of `T` that the loop started a run of,
+        /// in order.
+        tab_runs: Vec<crate::shell::ShellCommand>,
+        /// The worktree and the generation of each press of `T`, in the order
+        /// of [`Seen::tab_runs`].
+        tab_paths: Vec<(WorktreePath, Generation)>,
         /// The worktree and the generation of each run of `m`, in order.
         conflict_paths: Vec<(WorktreePath, Generation)>,
         /// The timing of each frame the loop rendered, in order.
@@ -9286,6 +9720,13 @@ mod push_loop_tests {
                     let mut seen = seen.borrow_mut();
                     seen.base_updates.push(command);
                     seen.base_update_paths.push(current.clone());
+                },
+                start_tab: |command: crate::shell::ShellCommand,
+                            current: &WorktreePath,
+                            generation: Generation| {
+                    let mut seen = seen.borrow_mut();
+                    seen.tab_runs.push(command);
+                    seen.tab_paths.push((current.clone(), generation));
                 },
                 start_issue: |steps: crate::issue::Steps,
                               current: &WorktreePath,
@@ -9897,6 +10338,285 @@ mod push_loop_tests {
         );
     }
 
+    /// The command that the probe of `T` found, as the tests spell it.
+    fn stp() -> crate::shell::ShellCommand {
+        crate::shell::ShellCommand::new(None, crate::tab::DEFAULT_TAB_COMMAND)
+            .expect("the default names a command")
+    }
+
+    /// The answer of the probe of `T`, as the loop receives it.
+    fn tab_probe_answered() -> Event {
+        Event::TabCommandFound(stp())
+    }
+
+    /// One press of `T`.
+    fn press_t() -> Event {
+        key(KeyCode::Char('T'))
+    }
+
+    /// The end of a run of `T` that started in the first worktree.
+    fn tab_finished(outcome: crate::tab::TabOutcome) -> Event {
+        tab_finished_in(Generation::default(), outcome)
+    }
+
+    /// The end of a run of `T` that started at `generation`.
+    fn tab_finished_in(generation: Generation, outcome: crate::tab::TabOutcome) -> Event {
+        Event::TabFinished {
+            generation,
+            outcome,
+        }
+    }
+
+    #[test]
+    fn t_starts_nothing_until_the_probe_has_answered() {
+        // A key with no command behind it stays silent, as `G` does.
+        let (_screen, seen) = run_loop(vec![press_t(), Event::Quit]);
+        assert!(
+            seen.tab_runs.is_empty(),
+            "`T` must start nothing before the probe answers, got {:?}",
+            seen.tab_runs,
+        );
+    }
+
+    #[test]
+    fn t_runs_the_command_the_probe_found_in_the_worktree_on_the_screen() {
+        // The tab title belongs to the worktree in the frame, so the run must
+        // start there and carry the generation of the press.
+        let (_screen, seen) = run_in(
+            World::three(),
+            vec![
+                tab_probe_answered(),
+                key(KeyCode::Right),
+                press_t(),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(seen.tab_runs, vec![stp()], "`T` must run the found command");
+        assert_eq!(
+            seen.tab_paths,
+            vec![(worktree(CHARLIE), after_one_switch())],
+            "the run must start in the worktree on the screen",
+        );
+    }
+
+    #[test]
+    fn a_second_t_while_a_run_is_in_flight_starts_nothing() {
+        // Two runs of `stp` race to rename one tab, so one run at a time.
+        let (_screen, seen) = run_loop(vec![
+            tab_probe_answered(),
+            press_t(),
+            press_t(),
+            Event::Quit,
+        ]);
+        assert_eq!(
+            seen.tab_runs.len(),
+            1,
+            "a burst of presses must start one run, got {:?}",
+            seen.tab_runs,
+        );
+    }
+
+    #[test]
+    fn t_starts_another_run_once_the_first_has_ended() {
+        // The outcome gives the key back.
+        let (_screen, seen) = run_loop(vec![
+            tab_probe_answered(),
+            press_t(),
+            tab_finished(crate::tab::TabOutcome::Worked(None)),
+            press_t(),
+            Event::Quit,
+        ]);
+        assert_eq!(
+            seen.tab_runs.len(),
+            2,
+            "the outcome must free the key, got {:?}",
+            seen.tab_runs,
+        );
+    }
+
+    #[test]
+    fn t_runs_while_a_push_runs() {
+        // A tab title is not the repository, so a push in flight does not
+        // stop it.
+        let (_screen, seen) = run_loop(vec![
+            Event::PushRequested(PushHooks::Run),
+            Event::Confirmed,
+            tab_probe_answered(),
+            press_t(),
+            Event::Quit,
+        ]);
+        assert_eq!(
+            seen.tab_runs.len(),
+            1,
+            "`T` must run during a push, got {:?}",
+            seen.tab_runs,
+        );
+    }
+
+    #[test]
+    fn t_asks_no_second_press_on_a_remote_shell() {
+        // The rename goes through the zellij server, so it is correct for a
+        // remote client too. `G` asks, and `T` does not.
+        let (_screen, seen) = run_loop_remote(vec![tab_probe_answered(), press_t(), Event::Quit]);
+        assert_eq!(
+            seen.tab_runs.len(),
+            1,
+            "`T` must run on the first press on a remote shell, got {:?}",
+            seen.tab_runs,
+        );
+    }
+
+    #[test]
+    fn a_run_that_worked_shows_its_last_line_on_a_line_that_fades() {
+        // The line is the report of a key the user pressed, so it fades. The
+        // age after the line shows that it does.
+        let (screen, _seen) = run_loop(vec![
+            tab_probe_answered(),
+            press_t(),
+            tab_finished(crate::tab::TabOutcome::Worked(Some(
+                "stp: the tab already starts with 57".to_string(),
+            ))),
+            Event::Quit,
+        ]);
+        assert_eq!(
+            strip_ansi(&screen),
+            "FRAME\nstp: the tab already starts with 57 (0s ago)",
+            "the line of the run must fade under the frame",
+        );
+    }
+
+    #[test]
+    fn a_run_that_worked_and_wrote_nothing_puts_nothing_under_the_frame() {
+        // The tab title is the answer.
+        let (screen, _seen) = run_loop(vec![
+            tab_probe_answered(),
+            press_t(),
+            tab_finished(crate::tab::TabOutcome::Worked(None)),
+            Event::Quit,
+        ]);
+        assert_eq!(
+            screen, "FRAME",
+            "a run that wrote nothing must cost the frame no row, got {screen:?}",
+        );
+    }
+
+    #[test]
+    fn a_run_that_failed_shows_its_line_in_red_until_a_key() {
+        // The line is the words of another program, so it waits for a key and
+        // shows no age.
+        const LINE: &str = "stp: no open pull request for issue-620";
+        let failed = || tab_finished(crate::tab::TabOutcome::Failed(LINE.to_string()));
+        let (screen, _seen) = testcolor::with_forced_ansi(|| {
+            run_loop(vec![tab_probe_answered(), press_t(), failed(), Event::Quit])
+        });
+        let red = testcolor::with_forced_ansi(|| LINE.red().to_string());
+        assert!(
+            screen.contains(&red),
+            "the line of the failure must be red, got {screen:?}",
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME\n{LINE}"),
+            "the line must not fade",
+        );
+
+        // A key takes it away.
+        let (screen, _seen) = run_loop(vec![
+            tab_probe_answered(),
+            press_t(),
+            failed(),
+            key(KeyCode::Char('x')),
+            Event::Quit,
+        ]);
+        assert_eq!(
+            strip_ansi(&screen),
+            "FRAME",
+            "the next key must remove the line",
+        );
+    }
+
+    #[test]
+    fn a_press_past_the_deadline_says_so_and_gives_the_key_back() {
+        // A run past its deadline is a failure like any other, and its
+        // outcome frees the key.
+        let line = format!(
+            "stp has not finished after {}s",
+            crate::tab::RUN_DEADLINE.as_secs()
+        );
+        let (screen, seen) = run_loop(vec![
+            tab_probe_answered(),
+            press_t(),
+            tab_finished(crate::tab::TabOutcome::Failed(line)),
+            press_t(),
+            Event::Quit,
+        ]);
+        assert!(
+            screen.contains("stp has not finished after 60s"),
+            "the deadline must reach the screen, got {screen:?}",
+        );
+        assert_eq!(
+            seen.tab_runs.len(),
+            2,
+            "the outcome must give the key back, got {:?}",
+            seen.tab_runs,
+        );
+    }
+
+    #[test]
+    fn a_t_outcome_from_before_a_switch_is_dropped_and_t_works_again() {
+        // A line under the frame must describe the worktree in the frame, so
+        // the error of the run in bravo must not reach the row of charlie.
+        let (screen, seen) = run_in(
+            World::three(),
+            vec![
+                tab_probe_answered(),
+                press_t(),
+                key(KeyCode::Right),
+                tab_finished_in(
+                    before_the_switch(),
+                    crate::tab::TabOutcome::Failed("stp: no open pull request".to_string()),
+                ),
+                press_t(),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME {CHARLIE}"),
+            "the error of the run in bravo must not reach the row of charlie",
+        );
+        assert_eq!(
+            seen.tab_paths,
+            vec![
+                (worktree(BRAVO), before_the_switch()),
+                (worktree(CHARLIE), after_one_switch()),
+            ],
+            "the outcome must free the key, and the next run must carry the new generation",
+        );
+    }
+
+    #[test]
+    fn the_one_run_rule_of_t_spans_a_switch() {
+        // A run continues after a switch, and the rule of one run at a time
+        // holds for the whole process.
+        let (_screen, seen) = run_in(
+            World::three(),
+            vec![
+                tab_probe_answered(),
+                press_t(),
+                key(KeyCode::Right),
+                press_t(),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            seen.tab_runs.len(),
+            1,
+            "a run of `T` in flight must refuse a second run after a switch, got {:?}",
+            seen.tab_runs,
+        );
+    }
+
     /// One press of `m`.
     fn press_m() -> Event {
         key(KeyCode::Char('m'))
@@ -10269,6 +10989,7 @@ mod push_loop_tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -11152,6 +11873,7 @@ mod push_loop_tests {
                         |command: crate::update::BaseUpdateCommand, _current: &WorktreePath| {
                             seen.borrow_mut().base_updates.push(command)
                         },
+                    start_tab: no_tab,
                     start_issue: |steps: crate::issue::Steps,
                                   _current: &WorktreePath,
                                   _generation: Generation| {
@@ -11730,6 +12452,7 @@ mod push_loop_tests {
             schedule: no_timed_refresh_for_push(),
             ui: PushUi::new(false),
             issue,
+            tab: TabRun::new(),
             base_updates: BaseUpdateCommands::new(),
             conflicts: ConflictsRun::new(),
             home: worktree(BRAVO),
@@ -11778,6 +12501,7 @@ mod push_loop_tests {
             schedule: no_timed_refresh_for_push(),
             ui,
             issue: issue_run_in(crate::remote::Session::Local),
+            tab: TabRun::new(),
             base_updates: BaseUpdateCommands::new(),
             conflicts: ConflictsRun::new(),
             home: worktree(BRAVO),
@@ -13560,7 +14284,8 @@ mod watched_tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use super::tests::{
-        frame, no_fetch, no_list, timer_off, walk_config, TEST_DEBOUNCE, TEST_DIMS, WALK_LOG_LIMIT,
+        frame, no_fetch, no_list, no_tab, timer_off, walk_config, TEST_DEBOUNCE, TEST_DIMS,
+        WALK_LOG_LIMIT,
     };
     use super::{
         event_loop, listed, listed_paths, switch_watched, worktree_on_start_branch, Dimensions,
@@ -14491,6 +15216,7 @@ mod watched_tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},

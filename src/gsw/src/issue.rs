@@ -16,7 +16,7 @@ use std::ffi::OsStr;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use crate::shell::{last_with_text, run_command, start_run, OutputStream, RunEnd, ShellCommand};
+use crate::shell::{cannot_run_line, run_until, Ended, Ran, ShellCommand};
 
 /// The variable that holds the command `G` runs second, where the first step fails.
 ///
@@ -141,41 +141,20 @@ impl IssueOutcome {
     }
 
     /// The outcome of a step of `name` that failed. The step wrote `lines`
-    /// and ended the way `status` reads.
-    ///
-    /// A failure says the last line that has text in it. That text comes from
-    /// another program: `ggs` refuses with exit status 2 on a branch that
-    /// names no issue, and that refusal is the whole reason the key did
-    /// nothing. A failure that wrote nothing has only the status left to
-    /// report, and a blank row under the frame would read as success.
+    /// and ended the way `status` reads. [`crate::shell::failure_line`] holds
+    /// the words.
     pub(crate) fn failed(name: &str, lines: &[String], status: &str) -> Self {
         Self {
-            message: Some(
-                last_with_text(lines.iter().map(String::as_str))
-                    .unwrap_or_else(|| format!("{name} failed ({status})")),
-            ),
+            message: Some(crate::shell::failure_line(name, lines, status)),
         }
     }
 
     /// The outcome of a run of `name` that `lines` came from and that was
-    /// still running at `deadline`.
-    ///
-    /// The message names the timeout every time, because the timeout is the
-    /// thing the user cannot see: the run goes on, the key is free again, and
-    /// no page opened. A row that said only what the command wrote would read
-    /// as a run that stopped.
-    ///
-    /// A command that said why before it stopped answering keeps its words,
-    /// after the timeout. `gh` reports a login it needs and then waits for an
-    /// answer nobody can give it, and that report is the whole reason the run
-    /// went nowhere.
+    /// still running at `deadline`. [`crate::shell::unfinished_line`] holds
+    /// the words.
     pub(crate) fn unfinished(name: &str, lines: &[String], deadline: Duration) -> Self {
-        let waited = format!("{name} has not finished after {}s", deadline.as_secs());
         Self {
-            message: Some(match last_with_text(lines.iter().map(String::as_str)) {
-                Some(said) => format!("{waited}: {said}"),
-                None => waited,
-            }),
+            message: Some(crate::shell::unfinished_line(name, lines, deadline)),
         }
     }
 
@@ -269,27 +248,8 @@ enum StepEnd {
 /// `deadline` is the deadline of the whole press. A step that is still running
 /// names it in the message, and not the time that was left to it.
 ///
-/// The directory is a parameter so a test can watch it. Production passes
-/// [`std::env::temp_dir`].
-///
-/// **At the deadline gsw stops waiting, and it kills nothing.** This is the one
-/// place where a run and the probe part company, and the reason is whose
-/// process it is. The probe's child is gsw's own question, so gsw ends that
-/// child and the whole process group under it. This
-/// child is the user's own command, and a command that holds a browser in the
-/// foreground is the shape this deadline exists for — `xdg-open` does it. To
-/// kill that process group is to close the page the user asked gsw to open.
-///
-/// The user's rc file is bounded already, one layer up: the probe runs
-/// `$SHELL -ic 'command -v <name>'`, which loads that same rc file under
-/// [`crate::shell::PROBE_DEADLINE`]. So a run that hangs hangs in the command,
-/// and the command is the user's to end.
-///
-/// The child still has to be reaped. A dropped [`std::process::Child`] is
-/// neither killed nor waited for, and a child nobody waits for stays as a
-/// defunct entry for the life of the session — which is the cost this deadline
-/// exists to avoid. So the child goes to a thread that waits for it. That
-/// thread ends when the child ends, so the child is what bounds it.
+/// [`run_until`] holds the rules of the run, including why gsw kills nothing
+/// at the deadline. This function maps how the run ended to the end of a step.
 fn run_step(
     shell: &OsStr,
     command: &ShellCommand,
@@ -299,44 +259,24 @@ fn run_step(
     deadline: Duration,
 ) -> StepEnd {
     let name = command.name();
-    // The shell is gone, it cannot be started, there is nowhere to put what it
-    // writes, or it cannot be asked about. Rare, and worth saying plainly:
-    // every other failure here is the child's own words.
-    let cannot_run = |error: std::io::Error| {
-        StepEnd::Failed(IssueOutcome {
-            message: Some(format!("cannot run {name}: {error}")),
-        })
-    };
-    let run = match start_run(run_command(shell, command, workdir), scratch) {
-        Ok(run) => run,
-        Err(error) => return cannot_run(error),
-    };
-
-    // Standard output first, then standard error, whatever order the lines
-    // arrived in. That is the order a refusal reads in: a command says what it
-    // did on one stream and why it stopped on the other.
-    let mut lines = Vec::new();
-    let mut reasons = Vec::new();
-    let end = run.wait(Some(wait), &mut |stream, line| match stream {
-        OutputStream::Stdout => lines.push(line),
-        OutputStream::Stderr => reasons.push(line),
-    });
-    lines.append(&mut reasons);
-
-    match end {
-        Ok(RunEnd::Exited(status)) if status.success() => StepEnd::Opened,
-        Ok(RunEnd::Exited(status)) => {
-            StepEnd::Failed(IssueOutcome::failed(name, &lines, &status.to_string()))
-        }
+    match run_until(shell, command, workdir, scratch, wait) {
+        Ok(Ran {
+            ended: Ended::Exited(status),
+            ..
+        }) if status.success() => StepEnd::Opened,
+        Ok(Ran {
+            ended: Ended::Exited(status),
+            lines,
+        }) => StepEnd::Failed(IssueOutcome::failed(name, &lines, &status.to_string())),
         // A command that said why before it stopped answering is worth
         // showing, and the timeout is worth saying either way.
-        Ok(RunEnd::StillRunning(mut child)) => {
-            std::thread::spawn(move || {
-                let _ = child.wait();
-            });
-            StepEnd::StillRunning(IssueOutcome::unfinished(name, &lines, deadline))
-        }
-        Err(error) => cannot_run(error),
+        Ok(Ran {
+            ended: Ended::StillRunning,
+            lines,
+        }) => StepEnd::StillRunning(IssueOutcome::unfinished(name, &lines, deadline)),
+        Err(error) => StepEnd::Failed(IssueOutcome {
+            message: Some(cannot_run_line(name, &error)),
+        }),
     }
 }
 
@@ -407,6 +347,23 @@ mod run_tests {
         let issue =
             ShellCommand::new(None, DEFAULT_ISSUE_COMMAND).expect("the default names a command");
         Steps::new(Some(pull_request), Some(issue)).expect("two commands are steps")
+    }
+
+    #[test]
+    fn a_run_that_cannot_start_says_why() {
+        // A shell that is gone must not look like an unbound key. A press that
+        // does nothing and says nothing reads as a key that is not bound, so
+        // the run says that it could not start.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("no-such-shell");
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let outcome = run(missing.as_os_str(), &default_steps(), workdir.path());
+        let message = outcome.message();
+        let expected = format!("cannot run {DEFAULT_ISSUE_COMMAND}: ");
+        assert!(
+            message.is_some_and(|m| m.starts_with(&expected)),
+            "got {message:?}"
+        );
     }
 
     /// The steps that ran, in order, out of every argument the stub recorded.
