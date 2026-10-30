@@ -2076,11 +2076,11 @@ fn read_value(name: &str) -> Option<String> {
 /// and report each answer on the loop's own channel.
 ///
 /// **One thread and one shell for each command.** `G` has two commands, so the
-/// four keys that run commands have five probes. A shell that answered for several
-/// names at once would need its standard output parsed, and an rc file can
-/// print to that output — so the answer of such a shell says as much about the
-/// banner of the user as about the commands. Exit status carries one answer,
-/// which is why each name gets a shell of its own.
+/// four keys that run commands have five probes. A shell that answered for
+/// several names at once would need its standard output parsed, and an rc file
+/// can print to that output — so the answer of such a shell says as much about
+/// the banner of the user as about the commands. Exit status carries one
+/// answer, which is why each name gets a shell of its own.
 ///
 /// On threads of their own, because an interactive shell reads an rc file and
 /// an rc file is somebody else's code: it can take a second, and it can take
@@ -3433,11 +3433,11 @@ where
             ConflictsPress::Nothing => {}
         },
         // A run of `G`, `T`, or `m` continues after a switch, in the worktree
-        // where it started. An event of such a run describes a worktree that the frame no longer
-        // shows, and a line under the frame must describe the worktree in the
-        // frame. So it posts nothing. An outcome still frees its key, because
-        // one run at a time is a rule for the whole process, and that run has
-        // ended.
+        // where it started. An event of such a run describes a worktree that
+        // the frame no longer shows, and a line under the frame must describe
+        // the worktree in the frame. So it posts nothing. An outcome still
+        // frees its key, because one run at a time is a rule for the whole
+        // process, and that run has ended.
         Event::ConflictsStarted { generation, .. } if state.is_stale(generation) => {}
         Event::ConflictsFinished { generation, .. } if state.is_stale(generation) => {
             state.conflicts.finished();
@@ -4107,11 +4107,11 @@ fn forward_input(event: CtEvent) -> Option<Event> {
 ///   killed from another pane.
 /// - [`InputMode::Normal`]: `q` quits, `r` forces a refresh, `p` asks to push,
 ///   `P` asks to push without the `pre-push` hook, `G` asks for the issue of
-///   the branch, `T` runs the tab-title command, `R` asks to rebase the branch onto its base, `M` asks to
-///   merge the base into the branch, and `m` asks to measure a rebase and a
-///   merge against the default branch. Up goes to the home worktree, Left to
-///   the previous worktree, Right to the next worktree, and Down opens the
-///   list of the worktrees. Esc is
+///   the branch, `T` runs the tab-title command, `R` asks to rebase the branch
+///   onto its base, `M` asks to merge the base into the branch, and `m` asks to
+///   measure a rebase and a merge against the default branch. Up goes to the
+///   home worktree, Left to the previous worktree, Right to the next worktree,
+///   and Down opens the list of the worktrees. Esc is
 ///   [`Event::ReturnRequested`]. Where the name in the header is red, its first
 ///   press asks for a second one, and the second press goes back to the start
 ///   branch: it moves the watch to the worktree that is on it, or else it runs
