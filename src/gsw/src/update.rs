@@ -28,7 +28,9 @@ use crate::push::{
 };
 use crate::render::{Operation, Snapshot};
 use crate::repo::{OperationStart, DETACHED_HEAD};
-use crate::shell::{shell_child, start_run, RunEnd, ShellCommand};
+use crate::shell::{
+    cannot_run_line, failed_in_silence_line, shell_child, start_run, RunEnd, ShellCommand,
+};
 
 /// The variable that holds the command `R` runs.
 ///
@@ -665,7 +667,7 @@ fn run_in(
         Err(error) => {
             return PushOutcome {
                 success: false,
-                output: format!("cannot run {name}: {error}"),
+                output: cannot_run_line(name, &error),
             }
         }
     };
@@ -775,12 +777,9 @@ fn run_in(
     let success = status.success() && held.is_none();
     let mut text = record.into_text();
     if !success && text.trim().is_empty() {
-        // A failure with nothing to show would paint a blank row, and a blank
-        // row under the frame reads as a run that worked. The status is all the
-        // command left, and the name is the whole line the user wrote into the
-        // variable — a message that named the first word alone would report
-        // `grp failed` for a run of `grp --fork-point`.
-        text = format!("{name} failed ({status})");
+        // A failure with nothing to show names the command and its status.
+        // See [`failed_in_silence_line`].
+        text = failed_in_silence_line(name, &status.to_string());
     }
 
     PushOutcome {

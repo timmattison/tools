@@ -12,11 +12,13 @@
 //! the first word alone. The run carries the whole line, because the rest of it
 //! is the user's own arguments.
 //!
-//! The words that report a run that failed, a run past its deadline, and a run
-//! that cannot start are the same for every key, so they live here. Each key
-//! keeps its variable, its default name, its deadline, and the rest of its
-//! words. `G` keeps those in [`crate::issue`], and `T` keeps them in
-//! [`crate::tab`].
+//! The words that report a run that cannot start, and a run that failed and
+//! wrote nothing, are the same for every key, so they live here. So do the
+//! words of `G` and `T` for a run that failed after it wrote, and for a run
+//! past its deadline. Each key keeps its variable, its default name, its
+//! deadline where it has one, and the rest of its words. `G` keeps those in
+//! [`crate::issue`], `T` keeps them in [`crate::tab`], and `R` and `M` keep
+//! them in [`crate::update`].
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
@@ -676,9 +678,10 @@ pub(crate) struct Ran {
 /// Run `command` in `workdir`, with the two files of the run in `scratch`, and
 /// stop waiting after `wait`.
 ///
-/// Every key that runs a command the user supplies starts its run here, so the
-/// rules of a run are written once. The key keeps the words it leaves under
-/// the frame.
+/// `G` and `T` start their runs here, because a run of each key has a
+/// deadline. The rules of such a run are thus written once. Each key keeps the
+/// words it leaves under the frame. `R` and `M` have no deadline, and they show
+/// each line as it arrives, so they call [`start_run`] themselves.
 ///
 /// The directory is a parameter so a test can watch it. Production passes
 /// [`std::env::temp_dir`].
@@ -744,11 +747,21 @@ pub(crate) fn run_until(
 /// A failure says the last line that has text in it. That text comes from
 /// another program: `ggs` refuses with exit status 2 on a branch that names no
 /// issue, and that refusal is the whole reason the key did nothing. A failure
-/// that wrote nothing has only the status left to report, and a blank row
-/// under the frame would read as success.
+/// that wrote nothing gets [`failed_in_silence_line`].
 pub(crate) fn failure_line(name: &str, lines: &[String], status: &str) -> String {
     last_with_text(lines.iter().map(String::as_str))
-        .unwrap_or_else(|| format!("{name} failed ({status})"))
+        .unwrap_or_else(|| failed_in_silence_line(name, status))
+}
+
+/// The line to put under the frame for a run of `name` that failed and wrote
+/// nothing. The run ended the way `status` reads.
+///
+/// A blank row under the frame would read as success, so the status is all
+/// there is left to report. `name` is the whole command line and not its
+/// first word, because a line that named `grp` alone would hide the
+/// arguments of a run of `grp --fork-point`.
+pub(crate) fn failed_in_silence_line(name: &str, status: &str) -> String {
+    format!("{name} failed ({status})")
 }
 
 /// The line to put under the frame for a run of `name` that `lines` came from
