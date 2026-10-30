@@ -15,7 +15,10 @@ use std::ffi::OsStr;
 use std::path::Path;
 use std::time::Duration;
 
-use crate::shell::ShellCommand;
+use crate::shell::{
+    cannot_run_line, failure_line, last_with_text, run_until, unfinished_line, Ended, Ran,
+    ShellCommand,
+};
 
 /// The variable that holds the command `T` runs.
 ///
@@ -60,6 +63,16 @@ pub(crate) fn run(shell: &OsStr, command: &ShellCommand, workdir: &Path) -> TabO
 /// Run `command` in `workdir`, with the two files of the run in `scratch`, and
 /// stop waiting after `deadline`.
 ///
+/// Four rules decide what the press reports:
+///
+/// - A run that exited 0 reports the last line with text that it wrote, or
+///   nothing where it wrote nothing.
+/// - A run that failed reports its last line with text, or its name and exit
+///   status where it wrote nothing.
+/// - A run that was still running at `deadline` reports the timeout. gsw kills
+///   nothing, because the command is the user's own.
+/// - A run that cannot start reports why.
+///
 /// The directory is a parameter so a test can watch it. Production passes
 /// [`std::env::temp_dir`].
 fn run_in(
@@ -69,8 +82,24 @@ fn run_in(
     scratch: &Path,
     deadline: Duration,
 ) -> TabOutcome {
-    let _ = (shell, command, workdir, scratch, deadline);
-    TabOutcome::Worked(None)
+    let name = command.name();
+    match run_until(shell, command, workdir, scratch, deadline) {
+        Ok(Ran {
+            ended: Ended::Exited(status),
+            lines,
+        }) if status.success() => {
+            TabOutcome::Worked(last_with_text(lines.iter().map(String::as_str)))
+        }
+        Ok(Ran {
+            ended: Ended::Exited(status),
+            lines,
+        }) => TabOutcome::Failed(failure_line(name, &lines, &status.to_string())),
+        Ok(Ran {
+            ended: Ended::StillRunning,
+            lines,
+        }) => TabOutcome::Failed(unfinished_line(name, &lines, deadline)),
+        Err(error) => TabOutcome::Failed(cannot_run_line(name, &error)),
+    }
 }
 
 #[cfg(all(test, unix))]
