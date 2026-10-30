@@ -2193,9 +2193,11 @@ fn log_fork(log: Option<&Path>, record: &fork_log::ForkRecord) {
 /// With `scan`, the function then reads the transcripts of `projects_dir`, the
 /// own projects tree of the user, and prints each one that shares a `uuid`
 /// value with the transcript of the id (see [`fork_scan`]). It finds forks that
-/// the log does not hold. When no transcript has the id, it says so. A
-/// transcript that cannot be read gives a warning on stderr, and the exit code
-/// stays 0.
+/// the log does not hold. When no transcript has the id, it says so. When the
+/// transcript of the id cannot be read, or the search for its `uuid` values
+/// cannot be made, the scan stops with a warning on stderr. Each other
+/// transcript or folder that cannot be read adds to a count line of the report
+/// on stdout. The exit code stays 0 in both cases.
 fn run_forks(
     roots: &[UserProjects],
     projects_dir: &Path,
