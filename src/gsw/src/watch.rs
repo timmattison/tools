@@ -695,7 +695,7 @@ enum Event {
     /// name.
     ///
     /// One event for each key, because each key has a probe of its own and the
-    /// four probes answer in whatever order their shells finish. A key is
+    /// five probes answer in whatever order their shells finish. A key is
     /// unbound until its own answer arrives. A shell that says no, a shell
     /// that cannot be started, and a shell that never answers all send
     /// nothing, so that key stays unbound and silent.
@@ -811,6 +811,17 @@ enum Event {
         /// What the run did.
         outcome: crate::issue::IssueOutcome,
     },
+    /// The user asked to run the tab-title command (`T`).
+    ///
+    /// Only [`classify_input`] makes one, and it makes one only where the
+    /// command exists — so the loop never receives a request it cannot serve.
+    TabRequested,
+    /// The probe of `T` found its command, and this is the command.
+    ///
+    /// Sent only where the command exists. A shell that says no, a shell that
+    /// cannot be started, and a shell that never answers all send nothing, so
+    /// the key stays unbound and silent.
+    TabCommandFound(crate::shell::ShellCommand),
     /// The user asked to measure a rebase and a merge against the default
     /// branch (`m`).
     ///
@@ -913,14 +924,14 @@ pub(crate) enum Binding {
     Unbound,
 }
 
-/// Which of the three keys that run a command of the user have one behind
-/// them: `G`, `R`, and `M`.
+/// Which of the four keys that run a command of the user have one behind
+/// them: `G`, `R`, `M`, and `T`.
 ///
-/// One value rather than three parameters of [`classify_input`], because the
-/// answers of the keys travel together and arrive together: each of the four probes
-/// answers on the loop's own channel, and the key table reads whatever has
-/// arrived by the press. A fourth such key then adds a field here and moves no
-/// call site.
+/// One value rather than four parameters of [`classify_input`], because the
+/// answers of the keys travel together and arrive together: each of the five
+/// probes answers on the loop's own channel, and the key table reads whatever
+/// has arrived by the press. A fifth such key then adds a field here and moves
+/// no call site.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct CommandKeys {
     /// Whether `G`, which opens the pull request or the issue of the branch,
@@ -930,6 +941,8 @@ pub(crate) struct CommandKeys {
     rebase: Binding,
     /// Whether `M`, which merges the base into the branch, has a command.
     merge: Binding,
+    /// Whether `T`, which runs the tab-title command, has a command.
+    tab: Binding,
 }
 
 /// What one press of `G` does.
@@ -1076,6 +1089,38 @@ impl IssueRun {
     }
 }
 
+/// The `T` key's own state, for the life of one watch-mode run.
+///
+/// One fact for now: the command the probe found. It is a value of its own,
+/// beside [`IssueRun`], because `T` changes no other key and no other key
+/// changes `T`.
+struct TabRun {
+    /// The command the probe found. `None` until the probe answers, and forever
+    /// where it found none or where the key is off.
+    command: Option<crate::shell::ShellCommand>,
+}
+
+impl TabRun {
+    /// The probe has not answered, so `T` does not act.
+    const fn new() -> Self {
+        Self { command: None }
+    }
+
+    /// Whether `T` has a command behind it.
+    fn key(&self) -> Binding {
+        if self.command.is_some() {
+            Binding::Bound
+        } else {
+            Binding::Unbound
+        }
+    }
+
+    /// Keep the command the probe found.
+    fn found(&mut self, command: crate::shell::ShellCommand) {
+        self.command = Some(command);
+    }
+}
+
 /// The command behind each of the two keys that bring the branch up to date
 /// with its base.
 ///
@@ -1130,13 +1175,15 @@ impl BaseUpdateCommands {
         }
     }
 
-    /// Which of the three keys that run a command of the user have one, with
-    /// the answer for `G` from [`IssueRun::key`].
-    fn keys(&self, issue: Binding) -> CommandKeys {
+    /// Which of the four keys that run a command of the user have one, with
+    /// the answer for `G` from [`IssueRun::key`] and the answer for `T` from
+    /// [`TabRun::key`].
+    fn keys(&self, issue: Binding, tab: Binding) -> CommandKeys {
         CommandKeys {
             issue,
             rebase: self.binding(crate::update::BaseUpdate::Rebase),
             merge: self.binding(crate::update::BaseUpdate::Merge),
+            tab,
         }
     }
 }
@@ -1930,6 +1977,8 @@ struct CommandValues {
     rebase: Option<String>,
     /// What [`crate::update::MERGE_COMMAND_ENV`] says `M` runs.
     merge: Option<String>,
+    /// What [`crate::tab::TAB_COMMAND_ENV`] says `T` runs.
+    tab: Option<String>,
 }
 
 impl CommandValues {
@@ -1940,6 +1989,7 @@ impl CommandValues {
             issue: read_value(crate::issue::Page::Issue.env()),
             rebase: read_value(crate::update::BaseUpdate::Rebase.env()),
             merge: read_value(crate::update::BaseUpdate::Merge.env()),
+            tab: read_value(crate::tab::TAB_COMMAND_ENV),
         }
     }
 
@@ -2074,7 +2124,7 @@ mod probe_tests {
     /// the question the shell was really asked and never on a count of runs.
     const PROBE_PREFIX: &str = "command -v ";
 
-    /// The values of the four variables, as a test states them.
+    /// The values of the five variables, as a test states them.
     ///
     /// `None` is a variable the environment does not set, which is the case
     /// that takes the default name of that key. No test of this module sets a
@@ -2086,12 +2136,14 @@ mod probe_tests {
         issue: Option<&str>,
         rebase: Option<&str>,
         merge: Option<&str>,
+        tab: Option<&str>,
     ) -> CommandValues {
         CommandValues {
             pull_request: pull_request.map(str::to_string),
             issue: issue.map(str::to_string),
             rebase: rebase.map(str::to_string),
             merge: merge.map(str::to_string),
+            tab: tab.map(str::to_string),
         }
     }
 
@@ -2145,17 +2197,18 @@ mod probe_tests {
             Event::BaseUpdateCommandFound(update, command) => {
                 format!("{} {}", update.key(), command.name())
             }
+            Event::TabCommandFound(command) => format!("T {}", command.name()),
             _ => "another event".to_string(),
         }
     }
 
     #[test]
     fn an_unset_variable_probes_the_default_command_of_its_own_key() {
-        // Four probes, four shells, four questions. A key whose variable the
+        // Five probes, five shells, five questions. A key whose variable the
         // environment never names still asks about the name it falls back on,
         // because that name is what the key runs.
         let stub = StubShell::answering(0);
-        let (words, _) = probed(&values(None, None, None, None), &stub);
+        let (words, _) = probed(&values(None, None, None, None, None), &stub);
         assert_eq!(
             words,
             [
@@ -2163,6 +2216,7 @@ mod probe_tests {
                 crate::issue::DEFAULT_PR_COMMAND,
                 BaseUpdate::Merge.default_command(),
                 BaseUpdate::Rebase.default_command(),
+                crate::tab::DEFAULT_TAB_COMMAND,
             ],
             "each key must ask the shell about its own default command",
         );
@@ -2173,7 +2227,10 @@ mod probe_tests {
         // `G` has two probes. The first one asks about the command that runs
         // first, and its answer must reach the page of the pull request.
         let stub = StubShell::answering(0);
-        let (words, answers) = probed(&values(None, Some("myissue"), Some(""), Some("")), &stub);
+        let (words, answers) = probed(
+            &values(None, Some("myissue"), Some(""), Some(""), Some("")),
+            &stub,
+        );
         assert_eq!(
             words,
             [crate::issue::DEFAULT_PR_COMMAND, "myissue"],
@@ -2189,7 +2246,7 @@ mod probe_tests {
     #[test]
     fn an_empty_pr_variable_starts_no_shell_for_it_and_g_keeps_the_issue_command() {
         let stub = StubShell::answering(0);
-        let (words, answers) = probed(&values(Some(""), None, Some(""), Some("")), &stub);
+        let (words, answers) = probed(&values(Some(""), None, Some(""), Some(""), Some("")), &stub);
         assert_eq!(
             words,
             [crate::issue::DEFAULT_ISSUE_COMMAND],
@@ -2205,7 +2262,10 @@ mod probe_tests {
     #[test]
     fn a_pr_variable_with_a_name_in_it_probes_that_command() {
         let stub = StubShell::answering(0);
-        let (words, answers) = probed(&values(Some("myprs"), None, Some(""), Some("")), &stub);
+        let (words, answers) = probed(
+            &values(Some("myprs"), None, Some(""), Some(""), Some("")),
+            &stub,
+        );
         assert_eq!(
             words,
             [crate::issue::DEFAULT_ISSUE_COMMAND, "myprs"],
@@ -2225,7 +2285,7 @@ mod probe_tests {
         // nothing at all — no shell, and so no rc file read — and it must turn
         // off the one key it names and no other.
         let stub = StubShell::answering(0);
-        let (words, answers) = probed(&values(None, None, Some(""), None), &stub);
+        let (words, answers) = probed(&values(None, None, Some(""), None, Some("")), &stub);
         assert_eq!(
             words,
             [
@@ -2248,7 +2308,7 @@ mod probe_tests {
         // person's rc file gives it, and a user who calls it something else
         // must have gsw ask about the name they chose.
         let stub = StubShell::answering(0);
-        let (words, answers) = probed(&values(None, None, None, Some("mymerge")), &stub);
+        let (words, answers) = probed(&values(None, None, None, Some("mymerge"), Some("")), &stub);
         assert_eq!(
             words,
             [
@@ -2268,15 +2328,83 @@ mod probe_tests {
 
     #[test]
     fn each_answer_arrives_as_the_event_of_its_own_key() {
-        // Four answers on one channel, and each must reach the key it belongs
+        // Five answers on one channel, and each must reach the key it belongs
         // to. An answer that reached the other key would bind `M` to the
         // command that rebases the branch and force-pushes it.
         let stub = StubShell::answering(0);
-        let (_, answers) = probed(&values(None, None, None, None), &stub);
+        let (_, answers) = probed(&values(None, None, None, None, None), &stub);
+        assert_eq!(
+            answers,
+            [
+                "G Issue ggs",
+                "G PullRequest ggsp",
+                "M gmp",
+                "R grp",
+                "T stp"
+            ],
+            "each key must be bound by the answer of its own probe",
+        );
+    }
+
+    #[test]
+    fn an_unset_tab_variable_probes_stp_for_t() {
+        // `T` has one command. An unset variable takes the default name, as it
+        // does for the other keys.
+        let stub = StubShell::answering(0);
+        let (words, answers) = probed(&values(Some(""), Some(""), Some(""), Some(""), None), &stub);
+        assert_eq!(
+            words,
+            [crate::tab::DEFAULT_TAB_COMMAND],
+            "an unset GSW_TAB_COMMAND must ask about the default command of T",
+        );
+        assert_eq!(
+            answers,
+            ["T stp"],
+            "the answer for stp must reach the key T",
+        );
+    }
+
+    #[test]
+    fn an_empty_tab_variable_starts_no_shell_for_t_and_leaves_the_other_keys_probing() {
+        // The empty value is the one way to turn `T` off. It must cost no
+        // shell, and so no rc file read, and it must turn off no other key.
+        let stub = StubShell::answering(0);
+        let (words, answers) = probed(&values(None, None, None, None, Some("")), &stub);
+        assert_eq!(
+            words,
+            [
+                crate::issue::DEFAULT_ISSUE_COMMAND,
+                crate::issue::DEFAULT_PR_COMMAND,
+                BaseUpdate::Merge.default_command(),
+                BaseUpdate::Rebase.default_command(),
+            ],
+            "an empty GSW_TAB_COMMAND must start no shell for T, and leave the other keys probing",
+        );
         assert_eq!(
             answers,
             ["G Issue ggs", "G PullRequest ggsp", "M gmp", "R grp"],
-            "each key must be bound by the answer of its own probe",
+            "a key that started no shell must send no answer",
+        );
+    }
+
+    #[test]
+    fn a_tab_variable_with_a_name_in_it_probes_that_command() {
+        // The probe asks about the first word. The answer carries the whole
+        // line, because the whole line is what `T` runs.
+        let stub = StubShell::answering(0);
+        let (words, answers) = probed(
+            &values(Some(""), Some(""), Some(""), Some(""), Some("mytab --here")),
+            &stub,
+        );
+        assert_eq!(
+            words,
+            ["mytab"],
+            "GSW_TAB_COMMAND must name the command that T asks about",
+        );
+        assert_eq!(
+            answers,
+            ["T mytab --here"],
+            "the answer of T must carry the whole line the user wrote",
         );
     }
 
@@ -2293,7 +2421,7 @@ mod probe_tests {
         // wait only for the bound of a user.
         let late = crate::shell::PROBE_DEADLINE + Duration::from_secs(1);
         let stub = StubShell::new(&format!("sleep {}; exit 0", late.as_secs()));
-        let (_, answers) = probed(&values(None, None, None, None), &stub);
+        let (_, answers) = probed(&values(None, None, None, None, Some("")), &stub);
         assert_eq!(
             answers,
             ["G Issue ggs", "G PullRequest ggsp", "M gmp", "R grp"],
@@ -2557,6 +2685,8 @@ struct LoopState {
     ui: PushUi,
     /// The state of the `G` key.
     issue: IssueRun,
+    /// The state of the `T` key.
+    tab: TabRun,
     /// The commands behind the `R` and `M` keys.
     base_updates: BaseUpdateCommands,
     /// The state of the `m` key.
@@ -2564,7 +2694,7 @@ struct LoopState {
     /// The worktree where the user started gsw.
     home: WorktreePath,
     /// The worktree that the frame shows. The walk, `p`, `P`, `R`, `M`, `G`,
-    /// and `m` act on it. It starts at [`LoopState::home`].
+    /// `T`, and `m` act on it. It starts at [`LoopState::home`].
     current: WorktreePath,
     /// How many switches the loop has made. See [`Generation`].
     generation: Generation,
@@ -2966,7 +3096,7 @@ where
         Event::Resize => pending.resize = true,
         Event::ForceRefresh => pending.force = true,
         Event::Key(key) => {
-            let keys = state.base_updates.keys(state.issue.key());
+            let keys = state.base_updates.keys(state.issue.key(), state.tab.key());
             if let Some(action) = classify_input(key, state.ui.mode(), keys) {
                 // Every key but `G` takes the arming away. The message that
                 // asks for the second press is the armed state, and this key
@@ -3212,6 +3342,9 @@ where
             }
         }
         Event::IssueCommandFound(page, command) => state.issue.found(page, command),
+        Event::TabCommandFound(command) => state.tab.found(command),
+        // A press of `T` starts a run in slice 3 of issue #620. The key is bound already, so the press is read and does nothing.
+        Event::TabRequested => {}
         // The check and the start are one step on the thread of the loop, so
         // a burst of presses starts one run. See [`ConflictsRun`].
         Event::ConflictsRequested => match state.conflicts.press() {
@@ -3471,6 +3604,8 @@ where
         // The probe answers on the loop's own channel, so the key is unbound
         // until it does and the loop never waits for it.
         issue: IssueRun::new(session),
+        // `T` answers on the same channel, on the same terms.
+        tab: TabRun::new(),
         // One probe for each of the two keys, on the same terms.
         base_updates: BaseUpdateCommands::new(),
         // The loop owns the state of `m`, and the thread that measures never
@@ -4940,32 +5075,46 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
-    /// One combination of the three bindings, as [`classify_input`] reads it.
-    const fn bindings(issue: Binding, rebase: Binding, merge: Binding) -> CommandKeys {
+    /// One combination of the four bindings, as [`classify_input`] reads it.
+    const fn bindings(
+        issue: Binding,
+        rebase: Binding,
+        merge: Binding,
+        tab: Binding,
+    ) -> CommandKeys {
         CommandKeys {
             issue,
             rebase,
             merge,
+            tab,
         }
     }
 
-    /// Every combination of the three bindings, all eight of them.
+    /// Every combination of the four bindings, all sixteen of them.
     ///
     /// Every old key means the same thing under each of them: a new key must
-    /// move no old one. Three keys read this value and each reads one field of
+    /// move no old one. Four keys read this value and each reads one field of
     /// it, so a combination left out here is a pair of keys nobody holds
     /// against each other.
-    const EVERY_BINDING_COMBINATION: [CommandKeys; 8] = {
+    const EVERY_BINDING_COMBINATION: [CommandKeys; 16] = {
         use Binding::{Bound, Unbound};
         [
-            bindings(Unbound, Unbound, Unbound),
-            bindings(Unbound, Unbound, Bound),
-            bindings(Unbound, Bound, Unbound),
-            bindings(Unbound, Bound, Bound),
-            bindings(Bound, Unbound, Unbound),
-            bindings(Bound, Unbound, Bound),
-            bindings(Bound, Bound, Unbound),
-            bindings(Bound, Bound, Bound),
+            bindings(Unbound, Unbound, Unbound, Unbound),
+            bindings(Unbound, Unbound, Unbound, Bound),
+            bindings(Unbound, Unbound, Bound, Unbound),
+            bindings(Unbound, Unbound, Bound, Bound),
+            bindings(Unbound, Bound, Unbound, Unbound),
+            bindings(Unbound, Bound, Unbound, Bound),
+            bindings(Unbound, Bound, Bound, Unbound),
+            bindings(Unbound, Bound, Bound, Bound),
+            bindings(Bound, Unbound, Unbound, Unbound),
+            bindings(Bound, Unbound, Unbound, Bound),
+            bindings(Bound, Unbound, Bound, Unbound),
+            bindings(Bound, Unbound, Bound, Bound),
+            bindings(Bound, Bound, Unbound, Unbound),
+            bindings(Bound, Bound, Unbound, Bound),
+            bindings(Bound, Bound, Bound, Unbound),
+            bindings(Bound, Bound, Bound, Bound),
         ]
     };
 
@@ -11730,6 +11879,7 @@ mod push_loop_tests {
             schedule: no_timed_refresh_for_push(),
             ui: PushUi::new(false),
             issue,
+            tab: TabRun::new(),
             base_updates: BaseUpdateCommands::new(),
             conflicts: ConflictsRun::new(),
             home: worktree(BRAVO),
@@ -11778,6 +11928,7 @@ mod push_loop_tests {
             schedule: no_timed_refresh_for_push(),
             ui,
             issue: issue_run_in(crate::remote::Session::Local),
+            tab: TabRun::new(),
             base_updates: BaseUpdateCommands::new(),
             conflicts: ConflictsRun::new(),
             home: worktree(BRAVO),
