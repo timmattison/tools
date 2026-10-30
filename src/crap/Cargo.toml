@@ -8,20 +8,23 @@ name = "crap"
 path = "src/main.rs"
 
 [dependencies]
+aho-corasick.workspace = true
 buildinfo.workspace = true
+chrono.workspace = true
 clap.workspace = true
 colored.workspace = true
 comfy-table.workspace = true
 dirs.workspace = true
+rayon.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 shellsetup.workspace = true
+tempfile.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
 shellquote.workspace = true
-tempfile.workspace = true
 
 [lints]
 workspace = true

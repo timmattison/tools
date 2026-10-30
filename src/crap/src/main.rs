@@ -45,6 +45,26 @@
 //! That per-directory listing is inherently the current user's, so it stays
 //! current-user-only and ignores `--user`.
 //!
+//! Each fork that `crap` starts adds one line to a fork log: `forks.jsonl` in
+//! the `crap` directory of the data directory of the current user (see
+//! [`fork_log`]). That is each `--here` fork and each cross-user resume. The
+//! binary writes the line immediately before it prints the fork output, so
+//! the line names the source, the fork id, the account that owns the source,
+//! both directories, and the kind of fork. Claude Code records no link between
+//! a fork and its source, so the log is the only record of a fork that `crap`
+//! made. A cross-user fork writes to the log of the current user, never into
+//! the other home. If the log cannot be written, `crap` shows a warning and
+//! continues the fork.
+//!
+//! With `--forks <id>`, it resumes nothing: it reads the log and lists each
+//! fork of the session, with `saved` or `not saved` (the lookup of
+//! `--status <fork-id>`), and the chain of sources up to a session that is not
+//! a fork. `--scan` adds the forks that the log does not have: older forks,
+//! and forks that another tool made. Claude keeps the `uuid` of each line that
+//! it copies into a fork, so the scan reads every transcript in the tree of
+//! the current user and reports each one that shares a top-level `uuid` with
+//! the session (see [`fork_scan`]).
+//!
 //! A session that belongs to another account is found automatically, with no
 //! flag at all: `crap <id>` searches your own tree first (the fast path,
 //! unchanged) and, only on a miss, falls back to scanning every sibling home
@@ -114,6 +134,9 @@ use colored::Colorize;
 use comfy_table::{presets::UTF8_FULL, ContentArrangement, Table};
 use serde::Serialize;
 use shellsetup::ShellIntegration;
+
+mod fork_log;
+mod fork_scan;
 
 /// Exit codes for the different failure conditions.
 mod exit_codes {
@@ -193,27 +216,48 @@ fn is_valid_session_id(id: &str) -> bool {
     })
 }
 
+/// Returns the `cwd` of one transcript line, or `None` when the line has none.
+///
+/// A line has a usable `cwd` when it is a JSON object with a non-empty string
+/// `cwd`. Blank lines, non-JSON lines, and a `cwd` that is `null`, empty, or
+/// not a string give `None`.
+fn cwd_of_line(line: &str) -> Option<String> {
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+    let value = serde_json::from_str::<serde_json::Value>(line).ok()?;
+    value
+        .get("cwd")
+        .and_then(serde_json::Value::as_str)
+        .filter(|cwd| !cwd.is_empty())
+        .map(str::to_string)
+}
+
 /// Extracts the first non-empty `cwd` value from Claude session JSONL contents.
 ///
 /// Each line is an independent JSON object; the early bookkeeping lines often
 /// carry `"cwd": null`, so the first line with a non-empty string `cwd` wins.
 /// Non-JSON lines are skipped. Returns `None` if no usable `cwd` is present.
 fn extract_cwd(contents: &str) -> Option<String> {
-    for line in contents.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        if let Some(cwd) = value.get("cwd").and_then(serde_json::Value::as_str) {
-            if !cwd.is_empty() {
-                return Some(cwd.to_string());
-            }
-        }
-    }
-    None
+    contents.lines().find_map(cwd_of_line)
+}
+
+/// Reads the first non-empty `cwd` that the transcript at `transcript` records.
+///
+/// The rule per line is the one of [`extract_cwd`] ([`cwd_of_line`]). The
+/// function reads line by line and stops at the first hit, because a
+/// transcript can reach tens of megabytes and the `cwd` is near its start.
+/// Returns `None` when the file cannot be opened or read, or when it records
+/// no `cwd`.
+fn recorded_cwd(transcript: &Path) -> Option<String> {
+    use std::io::BufRead;
+
+    let file = std::fs::File::open(transcript).ok()?;
+    std::io::BufReader::new(file)
+        .lines()
+        .map_while(Result::ok)
+        .find_map(|line| cwd_of_line(&line))
 }
 
 /// Locates `<session_id>.jsonl` inside any immediate subdirectory of
@@ -967,6 +1011,9 @@ enum ImportMode {
 /// untouched: a session id is a UUID, so a file there can only be this very
 /// session, and clobbering it would never be correct.
 ///
+/// Runs that import the same session at the same moment all succeed, and only
+/// one of them creates the file. The others get `None`.
+///
 /// # Errors
 ///
 /// Returns the underlying [`std::io::Error`] if the project folder cannot be
@@ -993,16 +1040,43 @@ fn prepare_import(
     match mode {
         ImportMode::Symlink => {
             #[cfg(unix)]
-            std::os::unix::fs::symlink(source_jsonl, &link_path)?;
+            let made = std::os::unix::fs::symlink(source_jsonl, &link_path);
             #[cfg(not(unix))]
-            std::os::windows::fs::symlink_file(source_jsonl, &link_path)?;
+            let made = std::os::windows::fs::symlink_file(source_jsonl, &link_path);
+            placed_or_lost_race(made, link_path)
         }
         ImportMode::Copy => {
-            std::fs::copy(source_jsonl, &link_path)?;
+            // Each call copies into its own new directory with a random name.
+            // No transcript listing reads that directory, and no other call
+            // shares it. Then the call hard-links the copy into place.
+            // `hard_link` never replaces a file, so the target appears complete
+            // and at most once.
+            let scratch = tempfile::Builder::new()
+                .prefix(&format!(".{session_id}.jsonl."))
+                .suffix(".tmp")
+                .tempdir_in(&folder)?;
+            let copy = scratch.path().join(format!("{session_id}.jsonl"));
+            let linked = std::fs::copy(source_jsonl, &copy)
+                .and_then(|_| std::fs::hard_link(&copy, &link_path));
+            // Best effort: the target no longer needs the scratch directory.
+            drop(scratch);
+            placed_or_lost_race(linked, link_path)
         }
     }
+}
 
-    Ok(Some(link_path))
+/// Turns the result of placing the import into the return value of
+/// [`prepare_import`]. `AlreadyExists` means that another run placed the file
+/// first, so this run has nothing to create and nothing to clean up.
+fn placed_or_lost_race(
+    placed: std::io::Result<()>,
+    link_path: PathBuf,
+) -> std::io::Result<Option<PathBuf>> {
+    match placed {
+        Ok(()) => Ok(Some(link_path)),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
+        Err(err) => Err(err),
+    }
 }
 
 /// Why `--here` could not place a session under the current directory.
@@ -1024,6 +1098,18 @@ enum HereResolveError {
     Io(std::io::Error),
 }
 
+/// What [`resolve_here_import`] found and did for one `--here` fork.
+#[derive(Debug, PartialEq, Eq)]
+struct HereImport {
+    /// The symlink or copy to clean up afterwards, or `None` when the session
+    /// is already resolvable from the current directory (no import needed).
+    link: Option<PathBuf>,
+    /// The transcript that the fork reads, in the tree where it was found.
+    source_transcript: PathBuf,
+    /// The account that owns the tree where the transcript was found.
+    source_user: String,
+}
+
 /// Validates `session_id`, locates its transcript across `roots`, and imports it
 /// into `pwd`'s project folder under `dest_projects_dir` so `claude --resume`
 /// will find it from there.
@@ -1035,8 +1121,9 @@ enum HereResolveError {
 /// `dest_projects_dir` is always the current user's tree, so every write lands
 /// under the current user's home even when the source is foreign.
 ///
-/// Returns the path of the symlink or copy to clean up afterwards, or `None`
-/// when the session is already resolvable from `pwd` (no import needed).
+/// Returns a [`HereImport`]: the path of the symlink or copy to clean up
+/// afterwards (`None` when the session is already resolvable from `pwd`), and
+/// the transcript and owner of the source.
 ///
 /// # Errors
 ///
@@ -1046,7 +1133,7 @@ fn resolve_here_import(
     dest_projects_dir: &Path,
     pwd: &Path,
     session_id: &str,
-) -> Result<Option<PathBuf>, HereResolveError> {
+) -> Result<HereImport, HereResolveError> {
     if !is_valid_session_id(session_id) {
         return Err(HereResolveError::InvalidSessionId);
     }
@@ -1064,7 +1151,13 @@ fn resolve_here_import(
     } else {
         ImportMode::Copy
     };
-    prepare_import(dest_projects_dir, &path, pwd, session_id, mode).map_err(HereResolveError::Io)
+    let link = prepare_import(dest_projects_dir, &path, pwd, session_id, mode)
+        .map_err(HereResolveError::Io)?;
+    Ok(HereImport {
+        link,
+        source_transcript: path,
+        source_user: root.user,
+    })
 }
 
 /// The id of the fork that `--here` and the cross-user resume make.
@@ -1686,7 +1779,8 @@ function __crap_launch() {
 }
 function crap() {
     # These flags make the binary print to stdout and exit 0 without mutating
-    # the parent shell: --status queries, --help/-h/--version/-V emit
+    # the parent shell: --status queries, --forks prints a report from the fork
+    # log, --help/-h/--version/-V emit
     # informational text, and --shell-setup writes the rc file (not the live
     # shell) and prints activation instructions. Run them straight through so
     # their output reaches the terminal instead of being parsed as a
@@ -1694,7 +1788,7 @@ function crap() {
     # text and mangle it). --shell-setup matters on upgrades, when this very
     # function is already loaded and would otherwise swallow its instructions.
     case " $* " in
-        *" --status "*|*" --help "*|*" -h "*|*" --version "*|*" -V "*|*" --shell-setup "*)
+        *" --status "*|*" --forks "*|*" --help "*|*" -h "*|*" --version "*|*" -V "*|*" --shell-setup "*)
             command crap "$@"; return $? ;;
     esac
     local __crap_out
@@ -1875,6 +1969,30 @@ struct Cli {
     #[arg(long)]
     status: bool,
 
+    /// Show what the fork log of `crap` knows about the session, then exit.
+    ///
+    /// The report lists each fork of the session, with `saved` or `not saved`,
+    /// and the chain of sessions that it was forked from. It resumes nothing and
+    /// writes nothing. The log has only the forks that `crap` started: `--here`
+    /// and the cross-user resume.
+    ///
+    /// Each such fork adds one JSON line to `forks.jsonl` in the `crap`
+    /// directory of your data directory: `~/Library/Application Support/crap`
+    /// on macOS, `$XDG_DATA_HOME/crap` (else `~/.local/share/crap`) on Linux.
+    #[arg(long, conflicts_with_all = ["here", "status", "shell_setup", "user", "force"])]
+    forks: bool,
+
+    /// With `--forks`: also read the transcripts of your own tree, then report
+    /// each one that shares a uuid value with the session.
+    ///
+    /// The scan reads every transcript in your own `~/.claude/projects` tree. It
+    /// reports each transcript that shares a top-level `uuid` value with the
+    /// transcript of the id, with the count of shared values and the relation:
+    /// `fork`, `source`, or `related`. It finds forks that are not in the fork
+    /// log. It reads only your own tree, and it skips subagent transcripts.
+    #[arg(long, requires = "forks")]
+    scan: bool,
+
     /// Emit machine-readable JSON instead of human-formatted text.
     ///
     /// Only valid with `--status`. With a session id it prints one object;
@@ -1972,13 +2090,15 @@ fn exit_session_not_found(session_id: &str, roots: &[UserProjects], skipped: &[S
 /// sibling's tree when `--user` was given). A same-user hit is symlinked; a
 /// cross-user hit is copied into `dest_projects_dir` (always the current user's
 /// tree). Either way `--here` stays in the current directory and forks, so a
-/// live original is never blocked or corrupted.
+/// live original is never blocked or corrupted. Each fork adds one line to the
+/// fork log at `fork_log` (see [`log_fork`]) before the output is printed.
 fn run_here(
     roots: &[UserProjects],
     dest_projects_dir: &Path,
     session_id: &str,
     new_session_id: Option<&str>,
     force: bool,
+    fork_log: Option<&Path>,
 ) -> ! {
     let Ok(pwd) = std::env::current_dir() else {
         eprintln!(
@@ -1997,10 +2117,22 @@ fn run_here(
     abort_if_session_live(session_id, true, force);
 
     match resolve_here_import(roots, dest_projects_dir, &pwd, session_id) {
-        Ok(link) => {
+        Ok(import) => {
+            log_fork(
+                fork_log,
+                &fork_log::ForkRecord {
+                    time: fork_time_now(),
+                    source_id: session_id.to_string(),
+                    fork_id: fork_id.as_str().to_string(),
+                    source_user: import.source_user,
+                    source_dir: recorded_cwd(&import.source_transcript),
+                    fork_dir: pwd.to_string_lossy().into_owned(),
+                    kind: fork_log::ForkKind::Here,
+                },
+            );
             print!(
                 "{}",
-                format_here_output(session_id, &fork_id, link.as_deref())
+                format_here_output(session_id, &fork_id, import.link.as_deref())
             );
             exit(0);
         }
@@ -2022,6 +2154,154 @@ fn run_here(
             exit(exit_codes::HERE_LINK_ERROR);
         }
     }
+}
+
+/// Adds `record` to the fork log at `log`, or shows a warning on stderr.
+/// The log must not stop a fork, so a failure never changes the exit status.
+fn log_fork(log: Option<&Path>, record: &fork_log::ForkRecord) {
+    match log {
+        None => eprintln!(
+            "{} the data directory of this user is not known, so the fork is not in the fork log",
+            "Warning:".yellow().bold()
+        ),
+        Some(path) => {
+            if let Err(err) = fork_log::append_fork_record(path, record) {
+                eprintln!(
+                    "{} could not add the fork to the fork log {}: {err}",
+                    "Warning:".yellow().bold(),
+                    path.display()
+                );
+            }
+        }
+    }
+}
+
+/// Handles `crap --forks <id>`: print what the fork log knows about the session.
+///
+/// The report names each fork of the session, with `saved` or `not saved`, and
+/// the chain of sessions that it was forked from. A fork is `saved` when
+/// [`find_session_across`] finds its transcript, the same lookup that
+/// `crap --status <fork-id>` uses. The function resumes nothing and writes
+/// nothing. Three cases give a warning on stderr: the data directory is not
+/// known, the log cannot be read, and some lines of the log cannot be read. A
+/// log file that does not exist is an empty log and gives no warning. The
+/// report uses the records that could be read. When the log does not know the
+/// id (no fork and no source) and no transcript has the id, the function exits
+/// with [`exit_codes::SESSION_NOT_FOUND`]. When the log knows the id, the
+/// report prints and the exit code is 0, also when no transcript has the id.
+///
+/// With `scan`, the function then reads the transcripts of `projects_dir`, the
+/// own projects tree of the user, and prints each one that shares a `uuid`
+/// value with the transcript of the id (see [`fork_scan`]). It finds forks that
+/// the log does not hold. When no transcript has the id, it says so. When the
+/// transcript of the id cannot be read, or the search for its `uuid` values
+/// cannot be made, the scan stops with a warning on stderr. Each other
+/// transcript or folder that cannot be read adds to a count line of the report
+/// on stdout. The exit code stays 0 in both cases.
+fn run_forks(
+    roots: &[UserProjects],
+    projects_dir: &Path,
+    fork_log: Option<&Path>,
+    session_id: &str,
+    scan: bool,
+) -> ! {
+    if !is_valid_session_id(session_id) {
+        eprintln!(
+            "{} '{session_id}' is not a valid session id",
+            "Error:".red().bold()
+        );
+        exit(exit_codes::INVALID_SESSION_ID);
+    }
+    let warn = |message: String| eprintln!("{} {message}", "Warning:".yellow().bold());
+    let records = match fork_log {
+        None => {
+            warn(
+                "the data directory of this user is not known, so there is no fork log to read"
+                    .to_string(),
+            );
+            Vec::new()
+        }
+        Some(path) => match fork_log::read_fork_log(path) {
+            Ok(log) => {
+                if log.unreadable_lines > 0 {
+                    let noun = if log.unreadable_lines == 1 {
+                        "line"
+                    } else {
+                        "lines"
+                    };
+                    warn(format!(
+                        "{} {noun} of the fork log {} could not be read",
+                        log.unreadable_lines,
+                        path.display()
+                    ));
+                }
+                log.records
+            }
+            Err(err) => {
+                warn(format!(
+                    "could not read the fork log {}: {err}",
+                    path.display()
+                ));
+                Vec::new()
+            }
+        },
+    };
+
+    let forks: Vec<fork_log::ForkLine<'_>> = fork_log::forks_of(&records, session_id)
+        .into_iter()
+        .map(|record| fork_log::ForkLine {
+            record,
+            saved: matches!(
+                find_session_across(roots, &record.fork_id),
+                FoundSession::Found { .. }
+            ),
+        })
+        .collect();
+    let chain = fork_log::source_chain(&records, session_id);
+    let transcript = find_session_across(roots, session_id);
+
+    if forks.is_empty()
+        && chain.links.is_empty()
+        && matches!(transcript, FoundSession::NotFound { .. })
+    {
+        eprintln!(
+            "{} no Claude session and no fork log line has id '{session_id}'",
+            "Error:".red().bold()
+        );
+        eprint!("{}", format_searched_roots(roots));
+        exit(exit_codes::SESSION_NOT_FOUND);
+    }
+    print!(
+        "{}",
+        fork_log::format_log_report(session_id, &forks, &chain)
+    );
+    if scan {
+        println!();
+        match transcript {
+            FoundSession::Found { path, .. } => {
+                match fork_scan::scan_for_relatives(projects_dir, session_id, &path) {
+                    Ok(report) => print!(
+                        "{}",
+                        fork_scan::format_scan_report(session_id, projects_dir, &report)
+                    ),
+                    Err(err) => warn(format!(
+                        "the scan stopped at the transcript {}: {err}",
+                        path.display()
+                    )),
+                }
+            }
+            FoundSession::NotFound { .. } => {
+                println!("The scan has nothing to compare: no transcript has id {session_id}.");
+            }
+        }
+    }
+    exit(0);
+}
+
+/// Returns the time of now in RFC 3339 and UTC, to the second, for a fork
+/// record. Example: `2026-10-28T01:51:22Z`.
+fn fork_time_now() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 /// Handles `crap --status <id> [--user <name>]`: print the session's state to
@@ -2221,6 +2501,7 @@ fn run_resume(
     dest_projects_dir: &Path,
     session_id: &str,
     force: bool,
+    fork_log: Option<&Path>,
 ) -> ! {
     if !is_valid_session_id(session_id) {
         eprintln!(
@@ -2263,6 +2544,18 @@ fn run_resume(
     let fork_id = fork_id_or_exit(dest_projects_dir, None);
     match prepare_import(dest_projects_dir, &path, &dir, session_id, ImportMode::Copy) {
         Ok(link) => {
+            log_fork(
+                fork_log,
+                &fork_log::ForkRecord {
+                    time: fork_time_now(),
+                    source_id: session_id.to_string(),
+                    fork_id: fork_id.as_str().to_string(),
+                    source_user: root.user,
+                    source_dir: Some(dir.to_string_lossy().into_owned()),
+                    fork_dir: dir.to_string_lossy().into_owned(),
+                    kind: fork_log::ForkKind::ForkAt,
+                },
+            );
             print!(
                 "{}",
                 format_fork_at_output(session_id, &fork_id, link.as_deref(), &dir)
@@ -2379,6 +2672,21 @@ fn main() {
         .session_id
         .expect("session id is required without --shell-setup or --status");
 
+    // The one place that reads the environment for the fork log, like
+    // `self_projects` for the home layout.
+    let fork_log = dirs::data_dir().map(|data| fork_log::fork_log_path(&data));
+
+    if cli.forks {
+        let roots = resolve_search_roots(&home, None);
+        run_forks(
+            &roots,
+            &projects_dir,
+            fork_log.as_deref(),
+            &session_id,
+            cli.scan,
+        );
+    }
+
     // Build the search roots (self-first, or one sibling for `--user`); a bad
     // `--user` exits here, before either `run_here` or `run_resume`, so
     // `--here --user <ghost>` rejects for free. Both `--here` and the default
@@ -2393,10 +2701,17 @@ fn main() {
             &session_id,
             cli.new_session_id.as_deref(),
             cli.force,
+            fork_log.as_deref(),
         );
     }
 
-    run_resume(&roots, &projects_dir, &session_id, cli.force);
+    run_resume(
+        &roots,
+        &projects_dir,
+        &session_id,
+        cli.force,
+        fork_log.as_deref(),
+    );
 }
 
 #[cfg(test)]
@@ -2615,6 +2930,31 @@ mod tests {
     fn extract_cwd_skips_non_json_and_missing_or_empty() {
         let contents = "not json at all\n{\"foo\":1}\n{\"cwd\":\"\"}\n";
         assert_eq!(extract_cwd(contents), None);
+    }
+
+    #[test]
+    fn recorded_cwd_first_non_empty_cwd_wins_over_earlier_null_and_empty() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("t.jsonl");
+        let contents = format!(
+            "{}{}{}{}{}",
+            "{\"cwd\":null}\n",
+            "{\"cwd\":\"\"}\n",
+            "not json\n",
+            cwd_line("/first"),
+            cwd_line("/second"),
+        );
+        fs::write(&file, contents).unwrap();
+        assert_eq!(recorded_cwd(&file).as_deref(), Some("/first"));
+    }
+
+    #[test]
+    fn recorded_cwd_is_none_without_a_cwd_or_a_file() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("t.jsonl");
+        fs::write(&file, "{\"foo\":1}\n{\"cwd\":null}\n").unwrap();
+        assert_eq!(recorded_cwd(&file), None);
+        assert_eq!(recorded_cwd(&dir.path().join("missing.jsonl")), None);
     }
 
     #[test]
@@ -3044,6 +3384,144 @@ mod tests {
         assert_eq!(
             prepare_import(&projects, &source, target, SAMPLE_ID, ImportMode::Copy).expect("ok"),
             None
+        );
+    }
+
+    /// How many threads import the same session at the same moment.
+    const RACE_THREADS: usize = 8;
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_symlink_imports_all_succeed_and_one_creates_the_link() {
+        use std::sync::{Arc, Barrier};
+
+        let dir = tempdir().unwrap();
+        let projects = dir.path().to_path_buf();
+        let orig = projects.join("-orig");
+        fs::create_dir_all(&orig).unwrap();
+        let original = orig.join(format!("{SAMPLE_ID}.jsonl"));
+        fs::write(&original, "{}\n").unwrap();
+
+        let target = PathBuf::from("/Volumes/x/race-here");
+        let barrier = Arc::new(Barrier::new(RACE_THREADS));
+        let handles: Vec<_> = (0..RACE_THREADS)
+            .map(|_| {
+                let (projects, original, target) =
+                    (projects.clone(), original.clone(), target.clone());
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    prepare_import(
+                        &projects,
+                        &original,
+                        &target,
+                        SAMPLE_ID,
+                        ImportMode::Symlink,
+                    )
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        for result in &results {
+            assert!(result.is_ok(), "every import must succeed: {result:?}");
+        }
+        let created: Vec<_> = results.into_iter().filter_map(|r| r.unwrap()).collect();
+        assert_eq!(created.len(), 1, "exactly one run creates the link");
+        assert_eq!(fs::read_link(&created[0]).unwrap(), original);
+    }
+
+    /// How many times the copy race test runs the whole race. One round fails
+    /// only some of the time at a 1 us clock, so the test runs enough rounds to
+    /// fail every time.
+    const COPY_RACE_ROUNDS: usize = 20;
+
+    #[test]
+    fn concurrent_copy_imports_never_show_a_partial_copy() {
+        for round in 0..COPY_RACE_ROUNDS {
+            copy_race_round(round);
+        }
+    }
+
+    /// Runs one race of `RACE_THREADS` copy imports against a reader thread, in
+    /// its own temporary directory.
+    fn copy_race_round(round: usize) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Barrier};
+
+        let dir = tempdir().unwrap();
+        let projects = dir.path().join("dest/.claude/projects");
+        fs::create_dir_all(&projects).unwrap();
+        let src_dir = dir.path().join("other/.claude/projects/-orig");
+        fs::create_dir_all(&src_dir).unwrap();
+        let source = src_dir.join(format!("{SAMPLE_ID}.jsonl"));
+        let line = "{\"type\":\"user\",\"cwd\":\"/work\",\"text\":\"0123456789abcdef\"}\n";
+        let bytes = line.repeat((4 * 1024 * 1024) / line.len());
+        fs::write(&source, &bytes).unwrap();
+
+        let target = PathBuf::from("/Volumes/x/race-copy");
+        let folder = projects.join(encode_project_dir(&target));
+        let link = folder.join(format!("{SAMPLE_ID}.jsonl"));
+
+        let finished = Arc::new(AtomicBool::new(false));
+        let reader = {
+            let (link, finished) = (link.clone(), Arc::clone(&finished));
+            let expected = bytes.len();
+            std::thread::spawn(move || {
+                let mut partial = Vec::new();
+                while !finished.load(Ordering::Acquire) {
+                    if let Ok(seen) = fs::read(&link) {
+                        if seen.len() != expected {
+                            partial.push(seen.len());
+                        }
+                    }
+                }
+                partial
+            })
+        };
+
+        let barrier = Arc::new(Barrier::new(RACE_THREADS));
+        let handles: Vec<_> = (0..RACE_THREADS)
+            .map(|_| {
+                let (projects, source, target) = (projects.clone(), source.clone(), target.clone());
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    prepare_import(&projects, &source, &target, SAMPLE_ID, ImportMode::Copy)
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        finished.store(true, Ordering::Release);
+        let partial = reader.join().unwrap();
+
+        assert!(
+            partial.is_empty(),
+            "round {round}: a reader saw partial lengths: {partial:?}"
+        );
+        for result in &results {
+            assert!(
+                result.is_ok(),
+                "round {round}: every import must succeed: {result:?}"
+            );
+        }
+        let created = results
+            .into_iter()
+            .filter(|r| matches!(r, Ok(Some(_))))
+            .count();
+        assert_eq!(
+            created, 1,
+            "round {round}: exactly one run creates the file"
+        );
+        assert_eq!(fs::read(&link).unwrap(), bytes.as_bytes());
+        let names: Vec<_> = fs::read_dir(&folder)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            names.len(),
+            1,
+            "round {round}: no temporary file may remain: {names:?}"
         );
     }
 
@@ -4098,14 +4576,16 @@ mod tests {
         let original = orig.join(format!("{SAMPLE_ID}.jsonl"));
         fs::write(&original, "{}\n").unwrap();
 
-        let link = resolve_here_import(
+        let import = resolve_here_import(
             &self_root(projects),
             projects,
             Path::new("/Volumes/x/here"),
             SAMPLE_ID,
         )
-        .expect("ok")
-        .expect("a symlink should be created");
+        .expect("ok");
+        assert_eq!(import.source_user, "me");
+        assert_eq!(import.source_transcript, original);
+        let link = import.link.expect("a symlink should be created");
         assert_eq!(
             link,
             projects
@@ -4144,9 +4624,10 @@ mod tests {
             is_self: false,
         }];
         let pwd = Path::new("/Volumes/x/here");
-        let link = resolve_here_import(&roots, &dest, pwd, SAMPLE_ID)
-            .expect("ok")
-            .expect("a copy should be created");
+        let import = resolve_here_import(&roots, &dest, pwd, SAMPLE_ID).expect("ok");
+        assert_eq!(import.source_user, "them");
+        assert_eq!(import.source_transcript, source);
+        let link = import.link.expect("a copy should be created");
 
         // The import lands in OUR tree, at pwd's encoded project folder.
         assert_eq!(
@@ -4188,7 +4669,8 @@ mod tests {
                 Path::new("/Volumes/x/here"),
                 SAMPLE_ID
             )
-            .expect("ok"),
+            .expect("ok")
+            .link,
             None
         );
     }
@@ -4337,7 +4819,7 @@ mod tests {
         // the parent shell, and each must reach the terminal rather than being
         // parsed as a "<session-id>\n<dir>" resume target.
         assert!(SHELL_CODE.contains(
-            r#"*" --status "*|*" --help "*|*" -h "*|*" --version "*|*" -V "*|*" --shell-setup "*)"#
+            r#"*" --status "*|*" --forks "*|*" --help "*|*" -h "*|*" --version "*|*" -V "*|*" --shell-setup "*)"#
         ));
         assert!(SHELL_CODE.contains(r#"command crap "$@"; return $?"#));
     }
@@ -4473,6 +4955,7 @@ mod tests {
             case \" $* \" in\n\
             \x20 *\" --help \"*|*\" -h \"*) printf 'CRAP_HELP_MARKER\\nUsage: crap\\nmore\\n'; exit 0 ;;\n\
             \x20 *\" --version \"*|*\" -V \"*) printf 'CRAP_VERSION_MARKER 0.1.0\\n'; exit 0 ;;\n\
+            \x20 *\" --forks \"*) printf 'CRAP_FORKS_MARKER\\n'; exit 0 ;;\n\
             \x20 *\" --shell-setup \"*) printf 'CRAP_SETUP_MARKER\\nTo activate, run:\\n  source ~/.zshrc\\n'; exit 0 ;;\n\
             esac\n\
             printf 'session-xyz\\n/tmp/crap-resume-dir\\n'\n";
@@ -4517,6 +5000,10 @@ mod tests {
             ("--version", "CRAP_VERSION_MARKER"),
             ("-V", "CRAP_VERSION_MARKER"),
             ("--shell-setup", "CRAP_SETUP_MARKER"),
+            (
+                "--forks 33333333-4444-5555-6666-777777777777",
+                "CRAP_FORKS_MARKER",
+            ),
         ] {
             let (stdout, claude_called) = run_shell_function(args);
             assert!(
@@ -5731,6 +6218,23 @@ mod tests {
     }
 
     #[test]
+    fn cli_forks_parses_alone_and_conflicts_with_here_and_status() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["crap", "--forks", SAMPLE_ID]).unwrap();
+        assert!(cli.forks);
+        assert!(Cli::try_parse_from(["crap", "--forks", "--here", SAMPLE_ID]).is_err());
+        assert!(Cli::try_parse_from(["crap", "--forks", "--status", SAMPLE_ID]).is_err());
+    }
+
+    #[test]
+    fn cli_scan_needs_forks() {
+        use clap::Parser;
+        assert!(Cli::try_parse_from(["crap", "--scan", SAMPLE_ID]).is_err());
+        let cli = Cli::try_parse_from(["crap", "--forks", SAMPLE_ID, "--scan"]).unwrap();
+        assert!(cli.forks && cli.scan);
+    }
+
+    #[test]
     fn cli_bare_user_is_a_parse_error() {
         use clap::Parser;
         // `--user` requires a NAME; a bare flag is rejected.
@@ -5846,27 +6350,66 @@ mod tests {
             "the shell matcher must flag a known violation"
         );
 
-        // The real source. `include_str!` is relative to this file, so this is
-        // the very text being compiled.
-        let programs = spawned_programs(include_str!("main.rs"));
+        // The real source: every `.rs` file under `src/`, read at test run
+        // time, so a new module cannot hide a spawn from the guard.
+        fn rust_files(dir: &Path, found: &mut Vec<PathBuf>) {
+            for entry in fs::read_dir(dir).expect("the guard must list the source directory") {
+                let path = entry
+                    .expect("a source directory entry must be readable")
+                    .path();
+                if path.is_dir() {
+                    rust_files(&path, found);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    found.push(path);
+                }
+            }
+        }
+        let source_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        rust_files(&source_dir, &mut files);
+        files.sort();
         assert!(
-            !programs.is_empty(),
-            "the scan found no spawns at all — `crap` does spawn `ps`, so the matcher is broken"
+            !files.is_empty(),
+            "the guard read no source files from {}",
+            source_dir.display()
         );
-
-        const ALLOWED: [&str; 3] = ["ps", "bash", "zsh"];
-        for program in &programs {
+        let names: Vec<String> = files
+            .iter()
+            .filter_map(|file| file.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .collect();
+        for expected in ["main.rs", "fork_log.rs"] {
             assert!(
-                ALLOWED.contains(&program.as_str()),
-                "`crap` spawns `{program}`, which is not in the allowlist {ALLOWED:?}; \
-                 every new spawn must be added here deliberately"
-            );
-            assert!(
-                !escalators.contains(program),
-                "`crap` spawns `{program}`, a privilege-escalation binary; \
-                 `crap` detects and guides, it never escalates itself"
+                names.iter().any(|name| name == expected),
+                "the guard did not read `{expected}`; it read {names:?}"
             );
         }
+
+        const ALLOWED: [&str; 3] = ["ps", "bash", "zsh"];
+        let mut total_spawns = 0;
+        for file in &files {
+            let source = fs::read_to_string(file).expect("a source file must be readable");
+            let programs = spawned_programs(&source);
+            total_spawns += programs.len();
+            for program in &programs {
+                assert!(
+                    ALLOWED.contains(&program.as_str()),
+                    "`{}` spawns `{program}`, which is not in the allowlist {ALLOWED:?}; \
+                     every new spawn must be added here deliberately",
+                    file.display()
+                );
+                assert!(
+                    !escalators.contains(program),
+                    "`{}` spawns `{program}`, a privilege-escalation binary; \
+                     `crap` detects and guides, it never escalates itself",
+                    file.display()
+                );
+            }
+        }
+        assert!(
+            total_spawns > 0,
+            "the scan found no spawns at all — `crap` does spawn `ps`, so the matcher is broken"
+        );
 
         // The shell function installed by `--shell-setup` runs in the user's
         // own shell, so it is held to the same rule.

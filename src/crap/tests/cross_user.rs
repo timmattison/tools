@@ -13,7 +13,7 @@ mod common;
 
 use std::fs;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 
 /// A foreign session id planted under another user's tree.
 const FOREIGN_ID: &str = "11111111-2222-3333-4444-555555555555";
@@ -168,8 +168,7 @@ fn assert_owner_only_guidance(stderr: &str) {
 fn run_crap(root: &Path, args: &[&str]) -> Output {
     let work = root.join("work");
     fs::create_dir_all(&work).unwrap();
-    Command::new(env!("CARGO_BIN_EXE_crap"))
-        .env("HOME", root.join("home"))
+    common::crap_command(&root.join("home"))
         .current_dir(&work)
         .args(args)
         .output()

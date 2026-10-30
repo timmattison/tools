@@ -148,6 +148,8 @@ unicode-width = "0.2"
 regex = "1.12"
 wait-timeout = "0.2"
 memchr = "2.8"
+# Multi-pattern substring search; the crap fork scan
+aho-corasick = "1.1"
 globset = "0.4"
 csv = "1.4"
 
