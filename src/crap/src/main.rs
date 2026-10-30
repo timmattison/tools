@@ -1046,20 +1046,20 @@ fn prepare_import(
             placed_or_lost_race(made, link_path)
         }
         ImportMode::Copy => {
-            // Copy to a name that no transcript listing reads, then hard-link it
-            // into place. `hard_link` never replaces a file, so the target
-            // appears complete and at most once.
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |elapsed| elapsed.as_nanos());
-            let temporary = folder.join(format!(
-                ".{session_id}.jsonl.{}-{nanos}.tmp",
-                std::process::id()
-            ));
-            let linked = std::fs::copy(source_jsonl, &temporary)
-                .and_then(|_| std::fs::hard_link(&temporary, &link_path));
-            // Best effort: the target no longer needs the temporary name.
-            let _ = std::fs::remove_file(&temporary);
+            // Each call copies into its own new directory with a random name.
+            // No transcript listing reads that directory, and no other call
+            // shares it. Then the call hard-links the copy into place.
+            // `hard_link` never replaces a file, so the target appears complete
+            // and at most once.
+            let scratch = tempfile::Builder::new()
+                .prefix(&format!(".{session_id}.jsonl."))
+                .suffix(".tmp")
+                .tempdir_in(&folder)?;
+            let copy = scratch.path().join(format!("{session_id}.jsonl"));
+            let linked = std::fs::copy(source_jsonl, &copy)
+                .and_then(|_| std::fs::hard_link(&copy, &link_path));
+            // Best effort: the target no longer needs the scratch directory.
+            drop(scratch);
             placed_or_lost_race(linked, link_path)
         }
     }

@@ -19,12 +19,12 @@ rayon.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 shellsetup.workspace = true
+tempfile.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
 shellquote.workspace = true
-tempfile.workspace = true
 
 [lints]
 workspace = true
