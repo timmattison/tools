@@ -114,6 +114,22 @@ mod run_tests {
     }
 
     #[test]
+    fn a_run_that_cannot_start_says_why() {
+        // A shell that is gone must not look like an unbound key. A press that
+        // does nothing and says nothing reads as a key that is not bound, so
+        // the run says that it could not start.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("no-such-shell");
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let outcome = run(missing.as_os_str(), &stp(), workdir.path());
+        let TabOutcome::Failed(line) = &outcome else {
+            panic!("expected a failure, got {outcome:?}");
+        };
+        let expected = format!("cannot run {DEFAULT_TAB_COMMAND}: ");
+        assert!(line.starts_with(&expected), "got {line:?}");
+    }
+
+    #[test]
     fn the_run_is_interactive_and_runs_in_the_worktree_on_the_screen() {
         // `stp` is a function of the rc file, so only an interactive shell
         // finds it. It also reads the branch of the directory it runs in, so

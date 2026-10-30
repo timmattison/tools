@@ -1666,6 +1666,20 @@ mod run_tests {
         dir
     }
 
+    #[test]
+    fn a_run_that_cannot_start_says_why() {
+        // A shell that is gone must not look like an unbound key. A press that
+        // does nothing and says nothing reads as a key that is not bound, so
+        // the run says that it could not start.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("no-such-shell");
+        let workdir = work_tree();
+        let outcome = run_quiet(missing.as_os_str(), &default_command(), workdir.path());
+        assert!(!outcome.success, "got {outcome:?}");
+        let expected = format!("cannot run {DEFAULT_REBASE_COMMAND}: ");
+        assert!(outcome.output.starts_with(&expected), "got {outcome:?}");
+    }
+
     /// `path` with every symbolic link in it resolved.
     ///
     /// macOS reaches a temporary directory through a symbolic link, so the path

@@ -349,6 +349,23 @@ mod run_tests {
         Steps::new(Some(pull_request), Some(issue)).expect("two commands are steps")
     }
 
+    #[test]
+    fn a_run_that_cannot_start_says_why() {
+        // A shell that is gone must not look like an unbound key. A press that
+        // does nothing and says nothing reads as a key that is not bound, so
+        // the run says that it could not start.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("no-such-shell");
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let outcome = run(missing.as_os_str(), &default_steps(), workdir.path());
+        let message = outcome.message();
+        let expected = format!("cannot run {DEFAULT_ISSUE_COMMAND}: ");
+        assert!(
+            message.is_some_and(|m| m.starts_with(&expected)),
+            "got {message:?}"
+        );
+    }
+
     /// The steps that ran, in order, out of every argument the stub recorded.
     fn steps_run(runs: &str) -> Vec<&str> {
         runs.lines()
