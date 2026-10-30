@@ -822,6 +822,14 @@ enum Event {
     /// cannot be started, and a shell that never answers all send nothing, so
     /// the key stays unbound and silent.
     TabCommandFound(crate::shell::ShellCommand),
+    /// A press of `T` has finished, either way.
+    TabFinished {
+        /// The generation that [`LoopHooks::start_tab`] was given for this
+        /// run: the generation of the worktree where the run started.
+        generation: Generation,
+        /// What the run did.
+        outcome: crate::tab::TabOutcome,
+    },
     /// The user asked to measure a rebase and a merge against the default
     /// branch (`m`).
     ///
@@ -1091,19 +1099,25 @@ impl IssueRun {
 
 /// The `T` key's own state, for the life of one watch-mode run.
 ///
-/// One fact for now: the command the probe found. It is a value of its own,
-/// beside [`IssueRun`], because `T` changes no other key and no other key
-/// changes `T`.
+/// Two facts: the command the probe found, and whether a run is in flight. It
+/// is a value of its own, beside [`IssueRun`], because `T` changes no other
+/// key and no other key changes `T`.
 struct TabRun {
     /// The command the probe found. `None` until the probe answers, and forever
     /// where it found none or where the key is off.
     command: Option<crate::shell::ShellCommand>,
+    /// Whether a run is in flight. One run at a time, because two runs of
+    /// `stp` race to rename one tab.
+    running: bool,
 }
 
 impl TabRun {
     /// The probe has not answered, so `T` does not act.
     const fn new() -> Self {
-        Self { command: None }
+        Self {
+            command: None,
+            running: false,
+        }
     }
 
     /// Whether `T` has a command behind it.
@@ -1118,6 +1132,11 @@ impl TabRun {
     /// Keep the command the probe found.
     fn found(&mut self, command: crate::shell::ShellCommand) {
         self.command = Some(command);
+    }
+
+    /// A run has ended, so `T` means something again.
+    fn finished(&mut self) {
+        self.running = false;
     }
 }
 
@@ -1268,7 +1287,7 @@ impl ConflictsRun {
 /// How many times the loop has switched the worktree it watches: a stamp on
 /// the work that the loop starts.
 ///
-/// A run of `G` or `m` continues after a switch, in the worktree where it
+/// A run of `G`, `T`, or `m` continues after a switch, in the worktree where it
 /// started, so its outcome can arrive when the frame shows another worktree.
 /// A line under the frame must describe the worktree in the frame. So each run
 /// keeps the generation of its press, its events carry that generation back,
@@ -1678,6 +1697,7 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
     // the command, and both must ask the same shell.
     let shell = crate::shell::user_shell();
     let issue_tx = tx.clone();
+    let tab_tx = tx.clone();
     // The environment is read here, once, and the values go on from there. The
     // handles are dropped, which detaches the threads: the loop waits for no
     // probe.
@@ -1785,6 +1805,23 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
                 thread::spawn(move || {
                     let outcome = crate::issue::run(&shell, &steps, &workdir);
                     let _ = finish_tx.send(Event::IssueFinished {
+                        generation,
+                        outcome,
+                    });
+                });
+            },
+            start_tab: |command: crate::shell::ShellCommand,
+                        current: &WorktreePath,
+                        generation: Generation| {
+                // The run keeps the generation of its press and sends it back
+                // with the outcome, so the loop knows an outcome that arrives
+                // after a switch.
+                let workdir = current.as_path().to_path_buf();
+                let finish_tx = tab_tx.clone();
+                let shell = shell.clone();
+                thread::spawn(move || {
+                    let outcome = crate::tab::run(&shell, &command, &workdir);
+                    let _ = finish_tx.send(Event::TabFinished {
                         generation,
                         outcome,
                     });
@@ -2876,6 +2913,7 @@ struct LoopHooks<
     StartPush,
     StartBaseUpdate,
     StartIssue,
+    StartTab,
     StartConflicts,
     Worktrees,
     Paths,
@@ -2932,6 +2970,12 @@ struct LoopHooks<
     /// tests record the command and decide for themselves when the outcome
     /// arrives.
     start_issue: StartIssue,
+    /// Start the tab-title command of a press of `T` in the worktree on the
+    /// screen at the press. Production spawns a thread that runs it and sends
+    /// the outcome back as [`Event::TabFinished`], with the [`Generation`] it
+    /// was given. Tests record the command and decide for themselves when the
+    /// outcome arrives.
+    start_tab: StartTab,
     /// Start a measurement of a rebase and a merge against the default branch,
     /// in the worktree on the screen at the press. Production starts it on a
     /// thread of its own, which sends the branch back as
@@ -3041,9 +3085,9 @@ enum Flow {
 /// is where the push, the issue key, and `m` do their work.
 #[expect(
     clippy::type_complexity,
-    reason = "the loop takes one generic for each of its seventeen hooks, so each hook stays \
+    reason = "the loop takes one generic for each of its eighteen hooks, so each hook stays \
               a plain closure that a test replaces with a fake. A type alias spells the same \
-              seventeen generics, and the borrow of the whole value keeps every call of \
+              eighteen generics, and the borrow of the whole value keeps every call of \
               absorb the same"
 )]
 fn absorb<
@@ -3058,6 +3102,7 @@ fn absorb<
     StartPush,
     StartBaseUpdate,
     StartIssue,
+    StartTab,
     StartConflicts,
     Worktrees,
     Paths,
@@ -3080,6 +3125,7 @@ fn absorb<
         StartPush,
         StartBaseUpdate,
         StartIssue,
+        StartTab,
         StartConflicts,
         Worktrees,
         Paths,
@@ -3093,6 +3139,7 @@ where
     StartPush: FnMut(PushCommand, &WorktreePath),
     StartBaseUpdate: FnMut(crate::update::BaseUpdateCommand, &WorktreePath),
     StartIssue: FnMut(crate::issue::Steps, &WorktreePath, Generation),
+    StartTab: FnMut(crate::shell::ShellCommand, &WorktreePath, Generation),
     StartConflicts: FnMut(&WorktreePath, Generation),
     Worktrees: FnMut() -> Vec<WorktreeEntry>,
     Paths: FnMut() -> Vec<WorktreePath>,
@@ -3400,6 +3447,7 @@ where
             // stands on where the line landed.
             let _ = state.ui.post_notice(outcome.line(), clock());
         }
+        Event::TabFinished { .. } => state.tab.finished(),
         Event::IssueFinished { outcome, .. } => {
             state.issue.finished();
             // A run that worked says nothing: the browser is the answer. A run
@@ -3532,9 +3580,9 @@ where
 /// loop goes back to the home worktree ([`LoopState::return_home_if_gone`]).
 #[expect(
     clippy::type_complexity,
-    reason = "the loop takes one generic for each of its seventeen hooks, so each hook stays \
+    reason = "the loop takes one generic for each of its eighteen hooks, so each hook stays \
               a plain closure that a test replaces with a fake. A type alias spells the same \
-              seventeen generics, as the expectation on absorb says"
+              eighteen generics, as the expectation on absorb says"
 )]
 fn event_loop<
     Collect,
@@ -3548,6 +3596,7 @@ fn event_loop<
     StartPush,
     StartBaseUpdate,
     StartIssue,
+    StartTab,
     StartConflicts,
     Worktrees,
     Paths,
@@ -3571,6 +3620,7 @@ fn event_loop<
         StartPush,
         StartBaseUpdate,
         StartIssue,
+        StartTab,
         StartConflicts,
         Worktrees,
         Paths,
@@ -3591,6 +3641,7 @@ where
     StartPush: FnMut(PushCommand, &WorktreePath),
     StartBaseUpdate: FnMut(crate::update::BaseUpdateCommand, &WorktreePath),
     StartIssue: FnMut(crate::issue::Steps, &WorktreePath, Generation),
+    StartTab: FnMut(crate::shell::ShellCommand, &WorktreePath, Generation),
     StartConflicts: FnMut(&WorktreePath, Generation),
     Worktrees: FnMut() -> Vec<WorktreeEntry>,
     Paths: FnMut() -> Vec<WorktreePath>,
@@ -6185,6 +6236,14 @@ mod tests {
     /// with no worktree on the start branch. It starts nothing.
     pub(super) fn no_return(_child: std::process::Command) {}
 
+    /// A `start_tab` hook for a test that presses no `T`.
+    pub(super) fn no_tab(
+        _command: crate::shell::ShellCommand,
+        _current: &WorktreePath,
+        _generation: Generation,
+    ) {
+    }
+
     /// A `fetch_log` hook for the loop tests whose log is off. The limit of
     /// such a pane is zero, and no cached log holds fewer commits than zero,
     /// so the loop never calls it. It gives no commit, and a fetch with no
@@ -6321,6 +6380,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -6384,6 +6444,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -6450,6 +6511,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -6518,6 +6580,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -6582,6 +6645,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -6643,6 +6707,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -6706,6 +6771,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -6769,6 +6835,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -6833,6 +6900,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -6903,6 +6971,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -7231,6 +7300,7 @@ mod tests {
                     start_push: |_command: PushCommand, _current: &WorktreePath| {},
                     start_base_update:
                         |_command: crate::update::BaseUpdateCommand, _current: &WorktreePath| {},
+                    start_tab: no_tab,
                     start_issue: |_steps: crate::issue::Steps,
                                   _current: &WorktreePath,
                                   _generation: Generation| {},
@@ -7780,6 +7850,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -7851,6 +7922,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -7932,6 +8004,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -8032,6 +8105,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -8136,6 +8210,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -8221,6 +8296,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -8313,6 +8389,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -8404,6 +8481,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -8475,6 +8553,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -8559,6 +8638,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -8667,6 +8747,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -8799,6 +8880,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -8965,8 +9047,8 @@ mod tests {
 #[cfg(test)]
 mod push_loop_tests {
     use super::tests::{
-        frame, loop_home, no_fetch, no_list, no_return, no_start_branch, no_switch, stepping_clock,
-        timer_off, TEST_DEBOUNCE, TEST_DIMS,
+        frame, loop_home, no_fetch, no_list, no_return, no_start_branch, no_switch, no_tab,
+        stepping_clock, timer_off, TEST_DEBOUNCE, TEST_DIMS,
     };
     use super::*;
     use crate::conflicts::ConflictsOutcome;
@@ -9071,6 +9153,12 @@ mod push_loop_tests {
         /// The worktree and the generation of each press of `G`,
         /// in the order of [`Seen::issue_runs`].
         issue_paths: Vec<(WorktreePath, Generation)>,
+        /// The command of every press of `T` that the loop started a run of,
+        /// in order.
+        tab_runs: Vec<crate::shell::ShellCommand>,
+        /// The worktree and the generation of each press of `T`, in the order
+        /// of [`Seen::tab_runs`].
+        tab_paths: Vec<(WorktreePath, Generation)>,
         /// The worktree and the generation of each run of `m`, in order.
         conflict_paths: Vec<(WorktreePath, Generation)>,
         /// The timing of each frame the loop rendered, in order.
@@ -9593,6 +9681,13 @@ mod push_loop_tests {
                     let mut seen = seen.borrow_mut();
                     seen.base_updates.push(command);
                     seen.base_update_paths.push(current.clone());
+                },
+                start_tab: |command: crate::shell::ShellCommand,
+                            current: &WorktreePath,
+                            generation: Generation| {
+                    let mut seen = seen.borrow_mut();
+                    seen.tab_runs.push(command);
+                    seen.tab_paths.push((current.clone(), generation));
                 },
                 start_issue: |steps: crate::issue::Steps,
                               current: &WorktreePath,
@@ -10204,6 +10299,285 @@ mod push_loop_tests {
         );
     }
 
+    /// The command that the probe of `T` found, as the tests spell it.
+    fn stp() -> crate::shell::ShellCommand {
+        crate::shell::ShellCommand::new(None, crate::tab::DEFAULT_TAB_COMMAND)
+            .expect("the default names a command")
+    }
+
+    /// The answer of the probe of `T`, as the loop receives it.
+    fn tab_probe_answered() -> Event {
+        Event::TabCommandFound(stp())
+    }
+
+    /// One press of `T`.
+    fn press_t() -> Event {
+        key(KeyCode::Char('T'))
+    }
+
+    /// The end of a run of `T` that started in the first worktree.
+    fn tab_finished(outcome: crate::tab::TabOutcome) -> Event {
+        tab_finished_in(Generation::default(), outcome)
+    }
+
+    /// The end of a run of `T` that started at `generation`.
+    fn tab_finished_in(generation: Generation, outcome: crate::tab::TabOutcome) -> Event {
+        Event::TabFinished {
+            generation,
+            outcome,
+        }
+    }
+
+    #[test]
+    fn t_starts_nothing_until_the_probe_has_answered() {
+        // A key with no command behind it stays silent, as `G` does.
+        let (_screen, seen) = run_loop(vec![press_t(), Event::Quit]);
+        assert!(
+            seen.tab_runs.is_empty(),
+            "`T` must start nothing before the probe answers, got {:?}",
+            seen.tab_runs,
+        );
+    }
+
+    #[test]
+    fn t_runs_the_command_the_probe_found_in_the_worktree_on_the_screen() {
+        // The tab title belongs to the worktree in the frame, so the run must
+        // start there and carry the generation of the press.
+        let (_screen, seen) = run_in(
+            World::three(),
+            vec![
+                tab_probe_answered(),
+                key(KeyCode::Right),
+                press_t(),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(seen.tab_runs, vec![stp()], "`T` must run the found command");
+        assert_eq!(
+            seen.tab_paths,
+            vec![(worktree(CHARLIE), after_one_switch())],
+            "the run must start in the worktree on the screen",
+        );
+    }
+
+    #[test]
+    fn a_second_t_while_a_run_is_in_flight_starts_nothing() {
+        // Two runs of `stp` race to rename one tab, so one run at a time.
+        let (_screen, seen) = run_loop(vec![
+            tab_probe_answered(),
+            press_t(),
+            press_t(),
+            Event::Quit,
+        ]);
+        assert_eq!(
+            seen.tab_runs.len(),
+            1,
+            "a burst of presses must start one run, got {:?}",
+            seen.tab_runs,
+        );
+    }
+
+    #[test]
+    fn t_starts_another_run_once_the_first_has_ended() {
+        // The outcome gives the key back.
+        let (_screen, seen) = run_loop(vec![
+            tab_probe_answered(),
+            press_t(),
+            tab_finished(crate::tab::TabOutcome::Worked(None)),
+            press_t(),
+            Event::Quit,
+        ]);
+        assert_eq!(
+            seen.tab_runs.len(),
+            2,
+            "the outcome must free the key, got {:?}",
+            seen.tab_runs,
+        );
+    }
+
+    #[test]
+    fn t_runs_while_a_push_runs() {
+        // A tab title is not the repository, so a push in flight does not
+        // stop it.
+        let (_screen, seen) = run_loop(vec![
+            Event::PushRequested(PushHooks::Run),
+            Event::Confirmed,
+            tab_probe_answered(),
+            press_t(),
+            Event::Quit,
+        ]);
+        assert_eq!(
+            seen.tab_runs.len(),
+            1,
+            "`T` must run during a push, got {:?}",
+            seen.tab_runs,
+        );
+    }
+
+    #[test]
+    fn t_asks_no_second_press_on_a_remote_shell() {
+        // The rename goes through the zellij server, so it is correct for a
+        // remote client too. `G` asks, and `T` does not.
+        let (_screen, seen) = run_loop_remote(vec![tab_probe_answered(), press_t(), Event::Quit]);
+        assert_eq!(
+            seen.tab_runs.len(),
+            1,
+            "`T` must run on the first press on a remote shell, got {:?}",
+            seen.tab_runs,
+        );
+    }
+
+    #[test]
+    fn a_run_that_worked_shows_its_last_line_on_a_line_that_fades() {
+        // The line is the report of a key the user pressed, so it fades. The
+        // age after the line shows that it does.
+        let (screen, _seen) = run_loop(vec![
+            tab_probe_answered(),
+            press_t(),
+            tab_finished(crate::tab::TabOutcome::Worked(Some(
+                "stp: the tab already starts with 57".to_string(),
+            ))),
+            Event::Quit,
+        ]);
+        assert_eq!(
+            strip_ansi(&screen),
+            "FRAME\nstp: the tab already starts with 57 (0s ago)",
+            "the line of the run must fade under the frame",
+        );
+    }
+
+    #[test]
+    fn a_run_that_worked_and_wrote_nothing_puts_nothing_under_the_frame() {
+        // The tab title is the answer.
+        let (screen, _seen) = run_loop(vec![
+            tab_probe_answered(),
+            press_t(),
+            tab_finished(crate::tab::TabOutcome::Worked(None)),
+            Event::Quit,
+        ]);
+        assert_eq!(
+            screen, "FRAME",
+            "a run that wrote nothing must cost the frame no row, got {screen:?}",
+        );
+    }
+
+    #[test]
+    fn a_run_that_failed_shows_its_line_in_red_until_a_key() {
+        // The line is the words of another program, so it waits for a key and
+        // shows no age.
+        const LINE: &str = "stp: no open pull request for issue-620";
+        let failed = || tab_finished(crate::tab::TabOutcome::Failed(LINE.to_string()));
+        let (screen, _seen) = testcolor::with_forced_ansi(|| {
+            run_loop(vec![tab_probe_answered(), press_t(), failed(), Event::Quit])
+        });
+        let red = testcolor::with_forced_ansi(|| LINE.red().to_string());
+        assert!(
+            screen.contains(&red),
+            "the line of the failure must be red, got {screen:?}",
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME\n{LINE}"),
+            "the line must not fade",
+        );
+
+        // A key takes it away.
+        let (screen, _seen) = run_loop(vec![
+            tab_probe_answered(),
+            press_t(),
+            failed(),
+            key(KeyCode::Char('x')),
+            Event::Quit,
+        ]);
+        assert_eq!(
+            strip_ansi(&screen),
+            "FRAME",
+            "the next key must remove the line",
+        );
+    }
+
+    #[test]
+    fn a_press_past_the_deadline_says_so_and_gives_the_key_back() {
+        // A run past its deadline is a failure like any other, and its
+        // outcome frees the key.
+        let line = format!(
+            "stp has not finished after {}s",
+            crate::tab::RUN_DEADLINE.as_secs()
+        );
+        let (screen, seen) = run_loop(vec![
+            tab_probe_answered(),
+            press_t(),
+            tab_finished(crate::tab::TabOutcome::Failed(line)),
+            press_t(),
+            Event::Quit,
+        ]);
+        assert!(
+            screen.contains("stp has not finished after 60s"),
+            "the deadline must reach the screen, got {screen:?}",
+        );
+        assert_eq!(
+            seen.tab_runs.len(),
+            2,
+            "the outcome must give the key back, got {:?}",
+            seen.tab_runs,
+        );
+    }
+
+    #[test]
+    fn a_t_outcome_from_before_a_switch_is_dropped_and_t_works_again() {
+        // A line under the frame must describe the worktree in the frame, so
+        // the error of the run in bravo must not reach the row of charlie.
+        let (screen, seen) = run_in(
+            World::three(),
+            vec![
+                tab_probe_answered(),
+                press_t(),
+                key(KeyCode::Right),
+                tab_finished_in(
+                    before_the_switch(),
+                    crate::tab::TabOutcome::Failed("stp: no open pull request".to_string()),
+                ),
+                press_t(),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME {CHARLIE}"),
+            "the error of the run in bravo must not reach the row of charlie",
+        );
+        assert_eq!(
+            seen.tab_paths,
+            vec![
+                (worktree(BRAVO), before_the_switch()),
+                (worktree(CHARLIE), after_one_switch()),
+            ],
+            "the outcome must free the key, and the next run must carry the new generation",
+        );
+    }
+
+    #[test]
+    fn the_one_run_rule_of_t_spans_a_switch() {
+        // A run continues after a switch, and the rule of one run at a time
+        // holds for the whole process.
+        let (_screen, seen) = run_in(
+            World::three(),
+            vec![
+                tab_probe_answered(),
+                press_t(),
+                key(KeyCode::Right),
+                press_t(),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            seen.tab_runs.len(),
+            1,
+            "a run of `T` in flight must refuse a second run after a switch, got {:?}",
+            seen.tab_runs,
+        );
+    }
+
     /// One press of `m`.
     fn press_m() -> Event {
         key(KeyCode::Char('m'))
@@ -10576,6 +10950,7 @@ mod push_loop_tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -11459,6 +11834,7 @@ mod push_loop_tests {
                         |command: crate::update::BaseUpdateCommand, _current: &WorktreePath| {
                             seen.borrow_mut().base_updates.push(command)
                         },
+                    start_tab: no_tab,
                     start_issue: |steps: crate::issue::Steps,
                                   _current: &WorktreePath,
                                   _generation: Generation| {
@@ -13869,7 +14245,8 @@ mod watched_tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use super::tests::{
-        frame, no_fetch, no_list, timer_off, walk_config, TEST_DEBOUNCE, TEST_DIMS, WALK_LOG_LIMIT,
+        frame, no_fetch, no_list, no_tab, timer_off, walk_config, TEST_DEBOUNCE, TEST_DIMS,
+        WALK_LOG_LIMIT,
     };
     use super::{
         event_loop, listed, listed_paths, switch_watched, worktree_on_start_branch, Dimensions,
@@ -14800,6 +15177,7 @@ mod watched_tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
+                start_tab: no_tab,
                 start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
