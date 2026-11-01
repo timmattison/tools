@@ -5683,4 +5683,78 @@ mod tests {
             Color::Indexed(246)
         );
     }
+
+    /// A board with a running run, which takes the default highlight, and a
+    /// passed run of the repository `other` that ended at `updated`. The
+    /// repository of the running run is `timmattison/tools`.
+    fn fade_board(window: Duration, other: &str, updated: &str) -> Board {
+        let mut board = Board::new(window);
+        board.replace(
+            repo("timmattison/tools"),
+            vec![run(
+                7001,
+                "timmattison/tools",
+                "CI",
+                "main",
+                "Live work",
+                RunState::Running,
+                "2026-10-14T11:45:30Z",
+                "2026-10-14T11:59:00Z",
+            )],
+            now(),
+        );
+        board.replace(
+            repo(other),
+            vec![run(
+                7002,
+                other,
+                "CI",
+                "main",
+                "Old work",
+                RunState::Passed,
+                "2026-10-14T07:00:00Z",
+                updated,
+            )],
+            now(),
+        );
+        board
+    }
+
+    /// The buffer row of the first row that holds `needle`.
+    fn row_of(buffer: &Buffer, needle: &str) -> u16 {
+        let text = lines(buffer);
+        u16::try_from(row_holding(&text, needle)).expect("a row index fits in u16")
+    }
+
+    /// Asserts that the row `y` is not highlighted and that each text cell of
+    /// it (columns 3 to 116 of a 120-column frame) has the foreground `color`.
+    fn assert_text_color(buffer: &Buffer, y: u16, color: Color) {
+        assert!(
+            !buffer[(60, y)].modifier.contains(Modifier::REVERSED),
+            "the row {y} is highlighted: {:?}",
+            lines(buffer)[usize::from(y)]
+        );
+        for x in 3_u16..117 {
+            assert_eq!(
+                buffer[(x, y)].fg,
+                color,
+                "cell {x} of {:?}",
+                lines(buffer)[usize::from(y)]
+            );
+        }
+    }
+
+    #[test]
+    fn a_finished_run_half_a_window_old_has_a_gray_between_the_start_and_the_floor() {
+        let mut board = fade_board(
+            Duration::from_hours(8),
+            "acme/widgets",
+            "2026-10-14T08:00:00Z",
+        );
+        let buffer = render_with(120, 10, &mut board, &loaded());
+        let y = row_of(&buffer, "7002");
+        // 4 hours is half of the 8 hour window. Index 246 is between the floor
+        // 238 and the start 253.
+        assert_text_color(&buffer, y, Color::Indexed(246));
+    }
 }
