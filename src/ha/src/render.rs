@@ -123,6 +123,19 @@ fn fit(text: &str, width: usize) -> String {
     pad_right(&truncate_to_budget(text, width), width)
 }
 
+/// The repository cell of a row, in two parts. Together the parts are the
+/// whole cell.
+#[derive(Debug, PartialEq, Eq)]
+struct RepoCell {
+    /// The sleeping mark: [`STALE_MARK`] for a stale row whose cell is at least
+    /// as wide as the mark. For a stale cell narrower than the mark, it is the
+    /// whole cell, which is what [`fit`] makes of the mark and the name. For a
+    /// fresh row, it is empty. `cells` draws it in [`MARK_STYLE`].
+    mark: String,
+    /// The rest of the cell: the cut name and the padding.
+    name: String,
+}
+
 /// Cuts a repository name to a column width, then pads it to that width.
 ///
 /// A name that does not fit keeps its end and starts with `…`, because the end
@@ -131,16 +144,28 @@ fn fit(text: &str, width: usize) -> String {
 /// leaves. A cell of exactly the width of the mark shows the mark and no name.
 /// A cell narrower than the mark shows what [`fit`] makes of the mark and the
 /// name. `textfit` gives an empty cut for a budget of 0.
-fn fit_repo(name: &str, is_stale: bool, width: usize) -> String {
+///
+/// The result holds the mark apart from the name (see [`RepoCell`]), thus the
+/// mark can keep its own colors.
+fn fit_repo(name: &str, is_stale: bool, width: usize) -> RepoCell {
     let mark_width = text_width(STALE_MARK);
     if !is_stale {
-        return pad_right(&truncate_left_to_budget(name, width), width);
+        return RepoCell {
+            mark: String::new(),
+            name: pad_right(&truncate_left_to_budget(name, width), width),
+        };
     }
     if width < mark_width {
-        return fit(&format!("{STALE_MARK}{name}"), width);
+        return RepoCell {
+            mark: fit(&format!("{STALE_MARK}{name}"), width),
+            name: String::new(),
+        };
     }
     let cut = truncate_left_to_budget(name, width - mark_width);
-    pad_right(&format!("{STALE_MARK}{cut}"), width)
+    RepoCell {
+        mark: STALE_MARK.to_owned(),
+        name: pad_right(&cut, width - mark_width),
+    }
 }
 
 /// Cuts a text to a column width, then pads it on the left to that width.
@@ -168,11 +193,13 @@ fn fit_right(text: &str, width: usize) -> String {
 /// The line holds these spans, in this order:
 ///
 /// 1. The left marker cell and one space, in [`MARK_STYLE`].
-/// 2. The text cells, with one space between them, in the style of the line.
-/// 3. One space and the right marker cell, in [`MARK_STYLE`].
+/// 2. The sleeping mark of a stale row, in [`MARK_STYLE`]. A fresh row has no
+///    such span.
+/// 3. The text cells, with one space between them, in the style of the line.
+/// 4. One space and the right marker cell, in [`MARK_STYLE`].
 ///
-/// The two marker cells keep `Color::Reset`, whatever color the line gets.
-/// The concatenated text of the spans is the whole row.
+/// The two marker cells and the sleeping mark keep `Color::Reset`, whatever
+/// color the line gets. The concatenated text of the spans is the whole row.
 fn cells(
     widths: Widths,
     marker: &str,
@@ -183,8 +210,9 @@ fn cells(
     time: &str,
 ) -> Line<'static> {
     let [repo, workflow, branch, title] = texts;
+    let repo = fit_repo(repo, is_stale, widths.repo);
     let text = [
-        fit_repo(repo, is_stale, widths.repo),
+        repo.name,
         fit(workflow, widths.workflow),
         fit_right(id, ID_WIDTH),
         fit(branch, widths.branch),
@@ -193,11 +221,19 @@ fn cells(
         pad_right(time, TIME_WIDTH),
     ]
     .join(" ");
-    Line::from(vec![
-        Span::styled(format!("{} ", pad_right(marker, MARKER_WIDTH)), MARK_STYLE),
-        Span::raw(text),
-        Span::styled(format!(" {}", pad_right(marker, MARKER_WIDTH)), MARK_STYLE),
-    ])
+    let mut spans = vec![Span::styled(
+        format!("{} ", pad_right(marker, MARKER_WIDTH)),
+        MARK_STYLE,
+    )];
+    if !repo.mark.is_empty() {
+        spans.push(Span::styled(repo.mark, MARK_STYLE));
+    }
+    spans.push(Span::raw(text));
+    spans.push(Span::styled(
+        format!(" {}", pad_right(marker, MARKER_WIDTH)),
+        MARK_STYLE,
+    ));
+    Line::from(spans)
 }
 
 /// The style of a marker cell. A terminal draws an emoji in its own colors,
@@ -3060,7 +3096,10 @@ mod tests {
         let name = "Lock-Free-Labs/expert-witness";
         for (width, expected) in [(0, ""), (1, "…"), (2, "… "), (3, "\u{1F4A4} ")] {
             assert_eq!(
-                fit_repo(name, true, width),
+                {
+                    let cell = fit_repo(name, true, width);
+                    format!("{}{}", cell.mark, cell.name)
+                },
                 expected,
                 "a stale cell of width {width}"
             );
