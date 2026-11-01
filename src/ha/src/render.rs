@@ -838,14 +838,19 @@ const MESSAGE_RAMP: GrayRamp = GrayRamp {
 /// 238 (68, 68, 68). Index 253 is the gray nearest to the subject color of
 /// `gsw`, which is (220, 220, 220). Index 238 is the gray nearest to 220 times
 /// 0.30, which is 66, thus `ha` keeps the floor ratio of `gsw` (`FADE_FLOOR`
-/// in `src/gsw/src/age.rs`). The text never goes to black. With the default
-/// window of 8 hours, one of the 15 steps is 32 minutes.
+/// in `src/gsw/src/age.rs`). The text never goes to black.
 const ROW_RAMP: GrayRamp = GrayRamp {
     start: 253,
     floor: 238,
 };
 /// The age at which the text of a finished row reaches the floor of
-/// [`ROW_RAMP`]: 2 hours, the same as `FADE_DARKEST_AT` of `gsw`.
+/// [`ROW_RAMP`]: 2 hours, the same as `FADE_DARKEST_AT` of `gsw`. One of the
+/// 15 steps is thus 8 minutes.
+///
+/// The fade does not use the window of the board. On a busy board, the rows
+/// on the screen span only the first hour or two of the window. A ramp over
+/// the 8 hour window gave those rows 4 grays, 10 RGB levels apart, and no row
+/// looked faded. A ramp over 2 hours gives the first 2 hours all 16 grays.
 const ROW_FADE_END: Duration = Duration::from_hours(2);
 
 /// The text of the refresh slot before the first cycle ends.
@@ -1040,35 +1045,34 @@ fn layout_status(left: &str, mark: Option<&str>, width: usize) -> StatusLayout {
 /// The style of the text of a board row.
 ///
 /// The text of a finished run row and of a departure row fades along
-/// [`ROW_RAMP`], from index 253 at age zero to index 238 at the age of the
-/// window. The age of a run row is the time since the run ended. The age of a
-/// departure row is the time since the pull request left the queue. Live work
-/// (an active run and a queue entry) and the highlighted row keep the default
-/// color, because a reversed dark gray gives a dark bar that is hard to see.
-/// A job row of a finished run fades with its run, by the time since the run
-/// ended. A job row of an active run keeps the default color. Every other row
-/// keeps the default color too.
-fn age_style(row: &Row<'_>, now: DateTime<Utc>, window: Duration) -> Style {
+/// [`ROW_RAMP`], from index 253 at age zero to index 238 at an age of
+/// [`ROW_FADE_END`] (2 hours). An older row keeps index 238. The window of
+/// the board does not change the fade. The age of a run row is the time since
+/// the run ended. The age of a departure row is the time since the pull
+/// request left the queue. Live work (an active run and a queue entry) and the
+/// highlighted row keep the default color, because a reversed dark gray gives
+/// a dark bar that is hard to see. A job row of a finished run fades with its
+/// run, by the time since the run ended. A job row of an active run keeps the
+/// default color. Every other row keeps the default color too.
+fn age_style(row: &Row<'_>, now: DateTime<Utc>) -> Style {
+    let faded =
+        |ended: DateTime<Utc>| Style::default().fg(ROW_RAMP.color(span(ended, now), ROW_FADE_END));
     match row {
         Row::Run {
             run,
             state,
             selected: false,
             ..
-        } if state.is_finished() => {
-            Style::default().fg(ROW_RAMP.color(span(run.updated_at, now), window))
-        }
+        } if state.is_finished() => faded(run.updated_at),
         Row::Job {
             run,
             selected: false,
             ..
-        } if run.state.is_finished() => {
-            Style::default().fg(ROW_RAMP.color(span(run.updated_at, now), window))
-        }
+        } if run.state.is_finished() => faded(run.updated_at),
         Row::Departure {
             departure,
             selected: false,
-        } => Style::default().fg(ROW_RAMP.color(span(departure.left_at, now), window)),
+        } => faded(departure.left_at),
         _ => Style::default(),
     }
 }
@@ -1105,12 +1109,11 @@ fn reverse_if(selected: bool, buffer: &mut Buffer, area: Rect, y: u16) {
 ///
 /// The board rows come from [`Board::view`] with the frame height minus the
 /// two fixed lines. Times show in the time zone `tz`. The text of a finished
-/// row fades along [`ROW_RAMP`] over the window of the board (see
-/// [`age_style`]). The marker cells and the sleeping mark of a row keep
-/// `Color::Reset`. With a `prompt`, the box
-/// of the cancel prompt draws last, over the rows (see [`draw_prompt`]). While
-/// the box shows, the status line has no key hints. This function never
-/// panics, whatever the size of the frame.
+/// row fades along [`ROW_RAMP`] over [`ROW_FADE_END`] (see [`age_style`]).
+/// The marker cells and the sleeping mark of a row keep `Color::Reset`. With
+/// a `prompt`, the box of the cancel prompt draws last, over the rows (see
+/// [`draw_prompt`]). While the box shows, the status line has no key hints.
+/// This function never panics, whatever the size of the frame.
 pub fn draw<Tz: TimeZone>(
     frame: &mut Frame,
     board: &mut Board,
@@ -1127,9 +1130,8 @@ pub fn draw<Tz: TimeZone>(
     }
     let widths = Widths::for_width(usize::from(area.width));
     let height = usize::from(area.height).saturating_sub(FIXED_LINES);
-    let window = board.window();
     let spans = Spans {
-        window,
+        window: board.window(),
         history_reach: board.history_reach(now),
     };
     // The first refresh cycle ended. Until then, the board can miss runs.
@@ -1163,7 +1165,7 @@ pub fn draw<Tz: TimeZone>(
                 stale,
             } => {
                 let line = run_line(run, *state, *stale, now, tz, widths);
-                let y = put_line(buffer, index + 1, &line.style(age_style(row, now, window)));
+                let y = put_line(buffer, index + 1, &line.style(age_style(row, now)));
                 reverse_if(*selected, buffer, area, y);
             }
             Row::Job {
@@ -1173,12 +1175,12 @@ pub fn draw<Tz: TimeZone>(
                 ..
             } => {
                 let line = job_line(job, *last, now, tz, widths);
-                let y = put_line(buffer, index + 1, &line.style(age_style(row, now, window)));
+                let y = put_line(buffer, index + 1, &line.style(age_style(row, now)));
                 reverse_if(*selected, buffer, area, y);
             }
             Row::Entry { entry, selected } => {
                 let line = entry_line(entry, now, tz, widths);
-                let y = put_line(buffer, index + 1, &line.style(age_style(row, now, window)));
+                let y = put_line(buffer, index + 1, &line.style(age_style(row, now)));
                 reverse_if(*selected, buffer, area, y);
             }
             Row::Departure {
@@ -1186,7 +1188,7 @@ pub fn draw<Tz: TimeZone>(
                 selected,
             } => {
                 let line = departure_line(departure, now, tz, widths);
-                let y = put_line(buffer, index + 1, &line.style(age_style(row, now, window)));
+                let y = put_line(buffer, index + 1, &line.style(age_style(row, now)));
                 reverse_if(*selected, buffer, area, y);
             }
             Row::JobsLoading => put_status_row(buffer, index + 1, JOBS_LOADING),
