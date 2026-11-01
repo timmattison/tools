@@ -1139,11 +1139,7 @@ pub fn draw<Tz: TimeZone>(
                 stale,
             } => {
                 let line = run_line(run, *state, *stale, now, tz, widths);
-                let y = put_line(
-                    buffer,
-                    index + 1,
-                    &line.style(age_style(row, now, window)),
-                );
+                let y = put_line(buffer, index + 1, &line.style(age_style(row, now, window)));
                 reverse_if(*selected, buffer, area, y);
             }
             Row::Job {
@@ -1157,11 +1153,7 @@ pub fn draw<Tz: TimeZone>(
             }
             Row::Entry { entry, selected } => {
                 let line = entry_line(entry, now, tz, widths);
-                let y = put_line(
-                    buffer,
-                    index + 1,
-                    &line.style(age_style(row, now, window)),
-                );
+                let y = put_line(buffer, index + 1, &line.style(age_style(row, now, window)));
                 reverse_if(*selected, buffer, area, y);
             }
             Row::Departure {
@@ -1169,11 +1161,7 @@ pub fn draw<Tz: TimeZone>(
                 selected,
             } => {
                 let line = departure_line(departure, now, tz, widths);
-                let y = put_line(
-                    buffer,
-                    index + 1,
-                    &line.style(age_style(row, now, window)),
-                );
+                let y = put_line(buffer, index + 1, &line.style(age_style(row, now, window)));
                 reverse_if(*selected, buffer, area, y);
             }
             Row::JobsLoading => put_status_row(buffer, index + 1, JOBS_LOADING),
@@ -5863,7 +5851,11 @@ mod tests {
 
     #[test]
     fn the_fade_starts_at_the_start_gray_for_a_run_that_just_ended() {
-        let mut board = fade_board(Duration::from_hours(8), "acme/widgets", "2026-10-14T12:00:00Z");
+        let mut board = fade_board(
+            Duration::from_hours(8),
+            "acme/widgets",
+            "2026-10-14T12:00:00Z",
+        );
         let buffer = render_with(120, 10, &mut board, &loaded());
         assert_text_color(&buffer, row_of(&buffer, "7002"), Color::Indexed(253));
     }
