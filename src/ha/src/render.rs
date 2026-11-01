@@ -5997,6 +5997,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_highlighted_departure_row_has_no_fade() {
+        let mut board = queue_frame_board();
+        // The highlight starts on 16012. Four steps reach 15990, which left
+        // the queue 4 hours ago and has the floor gray without the highlight.
+        for _ in 0..4 {
+            board.select_next(now());
+        }
+        let buffer = render_with(120, 20, &mut board, &loaded());
+        let y = row_of(&buffer, "15990");
+        assert!(
+            buffer[(60, y)].modifier.contains(Modifier::REVERSED),
+            "{:?}",
+            lines(&buffer)[usize::from(y)]
+        );
+        for x in 3_u16..117 {
+            assert_eq!(
+                buffer[(x, y)].fg,
+                Color::Reset,
+                "cell {x} of {:?}",
+                lines(&buffer)[usize::from(y)]
+            );
+        }
+    }
+
     /// The run ID of the passed run of [`fade_jobs_board`].
     const FADE_JOBS_RUN: u64 = 7002;
 
