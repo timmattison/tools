@@ -2194,11 +2194,12 @@ cannot hang the caller. Used by `cwt` and `ha`.
     without a read of the started column. The age of a run is the time since it ended. The age of
     a pull request in "Merge history" is the time since it left the queue. The job rows of an
     expanded finished run have the gray of their run.
-    - The fade is one ramp over the window (`--window`, 8 hours by default). It starts at index
-      253 of the gray ramp of the 256-color palette, and it stops at index 238 at the end of the
-      window. Thus the oldest row stays readable, and a longer window spreads its rows across the
-      full ramp. With the default window, the gray changes every 32 minutes. The fade advances
-      with each frame, and it needs no new read from GitHub.
+    - The fade is one ramp over 2 hours, as the fade of `gsw` is. It starts at index 253 of the
+      gray ramp of the 256-color palette, and it stops at index 238 at an age of 2 hours. The
+      gray changes every 8 minutes. A row older than 2 hours keeps index 238, thus the oldest row
+      stays readable. The fade does not change with `--window`, because the rows on the screen
+      of a busy repository span only the first hour or two of the window. The fade advances with
+      each frame, and it needs no new read from GitHub.
     - Active runs, the pull requests in a merge queue, and the highlighted row keep the color of
       the terminal. Thus live work never looks old, and the highlight is easy to see at each age.
       The markers and `💤` keep the colors of the terminal, and a runner name stays cyan.
