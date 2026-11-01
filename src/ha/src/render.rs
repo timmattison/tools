@@ -123,6 +123,19 @@ fn fit(text: &str, width: usize) -> String {
     pad_right(&truncate_to_budget(text, width), width)
 }
 
+/// The repository cell of a row, in two parts. Together the parts are the
+/// whole cell.
+#[derive(Debug, PartialEq, Eq)]
+struct RepoCell {
+    /// The sleeping mark: [`STALE_MARK`] for a stale row whose cell is at least
+    /// as wide as the mark. For a stale cell narrower than the mark, it is the
+    /// whole cell, which is what [`fit`] makes of the mark and the name. For a
+    /// fresh row, it is empty. `cells` draws it in [`MARK_STYLE`].
+    mark: String,
+    /// The rest of the cell: the cut name and the padding.
+    name: String,
+}
+
 /// Cuts a repository name to a column width, then pads it to that width.
 ///
 /// A name that does not fit keeps its end and starts with `…`, because the end
@@ -131,16 +144,28 @@ fn fit(text: &str, width: usize) -> String {
 /// leaves. A cell of exactly the width of the mark shows the mark and no name.
 /// A cell narrower than the mark shows what [`fit`] makes of the mark and the
 /// name. `textfit` gives an empty cut for a budget of 0.
-fn fit_repo(name: &str, is_stale: bool, width: usize) -> String {
+///
+/// The result holds the mark apart from the name (see [`RepoCell`]), thus the
+/// mark can keep its own colors.
+fn fit_repo(name: &str, is_stale: bool, width: usize) -> RepoCell {
     let mark_width = text_width(STALE_MARK);
     if !is_stale {
-        return pad_right(&truncate_left_to_budget(name, width), width);
+        return RepoCell {
+            mark: String::new(),
+            name: pad_right(&truncate_left_to_budget(name, width), width),
+        };
     }
     if width < mark_width {
-        return fit(&format!("{STALE_MARK}{name}"), width);
+        return RepoCell {
+            mark: fit(&format!("{STALE_MARK}{name}"), width),
+            name: String::new(),
+        };
     }
     let cut = truncate_left_to_budget(name, width - mark_width);
-    pad_right(&format!("{STALE_MARK}{cut}"), width)
+    RepoCell {
+        mark: STALE_MARK.to_owned(),
+        name: pad_right(&cut, width - mark_width),
+    }
 }
 
 /// Cuts a text to a column width, then pads it on the left to that width.
@@ -164,6 +189,17 @@ fn fit_right(text: &str, width: usize) -> String {
 /// `texts[0]` is the bare repository name. The repository cell keeps the end of
 /// a name that does not fit, and `is_stale` puts the [`STALE_MARK`] before the
 /// name (see [`fit_repo`]). The other text cells keep their start.
+///
+/// The line holds these spans, in this order:
+///
+/// 1. The left marker cell and one space, in [`MARK_STYLE`].
+/// 2. The sleeping mark of a stale row, in [`MARK_STYLE`]. A fresh row has no
+///    such span.
+/// 3. The text cells, with one space between them, in the style of the line.
+/// 4. One space and the right marker cell, in [`MARK_STYLE`].
+///
+/// The two marker cells and the sleeping mark keep `Color::Reset`, whatever
+/// color the line gets. The concatenated text of the spans is the whole row.
 fn cells(
     widths: Widths,
     marker: &str,
@@ -172,21 +208,38 @@ fn cells(
     id: &str,
     started: &str,
     time: &str,
-) -> String {
+) -> Line<'static> {
     let [repo, workflow, branch, title] = texts;
-    [
-        pad_right(marker, MARKER_WIDTH),
-        fit_repo(repo, is_stale, widths.repo),
+    let repo = fit_repo(repo, is_stale, widths.repo);
+    let text = [
+        repo.name,
         fit(workflow, widths.workflow),
         fit_right(id, ID_WIDTH),
         fit(branch, widths.branch),
         fit(title, widths.title),
         pad_right(started, STARTED_WIDTH),
         pad_right(time, TIME_WIDTH),
-        pad_right(marker, MARKER_WIDTH),
     ]
-    .join(" ")
+    .join(" ");
+    let mut spans = vec![Span::styled(
+        format!("{} ", pad_right(marker, MARKER_WIDTH)),
+        MARK_STYLE,
+    )];
+    if !repo.mark.is_empty() {
+        spans.push(Span::styled(repo.mark, MARK_STYLE));
+    }
+    spans.push(Span::raw(text));
+    spans.push(Span::styled(
+        format!(" {}", pad_right(marker, MARKER_WIDTH)),
+        MARK_STYLE,
+    ));
+    Line::from(spans)
 }
+
+/// The style of a marker cell. A terminal draws an emoji in its own colors,
+/// thus a marker cell (and the sleeping mark) never takes the color of the row.
+/// The explicit `Color::Reset` wins over the style of the line.
+const MARK_STYLE: Style = Style::new().fg(Color::Reset);
 
 /// Joins the cells of the header line. One space stands between cells.
 ///
@@ -251,10 +304,16 @@ fn fit_runner(name: &RunnerName, room: usize) -> Option<String> {
 ///
 /// The line holds these spans, in this order:
 ///
-/// 1. The marker, a space, the text, and, when a runner name shows, the space
-///    before it.
-/// 2. The runner name, when it shows.
-/// 3. The padding of the text cell and the other cells.
+/// 1. The left marker cell and one space, in [`MARK_STYLE`].
+/// 2. The text, and, when a runner name shows, the space before it, in the
+///    style of the line.
+/// 3. The runner name, when it shows, in [`RUNNER_STYLE`].
+/// 4. The padding of the text cell and the other cells, in the style of the
+///    line.
+/// 5. One space and the right marker cell, in [`MARK_STYLE`].
+///
+/// The two marker cells keep `Color::Reset`, and the runner name keeps its
+/// cyan, whatever color the line gets.
 fn job_cells(
     widths: Widths,
     marker: &str,
@@ -269,8 +328,11 @@ fn job_cells(
     let room = cell.saturating_sub(text_width(&text) + 1);
     let runner = runner.and_then(|name| fit_runner(name, room));
     let mut used = text_width(&text);
-    let mut lead = format!("{} {text}", pad_right(marker, MARKER_WIDTH));
-    let mut spans = Vec::with_capacity(3);
+    let mut lead = text;
+    let mut spans = vec![Span::styled(
+        format!("{} ", pad_right(marker, MARKER_WIDTH)),
+        MARK_STYLE,
+    )];
     if let Some(name) = &runner {
         lead.push(' ');
         used += 1 + text_width(name);
@@ -284,13 +346,16 @@ fn job_cells(
         " ".repeat(widths.branch + 1 + widths.title),
         pad_right(started, STARTED_WIDTH),
         pad_right(time, TIME_WIDTH),
-        pad_right(marker, MARKER_WIDTH),
     ]
     .join(" ");
     spans.push(Span::raw(format!(
         "{} {rest}",
         " ".repeat(cell.saturating_sub(used))
     )));
+    spans.push(Span::styled(
+        format!(" {}", pad_right(marker, MARKER_WIDTH)),
+        MARK_STYLE,
+    ));
     Line::from(spans)
 }
 
@@ -383,7 +448,9 @@ where
 /// The line of one run. `state` is the state that the row shows, not the state
 /// that GitHub reports. It sets the marker and the time cells. A stale run
 /// has the [`STALE_MARK`] before its repository name. `cells` puts the mark
-/// there and cuts the name at its start when the name does not fit.
+/// there and cuts the name at its start when the name does not fit. The line
+/// holds the spans of `cells`: the two marker cells keep `Color::Reset`, and
+/// the text cells take the style that the caller gives the line.
 fn run_line<Tz: TimeZone>(
     run: &Run,
     state: RunState,
@@ -391,7 +458,7 @@ fn run_line<Tz: TimeZone>(
     now: DateTime<Utc>,
     tz: &Tz,
     widths: Widths,
-) -> String
+) -> Line<'static>
 where
     Tz::Offset: Display,
 {
@@ -421,13 +488,14 @@ where
 /// The row uses the columns of a run row. The workflow cell holds the word of
 /// the state of the entry, and the ID part holds the number of the pull
 /// request. The started cell is the time that the pull request joined the
-/// queue, and the time cell is how long it has waited until `now`.
+/// queue, and the time cell is how long it has waited until `now`. The line
+/// holds the spans of `cells`.
 fn entry_line<Tz: TimeZone>(
     entry: &QueueEntry,
     now: DateTime<Utc>,
     tz: &Tz,
     widths: Widths,
-) -> String
+) -> Line<'static>
 where
     Tz::Offset: Display,
 {
@@ -449,13 +517,13 @@ where
 /// the outcome, and the ID part holds the number of the pull request. The
 /// started cell is the time that the pull request joined the queue, and the
 /// time cell is how long it stayed in the queue. Both cells are empty when
-/// the time that it joined is not known.
+/// the time that it joined is not known. The line holds the spans of `cells`.
 fn departure_line<Tz: TimeZone>(
     departure: &Departure,
     now: DateTime<Utc>,
     tz: &Tz,
     widths: Widths,
-) -> String
+) -> Line<'static>
 where
     Tz::Offset: Display,
 {
@@ -713,14 +781,6 @@ fn lead(board: &Board, status: &Status, now: DateTime<Utc>) -> Option<String> {
     None
 }
 
-/// The first index of the xterm 256-color gray ramp that a new message uses.
-/// Index 252 is the color (208, 208, 208), the light gray that the push
-/// status of `gsw` starts with.
-const MESSAGE_START_GRAY: u8 = 252;
-/// The number of steps from the first gray to the last. Index 232 is the
-/// color (8, 8, 8), which is near black.
-const MESSAGE_FADE_STEPS: u8 = 20;
-
 /// The color of a status message of the age `age`.
 ///
 /// The message fades from light gray to near black over [`MESSAGE_LIFETIME`].
@@ -729,10 +789,69 @@ const MESSAGE_FADE_STEPS: u8 = 20;
 /// truecolor support. An age of zero gives index 252, half of the lifetime
 /// gives index 242, and an age of the lifetime or more gives index 232.
 fn message_color(age: Duration) -> Color {
-    let steps = u128::from(MESSAGE_FADE_STEPS) * age.as_millis() / MESSAGE_LIFETIME.as_millis();
-    let step = u8::try_from(steps).map_or(MESSAGE_FADE_STEPS, |s| s.min(MESSAGE_FADE_STEPS));
-    Color::Indexed(MESSAGE_START_GRAY - step)
+    MESSAGE_RAMP.color(age, MESSAGE_LIFETIME)
 }
+
+/// One linear fade along the gray ramp of the xterm 256-color palette
+/// (index 232 to 255).
+///
+/// The fade starts at the index `start` for an age of zero and ends at the
+/// index `floor`. A lower index is a darker gray. The palette ramp is in every
+/// terminal that shows 256 colors, thus `ha` needs no detection of truecolor
+/// support. The status message and the text of a finished row use this one
+/// type, thus both fades round and clamp in the same way.
+#[derive(Debug, Clone, Copy)]
+struct GrayRamp {
+    /// The palette index at an age of zero.
+    start: u8,
+    /// The palette index at the end of the ramp and after it. The fade never
+    /// goes darker.
+    floor: u8,
+}
+
+impl GrayRamp {
+    /// The gray of the age `age` on a ramp that ends at the age `end`.
+    ///
+    /// An age of zero gives the start gray. An age of `end` or more gives the
+    /// floor gray. In between, the index decreases by one for each equal part
+    /// of `end`, and the division rounds down. The gray never gets lighter as
+    /// the age grows. An `end` of zero gives the floor gray and does not panic.
+    fn color(self, age: Duration, end: Duration) -> Color {
+        let steps = self.start.saturating_sub(self.floor);
+        if end.is_zero() {
+            return Color::Indexed(self.floor);
+        }
+        let step = u128::from(steps) * age.as_nanos() / end.as_nanos();
+        let step = u8::try_from(step).map_or(steps, |step| step.min(steps));
+        Color::Indexed(self.start - step)
+    }
+}
+
+/// The ramp of a status message: index 252 (208, 208, 208), the light gray
+/// that the push status of `gsw` starts with, to index 232 (8, 8, 8), which is
+/// near black. It runs over [`MESSAGE_LIFETIME`].
+const MESSAGE_RAMP: GrayRamp = GrayRamp {
+    start: 252,
+    floor: 232,
+};
+/// The ramp of the text of a finished row: index 253 (218, 218, 218) to index
+/// 238 (68, 68, 68). Index 253 is the gray nearest to the subject color of
+/// `gsw`, which is (220, 220, 220). Index 238 is the gray nearest to 220 times
+/// 0.30, which is 66, thus `ha` keeps the floor ratio of `gsw` (`FADE_FLOOR`
+/// in `src/gsw/src/age.rs`). The text never goes to black.
+const ROW_RAMP: GrayRamp = GrayRamp {
+    start: 253,
+    floor: 238,
+};
+/// The age at which the text of a finished row reaches the floor of
+/// [`ROW_RAMP`]: 2 hours, the same as `FADE_DARKEST_AT` of `gsw`. One of the
+/// 15 steps is thus 8 minutes.
+///
+/// The fade does not use the window of the board. On a busy board, the rows
+/// on the screen span only the first hour or two of the window. A ramp over
+/// the 8 hour window gave those rows 4 grays, 10 RGB levels apart, and no row
+/// looked faded. A ramp over 2 hours gives the first 2 hours all 16 grays.
+const ROW_FADE_END: Duration = Duration::from_hours(2);
 
 /// The text of the refresh slot before the first cycle ends.
 const LOADING: &str = "loading…";
@@ -923,6 +1042,41 @@ fn layout_status(left: &str, mark: Option<&str>, width: usize) -> StatusLayout {
     }
 }
 
+/// The style of the text of a board row.
+///
+/// The text of a finished run row and of a departure row fades along
+/// [`ROW_RAMP`], from index 253 at age zero to index 238 at an age of
+/// [`ROW_FADE_END`] (2 hours). An older row keeps index 238. The window of
+/// the board does not change the fade. The age of a run row is the time since
+/// the run ended. The age of a departure row is the time since the pull
+/// request left the queue. Live work (an active run and a queue entry) and the
+/// highlighted row keep the default color, because a reversed dark gray gives
+/// a dark bar that is hard to see. A job row of a finished run fades with its
+/// run, by the time since the run ended. A job row of an active run keeps the
+/// default color. Every other row keeps the default color too.
+fn age_style(row: &Row<'_>, now: DateTime<Utc>) -> Style {
+    let faded =
+        |ended: DateTime<Utc>| Style::default().fg(ROW_RAMP.color(span(ended, now), ROW_FADE_END));
+    match row {
+        Row::Run {
+            run,
+            state,
+            selected: false,
+            ..
+        } if state.is_finished() => faded(run.updated_at),
+        Row::Job {
+            run,
+            selected: false,
+            ..
+        } if run.state.is_finished() => faded(run.updated_at),
+        Row::Departure {
+            departure,
+            selected: false,
+        } => faded(departure.left_at),
+        _ => Style::default(),
+    }
+}
+
 /// Writes one line of text at row `y` of the area and returns the buffer row.
 fn put(buffer: &mut Buffer, y: usize, text: &str, style: Style) -> u16 {
     let area = buffer.area;
@@ -954,10 +1108,12 @@ fn reverse_if(selected: bool, buffer: &mut Buffer, area: Rect, y: u16) {
 /// Draws one frame: the column header, the board rows, and the status line.
 ///
 /// The board rows come from [`Board::view`] with the frame height minus the
-/// two fixed lines. Times show in the time zone `tz`. With a `prompt`, the box
-/// of the cancel prompt draws last, over the rows (see [`draw_prompt`]). While
-/// the box shows, the status line has no key hints. This function never
-/// panics, whatever the size of the frame.
+/// two fixed lines. Times show in the time zone `tz`. The text of a finished
+/// row fades along [`ROW_RAMP`] over [`ROW_FADE_END`] (see [`age_style`]).
+/// The marker cells and the sleeping mark of a row keep `Color::Reset`. With
+/// a `prompt`, the box of the cancel prompt draws last, over the rows (see
+/// [`draw_prompt`]). While the box shows, the status line has no key hints.
+/// This function never panics, whatever the size of the frame.
 pub fn draw<Tz: TimeZone>(
     frame: &mut Frame,
     board: &mut Board,
@@ -1009,21 +1165,22 @@ pub fn draw<Tz: TimeZone>(
                 stale,
             } => {
                 let line = run_line(run, *state, *stale, now, tz, widths);
-                let y = put(buffer, index + 1, &line, Style::default());
+                let y = put_line(buffer, index + 1, &line.style(age_style(row, now)));
                 reverse_if(*selected, buffer, area, y);
             }
             Row::Job {
                 job,
                 last,
                 selected,
+                ..
             } => {
                 let line = job_line(job, *last, now, tz, widths);
-                let y = put_line(buffer, index + 1, &line);
+                let y = put_line(buffer, index + 1, &line.style(age_style(row, now)));
                 reverse_if(*selected, buffer, area, y);
             }
             Row::Entry { entry, selected } => {
                 let line = entry_line(entry, now, tz, widths);
-                let y = put(buffer, index + 1, &line, Style::default());
+                let y = put_line(buffer, index + 1, &line.style(age_style(row, now)));
                 reverse_if(*selected, buffer, area, y);
             }
             Row::Departure {
@@ -1031,7 +1188,7 @@ pub fn draw<Tz: TimeZone>(
                 selected,
             } => {
                 let line = departure_line(departure, now, tz, widths);
-                let y = put(buffer, index + 1, &line, Style::default());
+                let y = put_line(buffer, index + 1, &line.style(age_style(row, now)));
                 reverse_if(*selected, buffer, area, y);
             }
             Row::JobsLoading => put_status_row(buffer, index + 1, JOBS_LOADING),
@@ -2953,7 +3110,7 @@ mod tests {
                     Widths::for_width(frame),
                 );
                 assert_eq!(
-                    display_width(&line),
+                    display_width(&line.to_string()),
                     frame,
                     "frame {frame}, stale {is_stale}: {line:?}"
                 );
@@ -2966,7 +3123,10 @@ mod tests {
         let name = "Lock-Free-Labs/expert-witness";
         for (width, expected) in [(0, ""), (1, "…"), (2, "… "), (3, "\u{1F4A4} ")] {
             assert_eq!(
-                fit_repo(name, true, width),
+                {
+                    let cell = fit_repo(name, true, width);
+                    format!("{}{}", cell.mark, cell.name)
+                },
                 expected,
                 "a stale cell of width {width}"
             );
@@ -4706,7 +4866,7 @@ mod tests {
                     "2026-10-14T11:00:00Z",
                     "2026-10-14T11:30:00Z",
                 );
-                let line = run_line(&run, state, false, now(), &utc(), widths);
+                let line = run_line(&run, state, false, now(), &utc(), widths).to_string();
                 assert_eq!(display_width(&line), usize::from(w), "{state:?}: {line:?}");
             }
             for (id, state) in MARKER_JOB_STATES {
@@ -5215,8 +5375,8 @@ mod tests {
         };
         let widths = Widths::for_width(90);
         let lines = [
-            entry_line(&entry, now(), &utc(), widths),
-            departure_line(&departure, now(), &utc(), widths),
+            entry_line(&entry, now(), &utc(), widths).to_string(),
+            departure_line(&departure, now(), &utc(), widths).to_string(),
         ];
         let fresh = run(
             9,
@@ -5228,7 +5388,8 @@ mod tests {
             "2026-10-14T11:45:30Z",
             "2026-10-14T11:59:00Z",
         );
-        let reference = run_line(&fresh, RunState::Running, false, now(), &utc(), widths);
+        let reference =
+            run_line(&fresh, RunState::Running, false, now(), &utc(), widths).to_string();
         assert!(reference.contains(CUT), "{reference:?}");
         for line in lines {
             assert!(line.contains(CUT), "{line:?}");
@@ -5573,5 +5734,408 @@ mod tests {
             ),
             "{line}"
         );
+    }
+
+    /// The palette index of a color that must be an indexed color.
+    fn gray_index(color: Color) -> u8 {
+        match color {
+            Color::Indexed(index) => index,
+            other => panic!("expected an indexed color, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_row_of_age_zero_has_the_start_gray() {
+        assert_eq!(
+            ROW_RAMP.color(Duration::ZERO, ROW_FADE_END),
+            Color::Indexed(253)
+        );
+    }
+
+    #[test]
+    fn a_row_of_two_hours_or_more_has_the_floor_gray() {
+        assert_eq!(ROW_FADE_END, Duration::from_hours(2));
+        assert_eq!(
+            ROW_RAMP.color(ROW_FADE_END, ROW_FADE_END),
+            Color::Indexed(238)
+        );
+        assert_eq!(
+            ROW_RAMP.color(Duration::from_hours(8), ROW_FADE_END),
+            Color::Indexed(238)
+        );
+    }
+
+    #[test]
+    fn a_row_gray_never_gets_lighter_as_the_age_grows() {
+        let indexes: Vec<u8> = (0..=3 * 60)
+            .map(|minutes| gray_index(ROW_RAMP.color(Duration::from_mins(minutes), ROW_FADE_END)))
+            .collect();
+        assert!(indexes.windows(2).all(|pair| pair[1] <= pair[0]));
+        assert_eq!(indexes.first(), Some(&253));
+        assert_eq!(indexes.last(), Some(&238));
+    }
+
+    #[test]
+    fn a_ramp_that_ends_at_zero_gives_the_floor_with_no_panic() {
+        assert_eq!(
+            ROW_RAMP.color(Duration::ZERO, Duration::ZERO),
+            Color::Indexed(238)
+        );
+        assert_eq!(
+            ROW_RAMP.color(Duration::from_secs(60), Duration::ZERO),
+            Color::Indexed(238)
+        );
+    }
+
+    #[test]
+    fn the_row_fade_steps_every_8_minutes() {
+        assert_eq!(
+            ROW_RAMP.color(Duration::from_secs(7 * 60 + 59), ROW_FADE_END),
+            Color::Indexed(253)
+        );
+        assert_eq!(
+            ROW_RAMP.color(Duration::from_mins(8), ROW_FADE_END),
+            Color::Indexed(252)
+        );
+        assert_eq!(
+            ROW_RAMP.color(Duration::from_hours(1), ROW_FADE_END),
+            Color::Indexed(246)
+        );
+    }
+
+    /// A board with a running run, which takes the default highlight, and a
+    /// passed run of the repository `other` that ended at `updated`. The
+    /// repository of the running run is `timmattison/tools`.
+    fn fade_board(window: Duration, other: &str, updated: &str) -> Board {
+        let mut board = Board::new(window);
+        board.replace(
+            repo("timmattison/tools"),
+            vec![run(
+                7001,
+                "timmattison/tools",
+                "CI",
+                "main",
+                "Live work",
+                RunState::Running,
+                "2026-10-14T11:45:30Z",
+                "2026-10-14T11:59:00Z",
+            )],
+            now(),
+        );
+        board.replace(
+            repo(other),
+            vec![run(
+                7002,
+                other,
+                "CI",
+                "main",
+                "Old work",
+                RunState::Passed,
+                "2026-10-14T07:00:00Z",
+                updated,
+            )],
+            now(),
+        );
+        board
+    }
+
+    /// The buffer row of the first row that holds `needle`.
+    fn row_of(buffer: &Buffer, needle: &str) -> u16 {
+        let text = lines(buffer);
+        u16::try_from(row_holding(&text, needle)).expect("a row index fits in u16")
+    }
+
+    /// Asserts that the row `y` is not highlighted and that each text cell of
+    /// it (columns 3 to 116 of a 120-column frame) has the foreground `color`.
+    fn assert_text_color(buffer: &Buffer, y: u16, color: Color) {
+        assert!(
+            !buffer[(60, y)].modifier.contains(Modifier::REVERSED),
+            "the row {y} is highlighted: {:?}",
+            lines(buffer)[usize::from(y)]
+        );
+        for x in 3_u16..117 {
+            assert_eq!(
+                buffer[(x, y)].fg,
+                color,
+                "cell {x} of {:?}",
+                lines(buffer)[usize::from(y)]
+            );
+        }
+    }
+
+    #[test]
+    fn a_finished_run_one_hour_old_has_a_gray_between_the_start_and_the_floor() {
+        let mut board = fade_board(
+            Duration::from_hours(8),
+            "acme/widgets",
+            "2026-10-14T11:00:00Z",
+        );
+        let buffer = render_with(120, 10, &mut board, &loaded());
+        let y = row_of(&buffer, "7002");
+        // 1 hour is half of the 2 hour fade. Index 246 is between the floor
+        // 238 and the start 253.
+        assert_text_color(&buffer, y, Color::Indexed(246));
+    }
+
+    #[test]
+    fn a_finished_run_two_hours_old_has_the_floor_gray_in_an_8_hour_window() {
+        let mut board = fade_board(
+            Duration::from_hours(8),
+            "acme/widgets",
+            "2026-10-14T10:00:00Z",
+        );
+        let buffer = render_with(120, 10, &mut board, &loaded());
+        assert_text_color(&buffer, row_of(&buffer, "7002"), Color::Indexed(238));
+    }
+
+    #[test]
+    fn the_fade_starts_at_the_start_gray_for_a_run_that_just_ended() {
+        let mut board = fade_board(
+            Duration::from_hours(8),
+            "acme/widgets",
+            "2026-10-14T12:00:00Z",
+        );
+        let buffer = render_with(120, 10, &mut board, &loaded());
+        assert_text_color(&buffer, row_of(&buffer, "7002"), Color::Indexed(253));
+    }
+
+    #[test]
+    fn the_fade_does_not_stretch_with_the_window() {
+        // A run 1 hour old has the same gray in a 24 hour window as in an
+        // 8 hour window.
+        let mut board = fade_board(
+            Duration::from_hours(24),
+            "acme/widgets",
+            "2026-10-14T11:00:00Z",
+        );
+        let buffer = render_with(120, 10, &mut board, &loaded());
+        assert_text_color(&buffer, row_of(&buffer, "7002"), Color::Indexed(246));
+    }
+
+    #[test]
+    fn a_run_that_is_not_finished_has_no_fade() {
+        let mut board = four_run_board();
+        let buffer = render_with(120, 10, &mut board, &loaded());
+        assert_text_color(&buffer, row_of(&buffer, "Add release job"), Color::Reset);
+    }
+
+    #[test]
+    fn a_queue_entry_has_no_fade() {
+        let mut board = queue_frame_board();
+        let buffer = render_with(120, 20, &mut board, &loaded());
+        assert_text_color(&buffer, row_of(&buffer, "16020"), Color::Reset);
+    }
+
+    #[test]
+    fn the_marker_cells_of_a_faded_row_keep_the_colors_of_the_terminal() {
+        let mut board = four_run_board();
+        let buffer = render_with(120, 10, &mut board, &loaded());
+        // Row of run 3 ended 2h49m55s ago, row of run 4 ended 7h30m ago. Both
+        // are older than the 2 hour fade.
+        for (needle, gray) in [("Bump deps", 238), ("Broken build", 238)] {
+            let y = row_of(&buffer, needle);
+            assert_text_color(&buffer, y, Color::Indexed(gray));
+            for x in [0_u16, 1, 118, 119] {
+                assert_eq!(buffer[(x, y)].fg, Color::Reset, "{needle}, cell {x}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_sleeping_mark_of_a_faded_row_keeps_the_colors_of_the_terminal() {
+        let mut board = fade_board(
+            Duration::from_hours(8),
+            "acme/widgets",
+            "2026-10-14T11:00:00Z",
+        );
+        board.fail(repo("acme/widgets"), "HTTP 500".to_owned());
+        let buffer = render_with(120, 10, &mut board, &loaded());
+        let y = row_of(&buffer, "7002");
+        assert!(
+            lines(&buffer)[usize::from(y)].contains('\u{1F4A4}'),
+            "{:?}",
+            lines(&buffer)[usize::from(y)]
+        );
+        assert!(!buffer[(60, y)].modifier.contains(Modifier::REVERSED));
+        // The mark fills the cells 3 and 4, and the space after it is cell 5.
+        for x in 3_u16..6 {
+            assert_eq!(buffer[(x, y)].fg, Color::Reset, "cell {x}");
+        }
+        for x in 6_u16..117 {
+            assert_eq!(buffer[(x, y)].fg, Color::Indexed(246), "cell {x}");
+        }
+    }
+
+    #[test]
+    fn a_highlighted_finished_row_has_no_fade() {
+        let mut board = fade_board(
+            Duration::from_hours(8),
+            "acme/widgets",
+            "2026-10-14T11:00:00Z",
+        );
+        board.select_next(now());
+        let buffer = render_with(120, 10, &mut board, &loaded());
+        let y = row_of(&buffer, "7002");
+        assert!(
+            buffer[(60, y)].modifier.contains(Modifier::REVERSED),
+            "{:?}",
+            lines(&buffer)[usize::from(y)]
+        );
+        for x in 3_u16..117 {
+            assert_eq!(buffer[(x, y)].fg, Color::Reset, "cell {x}");
+        }
+    }
+
+    #[test]
+    fn a_departure_row_fades_by_the_time_it_left_the_queue() {
+        let mut board = queue_frame_board();
+        let buffer = render_with(120, 20, &mut board, &loaded());
+        // The pull requests left 1h47m20s, 2h51m58s, and 4h ago. The last two
+        // are older than the 2 hour fade.
+        for (pull, gray) in [("16001", 240), ("15998", 238), ("15990", 238)] {
+            assert_text_color(&buffer, row_of(&buffer, pull), Color::Indexed(gray));
+        }
+    }
+
+    #[test]
+    fn a_highlighted_departure_row_has_no_fade() {
+        let mut board = queue_frame_board();
+        // The highlight starts on 16012. Four steps reach 15990, which left
+        // the queue 4 hours ago and has the floor gray without the highlight.
+        for _ in 0..4 {
+            board.select_next(now());
+        }
+        let buffer = render_with(120, 20, &mut board, &loaded());
+        let y = row_of(&buffer, "15990");
+        assert!(
+            buffer[(60, y)].modifier.contains(Modifier::REVERSED),
+            "{:?}",
+            lines(&buffer)[usize::from(y)]
+        );
+        for x in 3_u16..117 {
+            assert_eq!(
+                buffer[(x, y)].fg,
+                Color::Reset,
+                "cell {x} of {:?}",
+                lines(&buffer)[usize::from(y)]
+            );
+        }
+    }
+
+    /// The run ID of the passed run of [`fade_jobs_board`].
+    const FADE_JOBS_RUN: u64 = 7002;
+
+    /// A board like [`fade_board`] (8 hour window, the passed run ended 1
+    /// hour ago), with the passed run expanded and `jobs` jobs under it. The
+    /// first job runs on the runner `mbp`. The highlight is on the running run,
+    /// thus no row of the passed run is highlighted.
+    fn fade_jobs_board(jobs: u64) -> Board {
+        let mut board = fade_board(
+            Duration::from_hours(8),
+            "acme/widgets",
+            "2026-10-14T11:00:00Z",
+        );
+        board.select_next(now());
+        board.expand(now());
+        board.set_jobs(
+            RunId(FADE_JOBS_RUN),
+            (0..jobs)
+                .map(|index| {
+                    let built = job(
+                        9001 + index,
+                        &format!("job-{index}"),
+                        RunState::Passed,
+                        Some("2026-10-14T07:01:00Z"),
+                        Some("2026-10-14T07:05:00Z"),
+                    );
+                    if index == 0 {
+                        on("mbp", built)
+                    } else {
+                        built
+                    }
+                })
+                .collect(),
+        );
+        board.select_previous(now());
+        board
+    }
+
+    #[test]
+    fn the_job_rows_of_a_finished_run_fade_with_their_run() {
+        let mut board = fade_jobs_board(2);
+        let buffer = render_with(120, 12, &mut board, &loaded());
+        for id in ["9001", "9002"] {
+            let y = row_of(&buffer, id);
+            assert!(
+                !buffer[(60, y)].modifier.contains(Modifier::REVERSED),
+                "{:?}",
+                lines(&buffer)[usize::from(y)]
+            );
+            let cyan = cyan_columns(&buffer, y);
+            assert_eq!(cyan.len(), if id == "9001" { 3 } else { 0 }, "row {id}");
+            for x in 3_u16..117 {
+                let want = if cyan.contains(&x) {
+                    Color::Cyan
+                } else {
+                    Color::Indexed(246)
+                };
+                assert_eq!(
+                    buffer[(x, y)].fg,
+                    want,
+                    "cell {x} of {:?}",
+                    lines(&buffer)[usize::from(y)]
+                );
+            }
+            for x in [0_u16, 1, 118, 119] {
+                assert_eq!(buffer[(x, y)].fg, Color::Reset, "marker cell {x}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_job_row_fades_with_its_run_when_the_run_row_is_above_the_view() {
+        let mut board = fade_jobs_board(8);
+        // The passed run, then its eight jobs: nine steps reach the last job.
+        for _ in 0..9 {
+            board.select_next(now());
+        }
+        let buffer = render_with(120, 6, &mut board, &loaded());
+        let text = lines(&buffer);
+        assert!(
+            text.iter().all(|line| !line.contains("Old work")),
+            "the run row is in the view: {text:?}"
+        );
+        let y = row_of(&buffer, "9007");
+        assert_text_color(&buffer, y, Color::Indexed(246));
+        let last = row_of(&buffer, "9008");
+        assert!(
+            buffer[(60, last)].modifier.contains(Modifier::REVERSED),
+            "{text:?}"
+        );
+    }
+
+    #[test]
+    fn a_highlighted_job_row_of_a_finished_run_has_no_fade() {
+        let mut board = fade_jobs_board(2);
+        // The passed run, then its first job, which runs on `mbp`.
+        board.select_next(now());
+        board.select_next(now());
+        let buffer = render_with(120, 12, &mut board, &loaded());
+        let y = row_of(&buffer, "9001");
+        assert!(
+            buffer[(60, y)].modifier.contains(Modifier::REVERSED),
+            "{:?}",
+            lines(&buffer)[usize::from(y)]
+        );
+        let cyan = cyan_columns(&buffer, y);
+        assert_eq!(cyan.len(), 3);
+        for x in 3_u16..117 {
+            let want = if cyan.contains(&x) {
+                Color::Cyan
+            } else {
+                Color::Reset
+            };
+            assert_eq!(buffer[(x, y)].fg, want, "cell {x}");
+        }
     }
 }

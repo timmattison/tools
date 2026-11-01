@@ -2189,6 +2189,21 @@ cannot hang the caller. Used by `cwt` and `ha`.
   - Each run row and each job row shows its marker two times: in the first column, and after
     the time column. Thus the marker is next to the time that it explains, and on a wide terminal
     you do not have to read across the full row. The two markers of a row are always the same.
+  - The text of each finished row fades from light gray to dark gray as the row gets older, as
+    the commit rows of `gsw` do. Thus a new result is bright, and you can tell the age of a row
+    without a read of the started column. The age of a run is the time since it ended. The age of
+    a pull request in "Merge history" is the time since it left the queue. The job rows of an
+    expanded finished run have the gray of their run.
+    - The fade is one ramp over 2 hours, as the fade of `gsw` is. It starts at index 253 of the
+      gray ramp of the 256-color palette, and it stops at index 238 at an age of 2 hours. The
+      gray changes every 8 minutes. A row older than 2 hours keeps index 238, thus the oldest row
+      stays readable. The fade does not change with `--window`, because the rows on the screen
+      of a busy repository span only the first hour or two of the window. The fade advances with
+      each frame, and it needs no new read from GitHub.
+    - Active runs, the pull requests in a merge queue, and the highlighted row keep the color of
+      the terminal. Thus live work never looks old, and the highlight is easy to see at each age.
+      The markers and `💤` keep the colors of the terminal, and a runner name stays cyan.
+    - The fade assumes a dark background, as the fade of `gsw` does.
   - Until the first refresh ends, an empty section shows `Loading…` and the section headers
     show no counts. Thus a board that did not load yet does not look like a board with no runs.
   - The status line shows how long ago the last refresh ended (`updated 1m 05s ago`), in the
