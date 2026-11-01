@@ -844,6 +844,9 @@ const ROW_RAMP: GrayRamp = GrayRamp {
     start: 253,
     floor: 238,
 };
+/// The age at which the text of a finished row reaches the floor of
+/// [`ROW_RAMP`]: 2 hours, the same as `FADE_DARKEST_AT` of `gsw`.
+const ROW_FADE_END: Duration = Duration::from_hours(2);
 
 /// The text of the refresh slot before the first cycle ends.
 const LOADING: &str = "loading…";
@@ -5742,26 +5745,28 @@ mod tests {
     #[test]
     fn a_row_of_age_zero_has_the_start_gray() {
         assert_eq!(
-            ROW_RAMP.color(Duration::ZERO, Duration::from_hours(8)),
+            ROW_RAMP.color(Duration::ZERO, ROW_FADE_END),
             Color::Indexed(253)
         );
     }
 
     #[test]
-    fn a_row_of_one_window_or_more_has_the_floor_gray() {
-        let window = Duration::from_hours(8);
-        assert_eq!(ROW_RAMP.color(window, window), Color::Indexed(238));
+    fn a_row_of_two_hours_or_more_has_the_floor_gray() {
+        assert_eq!(ROW_FADE_END, Duration::from_hours(2));
         assert_eq!(
-            ROW_RAMP.color(Duration::from_hours(16), window),
+            ROW_RAMP.color(ROW_FADE_END, ROW_FADE_END),
+            Color::Indexed(238)
+        );
+        assert_eq!(
+            ROW_RAMP.color(Duration::from_hours(8), ROW_FADE_END),
             Color::Indexed(238)
         );
     }
 
     #[test]
     fn a_row_gray_never_gets_lighter_as_the_age_grows() {
-        let window = Duration::from_hours(8);
-        let indexes: Vec<u8> = (0..=9 * 60)
-            .map(|minutes| gray_index(ROW_RAMP.color(Duration::from_mins(minutes), window)))
+        let indexes: Vec<u8> = (0..=3 * 60)
+            .map(|minutes| gray_index(ROW_RAMP.color(Duration::from_mins(minutes), ROW_FADE_END)))
             .collect();
         assert!(indexes.windows(2).all(|pair| pair[1] <= pair[0]));
         assert_eq!(indexes.first(), Some(&253));
@@ -5769,7 +5774,7 @@ mod tests {
     }
 
     #[test]
-    fn a_window_of_zero_gives_the_floor_with_no_panic() {
+    fn a_ramp_that_ends_at_zero_gives_the_floor_with_no_panic() {
         assert_eq!(
             ROW_RAMP.color(Duration::ZERO, Duration::ZERO),
             Color::Indexed(238)
@@ -5781,18 +5786,17 @@ mod tests {
     }
 
     #[test]
-    fn the_default_window_steps_every_32_minutes() {
-        let window = Duration::from_hours(8);
+    fn the_row_fade_steps_every_8_minutes() {
         assert_eq!(
-            ROW_RAMP.color(Duration::from_secs(31 * 60 + 59), window),
+            ROW_RAMP.color(Duration::from_secs(7 * 60 + 59), ROW_FADE_END),
             Color::Indexed(253)
         );
         assert_eq!(
-            ROW_RAMP.color(Duration::from_mins(32), window),
+            ROW_RAMP.color(Duration::from_mins(8), ROW_FADE_END),
             Color::Indexed(252)
         );
         assert_eq!(
-            ROW_RAMP.color(Duration::from_hours(4), window),
+            ROW_RAMP.color(Duration::from_hours(1), ROW_FADE_END),
             Color::Indexed(246)
         );
     }
@@ -5858,17 +5862,28 @@ mod tests {
     }
 
     #[test]
-    fn a_finished_run_half_a_window_old_has_a_gray_between_the_start_and_the_floor() {
+    fn a_finished_run_one_hour_old_has_a_gray_between_the_start_and_the_floor() {
         let mut board = fade_board(
             Duration::from_hours(8),
             "acme/widgets",
-            "2026-10-14T08:00:00Z",
+            "2026-10-14T11:00:00Z",
         );
         let buffer = render_with(120, 10, &mut board, &loaded());
         let y = row_of(&buffer, "7002");
-        // 4 hours is half of the 8 hour window. Index 246 is between the floor
+        // 1 hour is half of the 2 hour fade. Index 246 is between the floor
         // 238 and the start 253.
         assert_text_color(&buffer, y, Color::Indexed(246));
+    }
+
+    #[test]
+    fn a_finished_run_two_hours_old_has_the_floor_gray_in_an_8_hour_window() {
+        let mut board = fade_board(
+            Duration::from_hours(8),
+            "acme/widgets",
+            "2026-10-14T10:00:00Z",
+        );
+        let buffer = render_with(120, 10, &mut board, &loaded());
+        assert_text_color(&buffer, row_of(&buffer, "7002"), Color::Indexed(238));
     }
 
     #[test]
@@ -5883,12 +5898,13 @@ mod tests {
     }
 
     #[test]
-    fn the_fade_stretches_with_the_window() {
-        // 12 hours is half of a 24 hour window.
+    fn the_fade_does_not_stretch_with_the_window() {
+        // A run 1 hour old has the same gray in a 24 hour window as in an
+        // 8 hour window.
         let mut board = fade_board(
             Duration::from_hours(24),
             "acme/widgets",
-            "2026-10-14T00:00:00Z",
+            "2026-10-14T11:00:00Z",
         );
         let buffer = render_with(120, 10, &mut board, &loaded());
         assert_text_color(&buffer, row_of(&buffer, "7002"), Color::Indexed(246));
@@ -5912,8 +5928,9 @@ mod tests {
     fn the_marker_cells_of_a_faded_row_keep_the_colors_of_the_terminal() {
         let mut board = four_run_board();
         let buffer = render_with(120, 10, &mut board, &loaded());
-        // Row of run 3 ended 2h49m55s ago, row of run 4 ended 7h30m ago.
-        for (needle, gray) in [("Bump deps", 248), ("Broken build", 239)] {
+        // Row of run 3 ended 2h49m55s ago, row of run 4 ended 7h30m ago. Both
+        // are older than the 2 hour fade.
+        for (needle, gray) in [("Bump deps", 238), ("Broken build", 238)] {
             let y = row_of(&buffer, needle);
             assert_text_color(&buffer, y, Color::Indexed(gray));
             for x in [0_u16, 1, 118, 119] {
@@ -5927,7 +5944,7 @@ mod tests {
         let mut board = fade_board(
             Duration::from_hours(8),
             "acme/widgets",
-            "2026-10-14T08:00:00Z",
+            "2026-10-14T11:00:00Z",
         );
         board.fail(repo("acme/widgets"), "HTTP 500".to_owned());
         let buffer = render_with(120, 10, &mut board, &loaded());
@@ -5952,7 +5969,7 @@ mod tests {
         let mut board = fade_board(
             Duration::from_hours(8),
             "acme/widgets",
-            "2026-10-14T08:00:00Z",
+            "2026-10-14T11:00:00Z",
         );
         board.select_next(now());
         let buffer = render_with(120, 10, &mut board, &loaded());
@@ -5971,8 +5988,9 @@ mod tests {
     fn a_departure_row_fades_by_the_time_it_left_the_queue() {
         let mut board = queue_frame_board();
         let buffer = render_with(120, 20, &mut board, &loaded());
-        // The pull requests left 1h47m20s, 2h51m58s, and 4h ago.
-        for (pull, gray) in [("16001", 250), ("15998", 248), ("15990", 246)] {
+        // The pull requests left 1h47m20s, 2h51m58s, and 4h ago. The last two
+        // are older than the 2 hour fade.
+        for (pull, gray) in [("16001", 240), ("15998", 238), ("15990", 238)] {
             assert_text_color(&buffer, row_of(&buffer, pull), Color::Indexed(gray));
         }
     }
@@ -5980,15 +5998,15 @@ mod tests {
     /// The run ID of the passed run of [`fade_jobs_board`].
     const FADE_JOBS_RUN: u64 = 7002;
 
-    /// A board like [`fade_board`] (8 hour window, the passed run ended 4
-    /// hours ago), with the passed run expanded and `jobs` jobs under it. The
+    /// A board like [`fade_board`] (8 hour window, the passed run ended 1
+    /// hour ago), with the passed run expanded and `jobs` jobs under it. The
     /// first job runs on the runner `mbp`. The highlight is on the running run,
     /// thus no row of the passed run is highlighted.
     fn fade_jobs_board(jobs: u64) -> Board {
         let mut board = fade_board(
             Duration::from_hours(8),
             "acme/widgets",
-            "2026-10-14T08:00:00Z",
+            "2026-10-14T11:00:00Z",
         );
         board.select_next(now());
         board.expand(now());
