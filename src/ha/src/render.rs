@@ -5954,4 +5954,70 @@ mod tests {
             assert_text_color(&buffer, row_of(&buffer, pull), Color::Indexed(gray));
         }
     }
+
+    /// The run ID of the passed run of [`fade_jobs_board`].
+    const FADE_JOBS_RUN: u64 = 7002;
+
+    /// A board like [`fade_board`] (8 hour window, the passed run ended 4
+    /// hours ago), with the passed run expanded and `jobs` jobs under it. The
+    /// first job runs on the runner `mbp`. The highlight is on the running run,
+    /// thus no row of the passed run is highlighted.
+    fn fade_jobs_board(jobs: u64) -> Board {
+        let mut board = fade_board(
+            Duration::from_hours(8),
+            "acme/widgets",
+            "2026-10-14T08:00:00Z",
+        );
+        board.select_next(now());
+        board.expand(now());
+        board.set_jobs(
+            RunId(FADE_JOBS_RUN),
+            (0..jobs)
+                .map(|index| {
+                    let built = job(
+                        9001 + index,
+                        &format!("job-{index}"),
+                        RunState::Passed,
+                        Some("2026-10-14T07:01:00Z"),
+                        Some("2026-10-14T07:05:00Z"),
+                    );
+                    if index == 0 { on("mbp", built) } else { built }
+                })
+                .collect(),
+        );
+        board.select_previous(now());
+        board
+    }
+
+    #[test]
+    fn the_job_rows_of_a_finished_run_fade_with_their_run() {
+        let mut board = fade_jobs_board(2);
+        let buffer = render_with(120, 12, &mut board, &loaded());
+        for id in ["9001", "9002"] {
+            let y = row_of(&buffer, id);
+            assert!(
+                !buffer[(60, y)].modifier.contains(Modifier::REVERSED),
+                "{:?}",
+                lines(&buffer)[usize::from(y)]
+            );
+            let cyan = cyan_columns(&buffer, y);
+            assert_eq!(cyan.len(), if id == "9001" { 3 } else { 0 }, "row {id}");
+            for x in 3_u16..117 {
+                let want = if cyan.contains(&x) {
+                    Color::Cyan
+                } else {
+                    Color::Indexed(246)
+                };
+                assert_eq!(
+                    buffer[(x, y)].fg,
+                    want,
+                    "cell {x} of {:?}",
+                    lines(&buffer)[usize::from(y)]
+                );
+            }
+            for x in [0_u16, 1, 118, 119] {
+                assert_eq!(buffer[(x, y)].fg, Color::Reset, "marker cell {x}");
+            }
+        }
+    }
 }
