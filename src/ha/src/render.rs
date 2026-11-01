@@ -1024,9 +1024,11 @@ fn layout_status(left: &str, mark: Option<&str>, width: usize) -> StatusLayout {
 
 /// The style of the text of a board row.
 ///
-/// The text of a finished run row fades along [`ROW_RAMP`], from index 253 at
-/// age zero to index 238 at the age of the window. The age of a run row is the
-/// time since the run ended. Live work and the highlighted row keep the default
+/// The text of a finished run row and of a departure row fades along
+/// [`ROW_RAMP`], from index 253 at age zero to index 238 at the age of the
+/// window. The age of a run row is the time since the run ended. The age of a
+/// departure row is the time since the pull request left the queue. Live work
+/// (an active run and a queue entry) and the highlighted row keep the default
 /// color, because a reversed dark gray gives a dark bar that is hard to see.
 /// Every other row keeps the default color too.
 fn age_style(row: &Row<'_>, now: DateTime<Utc>, window: Duration) -> Style {
@@ -1039,6 +1041,10 @@ fn age_style(row: &Row<'_>, now: DateTime<Utc>, window: Duration) -> Style {
         } if state.is_finished() => {
             Style::default().fg(ROW_RAMP.color(span(run.updated_at, now), window))
         }
+        Row::Departure {
+            departure,
+            selected: false,
+        } => Style::default().fg(ROW_RAMP.color(span(departure.left_at, now), window)),
         _ => Style::default(),
     }
 }
