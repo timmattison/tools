@@ -713,14 +713,6 @@ fn lead(board: &Board, status: &Status, now: DateTime<Utc>) -> Option<String> {
     None
 }
 
-/// The first index of the xterm 256-color gray ramp that a new message uses.
-/// Index 252 is the color (208, 208, 208), the light gray that the push
-/// status of `gsw` starts with.
-const MESSAGE_START_GRAY: u8 = 252;
-/// The number of steps from the first gray to the last. Index 232 is the
-/// color (8, 8, 8), which is near black.
-const MESSAGE_FADE_STEPS: u8 = 20;
-
 /// The color of a status message of the age `age`.
 ///
 /// The message fades from light gray to near black over [`MESSAGE_LIFETIME`].
@@ -729,9 +721,7 @@ const MESSAGE_FADE_STEPS: u8 = 20;
 /// truecolor support. An age of zero gives index 252, half of the lifetime
 /// gives index 242, and an age of the lifetime or more gives index 232.
 fn message_color(age: Duration) -> Color {
-    let steps = u128::from(MESSAGE_FADE_STEPS) * age.as_millis() / MESSAGE_LIFETIME.as_millis();
-    let step = u8::try_from(steps).map_or(MESSAGE_FADE_STEPS, |s| s.min(MESSAGE_FADE_STEPS));
-    Color::Indexed(MESSAGE_START_GRAY - step)
+    MESSAGE_RAMP.color(age, MESSAGE_LIFETIME)
 }
 
 /// One linear fade along the gray ramp of the xterm 256-color palette
@@ -759,7 +749,13 @@ impl GrayRamp {
     /// `end`, and the division rounds down. The gray never gets lighter as the
     /// age grows. An `end` of zero gives the floor gray and does not panic.
     fn color(self, age: Duration, end: Duration) -> Color {
-        Color::Indexed(self.start)
+        let steps = self.start.saturating_sub(self.floor);
+        if end.is_zero() {
+            return Color::Indexed(self.floor);
+        }
+        let step = u128::from(steps) * age.as_nanos() / end.as_nanos();
+        let step = u8::try_from(step).map_or(steps, |step| step.min(steps));
+        Color::Indexed(self.start - step)
     }
 }
 
