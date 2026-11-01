@@ -6042,4 +6042,68 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn a_job_row_fades_with_its_run_when_the_run_row_is_above_the_view() {
+        let mut board = fade_jobs_board(8);
+        // The passed run, then its eight jobs: nine steps reach the last job.
+        for _ in 0..9 {
+            board.select_next(now());
+        }
+        let buffer = render_with(120, 6, &mut board, &loaded());
+        let text = lines(&buffer);
+        assert!(
+            text.iter().all(|line| !line.contains("Old work")),
+            "the run row is in the view: {text:?}"
+        );
+        let y = row_of(&buffer, "9007");
+        assert_text_color(&buffer, y, Color::Indexed(246));
+        let last = row_of(&buffer, "9008");
+        assert!(
+            buffer[(60, last)].modifier.contains(Modifier::REVERSED),
+            "{text:?}"
+        );
+    }
+
+    #[test]
+    fn the_job_rows_of_an_active_run_keep_the_default_color() {
+        let mut board = megarepo_board();
+        let buffer = render_with(160, 16, &mut board, &loaded());
+        let y = row_of(&buffer, "107851237701");
+        let cyan = cyan_columns(&buffer, y);
+        assert!(!cyan.is_empty());
+        for x in 3_u16..157 {
+            let want = if cyan.contains(&x) {
+                Color::Cyan
+            } else {
+                Color::Reset
+            };
+            assert_eq!(buffer[(x, y)].fg, want, "cell {x}");
+        }
+    }
+
+    #[test]
+    fn a_highlighted_job_row_of_a_finished_run_has_no_fade() {
+        let mut board = fade_jobs_board(2);
+        // The passed run, then its first job, which runs on `mbp`.
+        board.select_next(now());
+        board.select_next(now());
+        let buffer = render_with(120, 12, &mut board, &loaded());
+        let y = row_of(&buffer, "9001");
+        assert!(
+            buffer[(60, y)].modifier.contains(Modifier::REVERSED),
+            "{:?}",
+            lines(&buffer)[usize::from(y)]
+        );
+        let cyan = cyan_columns(&buffer, y);
+        assert_eq!(cyan.len(), 3);
+        for x in 3_u16..117 {
+            let want = if cyan.contains(&x) {
+                Color::Cyan
+            } else {
+                Color::Reset
+            };
+            assert_eq!(buffer[(x, y)].fg, want, "cell {x}");
+        }
+    }
 }
