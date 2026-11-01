@@ -5920,4 +5920,24 @@ mod tests {
             assert_eq!(buffer[(x, y)].fg, Color::Indexed(246), "cell {x}");
         }
     }
+
+    #[test]
+    fn a_highlighted_finished_row_has_no_fade() {
+        let mut board = fade_board(
+            Duration::from_hours(8),
+            "acme/widgets",
+            "2026-10-14T08:00:00Z",
+        );
+        board.select_next(now());
+        let buffer = render_with(120, 10, &mut board, &loaded());
+        let y = row_of(&buffer, "7002");
+        assert!(
+            buffer[(60, y)].modifier.contains(Modifier::REVERSED),
+            "{:?}",
+            lines(&buffer)[usize::from(y)]
+        );
+        for x in 3_u16..117 {
+            assert_eq!(buffer[(x, y)].fg, Color::Reset, "cell {x}");
+        }
+    }
 }
