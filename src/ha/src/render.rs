@@ -5856,4 +5856,29 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn the_sleeping_mark_of_a_faded_row_keeps_the_colors_of_the_terminal() {
+        let mut board = fade_board(
+            Duration::from_hours(8),
+            "acme/widgets",
+            "2026-10-14T08:00:00Z",
+        );
+        board.fail(repo("acme/widgets"), "HTTP 500".to_owned());
+        let buffer = render_with(120, 10, &mut board, &loaded());
+        let y = row_of(&buffer, "7002");
+        assert!(
+            lines(&buffer)[usize::from(y)].contains('\u{1F4A4}'),
+            "{:?}",
+            lines(&buffer)[usize::from(y)]
+        );
+        assert!(!buffer[(60, y)].modifier.contains(Modifier::REVERSED));
+        // The mark fills the cells 3 and 4, and the space after it is cell 5.
+        for x in 3_u16..6 {
+            assert_eq!(buffer[(x, y)].fg, Color::Reset, "cell {x}");
+        }
+        for x in 6_u16..117 {
+            assert_eq!(buffer[(x, y)].fg, Color::Indexed(246), "cell {x}");
+        }
+    }
 }
