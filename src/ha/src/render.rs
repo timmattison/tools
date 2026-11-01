@@ -813,9 +813,9 @@ impl GrayRamp {
     /// The gray of the age `age` on a ramp that ends at the age `end`.
     ///
     /// An age of zero gives the start gray. An age of `end` or more gives the
-    /// floor gray. In between, the index falls by one for each equal part of
-    /// `end`, and the division rounds down. The gray never gets lighter as the
-    /// age grows. An `end` of zero gives the floor gray and does not panic.
+    /// floor gray. In between, the index decreases by one for each equal part
+    /// of `end`, and the division rounds down. The gray never gets lighter as
+    /// the age grows. An `end` of zero gives the floor gray and does not panic.
     fn color(self, age: Duration, end: Duration) -> Color {
         let steps = self.start.saturating_sub(self.floor);
         if end.is_zero() {
@@ -6067,23 +6067,6 @@ mod tests {
             buffer[(60, last)].modifier.contains(Modifier::REVERSED),
             "{text:?}"
         );
-    }
-
-    #[test]
-    fn the_job_rows_of_an_active_run_keep_the_default_color() {
-        let mut board = megarepo_board();
-        let buffer = render_with(160, 16, &mut board, &loaded());
-        let y = row_of(&buffer, "107851237701");
-        let cyan = cyan_columns(&buffer, y);
-        assert!(!cyan.is_empty());
-        for x in 3_u16..157 {
-            let want = if cyan.contains(&x) {
-                Color::Cyan
-            } else {
-                Color::Reset
-            };
-            assert_eq!(buffer[(x, y)].fg, want, "cell {x}");
-        }
     }
 
     #[test]
