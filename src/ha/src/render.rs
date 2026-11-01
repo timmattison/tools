@@ -5946,4 +5946,14 @@ mod tests {
             assert_eq!(buffer[(x, y)].fg, Color::Reset, "cell {x}");
         }
     }
+
+    #[test]
+    fn a_departure_row_fades_by_the_time_it_left_the_queue() {
+        let mut board = queue_frame_board();
+        let buffer = render_with(120, 20, &mut board, &loaded());
+        // The pull requests left 1h47m20s, 2h51m58s, and 4h ago.
+        for (pull, gray) in [("16001", 250), ("15998", 248), ("15990", 246)] {
+            assert_text_color(&buffer, row_of(&buffer, pull), Color::Indexed(gray));
+        }
+    }
 }
