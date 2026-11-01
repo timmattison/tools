@@ -164,6 +164,15 @@ fn fit_right(text: &str, width: usize) -> String {
 /// `texts[0]` is the bare repository name. The repository cell keeps the end of
 /// a name that does not fit, and `is_stale` puts the [`STALE_MARK`] before the
 /// name (see [`fit_repo`]). The other text cells keep their start.
+///
+/// The line holds these spans, in this order:
+///
+/// 1. The left marker cell and one space, in [`MARK_STYLE`].
+/// 2. The text cells, with one space between them, in the style of the line.
+/// 3. One space and the right marker cell, in [`MARK_STYLE`].
+///
+/// The two marker cells keep `Color::Reset`, whatever color the line gets.
+/// The concatenated text of the spans is the whole row.
 fn cells(
     widths: Widths,
     marker: &str,
@@ -172,10 +181,9 @@ fn cells(
     id: &str,
     started: &str,
     time: &str,
-) -> String {
+) -> Line<'static> {
     let [repo, workflow, branch, title] = texts;
-    [
-        pad_right(marker, MARKER_WIDTH),
+    let text = [
         fit_repo(repo, is_stale, widths.repo),
         fit(workflow, widths.workflow),
         fit_right(id, ID_WIDTH),
@@ -183,10 +191,19 @@ fn cells(
         fit(title, widths.title),
         pad_right(started, STARTED_WIDTH),
         pad_right(time, TIME_WIDTH),
-        pad_right(marker, MARKER_WIDTH),
     ]
-    .join(" ")
+    .join(" ");
+    Line::from(vec![
+        Span::styled(format!("{} ", pad_right(marker, MARKER_WIDTH)), MARK_STYLE),
+        Span::raw(text),
+        Span::styled(format!(" {}", pad_right(marker, MARKER_WIDTH)), MARK_STYLE),
+    ])
 }
+
+/// The style of a marker cell. A terminal draws an emoji in its own colors,
+/// thus a marker cell (and the sleeping mark) never takes the color of the row.
+/// The explicit `Color::Reset` wins over the style of the line.
+const MARK_STYLE: Style = Style::new().fg(Color::Reset);
 
 /// Joins the cells of the header line. One space stands between cells.
 ///
@@ -383,7 +400,9 @@ where
 /// The line of one run. `state` is the state that the row shows, not the state
 /// that GitHub reports. It sets the marker and the time cells. A stale run
 /// has the [`STALE_MARK`] before its repository name. `cells` puts the mark
-/// there and cuts the name at its start when the name does not fit.
+/// there and cuts the name at its start when the name does not fit. The line
+/// holds the spans of `cells`: the two marker cells keep `Color::Reset`, and
+/// the text cells take the style that the caller gives the line.
 fn run_line<Tz: TimeZone>(
     run: &Run,
     state: RunState,
@@ -391,7 +410,7 @@ fn run_line<Tz: TimeZone>(
     now: DateTime<Utc>,
     tz: &Tz,
     widths: Widths,
-) -> String
+) -> Line<'static>
 where
     Tz::Offset: Display,
 {
@@ -421,13 +440,14 @@ where
 /// The row uses the columns of a run row. The workflow cell holds the word of
 /// the state of the entry, and the ID part holds the number of the pull
 /// request. The started cell is the time that the pull request joined the
-/// queue, and the time cell is how long it has waited until `now`.
+/// queue, and the time cell is how long it has waited until `now`. The line
+/// holds the spans of `cells`.
 fn entry_line<Tz: TimeZone>(
     entry: &QueueEntry,
     now: DateTime<Utc>,
     tz: &Tz,
     widths: Widths,
-) -> String
+) -> Line<'static>
 where
     Tz::Offset: Display,
 {
@@ -449,13 +469,13 @@ where
 /// the outcome, and the ID part holds the number of the pull request. The
 /// started cell is the time that the pull request joined the queue, and the
 /// time cell is how long it stayed in the queue. Both cells are empty when
-/// the time that it joined is not known.
+/// the time that it joined is not known. The line holds the spans of `cells`.
 fn departure_line<Tz: TimeZone>(
     departure: &Departure,
     now: DateTime<Utc>,
     tz: &Tz,
     widths: Widths,
-) -> String
+) -> Line<'static>
 where
     Tz::Offset: Display,
 {
@@ -966,6 +986,21 @@ fn layout_status(left: &str, mark: Option<&str>, width: usize) -> StatusLayout {
     }
 }
 
+/// The style of the text of a board row.
+///
+/// The text of a finished run row fades along [`ROW_RAMP`], from index 253 at
+/// age zero to index 238 at the age of the window. The age of a run row is the
+/// time since the run ended. Live work and the highlighted row keep the default
+/// color. Every other row keeps the default color too.
+fn age_style(row: &Row<'_>, now: DateTime<Utc>, window: Duration) -> Style {
+    match row {
+        Row::Run { run, state, .. } if state.is_finished() => {
+            Style::default().fg(ROW_RAMP.color(span(run.updated_at, now), window))
+        }
+        _ => Style::default(),
+    }
+}
+
 /// Writes one line of text at row `y` of the area and returns the buffer row.
 fn put(buffer: &mut Buffer, y: usize, text: &str, style: Style) -> u16 {
     let area = buffer.area;
@@ -997,7 +1032,10 @@ fn reverse_if(selected: bool, buffer: &mut Buffer, area: Rect, y: u16) {
 /// Draws one frame: the column header, the board rows, and the status line.
 ///
 /// The board rows come from [`Board::view`] with the frame height minus the
-/// two fixed lines. Times show in the time zone `tz`. With a `prompt`, the box
+/// two fixed lines. Times show in the time zone `tz`. The text of a finished
+/// row fades along [`ROW_RAMP`] over the window of the board (see
+/// [`age_style`]). The marker cells and the sleeping mark of a row keep
+/// `Color::Reset`. With a `prompt`, the box
 /// of the cancel prompt draws last, over the rows (see [`draw_prompt`]). While
 /// the box shows, the status line has no key hints. This function never
 /// panics, whatever the size of the frame.
@@ -1017,8 +1055,9 @@ pub fn draw<Tz: TimeZone>(
     }
     let widths = Widths::for_width(usize::from(area.width));
     let height = usize::from(area.height).saturating_sub(FIXED_LINES);
+    let window = board.window();
     let spans = Spans {
-        window: board.window(),
+        window,
         history_reach: board.history_reach(now),
     };
     // The first refresh cycle ended. Until then, the board can miss runs.
@@ -1052,7 +1091,11 @@ pub fn draw<Tz: TimeZone>(
                 stale,
             } => {
                 let line = run_line(run, *state, *stale, now, tz, widths);
-                let y = put(buffer, index + 1, &line, Style::default());
+                let y = put_line(
+                    buffer,
+                    index + 1,
+                    &line.style(age_style(row, now, window)),
+                );
                 reverse_if(*selected, buffer, area, y);
             }
             Row::Job {
@@ -1066,7 +1109,11 @@ pub fn draw<Tz: TimeZone>(
             }
             Row::Entry { entry, selected } => {
                 let line = entry_line(entry, now, tz, widths);
-                let y = put(buffer, index + 1, &line, Style::default());
+                let y = put_line(
+                    buffer,
+                    index + 1,
+                    &line.style(age_style(row, now, window)),
+                );
                 reverse_if(*selected, buffer, area, y);
             }
             Row::Departure {
@@ -1074,7 +1121,11 @@ pub fn draw<Tz: TimeZone>(
                 selected,
             } => {
                 let line = departure_line(departure, now, tz, widths);
-                let y = put(buffer, index + 1, &line, Style::default());
+                let y = put_line(
+                    buffer,
+                    index + 1,
+                    &line.style(age_style(row, now, window)),
+                );
                 reverse_if(*selected, buffer, area, y);
             }
             Row::JobsLoading => put_status_row(buffer, index + 1, JOBS_LOADING),
@@ -2996,7 +3047,7 @@ mod tests {
                     Widths::for_width(frame),
                 );
                 assert_eq!(
-                    display_width(&line),
+                    display_width(&line.to_string()),
                     frame,
                     "frame {frame}, stale {is_stale}: {line:?}"
                 );
@@ -4749,7 +4800,7 @@ mod tests {
                     "2026-10-14T11:00:00Z",
                     "2026-10-14T11:30:00Z",
                 );
-                let line = run_line(&run, state, false, now(), &utc(), widths);
+                let line = run_line(&run, state, false, now(), &utc(), widths).to_string();
                 assert_eq!(display_width(&line), usize::from(w), "{state:?}: {line:?}");
             }
             for (id, state) in MARKER_JOB_STATES {
@@ -5258,8 +5309,8 @@ mod tests {
         };
         let widths = Widths::for_width(90);
         let lines = [
-            entry_line(&entry, now(), &utc(), widths),
-            departure_line(&departure, now(), &utc(), widths),
+            entry_line(&entry, now(), &utc(), widths).to_string(),
+            departure_line(&departure, now(), &utc(), widths).to_string(),
         ];
         let fresh = run(
             9,
@@ -5271,7 +5322,8 @@ mod tests {
             "2026-10-14T11:45:30Z",
             "2026-10-14T11:59:00Z",
         );
-        let reference = run_line(&fresh, RunState::Running, false, now(), &utc(), widths);
+        let reference =
+            run_line(&fresh, RunState::Running, false, now(), &utc(), widths).to_string();
         assert!(reference.contains(CUT), "{reference:?}");
         for line in lines {
             assert!(line.contains(CUT), "{line:?}");
