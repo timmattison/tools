@@ -1027,10 +1027,16 @@ fn layout_status(left: &str, mark: Option<&str>, width: usize) -> StatusLayout {
 /// The text of a finished run row fades along [`ROW_RAMP`], from index 253 at
 /// age zero to index 238 at the age of the window. The age of a run row is the
 /// time since the run ended. Live work and the highlighted row keep the default
-/// color. Every other row keeps the default color too.
+/// color, because a reversed dark gray gives a dark bar that is hard to see.
+/// Every other row keeps the default color too.
 fn age_style(row: &Row<'_>, now: DateTime<Utc>, window: Duration) -> Style {
     match row {
-        Row::Run { run, state, .. } if state.is_finished() => {
+        Row::Run {
+            run,
+            state,
+            selected: false,
+            ..
+        } if state.is_finished() => {
             Style::default().fg(ROW_RAMP.color(span(run.updated_at, now), window))
         }
         _ => Style::default(),
