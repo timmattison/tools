@@ -944,6 +944,45 @@ fn refuses_a_locked_worktree_even_with_force() {
     );
 }
 
+/// The lock refusal must not depend on `--force`. Each other lock test in this
+/// file passes `--force`. Thus, if the lock check moved under that flag, those
+/// tests stay green, but a plain `gitnuke` goes on to `git worktree remove` and
+/// prints the raw `fatal:` of git. `--safe` is the path that `gitclean` takes.
+/// `hold-worktree` locks a worktree to put it on hold, and each way to nuke
+/// that worktree must refuse it with the same code.
+#[test]
+fn refuses_a_locked_worktree_without_force() {
+    for flags in [&[][..], &["--safe"][..]] {
+        let fixture = Fixture::new();
+        let worktree = fixture.add_worktree("feature-wt", "feature");
+        let main = fixture.main_repo();
+        fixture.lock_worktree(&worktree, Some("on hold"));
+
+        let mut args = flags.to_vec();
+        args.push("feature");
+        let output = gitnuke(&main, &args);
+        let message = combined(&output);
+
+        assert_exit_code(
+            &output,
+            exit_codes::LOCKED_WORKTREE,
+            &format!("gitnuke {flags:?} must refuse a locked worktree with its own code"),
+        );
+        assert!(
+            worktree.exists(),
+            "gitnuke {flags:?}: the locked worktree must survive: {message}"
+        );
+        assert!(
+            worktree_registered(&main, &worktree),
+            "gitnuke {flags:?}: git must still track the locked worktree: {message}"
+        );
+        assert!(
+            branch_exists(&main, "feature"),
+            "gitnuke {flags:?}: the branch must survive a refused removal: {message}"
+        );
+    }
+}
+
 /// `git worktree lock --reason` records *why* the worktree was locked. That
 /// reason is the whole reason the lock is respectable, so the refusal has to
 /// quote it back rather than making the caller go look it up.
