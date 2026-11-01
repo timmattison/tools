@@ -6003,7 +6003,11 @@ mod tests {
                         Some("2026-10-14T07:01:00Z"),
                         Some("2026-10-14T07:05:00Z"),
                     );
-                    if index == 0 { on("mbp", built) } else { built }
+                    if index == 0 {
+                        on("mbp", built)
+                    } else {
+                        built
+                    }
                 })
                 .collect(),
         );
