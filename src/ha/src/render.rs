@@ -304,10 +304,16 @@ fn fit_runner(name: &RunnerName, room: usize) -> Option<String> {
 ///
 /// The line holds these spans, in this order:
 ///
-/// 1. The marker, a space, the text, and, when a runner name shows, the space
-///    before it.
-/// 2. The runner name, when it shows.
-/// 3. The padding of the text cell and the other cells.
+/// 1. The left marker cell and one space, in [`MARK_STYLE`].
+/// 2. The text, and, when a runner name shows, the space before it, in the
+///    style of the line.
+/// 3. The runner name, when it shows, in [`RUNNER_STYLE`].
+/// 4. The padding of the text cell and the other cells, in the style of the
+///    line.
+/// 5. One space and the right marker cell, in [`MARK_STYLE`].
+///
+/// The two marker cells keep `Color::Reset`, and the runner name keeps its
+/// cyan, whatever color the line gets.
 fn job_cells(
     widths: Widths,
     marker: &str,
@@ -322,8 +328,11 @@ fn job_cells(
     let room = cell.saturating_sub(text_width(&text) + 1);
     let runner = runner.and_then(|name| fit_runner(name, room));
     let mut used = text_width(&text);
-    let mut lead = format!("{} {text}", pad_right(marker, MARKER_WIDTH));
-    let mut spans = Vec::with_capacity(3);
+    let mut lead = text;
+    let mut spans = vec![Span::styled(
+        format!("{} ", pad_right(marker, MARKER_WIDTH)),
+        MARK_STYLE,
+    )];
     if let Some(name) = &runner {
         lead.push(' ');
         used += 1 + text_width(name);
@@ -337,13 +346,16 @@ fn job_cells(
         " ".repeat(widths.branch + 1 + widths.title),
         pad_right(started, STARTED_WIDTH),
         pad_right(time, TIME_WIDTH),
-        pad_right(marker, MARKER_WIDTH),
     ]
     .join(" ");
     spans.push(Span::raw(format!(
         "{} {rest}",
         " ".repeat(cell.saturating_sub(used))
     )));
+    spans.push(Span::styled(
+        format!(" {}", pad_right(marker, MARKER_WIDTH)),
+        MARK_STYLE,
+    ));
     Line::from(spans)
 }
 
@@ -1030,7 +1042,9 @@ fn layout_status(left: &str, mark: Option<&str>, width: usize) -> StatusLayout {
 /// departure row is the time since the pull request left the queue. Live work
 /// (an active run and a queue entry) and the highlighted row keep the default
 /// color, because a reversed dark gray gives a dark bar that is hard to see.
-/// Every other row keeps the default color too.
+/// A job row of a finished run fades with its run, by the time since the run
+/// ended. A job row of an active run keeps the default color. Every other row
+/// keeps the default color too.
 fn age_style(row: &Row<'_>, now: DateTime<Utc>, window: Duration) -> Style {
     match row {
         Row::Run {
@@ -1039,6 +1053,13 @@ fn age_style(row: &Row<'_>, now: DateTime<Utc>, window: Duration) -> Style {
             selected: false,
             ..
         } if state.is_finished() => {
+            Style::default().fg(ROW_RAMP.color(span(run.updated_at, now), window))
+        }
+        Row::Job {
+            run,
+            selected: false,
+            ..
+        } if run.state.is_finished() => {
             Style::default().fg(ROW_RAMP.color(span(run.updated_at, now), window))
         }
         Row::Departure {
@@ -1146,9 +1167,10 @@ pub fn draw<Tz: TimeZone>(
                 job,
                 last,
                 selected,
+                ..
             } => {
                 let line = job_line(job, *last, now, tz, widths);
-                let y = put_line(buffer, index + 1, &line);
+                let y = put_line(buffer, index + 1, &line.style(age_style(row, now, window)));
                 reverse_if(*selected, buffer, area, y);
             }
             Row::Entry { entry, selected } => {

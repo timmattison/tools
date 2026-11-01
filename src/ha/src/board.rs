@@ -100,6 +100,9 @@ pub enum Row<'a> {
         last: bool,
         /// True for the one row that the selection marks.
         selected: bool,
+        /// The run that the job belongs to. The render reads its state and
+        /// end time to fade the job row with its run.
+        run: &'a Run,
     },
     /// The row of an expanded run before the first answer: "Loading jobs…".
     JobsLoading,
@@ -1104,17 +1107,19 @@ fn push_runs<'a>(
             stale: view.errors.contains_key(&run.repo),
         });
         if view.expanded.contains(&run.id) {
-            push_jobs(rows, answer, here.and_then(|selection| selection.job));
+            push_jobs(rows, run, answer, here.and_then(|selection| selection.job));
         }
     }
 }
 
 /// Adds the block of rows of one expanded run to `rows`.
 ///
+/// `run` is the run that owns the block, and each job row carries it.
 /// `answer` is the job answer that the board holds for the run. `None` gives
 /// the loading row. The job row at the position of `selected` gets the mark.
 fn push_jobs<'a>(
     rows: &mut Vec<Row<'a>>,
+    run: &'a Run,
     answer: Option<&'a Jobs>,
     selected: Option<(JobId, usize)>,
 ) {
@@ -1127,6 +1132,7 @@ fn push_jobs<'a>(
                 job,
                 last: index + 1 == list.len(),
                 selected: marked(index),
+                run,
             }));
         }
         Some(Jobs::Failed { jobs, error }) => {
@@ -1134,6 +1140,7 @@ fn push_jobs<'a>(
                 job,
                 last: false,
                 selected: marked(index),
+                run,
             }));
             rows.push(Row::JobsError(error));
         }
@@ -1247,6 +1254,7 @@ mod tests {
                     job,
                     last,
                     selected,
+                    ..
                 } => format!(
                     "{}({}){}",
                     if *last { "LastJob" } else { "Job" },
