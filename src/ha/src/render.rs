@@ -734,6 +734,53 @@ fn message_color(age: Duration) -> Color {
     Color::Indexed(MESSAGE_START_GRAY - step)
 }
 
+/// One linear fade along the gray ramp of the xterm 256-color palette
+/// (index 232 to 255).
+///
+/// The fade starts at the index `start` for an age of zero and ends at the
+/// index `floor`. A lower index is a darker gray. The palette ramp is in every
+/// terminal that shows 256 colors, thus `ha` needs no detection of truecolor
+/// support. The status message and the text of a finished row use this one
+/// type, thus both fades round and clamp in the same way.
+#[derive(Debug, Clone, Copy)]
+struct GrayRamp {
+    /// The palette index at an age of zero.
+    start: u8,
+    /// The palette index at the end of the ramp and after it. The fade never
+    /// goes darker.
+    floor: u8,
+}
+
+impl GrayRamp {
+    /// The gray of the age `age` on a ramp that ends at the age `end`.
+    ///
+    /// An age of zero gives the start gray. An age of `end` or more gives the
+    /// floor gray. In between, the index falls by one for each equal part of
+    /// `end`, and the division rounds down. The gray never gets lighter as the
+    /// age grows. An `end` of zero gives the floor gray and does not panic.
+    fn color(self, age: Duration, end: Duration) -> Color {
+        Color::Indexed(self.start)
+    }
+}
+
+/// The ramp of a status message: index 252 (208, 208, 208), the light gray
+/// that the push status of `gsw` starts with, to index 232 (8, 8, 8), which is
+/// near black. It runs over [`MESSAGE_LIFETIME`].
+const MESSAGE_RAMP: GrayRamp = GrayRamp {
+    start: 252,
+    floor: 232,
+};
+/// The ramp of the text of a finished row: index 253 (218, 218, 218) to index
+/// 238 (68, 68, 68). Index 253 is the gray nearest to the subject color of
+/// `gsw`, which is (220, 220, 220). Index 238 is the gray nearest to 220 times
+/// 0.30, which is 66, thus `ha` keeps the floor ratio of `gsw` (`FADE_FLOOR`
+/// in `src/gsw/src/age.rs`). The text never goes to black. With the default
+/// window of 8 hours, one of the 15 steps is 32 minutes.
+const ROW_RAMP: GrayRamp = GrayRamp {
+    start: 253,
+    floor: 238,
+};
+
 /// The text of the refresh slot before the first cycle ends.
 const LOADING: &str = "loading…";
 /// The text before the age of the last refresh.
@@ -5572,6 +5619,72 @@ mod tests {
                 "⚠ merge queues: GitHub refused the GraphQL query: API rate limit exceeded"
             ),
             "{line}"
+        );
+    }
+
+    /// The palette index of a color that must be an indexed color.
+    fn gray_index(color: Color) -> u8 {
+        match color {
+            Color::Indexed(index) => index,
+            other => panic!("expected an indexed color, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_row_of_age_zero_has_the_start_gray() {
+        assert_eq!(
+            ROW_RAMP.color(Duration::ZERO, Duration::from_hours(8)),
+            Color::Indexed(253)
+        );
+    }
+
+    #[test]
+    fn a_row_of_one_window_or_more_has_the_floor_gray() {
+        let window = Duration::from_hours(8);
+        assert_eq!(ROW_RAMP.color(window, window), Color::Indexed(238));
+        assert_eq!(
+            ROW_RAMP.color(Duration::from_hours(16), window),
+            Color::Indexed(238)
+        );
+    }
+
+    #[test]
+    fn a_row_gray_never_gets_lighter_as_the_age_grows() {
+        let window = Duration::from_hours(8);
+        let indexes: Vec<u8> = (0..=9 * 60)
+            .map(|minutes| gray_index(ROW_RAMP.color(Duration::from_mins(minutes), window)))
+            .collect();
+        assert!(indexes.windows(2).all(|pair| pair[1] <= pair[0]));
+        assert_eq!(indexes.first(), Some(&253));
+        assert_eq!(indexes.last(), Some(&238));
+    }
+
+    #[test]
+    fn a_window_of_zero_gives_the_floor_with_no_panic() {
+        assert_eq!(
+            ROW_RAMP.color(Duration::ZERO, Duration::ZERO),
+            Color::Indexed(238)
+        );
+        assert_eq!(
+            ROW_RAMP.color(Duration::from_secs(60), Duration::ZERO),
+            Color::Indexed(238)
+        );
+    }
+
+    #[test]
+    fn the_default_window_steps_every_32_minutes() {
+        let window = Duration::from_hours(8);
+        assert_eq!(
+            ROW_RAMP.color(Duration::from_secs(31 * 60 + 59), window),
+            Color::Indexed(253)
+        );
+        assert_eq!(
+            ROW_RAMP.color(Duration::from_mins(32), window),
+            Color::Indexed(252)
+        );
+        assert_eq!(
+            ROW_RAMP.color(Duration::from_hours(4), window),
+            Color::Indexed(246)
         );
     }
 }
