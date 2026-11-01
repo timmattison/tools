@@ -5809,4 +5809,51 @@ mod tests {
         // 238 and the start 253.
         assert_text_color(&buffer, y, Color::Indexed(246));
     }
+
+    #[test]
+    fn the_fade_starts_at_the_start_gray_for_a_run_that_just_ended() {
+        let mut board = fade_board(Duration::from_hours(8), "acme/widgets", "2026-10-14T12:00:00Z");
+        let buffer = render_with(120, 10, &mut board, &loaded());
+        assert_text_color(&buffer, row_of(&buffer, "7002"), Color::Indexed(253));
+    }
+
+    #[test]
+    fn the_fade_stretches_with_the_window() {
+        // 12 hours is half of a 24 hour window.
+        let mut board = fade_board(
+            Duration::from_hours(24),
+            "acme/widgets",
+            "2026-10-14T00:00:00Z",
+        );
+        let buffer = render_with(120, 10, &mut board, &loaded());
+        assert_text_color(&buffer, row_of(&buffer, "7002"), Color::Indexed(246));
+    }
+
+    #[test]
+    fn a_run_that_is_not_finished_has_no_fade() {
+        let mut board = four_run_board();
+        let buffer = render_with(120, 10, &mut board, &loaded());
+        assert_text_color(&buffer, row_of(&buffer, "Add release job"), Color::Reset);
+    }
+
+    #[test]
+    fn a_queue_entry_has_no_fade() {
+        let mut board = queue_frame_board();
+        let buffer = render_with(120, 20, &mut board, &loaded());
+        assert_text_color(&buffer, row_of(&buffer, "16020"), Color::Reset);
+    }
+
+    #[test]
+    fn the_marker_cells_of_a_faded_row_keep_the_colors_of_the_terminal() {
+        let mut board = four_run_board();
+        let buffer = render_with(120, 10, &mut board, &loaded());
+        // Row of run 3 ended 2h49m55s ago, row of run 4 ended 7h30m ago.
+        for (needle, gray) in [("Bump deps", 248), ("Broken build", 239)] {
+            let y = row_of(&buffer, needle);
+            assert_text_color(&buffer, y, Color::Indexed(gray));
+            for x in [0_u16, 1, 118, 119] {
+                assert_eq!(buffer[(x, y)].fg, Color::Reset, "{needle}, cell {x}");
+            }
+        }
+    }
 }
