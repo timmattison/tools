@@ -944,10 +944,10 @@ fn refuses_a_locked_worktree_even_with_force() {
     );
 }
 
-/// The lock refusal must not depend on `--force`. Each lock test above passes
-/// `--force`. Thus, if the lock check moved under that flag, those tests stay
-/// green, but a plain `gitnuke` goes on to `git worktree remove` and prints the
-/// raw `fatal:` of git. `--safe` is the path that `gitclean` takes.
+/// The lock refusal must not depend on `--force`. Each other lock test in this
+/// file passes `--force`. Thus, if the lock check moved under that flag, those
+/// tests stay green, but a plain `gitnuke` goes on to `git worktree remove` and
+/// prints the raw `fatal:` of git. `--safe` is the path that `gitclean` takes.
 /// `hold-worktree` locks a worktree to put it on hold, and each way to nuke
 /// that worktree must refuse it with the same code.
 #[test]
