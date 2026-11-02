@@ -856,40 +856,30 @@ fn header_line(
     let history = spans.history_text();
     let window = format_duration_setting(spans.window);
     let text = match (section, loaded) {
-        (Section::Active, true) => return active_line(&header.jobs, &header.runners),
-        (Section::Active, false) => ACTIVE_TITLE.to_owned(),
-        (Section::Recent, false) => {
-            let text = format!("Last {window}");
-            if history_shows {
-                text
-            } else {
-                with_started_word(&text, FINISHED_HEADER, widths)
-            }
-        }
-        (Section::Recent, true) => {
-            let text = format!(
-                "Last {window} · {passed} passed · {failed} failed · {cancelled} cancelled"
-            );
-            if history_shows {
-                text
-            } else {
-                with_started_word(&text, FINISHED_HEADER, widths)
-            }
-        }
         (Section::Queue, false) => "Merge queue".to_owned(),
         (Section::Queue, true) => format!("Merge queue · {count}"),
-        (Section::History, false) => with_started_word(
-            &format!("Merge history · Last {history}"),
-            FINISHED_HEADER,
-            widths,
+        (Section::Active, true) => return active_line(&header.jobs, &header.runners),
+        (Section::Active, false) => ACTIVE_TITLE.to_owned(),
+        (Section::History, false) => format!("Merge history · Last {history}"),
+        (Section::History, true) => format!(
+            "Merge history · Last {history} · {passed} merged · {failed} failed · {cancelled} removed"
         ),
-        (Section::History, true) => with_started_word(
-            &format!(
-                "Merge history · Last {history} · {passed} merged · {failed} failed · {cancelled} removed"
-            ),
-            FINISHED_HEADER,
-            widths,
-        ),
+        (Section::Recent, false) => format!("Last {window}"),
+        (Section::Recent, true) => {
+            format!("Last {window} · {passed} passed · {failed} failed · {cancelled} cancelled")
+        }
+    };
+    // One word heads the sections of finished rows: the merge history header
+    // when that section shows, else the recent header.
+    let heads_finished_rows = match section {
+        Section::History => true,
+        Section::Recent => !history_shows,
+        Section::Queue | Section::Active => false,
+    };
+    let text = if heads_finished_rows {
+        with_started_word(&text, FINISHED_HEADER, widths)
+    } else {
+        text
     };
     Line::from(Span::styled(text, HEADER_STYLE))
 }
