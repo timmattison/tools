@@ -13,7 +13,6 @@
 //! queue inside the window. The selection moves through the rows of all the
 //! sections.
 
-use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
@@ -100,7 +99,7 @@ impl JobCounts {
     }
 }
 
-/// The order of the runner names in the header of the active section.
+/// The key that orders the runner names in the header of the active section.
 ///
 /// The shortest name by display width in terminal columns comes first. Then
 /// the names sort by the text with no difference between capital and small
@@ -109,12 +108,9 @@ impl JobCounts {
 /// the screen. The long names of the GitHub-hosted runners (`GitHub Actions
 /// 1001`) go last, thus the edge cuts them and keeps the short names of the
 /// local runners.
-fn runner_order(a: &RunnerName, b: &RunnerName) -> Ordering {
-    let (a, b) = (a.as_str(), b.as_str());
-    a.width()
-        .cmp(&b.width())
-        .then_with(|| a.to_lowercase().cmp(&b.to_lowercase()))
-        .then_with(|| a.cmp(b))
+fn runner_key(name: &RunnerName) -> (usize, String, &str) {
+    let name = name.as_str();
+    (name.width(), name.to_lowercase(), name)
 }
 
 /// One row of the board.
@@ -899,7 +895,7 @@ impl Board {
             .filter(|job| matches!(job.state, RunState::Queued | RunState::Running))
             .filter_map(|job| job.runner.as_ref())
             .collect();
-        names.sort_by(|a, b| runner_order(a, b));
+        names.sort_by_cached_key(|&name| runner_key(name));
         names.dedup();
         names
     }
