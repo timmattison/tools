@@ -6088,7 +6088,7 @@ mod tests {
                     16001,
                     "bump-serde",
                     "Bump serde",
-                    "10:00:00",
+                    "10:12:40",
                     "12m 40s"
                 ),
                 queue_golden(
@@ -6097,10 +6097,18 @@ mod tests {
                     15998,
                     "",
                     "Remove the thing",
-                    "09:00:00",
+                    "09:08:02",
                     "8m 02s"
                 ),
-                queue_golden("🪦", "removed", 15990, "old-branch", "Old work", "", ""),
+                queue_golden(
+                    "🪦",
+                    "removed",
+                    15990,
+                    "old-branch",
+                    "Old work",
+                    "08:00:00",
+                    ""
+                ),
             ]
         );
         assert!(text[10].starts_with("Last 8h"), "{:?}", text[10]);
@@ -6192,6 +6200,132 @@ mod tests {
             text[history + 1],
             "   No pull request left the merge queue in the last 2h 00m."
         );
+    }
+
+    /// A board with a merge history of `rust-lang/cargo` that holds these
+    /// departures, and a window of `window`.
+    fn history_board(window: Duration, departures: Vec<Departure>) -> Board {
+        let cargo = repo("rust-lang/cargo");
+        let mut board = Board::new(window);
+        board.set_queues(&BTreeSet::from([cargo.clone()]));
+        board.set_queue(
+            &cargo,
+            Ok(Vec::new()),
+            Ok(History {
+                departures,
+                cut_at: None,
+            }),
+        );
+        board
+    }
+
+    /// The index of the first line that holds `text`.
+    fn line_holding(text: &[String], needle: &str) -> usize {
+        text.iter()
+            .position(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("no line holds {needle:?}: {text:?}"))
+    }
+
+    #[test]
+    fn a_departure_of_today_shows_when_it_left_and_how_long_it_stayed() {
+        let mut board = history_board(
+            Duration::from_hours(8),
+            vec![departure(
+                16001,
+                Outcome::Merged,
+                "bump-serde",
+                "Bump serde",
+                Some("2026-10-14T10:00:00Z"),
+                "2026-10-14T10:12:40Z",
+            )],
+        );
+        let text = lines(&render_with(120, 12, &mut board, &loaded()));
+        let row = line_holding(&text, "Bump serde");
+        assert_eq!(started_cells(&text, row), "10:12:40");
+        assert_eq!(time_cells(&text, row), "12m 40s");
+    }
+
+    #[test]
+    fn a_departure_of_an_earlier_day_shows_the_date_and_the_clock_of_when_it_left() {
+        let mut board = history_board(
+            Duration::from_hours(24),
+            vec![departure(
+                16001,
+                Outcome::Merged,
+                "bump-serde",
+                "Bump serde",
+                Some("2026-10-13T19:30:00Z"),
+                "2026-10-13T20:00:00Z",
+            )],
+        );
+        let text = lines(&render_with(120, 12, &mut board, &loaded()));
+        let row = line_holding(&text, "Bump serde");
+        assert_eq!(started_cells(&text, row), "10-13 20:00");
+        assert_eq!(time_cells(&text, row), "30m 00s");
+    }
+
+    #[test]
+    fn a_departure_with_an_unknown_join_time_shows_when_it_left_and_no_time() {
+        let mut board = history_board(
+            Duration::from_hours(8),
+            vec![departure(
+                15990,
+                Outcome::Removed,
+                "old-branch",
+                "Old work",
+                None,
+                "2026-10-14T08:00:00Z",
+            )],
+        );
+        let text = lines(&render_with(120, 12, &mut board, &loaded()));
+        let row = line_holding(&text, "Old work");
+        assert_eq!(started_cells(&text, row), "08:00:00");
+        assert_eq!(time_cells(&text, row), "");
+    }
+
+    #[test]
+    fn the_started_times_of_the_history_rows_decrease_from_the_top_down() {
+        let mut board = history_board(
+            Duration::from_hours(8),
+            vec![
+                departure(
+                    1,
+                    Outcome::Merged,
+                    "a",
+                    "Work A",
+                    Some("2026-10-14T09:00:00Z"),
+                    "2026-10-14T10:30:00Z",
+                ),
+                departure(
+                    2,
+                    Outcome::Merged,
+                    "b",
+                    "Work B",
+                    Some("2026-10-14T10:00:00Z"),
+                    "2026-10-14T10:15:00Z",
+                ),
+                departure(
+                    3,
+                    Outcome::Failed,
+                    "c",
+                    "Work C",
+                    Some("2026-10-14T09:30:00Z"),
+                    "2026-10-14T09:45:00Z",
+                ),
+            ],
+        );
+        let text = lines(&render_with(120, 14, &mut board, &loaded()));
+        let cells: Vec<String> = ["Work A", "Work B", "Work C"]
+            .iter()
+            .map(|title| started_cells(&text, line_holding(&text, title)))
+            .collect();
+        assert_eq!(cells, ["10:30:00", "10:15:00", "09:45:00"]);
+        assert!(cells.windows(2).all(|pair| pair[0] > pair[1]), "{cells:?}");
+        let rows: Vec<usize> = ["Work A", "Work B", "Work C"]
+            .iter()
+            .map(|title| line_holding(&text, title))
+            .collect();
+        assert!(rows.windows(2).all(|pair| pair[0] < pair[1]), "{rows:?}");
     }
 
     #[test]
