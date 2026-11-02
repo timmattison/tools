@@ -13,7 +13,7 @@ use ratatui::Frame;
 use textfit::{pad_right, truncate_left_to_budget, truncate_to_budget};
 use unicode_width::UnicodeWidthStr;
 
-use crate::board::{Board, Header, Row, Section};
+use crate::board::{Board, Header, JobCounts, Row, Section};
 use crate::cancel::Confirm;
 use crate::job::{Job, RunnerName};
 use crate::queue::{Departure, EntryState, Outcome, PullNumber, QueueEntry};
@@ -681,9 +681,32 @@ impl Spans {
     }
 }
 
+/// The text of a loaded `Running` header: the word and the five job counts.
+///
+/// The counts are in the order queued, running, passed, failed, and skipped.
+/// Each count is a number, one space, and the marker of its state. Each count
+/// shows also when it is 0.
+fn active_counts_text(jobs: &JobCounts) -> String {
+    let counts = [
+        (jobs.queued, RunState::Queued),
+        (jobs.running, RunState::Running),
+        (jobs.passed, RunState::Passed),
+        (jobs.failed, RunState::Failed),
+        (jobs.skipped, RunState::Skipped),
+    ];
+    let cells: Vec<String> = counts
+        .iter()
+        .map(|(count, state)| format!("{count} {}", marker(*state)))
+        .collect();
+    format!("Running · {}", cells.join(" · "))
+}
+
 /// The line of a section header.
 ///
 /// The line names the section of `header` and shows its counts.
+///
+/// A loaded running header names the counts of the jobs by state (see
+/// [`active_counts_text`]).
 ///
 /// A loaded recent header names the counts of passed, failed, and cancelled
 /// runs. Each count shows also when it is 0.
@@ -704,7 +727,7 @@ fn header_line(header: &Header<'_>, spans: Spans, loaded: bool) -> String {
     let window = format_duration_setting(spans.window);
     match (section, loaded) {
         (Section::Active, false) => "Running".to_owned(),
-        (Section::Active, true) => format!("Running · {count}"),
+        (Section::Active, true) => active_counts_text(&header.jobs),
         (Section::Recent, false) => format!("Last {window}"),
         (Section::Recent, true) => {
             format!("Last {window} · {passed} passed · {failed} failed · {cancelled} cancelled")
