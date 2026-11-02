@@ -1786,7 +1786,7 @@ mod tests {
                 "❌ ├ lint                         107851237795                                                    11:46:00    45s     ❌",
                 "🏃 └ test                         107851237796                                                    11:50:10    9m 50s  🏃",
                 "Last 8h · 1 passed · 0 failed · 0 cancelled",
-                "✅ acme/widgets          Release   39149711502 issue-11     Bump deps                             09:00:00    10m 05s ✅",
+                "✅ acme/widgets          Release   39149711502 issue-11     Bump deps                             09:10:05    10m 05s ✅",
             ]
         );
     }
@@ -1803,8 +1803,8 @@ mod tests {
                 "🏃 timmattison/tools     CI                  1 main         Fix the thing                         11:45:30    14m 30s 🏃",
                 "⏳ acme/widgets          Release             2 issue-12     Add release job                       11:58:00    2m 00s  ⏳",
                 "Last 8h · 1 passed · 1 failed · 0 cancelled",
-                "✅ timmattison/tools     CI                  3 main         Bump deps                             09:00:00    10m 05s ✅",
-                "❌ acme/widgets          Release             4 issue-11     Broken build                          10-13 23:50 4h 40m  ❌",
+                "✅ timmattison/tools     CI                  3 main         Bump deps                             09:10:05    10m 05s ✅",
+                "❌ acme/widgets          Release             4 issue-11     Broken build                          04:30:00    4h 40m   ❌",
                 "",
                 "",
                 "updated 30s ago      ·  ↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  r refresh  q quit",
@@ -2379,6 +2379,104 @@ mod tests {
         assert_eq!(started_cells(&in_tokyo, 3), "01:00:00");
         assert_eq!(started_cells(&in_utc, 2), "10-13 14:59");
         assert_eq!(started_cells(&in_utc, 3), "10-13 16:00");
+    }
+
+    #[test]
+    fn the_recent_rows_show_when_each_run_finished() {
+        let mut board = Board::new(Duration::from_hours(8));
+        board.replace(
+            repo("acme/widgets"),
+            vec![
+                run(
+                    39_149_840_084,
+                    "acme/widgets",
+                    "CI",
+                    "issue-12",
+                    "Add a cache",
+                    RunState::Running,
+                    "2026-10-14T11:45:30Z",
+                    "2026-10-14T11:59:00Z",
+                ),
+                run(
+                    39_149_840_090,
+                    "acme/widgets",
+                    "CI",
+                    "main",
+                    "Release build",
+                    RunState::Passed,
+                    "2026-10-14T10:28:00Z",
+                    "2026-10-14T11:58:00Z",
+                ),
+                run(
+                    39_149_840_091,
+                    "acme/widgets",
+                    "CI",
+                    "issue-11",
+                    "Fix the docs",
+                    RunState::Passed,
+                    "2026-10-14T11:35:00Z",
+                    "2026-10-14T11:40:00Z",
+                ),
+            ],
+            now(),
+        );
+        let text = lines(&render_with(100, 10, &mut board, &loaded()));
+        let running = row_holding(&text, "39149840084");
+        let later = row_holding(&text, "39149840090");
+        let earlier = row_holding(&text, "39149840091");
+        // The running row keeps its start time.
+        assert_eq!(started_cells(&text, running), "11:45:30");
+        // The order of the rows does not change.
+        assert!(later < earlier, "{text:?}");
+        // The finished rows show the finish time, and the time cell shows the run time.
+        assert_eq!(started_cells(&text, later), "11:58:00");
+        assert_eq!(started_cells(&text, earlier), "11:40:00");
+        assert_eq!(time_cells(&text, later), "1h 30m");
+        assert_eq!(time_cells(&text, earlier), "5m 00s");
+    }
+
+    #[test]
+    fn the_finish_time_follows_the_time_zone() {
+        // The runs finished about 20 hours before now, thus a window of 48h holds them.
+        let mut board = Board::new(Duration::from_hours(48));
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(
+                    1,
+                    "a/x",
+                    "CI",
+                    "main",
+                    "finished early",
+                    RunState::Passed,
+                    "2026-10-13T14:00:00Z",
+                    "2026-10-13T14:59:00Z",
+                ),
+                run(
+                    2,
+                    "a/x",
+                    "CI",
+                    "main",
+                    "finished late",
+                    RunState::Failed,
+                    "2026-10-13T14:50:00Z",
+                    "2026-10-13T16:00:00Z",
+                ),
+            ],
+            now(),
+        );
+        let tokyo = chrono::FixedOffset::east_opt(9 * 3_600).expect("nine hours is valid");
+        let in_tokyo = lines(&render_in(120, 10, &mut board, &Status::default(), &tokyo));
+        let in_utc = lines(&render_with(120, 10, &mut board, &Status::default()));
+        let early = row_holding(&in_tokyo, "finished early");
+        let late = row_holding(&in_tokyo, "finished late");
+        // Tokyo reads 21:00 on 10-14 now. 14:59 UTC is 23:59 on 10-13 there,
+        // and 16:00 UTC is 01:00 on 10-14 there. Thus the late run finished
+        // today in Tokyo, although it started on 10-13 there.
+        assert_eq!(started_cells(&in_tokyo, early), "10-13 23:59");
+        assert_eq!(started_cells(&in_tokyo, late), "01:00:00");
+        assert_eq!(started_cells(&in_utc, early), "10-13 14:59");
+        assert_eq!(started_cells(&in_utc, late), "10-13 16:00");
     }
 
     #[test]
@@ -4725,9 +4823,9 @@ mod tests {
     const MARKER_ROWS: [ExpectedCells; 12] = [
         (39_149_840_001, Some(("11:00:00", "1h 00m"))),
         (39_149_840_002, Some(("11:10:00", "50m 00s"))),
-        (39_149_840_003, Some(("10:00:00", "5m 00s"))),
-        (39_149_840_004, Some(("10:10:00", "10m 00s"))),
-        (39_149_840_005, Some(("10:30:00", "12m 00s"))),
+        (39_149_840_003, Some(("10:05:00", "5m 00s"))),
+        (39_149_840_004, Some(("10:20:00", "10m 00s"))),
+        (39_149_840_005, Some(("10:42:00", "12m 00s"))),
         (107_851_237_801, None),
         (107_851_237_802, Some(("11:05:10", "54m 50s"))),
         (107_851_237_803, Some(("11:01:00", "2m 00s"))),
