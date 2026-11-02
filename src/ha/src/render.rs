@@ -2444,6 +2444,68 @@ mod tests {
     }
 
     #[test]
+    fn the_job_rows_of_a_finished_run_show_when_each_job_finished() {
+        let mut board = Board::new(Duration::from_hours(8));
+        board.replace(
+            repo("acme/widgets"),
+            vec![run(
+                39_149_711_502,
+                "acme/widgets",
+                "Release",
+                "issue-11",
+                "Bump deps",
+                RunState::Failed,
+                "2026-10-14T09:00:00Z",
+                "2026-10-14T09:10:05Z",
+            )],
+            now(),
+        );
+        board.expand(now());
+        board.set_jobs(
+            RunId(39_149_711_502),
+            vec![
+                job(
+                    107_851_237_801,
+                    "build",
+                    RunState::Passed,
+                    Some("2026-10-14T09:00:10Z"),
+                    Some("2026-10-14T09:04:00Z"),
+                ),
+                job(
+                    107_851_237_802,
+                    "lint",
+                    RunState::Failed,
+                    Some("2026-10-14T09:00:20Z"),
+                    Some("2026-10-14T09:01:05Z"),
+                ),
+                job(
+                    107_851_237_803,
+                    "test",
+                    RunState::Cancelled,
+                    Some("2026-10-14T09:02:00Z"),
+                    None,
+                ),
+            ],
+        );
+        let text = lines(&render_with(120, 12, &mut board, &loaded()));
+        let run_row = row_holding(&text, "39149711502");
+        let build = row_holding(&text, "107851237801");
+        let lint = row_holding(&text, "107851237802");
+        let test = row_holding(&text, "107851237803");
+        // The job rows show the finish time of their job.
+        assert_eq!(started_cells(&text, build), "09:04:00");
+        assert_eq!(started_cells(&text, lint), "09:01:05");
+        // A job with no finish time has an empty started cell.
+        assert_eq!(started_cells(&text, test), "");
+        // The time cell does not change.
+        assert_eq!(time_cells(&text, build), "3m 50s");
+        assert_eq!(time_cells(&text, lint), "45s");
+        assert_eq!(time_cells(&text, test), "");
+        // The job rows agree with their run.
+        assert_eq!(started_cells(&text, run_row), "09:10:05");
+    }
+
+    #[test]
     fn the_finish_time_follows_the_time_zone() {
         // The runs finished about 20 hours before now, thus a window of 48h holds them.
         let mut board = Board::new(Duration::from_hours(48));
