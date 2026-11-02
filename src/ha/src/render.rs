@@ -6217,13 +6217,6 @@ mod tests {
         board
     }
 
-    /// The index of the first line that holds `text`.
-    fn line_holding(text: &[String], needle: &str) -> usize {
-        text.iter()
-            .position(|line| line.contains(needle))
-            .unwrap_or_else(|| panic!("no line holds {needle:?}: {text:?}"))
-    }
-
     #[test]
     fn a_departure_of_today_shows_when_it_left_and_how_long_it_stayed() {
         let mut board = history_board(
@@ -6238,7 +6231,7 @@ mod tests {
             )],
         );
         let text = lines(&render_with(120, 12, &mut board, &loaded()));
-        let row = line_holding(&text, "Bump serde");
+        let row = row_holding(&text, "Bump serde");
         assert_eq!(started_cells(&text, row), "10:12:40");
         assert_eq!(time_cells(&text, row), "12m 40s");
     }
@@ -6257,7 +6250,7 @@ mod tests {
             )],
         );
         let text = lines(&render_with(120, 12, &mut board, &loaded()));
-        let row = line_holding(&text, "Bump serde");
+        let row = row_holding(&text, "Bump serde");
         assert_eq!(started_cells(&text, row), "10-13 20:00");
         assert_eq!(time_cells(&text, row), "30m 00s");
     }
@@ -6276,7 +6269,7 @@ mod tests {
             )],
         );
         let text = lines(&render_with(120, 12, &mut board, &loaded()));
-        let row = line_holding(&text, "Old work");
+        let row = row_holding(&text, "Old work");
         assert_eq!(started_cells(&text, row), "08:00:00");
         assert_eq!(time_cells(&text, row), "");
     }
@@ -6315,13 +6308,13 @@ mod tests {
         let text = lines(&render_with(120, 14, &mut board, &loaded()));
         let cells: Vec<String> = ["Work A", "Work B", "Work C"]
             .iter()
-            .map(|title| started_cells(&text, line_holding(&text, title)))
+            .map(|title| started_cells(&text, row_holding(&text, title)))
             .collect();
         assert_eq!(cells, ["10:30:00", "10:15:00", "09:45:00"]);
         assert!(cells.windows(2).all(|pair| pair[0] > pair[1]), "{cells:?}");
         let rows: Vec<usize> = ["Work A", "Work B", "Work C"]
             .iter()
-            .map(|title| line_holding(&text, title))
+            .map(|title| row_holding(&text, title))
             .collect();
         assert!(rows.windows(2).all(|pair| pair[0] < pair[1]), "{rows:?}");
     }
