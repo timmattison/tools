@@ -4975,6 +4975,52 @@ mod tests {
         );
     }
 
+    /// The cell of buffer row `y` that starts at display column `column`.
+    fn cell_at(buffer: &Buffer, y: u16, column: usize) -> &ratatui::buffer::Cell {
+        &buffer[(u16::try_from(column).expect("a column fits"), y)]
+    }
+
+    #[test]
+    fn the_runner_names_are_cyan_and_the_counts_are_bold() {
+        let mut board = busy_runners_board();
+        let buffer = render_with(160, 12, &mut board, &loaded());
+        let text = lines(&buffer);
+        let line = &text[1];
+        let bold = |column: usize| {
+            cell_at(&buffer, 1, column)
+                .modifier
+                .contains(Modifier::BOLD)
+        };
+        let cyan = |column: usize| cell_at(&buffer, 1, column).fg == Color::Cyan;
+        // The word and the first count digit.
+        assert!((0..7).all(bold), "the word is bold");
+        let digit = display_width("Running · ");
+        assert_eq!(columns(line, digit, 1), "1");
+        assert!(bold(digit) && !cyan(digit), "a count is bold and not cyan");
+        // Each name is cyan. The separator between two names is bold, not cyan.
+        let names_start = display_width("Running · 1 ⏳ · 2 🏃 · 0 ✅ · 0 ❌ · 0 💨 · ");
+        let mut column = names_start;
+        for (index, name) in ["pi5", "mini", "GitHub Actions 1001"].iter().enumerate() {
+            if index > 0 {
+                let separator = columns(line, column, 2);
+                assert_eq!(separator, ", ");
+                assert!(
+                    (column..column + 2).all(|c| bold(c) && !cyan(c)),
+                    "the separator at column {column} is bold and not cyan"
+                );
+                column += 2;
+            }
+            assert_eq!(&columns(line, column, display_width(name)), name);
+            assert!(
+                (column..column + display_width(name)).all(cyan),
+                "the name {name} is cyan"
+            );
+            column += display_width(name);
+        }
+        // The ` · ` before the first name is bold and not cyan.
+        assert!((names_start - 3..names_start).all(|c| bold(c) && !cyan(c)));
+    }
+
     /// The run ID of the megarepo board.
     const MEGAREPO_RUN: u64 = 39_450_362_521;
 
