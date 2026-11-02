@@ -41,7 +41,8 @@ pub enum Section {
 /// In the history section, the three counts are about pull requests:
 /// `passed` counts the merged ones, `failed` the ones that the queue
 /// removed, and `cancelled` the ones that a person removed. Each one shows
-/// the marker of the run state of the same name.
+/// the marker of the run state of the same name. In the active section,
+/// `jobs` counts the jobs of the active runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Header {
     /// The section that the header opens.
@@ -76,6 +77,21 @@ pub struct JobCounts {
     pub failed: usize,
     /// The number of jobs in the state `Skipped`.
     pub skipped: usize,
+}
+
+impl JobCounts {
+    /// Adds one job in `state` to the count of that state. A job in any other
+    /// state is in no count.
+    fn add(&mut self, state: RunState) {
+        match state {
+            RunState::Queued => self.queued += 1,
+            RunState::Running => self.running += 1,
+            RunState::Passed => self.passed += 1,
+            RunState::Failed => self.failed += 1,
+            RunState::Skipped => self.skipped += 1,
+            RunState::Cancelled | RunState::Other => {}
+        }
+    }
 }
 
 /// One row of the board.
@@ -725,7 +741,8 @@ impl Board {
     /// Builds the full list of rows.
     ///
     /// The list has the two merge sections when the board holds a merge
-    /// queue, and then the two run sections. The selected row carries the
+    /// queue, and then the two run sections. The header of the active section
+    /// counts the jobs of the active runs by state. The selected row carries the
     /// selection mark. This is the row of the selected item, or the row of
     /// its selected job. The block of each expanded run follows the row of
     /// that run.
@@ -797,7 +814,7 @@ impl Board {
             passed: 0,
             failed: 0,
             cancelled: 0,
-            jobs: JobCounts::default(),
+            jobs: self.active_job_counts(&active),
         }));
         push_runs(&mut rows, &active, Section::Active, first, selected, view);
         rows.push(Row::Header(Header {
@@ -817,6 +834,22 @@ impl Board {
             view,
         );
         rows
+    }
+
+    /// Counts the jobs of the `active` runs by state. This covers each active
+    /// run that the board holds, expanded or not and in the view or not. A run
+    /// with no job answer adds nothing. A run whose last fetch failed adds its
+    /// last good jobs. A run that is not in `active` adds nothing.
+    fn active_job_counts(&self, active: &[&Run]) -> JobCounts {
+        let mut counts = JobCounts::default();
+        for run in active {
+            if let Some(Jobs::Ready(jobs) | Jobs::Failed { jobs, .. }) = self.jobs.get(&run.id) {
+                for job in jobs {
+                    counts.add(job.state);
+                }
+            }
+        }
+        counts
     }
 
     /// Expands the run of the selection. The run shows its jobs at once when
@@ -2346,8 +2379,11 @@ mod tests {
             skipped: 1,
         };
         assert_eq!(active_header(&board.rows(now())).jobs, expected);
-        assert_eq!(board.view(now(), 1).rows.len(), 1);
-        assert_eq!(active_header(&board.view(now(), 1).rows).jobs, expected);
+        // Only the header and the selected run are in view. The job rows of
+        // run 1 and the whole of run 2 are below the bottom of the screen.
+        let view = board.view(now(), 2);
+        assert_eq!(view.rows.len(), 2);
+        assert_eq!(active_header(&view.rows).jobs, expected);
     }
 
     #[test]
