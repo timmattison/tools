@@ -4920,6 +4920,44 @@ mod tests {
         }
     }
 
+    /// The board of four runs with three jobs that wait or run on a runner.
+    /// One runner name holds spaces, as the name of a GitHub-hosted runner does.
+    fn busy_runners_board() -> Board {
+        board_with_jobs(vec![
+            on(
+                "mini",
+                job(
+                    21,
+                    "build",
+                    RunState::Running,
+                    Some("2026-10-14T11:46:00Z"),
+                    None,
+                ),
+            ),
+            on(
+                "GitHub Actions 1001",
+                job(
+                    22,
+                    "lint",
+                    RunState::Running,
+                    Some("2026-10-14T11:47:00Z"),
+                    None,
+                ),
+            ),
+            on("pi5", job(23, "test", RunState::Queued, None, None)),
+        ])
+    }
+
+    #[test]
+    fn the_running_header_names_the_busy_runners_after_the_counts() {
+        let mut board = busy_runners_board();
+        let text = lines(&render_with(160, 12, &mut board, &loaded()));
+        assert_eq!(
+            text[1],
+            "Running · 1 ⏳ · 2 🏃 · 0 ✅ · 0 ❌ · 0 💨 · pi5, mini, GitHub Actions 1001"
+        );
+    }
+
     /// The run ID of the megarepo board.
     const MEGAREPO_RUN: u64 = 39_450_362_521;
 
