@@ -765,11 +765,22 @@ impl Board {
         Some((jobs[index].id, index))
     }
 
+    /// Tells if the board shows the two merge sections: the merge queue and
+    /// the merge history.
+    ///
+    /// The answer is true when some watched repository has a merge queue.
+    /// [`Board::build_rows`] and the renderer both use this rule, thus the
+    /// header of the last section and the sections themselves agree.
+    #[must_use]
+    pub fn shows_merge_sections(&self) -> bool {
+        !self.queues.is_empty()
+    }
+
     /// Builds the full list of rows.
     ///
     /// The order of the sections is: the merge queue, the active runs, the
     /// merge history, and the recent runs. The two merge sections show only
-    /// when the board holds a merge queue. The header of the active section
+    /// when [`Board::shows_merge_sections`] is true. The header of the active section
     /// counts the jobs of the active runs by state and names the runners of the
     /// jobs that wait or run. The selected row carries the
     /// selection mark. This is the row of the selected item, or the row of
@@ -780,7 +791,7 @@ impl Board {
         let selected = self.selected.as_ref();
         let mut rows = Vec::new();
         let mut first = 0;
-        let has_queue = !self.queues.is_empty();
+        let has_queue = self.shows_merge_sections();
         let (entries, departures) = self.queue_sections(now);
         let (active, recent) = self.sections(now);
         let view = JobView {

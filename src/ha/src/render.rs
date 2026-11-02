@@ -45,8 +45,11 @@ const TIME_WIDTH: usize = 7;
 /// columns.
 const FIXED_COLUMNS: usize =
     MARKER_WIDTH + ID_WIDTH + STARTED_WIDTH + TIME_WIDTH + MARKER_WIDTH + 8;
-/// The header word of the started column in the recent section. A row there
-/// shows when its run or its job finished (see [`run_line`] and [`job_line`]).
+/// The header word of the started column of the finished rows. A row of the
+/// recent section shows when its run or its job finished (see [`run_line`] and
+/// [`job_line`]). A row of the merge history shows when its pull request left
+/// the queue. The word stands in the merge history header when that section
+/// shows, else in the recent header.
 const FINISHED_HEADER: &str = "FINISHED";
 /// The columns from the start of the started cell to the end of a row: the
 /// started cell, one space, the time cell, one space, and the right marker
@@ -820,15 +823,28 @@ fn with_started_word(text: &str, word: &str, widths: Widths) -> String {
 /// A loaded recent header names the counts of passed, failed, and cancelled
 /// runs. Each count shows also when it is 0.
 ///
-/// The recent header names the started column [`FINISHED_HEADER`], at the
-/// column that `widths` gives (see [`with_started_word`]), because its rows
-/// show when each run finished. The word shows also before the first refresh
-/// cycle ends.
+/// The merge history header names the started column [`FINISHED_HEADER`], at
+/// the column that `widths` gives (see [`with_started_word`]), because its
+/// rows show when each pull request left the queue. The recent header names
+/// the column too, but only when `history_shows` is false. Then no merge
+/// history stands above it, and its rows show when each run finished. When
+/// `history_shows` is true, one word heads the two sections of finished rows
+/// below it, and the recent header is plain text. The word shows also before
+/// the first refresh cycle ends.
+///
+/// `history_shows` is true when the board shows the merge history section (see
+/// [`Board::shows_merge_sections`]).
 ///
 /// Before the first refresh cycle ends (`loaded` is false), the header gives
 /// no counts and no runner names. The board then holds only the repositories
 /// that the worker fetched so far, thus a count is too low.
-fn header_line(header: &Header<'_>, spans: Spans, loaded: bool, widths: Widths) -> Line<'static> {
+fn header_line(
+    header: &Header<'_>,
+    spans: Spans,
+    loaded: bool,
+    widths: Widths,
+    history_shows: bool,
+) -> Line<'static> {
     let Header {
         section,
         count,
@@ -843,18 +859,36 @@ fn header_line(header: &Header<'_>, spans: Spans, loaded: bool, widths: Widths) 
         (Section::Active, true) => return active_line(&header.jobs, &header.runners),
         (Section::Active, false) => ACTIVE_TITLE.to_owned(),
         (Section::Recent, false) => {
-            with_started_word(&format!("Last {window}"), FINISHED_HEADER, widths)
+            let text = format!("Last {window}");
+            if history_shows {
+                text
+            } else {
+                with_started_word(&text, FINISHED_HEADER, widths)
+            }
         }
-        (Section::Recent, true) => with_started_word(
-            &format!("Last {window} · {passed} passed · {failed} failed · {cancelled} cancelled"),
+        (Section::Recent, true) => {
+            let text = format!(
+                "Last {window} · {passed} passed · {failed} failed · {cancelled} cancelled"
+            );
+            if history_shows {
+                text
+            } else {
+                with_started_word(&text, FINISHED_HEADER, widths)
+            }
+        }
+        (Section::Queue, false) => "Merge queue".to_owned(),
+        (Section::Queue, true) => format!("Merge queue · {count}"),
+        (Section::History, false) => with_started_word(
+            &format!("Merge history · Last {history}"),
             FINISHED_HEADER,
             widths,
         ),
-        (Section::Queue, false) => "Merge queue".to_owned(),
-        (Section::Queue, true) => format!("Merge queue · {count}"),
-        (Section::History, false) => format!("Merge history · Last {history}"),
-        (Section::History, true) => format!(
-            "Merge history · Last {history} · {passed} merged · {failed} failed · {cancelled} removed"
+        (Section::History, true) => with_started_word(
+            &format!(
+                "Merge history · Last {history} · {passed} merged · {failed} failed · {cancelled} removed"
+            ),
+            FINISHED_HEADER,
+            widths,
         ),
     };
     Line::from(Span::styled(text, HEADER_STYLE))
@@ -1257,8 +1291,9 @@ fn reverse_if(selected: bool, buffer: &mut Buffer, area: Rect, y: u16) {
 /// The marker cells and the sleeping mark of a row keep `Color::Reset`. With
 /// a `prompt`, the box of the cancel prompt draws last, over the rows (see
 /// [`draw_prompt`]). While the box shows, the status line has no key hints.
-/// The recent header names the started column `FINISHED`, because its rows
-/// show when each run finished.
+/// The merge history header names the started column `FINISHED`, because its
+/// rows show when each pull request left the queue. With no merge history, the
+/// recent header holds the word, because its rows show when each run finished.
 /// This function never panics, whatever the size of the frame.
 pub fn draw<Tz: TimeZone>(
     frame: &mut Frame,
@@ -1280,6 +1315,8 @@ pub fn draw<Tz: TimeZone>(
         window: board.window(),
         history_reach: board.history_reach(now),
     };
+    // The view borrows the board, thus this answer comes first.
+    let history_shows = board.shows_merge_sections();
     // The first refresh cycle ended. Until then, the board can miss runs.
     let loaded = status.last_refresh.is_some();
     let bold = Style::default().add_modifier(Modifier::BOLD);
@@ -1289,7 +1326,7 @@ pub fn draw<Tz: TimeZone>(
     for (index, row) in view.rows.iter().enumerate() {
         match row {
             Row::Header(header) => {
-                let line = header_line(header, spans, loaded, widths);
+                let line = header_line(header, spans, loaded, widths, history_shows);
                 put_line(buffer, index + 1, &prefix_to_width(line, area.width));
             }
             Row::Empty(section) => {
@@ -6226,7 +6263,7 @@ mod tests {
             let mut board = queue_frame_board();
             let text = lines(&render_with(120, 14, &mut board, &status));
             let y = line_starting_with(&text, "Merge history");
-            assert_eq!(text[y], format!("{:<97} FINISHED", text_of_header));
+            assert_eq!(text[y], format!("{text_of_header:<97} FINISHED"));
             assert_eq!(started_cells(&text, y), "FINISHED");
         }
     }
@@ -6306,7 +6343,6 @@ mod tests {
                     "width {width}: {:?}",
                     text[y]
                 );
-                assert_eq!(started_cells(&text, y), "", "width {width}");
             }
         }
     }
