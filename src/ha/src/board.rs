@@ -2387,6 +2387,22 @@ mod tests {
     }
 
     #[test]
+    fn a_cancelled_job_and_a_job_in_the_state_other_are_in_no_count() {
+        let mut board = two_active_runs(
+            vec![job(1, RunState::Cancelled), job(2, RunState::Other)],
+            vec![job(3, RunState::Passed), job(4, RunState::Cancelled)],
+        );
+        let counts = active_header(&board.rows(now())).jobs;
+        assert_eq!(
+            counts,
+            JobCounts {
+                passed: 1,
+                ..JobCounts::default()
+            }
+        );
+    }
+
+    #[test]
     fn expanding_the_selected_run_shows_a_loading_row_below_it() {
         let mut board = two_run_board();
         board.expand(now());
