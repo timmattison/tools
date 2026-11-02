@@ -702,9 +702,9 @@ const HEADER_STYLE: Style = Style::new().add_modifier(Modifier::BOLD);
 /// Each count is a number, one space, and the marker of its state. Each count
 /// shows also when it is 0. The names follow the counts, in [`RUNNER_STYLE`].
 /// They stand last because the edge of the screen cuts the end of the line:
-/// the counts always show, and the cut loses only the last names. When
-/// `runners` is empty, the line ends after the counts. All the other text of
-/// the line is bold.
+/// a cut at the right edge removes the last names first. The cut reaches the
+/// counts only on a screen narrower than the counts. When `runners` is empty,
+/// the line ends after the counts. All the other text of the line is bold.
 fn active_line(jobs: &JobCounts, runners: &[&RunnerName]) -> Line<'static> {
     let counts = [
         (jobs.queued, RunState::Queued),
@@ -772,8 +772,7 @@ fn prefix_to_width(line: Line<'static>, width: u16) -> Line<'static> {
 ///
 /// A loaded running header names the counts of the jobs by state and the
 /// runner names of the jobs that wait or run (see [`active_line`]). The names
-/// go last, because the edge of the screen cuts the end of the line, and the
-/// counts then still show.
+/// go last, thus a cut at the right edge removes the names before the counts.
 ///
 /// A loaded recent header names the counts of passed, failed, and cancelled
 /// runs. Each count shows also when it is 0.
