@@ -5037,6 +5037,13 @@ mod tests {
         assert!((names_start - 3..names_start).all(|c| bold(c) && !cyan(c)));
     }
 
+    #[test]
+    fn the_running_header_gives_no_counts_and_no_runners_before_the_first_refresh_ends() {
+        let mut board = busy_runners_board();
+        let text = lines(&render_with(160, 12, &mut board, &Status::default()));
+        assert_eq!(text[1], "Running");
+    }
+
     /// The run ID of the megarepo board.
     const MEGAREPO_RUN: u64 = 39_450_362_521;
 
