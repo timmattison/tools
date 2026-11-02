@@ -2433,6 +2433,32 @@ mod tests {
     }
 
     #[test]
+    fn the_jobs_of_a_finished_run_are_in_no_count() {
+        let mut board = two_run_board();
+        board.set_jobs(RunId(1), vec![job(1, RunState::Running)]);
+        board.set_jobs(
+            RunId(2),
+            vec![job(2, RunState::Passed), job(3, RunState::Failed)],
+        );
+        let rows = board.rows(now());
+        assert_eq!(
+            active_header(&rows).jobs,
+            JobCounts {
+                running: 1,
+                ..JobCounts::default()
+            }
+        );
+        let recent = rows
+            .iter()
+            .find_map(|row| match row {
+                Row::Header(header) if header.section == Section::Recent => Some(header),
+                _ => None,
+            })
+            .expect("a recent header");
+        assert_eq!(recent.jobs, JobCounts::default());
+    }
+
+    #[test]
     fn expanding_the_selected_run_shows_a_loading_row_below_it() {
         let mut board = two_run_board();
         board.expand(now());
