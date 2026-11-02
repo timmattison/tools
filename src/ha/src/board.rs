@@ -17,8 +17,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use unicode_width::UnicodeWidthStr;
 
-use crate::job::{Job, JobId};
+use crate::job::{Job, JobId, RunnerName};
 use crate::queue::{Departure, History, Outcome, PullNumber, QueueEntry};
 use crate::run::{keep_first_of_each_id, Run, RunId, RunState};
 use crate::target::RepoName;
@@ -36,30 +37,87 @@ pub enum Section {
     Recent,
 }
 
+/// The title row of a section, with what it counts.
+///
+/// In the history section, the three counts are about pull requests:
+/// `passed` counts the merged ones, `failed` the ones that the queue
+/// removed, and `cancelled` the ones that a person removed. Each one shows
+/// the marker of the run state of the same name. In the active section,
+/// `jobs` counts the jobs of the active runs, and `runners` names the runners
+/// that have a job that waits or runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Header<'a> {
+    /// The section that the header opens.
+    pub section: Section,
+    /// The number of rows in the section.
+    pub count: usize,
+    /// The number of passed runs, or of merged pull requests. This is 0
+    /// for the queue section and the active section.
+    pub passed: usize,
+    /// The number of failed runs, or of pull requests that the queue
+    /// removed. This is 0 for the queue section and the active section.
+    pub failed: usize,
+    /// The number of cancelled runs, or of pull requests that a person
+    /// removed. This is 0 for the queue section and the active section.
+    pub cancelled: usize,
+    /// The number of jobs in each state that the header of the active
+    /// section counts. This is `JobCounts::default()` for the other
+    /// sections.
+    pub jobs: JobCounts,
+    /// The names of the runners that have a job in the state `Queued` or
+    /// `Running` in the active runs. This is empty for the other sections.
+    pub runners: Vec<&'a RunnerName>,
+}
+
+/// The number of jobs in each state that the header of the active section counts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct JobCounts {
+    /// The number of jobs in the state `Queued`.
+    pub queued: usize,
+    /// The number of jobs in the state `Running`.
+    pub running: usize,
+    /// The number of jobs in the state `Passed`.
+    pub passed: usize,
+    /// The number of jobs in the state `Failed`.
+    pub failed: usize,
+    /// The number of jobs in the state `Skipped`.
+    pub skipped: usize,
+}
+
+impl JobCounts {
+    /// Adds one job in `state` to the count of that state. A job in any other
+    /// state is in no count.
+    fn add(&mut self, state: RunState) {
+        match state {
+            RunState::Queued => self.queued += 1,
+            RunState::Running => self.running += 1,
+            RunState::Passed => self.passed += 1,
+            RunState::Failed => self.failed += 1,
+            RunState::Skipped => self.skipped += 1,
+            RunState::Cancelled | RunState::Other => {}
+        }
+    }
+}
+
+/// The key that orders the runner names in the header of the active section.
+///
+/// The shortest name by display width in terminal columns comes first. Then
+/// the names sort by the text with no difference between capital and small
+/// letters. Then they sort by the exact text, thus equal names are adjacent.
+/// The width comes first because the header line stops at the right edge of
+/// the screen. The long names of the GitHub-hosted runners (`GitHub Actions
+/// 1001`) go last, thus the edge cuts them and keeps the short names of the
+/// local runners.
+fn runner_key(name: &RunnerName) -> (usize, String, &str) {
+    let name = name.as_str();
+    (name.width(), name.to_lowercase(), name)
+}
+
 /// One row of the board.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Row<'a> {
-    /// The title row of a section.
-    ///
-    /// In the history section, the three counts are about pull requests:
-    /// `passed` counts the merged ones, `failed` the ones that the queue
-    /// removed, and `cancelled` the ones that a person removed. Each one shows
-    /// the marker of the run state of the same name.
-    Header {
-        /// The section that the header opens.
-        section: Section,
-        /// The number of rows in the section.
-        count: usize,
-        /// The number of passed runs, or of merged pull requests. This is 0
-        /// for the queue section and the active section.
-        passed: usize,
-        /// The number of failed runs, or of pull requests that the queue
-        /// removed. This is 0 for the queue section and the active section.
-        failed: usize,
-        /// The number of cancelled runs, or of pull requests that a person
-        /// removed. This is 0 for the queue section and the active section.
-        cancelled: usize,
-    },
+    /// The title row of a section, see [`Header`].
+    Header(Header<'a>),
     /// The row that shows an empty section.
     Empty(Section),
     /// One pull request in a merge queue.
@@ -154,6 +212,16 @@ enum Jobs {
         /// The error of the last fetch.
         error: String,
     },
+}
+
+/// The last good jobs of the job answer `answer`. A failed fetch keeps the
+/// jobs of the last good answer, and that list is empty when there is none.
+/// No answer gives no job.
+fn last_good_jobs(answer: Option<&Jobs>) -> &[Job] {
+    match answer {
+        Some(Jobs::Ready(jobs) | Jobs::Failed { jobs, .. }) => jobs,
+        None => &[],
+    }
 }
 
 /// One row that the selection can mark, other than a job row, in the order of
@@ -449,14 +517,14 @@ impl Board {
             let on_item_row = selected_row.is_some_and(|row| rows[row].is_item());
             let header_above = on_item_row
                 && selected_row.is_some_and(|row| {
-                    row > 0 && matches!(rows.get(row - 1), Some(Row::Header { .. }))
+                    row > 0 && matches!(rows.get(row - 1), Some(Row::Header(_)))
                 });
             let len = rows.len();
             let below = selected_row.filter(|_| on_item_row).map_or(0, |row| {
                 rows[row + 1..]
                     .iter()
                     .take_while(|next| {
-                        !matches!(next, Row::Header { .. } | Row::Empty(_)) && !next.is_item()
+                        !matches!(next, Row::Header(_) | Row::Empty(_)) && !next.is_item()
                     })
                     .count()
             });
@@ -583,10 +651,7 @@ impl Board {
         if !self.expanded.contains(&run) {
             return &[];
         }
-        match self.jobs.get(&run) {
-            Some(Jobs::Ready(jobs) | Jobs::Failed { jobs, .. }) => jobs,
-            None => &[],
-        }
+        last_good_jobs(self.jobs.get(&run))
     }
 
     /// True when some repository list holds a run with the ID `run`.
@@ -699,7 +764,9 @@ impl Board {
     /// Builds the full list of rows.
     ///
     /// The list has the two merge sections when the board holds a merge
-    /// queue, and then the two run sections. The selected row carries the
+    /// queue, and then the two run sections. The header of the active section
+    /// counts the jobs of the active runs by state and names the runners of the
+    /// jobs that wait or run. The selected row carries the
     /// selection mark. This is the row of the selected item, or the row of
     /// its selected job. The block of each expanded run follows the row of
     /// that run.
@@ -709,13 +776,15 @@ impl Board {
         let mut first = 0;
         if !self.queues.is_empty() {
             let (entries, departures) = self.queue_sections(now);
-            rows.push(Row::Header {
+            rows.push(Row::Header(Header {
                 section: Section::Queue,
                 count: entries.len(),
                 passed: 0,
                 failed: 0,
                 cancelled: 0,
-            });
+                jobs: JobCounts::default(),
+                runners: Vec::new(),
+            }));
             if entries.is_empty() {
                 rows.push(Row::Empty(Section::Queue));
             }
@@ -735,13 +804,15 @@ impl Board {
                     .filter(|departure| departure.outcome == outcome)
                     .count()
             };
-            rows.push(Row::Header {
+            rows.push(Row::Header(Header {
                 section: Section::History,
                 count: departures.len(),
                 passed: count_of(Outcome::Merged),
                 failed: count_of(Outcome::Failed),
                 cancelled: count_of(Outcome::Removed),
-            });
+                jobs: JobCounts::default(),
+                runners: Vec::new(),
+            }));
             if departures.is_empty() {
                 rows.push(Row::Empty(Section::History));
             }
@@ -763,21 +834,25 @@ impl Board {
             errors: &self.errors,
             expanded: &self.expanded,
         };
-        rows.push(Row::Header {
+        rows.push(Row::Header(Header {
             section: Section::Active,
             count: active.len(),
             passed: 0,
             failed: 0,
             cancelled: 0,
-        });
+            jobs: self.active_job_counts(&active),
+            runners: self.active_runner_names(&active),
+        }));
         push_runs(&mut rows, &active, Section::Active, first, selected, view);
-        rows.push(Row::Header {
+        rows.push(Row::Header(Header {
             section: Section::Recent,
             count: recent.len(),
             passed: count_of(RunState::Passed),
             failed: count_of(RunState::Failed),
             cancelled: count_of(RunState::Cancelled),
-        });
+            jobs: JobCounts::default(),
+            runners: Vec::new(),
+        }));
         push_runs(
             &mut rows,
             &recent,
@@ -787,6 +862,42 @@ impl Board {
             view,
         );
         rows
+    }
+
+    /// The jobs of the `active` runs. This covers each active run that the
+    /// board holds, expanded or not and in the view or not. A run with no job
+    /// answer gives no job. A run whose last fetch failed gives its last good
+    /// jobs. A run that is not in `active` gives no job.
+    fn active_jobs<'s, 'a>(&'s self, active: &'a [&Run]) -> impl Iterator<Item = &'s Job> + 'a
+    where
+        's: 'a,
+    {
+        active
+            .iter()
+            .flat_map(|run| last_good_jobs(self.jobs.get(&run.id)).iter())
+    }
+
+    /// Counts the jobs of the `active` runs by state, see `active_jobs`.
+    fn active_job_counts(&self, active: &[&Run]) -> JobCounts {
+        let mut counts = JobCounts::default();
+        for job in self.active_jobs(active) {
+            counts.add(job.state);
+        }
+        counts
+    }
+
+    /// The names of the runners that have a job in the state `Queued` or
+    /// `Running` in the `active` runs, see `active_jobs`. A job that finished
+    /// gives no name, because its runner is free. Each name shows one time.
+    fn active_runner_names(&self, active: &[&Run]) -> Vec<&RunnerName> {
+        let mut names: Vec<&RunnerName> = self
+            .active_jobs(active)
+            .filter(|job| matches!(job.state, RunState::Queued | RunState::Running))
+            .filter_map(|job| job.runner.as_ref())
+            .collect();
+        names.sort_by_cached_key(|&name| runner_key(name));
+        names.dedup();
+        names
     }
 
     /// Expands the run of the selection. The run shows its jobs at once when
@@ -1096,10 +1207,7 @@ fn push_runs<'a>(
     for (offset, &run) in runs.iter().enumerate() {
         let here = selected.filter(|selection| selection.item.1 == first + offset);
         let answer = view.jobs.get(&run.id);
-        let jobs = match answer {
-            Some(Jobs::Ready(jobs) | Jobs::Failed { jobs, .. }) => jobs.as_slice(),
-            None => &[],
-        };
+        let jobs = last_good_jobs(answer);
         rows.push(Row::Run {
             run,
             state: run.state.shown_with_jobs(jobs.iter().map(|job| job.state)),
@@ -1224,13 +1332,14 @@ mod tests {
     fn marked(rows: &[Row<'_>]) -> Vec<String> {
         rows.iter()
             .map(|row| match row {
-                Row::Header {
+                Row::Header(Header {
                     section,
                     count,
                     passed,
                     failed,
                     cancelled,
-                } => format!("Header({section:?},{count},{passed},{failed},{cancelled})"),
+                    ..
+                }) => format!("Header({section:?},{count},{passed},{failed},{cancelled})"),
                 Row::Empty(section) => format!("Empty({section:?})"),
                 Row::Entry { entry, selected } => format!(
                     "Entry({}#{}){}",
@@ -1455,20 +1564,20 @@ mod tests {
             .position(|row| {
                 matches!(
                     row,
-                    Row::Header {
+                    Row::Header(Header {
                         section: Section::Recent,
                         ..
-                    }
+                    })
                 )
             })
             .expect("a recent header");
-        let Row::Header {
+        let Row::Header(Header {
             count,
             passed,
             failed,
             cancelled,
             ..
-        } = rows[position]
+        }) = rows[position]
         else {
             panic!("the row is a header");
         };
@@ -2261,6 +2370,265 @@ mod tests {
             now(),
         );
         board
+    }
+
+    /// Finds the header of the active section.
+    fn active_header<'r, 'a>(rows: &'r [Row<'a>]) -> &'r Header<'a> {
+        rows.iter()
+            .find_map(|row| match row {
+                Row::Header(header) if header.section == Section::Active => Some(header),
+                _ => None,
+            })
+            .expect("an active header")
+    }
+
+    /// A board with two active runs in `a/x`. Run 1 is expanded and run 2 is
+    /// collapsed. Both hold the jobs in `first` and `second`.
+    fn two_active_runs(first: Vec<Job>, second: Vec<Job>) -> Board {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Queued, 20, 1),
+            ],
+            now(),
+        );
+        board.set_jobs(RunId(1), first);
+        board.set_jobs(RunId(2), second);
+        board.expand(now());
+        board
+    }
+
+    #[test]
+    fn the_running_header_counts_the_jobs_of_each_active_run() {
+        let mut board = two_active_runs(
+            vec![
+                job(1, RunState::Queued),
+                job(2, RunState::Running),
+                job(3, RunState::Passed),
+                job(4, RunState::Passed),
+            ],
+            vec![
+                job(5, RunState::Queued),
+                job(6, RunState::Passed),
+                job(7, RunState::Failed),
+                job(8, RunState::Skipped),
+            ],
+        );
+        let expected = JobCounts {
+            queued: 2,
+            running: 1,
+            passed: 3,
+            failed: 1,
+            skipped: 1,
+        };
+        assert_eq!(active_header(&board.rows(now())).jobs, expected);
+        // Only the header and the selected run are in view. The job rows of
+        // run 1 and the whole of run 2 are below the bottom of the screen.
+        let view = board.view(now(), 2);
+        assert_eq!(view.rows.len(), 2);
+        assert_eq!(active_header(&view.rows).jobs, expected);
+    }
+
+    #[test]
+    fn a_cancelled_job_and_a_job_in_the_state_other_are_in_no_count() {
+        let mut board = two_active_runs(
+            vec![job(1, RunState::Cancelled), job(2, RunState::Other)],
+            vec![job(3, RunState::Passed), job(4, RunState::Cancelled)],
+        );
+        let counts = active_header(&board.rows(now())).jobs;
+        assert_eq!(
+            counts,
+            JobCounts {
+                passed: 1,
+                ..JobCounts::default()
+            }
+        );
+    }
+
+    #[test]
+    fn a_run_with_no_answer_adds_nothing_and_a_failed_fetch_adds_its_last_good_jobs() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Running, 20, 1),
+                run(3, "a/x", RunState::Running, 10, 1),
+            ],
+            now(),
+        );
+        // Run 1 has no answer. Run 2 has an answer and then a failed fetch.
+        board.set_jobs(
+            RunId(2),
+            vec![job(1, RunState::Running), job(2, RunState::Failed)],
+        );
+        board.fail_jobs(RunId(2), "boom".to_owned());
+        // Run 3 has a failed fetch and no good jobs.
+        board.fail_jobs(RunId(3), "boom".to_owned());
+        assert_eq!(
+            active_header(&board.rows(now())).jobs,
+            JobCounts {
+                running: 1,
+                failed: 1,
+                ..JobCounts::default()
+            }
+        );
+    }
+
+    #[test]
+    fn the_jobs_of_a_finished_run_are_in_no_count() {
+        let mut board = two_run_board();
+        board.set_jobs(RunId(1), vec![job(1, RunState::Running)]);
+        board.set_jobs(
+            RunId(2),
+            vec![job(2, RunState::Passed), job(3, RunState::Failed)],
+        );
+        let rows = board.rows(now());
+        assert_eq!(
+            active_header(&rows).jobs,
+            JobCounts {
+                running: 1,
+                ..JobCounts::default()
+            }
+        );
+        let recent = rows
+            .iter()
+            .find_map(|row| match row {
+                Row::Header(header) if header.section == Section::Recent => Some(header),
+                _ => None,
+            })
+            .expect("a recent header");
+        assert_eq!(recent.jobs, JobCounts::default());
+    }
+
+    /// Builds a job in `state` that has the runner `runner`.
+    fn runner_job(id: u64, state: RunState, runner: &str) -> Job {
+        Job {
+            runner: RunnerName::new(runner.to_owned()),
+            ..job(id, state)
+        }
+    }
+
+    /// The runner names in the header of the active section, as text.
+    fn active_runners<'r>(rows: &'r [Row<'_>]) -> Vec<&'r str> {
+        active_header(rows)
+            .runners
+            .iter()
+            .map(|runner| runner.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn the_runner_names_come_only_from_the_jobs_that_wait_or_run() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Queued, 20, 1),
+                run(3, "a/x", RunState::Passed, 60, 10),
+            ],
+            now(),
+        );
+        // Run 1 is expanded. Run 2 is collapsed, and its names still show.
+        board.set_jobs(
+            RunId(1),
+            vec![
+                runner_job(1, RunState::Queued, "m1"),
+                runner_job(2, RunState::Running, "pi5"),
+                runner_job(3, RunState::Passed, "done-passed"),
+                runner_job(4, RunState::Failed, "done-failed"),
+                runner_job(5, RunState::Skipped, "done-skipped"),
+                runner_job(6, RunState::Cancelled, "done-cancelled"),
+                runner_job(7, RunState::Other, "done-other"),
+                job(8, RunState::Queued),
+            ],
+        );
+        board.set_jobs(
+            RunId(2),
+            vec![
+                runner_job(9, RunState::Running, "pi5"),
+                runner_job(10, RunState::Queued, "zero"),
+                runner_job(11, RunState::Passed, "done-late"),
+            ],
+        );
+        // A finished run adds no name, also when its job is in the state Running.
+        board.set_jobs(RunId(3), vec![runner_job(12, RunState::Running, "ghost")]);
+        board.expand(now());
+        let rows = board.rows(now());
+        assert_eq!(active_runners(&rows), ["m1", "pi5", "zero"]);
+        let recent = rows
+            .iter()
+            .find_map(|row| match row {
+                Row::Header(header) if header.section == Section::Recent => Some(header),
+                _ => None,
+            })
+            .expect("a recent header");
+        assert!(recent.runners.is_empty());
+    }
+
+    #[test]
+    fn the_runner_names_sort_by_width_then_by_name_with_no_case_then_by_exact_text() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Queued, 20, 1),
+            ],
+            now(),
+        );
+        let names = |first_id: u64, names: &[&str]| -> Vec<Job> {
+            names
+                .iter()
+                .zip(first_id..)
+                .map(|(name, id)| {
+                    let state = if id % 2 == 0 {
+                        RunState::Running
+                    } else {
+                        RunState::Queued
+                    };
+                    runner_job(id, state, name)
+                })
+                .collect()
+        };
+        // Widths in columns: 19, 8, 4, 1, 19, 2, 4, 3, 10, 4, 1, 4.
+        board.set_jobs(
+            RunId(1),
+            names(
+                1,
+                &[
+                    "GitHub Actions 1002",
+                    "ランナー",
+                    "mini",
+                    "b",
+                    "GitHub Actions 1001",
+                    "🎉",
+                ],
+            ),
+        );
+        board.set_jobs(
+            RunId(2),
+            names(20, &["Mini", "pi5", "abcdefghij", "café", "A", "mini"]),
+        );
+        assert_eq!(
+            active_runners(&board.rows(now())),
+            [
+                "A",
+                "b",
+                "🎉",
+                "pi5",
+                "café",
+                "Mini",
+                "mini",
+                "ランナー",
+                "abcdefghij",
+                "GitHub Actions 1001",
+                "GitHub Actions 1002",
+            ]
+        );
     }
 
     #[test]

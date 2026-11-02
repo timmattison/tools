@@ -13,7 +13,7 @@ use ratatui::Frame;
 use textfit::{pad_right, truncate_left_to_budget, truncate_to_budget};
 use unicode_width::UnicodeWidthStr;
 
-use crate::board::{Board, Row, Section};
+use crate::board::{Board, Header, JobCounts, Row, Section};
 use crate::cancel::Confirm;
 use crate::job::{Job, RunnerName};
 use crate::queue::{Departure, EntryState, Outcome, PullNumber, QueueEntry};
@@ -681,28 +681,119 @@ impl Spans {
     }
 }
 
+/// The title of the header of the active section. A loaded header adds the
+/// job counts and the runner names after it.
+const ACTIVE_TITLE: &str = "Running";
+
+/// The text between two parts of a header line.
+const HEADER_SEPARATOR: &str = " · ";
+
+/// The text between two runner names in a header line. A space alone cannot
+/// divide the names, because the name of a GitHub-hosted runner holds spaces.
+const RUNNER_SEPARATOR: &str = ", ";
+
+/// The style of a section header: bold.
+const HEADER_STYLE: Style = Style::new().add_modifier(Modifier::BOLD);
+
+/// The line of a loaded `Running` header: the word, the five job counts, and
+/// the runner names.
+///
+/// The counts are in the order queued, running, passed, failed, and skipped.
+/// Each count is a number, one space, and the marker of its state. Each count
+/// shows also when it is 0. The names follow the counts, in [`RUNNER_STYLE`].
+/// They stand last because the edge of the screen cuts the end of the line:
+/// a cut at the right edge removes the last names first. The cut reaches the
+/// counts only on a screen narrower than the counts. When `runners` is empty,
+/// the line ends after the counts. All the other text of the line is bold.
+fn active_line(jobs: &JobCounts, runners: &[&RunnerName]) -> Line<'static> {
+    let counts = [
+        (jobs.queued, RunState::Queued),
+        (jobs.running, RunState::Running),
+        (jobs.passed, RunState::Passed),
+        (jobs.failed, RunState::Failed),
+        (jobs.skipped, RunState::Skipped),
+    ];
+    let mut text = ACTIVE_TITLE.to_owned();
+    for (count, state) in counts {
+        text.push_str(HEADER_SEPARATOR);
+        text.push_str(&count.to_string());
+        text.push(' ');
+        text.push_str(marker(state));
+    }
+    let mut spans = Vec::new();
+    if !runners.is_empty() {
+        text.push_str(HEADER_SEPARATOR);
+    }
+    spans.push(Span::styled(text, HEADER_STYLE));
+    for (index, name) in runners.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(RUNNER_SEPARATOR, HEADER_STYLE));
+        }
+        spans.push(Span::styled(name.as_str().to_owned(), RUNNER_STYLE));
+    }
+    Line::from(spans)
+}
+
+/// The part of `line` that fits in `width` display columns, as a prefix.
+///
+/// The cut stops at the first character that does not fit, and nothing after
+/// it shows. `Buffer::set_line` alone would skip a wide glyph at the edge and
+/// then draw a narrow glyph of the next span in the free column, and the line
+/// would no more be a prefix of the text. The cut works by characters, never
+/// by bytes.
+fn prefix_to_width(line: Line<'static>, width: u16) -> Line<'static> {
+    let mut left = usize::from(width);
+    let mut spans = Vec::new();
+    for span in line.spans {
+        let mut kept = String::new();
+        let mut cut = false;
+        for glyph in span.content.chars() {
+            let glyph_width = unicode_width::UnicodeWidthChar::width(glyph).unwrap_or(0);
+            if glyph_width > left {
+                cut = true;
+                break;
+            }
+            left -= glyph_width;
+            kept.push(glyph);
+        }
+        spans.push(Span::styled(kept, span.style));
+        if cut {
+            break;
+        }
+    }
+    Line::from(spans)
+}
+
 /// The line of a section header.
+///
+/// The line names the section of `header` and shows its counts. Every header
+/// is bold, and the runner names of a loaded running header are in
+/// [`RUNNER_STYLE`].
+///
+/// A loaded running header names the counts of the jobs by state and the
+/// runner names of the jobs that wait or run (see [`active_line`]). The names
+/// go last, thus a cut at the right edge removes the names before the counts.
 ///
 /// A loaded recent header names the counts of passed, failed, and cancelled
 /// runs. Each count shows also when it is 0.
 ///
 /// Before the first refresh cycle ends (`loaded` is false), the header gives
-/// no counts. The board then holds only the repositories that the worker
-/// fetched so far, thus a count is too low.
-fn header_line(
-    section: Section,
-    count: usize,
-    passed: usize,
-    failed: usize,
-    cancelled: usize,
-    spans: Spans,
-    loaded: bool,
-) -> String {
+/// no counts and no runner names. The board then holds only the repositories
+/// that the worker fetched so far, thus a count is too low.
+fn header_line(header: &Header<'_>, spans: Spans, loaded: bool) -> Line<'static> {
+    let Header {
+        section,
+        count,
+        passed,
+        failed,
+        cancelled,
+        ..
+    } = *header;
     let history = spans.history_text();
     let window = format_duration_setting(spans.window);
-    match (section, loaded) {
-        (Section::Active, false) => "Running".to_owned(),
-        (Section::Active, true) => format!("Running · {count}"),
+    let text = match (section, loaded) {
+        (Section::Active, true) => return active_line(&header.jobs, &header.runners),
+        (Section::Active, false) => ACTIVE_TITLE.to_owned(),
         (Section::Recent, false) => format!("Last {window}"),
         (Section::Recent, true) => {
             format!("Last {window} · {passed} passed · {failed} failed · {cancelled} cancelled")
@@ -713,7 +804,8 @@ fn header_line(
         (Section::History, true) => format!(
             "Merge history · Last {history} · {passed} merged · {failed} failed · {cancelled} removed"
         ),
-    }
+    };
+    Line::from(Span::styled(text, HEADER_STYLE))
 }
 
 /// The line that stands in an empty section.
@@ -1142,17 +1234,9 @@ pub fn draw<Tz: TimeZone>(
     let view = board.view(now, height);
     for (index, row) in view.rows.iter().enumerate() {
         match row {
-            Row::Header {
-                section,
-                count,
-                passed,
-                failed,
-                cancelled,
-            } => {
-                let line = header_line(
-                    *section, *count, *passed, *failed, *cancelled, spans, loaded,
-                );
-                put(buffer, index + 1, &line, bold);
+            Row::Header(header) => {
+                let line = header_line(header, spans, loaded);
+                put_line(buffer, index + 1, &prefix_to_width(line, area.width));
             }
             Row::Empty(section) => {
                 let line = empty_line(*section, spans, loaded);
@@ -1696,7 +1780,7 @@ mod tests {
             text[0..8],
             [
                 "   REPO                  WORKFLOW              BRANCH       TITLE                                 STARTED     TIME",
-                "Running · 1",
+                "Running · 0 ⏳ · 1 🏃 · 1 ✅ · 1 ❌ · 0 💨",
                 "🏃 timmattison/tools     CI        39149840084 main         Fix the thing                         11:45:30    14m 30s 🏃",
                 "✅ ├ build                        107851237794                                                    11:45:40    4m 20s  ✅",
                 "❌ ├ lint                         107851237795                                                    11:46:00    45s     ❌",
@@ -1715,7 +1799,7 @@ mod tests {
             lines(&buffer),
             [
                 "   REPO                  WORKFLOW              BRANCH       TITLE                                 STARTED     TIME",
-                "Running · 2",
+                "Running · 0 ⏳ · 0 🏃 · 0 ✅ · 0 ❌ · 0 💨",
                 "🏃 timmattison/tools     CI                  1 main         Fix the thing                         11:45:30    14m 30s 🏃",
                 "⏳ acme/widgets          Release             2 issue-12     Add release job                       11:58:00    2m 00s  ⏳",
                 "Last 8h · 1 passed · 1 failed · 0 cancelled",
@@ -2159,7 +2243,7 @@ mod tests {
         assert_eq!(
             text[1..5],
             [
-                "Running · 0",
+                "Running · 0 ⏳ · 0 🏃 · 0 ✅ · 0 ❌ · 0 💨",
                 "   No runs in progress or in the queue.",
                 "Last 8h · 0 passed · 0 failed · 0 cancelled",
                 "   No runs finished in the last 8h.",
@@ -4903,6 +4987,145 @@ mod tests {
         }
     }
 
+    /// The board of four runs with three jobs that wait or run on a runner.
+    /// One runner name holds spaces, as the name of a GitHub-hosted runner does.
+    fn busy_runners_board() -> Board {
+        board_with_jobs(vec![
+            on(
+                "mini",
+                job(
+                    21,
+                    "build",
+                    RunState::Running,
+                    Some("2026-10-14T11:46:00Z"),
+                    None,
+                ),
+            ),
+            on(
+                "GitHub Actions 1001",
+                job(
+                    22,
+                    "lint",
+                    RunState::Running,
+                    Some("2026-10-14T11:47:00Z"),
+                    None,
+                ),
+            ),
+            on("pi5", job(23, "test", RunState::Queued, None, None)),
+        ])
+    }
+
+    #[test]
+    fn the_running_header_names_the_busy_runners_after_the_counts() {
+        let mut board = busy_runners_board();
+        let text = lines(&render_with(160, 12, &mut board, &loaded()));
+        assert_eq!(
+            text[1],
+            "Running · 1 ⏳ · 2 🏃 · 0 ✅ · 0 ❌ · 0 💨 · pi5, mini, GitHub Actions 1001"
+        );
+    }
+
+    /// The cell of buffer row `y` that starts at display column `column`.
+    fn cell_at(buffer: &Buffer, y: u16, column: usize) -> &ratatui::buffer::Cell {
+        &buffer[(u16::try_from(column).expect("a column fits"), y)]
+    }
+
+    #[test]
+    fn the_runner_names_are_cyan_and_the_counts_are_bold() {
+        let mut board = busy_runners_board();
+        let buffer = render_with(160, 12, &mut board, &loaded());
+        let text = lines(&buffer);
+        let line = &text[1];
+        let bold = |column: usize| {
+            cell_at(&buffer, 1, column)
+                .modifier
+                .contains(Modifier::BOLD)
+        };
+        let cyan = |column: usize| cell_at(&buffer, 1, column).fg == Color::Cyan;
+        // The word and the first count digit.
+        assert!((0..7).all(bold), "the word is bold");
+        let digit = display_width("Running · ");
+        assert_eq!(columns(line, digit, 1), "1");
+        assert!(bold(digit) && !cyan(digit), "a count is bold and not cyan");
+        // Each name is cyan. The separator between two names is bold, not cyan.
+        let names_start = display_width("Running · 1 ⏳ · 2 🏃 · 0 ✅ · 0 ❌ · 0 💨 · ");
+        let mut column = names_start;
+        for (index, name) in ["pi5", "mini", "GitHub Actions 1001"].iter().enumerate() {
+            if index > 0 {
+                let separator = columns(line, column, 2);
+                assert_eq!(separator, ", ");
+                assert!(
+                    (column..column + 2).all(|c| bold(c) && !cyan(c)),
+                    "the separator at column {column} is bold and not cyan"
+                );
+                column += 2;
+            }
+            assert_eq!(&columns(line, column, display_width(name)), name);
+            assert!(
+                (column..column + display_width(name)).all(cyan),
+                "the name {name} is cyan"
+            );
+            column += display_width(name);
+        }
+        // The ` · ` before the first name is bold and not cyan.
+        assert!((names_start - 3..names_start).all(|c| bold(c) && !cyan(c)));
+    }
+
+    #[test]
+    fn the_running_header_gives_no_counts_and_no_runners_before_the_first_refresh_ends() {
+        let mut board = busy_runners_board();
+        let text = lines(&render_with(160, 12, &mut board, &Status::default()));
+        assert_eq!(text[1], "Running");
+    }
+
+    #[test]
+    fn a_narrow_screen_cuts_the_runner_names_and_does_not_panic() {
+        let board = || {
+            board_with_jobs(vec![
+                on(
+                    "ランナー",
+                    job(
+                        21,
+                        "a",
+                        RunState::Running,
+                        Some("2026-10-14T11:46:00Z"),
+                        None,
+                    ),
+                ),
+                on(
+                    "café",
+                    job(
+                        22,
+                        "b",
+                        RunState::Running,
+                        Some("2026-10-14T11:47:00Z"),
+                        None,
+                    ),
+                ),
+                on("🎉", job(23, "c", RunState::Queued, None, None)),
+            ])
+        };
+        let full_width = 200;
+        let full = lines(&render_with(full_width, 12, &mut board(), &loaded()))[1].clone();
+        assert!(full.ends_with(", café, ランナー"), "{full:?}");
+        for width in 1..=u16::try_from(display_width(&full)).expect("a width fits") + 2 {
+            let cut = lines(&render_with(width, 12, &mut board(), &loaded()))[1].clone();
+            assert!(full.starts_with(&cut), "width {width}: {cut:?} of {full:?}");
+            assert!(
+                display_width(&cut) <= usize::from(width),
+                "width {width}: {cut:?}"
+            );
+        }
+        // The edge falls inside the name "ランナー" (8 columns): 2 of its 4 glyphs fill 4 columns.
+        let names_start = display_width(&full) - display_width("ランナー");
+        let width = u16::try_from(names_start + 4).expect("a width fits");
+        let cut = lines(&render_with(width, 12, &mut board(), &loaded()))[1].clone();
+        assert_eq!(
+            cut,
+            "Running · 1 ⏳ · 2 🏃 · 0 ✅ · 0 ❌ · 0 💨 · 🎉, café, ラン"
+        );
+    }
+
     /// The run ID of the megarepo board.
     const MEGAREPO_RUN: u64 = 39_450_362_521;
 
@@ -5557,7 +5780,7 @@ mod tests {
                     "8m 02s"
                 ),
                 queue_golden("🪦", "removed", 15990, "old-branch", "Old work", "", ""),
-                "Running · 1".to_owned(),
+                "Running · 0 ⏳ · 0 🏃 · 0 ✅ · 0 ❌ · 0 💨".to_owned(),
             ]
         );
         assert!(text[9].starts_with("🏃 rust-lang/cargo"), "{:?}", text[9]);
