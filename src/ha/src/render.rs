@@ -1690,7 +1690,7 @@ mod tests {
             text[0..8],
             [
                 "   REPO                  WORKFLOW              BRANCH       TITLE                                 STARTED     TIME",
-                "Running · 1",
+                "Running · 0 ⏳ · 1 🏃 · 1 ✅ · 1 ❌ · 0 💨",
                 "🏃 timmattison/tools     CI        39149840084 main         Fix the thing                         11:45:30    14m 30s 🏃",
                 "✅ ├ build                        107851237794                                                    11:45:40    4m 20s  ✅",
                 "❌ ├ lint                         107851237795                                                    11:46:00    45s     ❌",
@@ -1709,7 +1709,7 @@ mod tests {
             lines(&buffer),
             [
                 "   REPO                  WORKFLOW              BRANCH       TITLE                                 STARTED     TIME",
-                "Running · 2",
+                "Running · 0 ⏳ · 0 🏃 · 0 ✅ · 0 ❌ · 0 💨",
                 "🏃 timmattison/tools     CI                  1 main         Fix the thing                         11:45:30    14m 30s 🏃",
                 "⏳ acme/widgets          Release             2 issue-12     Add release job                       11:58:00    2m 00s  ⏳",
                 "Last 8h · 1 passed · 1 failed · 0 cancelled",
@@ -2153,7 +2153,7 @@ mod tests {
         assert_eq!(
             text[1..5],
             [
-                "Running · 0",
+                "Running · 0 ⏳ · 0 🏃 · 0 ✅ · 0 ❌ · 0 💨",
                 "   No runs in progress or in the queue.",
                 "Last 8h · 0 passed · 0 failed · 0 cancelled",
                 "   No runs finished in the last 8h.",
@@ -5551,7 +5551,7 @@ mod tests {
                     "8m 02s"
                 ),
                 queue_golden("🪦", "removed", 15990, "old-branch", "Old work", "", ""),
-                "Running · 1".to_owned(),
+                "Running · 0 ⏳ · 0 🏃 · 0 ✅ · 0 ❌ · 0 💨".to_owned(),
             ]
         );
         assert!(text[9].starts_with("🏃 rust-lang/cargo"), "{:?}", text[9]);
