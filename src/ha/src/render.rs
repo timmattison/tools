@@ -464,10 +464,11 @@ where
 /// that GitHub reports. It sets the marker and the time cells. The started
 /// cell shows the start time of an active run. It shows the finish time
 /// (`Run::updated_at`) of a finished run, which stands in the recent section.
-/// A stale run has the [`STALE_MARK`] before its repository name. `cells` puts the mark
-/// there and cuts the name at its start when the name does not fit. The line
-/// holds the spans of `cells`: the two marker cells keep `Color::Reset`, and
-/// the text cells take the style that the caller gives the line.
+/// A stale run has the [`STALE_MARK`] before its repository name. `cells`
+/// puts the mark there and cuts the name at its start when the name does not
+/// fit. The line holds the spans of `cells`: the two marker cells keep
+/// `Color::Reset`, and the text cells take the style that the caller gives
+/// the line.
 fn run_line<Tz: TimeZone>(
     run: &Run,
     state: RunState,
@@ -2628,18 +2629,18 @@ mod tests {
         );
         let text = lines(&render_with(120, 12, &mut board, &loaded()));
         let run_row = row_holding(&text, "39149711502");
-        let build = row_holding(&text, "107851237801");
-        let lint = row_holding(&text, "107851237802");
-        let tests = row_holding(&text, "107851237803");
+        let build_row = row_holding(&text, "107851237801");
+        let lint_row = row_holding(&text, "107851237802");
+        let test_row = row_holding(&text, "107851237803");
         // The job rows show the finish time of their job.
-        assert_eq!(started_cells(&text, build), "09:04:00");
-        assert_eq!(started_cells(&text, lint), "09:01:05");
+        assert_eq!(started_cells(&text, build_row), "09:04:00");
+        assert_eq!(started_cells(&text, lint_row), "09:01:05");
         // A job with no finish time has an empty started cell.
-        assert_eq!(started_cells(&text, tests), "");
+        assert_eq!(started_cells(&text, test_row), "");
         // The time cell does not change.
-        assert_eq!(time_cells(&text, build), "3m 50s");
-        assert_eq!(time_cells(&text, lint), "45s");
-        assert_eq!(time_cells(&text, tests), "");
+        assert_eq!(time_cells(&text, build_row), "3m 50s");
+        assert_eq!(time_cells(&text, lint_row), "45s");
+        assert_eq!(time_cells(&text, test_row), "");
         // The job rows agree with their run.
         assert_eq!(started_cells(&text, run_row), "09:10:05");
     }
