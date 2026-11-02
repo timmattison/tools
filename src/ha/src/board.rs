@@ -120,10 +120,7 @@ fn runner_order(a: &RunnerName, b: &RunnerName) -> Ordering {
 /// One row of the board.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Row<'a> {
-    /// In the history section, the three counts are about pull requests:
-    /// `passed` counts the merged ones, `failed` the ones that the queue
-    /// removed, and `cancelled` the ones that a person removed. Each one shows
-    /// the marker of the run state of the same name.
+    /// The title row of a section, see [`Header`].
     Header(Header<'a>),
     /// The row that shows an empty section.
     Empty(Section),
