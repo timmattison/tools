@@ -785,8 +785,10 @@ impl Board {
     /// jobs that wait or run. The selected row carries the
     /// selection mark. This is the row of the selected item, or the row of
     /// its selected job. The block of each expanded run follows the row of
-    /// that run. The position of an item in `shown_items` is the same as its
-    /// position in this list.
+    /// that run. The item rows come in the order of `shown_items`, and the
+    /// selection finds the row of an item by the position of that item in
+    /// `shown_items`. The list also holds header rows, empty rows, and job
+    /// rows, thus the index of a row is not the position of its item.
     fn build_rows(&self, now: DateTime<Utc>) -> Vec<Row<'_>> {
         let selected = self.selected.as_ref();
         let mut rows = Vec::new();
