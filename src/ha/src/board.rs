@@ -3632,7 +3632,7 @@ mod tests {
     }
 
     #[test]
-    fn a_repository_with_a_merge_queue_adds_two_sections_above_the_runs() {
+    fn a_repository_with_a_merge_queue_puts_the_queue_above_the_runs_and_the_history_below_them() {
         let mut board = board();
         board.set_queues(&BTreeSet::from([repo("a/x")]));
         assert_eq!(
@@ -3640,12 +3640,105 @@ mod tests {
             [
                 "Header(Queue,0,0,0,0)",
                 "Empty(Queue)",
-                "Header(History,0,0,0,0)",
-                "Empty(History)",
                 "Header(Active,0,0,0,0)",
                 "Empty(Active)",
+                "Header(History,0,0,0,0)",
+                "Empty(History)",
                 "Header(Recent,0,0,0,0)",
                 "Empty(Recent)"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_sections_stand_in_the_order_queue_running_history_last() {
+        let mut board = mixed_board();
+        assert_eq!(
+            shape(&board.rows(now())),
+            [
+                "Header(Queue,1,0,0,0)",
+                "Entry(a/x#7)",
+                "Header(Active,1,0,0,0)",
+                "Run(1)",
+                "Header(History,1,1,0,0)",
+                "Departure(a/x#2)",
+                "Header(Recent,1,1,0,0)",
+                "Run(3)"
+            ]
+        );
+    }
+
+    /// A board with one entry, two active runs, two departures, and one recent run.
+    fn wide_mixed_board() -> Board {
+        let mut board = queue_board(
+            vec![queue_entry("a/x", 7, 1, 3)],
+            vec![
+                departure("a/x", 2, Outcome::Merged, 10),
+                departure("a/x", 4, Outcome::Failed, 20),
+            ],
+        );
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 5, 1),
+                run(2, "a/x", RunState::Running, 6, 2),
+                run(3, "a/x", RunState::Passed, 60, 10),
+            ],
+            now(),
+        );
+        board
+    }
+
+    #[test]
+    fn the_highlight_goes_from_the_running_runs_to_the_history_and_then_to_the_last_runs() {
+        let mut board = wide_mixed_board();
+        assert_eq!(
+            walk(&mut board, 6, Board::select_next),
+            [
+                "Entry(a/x#7)*",
+                "Run(1)*",
+                "Run(2)*",
+                "Departure(a/x#2)*",
+                "Departure(a/x#4)*",
+                "Run(3)*",
+                "Run(3)*"
+            ]
+        );
+        assert_eq!(
+            walk(&mut board, 6, Board::select_previous),
+            [
+                "Run(3)*",
+                "Departure(a/x#4)*",
+                "Departure(a/x#2)*",
+                "Run(2)*",
+                "Run(1)*",
+                "Entry(a/x#7)*",
+                "Entry(a/x#7)*"
+            ]
+        );
+    }
+
+    #[test]
+    fn page_down_and_page_up_use_the_order_of_the_board() {
+        let mut board = mixed_board();
+        assert_eq!(
+            walk(&mut board, 4, Board::select_next_page),
+            [
+                "Entry(a/x#7)*",
+                "Run(1)*",
+                "Departure(a/x#2)*",
+                "Run(3)*",
+                "Run(3)*"
+            ]
+        );
+        assert_eq!(
+            walk(&mut board, 4, Board::select_previous_page),
+            [
+                "Run(3)*",
+                "Departure(a/x#2)*",
+                "Run(1)*",
+                "Entry(a/x#7)*",
+                "Entry(a/x#7)*"
             ]
         );
     }
@@ -3899,14 +3992,14 @@ mod tests {
     }
 
     #[test]
-    fn up_and_down_move_through_the_queue_the_history_and_the_runs() {
+    fn up_and_down_move_through_the_queue_the_running_runs_the_history_and_the_last_runs() {
         let mut board = mixed_board();
         assert_eq!(
             walk(&mut board, 4, Board::select_next),
             [
                 "Entry(a/x#7)*",
-                "Departure(a/x#2)*",
                 "Run(1)*",
+                "Departure(a/x#2)*",
                 "Run(3)*",
                 "Run(3)*"
             ]
@@ -3915,8 +4008,8 @@ mod tests {
             walk(&mut board, 4, Board::select_previous),
             [
                 "Run(3)*",
-                "Run(1)*",
                 "Departure(a/x#2)*",
+                "Run(1)*",
                 "Entry(a/x#7)*",
                 "Entry(a/x#7)*"
             ]

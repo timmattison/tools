@@ -6053,11 +6053,12 @@ mod tests {
     }
 
     #[test]
-    fn a_frame_with_a_merge_queue_shows_the_queue_and_the_history_above_the_runs() {
+    fn a_frame_with_a_merge_queue_shows_the_queue_above_the_runs_and_the_history_below_them() {
         let mut board = queue_frame_board();
         let text = lines(&render_with(120, 14, &mut board, &loaded()));
+        assert!(text[5].starts_with("🏃 rust-lang/cargo"), "{:?}", text[5]);
         assert_eq!(
-            text[1..9],
+            text[1..10],
             [
                 "Merge queue · 2".to_owned(),
                 queue_golden(
@@ -6078,6 +6079,8 @@ mod tests {
                     "11:58:57",
                     "1m 03s"
                 ),
+                "Running · 0 ⏳ · 0 🏃 · 0 ✅ · 0 ❌ · 0 💨".to_owned(),
+                text[5].clone(),
                 "Merge history · Last 8h · 1 merged · 1 failed · 1 removed".to_owned(),
                 queue_golden(
                     "✅",
@@ -6098,10 +6101,9 @@ mod tests {
                     "8m 02s"
                 ),
                 queue_golden("🪦", "removed", 15990, "old-branch", "Old work", "", ""),
-                "Running · 0 ⏳ · 0 🏃 · 0 ✅ · 0 ❌ · 0 💨".to_owned(),
             ]
         );
-        assert!(text[9].starts_with("🏃 rust-lang/cargo"), "{:?}", text[9]);
+        assert!(text[10].starts_with("Last 8h"), "{:?}", text[10]);
     }
 
     #[test]
