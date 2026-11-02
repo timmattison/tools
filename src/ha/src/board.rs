@@ -218,6 +218,16 @@ enum Jobs {
     },
 }
 
+/// The last good jobs of the job answer `answer`. A failed fetch keeps the
+/// jobs of the last good answer, and that list is empty when there is none.
+/// No answer gives no job.
+fn last_good_jobs(answer: Option<&Jobs>) -> &[Job] {
+    match answer {
+        Some(Jobs::Ready(jobs) | Jobs::Failed { jobs, .. }) => jobs,
+        None => &[],
+    }
+}
+
 /// One row that the selection can mark, other than a job row, in the order of
 /// the board.
 #[derive(Debug, Clone, Copy)]
@@ -645,10 +655,7 @@ impl Board {
         if !self.expanded.contains(&run) {
             return &[];
         }
-        match self.jobs.get(&run) {
-            Some(Jobs::Ready(jobs) | Jobs::Failed { jobs, .. }) => jobs,
-            None => &[],
-        }
+        last_good_jobs(self.jobs.get(&run))
     }
 
     /// True when some repository list holds a run with the ID `run`.
@@ -869,13 +876,9 @@ impl Board {
     where
         's: 'a,
     {
-        active.iter().flat_map(|run| {
-            match self.jobs.get(&run.id) {
-                Some(Jobs::Ready(jobs) | Jobs::Failed { jobs, .. }) => jobs.as_slice(),
-                _ => &[],
-            }
+        active
             .iter()
-        })
+            .flat_map(|run| last_good_jobs(self.jobs.get(&run.id)).iter())
     }
 
     /// Counts the jobs of the `active` runs by state, see `active_jobs`.
@@ -1208,10 +1211,7 @@ fn push_runs<'a>(
     for (offset, &run) in runs.iter().enumerate() {
         let here = selected.filter(|selection| selection.item.1 == first + offset);
         let answer = view.jobs.get(&run.id);
-        let jobs = match answer {
-            Some(Jobs::Ready(jobs) | Jobs::Failed { jobs, .. }) => jobs.as_slice(),
-            None => &[],
-        };
+        let jobs = last_good_jobs(answer);
         rows.push(Row::Run {
             run,
             state: run.state.shown_with_jobs(jobs.iter().map(|job| job.state)),
