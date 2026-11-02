@@ -6111,7 +6111,8 @@ mod tests {
         let mut board = queue_frame_board();
         let text = lines(&render_with(120, 14, &mut board, &Status::default()));
         assert_eq!(text[1], "Merge queue");
-        assert_eq!(text[4], "Merge history · Last 8h");
+        let history = line_starting_with(&text, "Merge history");
+        assert_eq!(text[history], "Merge history · Last 8h");
     }
 
     #[test]
@@ -6120,17 +6121,28 @@ mod tests {
         board.set_queues(&BTreeSet::from([repo("rust-lang/cargo")]));
         let text = lines(&render_with(80, 12, &mut board, &loaded()));
         assert_eq!(
-            text[1..5],
+            text[1..3],
+            ["Merge queue · 0", "   No pull requests in the merge queue."]
+        );
+        let history = line_starting_with(&text, "Merge history");
+        assert_eq!(
+            text[history..history + 2],
             [
-                "Merge queue · 0",
-                "   No pull requests in the merge queue.",
                 "Merge history · Last 8h · 0 merged · 0 failed · 0 removed",
                 "   No pull request left the merge queue in the last 8h.",
             ]
         );
         let text = lines(&render_with(80, 12, &mut board, &Status::default()));
         assert_eq!(text[2], "   Loading…");
-        assert_eq!(text[4], "   Loading…");
+        let history = line_starting_with(&text, "Merge history");
+        assert_eq!(text[history + 1], "   Loading…");
+    }
+
+    /// The index of the first line that starts with `prefix`.
+    fn line_starting_with(text: &[String], prefix: &str) -> usize {
+        text.iter()
+            .position(|line| line.starts_with(prefix))
+            .unwrap_or_else(|| panic!("no line starts with {prefix:?}: {text:?}"))
     }
 
     /// A board whose merge history of `rust-lang/cargo` the page limit cut
@@ -6161,20 +6173,23 @@ mod tests {
             "2026-10-14T11:00:00Z",
         )]);
         let text = lines(&render_with(120, 12, &mut board, &loaded()));
+        let history = line_starting_with(&text, "Merge history");
         assert_eq!(
-            text[3],
+            text[history],
             "Merge history · Last 2h 00m of 8h · 1 merged · 0 failed · 0 removed"
         );
         let text = lines(&render_with(120, 12, &mut board, &Status::default()));
-        assert_eq!(text[3], "Merge history · Last 2h 00m of 8h");
+        let history = line_starting_with(&text, "Merge history");
+        assert_eq!(text[history], "Merge history · Last 2h 00m of 8h");
     }
 
     #[test]
     fn an_empty_cut_history_names_the_span_that_it_reaches() {
         let mut board = cut_history_board(Vec::new());
         let text = lines(&render_with(120, 12, &mut board, &loaded()));
+        let history = line_starting_with(&text, "Merge history");
         assert_eq!(
-            text[4],
+            text[history + 1],
             "   No pull request left the merge queue in the last 2h 00m."
         );
     }
@@ -6237,9 +6252,9 @@ mod tests {
     fn the_pull_request_number_ends_in_the_column_of_the_run_id() {
         let mut board = queue_frame_board();
         let text = lines(&render_with(120, 14, &mut board, &loaded()));
-        let run_end = last_digit_column(&text[9], "39149840084");
-        assert!(run_end.is_some(), "{:?}", text[9]);
-        for (y, digits) in [(2, "16012"), (3, "16020"), (5, "16001"), (7, "15990")] {
+        let run_end = last_digit_column(&text[5], "39149840084");
+        assert!(run_end.is_some(), "{:?}", text[5]);
+        for (y, digits) in [(2, "16012"), (3, "16020"), (7, "16001"), (9, "15990")] {
             assert_eq!(
                 last_digit_column(&text[y], digits),
                 run_end,
@@ -6543,9 +6558,10 @@ mod tests {
     #[test]
     fn a_highlighted_departure_row_has_no_fade() {
         let mut board = queue_frame_board();
-        // The highlight starts on 16012. Four steps reach 15990, which left
-        // the queue 4 hours ago and has the floor gray without the highlight.
-        for _ in 0..4 {
+        // The highlight starts on 16012. Five steps pass the entry 16020 and
+        // the run, and reach 15990, which left the queue 4 hours ago and has
+        // the floor gray without the highlight.
+        for _ in 0..5 {
             board.select_next(now());
         }
         let buffer = render_with(120, 20, &mut board, &loaded());
