@@ -539,9 +539,10 @@ where
 ///
 /// The row uses the columns of a run row. The workflow cell holds the word of
 /// the outcome, and the ID part holds the number of the pull request. The
-/// started cell is the time that the pull request joined the queue, and the
-/// time cell is how long it stayed in the queue. Both cells are empty when
-/// the time that it joined is not known. The line holds the spans of `cells`.
+/// started cell is the time that the pull request left the queue (see
+/// [`format_clock`]), and it is never empty. The time cell is how long it
+/// stayed in the queue. It is empty when the time that it joined is not
+/// known. The line holds the spans of `cells`.
 fn departure_line<Tz: TimeZone>(
     departure: &Departure,
     now: DateTime<Utc>,
@@ -552,10 +553,7 @@ where
     Tz::Offset: Display,
 {
     let (marker, word) = departure_look(departure.outcome);
-    let started = departure
-        .enqueued_at
-        .map(|at| format_clock(at, now, tz))
-        .unwrap_or_default();
+    let started = format_clock(departure.left_at, now, tz);
     let time = departure
         .enqueued_at
         .map(|at| format_elapsed(span(at, departure.left_at)))
