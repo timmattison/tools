@@ -567,14 +567,18 @@ where
 /// in cyan, when the text leaves room for it (see [`job_cells`]). The job ID
 /// follows, in the columns of the run ID.
 ///
-/// A job that waits did not start, thus its started cell is empty. Its time
-/// cell shows how long it waited, from its creation until `now`, and is empty
-/// when the job has no creation time. The time cells of each other job follow
-/// the rules of [`run_line`], with the finish time of the job in place of the
-/// update time. Such a job with no start time has an empty started cell and an
-/// empty time cell.
+/// The started cell of a job of a finished `run` shows when the job finished
+/// (`Job::completed_at`), and is empty when the job has no finish time. The
+/// started cell of a job of an active run shows when the job started. A job
+/// that waits did not start, thus its started cell is empty. The time cell of
+/// a job that waits shows how long it waited, from its creation until `now`,
+/// and is empty when the job has no creation time. The time cells of each
+/// other job follow the rules of [`run_line`], with the finish time of the job
+/// in place of the update time. Such a job with no start time has an empty
+/// time cell.
 fn job_line<Tz: TimeZone>(
     job: &Job,
+    run: &Run,
     last: bool,
     now: DateTime<Utc>,
     tz: &Tz,
@@ -583,28 +587,33 @@ fn job_line<Tz: TimeZone>(
 where
     Tz::Offset: Display,
 {
-    let (started, time) = if job.state == RunState::Queued {
-        // A job that waits did not start. Its time is the wait, from its creation.
-        (
-            String::new(),
-            job.created_at
-                .map(|created| format_elapsed(span(created, now)))
-                .unwrap_or_default(),
-        )
+    // `Board::sections` decides the section of a run from `run.state`, thus the
+    // jobs of the run follow the same state.
+    let clock_of = if run.state.is_finished() {
+        job.completed_at
+    } else if job.state == RunState::Queued {
+        // A job that waits did not start.
+        None
     } else {
-        (
-            job.started_at
-                .map(|started| format_clock(started, now, tz))
-                .unwrap_or_default(),
-            job.started_at.map_or_else(String::new, |started| {
-                if job.state.is_active() {
-                    format_elapsed(span(started, now))
-                } else {
-                    job.completed_at
-                        .map_or_else(String::new, |done| format_elapsed(span(started, done)))
-                }
-            }),
-        )
+        job.started_at
+    };
+    let started = clock_of
+        .map(|instant| format_clock(instant, now, tz))
+        .unwrap_or_default();
+    let time = if job.state == RunState::Queued {
+        // The time of a job that waits is the wait, from its creation.
+        job.created_at
+            .map(|created| format_elapsed(span(created, now)))
+            .unwrap_or_default()
+    } else {
+        job.started_at.map_or_else(String::new, |began| {
+            if job.state.is_active() {
+                format_elapsed(span(began, now))
+            } else {
+                job.completed_at
+                    .map_or_else(String::new, |done| format_elapsed(span(began, done)))
+            }
+        })
     };
     let glyph = if last { TREE_LAST } else { TREE_MIDDLE };
     job_cells(
@@ -1264,9 +1273,9 @@ pub fn draw<Tz: TimeZone>(
                 job,
                 last,
                 selected,
-                ..
+                run,
             } => {
-                let line = job_line(job, *last, now, tz, widths);
+                let line = job_line(job, run, *last, now, tz, widths);
                 let y = put_line(buffer, index + 1, &line.style(age_style(row, now)));
                 reverse_if(*selected, buffer, area, y);
             }
@@ -2491,16 +2500,16 @@ mod tests {
         let run_row = row_holding(&text, "39149711502");
         let build = row_holding(&text, "107851237801");
         let lint = row_holding(&text, "107851237802");
-        let test = row_holding(&text, "107851237803");
+        let tests = row_holding(&text, "107851237803");
         // The job rows show the finish time of their job.
         assert_eq!(started_cells(&text, build), "09:04:00");
         assert_eq!(started_cells(&text, lint), "09:01:05");
         // A job with no finish time has an empty started cell.
-        assert_eq!(started_cells(&text, test), "");
+        assert_eq!(started_cells(&text, tests), "");
         // The time cell does not change.
         assert_eq!(time_cells(&text, build), "3m 50s");
         assert_eq!(time_cells(&text, lint), "45s");
-        assert_eq!(time_cells(&text, test), "");
+        assert_eq!(time_cells(&text, tests), "");
         // The job rows agree with their run.
         assert_eq!(started_cells(&text, run_row), "09:10:05");
     }
@@ -5129,8 +5138,18 @@ mod tests {
                     Some("2026-10-14T11:00:00Z"),
                     Some("2026-10-14T11:30:00Z"),
                 );
+                let run = run(
+                    1,
+                    "a/x",
+                    "CI",
+                    "main",
+                    "title",
+                    RunState::Passed,
+                    "2026-10-14T11:00:00Z",
+                    "2026-10-14T11:30:00Z",
+                );
                 for last in [false, true] {
-                    let line = job_line(&job, last, now(), &utc(), widths).to_string();
+                    let line = job_line(&job, &run, last, now(), &utc(), widths).to_string();
                     assert_eq!(display_width(&line), usize::from(w), "{state:?}: {line:?}");
                 }
             }
