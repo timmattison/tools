@@ -2403,6 +2403,36 @@ mod tests {
     }
 
     #[test]
+    fn a_run_with_no_answer_adds_nothing_and_a_failed_fetch_adds_its_last_good_jobs() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Running, 20, 1),
+                run(3, "a/x", RunState::Running, 10, 1),
+            ],
+            now(),
+        );
+        // Run 1 has no answer. Run 2 has an answer and then a failed fetch.
+        board.set_jobs(
+            RunId(2),
+            vec![job(1, RunState::Running), job(2, RunState::Failed)],
+        );
+        board.fail_jobs(RunId(2), "boom".to_owned());
+        // Run 3 has a failed fetch and no good jobs.
+        board.fail_jobs(RunId(3), "boom".to_owned());
+        assert_eq!(
+            active_header(&board.rows(now())).jobs,
+            JobCounts {
+                running: 1,
+                failed: 1,
+                ..JobCounts::default()
+            }
+        );
+    }
+
+    #[test]
     fn expanding_the_selected_run_shows_a_loading_row_below_it() {
         let mut board = two_run_board();
         board.expand(now());
