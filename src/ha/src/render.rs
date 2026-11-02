@@ -13,7 +13,7 @@ use ratatui::Frame;
 use textfit::{pad_right, truncate_left_to_budget, truncate_to_budget};
 use unicode_width::UnicodeWidthStr;
 
-use crate::board::{Board, Row, Section};
+use crate::board::{Board, Header, Row, Section};
 use crate::cancel::Confirm;
 use crate::job::{Job, RunnerName};
 use crate::queue::{Departure, EntryState, Outcome, PullNumber, QueueEntry};
@@ -683,21 +683,22 @@ impl Spans {
 
 /// The line of a section header.
 ///
+/// The line names the section of `header` and shows its counts.
+///
 /// A loaded recent header names the counts of passed, failed, and cancelled
 /// runs. Each count shows also when it is 0.
 ///
 /// Before the first refresh cycle ends (`loaded` is false), the header gives
 /// no counts. The board then holds only the repositories that the worker
 /// fetched so far, thus a count is too low.
-fn header_line(
-    section: Section,
-    count: usize,
-    passed: usize,
-    failed: usize,
-    cancelled: usize,
-    spans: Spans,
-    loaded: bool,
-) -> String {
+fn header_line(header: &Header, spans: Spans, loaded: bool) -> String {
+    let Header {
+        section,
+        count,
+        passed,
+        failed,
+        cancelled,
+    } = *header;
     let history = spans.history_text();
     let window = format_duration_setting(spans.window);
     match (section, loaded) {
@@ -1142,16 +1143,8 @@ pub fn draw<Tz: TimeZone>(
     let view = board.view(now, height);
     for (index, row) in view.rows.iter().enumerate() {
         match row {
-            Row::Header {
-                section,
-                count,
-                passed,
-                failed,
-                cancelled,
-            } => {
-                let line = header_line(
-                    *section, *count, *passed, *failed, *cancelled, spans, loaded,
-                );
+            Row::Header(header) => {
+                let line = header_line(header, spans, loaded);
                 put(buffer, index + 1, &line, bold);
             }
             Row::Empty(section) => {

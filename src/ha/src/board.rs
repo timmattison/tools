@@ -36,30 +36,37 @@ pub enum Section {
     Recent,
 }
 
+/// The title row of a section, with what it counts.
+///
+/// In the history section, the three counts are about pull requests:
+/// `passed` counts the merged ones, `failed` the ones that the queue
+/// removed, and `cancelled` the ones that a person removed. Each one shows
+/// the marker of the run state of the same name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Header {
+    /// The section that the header opens.
+    pub section: Section,
+    /// The number of rows in the section.
+    pub count: usize,
+    /// The number of passed runs, or of merged pull requests. This is 0
+    /// for the queue section and the active section.
+    pub passed: usize,
+    /// The number of failed runs, or of pull requests that the queue
+    /// removed. This is 0 for the queue section and the active section.
+    pub failed: usize,
+    /// The number of cancelled runs, or of pull requests that a person
+    /// removed. This is 0 for the queue section and the active section.
+    pub cancelled: usize,
+}
+
 /// One row of the board.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Row<'a> {
-    /// The title row of a section.
-    ///
     /// In the history section, the three counts are about pull requests:
     /// `passed` counts the merged ones, `failed` the ones that the queue
     /// removed, and `cancelled` the ones that a person removed. Each one shows
     /// the marker of the run state of the same name.
-    Header {
-        /// The section that the header opens.
-        section: Section,
-        /// The number of rows in the section.
-        count: usize,
-        /// The number of passed runs, or of merged pull requests. This is 0
-        /// for the queue section and the active section.
-        passed: usize,
-        /// The number of failed runs, or of pull requests that the queue
-        /// removed. This is 0 for the queue section and the active section.
-        failed: usize,
-        /// The number of cancelled runs, or of pull requests that a person
-        /// removed. This is 0 for the queue section and the active section.
-        cancelled: usize,
-    },
+    Header(Header),
     /// The row that shows an empty section.
     Empty(Section),
     /// One pull request in a merge queue.
@@ -449,14 +456,14 @@ impl Board {
             let on_item_row = selected_row.is_some_and(|row| rows[row].is_item());
             let header_above = on_item_row
                 && selected_row.is_some_and(|row| {
-                    row > 0 && matches!(rows.get(row - 1), Some(Row::Header { .. }))
+                    row > 0 && matches!(rows.get(row - 1), Some(Row::Header(_)))
                 });
             let len = rows.len();
             let below = selected_row.filter(|_| on_item_row).map_or(0, |row| {
                 rows[row + 1..]
                     .iter()
                     .take_while(|next| {
-                        !matches!(next, Row::Header { .. } | Row::Empty(_)) && !next.is_item()
+                        !matches!(next, Row::Header(_) | Row::Empty(_)) && !next.is_item()
                     })
                     .count()
             });
@@ -709,13 +716,13 @@ impl Board {
         let mut first = 0;
         if !self.queues.is_empty() {
             let (entries, departures) = self.queue_sections(now);
-            rows.push(Row::Header {
+            rows.push(Row::Header(Header {
                 section: Section::Queue,
                 count: entries.len(),
                 passed: 0,
                 failed: 0,
                 cancelled: 0,
-            });
+            }));
             if entries.is_empty() {
                 rows.push(Row::Empty(Section::Queue));
             }
@@ -735,13 +742,13 @@ impl Board {
                     .filter(|departure| departure.outcome == outcome)
                     .count()
             };
-            rows.push(Row::Header {
+            rows.push(Row::Header(Header {
                 section: Section::History,
                 count: departures.len(),
                 passed: count_of(Outcome::Merged),
                 failed: count_of(Outcome::Failed),
                 cancelled: count_of(Outcome::Removed),
-            });
+            }));
             if departures.is_empty() {
                 rows.push(Row::Empty(Section::History));
             }
@@ -763,21 +770,21 @@ impl Board {
             errors: &self.errors,
             expanded: &self.expanded,
         };
-        rows.push(Row::Header {
+        rows.push(Row::Header(Header {
             section: Section::Active,
             count: active.len(),
             passed: 0,
             failed: 0,
             cancelled: 0,
-        });
+        }));
         push_runs(&mut rows, &active, Section::Active, first, selected, view);
-        rows.push(Row::Header {
+        rows.push(Row::Header(Header {
             section: Section::Recent,
             count: recent.len(),
             passed: count_of(RunState::Passed),
             failed: count_of(RunState::Failed),
             cancelled: count_of(RunState::Cancelled),
-        });
+        }));
         push_runs(
             &mut rows,
             &recent,
@@ -1224,13 +1231,13 @@ mod tests {
     fn marked(rows: &[Row<'_>]) -> Vec<String> {
         rows.iter()
             .map(|row| match row {
-                Row::Header {
+                Row::Header(Header {
                     section,
                     count,
                     passed,
                     failed,
                     cancelled,
-                } => format!("Header({section:?},{count},{passed},{failed},{cancelled})"),
+                }) => format!("Header({section:?},{count},{passed},{failed},{cancelled})"),
                 Row::Empty(section) => format!("Empty({section:?})"),
                 Row::Entry { entry, selected } => format!(
                     "Entry({}#{}){}",
@@ -1455,20 +1462,20 @@ mod tests {
             .position(|row| {
                 matches!(
                     row,
-                    Row::Header {
+                    Row::Header(Header {
                         section: Section::Recent,
                         ..
-                    }
+                    })
                 )
             })
             .expect("a recent header");
-        let Row::Header {
+        let Row::Header(Header {
             count,
             passed,
             failed,
             cancelled,
             ..
-        } = rows[position]
+        }) = rows[position]
         else {
             panic!("the row is a header");
         };
