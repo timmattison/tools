@@ -5044,6 +5044,54 @@ mod tests {
         assert_eq!(text[1], "Running");
     }
 
+    #[test]
+    fn a_narrow_screen_cuts_the_runner_names_and_does_not_panic() {
+        let board = || {
+            board_with_jobs(vec![
+                on(
+                    "ランナー",
+                    job(
+                        21,
+                        "a",
+                        RunState::Running,
+                        Some("2026-10-14T11:46:00Z"),
+                        None,
+                    ),
+                ),
+                on(
+                    "café",
+                    job(
+                        22,
+                        "b",
+                        RunState::Running,
+                        Some("2026-10-14T11:47:00Z"),
+                        None,
+                    ),
+                ),
+                on("🎉", job(23, "c", RunState::Queued, None, None)),
+            ])
+        };
+        let full_width = 200;
+        let full = lines(&render_with(full_width, 12, &mut board(), &loaded()))[1].clone();
+        assert!(full.ends_with(", café, ランナー"), "{full:?}");
+        for width in 1..=u16::try_from(display_width(&full)).expect("a width fits") + 2 {
+            let cut = lines(&render_with(width, 12, &mut board(), &loaded()))[1].clone();
+            assert!(full.starts_with(&cut), "width {width}: {cut:?} of {full:?}");
+            assert!(
+                display_width(&cut) <= usize::from(width),
+                "width {width}: {cut:?}"
+            );
+        }
+        // The edge falls inside the name "ランナー" (8 columns): 2 of its 4 glyphs show.
+        let names_start = display_width(&full) - display_width("ランナー");
+        let width = u16::try_from(names_start + 4).expect("a width fits");
+        let cut = lines(&render_with(width, 12, &mut board(), &loaded()))[1].clone();
+        assert_eq!(
+            cut,
+            "Running · 1 ⏳ · 2 🏃 · 0 ✅ · 0 ❌ · 0 💨 · 🎉, café, ランナ"
+        );
+    }
+
     /// The run ID of the megarepo board.
     const MEGAREPO_RUN: u64 = 39_450_362_521;
 
