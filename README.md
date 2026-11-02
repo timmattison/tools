@@ -2155,6 +2155,15 @@ cannot hang the caller. Used by `cwt` and `ha`.
     in the last 8 hours, the newest first, with how long each run took. A run that timed out or
     that failed to start counts as failed. The header counts the three apart, for example
     `Last 8h · 3 passed · 1 failed · 2 cancelled`. A skipped run does not show.
+    - The started column of each row in this section shows when the run finished, not when it
+      started. The header of the section shows the word `FINISHED` in that column, below the
+      `STARTED` of the column header. The rows are in order of finish time, thus the times in the
+      column decrease from the top down. The time column still shows how long the run took, thus
+      you can calculate when the run started.
+    - A job row of an expanded run in this section shows when its job finished. A job with no
+      finish time has an empty cell.
+    - On a narrow terminal, the text of the header ends in `…`, and the word `FINISHED` stays
+      whole above its column.
   - When a watched repository has a merge queue, two more sections stand above "Running". `ha`
     asks GitHub which repositories have a queue at the start and every 10 minutes. When no watched
     repository has a queue, the board does not change. GitHub gives a merge queue only to a
@@ -2200,9 +2209,9 @@ cannot hang the caller. Used by `cwt` and `ha`.
     you do not have to read across the full row. The two markers of a row are always the same.
   - The text of each finished row fades from light gray to dark gray as the row gets older, as
     the commit rows of `gsw` do. Thus a new result is bright, and you can tell the age of a row
-    without a read of the started column. The age of a run is the time since it ended. The age of
-    a pull request in "Merge history" is the time since it left the queue. The job rows of an
-    expanded finished run have the gray of their run.
+    before you read the finish time under `FINISHED`. The age of a run is the time since it
+    ended. The age of a pull request in "Merge history" is the time since it left the queue. The
+    job rows of an expanded finished run have the gray of their run.
     - The fade is one ramp over 2 hours, as the fade of `gsw` is. It starts at index 253 of the
       gray ramp of the 256-color palette, and it stops at index 238 at an age of 2 hours. The
       gray changes every 8 minutes. A row older than 2 hours keeps index 238, thus the oldest row
@@ -2236,10 +2245,11 @@ cannot hang the caller. Used by `cwt` and `ha`.
   - Right expands the highlighted run, and Left collapses it again. An expanded run shows one row
     for each job of its latest attempt, below the run row. Each job row shows the state marker of
     the job, the same emoji as for a run, the name of the job, its job ID, and when it started, if
-    it started. A cancelled job shows `🪦`. A skipped job shows `💨`, for example a job whose `if:`
-    condition is false, or a job that needs a failed job. The job ID is the
-    number in the URL of the job page (`/job/107851237794`). It stands in the columns of the run ID,
-    thus all IDs on the board end in one column. The time column of an active job has two meanings.
+    it started. Below a finished run, the job row shows when the job finished. A cancelled job
+    shows `🪦`. A skipped job shows `💨`, for example a job whose `if:` condition is false, or a
+    job that needs a failed job. The job ID is the number in the URL of the job page
+    (`/job/107851237794`). It stands in the columns of the run ID, thus all IDs on the board end
+    in one column. The time column of an active job has two meanings.
     A job that waits for a runner or for an approval (`⏳`) did not start, thus its started column
     is empty, and its time column shows how long it waited, from its creation until now. A running
     job (`🏃`) shows the time since a runner started it, without the wait before that start. Both

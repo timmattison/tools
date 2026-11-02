@@ -45,6 +45,13 @@ const TIME_WIDTH: usize = 7;
 /// columns.
 const FIXED_COLUMNS: usize =
     MARKER_WIDTH + ID_WIDTH + STARTED_WIDTH + TIME_WIDTH + MARKER_WIDTH + 8;
+/// The header word of the started column in the recent section. A row there
+/// shows when its run or its job finished (see [`run_line`] and [`job_line`]).
+const FINISHED_HEADER: &str = "FINISHED";
+/// The columns from the start of the started cell to the end of a row: the
+/// started cell, one space, the time cell, one space, and the right marker
+/// cell. [`header_cells`] ends the header line with the same cells.
+const STARTED_TO_END: usize = STARTED_WIDTH + 1 + TIME_WIDTH + 1 + MARKER_WIDTH;
 /// The header word of the workflow column.
 const WORKFLOW_HEADER: &str = "WORKFLOW";
 /// The most columns that the workflow name gets: the width of its header word.
@@ -115,6 +122,14 @@ impl Widths {
             branch,
             title: room - repo - workflow - branch,
         }
+    }
+
+    /// The display column where the started cell starts, in each row and in
+    /// the header line. It counts back from the end of the row with the same
+    /// constants that [`header_cells`] uses. A frame below [`FIXED_COLUMNS`]
+    /// columns gives the same column as a frame of that width.
+    fn started_column(self) -> usize {
+        FIXED_COLUMNS + self.repo + self.workflow + self.branch + self.title - STARTED_TO_END
     }
 }
 
@@ -430,10 +445,10 @@ fn span(from: DateTime<Utc>, to: DateTime<Utc>) -> Duration {
     Duration::from_secs(u64::try_from((to - from).num_seconds()).unwrap_or(0))
 }
 
-/// The started column: the clock for today, the date and the clock before.
-///
-/// A day starts and ends at midnight in the time zone `tz`.
-fn format_started<Tz: TimeZone>(started: DateTime<Utc>, now: DateTime<Utc>, tz: &Tz) -> String
+/// The text of one instant in the started column: the clock (`HH:MM:SS`) for
+/// an instant of today, and the date and the clock (`MM-DD HH:MM`) for an
+/// earlier day. A day starts and ends at midnight in the time zone `tz`.
+fn format_clock<Tz: TimeZone>(started: DateTime<Utc>, now: DateTime<Utc>, tz: &Tz) -> String
 where
     Tz::Offset: Display,
 {
@@ -446,11 +461,14 @@ where
 }
 
 /// The line of one run. `state` is the state that the row shows, not the state
-/// that GitHub reports. It sets the marker and the time cells. A stale run
-/// has the [`STALE_MARK`] before its repository name. `cells` puts the mark
-/// there and cuts the name at its start when the name does not fit. The line
-/// holds the spans of `cells`: the two marker cells keep `Color::Reset`, and
-/// the text cells take the style that the caller gives the line.
+/// that GitHub reports. It sets the marker and the time cells. The started
+/// cell shows the start time of an active run. It shows the finish time
+/// (`Run::updated_at`) of a finished run, which stands in the recent section.
+/// A stale run has the [`STALE_MARK`] before its repository name. `cells`
+/// puts the mark there and cuts the name at its start when the name does not
+/// fit. The line holds the spans of `cells`: the two marker cells keep
+/// `Color::Reset`, and the text cells take the style that the caller gives
+/// the line.
 fn run_line<Tz: TimeZone>(
     run: &Run,
     state: RunState,
@@ -467,6 +485,12 @@ where
     } else {
         format_elapsed(span(run.started_at, run.updated_at))
     };
+    // `Board::sections` decides the section from `run.state`, thus the cell does too.
+    let clock_instant = if run.state.is_finished() {
+        run.updated_at
+    } else {
+        run.started_at
+    };
     cells(
         widths,
         marker(state),
@@ -478,7 +502,7 @@ where
             &run.title,
         ],
         &run.id.0.to_string(),
-        &format_started(run.started_at, now, tz),
+        &format_clock(clock_instant, now, tz),
         &time,
     )
 }
@@ -506,7 +530,7 @@ where
         false,
         [&entry.repo.to_string(), word, &entry.branch, &entry.title],
         &pull_text(entry.pull),
-        &format_started(entry.enqueued_at, now, tz),
+        &format_clock(entry.enqueued_at, now, tz),
         &format_elapsed(span(entry.enqueued_at, now)),
     )
 }
@@ -530,7 +554,7 @@ where
     let (marker, word) = departure_look(departure.outcome);
     let started = departure
         .enqueued_at
-        .map(|at| format_started(at, now, tz))
+        .map(|at| format_clock(at, now, tz))
         .unwrap_or_default();
     let time = departure
         .enqueued_at
@@ -559,14 +583,18 @@ where
 /// in cyan, when the text leaves room for it (see [`job_cells`]). The job ID
 /// follows, in the columns of the run ID.
 ///
-/// A job that waits did not start, thus its started cell is empty. Its time
-/// cell shows how long it waited, from its creation until `now`, and is empty
-/// when the job has no creation time. The time cells of each other job follow
-/// the rules of [`run_line`], with the finish time of the job in place of the
-/// update time. Such a job with no start time has an empty started cell and an
-/// empty time cell.
+/// The started cell of a job of a finished `run` shows when the job finished
+/// (`Job::completed_at`), and is empty when the job has no finish time. The
+/// started cell of a job of an active run shows when the job started. A job
+/// that waits did not start, thus its started cell is empty. The time cell of
+/// a job that waits shows how long it waited, from its creation until `now`,
+/// and is empty when the job has no creation time. The time cells of each
+/// other job follow the rules of [`run_line`], with the finish time of the job
+/// in place of the update time. Such a job with no start time has an empty
+/// time cell.
 fn job_line<Tz: TimeZone>(
     job: &Job,
+    run: &Run,
     last: bool,
     now: DateTime<Utc>,
     tz: &Tz,
@@ -575,28 +603,33 @@ fn job_line<Tz: TimeZone>(
 where
     Tz::Offset: Display,
 {
-    let (started, time) = if job.state == RunState::Queued {
-        // A job that waits did not start. Its time is the wait, from its creation.
-        (
-            String::new(),
-            job.created_at
-                .map(|created| format_elapsed(span(created, now)))
-                .unwrap_or_default(),
-        )
+    // `Board::sections` decides the section of a run from `run.state`, thus the
+    // jobs of the run follow the same state.
+    let clock_of = if run.state.is_finished() {
+        job.completed_at
+    } else if job.state == RunState::Queued {
+        // A job that waits did not start.
+        None
     } else {
-        (
-            job.started_at
-                .map(|started| format_started(started, now, tz))
-                .unwrap_or_default(),
-            job.started_at.map_or_else(String::new, |started| {
-                if job.state.is_active() {
-                    format_elapsed(span(started, now))
-                } else {
-                    job.completed_at
-                        .map_or_else(String::new, |done| format_elapsed(span(started, done)))
-                }
-            }),
-        )
+        job.started_at
+    };
+    let started = clock_of
+        .map(|instant| format_clock(instant, now, tz))
+        .unwrap_or_default();
+    let time = if job.state == RunState::Queued {
+        // The time of a job that waits is the wait, from its creation.
+        job.created_at
+            .map(|created| format_elapsed(span(created, now)))
+            .unwrap_or_default()
+    } else {
+        job.started_at.map_or_else(String::new, |began| {
+            if job.state.is_active() {
+                format_elapsed(span(began, now))
+            } else {
+                job.completed_at
+                    .map_or_else(String::new, |done| format_elapsed(span(began, done)))
+            }
+        })
     };
     let glyph = if last { TREE_LAST } else { TREE_MIDDLE };
     job_cells(
@@ -764,6 +797,18 @@ fn prefix_to_width(line: Line<'static>, width: u16) -> Line<'static> {
     Line::from(spans)
 }
 
+/// Puts `word` in the started column of a header line, after `text`.
+///
+/// The text gets the columns before the started column, minus one space. A
+/// text that does not fit there ends in `…`. The word wins, because it names
+/// the column below it.
+fn with_started_word(text: &str, word: &str, widths: Widths) -> String {
+    format!(
+        "{} {word}",
+        fit(text, widths.started_column().saturating_sub(1))
+    )
+}
+
 /// The line of a section header.
 ///
 /// The line names the section of `header` and shows its counts. Every header
@@ -777,10 +822,15 @@ fn prefix_to_width(line: Line<'static>, width: u16) -> Line<'static> {
 /// A loaded recent header names the counts of passed, failed, and cancelled
 /// runs. Each count shows also when it is 0.
 ///
+/// The recent header names the started column [`FINISHED_HEADER`], at the
+/// column that `widths` gives (see [`with_started_word`]), because its rows
+/// show when each run finished. The word shows also before the first refresh
+/// cycle ends.
+///
 /// Before the first refresh cycle ends (`loaded` is false), the header gives
 /// no counts and no runner names. The board then holds only the repositories
 /// that the worker fetched so far, thus a count is too low.
-fn header_line(header: &Header<'_>, spans: Spans, loaded: bool) -> Line<'static> {
+fn header_line(header: &Header<'_>, spans: Spans, loaded: bool, widths: Widths) -> Line<'static> {
     let Header {
         section,
         count,
@@ -794,10 +844,14 @@ fn header_line(header: &Header<'_>, spans: Spans, loaded: bool) -> Line<'static>
     let text = match (section, loaded) {
         (Section::Active, true) => return active_line(&header.jobs, &header.runners),
         (Section::Active, false) => ACTIVE_TITLE.to_owned(),
-        (Section::Recent, false) => format!("Last {window}"),
-        (Section::Recent, true) => {
-            format!("Last {window} · {passed} passed · {failed} failed · {cancelled} cancelled")
+        (Section::Recent, false) => {
+            with_started_word(&format!("Last {window}"), FINISHED_HEADER, widths)
         }
+        (Section::Recent, true) => with_started_word(
+            &format!("Last {window} · {passed} passed · {failed} failed · {cancelled} cancelled"),
+            FINISHED_HEADER,
+            widths,
+        ),
         (Section::Queue, false) => "Merge queue".to_owned(),
         (Section::Queue, true) => format!("Merge queue · {count}"),
         (Section::History, false) => format!("Merge history · Last {history}"),
@@ -1205,6 +1259,8 @@ fn reverse_if(selected: bool, buffer: &mut Buffer, area: Rect, y: u16) {
 /// The marker cells and the sleeping mark of a row keep `Color::Reset`. With
 /// a `prompt`, the box of the cancel prompt draws last, over the rows (see
 /// [`draw_prompt`]). While the box shows, the status line has no key hints.
+/// The recent header names the started column `FINISHED`, because its rows
+/// show when each run finished.
 /// This function never panics, whatever the size of the frame.
 pub fn draw<Tz: TimeZone>(
     frame: &mut Frame,
@@ -1235,7 +1291,7 @@ pub fn draw<Tz: TimeZone>(
     for (index, row) in view.rows.iter().enumerate() {
         match row {
             Row::Header(header) => {
-                let line = header_line(header, spans, loaded);
+                let line = header_line(header, spans, loaded, widths);
                 put_line(buffer, index + 1, &prefix_to_width(line, area.width));
             }
             Row::Empty(section) => {
@@ -1256,9 +1312,9 @@ pub fn draw<Tz: TimeZone>(
                 job,
                 last,
                 selected,
-                ..
+                run,
             } => {
-                let line = job_line(job, *last, now, tz, widths);
+                let line = job_line(job, run, *last, now, tz, widths);
                 let y = put_line(buffer, index + 1, &line.style(age_style(row, now)));
                 reverse_if(*selected, buffer, area, y);
             }
@@ -1776,6 +1832,11 @@ mod tests {
             ],
         );
         let text = lines(&render_with(120, 10, &mut board, &loaded()));
+        // The started column starts at column 98 of 120, thus the text gets 97.
+        let recent = format!(
+            "{:<97} FINISHED",
+            "Last 8h · 1 passed · 0 failed · 0 cancelled"
+        );
         assert_eq!(
             text[0..8],
             [
@@ -1785,8 +1846,8 @@ mod tests {
                 "✅ ├ build                        107851237794                                                    11:45:40    4m 20s  ✅",
                 "❌ ├ lint                         107851237795                                                    11:46:00    45s     ❌",
                 "🏃 └ test                         107851237796                                                    11:50:10    9m 50s  🏃",
-                "Last 8h · 1 passed · 0 failed · 0 cancelled",
-                "✅ acme/widgets          Release   39149711502 issue-11     Bump deps                             09:00:00    10m 05s ✅",
+                recent.as_str(),
+                "✅ acme/widgets          Release   39149711502 issue-11     Bump deps                             09:10:05    10m 05s ✅",
             ]
         );
     }
@@ -1795,6 +1856,10 @@ mod tests {
     fn the_frame_holds_the_header_the_rows_and_the_status_line() {
         let mut board = four_run_board();
         let buffer = render_with(120, 10, &mut board, &loaded());
+        let recent = format!(
+            "{:<97} FINISHED",
+            "Last 8h · 1 passed · 1 failed · 0 cancelled"
+        );
         assert_eq!(
             lines(&buffer),
             [
@@ -1802,9 +1867,9 @@ mod tests {
                 "Running · 0 ⏳ · 0 🏃 · 0 ✅ · 0 ❌ · 0 💨",
                 "🏃 timmattison/tools     CI                  1 main         Fix the thing                         11:45:30    14m 30s 🏃",
                 "⏳ acme/widgets          Release             2 issue-12     Add release job                       11:58:00    2m 00s  ⏳",
-                "Last 8h · 1 passed · 1 failed · 0 cancelled",
-                "✅ timmattison/tools     CI                  3 main         Bump deps                             09:00:00    10m 05s ✅",
-                "❌ acme/widgets          Release             4 issue-11     Broken build                          10-13 23:50 4h 40m  ❌",
+                recent.as_str(),
+                "✅ timmattison/tools     CI                  3 main         Bump deps                             09:10:05    10m 05s ✅",
+                "❌ acme/widgets          Release             4 issue-11     Broken build                          04:30:00    4h 40m  ❌",
                 "",
                 "",
                 "updated 30s ago      ·  ↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  r refresh  q quit",
@@ -2125,9 +2190,11 @@ mod tests {
     fn each_empty_section_says_loading_before_the_first_refresh_ends() {
         let mut board = Board::new(Duration::from_hours(8));
         let text = lines(&render_with(60, 8, &mut board, &Status::default()));
+        // The started column starts at column 38 of 60, thus the text gets 37.
+        let recent = format!("{:<37} FINISHED", "Last 8h");
         assert_eq!(
             text[1..5],
-            ["Running", "   Loading…", "Last 8h", "   Loading…"]
+            ["Running", "   Loading…", recent.as_str(), "   Loading…"]
         );
     }
 
@@ -2137,7 +2204,7 @@ mod tests {
         let text = lines(&render_with(120, 10, &mut board, &Status::default()));
         assert_eq!(text[1], "Running");
         assert!(text[2].starts_with("🏃 timmattison/tools"), "{:?}", text[2]);
-        assert_eq!(text[4], "Last 8h");
+        assert_eq!(text[4], format!("{:<97} FINISHED", "Last 8h"));
         assert!(text[5].starts_with("✅ timmattison/tools"), "{:?}", text[5]);
     }
 
@@ -2161,7 +2228,8 @@ mod tests {
         let text = lines(&render_with(120, 8, &mut board, &Status::default()));
         assert_eq!(text[1], "Running");
         assert!(text[2].starts_with("🏃 timmattison/tools"), "{:?}", text[2]);
-        assert_eq!(text[3..5], ["Last 8h", "   Loading…"]);
+        let recent = format!("{:<97} FINISHED", "Last 8h");
+        assert_eq!(text[3..5], [recent.as_str(), "   Loading…"]);
     }
 
     #[test]
@@ -2245,7 +2313,7 @@ mod tests {
             [
                 "Running · 0 ⏳ · 0 🏃 · 0 ✅ · 0 ❌ · 0 💨",
                 "   No runs in progress or in the queue.",
-                "Last 8h · 0 passed · 0 failed · 0 cancelled",
+                "Last 8h · 0 passed · 0 failed · 0 ca… FINISHED",
                 "   No runs finished in the last 8h.",
             ]
         );
@@ -2280,7 +2348,7 @@ mod tests {
         let mut board = Board::new(Duration::from_mins(90));
         let buffer = render_with(60, 8, &mut board, &loaded());
         let text = lines(&buffer);
-        assert_eq!(text[3], "Last 90m · 0 passed · 0 failed · 0 cancelled");
+        assert_eq!(text[3], "Last 90m · 0 passed · 0 failed · 0 c… FINISHED");
         assert_eq!(text[4], "   No runs finished in the last 90m.");
     }
 
@@ -2310,7 +2378,87 @@ mod tests {
             now(),
         );
         let text = lines(&render_with(120, 10, &mut board, &loaded()));
-        assert_eq!(text[3], "Last 8h · 1 passed · 1 failed · 2 cancelled");
+        assert_eq!(
+            text[3],
+            format!(
+                "{:<97} FINISHED",
+                "Last 8h · 1 passed · 1 failed · 2 cancelled"
+            )
+        );
+    }
+
+    /// Finds the "Last 8h" line of a frame and gives its index.
+    fn recent_line(text: &[String]) -> usize {
+        row_holding(text, "Last 8h")
+    }
+
+    #[test]
+    fn the_recent_header_names_the_started_column_finished() {
+        for width in [80_u16, 120, 200] {
+            let mut board = four_run_board();
+            let text = lines(&render_with(width, 10, &mut board, &loaded()));
+            let y = recent_line(&text);
+            assert_eq!(started_cells(&text, y), "FINISHED", "width {width}");
+            assert!(
+                text[y].starts_with("Last 8h · 1 passed · 1 failed · 0 cancelled"),
+                "width {width}: {:?}",
+                text[y]
+            );
+            let column = header_column(&text, "STARTED");
+            assert_eq!(columns(&text[y], column - 1, 1), " ", "width {width}");
+        }
+    }
+
+    #[test]
+    fn the_recent_header_names_the_column_before_the_first_refresh_and_when_empty() {
+        let mut board = four_run_board();
+        let text = lines(&render_with(120, 10, &mut board, &Status::default()));
+        let y = recent_line(&text);
+        let column = header_column(&text, "STARTED");
+        assert!(text[y].starts_with("Last 8h"), "{:?}", text[y]);
+        assert_eq!(
+            columns(&text[y], "Last 8h".len(), column - "Last 8h".len()).trim(),
+            ""
+        );
+        assert_eq!(started_cells(&text, y), "FINISHED");
+        for status in [loaded(), Status::default()] {
+            let mut empty = Board::new(Duration::from_hours(8));
+            let text = lines(&render_with(120, 8, &mut empty, &status));
+            let y = recent_line(&text);
+            assert_eq!(started_cells(&text, y), "FINISHED", "{:?}", text[y]);
+        }
+    }
+
+    #[test]
+    fn each_cell_of_the_word_finished_is_bold() {
+        let mut board = four_run_board();
+        let buffer = render_with(120, 10, &mut board, &loaded());
+        let text = lines(&buffer);
+        let y = u16::try_from(recent_line(&text)).expect("the line index fits");
+        let first = u16::try_from(header_column(&text, "STARTED")).expect("the column fits");
+        for (offset, letter) in "FINISHED".chars().enumerate() {
+            let x = first + u16::try_from(offset).expect("the offset fits");
+            let cell = &buffer[(x, y)];
+            assert_eq!(cell.symbol(), letter.to_string(), "cell {x}");
+            assert!(cell.modifier.contains(Modifier::BOLD), "cell {x}");
+        }
+    }
+
+    #[test]
+    fn a_narrow_recent_header_cuts_its_text_and_keeps_the_word_whole() {
+        let mut board = four_run_board();
+        let text = lines(&render_with(60, 10, &mut board, &loaded()));
+        assert_eq!(
+            text[recent_line(&text)],
+            "Last 8h · 1 passed · 1 failed · 0 ca… FINISHED"
+        );
+        for width in 0_u16..=40 {
+            for status in [loaded(), Status::default()] {
+                let mut board = four_run_board();
+                let buffer = render_with(width, 8, &mut board, &status);
+                assert_eq!(buffer.area.width, width);
+            }
+        }
     }
 
     #[test]
@@ -2379,6 +2527,166 @@ mod tests {
         assert_eq!(started_cells(&in_tokyo, 3), "01:00:00");
         assert_eq!(started_cells(&in_utc, 2), "10-13 14:59");
         assert_eq!(started_cells(&in_utc, 3), "10-13 16:00");
+    }
+
+    #[test]
+    fn the_recent_rows_show_when_each_run_finished() {
+        let mut board = Board::new(Duration::from_hours(8));
+        board.replace(
+            repo("acme/widgets"),
+            vec![
+                run(
+                    39_149_840_084,
+                    "acme/widgets",
+                    "CI",
+                    "issue-12",
+                    "Add a cache",
+                    RunState::Running,
+                    "2026-10-14T11:45:30Z",
+                    "2026-10-14T11:59:00Z",
+                ),
+                run(
+                    39_149_840_090,
+                    "acme/widgets",
+                    "CI",
+                    "main",
+                    "Release build",
+                    RunState::Passed,
+                    "2026-10-14T10:28:00Z",
+                    "2026-10-14T11:58:00Z",
+                ),
+                run(
+                    39_149_840_091,
+                    "acme/widgets",
+                    "CI",
+                    "issue-11",
+                    "Fix the docs",
+                    RunState::Passed,
+                    "2026-10-14T11:35:00Z",
+                    "2026-10-14T11:40:00Z",
+                ),
+            ],
+            now(),
+        );
+        let text = lines(&render_with(100, 10, &mut board, &loaded()));
+        let running = row_holding(&text, "39149840084");
+        let later = row_holding(&text, "39149840090");
+        let earlier = row_holding(&text, "39149840091");
+        // The running row keeps its start time.
+        assert_eq!(started_cells(&text, running), "11:45:30");
+        // The order of the rows does not change.
+        assert!(later < earlier, "{text:?}");
+        // The finished rows show the finish time, and the time cell shows the run time.
+        assert_eq!(started_cells(&text, later), "11:58:00");
+        assert_eq!(started_cells(&text, earlier), "11:40:00");
+        assert_eq!(time_cells(&text, later), "1h 30m");
+        assert_eq!(time_cells(&text, earlier), "5m 00s");
+    }
+
+    #[test]
+    fn the_job_rows_of_a_finished_run_show_when_each_job_finished() {
+        let mut board = Board::new(Duration::from_hours(8));
+        board.replace(
+            repo("acme/widgets"),
+            vec![run(
+                39_149_711_502,
+                "acme/widgets",
+                "Release",
+                "issue-11",
+                "Bump deps",
+                RunState::Failed,
+                "2026-10-14T09:00:00Z",
+                "2026-10-14T09:10:05Z",
+            )],
+            now(),
+        );
+        board.expand(now());
+        board.set_jobs(
+            RunId(39_149_711_502),
+            vec![
+                job(
+                    107_851_237_801,
+                    "build",
+                    RunState::Passed,
+                    Some("2026-10-14T09:00:10Z"),
+                    Some("2026-10-14T09:04:00Z"),
+                ),
+                job(
+                    107_851_237_802,
+                    "lint",
+                    RunState::Failed,
+                    Some("2026-10-14T09:00:20Z"),
+                    Some("2026-10-14T09:01:05Z"),
+                ),
+                job(
+                    107_851_237_803,
+                    "test",
+                    RunState::Cancelled,
+                    Some("2026-10-14T09:02:00Z"),
+                    None,
+                ),
+            ],
+        );
+        let text = lines(&render_with(120, 12, &mut board, &loaded()));
+        let run_row = row_holding(&text, "39149711502");
+        let build_row = row_holding(&text, "107851237801");
+        let lint_row = row_holding(&text, "107851237802");
+        let test_row = row_holding(&text, "107851237803");
+        // The job rows show the finish time of their job.
+        assert_eq!(started_cells(&text, build_row), "09:04:00");
+        assert_eq!(started_cells(&text, lint_row), "09:01:05");
+        // A job with no finish time has an empty started cell.
+        assert_eq!(started_cells(&text, test_row), "");
+        // The time cell does not change.
+        assert_eq!(time_cells(&text, build_row), "3m 50s");
+        assert_eq!(time_cells(&text, lint_row), "45s");
+        assert_eq!(time_cells(&text, test_row), "");
+        // The job rows agree with their run.
+        assert_eq!(started_cells(&text, run_row), "09:10:05");
+    }
+
+    #[test]
+    fn the_finish_time_follows_the_time_zone() {
+        // The runs finished about 20 hours before now, thus a window of 48h holds them.
+        let mut board = Board::new(Duration::from_hours(48));
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(
+                    1,
+                    "a/x",
+                    "CI",
+                    "main",
+                    "finished early",
+                    RunState::Passed,
+                    "2026-10-13T14:00:00Z",
+                    "2026-10-13T14:59:00Z",
+                ),
+                run(
+                    2,
+                    "a/x",
+                    "CI",
+                    "main",
+                    "finished late",
+                    RunState::Failed,
+                    "2026-10-13T14:50:00Z",
+                    "2026-10-13T16:00:00Z",
+                ),
+            ],
+            now(),
+        );
+        let tokyo = chrono::FixedOffset::east_opt(9 * 3_600).expect("nine hours is valid");
+        let in_tokyo = lines(&render_in(120, 10, &mut board, &Status::default(), &tokyo));
+        let in_utc = lines(&render_with(120, 10, &mut board, &Status::default()));
+        let early = row_holding(&in_tokyo, "finished early");
+        let late = row_holding(&in_tokyo, "finished late");
+        // Tokyo reads 21:00 on 10-14 now. 14:59 UTC is 23:59 on 10-13 there,
+        // and 16:00 UTC is 01:00 on 10-14 there. Thus the late run finished
+        // today in Tokyo, although it started on 10-13 there.
+        assert_eq!(started_cells(&in_tokyo, early), "10-13 23:59");
+        assert_eq!(started_cells(&in_tokyo, late), "01:00:00");
+        assert_eq!(started_cells(&in_utc, early), "10-13 14:59");
+        assert_eq!(started_cells(&in_utc, late), "10-13 16:00");
     }
 
     #[test]
@@ -4725,9 +5033,9 @@ mod tests {
     const MARKER_ROWS: [ExpectedCells; 12] = [
         (39_149_840_001, Some(("11:00:00", "1h 00m"))),
         (39_149_840_002, Some(("11:10:00", "50m 00s"))),
-        (39_149_840_003, Some(("10:00:00", "5m 00s"))),
-        (39_149_840_004, Some(("10:10:00", "10m 00s"))),
-        (39_149_840_005, Some(("10:30:00", "12m 00s"))),
+        (39_149_840_003, Some(("10:05:00", "5m 00s"))),
+        (39_149_840_004, Some(("10:20:00", "10m 00s"))),
+        (39_149_840_005, Some(("10:42:00", "12m 00s"))),
         (107_851_237_801, None),
         (107_851_237_802, Some(("11:05:10", "54m 50s"))),
         (107_851_237_803, Some(("11:01:00", "2m 00s"))),
@@ -4961,8 +5269,18 @@ mod tests {
                     Some("2026-10-14T11:00:00Z"),
                     Some("2026-10-14T11:30:00Z"),
                 );
+                let run = run(
+                    1,
+                    "a/x",
+                    "CI",
+                    "main",
+                    "title",
+                    RunState::Passed,
+                    "2026-10-14T11:00:00Z",
+                    "2026-10-14T11:30:00Z",
+                );
                 for last in [false, true] {
-                    let line = job_line(&job, last, now(), &utc(), widths).to_string();
+                    let line = job_line(&job, &run, last, now(), &utc(), widths).to_string();
                     assert_eq!(display_width(&line), usize::from(w), "{state:?}: {line:?}");
                 }
             }
