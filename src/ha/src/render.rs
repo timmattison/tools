@@ -681,6 +681,10 @@ impl Spans {
     }
 }
 
+/// The title of the header of the active section. A loaded header adds the
+/// job counts and the runner names after it.
+const ACTIVE_TITLE: &str = "Running";
+
 /// The text between two parts of a header line.
 const HEADER_SEPARATOR: &str = " · ";
 
@@ -709,7 +713,7 @@ fn active_line(jobs: &JobCounts, runners: &[&RunnerName]) -> Line<'static> {
         (jobs.failed, RunState::Failed),
         (jobs.skipped, RunState::Skipped),
     ];
-    let mut text = "Running".to_owned();
+    let mut text = ACTIVE_TITLE.to_owned();
     for (count, state) in counts {
         text.push_str(HEADER_SEPARATOR);
         text.push_str(&count.to_string());
@@ -790,7 +794,7 @@ fn header_line(header: &Header<'_>, spans: Spans, loaded: bool) -> Line<'static>
     let window = format_duration_setting(spans.window);
     let text = match (section, loaded) {
         (Section::Active, true) => return active_line(&header.jobs, &header.runners),
-        (Section::Active, false) => "Running".to_owned(),
+        (Section::Active, false) => ACTIVE_TITLE.to_owned(),
         (Section::Recent, false) => format!("Last {window}"),
         (Section::Recent, true) => {
             format!("Last {window} · {passed} passed · {failed} failed · {cancelled} cancelled")
