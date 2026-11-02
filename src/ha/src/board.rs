@@ -2558,6 +2558,68 @@ mod tests {
     }
 
     #[test]
+    fn the_runner_names_sort_by_width_then_by_name_with_no_case_then_by_exact_text() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Queued, 20, 1),
+            ],
+            now(),
+        );
+        let names = |first_id: u64, names: &[&str]| -> Vec<Job> {
+            names
+                .iter()
+                .zip(first_id..)
+                .map(|(name, id)| {
+                    let state = if id % 2 == 0 {
+                        RunState::Running
+                    } else {
+                        RunState::Queued
+                    };
+                    runner_job(id, state, name)
+                })
+                .collect()
+        };
+        // Widths in columns: 19, 8, 4, 1, 19, 2, 4, 3, 10, 4, 1, 4.
+        board.set_jobs(
+            RunId(1),
+            names(
+                1,
+                &[
+                    "GitHub Actions 1002",
+                    "ランナー",
+                    "mini",
+                    "b",
+                    "GitHub Actions 1001",
+                    "🎉",
+                ],
+            ),
+        );
+        board.set_jobs(
+            RunId(2),
+            names(20, &["Mini", "pi5", "abcdefghij", "café", "A", "mini"]),
+        );
+        assert_eq!(
+            active_runners(&board.rows(now())),
+            [
+                "A",
+                "b",
+                "🎉",
+                "pi5",
+                "café",
+                "Mini",
+                "mini",
+                "ランナー",
+                "abcdefghij",
+                "GitHub Actions 1001",
+                "GitHub Actions 1002",
+            ]
+        );
+    }
+
+    #[test]
     fn expanding_the_selected_run_shows_a_loading_row_below_it() {
         let mut board = two_run_board();
         board.expand(now());
