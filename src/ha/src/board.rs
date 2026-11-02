@@ -42,7 +42,8 @@ pub enum Section {
 /// `passed` counts the merged ones, `failed` the ones that the queue
 /// removed, and `cancelled` the ones that a person removed. Each one shows
 /// the marker of the run state of the same name. In the active section,
-/// `jobs` counts the jobs of the active runs.
+/// `jobs` counts the jobs of the active runs, and `runners` names the runners
+/// that have a job that waits or runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Header<'a> {
     /// The section that the header opens.
@@ -745,7 +746,8 @@ impl Board {
     ///
     /// The list has the two merge sections when the board holds a merge
     /// queue, and then the two run sections. The header of the active section
-    /// counts the jobs of the active runs by state. The selected row carries the
+    /// counts the jobs of the active runs by state and names the runners of the
+    /// jobs that wait or run. The selected row carries the
     /// selection mark. This is the row of the selected item, or the row of
     /// its selected job. The block of each expanded run follows the row of
     /// that run.
@@ -820,7 +822,7 @@ impl Board {
             failed: 0,
             cancelled: 0,
             jobs: self.active_job_counts(&active),
-            runners: Vec::new(),
+            runners: self.active_runner_names(&active),
         }));
         push_runs(&mut rows, &active, Section::Active, first, selected, view);
         rows.push(Row::Header(Header {
@@ -843,20 +845,44 @@ impl Board {
         rows
     }
 
-    /// Counts the jobs of the `active` runs by state. This covers each active
-    /// run that the board holds, expanded or not and in the view or not. A run
-    /// with no job answer adds nothing. A run whose last fetch failed adds its
-    /// last good jobs. A run that is not in `active` adds nothing.
+    /// The jobs of the `active` runs. This covers each active run that the
+    /// board holds, expanded or not and in the view or not. A run with no job
+    /// answer gives no job. A run whose last fetch failed gives its last good
+    /// jobs. A run that is not in `active` gives no job.
+    fn active_jobs<'s, 'a>(&'s self, active: &'a [&Run]) -> impl Iterator<Item = &'s Job> + 'a
+    where
+        's: 'a,
+    {
+        active.iter().flat_map(|run| {
+            match self.jobs.get(&run.id) {
+                Some(Jobs::Ready(jobs) | Jobs::Failed { jobs, .. }) => jobs.as_slice(),
+                _ => &[],
+            }
+            .iter()
+        })
+    }
+
+    /// Counts the jobs of the `active` runs by state, see `active_jobs`.
     fn active_job_counts(&self, active: &[&Run]) -> JobCounts {
         let mut counts = JobCounts::default();
-        for run in active {
-            if let Some(Jobs::Ready(jobs) | Jobs::Failed { jobs, .. }) = self.jobs.get(&run.id) {
-                for job in jobs {
-                    counts.add(job.state);
-                }
-            }
+        for job in self.active_jobs(active) {
+            counts.add(job.state);
         }
         counts
+    }
+
+    /// The names of the runners that have a job in the state `Queued` or
+    /// `Running` in the `active` runs, see `active_jobs`. A job that finished
+    /// gives no name, because its runner is free. Each name shows one time.
+    fn active_runner_names(&self, active: &[&Run]) -> Vec<&RunnerName> {
+        let mut names: Vec<&RunnerName> = self
+            .active_jobs(active)
+            .filter(|job| matches!(job.state, RunState::Queued | RunState::Running))
+            .filter_map(|job| job.runner.as_ref())
+            .collect();
+        names.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        names.dedup();
+        names
     }
 
     /// Expands the run of the selection. The run shows its jobs at once when
