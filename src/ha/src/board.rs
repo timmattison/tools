@@ -8,10 +8,12 @@
 //! It does no I/O. Every reader takes the current time as an argument, so a
 //! test uses one fixed time and never reads the clock.
 //!
-//! When a watched repository has a merge queue, two sections stand above the
-//! runs: the pull requests in the queues, and the pull requests that left a
-//! queue inside the window. The selection moves through the rows of all the
-//! sections.
+//! When a watched repository has a merge queue, the board has two more
+//! sections. The section of the pull requests in the queues stands above the
+//! runs. The section of the pull requests that left a queue inside the window
+//! stands between the active runs and the recent runs. The order from the top
+//! is: queue, active, history, recent. The selection moves through the rows of
+//! all the sections in that order.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -24,15 +26,16 @@ use crate::queue::{Departure, History, Outcome, PullNumber, QueueEntry};
 use crate::run::{keep_first_of_each_id, Run, RunId, RunState};
 use crate::target::RepoName;
 
-/// One of the lists on the board.
+/// One of the lists on the board, in the order that the board shows them:
+/// queue, active, history, recent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
     /// Pull requests in a merge queue.
     Queue,
-    /// Pull requests that left a merge queue inside the window.
-    History,
     /// Runs that wait or run.
     Active,
+    /// Pull requests that left a merge queue inside the window.
+    History,
     /// Runs that finished inside the window.
     Recent,
 }
@@ -627,15 +630,16 @@ impl Board {
     }
 
     /// All items that show at `now`, in the order of the board: the entries,
-    /// the departures, the active runs, and the recent runs.
+    /// the active runs, the departures, and the recent runs.
     fn shown_items(&self, now: DateTime<Utc>) -> Vec<Item<'_>> {
         let (entries, departures) = self.queue_sections(now);
         let (active, recent) = self.sections(now);
         entries
             .into_iter()
             .map(Item::Entry)
+            .chain(active.into_iter().map(Item::Run))
             .chain(departures.into_iter().map(Item::Departure))
-            .chain(active.into_iter().chain(recent).map(Item::Run))
+            .chain(recent.into_iter().map(Item::Run))
             .collect()
     }
 
@@ -761,21 +765,43 @@ impl Board {
         Some((jobs[index].id, index))
     }
 
+    /// Tells if the board shows the two merge sections: the merge queue and
+    /// the merge history.
+    ///
+    /// The answer is true when some watched repository has a merge queue.
+    /// [`Board::build_rows`] and the renderer both use this rule, thus the
+    /// header of the last section and the sections themselves agree.
+    #[must_use]
+    pub fn shows_merge_sections(&self) -> bool {
+        !self.queues.is_empty()
+    }
+
     /// Builds the full list of rows.
     ///
-    /// The list has the two merge sections when the board holds a merge
-    /// queue, and then the two run sections. The header of the active section
+    /// The order of the sections is: the merge queue, the active runs, the
+    /// merge history, and the recent runs. The two merge sections show only
+    /// when [`Board::shows_merge_sections`] is true. The header of the active section
     /// counts the jobs of the active runs by state and names the runners of the
     /// jobs that wait or run. The selected row carries the
     /// selection mark. This is the row of the selected item, or the row of
     /// its selected job. The block of each expanded run follows the row of
-    /// that run.
+    /// that run. The item rows come in the order of `shown_items`, and the
+    /// selection finds the row of an item by the position of that item in
+    /// `shown_items`. The list also holds header rows, empty rows, and job
+    /// rows, thus the index of a row is not the position of its item.
     fn build_rows(&self, now: DateTime<Utc>) -> Vec<Row<'_>> {
         let selected = self.selected.as_ref();
         let mut rows = Vec::new();
         let mut first = 0;
-        if !self.queues.is_empty() {
-            let (entries, departures) = self.queue_sections(now);
+        let has_queue = self.shows_merge_sections();
+        let (entries, departures) = self.queue_sections(now);
+        let (active, recent) = self.sections(now);
+        let view = JobView {
+            jobs: &self.jobs,
+            errors: &self.errors,
+            expanded: &self.expanded,
+        };
+        if has_queue {
             rows.push(Row::Header(Header {
                 section: Section::Queue,
                 count: entries.len(),
@@ -798,6 +824,19 @@ impl Board {
                     }),
             );
             first += entries.len();
+        }
+        rows.push(Row::Header(Header {
+            section: Section::Active,
+            count: active.len(),
+            passed: 0,
+            failed: 0,
+            cancelled: 0,
+            jobs: self.active_job_counts(&active),
+            runners: self.active_runner_names(&active),
+        }));
+        push_runs(&mut rows, &active, Section::Active, first, selected, view);
+        first += active.len();
+        if has_queue {
             let count_of = |outcome: Outcome| {
                 departures
                     .iter()
@@ -827,23 +866,7 @@ impl Board {
             );
             first += departures.len();
         }
-        let (active, recent) = self.sections(now);
         let count_of = |state: RunState| recent.iter().filter(|run| run.state == state).count();
-        let view = JobView {
-            jobs: &self.jobs,
-            errors: &self.errors,
-            expanded: &self.expanded,
-        };
-        rows.push(Row::Header(Header {
-            section: Section::Active,
-            count: active.len(),
-            passed: 0,
-            failed: 0,
-            cancelled: 0,
-            jobs: self.active_job_counts(&active),
-            runners: self.active_runner_names(&active),
-        }));
-        push_runs(&mut rows, &active, Section::Active, first, selected, view);
         rows.push(Row::Header(Header {
             section: Section::Recent,
             count: recent.len(),
@@ -853,14 +876,7 @@ impl Board {
             jobs: JobCounts::default(),
             runners: Vec::new(),
         }));
-        push_runs(
-            &mut rows,
-            &recent,
-            Section::Recent,
-            first + active.len(),
-            selected,
-            view,
-        );
+        push_runs(&mut rows, &recent, Section::Recent, first, selected, view);
         rows
     }
 
@@ -3632,7 +3648,7 @@ mod tests {
     }
 
     #[test]
-    fn a_repository_with_a_merge_queue_adds_two_sections_above_the_runs() {
+    fn a_repository_with_a_merge_queue_puts_the_queue_above_the_runs_and_the_history_below_them() {
         let mut board = board();
         board.set_queues(&BTreeSet::from([repo("a/x")]));
         assert_eq!(
@@ -3640,12 +3656,105 @@ mod tests {
             [
                 "Header(Queue,0,0,0,0)",
                 "Empty(Queue)",
-                "Header(History,0,0,0,0)",
-                "Empty(History)",
                 "Header(Active,0,0,0,0)",
                 "Empty(Active)",
+                "Header(History,0,0,0,0)",
+                "Empty(History)",
                 "Header(Recent,0,0,0,0)",
                 "Empty(Recent)"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_sections_stand_in_the_order_queue_running_history_last() {
+        let mut board = mixed_board();
+        assert_eq!(
+            shape(&board.rows(now())),
+            [
+                "Header(Queue,1,0,0,0)",
+                "Entry(a/x#7)",
+                "Header(Active,1,0,0,0)",
+                "Run(1)",
+                "Header(History,1,1,0,0)",
+                "Departure(a/x#2)",
+                "Header(Recent,1,1,0,0)",
+                "Run(3)"
+            ]
+        );
+    }
+
+    /// A board with one entry, two active runs, two departures, and one recent run.
+    fn wide_mixed_board() -> Board {
+        let mut board = queue_board(
+            vec![queue_entry("a/x", 7, 1, 3)],
+            vec![
+                departure("a/x", 2, Outcome::Merged, 10),
+                departure("a/x", 4, Outcome::Failed, 20),
+            ],
+        );
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 5, 1),
+                run(2, "a/x", RunState::Running, 6, 2),
+                run(3, "a/x", RunState::Passed, 60, 10),
+            ],
+            now(),
+        );
+        board
+    }
+
+    #[test]
+    fn the_highlight_goes_from_the_running_runs_to_the_history_and_then_to_the_last_runs() {
+        let mut board = wide_mixed_board();
+        assert_eq!(
+            walk(&mut board, 6, Board::select_next),
+            [
+                "Entry(a/x#7)*",
+                "Run(2)*",
+                "Run(1)*",
+                "Departure(a/x#2)*",
+                "Departure(a/x#4)*",
+                "Run(3)*",
+                "Run(3)*"
+            ]
+        );
+        assert_eq!(
+            walk(&mut board, 6, Board::select_previous),
+            [
+                "Run(3)*",
+                "Departure(a/x#4)*",
+                "Departure(a/x#2)*",
+                "Run(1)*",
+                "Run(2)*",
+                "Entry(a/x#7)*",
+                "Entry(a/x#7)*"
+            ]
+        );
+    }
+
+    #[test]
+    fn page_down_and_page_up_use_the_order_of_the_board() {
+        let mut board = mixed_board();
+        assert_eq!(
+            walk(&mut board, 4, Board::select_next_page),
+            [
+                "Entry(a/x#7)*",
+                "Run(1)*",
+                "Departure(a/x#2)*",
+                "Run(3)*",
+                "Run(3)*"
+            ]
+        );
+        assert_eq!(
+            walk(&mut board, 4, Board::select_previous_page),
+            [
+                "Run(3)*",
+                "Departure(a/x#2)*",
+                "Run(1)*",
+                "Entry(a/x#7)*",
+                "Entry(a/x#7)*"
             ]
         );
     }
@@ -3690,10 +3799,12 @@ mod tests {
             ],
         );
         assert_eq!(
-            shape(&board.rows(now()))[..6],
+            shape(&board.rows(now()))[..8],
             [
                 "Header(Queue,0,0,0,0)",
                 "Empty(Queue)",
+                "Header(Active,0,0,0,0)",
+                "Empty(Active)",
                 "Header(History,3,1,1,1)",
                 "Departure(a/x#2)",
                 "Departure(a/x#4)",
@@ -3802,7 +3913,7 @@ mod tests {
             ])),
         );
         assert_eq!(
-            shape(&board.rows(now()))[2..5],
+            shape(&board.rows(now()))[4..7],
             [
                 "Header(History,2,1,1,0)",
                 "Departure(b/y#2)",
@@ -3899,14 +4010,14 @@ mod tests {
     }
 
     #[test]
-    fn up_and_down_move_through_the_queue_the_history_and_the_runs() {
+    fn up_and_down_move_through_the_queue_the_running_runs_the_history_and_the_last_runs() {
         let mut board = mixed_board();
         assert_eq!(
             walk(&mut board, 4, Board::select_next),
             [
                 "Entry(a/x#7)*",
-                "Departure(a/x#2)*",
                 "Run(1)*",
+                "Departure(a/x#2)*",
                 "Run(3)*",
                 "Run(3)*"
             ]
@@ -3915,8 +4026,8 @@ mod tests {
             walk(&mut board, 4, Board::select_previous),
             [
                 "Run(3)*",
-                "Run(1)*",
                 "Departure(a/x#2)*",
+                "Run(1)*",
                 "Entry(a/x#7)*",
                 "Entry(a/x#7)*"
             ]
@@ -3931,6 +4042,7 @@ mod tests {
             Some("https://github.com/a/x/pull/7")
         );
         board.select_next(now());
+        board.select_next(now());
         assert_eq!(
             board.selected_url(now()).as_deref(),
             Some("https://github.com/a/x/pull/2")
@@ -3943,13 +4055,14 @@ mod tests {
         assert_eq!(board.selected_pull(now()), Some(PullNumber(7)));
         assert!(board.selected_target(now()).is_none());
         board.select_next(now());
-        assert_eq!(board.selected_pull(now()), Some(PullNumber(2)));
-        board.select_next(now());
         assert_eq!(board.selected_pull(now()), None);
         assert_eq!(
             board.selected_target(now()).map(|(run, _)| run.id),
             Some(RunId(1))
         );
+        board.select_next(now());
+        assert_eq!(board.selected_pull(now()), Some(PullNumber(2)));
+        assert!(board.selected_target(now()).is_none());
     }
 
     #[test]
@@ -3963,7 +4076,6 @@ mod tests {
     #[test]
     fn left_on_a_queue_row_collapses_nothing() {
         let mut board = mixed_board();
-        board.select_next(now());
         board.select_next(now());
         board.expand(now());
         board.select_previous(now());
@@ -3992,6 +4104,7 @@ mod tests {
     #[test]
     fn the_selected_departure_stays_selected_through_a_refresh() {
         let mut board = mixed_board();
+        board.select_next(now());
         board.select_next(now());
         board.set_queue(
             &repo("a/x"),
@@ -4051,8 +4164,9 @@ mod tests {
             ["Header(Queue,1,0,0,0)", "Entry(a/x#7)*"]
         );
         board.select_next(now());
+        board.select_next(now());
         let view = board.view(now(), 2);
-        assert_eq!(view.first, 2);
+        assert_eq!(view.first, 4);
         assert_eq!(
             marked(&view.rows),
             ["Header(History,1,1,0,0)", "Departure(a/x#2)*"]

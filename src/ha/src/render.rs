@@ -45,8 +45,11 @@ const TIME_WIDTH: usize = 7;
 /// columns.
 const FIXED_COLUMNS: usize =
     MARKER_WIDTH + ID_WIDTH + STARTED_WIDTH + TIME_WIDTH + MARKER_WIDTH + 8;
-/// The header word of the started column in the recent section. A row there
-/// shows when its run or its job finished (see [`run_line`] and [`job_line`]).
+/// The header word of the started column of the finished rows. A row of the
+/// recent section shows when its run or its job finished (see [`run_line`] and
+/// [`job_line`]). A row of the merge history shows when its pull request left
+/// the queue. The word stands in the merge history header when that section
+/// shows, else in the recent header.
 const FINISHED_HEADER: &str = "FINISHED";
 /// The columns from the start of the started cell to the end of a row: the
 /// started cell, one space, the time cell, one space, and the right marker
@@ -539,9 +542,10 @@ where
 ///
 /// The row uses the columns of a run row. The workflow cell holds the word of
 /// the outcome, and the ID part holds the number of the pull request. The
-/// started cell is the time that the pull request joined the queue, and the
-/// time cell is how long it stayed in the queue. Both cells are empty when
-/// the time that it joined is not known. The line holds the spans of `cells`.
+/// started cell is the time that the pull request left the queue (see
+/// [`format_clock`]), and it is never empty. The time cell is how long it
+/// stayed in the queue. It is empty when the time that it joined is not
+/// known. The line holds the spans of `cells`.
 fn departure_line<Tz: TimeZone>(
     departure: &Departure,
     now: DateTime<Utc>,
@@ -552,10 +556,7 @@ where
     Tz::Offset: Display,
 {
     let (marker, word) = departure_look(departure.outcome);
-    let started = departure
-        .enqueued_at
-        .map(|at| format_clock(at, now, tz))
-        .unwrap_or_default();
+    let started = format_clock(departure.left_at, now, tz);
     let time = departure
         .enqueued_at
         .map(|at| format_elapsed(span(at, departure.left_at)))
@@ -822,15 +823,28 @@ fn with_started_word(text: &str, word: &str, widths: Widths) -> String {
 /// A loaded recent header names the counts of passed, failed, and cancelled
 /// runs. Each count shows also when it is 0.
 ///
-/// The recent header names the started column [`FINISHED_HEADER`], at the
-/// column that `widths` gives (see [`with_started_word`]), because its rows
-/// show when each run finished. The word shows also before the first refresh
-/// cycle ends.
+/// The merge history header names the started column [`FINISHED_HEADER`], at
+/// the column that `widths` gives (see [`with_started_word`]), because its
+/// rows show when each pull request left the queue. The recent header names
+/// the column too, but only when `history_shows` is false. Then no merge
+/// history stands above it, and its rows show when each run finished. When
+/// `history_shows` is true, one word heads the two sections of finished rows
+/// below it, and the recent header is plain text. The word shows also before
+/// the first refresh cycle ends.
+///
+/// `history_shows` is true when the board shows the merge history section (see
+/// [`Board::shows_merge_sections`]).
 ///
 /// Before the first refresh cycle ends (`loaded` is false), the header gives
 /// no counts and no runner names. The board then holds only the repositories
 /// that the worker fetched so far, thus a count is too low.
-fn header_line(header: &Header<'_>, spans: Spans, loaded: bool, widths: Widths) -> Line<'static> {
+fn header_line(
+    header: &Header<'_>,
+    spans: Spans,
+    loaded: bool,
+    widths: Widths,
+    history_shows: bool,
+) -> Line<'static> {
     let Header {
         section,
         count,
@@ -842,22 +856,30 @@ fn header_line(header: &Header<'_>, spans: Spans, loaded: bool, widths: Widths) 
     let history = spans.history_text();
     let window = format_duration_setting(spans.window);
     let text = match (section, loaded) {
-        (Section::Active, true) => return active_line(&header.jobs, &header.runners),
-        (Section::Active, false) => ACTIVE_TITLE.to_owned(),
-        (Section::Recent, false) => {
-            with_started_word(&format!("Last {window}"), FINISHED_HEADER, widths)
-        }
-        (Section::Recent, true) => with_started_word(
-            &format!("Last {window} · {passed} passed · {failed} failed · {cancelled} cancelled"),
-            FINISHED_HEADER,
-            widths,
-        ),
         (Section::Queue, false) => "Merge queue".to_owned(),
         (Section::Queue, true) => format!("Merge queue · {count}"),
+        (Section::Active, true) => return active_line(&header.jobs, &header.runners),
+        (Section::Active, false) => ACTIVE_TITLE.to_owned(),
         (Section::History, false) => format!("Merge history · Last {history}"),
         (Section::History, true) => format!(
             "Merge history · Last {history} · {passed} merged · {failed} failed · {cancelled} removed"
         ),
+        (Section::Recent, false) => format!("Last {window}"),
+        (Section::Recent, true) => {
+            format!("Last {window} · {passed} passed · {failed} failed · {cancelled} cancelled")
+        }
+    };
+    // One word heads the sections of finished rows: the merge history header
+    // when that section shows, else the recent header.
+    let heads_finished_rows = match section {
+        Section::History => true,
+        Section::Recent => !history_shows,
+        Section::Queue | Section::Active => false,
+    };
+    let text = if heads_finished_rows {
+        with_started_word(&text, FINISHED_HEADER, widths)
+    } else {
+        text
     };
     Line::from(Span::styled(text, HEADER_STYLE))
 }
@@ -1259,8 +1281,9 @@ fn reverse_if(selected: bool, buffer: &mut Buffer, area: Rect, y: u16) {
 /// The marker cells and the sleeping mark of a row keep `Color::Reset`. With
 /// a `prompt`, the box of the cancel prompt draws last, over the rows (see
 /// [`draw_prompt`]). While the box shows, the status line has no key hints.
-/// The recent header names the started column `FINISHED`, because its rows
-/// show when each run finished.
+/// The merge history header names the started column `FINISHED`, because its
+/// rows show when each pull request left the queue. With no merge history, the
+/// recent header holds the word, because its rows show when each run finished.
 /// This function never panics, whatever the size of the frame.
 pub fn draw<Tz: TimeZone>(
     frame: &mut Frame,
@@ -1282,6 +1305,8 @@ pub fn draw<Tz: TimeZone>(
         window: board.window(),
         history_reach: board.history_reach(now),
     };
+    // The view borrows the board, thus this answer comes first.
+    let history_shows = board.shows_merge_sections();
     // The first refresh cycle ended. Until then, the board can miss runs.
     let loaded = status.last_refresh.is_some();
     let bold = Style::default().add_modifier(Modifier::BOLD);
@@ -1291,7 +1316,7 @@ pub fn draw<Tz: TimeZone>(
     for (index, row) in view.rows.iter().enumerate() {
         match row {
             Row::Header(header) => {
-                let line = header_line(header, spans, loaded, widths);
+                let line = header_line(header, spans, loaded, widths, history_shows);
                 put_line(buffer, index + 1, &prefix_to_width(line, area.width));
             }
             Row::Empty(section) => {
@@ -6053,11 +6078,12 @@ mod tests {
     }
 
     #[test]
-    fn a_frame_with_a_merge_queue_shows_the_queue_and_the_history_above_the_runs() {
+    fn a_frame_with_a_merge_queue_shows_the_queue_above_the_runs_and_the_history_below_them() {
         let mut board = queue_frame_board();
         let text = lines(&render_with(120, 14, &mut board, &loaded()));
+        assert!(text[5].starts_with("🏃 rust-lang/cargo"), "{:?}", text[5]);
         assert_eq!(
-            text[1..9],
+            text[1..10],
             [
                 "Merge queue · 2".to_owned(),
                 queue_golden(
@@ -6078,14 +6104,19 @@ mod tests {
                     "11:58:57",
                     "1m 03s"
                 ),
-                "Merge history · Last 8h · 1 merged · 1 failed · 1 removed".to_owned(),
+                "Running · 0 ⏳ · 0 🏃 · 0 ✅ · 0 ❌ · 0 💨".to_owned(),
+                text[5].clone(),
+                format!(
+                    "{:<97} FINISHED",
+                    "Merge history · Last 8h · 1 merged · 1 failed · 1 removed"
+                ),
                 queue_golden(
                     "✅",
                     "merged",
                     16001,
                     "bump-serde",
                     "Bump serde",
-                    "10:00:00",
+                    "10:12:40",
                     "12m 40s"
                 ),
                 queue_golden(
@@ -6094,14 +6125,21 @@ mod tests {
                     15998,
                     "",
                     "Remove the thing",
-                    "09:00:00",
+                    "09:08:02",
                     "8m 02s"
                 ),
-                queue_golden("🪦", "removed", 15990, "old-branch", "Old work", "", ""),
-                "Running · 0 ⏳ · 0 🏃 · 0 ✅ · 0 ❌ · 0 💨".to_owned(),
+                queue_golden(
+                    "🪦",
+                    "removed",
+                    15990,
+                    "old-branch",
+                    "Old work",
+                    "08:00:00",
+                    ""
+                ),
             ]
         );
-        assert!(text[9].starts_with("🏃 rust-lang/cargo"), "{:?}", text[9]);
+        assert!(text[10].starts_with("Last 8h"), "{:?}", text[10]);
     }
 
     #[test]
@@ -6109,7 +6147,11 @@ mod tests {
         let mut board = queue_frame_board();
         let text = lines(&render_with(120, 14, &mut board, &Status::default()));
         assert_eq!(text[1], "Merge queue");
-        assert_eq!(text[4], "Merge history · Last 8h");
+        let history = line_starting_with(&text, "Merge history");
+        assert_eq!(
+            text[history],
+            format!("{:<97} FINISHED", "Merge history · Last 8h")
+        );
     }
 
     #[test]
@@ -6118,17 +6160,33 @@ mod tests {
         board.set_queues(&BTreeSet::from([repo("rust-lang/cargo")]));
         let text = lines(&render_with(80, 12, &mut board, &loaded()));
         assert_eq!(
-            text[1..5],
+            text[1..3],
+            ["Merge queue · 0", "   No pull requests in the merge queue."]
+        );
+        let history = line_starting_with(&text, "Merge history");
+        // The started column starts at column 58 of 80, thus the text gets 57.
+        let header = format!(
+            "{:<57} FINISHED",
+            "Merge history · Last 8h · 0 merged · 0 failed · 0 removed"
+        );
+        assert_eq!(
+            text[history..history + 2],
             [
-                "Merge queue · 0",
-                "   No pull requests in the merge queue.",
-                "Merge history · Last 8h · 0 merged · 0 failed · 0 removed",
+                header.as_str(),
                 "   No pull request left the merge queue in the last 8h.",
             ]
         );
         let text = lines(&render_with(80, 12, &mut board, &Status::default()));
         assert_eq!(text[2], "   Loading…");
-        assert_eq!(text[4], "   Loading…");
+        let history = line_starting_with(&text, "Merge history");
+        assert_eq!(text[history + 1], "   Loading…");
+    }
+
+    /// The index of the first line that starts with `prefix`.
+    fn line_starting_with(text: &[String], prefix: &str) -> usize {
+        text.iter()
+            .position(|line| line.starts_with(prefix))
+            .unwrap_or_else(|| panic!("no line starts with {prefix:?}: {text:?}"))
     }
 
     /// A board whose merge history of `rust-lang/cargo` the page limit cut
@@ -6159,22 +6217,267 @@ mod tests {
             "2026-10-14T11:00:00Z",
         )]);
         let text = lines(&render_with(120, 12, &mut board, &loaded()));
+        let history = line_starting_with(&text, "Merge history");
         assert_eq!(
-            text[3],
-            "Merge history · Last 2h 00m of 8h · 1 merged · 0 failed · 0 removed"
+            text[history],
+            format!(
+                "{:<97} FINISHED",
+                "Merge history · Last 2h 00m of 8h · 1 merged · 0 failed · 0 removed"
+            )
         );
         let text = lines(&render_with(120, 12, &mut board, &Status::default()));
-        assert_eq!(text[3], "Merge history · Last 2h 00m of 8h");
+        let history = line_starting_with(&text, "Merge history");
+        assert_eq!(
+            text[history],
+            format!("{:<97} FINISHED", "Merge history · Last 2h 00m of 8h")
+        );
+    }
+
+    /// A departure for the header tests of the Merge history section.
+    fn cut_departure() -> Departure {
+        departure(
+            16001,
+            Outcome::Merged,
+            "bump-serde",
+            "Bump serde",
+            Some("2026-10-14T10:30:00Z"),
+            "2026-10-14T11:00:00Z",
+        )
+    }
+
+    #[test]
+    fn the_merge_history_header_names_the_started_column_finished() {
+        let long = "Merge history · Last 8h · 1 merged · 1 failed · 1 removed";
+        let short = "Merge history · Last 8h";
+        for (status, text_of_header) in [(loaded(), long), (Status::default(), short)] {
+            let mut board = queue_frame_board();
+            let text = lines(&render_with(120, 14, &mut board, &status));
+            let y = line_starting_with(&text, "Merge history");
+            assert_eq!(text[y], format!("{text_of_header:<97} FINISHED"));
+            assert_eq!(started_cells(&text, y), "FINISHED");
+        }
+    }
+
+    #[test]
+    fn a_narrow_merge_history_header_cuts_its_text_and_keeps_the_word_whole() {
+        // The started column starts at column 38 of 60, thus the text gets 37.
+        let cases = [
+            (
+                loaded(),
+                "Merge history · Last 8h · 1 merged ·… FINISHED".to_owned(),
+            ),
+            (
+                Status::default(),
+                format!("{:<37} FINISHED", "Merge history · Last 8h"),
+            ),
+        ];
+        for (status, expected) in cases {
+            let mut board = queue_frame_board();
+            let text = lines(&render_with(60, 14, &mut board, &status));
+            let y = line_starting_with(&text, "Merge history");
+            assert_eq!(text[y], expected);
+            assert_eq!(started_cells(&text, y), "FINISHED");
+        }
+    }
+
+    #[test]
+    fn a_narrow_cut_history_header_cuts_its_text_and_keeps_the_word_whole() {
+        let loaded_text = "Merge history · Last 2h 00m of 8h · 1 merged · 0 failed · 0 removed";
+        let mut board = cut_history_board(vec![cut_departure()]);
+        let text = lines(&render_with(120, 12, &mut board, &loaded()));
+        let y = line_starting_with(&text, "Merge history");
+        assert_eq!(text[y], format!("{loaded_text:<97} FINISHED"));
+        // The text gets 37 columns at width 60 and 57 columns at width 80.
+        let cases = [
+            (60_u16, "Merge history · Last 2h 00m of 8h · … FINISHED"),
+            (
+                80,
+                "Merge history · Last 2h 00m of 8h · 1 merged · 0 failed … FINISHED",
+            ),
+        ];
+        for (width, expected) in cases {
+            let mut board = cut_history_board(vec![cut_departure()]);
+            let text = lines(&render_with(width, 12, &mut board, &loaded()));
+            let y = line_starting_with(&text, "Merge history");
+            assert_eq!(text[y], expected, "width {width}");
+            assert!(text[y].ends_with("… FINISHED"), "width {width}");
+            assert_eq!(started_cells(&text, y), "FINISHED", "width {width}");
+        }
+    }
+
+    #[test]
+    fn each_cell_of_the_word_finished_in_the_merge_history_header_is_bold() {
+        let mut board = queue_frame_board();
+        let buffer = render_with(120, 14, &mut board, &loaded());
+        let text = lines(&buffer);
+        let y =
+            u16::try_from(line_starting_with(&text, "Merge history")).expect("the line index fits");
+        let first = u16::try_from(header_column(&text, "STARTED")).expect("the column fits");
+        for (offset, letter) in "FINISHED".chars().enumerate() {
+            let x = first + u16::try_from(offset).expect("the offset fits");
+            let cell = &buffer[(x, y)];
+            assert_eq!(cell.symbol(), letter.to_string(), "cell {x}");
+            assert!(cell.modifier.contains(Modifier::BOLD), "cell {x}");
+        }
+    }
+
+    #[test]
+    fn the_last_header_has_no_finished_while_the_merge_history_shows() {
+        for width in [120_u16, 60] {
+            for status in [loaded(), Status::default()] {
+                let mut board = queue_frame_board();
+                let text = lines(&render_with(width, 14, &mut board, &status));
+                let y = line_starting_with(&text, "Last 8h");
+                assert!(
+                    !text[y].contains("FINISHED"),
+                    "width {width}: {:?}",
+                    text[y]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_last_header_gets_finished_back_when_the_merge_history_goes_away() {
+        let mut board = queue_frame_board();
+        board.set_queues(&BTreeSet::new());
+        let text = lines(&render_with(120, 14, &mut board, &loaded()));
+        assert!(
+            text.iter().all(|line| !line.starts_with("Merge history")),
+            "{text:?}"
+        );
+        let y = line_starting_with(&text, "Last 8h");
+        assert_eq!(started_cells(&text, y), "FINISHED", "{:?}", text[y]);
     }
 
     #[test]
     fn an_empty_cut_history_names_the_span_that_it_reaches() {
         let mut board = cut_history_board(Vec::new());
         let text = lines(&render_with(120, 12, &mut board, &loaded()));
+        let history = line_starting_with(&text, "Merge history");
         assert_eq!(
-            text[4],
+            text[history + 1],
             "   No pull request left the merge queue in the last 2h 00m."
         );
+    }
+
+    /// A board with a merge history of `rust-lang/cargo` that holds these
+    /// departures, and a window of `window`.
+    fn history_board(window: Duration, departures: Vec<Departure>) -> Board {
+        let cargo = repo("rust-lang/cargo");
+        let mut board = Board::new(window);
+        board.set_queues(&BTreeSet::from([cargo.clone()]));
+        board.set_queue(
+            &cargo,
+            Ok(Vec::new()),
+            Ok(History {
+                departures,
+                cut_at: None,
+            }),
+        );
+        board
+    }
+
+    #[test]
+    fn a_departure_of_today_shows_when_it_left_and_how_long_it_stayed() {
+        let mut board = history_board(
+            Duration::from_hours(8),
+            vec![departure(
+                16001,
+                Outcome::Merged,
+                "bump-serde",
+                "Bump serde",
+                Some("2026-10-14T10:00:00Z"),
+                "2026-10-14T10:12:40Z",
+            )],
+        );
+        let text = lines(&render_with(120, 12, &mut board, &loaded()));
+        let row = row_holding(&text, "Bump serde");
+        assert_eq!(started_cells(&text, row), "10:12:40");
+        assert_eq!(time_cells(&text, row), "12m 40s");
+    }
+
+    #[test]
+    fn a_departure_of_an_earlier_day_shows_the_date_and_the_clock_of_when_it_left() {
+        let mut board = history_board(
+            Duration::from_hours(24),
+            vec![departure(
+                16001,
+                Outcome::Merged,
+                "bump-serde",
+                "Bump serde",
+                Some("2026-10-13T19:30:00Z"),
+                "2026-10-13T20:00:00Z",
+            )],
+        );
+        let text = lines(&render_with(120, 12, &mut board, &loaded()));
+        let row = row_holding(&text, "Bump serde");
+        assert_eq!(started_cells(&text, row), "10-13 20:00");
+        assert_eq!(time_cells(&text, row), "30m 00s");
+    }
+
+    #[test]
+    fn a_departure_with_an_unknown_join_time_shows_when_it_left_and_no_time() {
+        let mut board = history_board(
+            Duration::from_hours(8),
+            vec![departure(
+                15990,
+                Outcome::Removed,
+                "old-branch",
+                "Old work",
+                None,
+                "2026-10-14T08:00:00Z",
+            )],
+        );
+        let text = lines(&render_with(120, 12, &mut board, &loaded()));
+        let row = row_holding(&text, "Old work");
+        assert_eq!(started_cells(&text, row), "08:00:00");
+        assert_eq!(time_cells(&text, row), "");
+    }
+
+    #[test]
+    fn the_started_times_of_the_history_rows_decrease_from_the_top_down() {
+        let mut board = history_board(
+            Duration::from_hours(8),
+            vec![
+                departure(
+                    1,
+                    Outcome::Merged,
+                    "a",
+                    "Work A",
+                    Some("2026-10-14T09:00:00Z"),
+                    "2026-10-14T10:30:00Z",
+                ),
+                departure(
+                    2,
+                    Outcome::Merged,
+                    "b",
+                    "Work B",
+                    Some("2026-10-14T10:00:00Z"),
+                    "2026-10-14T10:15:00Z",
+                ),
+                departure(
+                    3,
+                    Outcome::Failed,
+                    "c",
+                    "Work C",
+                    Some("2026-10-14T09:30:00Z"),
+                    "2026-10-14T09:45:00Z",
+                ),
+            ],
+        );
+        let text = lines(&render_with(120, 14, &mut board, &loaded()));
+        let cells: Vec<String> = ["Work A", "Work B", "Work C"]
+            .iter()
+            .map(|title| started_cells(&text, row_holding(&text, title)))
+            .collect();
+        assert_eq!(cells, ["10:30:00", "10:15:00", "09:45:00"]);
+        assert!(cells.windows(2).all(|pair| pair[0] > pair[1]), "{cells:?}");
+        let rows: Vec<usize> = ["Work A", "Work B", "Work C"]
+            .iter()
+            .map(|title| row_holding(&text, title))
+            .collect();
+        assert!(rows.windows(2).all(|pair| pair[0] < pair[1]), "{rows:?}");
     }
 
     #[test]
@@ -6235,9 +6538,9 @@ mod tests {
     fn the_pull_request_number_ends_in_the_column_of_the_run_id() {
         let mut board = queue_frame_board();
         let text = lines(&render_with(120, 14, &mut board, &loaded()));
-        let run_end = last_digit_column(&text[9], "39149840084");
-        assert!(run_end.is_some(), "{:?}", text[9]);
-        for (y, digits) in [(2, "16012"), (3, "16020"), (5, "16001"), (7, "15990")] {
+        let run_end = last_digit_column(&text[5], "39149840084");
+        assert!(run_end.is_some(), "{:?}", text[5]);
+        for (y, digits) in [(2, "16012"), (3, "16020"), (7, "16001"), (9, "15990")] {
             assert_eq!(
                 last_digit_column(&text[y], digits),
                 run_end,
@@ -6541,9 +6844,10 @@ mod tests {
     #[test]
     fn a_highlighted_departure_row_has_no_fade() {
         let mut board = queue_frame_board();
-        // The highlight starts on 16012. Four steps reach 15990, which left
-        // the queue 4 hours ago and has the floor gray without the highlight.
-        for _ in 0..4 {
+        // The highlight starts on 16012. Five steps pass the entry 16020 and
+        // the run, and reach 15990, which left the queue 4 hours ago and has
+        // the floor gray without the highlight.
+        for _ in 0..5 {
             board.select_next(now());
         }
         let buffer = render_with(120, 20, &mut board, &loaded());

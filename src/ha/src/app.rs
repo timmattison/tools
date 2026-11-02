@@ -3010,16 +3010,24 @@ mod tests {
     }
 
     #[test]
-    fn the_merge_queue_updates_show_the_queue_above_the_runs() {
+    fn the_merge_queue_updates_show_the_sections_in_the_order_queue_running_history_last() {
         let channels = channels();
         send_queue(&channels, vec![queue_entry(7)], Ok(Vec::new()));
         send_runs(&channels, vec![active_run(1, 5)]);
         let (result, frame) = run_app(&opener(false), &channels, quit());
         assert!(result.is_ok(), "{result:?}");
-        assert!(frame[1].starts_with("Merge queue"), "{frame:#?}");
-        assert!(frame[2].contains("#7"), "{frame:#?}");
-        let running = frame.iter().position(|line| line.starts_with("Running"));
-        assert!(running > Some(2), "{frame:#?}");
+        let at = |title: &str| frame.iter().position(|line| line.starts_with(title));
+        let found = [
+            at("Merge queue"),
+            at("Running"),
+            at("Merge history"),
+            at("Last"),
+        ];
+        assert!(found.iter().all(Option::is_some), "{frame:#?}");
+        assert!(
+            found.windows(2).all(|pair| pair[0] < pair[1]),
+            "{found:?} {frame:#?}"
+        );
     }
 
     #[test]
