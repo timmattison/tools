@@ -446,8 +446,10 @@ where
 }
 
 /// The line of one run. `state` is the state that the row shows, not the state
-/// that GitHub reports. It sets the marker and the time cells. A stale run
-/// has the [`STALE_MARK`] before its repository name. `cells` puts the mark
+/// that GitHub reports. It sets the marker and the time cells. The started
+/// cell shows the start time of an active run. It shows the finish time
+/// (`Run::updated_at`) of a finished run, which stands in the recent section.
+/// A stale run has the [`STALE_MARK`] before its repository name. `cells` puts the mark
 /// there and cuts the name at its start when the name does not fit. The line
 /// holds the spans of `cells`: the two marker cells keep `Color::Reset`, and
 /// the text cells take the style that the caller gives the line.
@@ -467,6 +469,12 @@ where
     } else {
         format_elapsed(span(run.started_at, run.updated_at))
     };
+    // `Board::sections` decides the section from `run.state`, thus the cell does too.
+    let clock_instant = if run.state.is_finished() {
+        run.updated_at
+    } else {
+        run.started_at
+    };
     cells(
         widths,
         marker(state),
@@ -478,7 +486,7 @@ where
             &run.title,
         ],
         &run.id.0.to_string(),
-        &format_clock(run.started_at, now, tz),
+        &format_clock(clock_instant, now, tz),
         &time,
     )
 }
@@ -1804,7 +1812,7 @@ mod tests {
                 "⏳ acme/widgets          Release             2 issue-12     Add release job                       11:58:00    2m 00s  ⏳",
                 "Last 8h · 1 passed · 1 failed · 0 cancelled",
                 "✅ timmattison/tools     CI                  3 main         Bump deps                             09:10:05    10m 05s ✅",
-                "❌ acme/widgets          Release             4 issue-11     Broken build                          04:30:00    4h 40m   ❌",
+                "❌ acme/widgets          Release             4 issue-11     Broken build                          04:30:00    4h 40m  ❌",
                 "",
                 "",
                 "updated 30s ago      ·  ↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  r refresh  q quit",
