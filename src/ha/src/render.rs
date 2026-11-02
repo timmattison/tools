@@ -1793,6 +1793,11 @@ mod tests {
             ],
         );
         let text = lines(&render_with(120, 10, &mut board, &loaded()));
+        // The started column starts at column 98 of 120, thus the text gets 97.
+        let recent = format!(
+            "{:<97} FINISHED",
+            "Last 8h · 1 passed · 0 failed · 0 cancelled"
+        );
         assert_eq!(
             text[0..8],
             [
@@ -1802,7 +1807,7 @@ mod tests {
                 "✅ ├ build                        107851237794                                                    11:45:40    4m 20s  ✅",
                 "❌ ├ lint                         107851237795                                                    11:46:00    45s     ❌",
                 "🏃 └ test                         107851237796                                                    11:50:10    9m 50s  🏃",
-                "Last 8h · 1 passed · 0 failed · 0 cancelled",
+                recent.as_str(),
                 "✅ acme/widgets          Release   39149711502 issue-11     Bump deps                             09:10:05    10m 05s ✅",
             ]
         );
@@ -1812,6 +1817,10 @@ mod tests {
     fn the_frame_holds_the_header_the_rows_and_the_status_line() {
         let mut board = four_run_board();
         let buffer = render_with(120, 10, &mut board, &loaded());
+        let recent = format!(
+            "{:<97} FINISHED",
+            "Last 8h · 1 passed · 1 failed · 0 cancelled"
+        );
         assert_eq!(
             lines(&buffer),
             [
@@ -1819,7 +1828,7 @@ mod tests {
                 "Running · 0 ⏳ · 0 🏃 · 0 ✅ · 0 ❌ · 0 💨",
                 "🏃 timmattison/tools     CI                  1 main         Fix the thing                         11:45:30    14m 30s 🏃",
                 "⏳ acme/widgets          Release             2 issue-12     Add release job                       11:58:00    2m 00s  ⏳",
-                "Last 8h · 1 passed · 1 failed · 0 cancelled",
+                recent.as_str(),
                 "✅ timmattison/tools     CI                  3 main         Bump deps                             09:10:05    10m 05s ✅",
                 "❌ acme/widgets          Release             4 issue-11     Broken build                          04:30:00    4h 40m  ❌",
                 "",
@@ -2142,9 +2151,11 @@ mod tests {
     fn each_empty_section_says_loading_before_the_first_refresh_ends() {
         let mut board = Board::new(Duration::from_hours(8));
         let text = lines(&render_with(60, 8, &mut board, &Status::default()));
+        // The started column starts at column 38 of 60, thus the text gets 37.
+        let recent = format!("{:<37} FINISHED", "Last 8h");
         assert_eq!(
             text[1..5],
-            ["Running", "   Loading…", "Last 8h", "   Loading…"]
+            ["Running", "   Loading…", recent.as_str(), "   Loading…"]
         );
     }
 
@@ -2154,7 +2165,7 @@ mod tests {
         let text = lines(&render_with(120, 10, &mut board, &Status::default()));
         assert_eq!(text[1], "Running");
         assert!(text[2].starts_with("🏃 timmattison/tools"), "{:?}", text[2]);
-        assert_eq!(text[4], "Last 8h");
+        assert_eq!(text[4], format!("{:<97} FINISHED", "Last 8h"));
         assert!(text[5].starts_with("✅ timmattison/tools"), "{:?}", text[5]);
     }
 
@@ -2178,7 +2189,8 @@ mod tests {
         let text = lines(&render_with(120, 8, &mut board, &Status::default()));
         assert_eq!(text[1], "Running");
         assert!(text[2].starts_with("🏃 timmattison/tools"), "{:?}", text[2]);
-        assert_eq!(text[3..5], ["Last 8h", "   Loading…"]);
+        let recent = format!("{:<97} FINISHED", "Last 8h");
+        assert_eq!(text[3..5], [recent.as_str(), "   Loading…"]);
     }
 
     #[test]
@@ -2262,7 +2274,7 @@ mod tests {
             [
                 "Running · 0 ⏳ · 0 🏃 · 0 ✅ · 0 ❌ · 0 💨",
                 "   No runs in progress or in the queue.",
-                "Last 8h · 0 passed · 0 failed · 0 cancelled",
+                "Last 8h · 0 passed · 0 failed · 0 ca… FINISHED",
                 "   No runs finished in the last 8h.",
             ]
         );
@@ -2297,7 +2309,7 @@ mod tests {
         let mut board = Board::new(Duration::from_mins(90));
         let buffer = render_with(60, 8, &mut board, &loaded());
         let text = lines(&buffer);
-        assert_eq!(text[3], "Last 90m · 0 passed · 0 failed · 0 cancelled");
+        assert_eq!(text[3], "Last 90m · 0 passed · 0 failed · 0 c… FINISHED");
         assert_eq!(text[4], "   No runs finished in the last 90m.");
     }
 
@@ -2327,7 +2339,87 @@ mod tests {
             now(),
         );
         let text = lines(&render_with(120, 10, &mut board, &loaded()));
-        assert_eq!(text[3], "Last 8h · 1 passed · 1 failed · 2 cancelled");
+        assert_eq!(
+            text[3],
+            format!(
+                "{:<97} FINISHED",
+                "Last 8h · 1 passed · 1 failed · 2 cancelled"
+            )
+        );
+    }
+
+    /// Finds the "Last 8h" line of a frame and gives its index.
+    fn recent_line(text: &[String]) -> usize {
+        row_holding(text, "Last 8h")
+    }
+
+    #[test]
+    fn the_recent_header_names_the_started_column_finished() {
+        for width in [80_u16, 120, 200] {
+            let mut board = four_run_board();
+            let text = lines(&render_with(width, 10, &mut board, &loaded()));
+            let y = recent_line(&text);
+            assert_eq!(started_cells(&text, y), "FINISHED", "width {width}");
+            assert!(
+                text[y].starts_with("Last 8h · 1 passed · 1 failed · 0 cancelled"),
+                "width {width}: {:?}",
+                text[y]
+            );
+            let column = header_column(&text, "STARTED");
+            assert_eq!(columns(&text[y], column - 1, 1), " ", "width {width}");
+        }
+    }
+
+    #[test]
+    fn the_recent_header_names_the_column_before_the_first_refresh_and_when_empty() {
+        let mut board = four_run_board();
+        let text = lines(&render_with(120, 10, &mut board, &Status::default()));
+        let y = recent_line(&text);
+        let column = header_column(&text, "STARTED");
+        assert!(text[y].starts_with("Last 8h"), "{:?}", text[y]);
+        assert_eq!(
+            columns(&text[y], "Last 8h".len(), column - "Last 8h".len()).trim(),
+            ""
+        );
+        assert_eq!(started_cells(&text, y), "FINISHED");
+        for status in [loaded(), Status::default()] {
+            let mut empty = Board::new(Duration::from_hours(8));
+            let text = lines(&render_with(120, 8, &mut empty, &status));
+            let y = recent_line(&text);
+            assert_eq!(started_cells(&text, y), "FINISHED", "{:?}", text[y]);
+        }
+    }
+
+    #[test]
+    fn each_cell_of_the_word_finished_is_bold() {
+        let mut board = four_run_board();
+        let buffer = render_with(120, 10, &mut board, &loaded());
+        let text = lines(&buffer);
+        let y = u16::try_from(recent_line(&text)).expect("the line index fits");
+        let first = u16::try_from(header_column(&text, "STARTED")).expect("the column fits");
+        for (offset, letter) in "FINISHED".chars().enumerate() {
+            let x = first + u16::try_from(offset).expect("the offset fits");
+            let cell = &buffer[(x, y)];
+            assert_eq!(cell.symbol(), letter.to_string(), "cell {x}");
+            assert!(cell.modifier.contains(Modifier::BOLD), "cell {x}");
+        }
+    }
+
+    #[test]
+    fn a_narrow_recent_header_cuts_its_text_and_keeps_the_word_whole() {
+        let mut board = four_run_board();
+        let text = lines(&render_with(60, 10, &mut board, &loaded()));
+        assert_eq!(
+            text[recent_line(&text)],
+            "Last 8h · 1 passed · 1 failed · 0 ca… FINISHED"
+        );
+        for width in 0_u16..=40 {
+            for status in [loaded(), Status::default()] {
+                let mut board = four_run_board();
+                let buffer = render_with(width, 8, &mut board, &status);
+                assert_eq!(buffer.area.width, width);
+            }
+        }
     }
 
     #[test]

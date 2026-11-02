@@ -1227,9 +1227,20 @@ mod tests {
         let channels = channels();
         let (result, before) = run_app(&opener(false), &channels, quit());
         assert!(result.is_ok(), "{result:?}");
+        // The started column starts at column 98 of 120, thus the text gets 97.
+        let recent_before = format!("{:<97} FINISHED", "Last 8h");
+        let recent_after = format!(
+            "{:<97} FINISHED",
+            "Last 8h · 0 passed · 0 failed · 0 cancelled"
+        );
         assert_eq!(
             before[1..5],
-            ["Running", "   Loading…", "Last 8h", "   Loading…"]
+            [
+                "Running",
+                "   Loading…",
+                recent_before.as_str(),
+                "   Loading…"
+            ]
         );
         channels
             .updates
@@ -1246,7 +1257,7 @@ mod tests {
             [
                 "Running · 0 ⏳ · 0 🏃 · 0 ✅ · 0 ❌ · 0 💨",
                 "   No runs in progress or in the queue.",
-                "Last 8h · 0 passed · 0 failed · 0 cancelled",
+                recent_after.as_str(),
                 "   No runs finished in the last 8h.",
             ]
         );
