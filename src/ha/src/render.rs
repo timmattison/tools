@@ -6079,7 +6079,10 @@ mod tests {
                 ),
                 "Running · 0 ⏳ · 0 🏃 · 0 ✅ · 0 ❌ · 0 💨".to_owned(),
                 text[5].clone(),
-                "Merge history · Last 8h · 1 merged · 1 failed · 1 removed".to_owned(),
+                format!(
+                    "{:<97} FINISHED",
+                    "Merge history · Last 8h · 1 merged · 1 failed · 1 removed"
+                ),
                 queue_golden(
                     "✅",
                     "merged",
@@ -6118,7 +6121,10 @@ mod tests {
         let text = lines(&render_with(120, 14, &mut board, &Status::default()));
         assert_eq!(text[1], "Merge queue");
         let history = line_starting_with(&text, "Merge history");
-        assert_eq!(text[history], "Merge history · Last 8h");
+        assert_eq!(
+            text[history],
+            format!("{:<97} FINISHED", "Merge history · Last 8h")
+        );
     }
 
     #[test]
@@ -6131,10 +6137,15 @@ mod tests {
             ["Merge queue · 0", "   No pull requests in the merge queue."]
         );
         let history = line_starting_with(&text, "Merge history");
+        // The started column starts at column 58 of 80, thus the text gets 57.
+        let header = format!(
+            "{:<57} FINISHED",
+            "Merge history · Last 8h · 0 merged · 0 failed · 0 removed"
+        );
         assert_eq!(
             text[history..history + 2],
             [
-                "Merge history · Last 8h · 0 merged · 0 failed · 0 removed",
+                header.as_str(),
                 "   No pull request left the merge queue in the last 8h.",
             ]
         );
@@ -6182,11 +6193,135 @@ mod tests {
         let history = line_starting_with(&text, "Merge history");
         assert_eq!(
             text[history],
-            "Merge history · Last 2h 00m of 8h · 1 merged · 0 failed · 0 removed"
+            format!(
+                "{:<97} FINISHED",
+                "Merge history · Last 2h 00m of 8h · 1 merged · 0 failed · 0 removed"
+            )
         );
         let text = lines(&render_with(120, 12, &mut board, &Status::default()));
         let history = line_starting_with(&text, "Merge history");
-        assert_eq!(text[history], "Merge history · Last 2h 00m of 8h");
+        assert_eq!(
+            text[history],
+            format!("{:<97} FINISHED", "Merge history · Last 2h 00m of 8h")
+        );
+    }
+
+    /// A departure for the header tests of the Merge history section.
+    fn cut_departure() -> Departure {
+        departure(
+            16001,
+            Outcome::Merged,
+            "bump-serde",
+            "Bump serde",
+            Some("2026-10-14T10:30:00Z"),
+            "2026-10-14T11:00:00Z",
+        )
+    }
+
+    #[test]
+    fn the_merge_history_header_names_the_started_column_finished() {
+        let long = "Merge history · Last 8h · 1 merged · 1 failed · 1 removed";
+        let short = "Merge history · Last 8h";
+        for (status, text_of_header) in [(loaded(), long), (Status::default(), short)] {
+            let mut board = queue_frame_board();
+            let text = lines(&render_with(120, 14, &mut board, &status));
+            let y = line_starting_with(&text, "Merge history");
+            assert_eq!(text[y], format!("{:<97} FINISHED", text_of_header));
+            assert_eq!(started_cells(&text, y), "FINISHED");
+        }
+    }
+
+    #[test]
+    fn a_narrow_merge_history_header_cuts_its_text_and_keeps_the_word_whole() {
+        // The started column starts at column 38 of 60, thus the text gets 37.
+        let cases = [
+            (
+                loaded(),
+                "Merge history · Last 8h · 1 merged ·… FINISHED".to_owned(),
+            ),
+            (
+                Status::default(),
+                format!("{:<37} FINISHED", "Merge history · Last 8h"),
+            ),
+        ];
+        for (status, expected) in cases {
+            let mut board = queue_frame_board();
+            let text = lines(&render_with(60, 14, &mut board, &status));
+            let y = line_starting_with(&text, "Merge history");
+            assert_eq!(text[y], expected);
+            assert_eq!(started_cells(&text, y), "FINISHED");
+        }
+    }
+
+    #[test]
+    fn a_narrow_cut_history_header_cuts_its_text_and_keeps_the_word_whole() {
+        let loaded_text = "Merge history · Last 2h 00m of 8h · 1 merged · 0 failed · 0 removed";
+        let mut board = cut_history_board(vec![cut_departure()]);
+        let text = lines(&render_with(120, 12, &mut board, &loaded()));
+        let y = line_starting_with(&text, "Merge history");
+        assert_eq!(text[y], format!("{loaded_text:<97} FINISHED"));
+        // The text gets 37 columns at width 60 and 57 columns at width 80.
+        let cases = [
+            (60_u16, "Merge history · Last 2h 00m of 8h · … FINISHED"),
+            (
+                80,
+                "Merge history · Last 2h 00m of 8h · 1 merged · 0 failed … FINISHED",
+            ),
+        ];
+        for (width, expected) in cases {
+            let mut board = cut_history_board(vec![cut_departure()]);
+            let text = lines(&render_with(width, 12, &mut board, &loaded()));
+            let y = line_starting_with(&text, "Merge history");
+            assert_eq!(text[y], expected, "width {width}");
+            assert!(text[y].ends_with("… FINISHED"), "width {width}");
+            assert_eq!(started_cells(&text, y), "FINISHED", "width {width}");
+        }
+    }
+
+    #[test]
+    fn each_cell_of_the_word_finished_in_the_merge_history_header_is_bold() {
+        let mut board = queue_frame_board();
+        let buffer = render_with(120, 14, &mut board, &loaded());
+        let text = lines(&buffer);
+        let y =
+            u16::try_from(line_starting_with(&text, "Merge history")).expect("the line index fits");
+        let first = u16::try_from(header_column(&text, "STARTED")).expect("the column fits");
+        for (offset, letter) in "FINISHED".chars().enumerate() {
+            let x = first + u16::try_from(offset).expect("the offset fits");
+            let cell = &buffer[(x, y)];
+            assert_eq!(cell.symbol(), letter.to_string(), "cell {x}");
+            assert!(cell.modifier.contains(Modifier::BOLD), "cell {x}");
+        }
+    }
+
+    #[test]
+    fn the_last_header_has_no_finished_while_the_merge_history_shows() {
+        for width in [120_u16, 60] {
+            for status in [loaded(), Status::default()] {
+                let mut board = queue_frame_board();
+                let text = lines(&render_with(width, 14, &mut board, &status));
+                let y = line_starting_with(&text, "Last 8h");
+                assert!(
+                    !text[y].contains("FINISHED"),
+                    "width {width}: {:?}",
+                    text[y]
+                );
+                assert_eq!(started_cells(&text, y), "", "width {width}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_last_header_gets_finished_back_when_the_merge_history_goes_away() {
+        let mut board = queue_frame_board();
+        board.set_queues(&BTreeSet::new());
+        let text = lines(&render_with(120, 14, &mut board, &loaded()));
+        assert!(
+            text.iter().all(|line| !line.starts_with("Merge history")),
+            "{text:?}"
+        );
+        let y = line_starting_with(&text, "Last 8h");
+        assert_eq!(started_cells(&text, y), "FINISHED", "{:?}", text[y]);
     }
 
     #[test]
