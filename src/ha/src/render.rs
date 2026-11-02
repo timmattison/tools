@@ -45,6 +45,13 @@ const TIME_WIDTH: usize = 7;
 /// columns.
 const FIXED_COLUMNS: usize =
     MARKER_WIDTH + ID_WIDTH + STARTED_WIDTH + TIME_WIDTH + MARKER_WIDTH + 8;
+/// The header word of the started column in the recent section. A row there
+/// shows when its run or its job finished (see [`run_line`] and [`job_line`]).
+const FINISHED_HEADER: &str = "FINISHED";
+/// The columns from the start of the started cell to the end of a row: the
+/// started cell, one space, the time cell, one space, and the right marker
+/// cell. [`header_cells`] ends the header line with the same cells.
+const STARTED_TO_END: usize = STARTED_WIDTH + 1 + TIME_WIDTH + 1 + MARKER_WIDTH;
 /// The header word of the workflow column.
 const WORKFLOW_HEADER: &str = "WORKFLOW";
 /// The most columns that the workflow name gets: the width of its header word.
@@ -115,6 +122,14 @@ impl Widths {
             branch,
             title: room - repo - workflow - branch,
         }
+    }
+
+    /// The display column where the started cell starts, in each row and in
+    /// the header line. It counts back from the end of the row with the same
+    /// constants that [`header_cells`] uses. A frame below [`FIXED_COLUMNS`]
+    /// columns gives the same column as a frame of that width.
+    fn started_column(self) -> usize {
+        FIXED_COLUMNS + self.repo + self.workflow + self.branch + self.title - STARTED_TO_END
     }
 }
 
@@ -781,6 +796,18 @@ fn prefix_to_width(line: Line<'static>, width: u16) -> Line<'static> {
     Line::from(spans)
 }
 
+/// Puts `word` in the started column of a header line, after `text`.
+///
+/// The text gets the columns before the started column, minus one space. A
+/// text that does not fit there ends in `…`. The word wins, because it names
+/// the column below it.
+fn with_started_word(text: &str, word: &str, widths: Widths) -> String {
+    format!(
+        "{} {word}",
+        fit(text, widths.started_column().saturating_sub(1))
+    )
+}
+
 /// The line of a section header.
 ///
 /// The line names the section of `header` and shows its counts. Every header
@@ -794,10 +821,15 @@ fn prefix_to_width(line: Line<'static>, width: u16) -> Line<'static> {
 /// A loaded recent header names the counts of passed, failed, and cancelled
 /// runs. Each count shows also when it is 0.
 ///
+/// The recent header names the started column [`FINISHED_HEADER`], at the
+/// column that `widths` gives (see [`with_started_word`]), because its rows
+/// show when each run finished. The word shows also before the first refresh
+/// cycle ends.
+///
 /// Before the first refresh cycle ends (`loaded` is false), the header gives
 /// no counts and no runner names. The board then holds only the repositories
 /// that the worker fetched so far, thus a count is too low.
-fn header_line(header: &Header<'_>, spans: Spans, loaded: bool) -> Line<'static> {
+fn header_line(header: &Header<'_>, spans: Spans, loaded: bool, widths: Widths) -> Line<'static> {
     let Header {
         section,
         count,
@@ -811,10 +843,14 @@ fn header_line(header: &Header<'_>, spans: Spans, loaded: bool) -> Line<'static>
     let text = match (section, loaded) {
         (Section::Active, true) => return active_line(&header.jobs, &header.runners),
         (Section::Active, false) => ACTIVE_TITLE.to_owned(),
-        (Section::Recent, false) => format!("Last {window}"),
-        (Section::Recent, true) => {
-            format!("Last {window} · {passed} passed · {failed} failed · {cancelled} cancelled")
+        (Section::Recent, false) => {
+            with_started_word(&format!("Last {window}"), FINISHED_HEADER, widths)
         }
+        (Section::Recent, true) => with_started_word(
+            &format!("Last {window} · {passed} passed · {failed} failed · {cancelled} cancelled"),
+            FINISHED_HEADER,
+            widths,
+        ),
         (Section::Queue, false) => "Merge queue".to_owned(),
         (Section::Queue, true) => format!("Merge queue · {count}"),
         (Section::History, false) => format!("Merge history · Last {history}"),
@@ -1222,6 +1258,8 @@ fn reverse_if(selected: bool, buffer: &mut Buffer, area: Rect, y: u16) {
 /// The marker cells and the sleeping mark of a row keep `Color::Reset`. With
 /// a `prompt`, the box of the cancel prompt draws last, over the rows (see
 /// [`draw_prompt`]). While the box shows, the status line has no key hints.
+/// The recent header names the started column `FINISHED`, because its rows
+/// show when each run finished.
 /// This function never panics, whatever the size of the frame.
 pub fn draw<Tz: TimeZone>(
     frame: &mut Frame,
@@ -1252,7 +1290,7 @@ pub fn draw<Tz: TimeZone>(
     for (index, row) in view.rows.iter().enumerate() {
         match row {
             Row::Header(header) => {
-                let line = header_line(header, spans, loaded);
+                let line = header_line(header, spans, loaded, widths);
                 put_line(buffer, index + 1, &prefix_to_width(line, area.width));
             }
             Row::Empty(section) => {
