@@ -730,6 +730,36 @@ fn active_line(jobs: &JobCounts, runners: &[&RunnerName]) -> Line<'static> {
     Line::from(spans)
 }
 
+/// The part of `line` that fits in `width` display columns, as a prefix.
+///
+/// The cut stops at the first character that does not fit, and nothing after
+/// it shows. `Buffer::set_line` alone would skip a wide glyph at the edge and
+/// then draw a narrow glyph of the next span in the free column, and the line
+/// would no more be a prefix of the text. The cut works by characters, never
+/// by bytes.
+fn prefix_to_width(line: Line<'static>, width: u16) -> Line<'static> {
+    let mut left = usize::from(width);
+    let mut spans = Vec::new();
+    for span in line.spans {
+        let mut kept = String::new();
+        let mut cut = false;
+        for glyph in span.content.chars() {
+            let glyph_width = unicode_width::UnicodeWidthChar::width(glyph).unwrap_or(0);
+            if glyph_width > left {
+                cut = true;
+                break;
+            }
+            left -= glyph_width;
+            kept.push(glyph);
+        }
+        spans.push(Span::styled(kept, span.style));
+        if cut {
+            break;
+        }
+    }
+    Line::from(spans)
+}
+
 /// The line of a section header.
 ///
 /// The line names the section of `header` and shows its counts. Every header
@@ -1202,7 +1232,8 @@ pub fn draw<Tz: TimeZone>(
     for (index, row) in view.rows.iter().enumerate() {
         match row {
             Row::Header(header) => {
-                put_line(buffer, index + 1, &header_line(header, spans, loaded));
+                let line = header_line(header, spans, loaded);
+                put_line(buffer, index + 1, &prefix_to_width(line, area.width));
             }
             Row::Empty(section) => {
                 let line = empty_line(*section, spans, loaded);
@@ -5082,13 +5113,13 @@ mod tests {
                 "width {width}: {cut:?}"
             );
         }
-        // The edge falls inside the name "ランナー" (8 columns): 2 of its 4 glyphs show.
+        // The edge falls inside the name "ランナー" (8 columns): 2 of its 4 glyphs fill 4 columns.
         let names_start = display_width(&full) - display_width("ランナー");
         let width = u16::try_from(names_start + 4).expect("a width fits");
         let cut = lines(&render_with(width, 12, &mut board(), &loaded()))[1].clone();
         assert_eq!(
             cut,
-            "Running · 1 ⏳ · 2 🏃 · 0 ✅ · 0 ❌ · 0 💨 · 🎉, café, ランナ"
+            "Running · 1 ⏳ · 2 🏃 · 0 ✅ · 0 ❌ · 0 💨 · 🎉, café, ラン"
         );
     }
 
