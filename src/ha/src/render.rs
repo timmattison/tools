@@ -430,10 +430,10 @@ fn span(from: DateTime<Utc>, to: DateTime<Utc>) -> Duration {
     Duration::from_secs(u64::try_from((to - from).num_seconds()).unwrap_or(0))
 }
 
-/// The started column: the clock for today, the date and the clock before.
-///
-/// A day starts and ends at midnight in the time zone `tz`.
-fn format_started<Tz: TimeZone>(started: DateTime<Utc>, now: DateTime<Utc>, tz: &Tz) -> String
+/// The text of one instant in the started column: the clock (`HH:MM:SS`) for
+/// an instant of today, and the date and the clock (`MM-DD HH:MM`) for an
+/// earlier day. A day starts and ends at midnight in the time zone `tz`.
+fn format_clock<Tz: TimeZone>(started: DateTime<Utc>, now: DateTime<Utc>, tz: &Tz) -> String
 where
     Tz::Offset: Display,
 {
@@ -478,7 +478,7 @@ where
             &run.title,
         ],
         &run.id.0.to_string(),
-        &format_started(run.started_at, now, tz),
+        &format_clock(run.started_at, now, tz),
         &time,
     )
 }
@@ -506,7 +506,7 @@ where
         false,
         [&entry.repo.to_string(), word, &entry.branch, &entry.title],
         &pull_text(entry.pull),
-        &format_started(entry.enqueued_at, now, tz),
+        &format_clock(entry.enqueued_at, now, tz),
         &format_elapsed(span(entry.enqueued_at, now)),
     )
 }
@@ -530,7 +530,7 @@ where
     let (marker, word) = departure_look(departure.outcome);
     let started = departure
         .enqueued_at
-        .map(|at| format_started(at, now, tz))
+        .map(|at| format_clock(at, now, tz))
         .unwrap_or_default();
     let time = departure
         .enqueued_at
@@ -586,7 +586,7 @@ where
     } else {
         (
             job.started_at
-                .map(|started| format_started(started, now, tz))
+                .map(|started| format_clock(started, now, tz))
                 .unwrap_or_default(),
             job.started_at.map_or_else(String::new, |started| {
                 if job.state.is_active() {
