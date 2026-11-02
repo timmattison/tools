@@ -688,16 +688,20 @@ const HEADER_SEPARATOR: &str = " · ";
 /// divide the names, because the name of a GitHub-hosted runner holds spaces.
 const RUNNER_SEPARATOR: &str = ", ";
 
-/// The text of a loaded `Running` header: the word, the five job counts, and
+/// The style of a section header: bold.
+const HEADER_STYLE: Style = Style::new().add_modifier(Modifier::BOLD);
+
+/// The line of a loaded `Running` header: the word, the five job counts, and
 /// the runner names.
 ///
 /// The counts are in the order queued, running, passed, failed, and skipped.
 /// Each count is a number, one space, and the marker of its state. Each count
-/// shows also when it is 0. The names follow the counts, and they stand last
-/// because the edge of the screen cuts the end of the line: the counts always
-/// show, and the cut loses only the last names. When `runners` is empty, the
-/// line ends after the counts.
-fn active_text(jobs: &JobCounts, runners: &[&RunnerName]) -> String {
+/// shows also when it is 0. The names follow the counts, in [`RUNNER_STYLE`].
+/// They stand last because the edge of the screen cuts the end of the line:
+/// the counts always show, and the cut loses only the last names. When
+/// `runners` is empty, the line ends after the counts. All the other text of
+/// the line is bold.
+fn active_line(jobs: &JobCounts, runners: &[&RunnerName]) -> Line<'static> {
     let counts = [
         (jobs.queued, RunState::Queued),
         (jobs.running, RunState::Running),
@@ -705,33 +709,45 @@ fn active_text(jobs: &JobCounts, runners: &[&RunnerName]) -> String {
         (jobs.failed, RunState::Failed),
         (jobs.skipped, RunState::Skipped),
     ];
-    let cells: Vec<String> = counts
-        .iter()
-        .map(|(count, state)| format!("{count} {}", marker(*state)))
-        .collect();
-    let mut text = format!("Running{HEADER_SEPARATOR}{}", cells.join(HEADER_SEPARATOR));
-    if !runners.is_empty() {
-        let names: Vec<&str> = runners.iter().map(|name| name.as_str()).collect();
+    let mut text = "Running".to_owned();
+    for (count, state) in counts {
         text.push_str(HEADER_SEPARATOR);
-        text.push_str(&names.join(RUNNER_SEPARATOR));
+        text.push_str(&count.to_string());
+        text.push(' ');
+        text.push_str(marker(state));
     }
-    text
+    let mut spans = Vec::new();
+    if !runners.is_empty() {
+        text.push_str(HEADER_SEPARATOR);
+    }
+    spans.push(Span::styled(text, HEADER_STYLE));
+    for (index, name) in runners.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(RUNNER_SEPARATOR, HEADER_STYLE));
+        }
+        spans.push(Span::styled(name.as_str().to_owned(), RUNNER_STYLE));
+    }
+    Line::from(spans)
 }
 
 /// The line of a section header.
 ///
-/// The line names the section of `header` and shows its counts.
+/// The line names the section of `header` and shows its counts. Every header
+/// is bold, and the runner names of a loaded running header are in
+/// [`RUNNER_STYLE`].
 ///
-/// A loaded running header names the counts of the jobs by state (see
-/// [`active_text`]).
+/// A loaded running header names the counts of the jobs by state and the
+/// runner names of the jobs that wait or run (see [`active_line`]). The names
+/// go last, because the edge of the screen cuts the end of the line, and the
+/// counts then still show.
 ///
 /// A loaded recent header names the counts of passed, failed, and cancelled
 /// runs. Each count shows also when it is 0.
 ///
 /// Before the first refresh cycle ends (`loaded` is false), the header gives
-/// no counts. The board then holds only the repositories that the worker
-/// fetched so far, thus a count is too low.
-fn header_line(header: &Header<'_>, spans: Spans, loaded: bool) -> String {
+/// no counts and no runner names. The board then holds only the repositories
+/// that the worker fetched so far, thus a count is too low.
+fn header_line(header: &Header<'_>, spans: Spans, loaded: bool) -> Line<'static> {
     let Header {
         section,
         count,
@@ -742,9 +758,9 @@ fn header_line(header: &Header<'_>, spans: Spans, loaded: bool) -> String {
     } = *header;
     let history = spans.history_text();
     let window = format_duration_setting(spans.window);
-    match (section, loaded) {
+    let text = match (section, loaded) {
+        (Section::Active, true) => return active_line(&header.jobs, &header.runners),
         (Section::Active, false) => "Running".to_owned(),
-        (Section::Active, true) => active_text(&header.jobs, &header.runners),
         (Section::Recent, false) => format!("Last {window}"),
         (Section::Recent, true) => {
             format!("Last {window} · {passed} passed · {failed} failed · {cancelled} cancelled")
@@ -755,7 +771,8 @@ fn header_line(header: &Header<'_>, spans: Spans, loaded: bool) -> String {
         (Section::History, true) => format!(
             "Merge history · Last {history} · {passed} merged · {failed} failed · {cancelled} removed"
         ),
-    }
+    };
+    Line::from(Span::styled(text, HEADER_STYLE))
 }
 
 /// The line that stands in an empty section.
@@ -1185,8 +1202,7 @@ pub fn draw<Tz: TimeZone>(
     for (index, row) in view.rows.iter().enumerate() {
         match row {
             Row::Header(header) => {
-                let line = header_line(header, spans, loaded);
-                put(buffer, index + 1, &line, bold);
+                put_line(buffer, index + 1, &header_line(header, spans, loaded));
             }
             Row::Empty(section) => {
                 let line = empty_line(*section, spans, loaded);
