@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 
-use crate::job::{Job, JobId};
+use crate::job::{Job, JobId, RunnerName};
 use crate::queue::{Departure, History, Outcome, PullNumber, QueueEntry};
 use crate::run::{keep_first_of_each_id, Run, RunId, RunState};
 use crate::target::RepoName;
@@ -44,7 +44,7 @@ pub enum Section {
 /// the marker of the run state of the same name. In the active section,
 /// `jobs` counts the jobs of the active runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Header {
+pub struct Header<'a> {
     /// The section that the header opens.
     pub section: Section,
     /// The number of rows in the section.
@@ -62,6 +62,9 @@ pub struct Header {
     /// section counts. This is `JobCounts::default()` for the other
     /// sections.
     pub jobs: JobCounts,
+    /// The names of the runners that have a job in the state `Queued` or
+    /// `Running` in the active runs. This is empty for the other sections.
+    pub runners: Vec<&'a RunnerName>,
 }
 
 /// The number of jobs in each state that the header of the active section counts.
@@ -101,7 +104,7 @@ pub enum Row<'a> {
     /// `passed` counts the merged ones, `failed` the ones that the queue
     /// removed, and `cancelled` the ones that a person removed. Each one shows
     /// the marker of the run state of the same name.
-    Header(Header),
+    Header(Header<'a>),
     /// The row that shows an empty section.
     Empty(Section),
     /// One pull request in a merge queue.
@@ -759,6 +762,7 @@ impl Board {
                 failed: 0,
                 cancelled: 0,
                 jobs: JobCounts::default(),
+                runners: Vec::new(),
             }));
             if entries.is_empty() {
                 rows.push(Row::Empty(Section::Queue));
@@ -786,6 +790,7 @@ impl Board {
                 failed: count_of(Outcome::Failed),
                 cancelled: count_of(Outcome::Removed),
                 jobs: JobCounts::default(),
+                runners: Vec::new(),
             }));
             if departures.is_empty() {
                 rows.push(Row::Empty(Section::History));
@@ -815,6 +820,7 @@ impl Board {
             failed: 0,
             cancelled: 0,
             jobs: self.active_job_counts(&active),
+            runners: Vec::new(),
         }));
         push_runs(&mut rows, &active, Section::Active, first, selected, view);
         rows.push(Row::Header(Header {
@@ -824,6 +830,7 @@ impl Board {
             failed: count_of(RunState::Failed),
             cancelled: count_of(RunState::Cancelled),
             jobs: JobCounts::default(),
+            runners: Vec::new(),
         }));
         push_runs(
             &mut rows,
@@ -2328,7 +2335,7 @@ mod tests {
     }
 
     /// Finds the header of the active section.
-    fn active_header<'r>(rows: &'r [Row<'_>]) -> &'r Header {
+    fn active_header<'r, 'a>(rows: &'r [Row<'a>]) -> &'r Header<'a> {
         rows.iter()
             .find_map(|row| match row {
                 Row::Header(header) if header.section == Section::Active => Some(header),
@@ -2456,6 +2463,72 @@ mod tests {
             })
             .expect("a recent header");
         assert_eq!(recent.jobs, JobCounts::default());
+    }
+
+    /// Builds a job in `state` that has the runner `runner`.
+    fn runner_job(id: u64, state: RunState, runner: &str) -> Job {
+        Job {
+            runner: RunnerName::new(runner.to_owned()),
+            ..job(id, state)
+        }
+    }
+
+    /// The runner names in the header of the active section, as text.
+    fn active_runners<'r>(rows: &'r [Row<'_>]) -> Vec<&'r str> {
+        active_header(rows)
+            .runners
+            .iter()
+            .map(|runner| runner.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn the_runner_names_come_only_from_the_jobs_that_wait_or_run() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Queued, 20, 1),
+                run(3, "a/x", RunState::Passed, 60, 10),
+            ],
+            now(),
+        );
+        // Run 1 is expanded. Run 2 is collapsed, and its names still show.
+        board.set_jobs(
+            RunId(1),
+            vec![
+                runner_job(1, RunState::Queued, "m1"),
+                runner_job(2, RunState::Running, "pi5"),
+                runner_job(3, RunState::Passed, "done-passed"),
+                runner_job(4, RunState::Failed, "done-failed"),
+                runner_job(5, RunState::Skipped, "done-skipped"),
+                runner_job(6, RunState::Cancelled, "done-cancelled"),
+                runner_job(7, RunState::Other, "done-other"),
+                job(8, RunState::Queued),
+            ],
+        );
+        board.set_jobs(
+            RunId(2),
+            vec![
+                runner_job(9, RunState::Running, "pi5"),
+                runner_job(10, RunState::Queued, "zero"),
+                runner_job(11, RunState::Passed, "done-late"),
+            ],
+        );
+        // A finished run adds no name, also when its job is in the state Running.
+        board.set_jobs(RunId(3), vec![runner_job(12, RunState::Running, "ghost")]);
+        board.expand(now());
+        let rows = board.rows(now());
+        assert_eq!(active_runners(&rows), ["m1", "pi5", "zero"]);
+        let recent = rows
+            .iter()
+            .find_map(|row| match row {
+                Row::Header(header) if header.section == Section::Recent => Some(header),
+                _ => None,
+            })
+            .expect("a recent header");
+        assert!(recent.runners.is_empty());
     }
 
     #[test]

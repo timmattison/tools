@@ -691,7 +691,7 @@ impl Spans {
 /// Before the first refresh cycle ends (`loaded` is false), the header gives
 /// no counts. The board then holds only the repositories that the worker
 /// fetched so far, thus a count is too low.
-fn header_line(header: &Header, spans: Spans, loaded: bool) -> String {
+fn header_line(header: &Header<'_>, spans: Spans, loaded: bool) -> String {
     let Header {
         section,
         count,
