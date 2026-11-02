@@ -57,6 +57,25 @@ pub struct Header {
     /// The number of cancelled runs, or of pull requests that a person
     /// removed. This is 0 for the queue section and the active section.
     pub cancelled: usize,
+    /// The number of jobs in each state that the header of the active
+    /// section counts. This is `JobCounts::default()` for the other
+    /// sections.
+    pub jobs: JobCounts,
+}
+
+/// The number of jobs in each state that the header of the active section counts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct JobCounts {
+    /// The number of jobs in the state `Queued`.
+    pub queued: usize,
+    /// The number of jobs in the state `Running`.
+    pub running: usize,
+    /// The number of jobs in the state `Passed`.
+    pub passed: usize,
+    /// The number of jobs in the state `Failed`.
+    pub failed: usize,
+    /// The number of jobs in the state `Skipped`.
+    pub skipped: usize,
 }
 
 /// One row of the board.
@@ -722,6 +741,7 @@ impl Board {
                 passed: 0,
                 failed: 0,
                 cancelled: 0,
+                jobs: JobCounts::default(),
             }));
             if entries.is_empty() {
                 rows.push(Row::Empty(Section::Queue));
@@ -748,6 +768,7 @@ impl Board {
                 passed: count_of(Outcome::Merged),
                 failed: count_of(Outcome::Failed),
                 cancelled: count_of(Outcome::Removed),
+                jobs: JobCounts::default(),
             }));
             if departures.is_empty() {
                 rows.push(Row::Empty(Section::History));
@@ -776,6 +797,7 @@ impl Board {
             passed: 0,
             failed: 0,
             cancelled: 0,
+            jobs: JobCounts::default(),
         }));
         push_runs(&mut rows, &active, Section::Active, first, selected, view);
         rows.push(Row::Header(Header {
@@ -784,6 +806,7 @@ impl Board {
             passed: count_of(RunState::Passed),
             failed: count_of(RunState::Failed),
             cancelled: count_of(RunState::Cancelled),
+            jobs: JobCounts::default(),
         }));
         push_runs(
             &mut rows,
@@ -1237,6 +1260,7 @@ mod tests {
                     passed,
                     failed,
                     cancelled,
+                    ..
                 }) => format!("Header({section:?},{count},{passed},{failed},{cancelled})"),
                 Row::Empty(section) => format!("Empty({section:?})"),
                 Row::Entry { entry, selected } => format!(
@@ -2268,6 +2292,62 @@ mod tests {
             now(),
         );
         board
+    }
+
+    /// Finds the header of the active section.
+    fn active_header<'r>(rows: &'r [Row<'_>]) -> &'r Header {
+        rows.iter()
+            .find_map(|row| match row {
+                Row::Header(header) if header.section == Section::Active => Some(header),
+                _ => None,
+            })
+            .expect("an active header")
+    }
+
+    /// A board with two active runs in `a/x`. Run 1 is expanded and run 2 is
+    /// collapsed. Both hold the jobs in `first` and `second`.
+    fn two_active_runs(first: Vec<Job>, second: Vec<Job>) -> Board {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Queued, 20, 1),
+            ],
+            now(),
+        );
+        board.set_jobs(RunId(1), first);
+        board.set_jobs(RunId(2), second);
+        board.expand(now());
+        board
+    }
+
+    #[test]
+    fn the_running_header_counts_the_jobs_of_each_active_run() {
+        let mut board = two_active_runs(
+            vec![
+                job(1, RunState::Queued),
+                job(2, RunState::Running),
+                job(3, RunState::Passed),
+                job(4, RunState::Passed),
+            ],
+            vec![
+                job(5, RunState::Queued),
+                job(6, RunState::Passed),
+                job(7, RunState::Failed),
+                job(8, RunState::Skipped),
+            ],
+        );
+        let expected = JobCounts {
+            queued: 2,
+            running: 1,
+            passed: 3,
+            failed: 1,
+            skipped: 1,
+        };
+        assert_eq!(active_header(&board.rows(now())).jobs, expected);
+        assert_eq!(board.view(now(), 1).rows.len(), 1);
+        assert_eq!(active_header(&board.view(now(), 1).rows).jobs, expected);
     }
 
     #[test]

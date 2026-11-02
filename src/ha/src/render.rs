@@ -698,6 +698,7 @@ fn header_line(header: &Header, spans: Spans, loaded: bool) -> String {
         passed,
         failed,
         cancelled,
+        ..
     } = *header;
     let history = spans.history_text();
     let window = format_duration_setting(spans.window);
