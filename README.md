@@ -2156,19 +2156,24 @@ cannot hang the caller. Used by `cwt` and `ha`.
     that failed to start counts as failed. The header counts the three apart, for example
     `Last 8h · 3 passed · 1 failed · 2 cancelled`. A skipped run does not show.
     - The started column of each row in this section shows when the run finished, not when it
-      started. The header of the section shows the word `FINISHED` in that column, below the
-      `STARTED` of the column header. The rows are in order of finish time, thus the times in the
-      column decrease from the top down. The time column still shows how long the run took, thus
-      you can calculate when the run started.
+      started. The rows are in order of finish time, thus the times in the column decrease from
+      the top down. The time column still shows how long the run took, thus you can calculate
+      when the run started.
+    - When no merge queue shows, the header of the section shows the word `FINISHED` in that
+      column, below the `STARTED` of the column header. When the merge queue sections show, the
+      word stands in the header of "Merge history" instead, because one word heads the two
+      sections of finished rows below it.
     - A job row of an expanded run in this section shows when its job finished. A job with no
       finish time has an empty cell.
-    - On a narrow terminal, the text of the header ends in `…`, and the word `FINISHED` stays
-      whole above its column.
-  - When a watched repository has a merge queue, two more sections stand above "Running". `ha`
-    asks GitHub which repositories have a queue at the start and every 10 minutes. When no watched
-    repository has a queue, the board does not change. GitHub gives a merge queue only to a
-    repository that an organization owns, and a private repository also needs GitHub Enterprise
-    Cloud.
+    - On a narrow terminal, the text of a header that shows `FINISHED` ends in `…`, and the word
+      stays whole above its column.
+  - When a watched repository has a merge queue, two more sections show. From the top down, the
+    board then shows "Merge queue", "Running", "Merge history", and "Last 8h". Thus the work that
+    waits or runs stands at the top, and the two sections of finished work stand together below
+    it. `ha` asks GitHub which repositories have a queue at the start and every 10 minutes. When
+    no watched repository has a queue, the board does not change. GitHub gives a merge queue only
+    to a repository that an organization owns, and a private repository also needs GitHub
+    Enterprise Cloud.
     - "Merge queue" shows the pull requests in the queue of the default branch of each repository,
       in queue order. A pull request has no workflow, thus the `WORKFLOW` cell shows what the entry
       waits for: `⏳ waiting` for its turn, `🏃 checks` while the checks of its merge group run,
@@ -2179,8 +2184,11 @@ cannot hang the caller. Used by `cwt` and `ha`.
       has waited. That time increases each second.
     - "Merge history" shows the pull requests that left a queue in the window, the newest first:
       `✅ merged`, `❌ failed` when the queue removed it (for example its checks failed, or a merge
-      conflict), and `🪦 removed` when a person removed it. The time column shows how long it
-      stayed in the queue. The header counts the three apart, for example
+      conflict), and `🪦 removed` when a person removed it. The started column shows when the pull
+      request left the queue, and the header of the section shows the word `FINISHED` above that
+      column. The rows are in order of that time, thus the times decrease from the top down, as in
+      "Last 8h". The time column shows how long the pull request stayed in the queue. The header
+      counts the three apart, for example
       `Merge history · Last 8h · 5 merged · 1 failed · 0 removed`. A pull request that left the
       queue two times has two rows.
     - These rows show no workflow runs and no jobs. The runs of a merge group show in "Running"
@@ -2198,7 +2206,8 @@ cannot hang the caller. Used by `cwt` and `ha`.
       21 hours on bevyengine/bevy and about 26 hours on rust-lang/rust-clippy. Then the history
       shows only the span in which the events of each repository are whole, and the header names
       that span, for example `Merge history · Last 21h 13m of 14d`. A pull request that joined
-      the queue before the events start has an empty started column and an empty time column.
+      the queue before the events start has an empty time column. Its started column shows when
+      it left the queue, as each row does.
     - `🔒` is the one marker that only the merge queue uses. It is one code point, 2 columns wide,
       as each other marker is.
   - Each marker is one emoji, 2 columns wide. The terminal draws each emoji in its own colors.
