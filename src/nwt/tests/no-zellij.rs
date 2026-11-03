@@ -5,10 +5,11 @@
 //! changed tabs that nobody asked to change. In issue #283, the tests of `nwt`
 //! renamed the real tab of the developer. Issue #633 removed the rename.
 //!
-//! The test runs the real binary in a simulated zellij session. The `ZELLIJ`
-//! variable is set, and a [`FakeMultiplexer`] is first on the `PATH` of the
-//! child. The fake records each call, so an empty record shows that `nwt` ran
-//! no `zellij` command.
+//! The test runs the real binary in a simulated zellij session. It sets all
+//! three session variables (`ZELLIJ`, `ZELLIJ_PANE_ID`, `ZELLIJ_SESSION_NAME`),
+//! so the child gets them in every place the test runs, not only inside zellij.
+//! A [`FakeMultiplexer`] is first on the `PATH` of the child. The fake records
+//! each call, so an empty record shows that `nwt` ran no `zellij` command.
 //!
 //! Unix only: [`FakeMultiplexer`] is a POSIX `sh` script.
 #![cfg(unix)]
@@ -24,11 +25,15 @@ use support::{init_repo, nanos, nwt_command, FakeMultiplexer};
 /// The program that `nwt` must not run.
 const MULTIPLEXER: &str = "zellij";
 
-/// The variable that zellij sets in each shell that it starts.
-const SESSION_VARIABLE: &str = "ZELLIJ";
-
-/// The value that zellij gives [`SESSION_VARIABLE`] in a real session.
-const SESSION_VALUE: &str = "0";
+/// The variables that zellij sets in each shell that it starts, with values of
+/// the shape that a real session gives them. `nwt_command` does not remove
+/// them, so without this table the child gets them only when the suite runs
+/// inside zellij.
+const SESSION: [(&str, &str); 3] = [
+    ("ZELLIJ", "0"),
+    ("ZELLIJ_PANE_ID", "0"),
+    ("ZELLIJ_SESSION_NAME", "nwt-no-zellij-test"),
+];
 
 /// The opt-out variable of the old rename.
 const OLD_OPT_OUT: &str = "NWT_NO_TAB_RENAME";
@@ -76,7 +81,7 @@ fn nwt_runs_no_zellij_command_inside_zellij() {
     let output = nwt_command(&repo)
         .args(["-b", &branch])
         .env("PATH", &path)
-        .env(SESSION_VARIABLE, SESSION_VALUE)
+        .envs(SESSION)
         // The old rename obeyed this opt-out. Remove it, so that an opt-out in
         // the environment of the tester cannot hide a rename that comes back.
         .env_remove(OLD_OPT_OUT)
