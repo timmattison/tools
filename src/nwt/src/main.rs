@@ -406,47 +406,6 @@ fn contains_control_chars(s: &str) -> bool {
     s.bytes().any(|b| b < 0x20 || b == 0x7F)
 }
 
-/// Checks if the current process is running inside a Zellij session.
-///
-/// This is determined by the presence of the `ZELLIJ` environment variable,
-/// which Zellij sets automatically when a shell is spawned inside it.
-fn is_running_in_zellij() -> bool {
-    std::env::var("ZELLIJ").is_ok()
-}
-
-/// Returns true if tab renaming has been explicitly disabled via the
-/// `NWT_NO_TAB_RENAME` environment variable.
-///
-/// Renaming the current tab is an interactive convenience: when `nwt`
-/// runs inside a terminal multiplexer it retargets the *current* tab to the new
-/// worktree's short name. That is what a human wants when they run
-/// `nwt -b issue-42`, but catastrophic when something *else* runs `nwt` while
-/// sharing the user's multiplexer session — most notably `nwt`'s own
-/// integration tests, which shell out to the real binary. If such a child
-/// inherits `ZELLIJ`, the rename hijacks whatever tab the runner is
-/// sitting in (issue #283).
-///
-/// This env var is the belt-and-suspenders safety net: even if a test or script
-/// forgets to scrub the multiplexer env from the child process, setting
-/// `NWT_NO_TAB_RENAME` to any non-empty value suppresses the rename entirely.
-/// Interactive use is unaffected because nothing sets this var by default.
-fn tab_rename_disabled() -> bool {
-    std::env::var_os("NWT_NO_TAB_RENAME").is_some_and(|value| !value.is_empty())
-}
-
-/// Renames the current Zellij tab to the given name.
-///
-/// This is a best-effort operation — if the rename fails (e.g., `zellij` binary
-/// not found or Zellij IPC error), the error is silently ignored. Tab renaming
-/// is a convenience feature, not worth failing the whole command over.
-fn rename_zellij_tab(name: &str) {
-    let _ = Command::new("zellij")
-        .args(["action", "rename-tab", name])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-}
-
 /// Exit codes for different failure modes.
 ///
 /// # Exit Code Design Decision: Why --run passes through the command's exit code
@@ -2173,28 +2132,6 @@ fn join_branch_args(args: &[String]) -> String {
     }
 }
 
-/// Shortens a worktree name for use as a Zellij tab name.
-///
-/// Converts `issue-<digits>` prefixes to `#<digits>` to save space in tab bars.
-/// All other names are returned unchanged.
-///
-/// This shortening applies to Zellij tab names only.
-/// The worktree directory and branch names are never modified.
-fn shorten_tab_name(name: &str) -> String {
-    if let Some(rest) = name.strip_prefix("issue-") {
-        // Find where the leading digits end. Since ASCII digits are 1 byte each,
-        // the byte index from `find` always lands on a valid UTF-8 boundary.
-        let digit_end = rest
-            .find(|c: char| !c.is_ascii_digit())
-            .unwrap_or(rest.len());
-        if digit_end > 0 {
-            let (digits, suffix) = rest.split_at(digit_end);
-            return format!("#{digits}{suffix}");
-        }
-    }
-    name.to_string()
-}
-
 /// Sanitizes a branch name for use as a directory name.
 ///
 /// Branch names commonly contain slashes (e.g., `feature/login`, `bugfix/auth-fix`)
@@ -3571,11 +3508,6 @@ fn main() {
             &sparse_excludes,
         ) {
             WorktreeResult::Success => {
-                // Compute the shortened name for the Zellij tab.
-                // This converts "issue-123-fix-bug" to "#123-fix-bug" to save
-                // space in tab bars. The directory/branch names are unaffected.
-                let tab_name = shorten_tab_name(&dir_name);
-
                 println!("{}", worktree_path.display());
 
                 print_tracking_notice(source, config.quiet);
@@ -3602,13 +3534,6 @@ fn main() {
                         &sparse_excludes,
                         config.quiet,
                     );
-                }
-
-                // Rename Zellij tab if running inside Zellij, unless tab renaming
-                // has been explicitly disabled (e.g. by a test or script that
-                // must not hijack the user's real tab — issue #283).
-                if is_running_in_zellij() && !tab_rename_disabled() {
-                    rename_zellij_tab(&tab_name);
                 }
 
                 // Bootstrap git hooks (e.g. husky's gitignored .husky/_) so they
@@ -7457,43 +7382,6 @@ mod tests {
                 "Should NOT contain untracked.txt"
             );
         }
-    }
-
-    #[test]
-    fn test_shorten_tab_name_issue_prefix() {
-        assert_eq!(shorten_tab_name("issue-99"), "#99");
-        assert_eq!(shorten_tab_name("issue-1234"), "#1234");
-    }
-
-    #[test]
-    fn test_shorten_tab_name_issue_prefix_with_suffix() {
-        assert_eq!(
-            shorten_tab_name("issue-1234-fix-pagination"),
-            "#1234-fix-pagination"
-        );
-        assert_eq!(shorten_tab_name("issue-42-add-login"), "#42-add-login");
-    }
-
-    #[test]
-    fn test_shorten_tab_name_no_change() {
-        // Random names pass through unchanged
-        assert_eq!(shorten_tab_name("happy-panda"), "happy-panda");
-        // Branch names without issue prefix pass through
-        assert_eq!(shorten_tab_name("fix-login-bug"), "fix-login-bug");
-        // "issue" without digits is not shortened
-        assert_eq!(shorten_tab_name("issue-fix"), "issue-fix");
-        // "issue" alone
-        assert_eq!(shorten_tab_name("issue"), "issue");
-    }
-
-    #[test]
-    fn test_shorten_tab_name_edge_cases() {
-        // "issue-" prefix but starts with non-digit
-        assert_eq!(shorten_tab_name("issue-abc"), "issue-abc");
-        // Empty string
-        assert_eq!(shorten_tab_name(""), "");
-        // Only issue- with digits and no suffix
-        assert_eq!(shorten_tab_name("issue-0"), "#0");
     }
 
     /// Tests for git-hook bootstrap detection (`detect_hook_bootstrap`).
