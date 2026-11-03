@@ -648,6 +648,7 @@ pub struct FakeMultiplexer {
     /// Owns the temp dir; dropping it deletes the fakes and the recorder.
     _dir: TempDir,
     bin_dir: PathBuf,
+    program: PathBuf,
     recorder: PathBuf,
 }
 
@@ -683,8 +684,18 @@ impl FakeMultiplexer {
         Self {
             _dir: dir,
             bin_dir,
+            program: script_path,
             recorder,
         }
+    }
+
+    /// The path of the fake `zellij` script.
+    ///
+    /// A test compares this path with the program that `zellij` resolves to on
+    /// [`path_env`](Self::path_env). An empty [`recorded`](Self::recorded) is
+    /// evidence only when the child can find the fake.
+    pub fn program(&self) -> &Path {
+        &self.program
     }
 
     /// A `PATH` value with the fake bin dir prepended to the inherited `PATH`, so
