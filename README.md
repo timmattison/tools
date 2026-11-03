@@ -5003,7 +5003,7 @@ History: 347,212 rows. 4,385 not counted (exit 127). 13 did not parse (wdid --un
 Shell: 276 aliases, 1,267 functions (24 did not parse).
 ```
 
-The excerpt leaves out rows of the table and entries of the groups. `si` is a shell function that runs `env -u ZELLIJ nwt -b <branch>`, so each `si` is a use of `nwt`.
+The excerpt leaves out rows of the table and entries of the groups. `si` is a shell function that runs `nwt -b <branch>`, so each `si` is a use of `nwt`.
 
 ### Install
 
