@@ -372,13 +372,14 @@ pub fn expand_transcript(transcript: &[u8], import_id: &str) -> Result<ExpandOut
     // Step 4: each summary has an owner.
     let mut removed: HashMap<String, Removed> = HashMap::new();
     let mut owned_boundaries = HashSet::new();
-    for line in lines.iter().filter(|l| l.is_summary()) {
-        let uuid = line.value::<String>(KEY_UUID);
+    for (index, line) in lines.iter().enumerate().filter(|(_, l)| l.is_summary()) {
+        let uuid = line
+            .value::<String>(KEY_UUID)
+            .ok_or(ExpandError::SummaryMissingUuid { line: index + 1 })?;
         let parent = line.value::<String>(KEY_PARENT_UUID);
-        let name = uuid.clone().unwrap_or_default();
-        let owner = owner_of_summary(parent.as_deref(), &parent_of, &boundary_uuids, &name)?;
+        let owner = owner_of_summary(parent.as_deref(), &parent_of, &boundary_uuids, &uuid)?;
         owned_boundaries.insert(owner.clone());
-        if let (Some(uuid), Some(parent)) = (uuid, parent) {
+        if let Some(parent) = parent {
             removed.insert(
                 uuid,
                 Removed {
