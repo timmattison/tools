@@ -621,3 +621,36 @@ fn the_directory_hint_names_expand() {
         "stderr: {stderr}"
     );
 }
+
+#[test]
+fn expand_fails_closed_in_default_mode() {
+    // The boundary names a logical parent that no line has.
+    let world = World::new(|cwd| {
+        let mut lines = chain(&BEFORE, None, cwd);
+        lines.push(boundary("b1", "gone", 1000, cwd));
+        lines.push(summary("s1", "b1", cwd));
+        lines.extend(chain(&AFTER, Some("s1"), cwd));
+        lines
+    });
+    let project_folder = world
+        .projects()
+        .join(encode_project_dir(&world.session_dir));
+
+    let out = world.run(&["--expand", ORIG]);
+
+    assert_eq!(out.status.code(), Some(EXPAND_FAILED));
+    assert!(out.stdout.is_empty(), "stdout: {:?}", out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("b1"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("No import was written."),
+        "stderr: {stderr}"
+    );
+    assert_eq!(names_in(&project_folder), Vec::<String>::new());
+    assert_eq!(
+        names_in(world.original.parent().unwrap()),
+        vec![format!("{ORIG}.jsonl")],
+        "the original folder holds only the original"
+    );
+    assert!(!world.fork_log().exists(), "nothing is logged");
+}
