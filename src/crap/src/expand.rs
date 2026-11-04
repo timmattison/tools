@@ -4,6 +4,7 @@
 //! bytes of a copy in which each compaction is undone. The module does no file
 //! access and reads no environment.
 
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use serde::de::{Deserialize, Deserializer, MapAccess, Visitor};
@@ -81,6 +82,9 @@ impl fmt::Display for ExpandError {
 
 impl std::error::Error for ExpandError {}
 
+const KEY_UUID: &str = "uuid";
+const KEY_PARENT_UUID: &str = "parentUuid";
+const KEY_LOGICAL_PARENT_UUID: &str = "logicalParentUuid";
 const KEY_SUBTYPE: &str = "subtype";
 const KEY_IS_COMPACT_SUMMARY: &str = "isCompactSummary";
 const SUBTYPE_COMPACT_BOUNDARY: &str = "compact_boundary";
@@ -152,6 +156,139 @@ fn split_lines(transcript: &[u8]) -> Vec<&[u8]> {
     transcript.split_inclusive(|byte| *byte == b'\n').collect()
 }
 
+/// The terminator of a line: `\r\n`, `\n`, or nothing for a torn last line.
+fn terminator(raw: &[u8]) -> &[u8] {
+    if raw.ends_with(b"\r\n") {
+        b"\r\n"
+    } else if raw.ends_with(b"\n") {
+        b"\n"
+    } else {
+        b""
+    }
+}
+
+/// A uuid that compaction removes from the chain, and what replaces it.
+struct Removed {
+    /// The uuid that a child of the removed uuid walks to next.
+    effective_parent: String,
+    /// The boundary that owns the removed uuid.
+    owner: String,
+}
+
+/// Walk from `start` through the removed uuids to the first kept uuid.
+fn resolve(start: &str, removed: &HashMap<String, Removed>) -> Result<String, ExpandError> {
+    let mut seen = HashSet::new();
+    let mut current = start;
+    while let Some(entry) = removed.get(current) {
+        if !seen.insert(current) {
+            let first = &removed[start];
+            return Err(ExpandError::HistoryMissing {
+                boundary: first.owner.clone(),
+            });
+        }
+        current = &entry.effective_parent;
+    }
+    Ok(current.to_string())
+}
+
+/// The new parent of a kept line, and the boundary to blame if that parent makes a cycle.
+struct Relink {
+    new_parent: String,
+    blame: String,
+}
+
+/// Find the boundary that owns a summary: the first boundary on the old parent chain.
+fn owner_of_summary(
+    summary_parent: Option<&str>,
+    parent_of: &HashMap<String, Option<String>>,
+    boundary_uuids: &HashSet<String>,
+    summary: &str,
+) -> Result<String, ExpandError> {
+    let orphan = || ExpandError::OrphanSummary {
+        summary: summary.to_string(),
+    };
+    let mut seen = HashSet::new();
+    let mut current = summary_parent.ok_or_else(orphan)?;
+    loop {
+        if boundary_uuids.contains(current) {
+            return Ok(current.to_string());
+        }
+        let next = parent_of.get(current).ok_or_else(orphan)?;
+        if !seen.insert(current) {
+            return Err(orphan());
+        }
+        current = next.as_deref().ok_or_else(orphan)?;
+    }
+}
+
+/// Fail when a relinked line now leads back to itself. The walk is iterative.
+fn check_no_cycle(kept: &[(&Line<'_>, Option<Relink>)]) -> Result<(), ExpandError> {
+    let mut new_parent: HashMap<String, Option<String>> = HashMap::new();
+    for (line, relink) in kept {
+        if let Some(uuid) = line.value::<String>(KEY_UUID) {
+            let parent = match relink {
+                Some(r) => Some(r.new_parent.clone()),
+                None => line.value::<String>(KEY_PARENT_UUID),
+            };
+            new_parent.insert(uuid, parent);
+        }
+    }
+    let mut finished: HashSet<&str> = HashSet::new();
+    for (line, relink) in kept {
+        let (Some(relink), Some(uuid)) = (relink, line.value::<String>(KEY_UUID)) else {
+            continue;
+        };
+        let mut on_walk: HashSet<&str> = HashSet::new();
+        let mut current = new_parent
+            .get_key_value(uuid.as_str())
+            .map(|(k, _)| k.as_str());
+        while let Some(node) = current {
+            if finished.contains(node) {
+                break;
+            }
+            if !on_walk.insert(node) {
+                return Err(ExpandError::HistoryMissing {
+                    boundary: relink.blame.clone(),
+                });
+            }
+            current = new_parent
+                .get(node)
+                .and_then(Option::as_deref)
+                .and_then(|p| new_parent.get_key_value(p))
+                .map(|(k, _)| k.as_str());
+        }
+        finished.extend(on_walk);
+    }
+    Ok(())
+}
+
+/// Re-emit a line with the new parent in place of its `parentUuid`.
+fn rewrite(line: &Line<'_>, relink: &Relink, out: &mut Vec<u8>) {
+    let Some(pairs) = line.pairs.as_ref() else {
+        out.extend_from_slice(line.raw);
+        return;
+    };
+    out.push(b'{');
+    for (index, (key, raw_value)) in pairs.iter().enumerate() {
+        if index > 0 {
+            out.push(b',');
+        }
+        out.extend_from_slice(json_string(key).as_bytes());
+        out.push(b':');
+        if key == KEY_PARENT_UUID {
+            out.extend_from_slice(json_string(&relink.new_parent).as_bytes());
+        } else {
+            out.extend_from_slice(raw_value.get().as_bytes());
+        }
+    }
+    out.push(b'}');
+    out.extend_from_slice(terminator(line.raw));
+}
+
+fn json_string(text: &str) -> String {
+    serde_json::to_string(text).unwrap_or_else(|_| String::from("\"\""))
+}
+
 /// Undo each compaction of `transcript`. Every `sessionId` of the output is `import_id`.
 pub fn expand_transcript(
     transcript: &[u8],
@@ -164,8 +301,109 @@ pub fn expand_transcript(
     if !lines.iter().any(|l| l.is_boundary() || l.is_summary()) {
         return Ok(ExpandOutcome::NoCompaction);
     }
+
+    // Step 2: every uuid, and the old parent of each uuid (the last line wins).
+    let mut all_uuids = HashSet::new();
+    let mut parent_of: HashMap<String, Option<String>> = HashMap::new();
+    for line in &lines {
+        if let Some(uuid) = line.value::<String>(KEY_UUID) {
+            all_uuids.insert(uuid.clone());
+            parent_of.insert(uuid, line.value::<String>(KEY_PARENT_UUID));
+        }
+    }
+
+    // Step 3: each boundary has a uuid and a known logical parent.
+    let mut boundary_uuids = HashSet::new();
+    let mut boundary_order = Vec::new();
+    let mut logical_of: HashMap<String, String> = HashMap::new();
+    for (index, line) in lines.iter().enumerate().filter(|(_, l)| l.is_boundary()) {
+        let uuid = line
+            .value::<String>(KEY_UUID)
+            .ok_or(ExpandError::MissingUuid { line: index + 1 })?;
+        let logical = line
+            .value::<String>(KEY_LOGICAL_PARENT_UUID)
+            .ok_or_else(|| ExpandError::MissingLogicalParent {
+                boundary: uuid.clone(),
+            })?;
+        if !all_uuids.contains(&logical) {
+            return Err(ExpandError::UnknownLogicalParent {
+                boundary: uuid,
+                logical_parent: logical,
+            });
+        }
+        if boundary_uuids.insert(uuid.clone()) {
+            boundary_order.push(uuid.clone());
+        }
+        logical_of.insert(uuid, logical);
+    }
+
+    // Step 4: each summary has an owner.
+    let mut removed: HashMap<String, Removed> = HashMap::new();
+    let mut owned_boundaries = HashSet::new();
+    for line in lines.iter().filter(|l| l.is_summary()) {
+        let uuid = line.value::<String>(KEY_UUID);
+        let parent = line.value::<String>(KEY_PARENT_UUID);
+        let name = uuid.clone().unwrap_or_default();
+        let owner = owner_of_summary(parent.as_deref(), &parent_of, &boundary_uuids, &name)?;
+        owned_boundaries.insert(owner.clone());
+        if let (Some(uuid), Some(parent)) = (uuid, parent) {
+            removed.insert(
+                uuid,
+                Removed {
+                    effective_parent: parent,
+                    owner,
+                },
+            );
+        }
+    }
+
+    // Step 5: each boundary owns a summary.
+    for boundary in &boundary_order {
+        if !owned_boundaries.contains(boundary) {
+            return Err(ExpandError::NoSummary {
+                boundary: boundary.clone(),
+            });
+        }
+    }
+
+    // Step 6: the boundaries are removed too.
+    for (boundary, logical) in &logical_of {
+        removed.insert(
+            boundary.clone(),
+            Removed {
+                effective_parent: logical.clone(),
+                owner: boundary.clone(),
+            },
+        );
+    }
+
+    // Step 7: relink each kept line whose parent is removed.
+    let mut kept: Vec<(&Line<'_>, Option<Relink>)> = Vec::new();
+    for line in lines.iter().filter(|l| !l.is_boundary() && !l.is_summary()) {
+        let relink = match line.value::<String>(KEY_PARENT_UUID) {
+            Some(parent) if removed.contains_key(&parent) => Some(Relink {
+                new_parent: resolve(&parent, &removed)?,
+                blame: removed[&parent].owner.clone(),
+            }),
+            _ => None,
+        };
+        kept.push((line, relink));
+    }
+
+    // Step 8: the relink makes no cycle.
+    check_no_cycle(&kept)?;
+
+    // Step 9: write the kept lines.
+    let mut output = Vec::with_capacity(transcript.len());
+    for (line, relink) in &kept {
+        match relink {
+            Some(relink) => rewrite(line, relink, &mut output),
+            None => output.extend_from_slice(line.raw),
+        }
+    }
+
     Ok(ExpandOutcome::Expanded(Expansion {
-        transcript: Vec::new(),
+        transcript: output,
         compactions: 0,
         last_pre_tokens: None,
     }))
