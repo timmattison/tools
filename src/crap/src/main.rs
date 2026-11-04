@@ -135,6 +135,7 @@ use comfy_table::{presets::UTF8_FULL, ContentArrangement, Table};
 use serde::Serialize;
 use shellsetup::ShellIntegration;
 
+mod expand;
 mod fork_log;
 mod fork_scan;
 
