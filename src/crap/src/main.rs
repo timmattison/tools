@@ -2693,7 +2693,8 @@ struct ResolveFailure {
     code: i32,
 }
 
-/// Maps a [`ResolveError`] to the failure it should produce.
+/// Maps a [`ResolveError`] to the failure it should produce, for the form of
+/// the command that failed.
 ///
 /// The two directory variants carry the `crap --here <id>` escape hatch because
 /// `--here` ignores the recorded directory entirely, so it succeeds in exactly
@@ -2702,12 +2703,6 @@ struct ResolveFailure {
 /// not something `--here` can route around, and dangling the hint there would
 /// be a false lead. That "only the directory failures get the hint" rule lives
 /// here, in one place, precisely so it cannot be half-applied.
-#[cfg(test)]
-fn describe_resolve_error(session_id: &str, err: &ResolveError) -> ResolveFailure {
-    describe_resolve_error_for(session_id, err, false)
-}
-
-/// Like [`describe_resolve_error`], for the form of the command that failed.
 ///
 /// With `expand`, the hint for a directory failure names `crap --here
 /// --expand <id>`, so the user keeps the expansion when the fork moves to
@@ -3128,6 +3123,12 @@ mod tests {
     /// Builds a single JSONL line recording `cwd`.
     fn cwd_line(cwd: &str) -> String {
         format!("{}\n", serde_json::json!({ "cwd": cwd }))
+    }
+
+    /// The failure that a command without `--expand` gives. The tests of the
+    /// old hint read the failure through this helper.
+    fn describe_resolve_error(session_id: &str, err: &ResolveError) -> ResolveFailure {
+        describe_resolve_error_for(session_id, err, false)
     }
 
     #[test]
