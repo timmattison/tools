@@ -3084,6 +3084,67 @@ mod tests {
     }
 
     #[test]
+    fn choose_import_id_accepts_a_generated_valid_id() {
+        // A transcript with another id is not a collision.
+        let projects = projects_with_transcripts(&[ID_A]);
+        let id = fork_id::choose_import_id(projects.path(), || ID_B.to_string()).unwrap();
+        assert_eq!(id.as_str(), ID_B);
+    }
+
+    #[test]
+    fn choose_import_id_refuses_a_generated_invalid_id() {
+        let projects = projects_with_transcripts(&[]);
+        assert_eq!(
+            fork_id::choose_import_id(projects.path(), || "not-a-uuid".to_string()),
+            Err(fork_id::ImportIdError::Invalid {
+                id: "not-a-uuid".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn choose_import_id_refuses_an_id_that_names_a_transcript() {
+        // The import is written as `<id>.jsonl`. An id of a transcript that
+        // exists thus would replace that conversation.
+        let projects = projects_with_transcripts(&[ID_B]);
+        assert_eq!(
+            fork_id::choose_import_id(projects.path(), || ID_B.to_string()),
+            Err(fork_id::ImportIdError::Exists {
+                id: ID_B.to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn describe_import_id_error_says_the_id_is_generated_and_not_valid() {
+        let failure = describe_import_id_error(&fork_id::ImportIdError::Invalid {
+            id: "not-a-uuid".to_string(),
+        });
+        assert_eq!(
+            failure.headline,
+            "the generated import id 'not-a-uuid' is not a valid session id"
+        );
+        assert_eq!(failure.detail, "");
+        assert_eq!(failure.code, exit_codes::INVALID_SESSION_ID);
+    }
+
+    #[test]
+    fn describe_import_id_error_for_a_collision_asks_for_a_new_run() {
+        let failure = describe_import_id_error(&fork_id::ImportIdError::Exists {
+            id: ID_B.to_string(),
+        });
+        assert_eq!(
+            failure.headline,
+            format!("the generated import id '{ID_B}' already names a session")
+        );
+        assert_eq!(
+            failure.detail,
+            "       run the command again to get a new id\n"
+        );
+        assert_eq!(failure.code, exit_codes::NEW_SESSION_ID_EXISTS);
+    }
+
+    #[test]
     fn describe_fork_id_error_keeps_the_messages_for_a_supplied_id() {
         // The messages and exit codes of a supplied id do not change. The
         // integration tests in `here_new_id.rs` read these words.
