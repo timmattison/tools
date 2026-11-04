@@ -1,7 +1,3 @@
-#![allow(
-    dead_code,
-    reason = "the CLI of issue 637 calls this module in a later commit"
-)]
 //! Undo the compactions of a Claude Code transcript.
 //!
 //! `expand_transcript` takes the bytes of a transcript and gives back the
