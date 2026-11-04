@@ -389,7 +389,8 @@ fn job_cells(
 /// of a failed job (issue #597). `💨` has no red and no circle. The text
 /// symbols of a circle with a line through it, for example `⊘` (U+2298), are
 /// 1 column wide, thus they move the columns. A skipped run does not show on
-/// the board, thus only a job row shows `💨`.
+/// the board, thus no run row shows `💨`. A job row and the skipped count of
+/// the `Running` header show it.
 fn marker(state: RunState) -> &'static str {
     match state {
         RunState::Running => "🏃",
