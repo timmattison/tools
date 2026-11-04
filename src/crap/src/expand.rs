@@ -829,4 +829,21 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn a_summary_that_descends_from_no_boundary_is_refused() {
+        let mut values = chain(&["m1", "m2"]);
+        values.push(boundary("b1", "m2", Some(1000), "s1"));
+        values.push(summary("s1", "b1"));
+        values.push(summary("s2", "m1"));
+
+        let error = expand_error(&join(&values));
+
+        assert_eq!(
+            error,
+            ExpandError::OrphanSummary {
+                summary: "s2".to_string()
+            }
+        );
+    }
 }
