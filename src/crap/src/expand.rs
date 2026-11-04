@@ -880,4 +880,39 @@ mod tests {
 
         assert_eq!(error, ExpandError::SummaryMissingUuid { line: 5 });
     }
+
+    fn attachment(uuid: &str, parent: &str) -> serde_json::Value {
+        json!({
+            "parentUuid": parent,
+            "isSidechain": false,
+            "type": "attachment",
+            "attachment": {"type": "hook_success"},
+            "uuid": uuid,
+            "timestamp": "2026-11-01T11:00:00.500Z",
+            "sessionId": OLD_SESSION_ID,
+        })
+    }
+
+    #[test]
+    fn a_summary_behind_attachments_is_undone() {
+        // Shape B: B -> a1 -> a2 -> a3 -> S -> p1 -> p2.
+        let mut values = chain(&["m1", "m2", "m3"]);
+        values.push(boundary("b1", "m3", Some(1000), "s1"));
+        values.push(attachment("a1", "b1"));
+        values.push(attachment("a2", "a1"));
+        values.push(attachment("a3", "a2"));
+        values.push(summary("s1", "a3"));
+        values.push(message("p1", Some("s1")));
+        values.push(message("p2", Some("p1")));
+
+        let output = expanded(&join(&values)).transcript;
+
+        let text = String::from_utf8(output.clone()).unwrap();
+        assert!(!text.contains("compact_boundary"));
+        assert!(!text.contains("isCompactSummary"));
+        assert_eq!(
+            walk(&output),
+            texts(&["p2", "p1", "a3", "a2", "a1", "m3", "m2", "m1"])
+        );
+    }
 }
