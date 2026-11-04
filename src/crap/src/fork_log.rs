@@ -221,9 +221,14 @@ pub fn format_log_report(id: &str, forks: &[ForkLine<'_>], chain: &SourceChain<'
         let _ = writeln!(out, "Forks of {id} in the fork log:");
         for fork in forks {
             let status = if fork.saved { "saved" } else { "not saved" };
+            let mark = if fork.record.expanded {
+                "  (expanded)"
+            } else {
+                ""
+            };
             let _ = writeln!(
                 out,
-                "  {}  {}  {status:<9}  {}",
+                "  {}  {}  {status:<9}  {}{mark}",
                 fork.record.fork_id, fork.record.time, fork.record.fork_dir
             );
         }
@@ -237,6 +242,11 @@ pub fn format_log_report(id: &str, forks: &[ForkLine<'_>], chain: &SourceChain<'
             let kind = match record.kind {
                 ForkKind::Here => "here",
                 ForkKind::ForkAt => "fork-at",
+            };
+            let kind = if record.expanded {
+                format!("{kind}, expanded")
+            } else {
+                kind.to_string()
             };
             let _ = writeln!(
                 out,
