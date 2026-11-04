@@ -23,7 +23,8 @@ pub const LOG_FILE_NAME: &str = "forks.jsonl";
 pub enum ForkKind {
     /// `crap --here <id>`: the fork of a session into the current directory.
     Here,
-    /// A fork made for a cross-user resume.
+    /// A fork that runs in the original directory of the source: a cross-user
+    /// resume, or `crap --expand <id>`.
     ForkAt,
 }
 
