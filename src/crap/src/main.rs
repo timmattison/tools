@@ -2358,14 +2358,76 @@ fn format_expand_note(
     note
 }
 
+/// An expanded import that [`write_expansion_or_exit`] wrote.
+#[derive(Debug)]
+struct WrittenImport {
+    /// The session id of the import. It is the first field of the wire output.
+    id: ImportId,
+    /// The path of the import file, in the project folder of the target
+    /// directory.
+    path: PathBuf,
+}
+
+/// The one shared step of both `--expand` modes: expands the transcript at
+/// `source` and writes the import into the project folder of `target_dir`
+/// under `dest_projects_dir`.
+///
+/// The function chooses the import id, reads the source, undoes each
+/// compaction in memory, writes the import, and prints the size note on
+/// stderr. It returns the import id and the path of the import. When the
+/// transcript has no compaction, it prints the no-compaction note, writes
+/// nothing, and returns `None`, so the caller continues as without
+/// `--expand`. On every failure it prints the failure and exits: a read
+/// failure of the source, an expansion that `crap` cannot do
+/// ([`exit_codes::EXPAND_FAILED`]), a refused import id, and a write failure.
+/// No failure leaves an import.
+fn write_expansion_or_exit(
+    source: &Path,
+    dest_projects_dir: &Path,
+    target_dir: &Path,
+    session_id: &str,
+) -> Option<WrittenImport> {
+    // Choose the import id before any write, as the fork id was chosen.
+    let id = import_id_or_exit(dest_projects_dir);
+    let fail = |action: &str, err: &dyn std::fmt::Display| -> ! {
+        eprintln!(
+            "{} could not {action} of '{session_id}': {err}",
+            "Error:".red().bold()
+        );
+        exit(exit_codes::HERE_LINK_ERROR);
+    };
+    let bytes = match std::fs::read(source) {
+        Ok(bytes) => bytes,
+        Err(err) => fail("read the transcript", &err),
+    };
+    let expansion = match expand::expand_transcript(&bytes, id.as_str()) {
+        Ok(expand::ExpandOutcome::Expanded(expansion)) => expansion,
+        Ok(expand::ExpandOutcome::NoCompaction) => {
+            eprint!("{}", format_no_compaction_note(session_id));
+            return None;
+        }
+        Err(err) => exit_with_failure(&describe_expand_error(session_id, &err)),
+    };
+    let path =
+        match write_expanded_import(dest_projects_dir, target_dir, &id, &expansion.transcript) {
+            Ok(path) => path,
+            Err(err) => fail("write the expanded import", &err),
+        };
+    eprint!(
+        "{}",
+        format_expand_note(session_id, expansion.compactions, expansion.last_pre_tokens)
+    );
+    Some(WrittenImport { id, path })
+}
+
 /// The `--expand` part of `crap --here --expand <id>`.
 ///
-/// It locates the transcript, undoes each compaction in memory, and writes the
-/// result as an expanded import in the project folder of `pwd`. Then it logs
-/// the fork, prints the here-mode output for the import, and exits. The fork
-/// log names the ORIGINAL session as the source. When the transcript has no
-/// compaction, the function writes nothing and returns, and the caller
-/// continues as without `--expand`.
+/// It locates the transcript and calls [`write_expansion_or_exit`] with the
+/// current directory `pwd` as the target. On success it logs the fork, prints
+/// the here-mode output for the import, and exits. The fork log names the
+/// ORIGINAL session as the source. When the transcript has no compaction, the
+/// function writes nothing and returns, and the caller continues as without
+/// `--expand`.
 fn expand_here_or_continue(
     roots: &[UserProjects],
     dest_projects_dir: &Path,
@@ -2374,41 +2436,13 @@ fn expand_here_or_continue(
     fork_id: &ForkId,
     fork_log: Option<&Path>,
 ) {
-    // Choose the import id before any write, as the fork id was chosen.
-    let import_id = import_id_or_exit(dest_projects_dir);
-
     let (source, root) = match locate_here_source(roots, session_id) {
         Ok(found) => found,
         Err(err) => exit_for_here_error(&err, session_id, roots),
     };
-    let write_failure = |err: &dyn std::fmt::Display| -> ! {
-        eprintln!(
-            "{} could not write the expanded import of '{session_id}': {err}",
-            "Error:".red().bold()
-        );
-        exit(exit_codes::HERE_LINK_ERROR);
+    let Some(import) = write_expansion_or_exit(&source, dest_projects_dir, pwd, session_id) else {
+        return;
     };
-    let bytes = match std::fs::read(&source) {
-        Ok(bytes) => bytes,
-        Err(err) => write_failure(&err),
-    };
-    let expansion = match expand::expand_transcript(&bytes, import_id.as_str()) {
-        Ok(expand::ExpandOutcome::Expanded(expansion)) => expansion,
-        Ok(expand::ExpandOutcome::NoCompaction) => {
-            eprint!("{}", format_no_compaction_note(session_id));
-            return;
-        }
-        Err(err) => exit_with_failure(&describe_expand_error(session_id, &err)),
-    };
-    let import =
-        match write_expanded_import(dest_projects_dir, pwd, &import_id, &expansion.transcript) {
-            Ok(path) => path,
-            Err(err) => write_failure(&err),
-        };
-    eprint!(
-        "{}",
-        format_expand_note(session_id, expansion.compactions, expansion.last_pre_tokens)
-    );
     log_fork(
         fork_log,
         &fork_log::ForkRecord {
@@ -2423,7 +2457,7 @@ fn expand_here_or_continue(
     );
     print!(
         "{}",
-        format_here_output(import_id.as_str(), fork_id, Some(&import))
+        format_here_output(import.id.as_str(), fork_id, Some(&import.path))
     );
     exit(0);
 }
@@ -2816,6 +2850,7 @@ fn run_resume(
     dest_projects_dir: &Path,
     session_id: &str,
     force: bool,
+    expand: bool,
     fork_log: Option<&Path>,
 ) -> ! {
     if !is_valid_session_id(session_id) {
@@ -2842,6 +2877,33 @@ fn run_resume(
         // `--here` hint that only two of them carry — from drifting apart.
         Err(err) => exit_with_failure(&describe_resolve_error(session_id, &err)),
     };
+
+    if expand {
+        // A fork never writes to the original, so a live original never
+        // blocks it. Choose the fork id first, so a refused id leaves no
+        // import. When the session has no compaction, the run continues as
+        // without `--expand`.
+        let fork_id = fork_id_or_exit(dest_projects_dir, None);
+        if let Some(import) = write_expansion_or_exit(&path, dest_projects_dir, &dir, session_id) {
+            log_fork(
+                fork_log,
+                &fork_log::ForkRecord {
+                    time: fork_time_now(),
+                    source_id: session_id.to_string(),
+                    fork_id: fork_id.as_str().to_string(),
+                    source_user: root.user,
+                    source_dir: Some(dir.to_string_lossy().into_owned()),
+                    fork_dir: dir.to_string_lossy().into_owned(),
+                    kind: fork_log::ForkKind::ForkAt,
+                },
+            );
+            print!(
+                "{}",
+                format_fork_at_output(import.id.as_str(), &fork_id, Some(&import.path), &dir)
+            );
+            exit(0);
+        }
+    }
 
     if root.is_self {
         // Same-user hit: resume the very session in place, as today.
@@ -3026,6 +3088,7 @@ fn main() {
         &projects_dir,
         &session_id,
         cli.force,
+        cli.expand,
         fork_log.as_deref(),
     );
 }
