@@ -492,3 +492,68 @@ fn expand_forks_at_the_original_directory() {
         "the original transcript is only read"
     );
 }
+
+/// A live process that `crap` takes for a Claude session: a `sleep` that runs
+/// under the name `claude`. The process stops when the guard drops. The sleep
+/// ends by itself after two minutes, also if the test is killed.
+struct FakeClaude {
+    child: std::process::Child,
+}
+
+impl FakeClaude {
+    fn start(folder: &Path) -> Self {
+        let program = folder.join("claude");
+        std::os::unix::fs::symlink("/bin/sleep", &program).unwrap();
+        let child = std::process::Command::new(&program)
+            .arg("120")
+            .spawn()
+            .expect("the fake claude should start");
+        Self { child }
+    }
+}
+
+impl Drop for FakeClaude {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Records a live session of `id` in the session registry of the world, the
+/// way Claude does (`~/.claude/sessions/<pid>.json`).
+fn plant_live_session(world: &World, fake: &FakeClaude, id: &str) {
+    let sessions = world.home.join(".claude/sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let record = json!({
+        "pid": fake.child.id(),
+        "sessionId": id,
+        "cwd": world.session_dir.to_string_lossy(),
+        "status": "busy",
+    });
+    fs::write(
+        sessions.join(format!("{}.json", fake.child.id())),
+        record.to_string(),
+    )
+    .unwrap();
+}
+
+/// The exit code for a session that is live in another process.
+const SESSION_ALREADY_RUNNING: i32 = 7;
+
+#[test]
+fn a_live_original_does_not_block_expand() {
+    let world = compacted_world();
+    let fake = FakeClaude::start(world._tmp.path());
+    plant_live_session(&world, &fake, ORIG);
+    let before = fs::read(&world.original).unwrap();
+
+    // The control: the plain resume refuses a live session.
+    let plain = world.run(&[ORIG]);
+    assert_eq!(plain.status.code(), Some(SESSION_ALREADY_RUNNING));
+
+    let out = world.run(&["--expand", ORIG]);
+    let fields = fork_at_fields(&out);
+    assert!(common::is_generated_fork_id(&fields[1]), "{fields:?}");
+
+    assert_eq!(fs::read(&world.original).unwrap(), before);
+}
