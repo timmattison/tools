@@ -21,6 +21,8 @@ const NEW: &str = "99999999-8888-7777-6666-555555555555";
 // These mirror the wire contract of `--here` (see `format_here_output` in
 // `main.rs`). The test file re-states the contract it pins.
 const HERE_SENTINEL: &str = "__CRAP_HERE__";
+/// The exit code for a compaction that `crap` cannot undo.
+const EXPAND_FAILED: i32 = 13;
 
 /// The uuids of a transcript with one partial compaction, oldest first.
 const BEFORE: [&str; 4] = ["m1", "m2", "m3", "m4"];
@@ -317,4 +319,43 @@ fn the_import_holds_the_full_history_without_the_compaction() {
         assert_ne!(value["subtype"], json!("compact_boundary"), "{line}");
         assert_ne!(value["isCompactSummary"], json!(true), "{line}");
     }
+}
+
+/// Lists the names in `folder`, or nothing when the folder does not exist.
+fn names_in(folder: &Path) -> Vec<String> {
+    match fs::read_dir(folder) {
+        Ok(entries) => entries
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+#[test]
+fn a_compaction_that_cannot_be_undone_fails_closed() {
+    // The boundary names a logical parent that no line has.
+    let world = World::new(|cwd| {
+        let mut lines = chain(&BEFORE, None, cwd);
+        lines.push(boundary("b1", "gone", 1000, cwd));
+        lines.push(summary("s1", "b1", cwd));
+        lines.extend(chain(&AFTER, Some("s1"), cwd));
+        lines
+    });
+
+    let out = world.run(&["--here", "--expand", ORIG]);
+
+    assert_eq!(out.status.code(), Some(EXPAND_FAILED));
+    assert!(out.stdout.is_empty(), "stdout: {:?}", out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(&format!("cannot expand session '{ORIG}'")),
+        "stderr: {stderr}"
+    );
+    assert!(stderr.contains("b1"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("No import was written."),
+        "stderr: {stderr}"
+    );
+    assert_eq!(names_in(&world.work_folder()), Vec::<String>::new());
+    assert!(!world.fork_log().exists(), "nothing is logged");
 }
