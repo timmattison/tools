@@ -29,6 +29,21 @@
 //! your own tree instead of symlinked, so nothing is ever linked into another
 //! user's home, and the copy is cleaned up the same way the symlink is.
 //!
+//! With `--expand`, the fork gets the full history of a compacted session.
+//! `/compact` keeps the old messages in the transcript, but a resume starts at
+//! the last message, follows `parentUuid` back, and stops at the compact
+//! boundary, whose `parentUuid` is `null`. Thus `crap` writes an expanded
+//! import: a copy of the transcript under a new id, in the project folder where
+//! the fork runs, with each boundary and summary removed and the messages
+//! linked to the `logicalParentUuid` of the boundary (see [`expand`]). The wire
+//! output names the import as the session to resume, and the shell function
+//! forks it and removes it as it removes any import, so the function does not
+//! change. `crap --here --expand <id>` forks in the current directory, and
+//! `crap --expand <id>` forks in the original directory. The original is only
+//! read, so `--expand` never refuses a live session. A transcript that `crap`
+//! cannot expand stops the run, and no import stays. The size of the expanded
+//! history goes to stderr, because it can be larger than the context window.
+//!
 //! With `--status`, it resumes nothing: it classifies where the session left
 //! off — `waiting-for-user`, `busy`, `awaiting-assistant`, or `empty`, inferred
 //! from the last conversational turn in the transcript (or the live process's
@@ -47,7 +62,8 @@
 //!
 //! Each fork that `crap` starts adds one line to a fork log: `forks.jsonl` in
 //! the `crap` directory of the data directory of the current user (see
-//! [`fork_log`]). That is each `--here` fork and each cross-user resume. The
+//! [`fork_log`]). That is each `--here` fork, each `--expand` fork, and each
+//! cross-user resume. The
 //! binary writes the line immediately before it prints the fork output, so
 //! the line names the source, the fork id, the account that owns the source,
 //! both directories, and the kind of fork. Claude Code records no link between
@@ -155,7 +171,9 @@ mod exit_codes {
     pub const NO_HOME_DIR: i32 = 6;
     /// The session is already running in another process.
     pub const SESSION_ALREADY_RUNNING: i32 = 7;
-    /// `--here`: the project folder or the symlink/copy could not be created.
+    /// `--here`, `--expand`, or a cross-user resume: the project folder or the
+    /// import (a symlink, a copy, or an expanded import) could not be made, or
+    /// `--expand` could not read the transcript.
     pub const HERE_LINK_ERROR: i32 = 8;
     /// `--here`: the current working directory could not be determined.
     pub const HERE_PWD_UNAVAILABLE: i32 = 9;
@@ -2112,8 +2130,9 @@ struct Cli {
     ///
     /// The report lists each fork of the session, with `saved` or `not saved`,
     /// and the chain of sessions that it was forked from. It resumes nothing and
-    /// writes nothing. The log has only the forks that `crap` started: `--here`
-    /// and the cross-user resume.
+    /// writes nothing. The log has only the forks that `crap` started: `--here`,
+    /// `--expand`, and the cross-user resume. An `--expand` fork shows
+    /// `(expanded)`.
     ///
     /// Each such fork adds one JSON line to `forks.jsonl` in the `crap`
     /// directory of your data directory: `~/Library/Application Support/crap`
@@ -2861,6 +2880,13 @@ fn exit_with_failure(failure: &ResolveFailure) -> ! {
 /// current user's home. That fork is pinned to a UUID v4 that `crap` generates
 /// and checks with [`fork_id_or_exit`]. Emits the output the shell function
 /// consumes.
+///
+/// With `expand` (`crap --expand <id>`), a session with a compaction always
+/// forks, also a same-user hit: [`write_expansion_or_exit`] writes the expanded
+/// import into the project folder of the original directory, and the output is
+/// the cross-user shape with the import as the session to resume. The live
+/// check does not apply, because a fork never writes to the original. A session
+/// with no compaction continues as without `expand`.
 fn run_resume(
     roots: &[UserProjects],
     dest_projects_dir: &Path,
