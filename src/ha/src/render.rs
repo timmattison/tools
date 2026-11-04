@@ -729,11 +729,12 @@ const RUNNER_SEPARATOR: &str = ", ";
 /// The style of a section header: bold.
 const HEADER_STYLE: Style = Style::new().add_modifier(Modifier::BOLD);
 
-/// The line of a loaded `Running` header: the word, the five job counts, and
+/// The line of a loaded `Running` header: the word, the six job counts, and
 /// the runner names.
 ///
-/// The counts are in the order queued, running, passed, failed, and skipped.
-/// Each count is a number, one space, and the marker of its state. Each count
+/// The counts are in the order queued, running, passed, failed, skipped, and
+/// cancelled. Each count is a number, one space, and the marker of its state,
+/// thus the header and the job rows show the same marker. Each count
 /// shows also when it is 0. The names follow the counts, in [`RUNNER_STYLE`].
 /// They stand last because the edge of the screen cuts the end of the line:
 /// a cut at the right edge removes the last names first. The cut reaches the
@@ -746,6 +747,7 @@ fn active_line(jobs: &JobCounts, runners: &[&RunnerName]) -> Line<'static> {
         (jobs.passed, RunState::Passed),
         (jobs.failed, RunState::Failed),
         (jobs.skipped, RunState::Skipped),
+        (jobs.cancelled, RunState::Cancelled),
     ];
     let mut text = ACTIVE_TITLE.to_owned();
     for (count, state) in counts {
