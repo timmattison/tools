@@ -795,4 +795,22 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn a_logical_parent_that_names_no_line_is_refused() {
+        let mut values = chain(&["m1", "m2"]);
+        values.push(boundary("b1", "ghost", Some(1000), "s1"));
+        values.push(summary("s1", "b1"));
+        values.push(message("p1", Some("s1")));
+
+        let error = expand_error(&join(&values));
+
+        assert_eq!(
+            error,
+            ExpandError::UnknownLogicalParent {
+                boundary: "b1".to_string(),
+                logical_parent: "ghost".to_string()
+            }
+        );
+    }
 }
