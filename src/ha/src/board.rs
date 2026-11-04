@@ -85,6 +85,8 @@ pub struct JobCounts {
     pub failed: usize,
     /// The number of jobs in the state `Skipped`.
     pub skipped: usize,
+    /// The number of jobs in the state `Cancelled`.
+    pub cancelled: usize,
 }
 
 impl JobCounts {
@@ -2430,6 +2432,7 @@ mod tests {
                 job(6, RunState::Passed),
                 job(7, RunState::Failed),
                 job(8, RunState::Skipped),
+                job(9, RunState::Cancelled),
             ],
         );
         let expected = JobCounts {
@@ -2438,6 +2441,7 @@ mod tests {
             passed: 3,
             failed: 1,
             skipped: 1,
+            cancelled: 1,
         };
         assert_eq!(active_header(&board.rows(now())).jobs, expected);
         // Only the header and the selected run are in view. The job rows of
@@ -2448,7 +2452,7 @@ mod tests {
     }
 
     #[test]
-    fn a_cancelled_job_and_a_job_in_the_state_other_are_in_no_count() {
+    fn the_cancelled_jobs_have_a_count_and_a_job_in_the_state_other_is_in_no_count() {
         let mut board = two_active_runs(
             vec![job(1, RunState::Cancelled), job(2, RunState::Other)],
             vec![job(3, RunState::Passed), job(4, RunState::Cancelled)],
@@ -2458,6 +2462,7 @@ mod tests {
             counts,
             JobCounts {
                 passed: 1,
+                cancelled: 2,
                 ..JobCounts::default()
             }
         );
