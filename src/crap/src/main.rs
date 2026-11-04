@@ -2700,17 +2700,26 @@ struct ResolveFailure {
 /// not something `--here` can route around, and dangling the hint there would
 /// be a false lead. That "only the directory failures get the hint" rule lives
 /// here, in one place, precisely so it cannot be half-applied.
+#[cfg(test)]
 fn describe_resolve_error(session_id: &str, err: &ResolveError) -> ResolveFailure {
     describe_resolve_error_for(session_id, err, false)
 }
 
 /// Like [`describe_resolve_error`], for the form of the command that failed.
+///
+/// With `expand`, the hint for a directory failure names `crap --here
+/// --expand <id>`, so the user keeps the expansion when the fork moves to
+/// the current directory.
 fn describe_resolve_error_for(
     session_id: &str,
     err: &ResolveError,
     expand: bool,
 ) -> ResolveFailure {
-    let _ = expand;
+    let here_command = if expand {
+        format!("crap --here --expand {session_id}")
+    } else {
+        format!("crap --here {session_id}")
+    };
     /// The hanging indent that aligns a detail line under the `Error:` prefix,
     /// matching every other multi-line message in this binary.
     const INDENT: &str = "       ";
@@ -2722,7 +2731,7 @@ fn describe_resolve_error_for(
         headline,
         detail: format!(
             "{INDENT}{}\n\
-             {INDENT}use 'crap --here {session_id}' to fork it in the current directory instead.\n",
+             {INDENT}use '{here_command}' to fork it in the current directory instead.\n",
             path.display()
         ),
         code,
@@ -2885,7 +2894,7 @@ fn run_resume(
         // `Error:` prefix and prints what it is handed. Keeping the mapping out of
         // this `match` is what stops the four cases — and in particular the
         // `--here` hint that only two of them carry — from drifting apart.
-        Err(err) => exit_with_failure(&describe_resolve_error(session_id, &err)),
+        Err(err) => exit_with_failure(&describe_resolve_error_for(session_id, &err, expand)),
     };
 
     if expand {
