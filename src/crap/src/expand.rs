@@ -964,4 +964,22 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn a_boundary_whose_logical_parent_is_its_own_summary_is_refused() {
+        let values = vec![
+            boundary("b1", "s1", Some(1000), "s1"),
+            summary("s1", "b1"),
+            message("p1", Some("s1")),
+        ];
+
+        let error = expand_error(&join(&values));
+
+        assert_eq!(
+            error,
+            ExpandError::HistoryMissing {
+                boundary: "b1".to_string()
+            }
+        );
+    }
 }
