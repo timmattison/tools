@@ -813,4 +813,20 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn a_boundary_that_owns_no_summary_is_refused() {
+        let mut values = chain(&["m1", "m2"]);
+        values.push(boundary("b1", "m2", Some(1000), "s1"));
+        values.push(message("p1", Some("m2")));
+
+        let error = expand_error(&join(&values));
+
+        assert_eq!(
+            error,
+            ExpandError::NoSummary {
+                boundary: "b1".to_string()
+            }
+        );
+    }
 }
