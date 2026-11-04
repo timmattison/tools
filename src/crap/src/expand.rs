@@ -50,6 +50,8 @@ pub enum ExpandError {
     NoSummary { boundary: String },
     /// A summary descends from no boundary.
     OrphanSummary { summary: String },
+    /// A summary has no string uuid. `line` is 1-based.
+    SummaryMissingUuid { line: usize },
     /// The messages from before a boundary are not in the transcript.
     HistoryMissing { boundary: String },
 }
@@ -75,6 +77,9 @@ impl fmt::Display for ExpandError {
             }
             Self::OrphanSummary { summary } => {
                 write!(f, "compact summary {summary} has no compact boundary")
+            }
+            Self::SummaryMissingUuid { line } => {
+                write!(f, "the compact summary on line {line} has no uuid")
             }
             Self::HistoryMissing { boundary } => write!(
                 f,
@@ -845,5 +850,33 @@ mod tests {
                 summary: "s2".to_string()
             }
         );
+    }
+
+    #[test]
+    fn a_summary_without_uuid_is_refused_with_its_line_number() {
+        let mut values = chain(&["m1", "m2"]);
+        values.push(boundary("b1", "m2", Some(1000), "s1"));
+        values.push(without(summary("s1", "b1"), "uuid"));
+        values.push(message("p1", Some("m2")));
+
+        let error = expand_error(&join(&values));
+
+        assert_eq!(error, ExpandError::SummaryMissingUuid { line: 4 });
+        assert_eq!(
+            error.to_string(),
+            "the compact summary on line 4 has no uuid"
+        );
+    }
+
+    #[test]
+    fn a_summary_without_uuid_is_refused_before_its_owner_is_sought() {
+        let mut values = chain(&["m1", "m2"]);
+        values.push(boundary("b1", "m2", Some(1000), "s1"));
+        values.push(summary("s1", "b1"));
+        values.push(without(summary("s2", "m1"), "uuid"));
+
+        let error = expand_error(&join(&values));
+
+        assert_eq!(error, ExpandError::SummaryMissingUuid { line: 5 });
     }
 }
