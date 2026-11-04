@@ -824,3 +824,16 @@ fn expand_logs_an_expanded_fork_at_the_original_directory() {
     assert_eq!(lines[0]["kind"], "fork-at");
     assert_eq!(lines[0]["expanded"], true);
 }
+
+#[test]
+fn here_without_expand_logs_a_record_with_no_expanded_key() {
+    let world = compacted_world();
+
+    let out = world.run(&["--here", ORIG]);
+    here_fields(&out);
+
+    let lines = fork_log_lines(&world);
+    assert_eq!(lines.len(), 1, "exactly one line: {lines:?}");
+    assert_eq!(lines[0]["source_id"], ORIG);
+    assert!(lines[0].get("expanded").is_none(), "line: {}", lines[0]);
+}
