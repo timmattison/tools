@@ -21,6 +21,7 @@ const NEW: &str = "99999999-8888-7777-6666-555555555555";
 // These mirror the wire contract of `--here` (see `format_here_output` in
 // `main.rs`). The test file re-states the contract it pins.
 const HERE_SENTINEL: &str = "__CRAP_HERE__";
+const FORK_AT_SENTINEL: &str = "__CRAP_FORK_AT__";
 /// The exit code for a compaction that `crap` cannot undo.
 const EXPAND_FAILED: i32 = 13;
 
@@ -37,6 +38,8 @@ struct World {
     work: PathBuf,
     /// The path of the original transcript.
     original: PathBuf,
+    /// The directory that the lines of the original record as `cwd`.
+    session_dir: PathBuf,
 }
 
 impl World {
@@ -64,6 +67,7 @@ impl World {
             home,
             work,
             original,
+            session_dir,
         }
     }
 
@@ -421,4 +425,70 @@ fn the_size_note_names_the_compactions_and_the_last_context_size() {
     );
     let import = fs::read(world.work_folder().join(format!("{}.jsonl", fields[1]))).unwrap();
     assert_eq!(walk(&import).len(), 8, "all eight messages, once each");
+}
+
+/// Splits the stdout of a successful `crap --expand` run (without `--here`)
+/// into its five fields.
+fn fork_at_fields(out: &Output) -> Vec<String> {
+    assert!(
+        out.status.success(),
+        "exit status was {:?}, stderr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout.clone()).unwrap();
+    assert!(stdout.ends_with('\n'), "stdout: {stdout:?}");
+    let fields: Vec<String> = stdout.lines().map(str::to_string).collect();
+    assert_eq!(fields.len(), 5, "stdout: {stdout:?}");
+    assert_eq!(fields[0], FORK_AT_SENTINEL);
+    fields
+}
+
+/// The expected list of uuids from the last message to the first, for a
+/// transcript with one compaction.
+fn full_history() -> Vec<String> {
+    AFTER
+        .iter()
+        .rev()
+        .chain(BEFORE.iter().rev())
+        .map(|uuid| (*uuid).to_string())
+        .collect()
+}
+
+#[test]
+fn expand_forks_at_the_original_directory() {
+    let world = compacted_world();
+    let before = fs::read(&world.original).unwrap();
+
+    let out = world.run(&["--expand", ORIG]);
+    let fields = fork_at_fields(&out);
+
+    let import_id = &fields[1];
+    let fork_id = &fields[2];
+    assert!(common::is_generated_fork_id(import_id), "{import_id:?}");
+    assert!(common::is_generated_fork_id(fork_id), "{fork_id:?}");
+    assert_ne!(import_id, ORIG);
+    assert_ne!(fork_id, ORIG);
+    assert_ne!(import_id, fork_id);
+
+    let link = world
+        .projects()
+        .join(encode_project_dir(&world.session_dir))
+        .join(format!("{import_id}.jsonl"));
+    assert_eq!(fields[3], link.display().to_string());
+    assert_eq!(fields[4], world.session_dir.display().to_string());
+    let meta = fs::symlink_metadata(&link).expect("the import exists");
+    assert!(meta.file_type().is_file(), "the import is a regular file");
+    assert_eq!(walk(&fs::read(&link).unwrap()), full_history());
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(&format!("crap expanded 1 compaction of session {ORIG}")),
+        "stderr: {stderr}"
+    );
+    assert_eq!(
+        fs::read(&world.original).unwrap(),
+        before,
+        "the original transcript is only read"
+    );
 }
