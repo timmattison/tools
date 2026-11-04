@@ -557,3 +557,46 @@ fn a_live_original_does_not_block_expand() {
 
     assert_eq!(fs::read(&world.original).unwrap(), before);
 }
+
+#[test]
+fn no_compaction_falls_back_to_the_plain_resume() {
+    let world = World::new(|cwd| chain(&BEFORE, None, cwd));
+    let dir = world.session_dir.display().to_string();
+
+    let plain = world.run(&[ORIG]);
+    assert_eq!(
+        String::from_utf8_lossy(&plain.stdout),
+        format!("{ORIG}\n{dir}\n")
+    );
+
+    let out = world.run(&["--expand", ORIG]);
+    assert!(out.status.success());
+    assert_eq!(
+        out.stdout, plain.stdout,
+        "the same bytes as the plain resume"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("has no compaction, so there is nothing to expand"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn the_no_compaction_fallback_keeps_the_live_check_and_force() {
+    let world = World::new(|cwd| chain(&BEFORE, None, cwd));
+    let fake = FakeClaude::start(world._tmp.path());
+    plant_live_session(&world, &fake, ORIG);
+    let dir = world.session_dir.display().to_string();
+
+    let blocked = world.run(&["--expand", ORIG]);
+    assert_eq!(blocked.status.code(), Some(SESSION_ALREADY_RUNNING));
+    assert!(blocked.stdout.is_empty());
+
+    let forced = world.run(&["--expand", ORIG, "--force"]);
+    assert!(forced.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&forced.stdout),
+        format!("{ORIG}\n{dir}\n")
+    );
+}
