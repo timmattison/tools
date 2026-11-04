@@ -568,4 +568,37 @@ mod tests {
             texts(&["p2", "p1", "m6", "m5", "m4", "m3", "m2", "m1"])
         );
     }
+
+    #[test]
+    fn two_compactions_are_undone() {
+        let mut values = chain(&["m1", "m2", "m3"]);
+        values.push(boundary("b1", "m3", Some(1000), "s1"));
+        values.push(summary("s1", "b1"));
+        values.push(message("p1", Some("s1")));
+        values.push(message("p2", Some("p1")));
+        values.push(boundary("b2", "p2", Some(2000), "s2"));
+        values.push(summary("s2", "b2"));
+        values.push(message("q1", Some("s2")));
+
+        let output = expanded(&join(&values)).transcript;
+
+        assert_eq!(walk(&output), texts(&["q1", "p2", "p1", "m3", "m2", "m1"]));
+    }
+
+    #[test]
+    fn a_compaction_right_after_a_compaction_skips_both_summaries() {
+        // The second boundary names the first summary as its logical parent.
+        // There are no messages between the two summaries, so the walk from q1
+        // goes q1 -> s2 -> b2 -> s1 -> b1 -> m3 -> m2 -> m1.
+        let mut values = chain(&["m1", "m2", "m3"]);
+        values.push(boundary("b1", "m3", Some(1000), "s1"));
+        values.push(summary("s1", "b1"));
+        values.push(boundary("b2", "s1", Some(2000), "s2"));
+        values.push(summary("s2", "b2"));
+        values.push(message("q1", Some("s2")));
+
+        let output = expanded(&join(&values)).transcript;
+
+        assert_eq!(walk(&output), texts(&["q1", "m3", "m2", "m1"]));
+    }
 }
