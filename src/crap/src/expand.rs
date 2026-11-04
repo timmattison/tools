@@ -85,6 +85,7 @@ impl std::error::Error for ExpandError {}
 const KEY_UUID: &str = "uuid";
 const KEY_PARENT_UUID: &str = "parentUuid";
 const KEY_LOGICAL_PARENT_UUID: &str = "logicalParentUuid";
+const KEY_SESSION_ID: &str = "sessionId";
 const KEY_SUBTYPE: &str = "subtype";
 const KEY_IS_COMPACT_SUMMARY: &str = "isCompactSummary";
 const SUBTYPE_COMPACT_BOUNDARY: &str = "compact_boundary";
@@ -140,6 +141,12 @@ impl<'a> Line<'a> {
     fn value<T: serde::de::DeserializeOwned>(&self, key: &str) -> Option<T> {
         let (_, raw) = self.pairs.as_ref()?.iter().find(|(k, _)| k == key)?;
         serde_json::from_str(raw.get()).ok()
+    }
+
+    fn has_key(&self, key: &str) -> bool {
+        self.pairs
+            .as_ref()
+            .is_some_and(|pairs| pairs.iter().any(|(k, _)| k == key))
     }
 
     fn is_boundary(&self) -> bool {
@@ -262,8 +269,9 @@ fn check_no_cycle(kept: &[(&Line<'_>, Option<Relink>)]) -> Result<(), ExpandErro
     Ok(())
 }
 
-/// Re-emit a line with the new parent in place of its `parentUuid`.
-fn rewrite(line: &Line<'_>, relink: &Relink, out: &mut Vec<u8>) {
+/// Re-emit a line. Each `sessionId` becomes `import_id`, and the `parentUuid`
+/// becomes the new parent when the line has a relink.
+fn rewrite(line: &Line<'_>, relink: Option<&Relink>, import_id: &str, out: &mut Vec<u8>) {
     let Some(pairs) = line.pairs.as_ref() else {
         out.extend_from_slice(line.raw);
         return;
@@ -275,7 +283,9 @@ fn rewrite(line: &Line<'_>, relink: &Relink, out: &mut Vec<u8>) {
         }
         out.extend_from_slice(json_string(key).as_bytes());
         out.push(b':');
-        if key == KEY_PARENT_UUID {
+        if key == KEY_SESSION_ID {
+            out.extend_from_slice(json_string(import_id).as_bytes());
+        } else if let (KEY_PARENT_UUID, Some(relink)) = (key.as_str(), relink) {
             out.extend_from_slice(json_string(&relink.new_parent).as_bytes());
         } else {
             out.extend_from_slice(raw_value.get().as_bytes());
@@ -290,10 +300,7 @@ fn json_string(text: &str) -> String {
 }
 
 /// Undo each compaction of `transcript`. Every `sessionId` of the output is `import_id`.
-pub fn expand_transcript(
-    transcript: &[u8],
-    _import_id: &str,
-) -> Result<ExpandOutcome, ExpandError> {
+pub fn expand_transcript(transcript: &[u8], import_id: &str) -> Result<ExpandOutcome, ExpandError> {
     let lines: Vec<Line<'_>> = split_lines(transcript)
         .into_iter()
         .map(Line::parse)
@@ -396,9 +403,10 @@ pub fn expand_transcript(
     // Step 9: write the kept lines.
     let mut output = Vec::with_capacity(transcript.len());
     for (line, relink) in &kept {
-        match relink {
-            Some(relink) => rewrite(line, relink, &mut output),
-            None => output.extend_from_slice(line.raw),
+        if relink.is_some() || line.has_key(KEY_SESSION_ID) {
+            rewrite(line, relink.as_ref(), import_id, &mut output);
+        } else {
+            output.extend_from_slice(line.raw);
         }
     }
 
