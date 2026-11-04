@@ -941,4 +941,27 @@ mod tests {
             texts(&["p2", "p1", "m3", "m2", "m1"])
         );
     }
+
+    #[test]
+    fn a_fork_of_a_compacted_session_is_refused() {
+        // Shape D: the messages from before h are not in the file, and the
+        // logical parent t is a descendant of the summary.
+        let values = vec![
+            boundary("b1", "t", Some(1000), "s1"),
+            summary("s1", "b1"),
+            message("h", Some("s1")),
+            message("x", Some("h")),
+            message("t", Some("x")),
+            message("p1", Some("t")),
+        ];
+
+        let error = expand_error(&join(&values));
+
+        assert_eq!(
+            error,
+            ExpandError::HistoryMissing {
+                boundary: "b1".to_string()
+            }
+        );
+    }
 }
