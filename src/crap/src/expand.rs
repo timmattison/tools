@@ -751,4 +751,28 @@ mod tests {
         assert_eq!(expansion.compactions, 1);
         assert_eq!(expansion.last_pre_tokens, None);
     }
+
+    fn without(mut value: serde_json::Value, key: &str) -> serde_json::Value {
+        value.as_object_mut().unwrap().remove(key);
+        value
+    }
+
+    fn expand_error(transcript: &str) -> ExpandError {
+        match expand_transcript(transcript.as_bytes(), IMPORT_ID) {
+            Err(error) => error,
+            other => panic!("expected an error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_boundary_without_uuid_is_refused_with_its_line_number() {
+        let mut values = chain(&["m1", "m2"]);
+        values.push(without(boundary("b1", "m2", Some(1000), "s1"), "uuid"));
+        values.push(summary("s1", "b1"));
+        values.push(message("p1", Some("s1")));
+
+        let error = expand_error(&join(&values));
+
+        assert_eq!(error, ExpandError::MissingUuid { line: 3 });
+    }
 }
