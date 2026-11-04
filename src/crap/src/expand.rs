@@ -203,4 +203,131 @@ mod tests {
 
         assert_eq!(outcome, Ok(ExpandOutcome::NoCompaction));
     }
+
+    fn boundary(
+        uuid: &str,
+        logical_parent: &str,
+        pre_tokens: Option<u64>,
+        anchor: &str,
+    ) -> serde_json::Value {
+        let mut metadata = json!({
+            "trigger": "manual",
+            "postTokens": 21332,
+            "preservedSegment": {"headUuid": "m4", "anchorUuid": anchor, "tailUuid": logical_parent},
+        });
+        if let Some(tokens) = pre_tokens {
+            metadata["preTokens"] = json!(tokens);
+        }
+        json!({
+            "parentUuid": null,
+            "logicalParentUuid": logical_parent,
+            "isSidechain": false,
+            "type": "system",
+            "subtype": "compact_boundary",
+            "content": "Conversation compacted",
+            "level": "info",
+            "compactMetadata": metadata,
+            "uuid": uuid,
+            "timestamp": "2026-11-01T11:00:00.000Z",
+            "sessionId": OLD_SESSION_ID,
+            "version": "2.1.318",
+        })
+    }
+
+    fn summary(uuid: &str, parent: &str) -> serde_json::Value {
+        json!({
+            "parentUuid": parent,
+            "isSidechain": false,
+            "type": "user",
+            "message": {"role": "user", "content": "This session is being continued from a previous conversation"},
+            "isVisibleInTranscriptOnly": true,
+            "isCompactSummary": true,
+            "uuid": uuid,
+            "timestamp": "2026-11-01T11:00:01.000Z",
+            "session_id": OLD_SESSION_ID,
+            "sessionId": OLD_SESSION_ID,
+            "version": "2.1.318",
+        })
+    }
+
+    /// Walk the way Claude loads a session: from the last message up to the first.
+    fn walk(transcript: &[u8]) -> Vec<String> {
+        let values: Vec<serde_json::Value> = std::str::from_utf8(transcript)
+            .unwrap()
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+        let mut parents = std::collections::HashMap::new();
+        let mut start = None;
+        for v in &values {
+            let Some(uuid) = v["uuid"].as_str() else {
+                continue;
+            };
+            parents.insert(
+                uuid.to_string(),
+                v["parentUuid"].as_str().map(str::to_string),
+            );
+            let kind = v["type"].as_str().unwrap_or_default();
+            if (kind == "user" || kind == "assistant") && v["isSidechain"] != json!(true) {
+                start = Some(uuid.to_string());
+            }
+        }
+        let mut path = Vec::new();
+        let mut next = start;
+        while let Some(uuid) = next {
+            assert!(!path.contains(&uuid), "cycle at {uuid}");
+            let parent = parents
+                .get(&uuid)
+                .unwrap_or_else(|| panic!("unknown uuid {uuid}"));
+            next = parent.clone();
+            path.push(uuid);
+        }
+        path
+    }
+
+    fn chain(uuids: &[&str]) -> Vec<serde_json::Value> {
+        let mut parent = None;
+        uuids
+            .iter()
+            .map(|uuid| {
+                let value = message(uuid, parent);
+                parent = Some(*uuid);
+                value
+            })
+            .collect()
+    }
+
+    fn join(values: &[serde_json::Value]) -> String {
+        values.iter().map(line).collect()
+    }
+
+    fn expanded(transcript: &str) -> Expansion {
+        match expand_transcript(transcript.as_bytes(), IMPORT_ID) {
+            Ok(ExpandOutcome::Expanded(expansion)) => expansion,
+            other => panic!("expected an expansion, got {other:?}"),
+        }
+    }
+
+    fn texts(uuids: &[&str]) -> Vec<String> {
+        uuids.iter().map(|u| (*u).to_string()).collect()
+    }
+
+    #[test]
+    fn one_partial_compaction_is_undone() {
+        let mut values = chain(&["m1", "m2", "m3", "m4", "m5", "m6"]);
+        values.push(boundary("b1", "m6", Some(1000), "s1"));
+        values.push(summary("s1", "b1"));
+        values.push(message("p1", Some("s1")));
+        values.push(message("p2", Some("p1")));
+
+        let output = expanded(&join(&values)).transcript;
+
+        let text = String::from_utf8(output.clone()).unwrap();
+        assert!(!text.contains("compact_boundary"));
+        assert!(!text.contains("isCompactSummary"));
+        assert_eq!(
+            walk(&output),
+            texts(&["p2", "p1", "m6", "m5", "m4", "m3", "m2", "m1"])
+        );
+    }
 }
