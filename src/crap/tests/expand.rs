@@ -600,3 +600,24 @@ fn the_no_compaction_fallback_keeps_the_live_check_and_force() {
         format!("{ORIG}\n{dir}\n")
     );
 }
+
+/// The exit code for a recorded directory that is gone.
+const DIRECTORY_MISSING: i32 = 3;
+
+#[test]
+fn the_directory_hint_names_expand() {
+    let world = compacted_world();
+    fs::remove_dir(&world.session_dir).unwrap();
+
+    let out = world.run(&["--expand", ORIG]);
+
+    assert_eq!(out.status.code(), Some(DIRECTORY_MISSING));
+    assert!(out.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "use 'crap --here --expand {ORIG}' to fork it in the current directory instead."
+        )),
+        "stderr: {stderr}"
+    );
+}

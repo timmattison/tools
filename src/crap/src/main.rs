@@ -2701,6 +2701,16 @@ struct ResolveFailure {
 /// be a false lead. That "only the directory failures get the hint" rule lives
 /// here, in one place, precisely so it cannot be half-applied.
 fn describe_resolve_error(session_id: &str, err: &ResolveError) -> ResolveFailure {
+    describe_resolve_error_for(session_id, err, false)
+}
+
+/// Like [`describe_resolve_error`], for the form of the command that failed.
+fn describe_resolve_error_for(
+    session_id: &str,
+    err: &ResolveError,
+    expand: bool,
+) -> ResolveFailure {
+    let _ = expand;
     /// The hanging indent that aligns a detail line under the `Error:` prefix,
     /// matching every other multi-line message in this binary.
     const INDENT: &str = "       ";
@@ -4985,6 +4995,37 @@ mod tests {
             "must say what --here does differently: {:?}",
             failure.detail
         );
+    }
+
+    #[test]
+    fn describe_resolve_error_for_expand_names_here_expand_in_both_directory_variants() {
+        for err in [
+            ResolveError::DirectoryMissing(PathBuf::from("/was/here/once")),
+            ResolveError::DirectoryUnreadable(PathBuf::from("/locked/out")),
+        ] {
+            let failure = describe_resolve_error_for(SAMPLE_ID, &err, true);
+            assert!(
+                failure.detail.contains(&format!(
+                    "use 'crap --here --expand {SAMPLE_ID}' to fork it in the current directory instead."
+                )),
+                "{:?}",
+                failure.detail
+            );
+        }
+    }
+
+    #[test]
+    fn describe_resolve_error_for_without_expand_keeps_the_old_hint() {
+        let err = ResolveError::DirectoryMissing(PathBuf::from("/was/here/once"));
+        let failure = describe_resolve_error_for(SAMPLE_ID, &err, false);
+        assert!(
+            failure.detail.contains(&format!(
+                "use 'crap --here {SAMPLE_ID}' to fork it in the current directory instead."
+            )),
+            "{:?}",
+            failure.detail
+        );
+        assert!(!failure.detail.contains("--expand"), "{:?}", failure.detail);
     }
 
     #[test]
