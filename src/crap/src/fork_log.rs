@@ -595,4 +595,24 @@ mod tests {
         assert_eq!(read.records.len(), 1);
         assert!(!read.records[0].expanded);
     }
+
+    #[test]
+    fn append_writes_the_expanded_key_only_for_an_expanded_record() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let log = dir.path().join(LOG_FILE_NAME);
+        let mut expanded = sample("f1", ForkKind::Here, None);
+        expanded.expanded = true;
+        append_fork_record(&log, &expanded).unwrap();
+        append_fork_record(&log, &sample("f2", ForkKind::Here, None)).unwrap();
+        let text = std::fs::read_to_string(&log).unwrap();
+        let values: Vec<serde_json::Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(values.len(), 2);
+        assert_eq!(values[0].as_object().unwrap().len(), 8);
+        assert_eq!(values[0]["expanded"], true);
+        assert_eq!(values[1].as_object().unwrap().len(), 7);
+        assert!(values[1].get("expanded").is_none());
+    }
 }
