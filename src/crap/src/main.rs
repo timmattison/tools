@@ -2353,7 +2353,7 @@ fn expand_here_or_continue(
     let expansion = match expand::expand_transcript(&bytes, import_id.as_str()) {
         Ok(expand::ExpandOutcome::Expanded(expansion)) => expansion,
         Ok(expand::ExpandOutcome::NoCompaction) => return,
-        Err(err) => write_failure(&err),
+        Err(err) => exit_with_failure(&describe_expand_error(session_id, &err)),
     };
     let import =
         match write_expanded_import(dest_projects_dir, pwd, &import_id, &expansion.transcript) {
@@ -2714,6 +2714,32 @@ fn describe_import_id_error(err: &fork_id::ImportIdError) -> ResolveFailure {
             detail: "       run the command again to get a new id\n".to_string(),
             code: exit_codes::NEW_SESSION_ID_EXISTS,
         },
+    }
+}
+
+/// Maps an [`expand::ExpandError`] to the failure that `crap` prints and exits
+/// with ([`exit_codes::EXPAND_FAILED`]).
+///
+/// Every error ends with the line `No import was written.`, because `crap`
+/// writes the import only after the expansion succeeds. `HistoryMissing`
+/// gets two more lines: it names the case of a fork that Claude made after a
+/// compaction, and the way to find the session that holds the full history.
+fn describe_expand_error(session_id: &str, err: &expand::ExpandError) -> ResolveFailure {
+    /// The hanging indent that aligns a detail line under the `Error:` prefix,
+    /// matching every other multi-line message in this binary.
+    const INDENT: &str = "       ";
+
+    let hint = match err {
+        expand::ExpandError::HistoryMissing { .. } => format!(
+            "{INDENT}A fork that Claude made after a compaction starts at the summary.\n\
+             {INDENT}Expand the session that the fork came from. 'crap --forks {session_id}' names it when crap made the fork.\n"
+        ),
+        _ => String::new(),
+    };
+    ResolveFailure {
+        headline: format!("cannot expand session '{session_id}': {err}"),
+        detail: format!("{hint}{INDENT}No import was written.\n"),
+        code: exit_codes::EXPAND_FAILED,
     }
 }
 
