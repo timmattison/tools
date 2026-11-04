@@ -46,13 +46,10 @@ pub struct ForkRecord {
     pub fork_dir: String,
     /// The way the fork was made.
     pub kind: ForkKind,
-    /// Whether crap forked an expanded import of the source (crap --expand).
-    #[serde(default = "stub_true", skip_serializing_if = "std::ops::Not::not")]
+    /// Whether crap forked an expanded import of the source (`crap --expand`).
+    /// An old line has no key and reads as false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub expanded: bool,
-}
-
-fn stub_true() -> bool {
-    true
 }
 
 /// The records of a log, and the count of lines that could not be read.
