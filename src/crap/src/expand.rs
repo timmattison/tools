@@ -775,4 +775,24 @@ mod tests {
 
         assert_eq!(error, ExpandError::MissingUuid { line: 3 });
     }
+
+    #[test]
+    fn a_boundary_without_logical_parent_is_refused() {
+        let mut values = chain(&["m1", "m2"]);
+        values.push(without(
+            boundary("b1", "m2", Some(1000), "s1"),
+            "logicalParentUuid",
+        ));
+        values.push(summary("s1", "b1"));
+        values.push(message("p1", Some("s1")));
+
+        let error = expand_error(&join(&values));
+
+        assert_eq!(
+            error,
+            ExpandError::MissingLogicalParent {
+                boundary: "b1".to_string()
+            }
+        );
+    }
 }
