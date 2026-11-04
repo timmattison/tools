@@ -616,4 +616,53 @@ mod tests {
         assert_eq!(values[1].as_object().unwrap().len(), 7);
         assert!(values[1].get("expanded").is_none());
     }
+
+    #[test]
+    fn report_marks_an_expanded_fork_line() {
+        let mut one = made(ID_A, ID_B, ForkKind::Here, "/w/one");
+        one.expanded = true;
+        let two = made(ID_A, ID_C, ForkKind::Here, "/w/two");
+        let forks = [
+            ForkLine {
+                record: &one,
+                saved: true,
+            },
+            ForkLine {
+                record: &two,
+                saved: true,
+            },
+        ];
+        let chain = SourceChain {
+            links: Vec::new(),
+            looped_at: None,
+        };
+        assert_eq!(
+            format_log_report(ID_A, &forks, &chain),
+            format!(
+                "Forks of {ID_A} in the fork log:\n\
+                 \x20 {ID_B}  2026-10-28T01:51:22Z  saved      /w/one  (expanded)\n\
+                 \x20 {ID_C}  2026-10-28T01:51:22Z  saved      /w/two\n"
+            )
+        );
+    }
+
+    #[test]
+    fn report_marks_an_expanded_chain_line() {
+        let mut first = made(ID_B, ID_C, ForkKind::ForkAt, "/w/c");
+        first.expanded = true;
+        let second = made(ID_A, ID_B, ForkKind::Here, "/w/b");
+        let chain = SourceChain {
+            links: vec![&first, &second],
+            looped_at: None,
+        };
+        assert_eq!(
+            format_log_report(ID_C, &[], &chain),
+            format!(
+                "Sources of {ID_C} in the fork log:\n\
+                 \x20 {ID_C} is a fork of {ID_B}, made 2026-10-28T01:51:22Z (fork-at, expanded) in /w/c\n\
+                 \x20 {ID_B} is a fork of {ID_A}, made 2026-10-28T01:51:22Z (here) in /w/b\n\
+                 \x20 {ID_A} is not a fork in the fork log.\n"
+            )
+        );
+    }
 }
