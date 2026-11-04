@@ -3069,6 +3069,34 @@ mod tests {
         assert!(Cli::try_parse_from(["crap", ID_A, ID_B]).is_err());
     }
 
+    #[test]
+    fn expand_conflicts_with_status_forks_and_shell_setup() {
+        for other in ["--status", "--forks", "--shell-setup"] {
+            let err = Cli::try_parse_from(["crap", "--expand", ID_A, other])
+                .err()
+                .unwrap_or_else(|| panic!("--expand with {other} must not parse"));
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ArgumentConflict,
+                "--expand with {other}"
+            );
+        }
+    }
+
+    #[test]
+    fn expand_composes_with_here_a_new_id_and_user() {
+        let cli =
+            Cli::try_parse_from(["crap", "--here", "--expand", ID_A, ID_B]).expect("should parse");
+        assert!(cli.here && cli.expand);
+        assert_eq!(cli.session_id.as_deref(), Some(ID_A));
+        assert_eq!(cli.new_session_id.as_deref(), Some(ID_B));
+
+        let cli =
+            Cli::try_parse_from(["crap", "--expand", ID_A, "--user", "x"]).expect("should parse");
+        assert!(cli.expand && !cli.here);
+        assert_eq!(cli.user.as_deref(), Some("x"));
+    }
+
     /// Makes a projects tree that holds one transcript for each id in `ids`.
     fn projects_with_transcripts(ids: &[&str]) -> tempfile::TempDir {
         let projects = tempdir().unwrap();
