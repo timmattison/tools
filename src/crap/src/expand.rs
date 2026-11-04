@@ -915,4 +915,30 @@ mod tests {
             texts(&["p2", "p1", "a3", "a2", "a1", "m3", "m2", "m1"])
         );
     }
+
+    #[test]
+    fn duplicate_boundary_and_summary_lines_are_undone_once() {
+        // Shape C: the boundary and the summary occur twice. The later copies
+        // of the post messages already link to the logical parent.
+        let mut values = chain(&["m1", "m2", "m3"]);
+        values.push(boundary("b1", "m3", Some(1000), "s1"));
+        values.push(summary("s1", "b1"));
+        values.push(message("p1", Some("s1")));
+        values.push(message("p2", Some("p1")));
+        values.push(boundary("b1", "m3", Some(1000), "s1"));
+        values.push(summary("s1", "b1"));
+        values.push(message("p1", Some("m3")));
+        values.push(message("p2", Some("p1")));
+
+        let expansion = expanded(&join(&values));
+
+        let text = String::from_utf8(expansion.transcript.clone()).unwrap();
+        assert!(!text.contains("compact_boundary"));
+        assert!(!text.contains("isCompactSummary"));
+        assert_eq!(expansion.compactions, 1);
+        assert_eq!(
+            walk(&expansion.transcript),
+            texts(&["p2", "p1", "m3", "m2", "m1"])
+        );
+    }
 }
