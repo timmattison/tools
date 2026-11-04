@@ -85,6 +85,8 @@ impl std::error::Error for ExpandError {}
 const KEY_UUID: &str = "uuid";
 const KEY_PARENT_UUID: &str = "parentUuid";
 const KEY_LOGICAL_PARENT_UUID: &str = "logicalParentUuid";
+const KEY_TYPE: &str = "type";
+const DROPPED_TYPES: [&str; 2] = ["bridge-session", "queue-operation"];
 const KEY_SESSION_ID: &str = "sessionId";
 const KEY_SUBTYPE: &str = "subtype";
 const KEY_IS_COMPACT_SUMMARY: &str = "isCompactSummary";
@@ -147,6 +149,12 @@ impl<'a> Line<'a> {
         self.pairs
             .as_ref()
             .is_some_and(|pairs| pairs.iter().any(|(k, _)| k == key))
+    }
+
+    /// A line type that an import does not keep.
+    fn is_dropped_type(&self) -> bool {
+        self.value::<String>(KEY_TYPE)
+            .is_some_and(|kind| DROPPED_TYPES.contains(&kind.as_str()))
     }
 
     fn is_boundary(&self) -> bool {
@@ -386,7 +394,10 @@ pub fn expand_transcript(transcript: &[u8], import_id: &str) -> Result<ExpandOut
 
     // Step 7: relink each kept line whose parent is removed.
     let mut kept: Vec<(&Line<'_>, Option<Relink>)> = Vec::new();
-    for line in lines.iter().filter(|l| !l.is_boundary() && !l.is_summary()) {
+    for line in lines
+        .iter()
+        .filter(|l| !l.is_boundary() && !l.is_summary() && !l.is_dropped_type())
+    {
         let relink = match line.value::<String>(KEY_PARENT_UUID) {
             Some(parent) if removed.contains_key(&parent) => Some(Relink {
                 new_parent: resolve(&parent, &removed)?,
