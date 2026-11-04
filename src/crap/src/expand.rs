@@ -678,4 +678,32 @@ mod tests {
         assert!(!output.contains("queue-operation"));
         assert_eq!(output.lines().count(), 3);
     }
+
+    #[test]
+    fn lines_the_rules_do_not_change_stay_byte_identical() {
+        let snapshot = "{\"type\":\"file-history-snapshot\",\"messageId\":\"m1\",\"snapshot\":{ \"trackedFileBackups\": {} },\"isSnapshotUpdate\":false}\n";
+        let not_json = "this is not json\n";
+        let torn = "{\"type\":\"user\",\"uuid\":\"t1\",\"parentUuid\":\"p1\",\"mess";
+        let mut values = chain(&["m1", "m2"]);
+        values.push(boundary("b1", "m2", Some(1000), "s1"));
+        values.push(summary("s1", "b1"));
+        // A rewritten line that ends in \r\n keeps its \r\n.
+        let crlf = line(&message("p1", Some("s1"))).replace('\n', "\r\n");
+        let mut input = String::new();
+        input.push_str(snapshot);
+        input.push_str(&join(&values));
+        input.push_str(not_json);
+        input.push_str(&crlf);
+        input.push_str(torn);
+
+        let output = String::from_utf8(expanded(&input).transcript).unwrap();
+
+        assert!(output.starts_with(snapshot));
+        assert!(output.contains(&format!("\n{not_json}")));
+        assert!(output.ends_with(torn));
+        let expected_p1 = crlf
+            .replace(OLD_SESSION_ID, IMPORT_ID)
+            .replace("\"parentUuid\":\"s1\"", "\"parentUuid\":\"m2\"");
+        assert!(output.contains(&expected_p1));
+    }
 }
