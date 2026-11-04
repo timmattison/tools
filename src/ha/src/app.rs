@@ -1255,7 +1255,7 @@ mod tests {
         assert_eq!(
             after[1..5],
             [
-                "Running · 0 ⏳ · 0 🏃 · 0 ✅ · 0 ❌ · 0 💨",
+                "Running · 0 ⏳ · 0 🏃 · 0 ✅ · 0 ❌ · 0 💨 · 0 🪦",
                 "   No runs in progress or in the queue.",
                 recent_after.as_str(),
                 "   No runs finished in the last 8h.",

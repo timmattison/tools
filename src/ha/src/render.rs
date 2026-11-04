@@ -1866,7 +1866,7 @@ mod tests {
             text[0..8],
             [
                 "   REPO                  WORKFLOW              BRANCH       TITLE                                 STARTED     TIME",
-                "Running · 0 ⏳ · 1 🏃 · 1 ✅ · 1 ❌ · 0 💨",
+                "Running · 0 ⏳ · 1 🏃 · 1 ✅ · 1 ❌ · 0 💨 · 0 🪦",
                 "🏃 timmattison/tools     CI        39149840084 main         Fix the thing                         11:45:30    14m 30s 🏃",
                 "✅ ├ build                        107851237794                                                    11:45:40    4m 20s  ✅",
                 "❌ ├ lint                         107851237795                                                    11:46:00    45s     ❌",
@@ -1889,7 +1889,7 @@ mod tests {
             lines(&buffer),
             [
                 "   REPO                  WORKFLOW              BRANCH       TITLE                                 STARTED     TIME",
-                "Running · 0 ⏳ · 0 🏃 · 0 ✅ · 0 ❌ · 0 💨",
+                "Running · 0 ⏳ · 0 🏃 · 0 ✅ · 0 ❌ · 0 💨 · 0 🪦",
                 "🏃 timmattison/tools     CI                  1 main         Fix the thing                         11:45:30    14m 30s 🏃",
                 "⏳ acme/widgets          Release             2 issue-12     Add release job                       11:58:00    2m 00s  ⏳",
                 recent.as_str(),
@@ -2336,7 +2336,7 @@ mod tests {
         assert_eq!(
             text[1..5],
             [
-                "Running · 0 ⏳ · 0 🏃 · 0 ✅ · 0 ❌ · 0 💨",
+                "Running · 0 ⏳ · 0 🏃 · 0 ✅ · 0 ❌ · 0 💨 · 0 🪦",
                 "   No runs in progress or in the queue.",
                 "Last 8h · 0 passed · 0 failed · 0 ca… FINISHED",
                 "   No runs finished in the last 8h.",
@@ -5364,7 +5364,55 @@ mod tests {
         let text = lines(&render_with(160, 12, &mut board, &loaded()));
         assert_eq!(
             text[1],
-            "Running · 1 ⏳ · 2 🏃 · 0 ✅ · 0 ❌ · 0 💨 · pi5, mini, GitHub Actions 1001"
+            "Running · 1 ⏳ · 2 🏃 · 0 ✅ · 0 ❌ · 0 💨 · 0 🪦 · pi5, mini, GitHub Actions 1001"
+        );
+    }
+
+    /// The count of the cancelled jobs comes last, after `💨` (issue #635). It
+    /// is 3, thus it differs from each other count, and a count that reads a
+    /// wrong field shows a wrong number. A cancelled job adds no runner name,
+    /// also when GitHub names its runner.
+    #[test]
+    fn the_running_header_counts_the_cancelled_jobs_last() {
+        let mut board = board_with_jobs(vec![
+            on(
+                "mini",
+                job(
+                    21,
+                    "build",
+                    RunState::Running,
+                    Some("2026-10-14T11:46:00Z"),
+                    None,
+                ),
+            ),
+            on(
+                "pi5",
+                job(
+                    22,
+                    "lint",
+                    RunState::Running,
+                    Some("2026-10-14T11:47:00Z"),
+                    None,
+                ),
+            ),
+            job(23, "test", RunState::Queued, None, None),
+            on(
+                "gone",
+                job(
+                    24,
+                    "a",
+                    RunState::Cancelled,
+                    Some("2026-10-14T11:46:00Z"),
+                    Some("2026-10-14T11:48:00Z"),
+                ),
+            ),
+            job(25, "b", RunState::Cancelled, None, None),
+            job(26, "c", RunState::Cancelled, None, None),
+        ]);
+        let text = lines(&render_with(160, 12, &mut board, &loaded()));
+        assert_eq!(
+            text[1],
+            "Running · 1 ⏳ · 2 🏃 · 0 ✅ · 0 ❌ · 0 💨 · 3 🪦 · pi5, mini"
         );
     }
 
@@ -5391,7 +5439,7 @@ mod tests {
         assert_eq!(columns(line, digit, 1), "1");
         assert!(bold(digit) && !cyan(digit), "a count is bold and not cyan");
         // Each name is cyan. The separator between two names is bold, not cyan.
-        let names_start = display_width("Running · 1 ⏳ · 2 🏃 · 0 ✅ · 0 ❌ · 0 💨 · ");
+        let names_start = display_width("Running · 1 ⏳ · 2 🏃 · 0 ✅ · 0 ❌ · 0 💨 · 0 🪦 · ");
         let mut column = names_start;
         for (index, name) in ["pi5", "mini", "GitHub Actions 1001"].iter().enumerate() {
             if index > 0 {
@@ -5465,7 +5513,7 @@ mod tests {
         let cut = lines(&render_with(width, 12, &mut board(), &loaded()))[1].clone();
         assert_eq!(
             cut,
-            "Running · 1 ⏳ · 2 🏃 · 0 ✅ · 0 ❌ · 0 💨 · 🎉, café, ラン"
+            "Running · 1 ⏳ · 2 🏃 · 0 ✅ · 0 ❌ · 0 💨 · 0 🪦 · 🎉, café, ラン"
         );
     }
 
@@ -6104,7 +6152,7 @@ mod tests {
                     "11:58:57",
                     "1m 03s"
                 ),
-                "Running · 0 ⏳ · 0 🏃 · 0 ✅ · 0 ❌ · 0 💨".to_owned(),
+                "Running · 0 ⏳ · 0 🏃 · 0 ✅ · 0 ❌ · 0 💨 · 0 🪦".to_owned(),
                 text[5].clone(),
                 format!(
                     "{:<97} FINISHED",
