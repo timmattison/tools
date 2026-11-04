@@ -289,3 +289,32 @@ fn here_expand_prints_the_wire_shape_and_writes_the_import() {
         "the original transcript is only read"
     );
 }
+
+/// Runs `crap --here --expand ORIG` in `world` and returns the bytes of the
+/// import that it wrote.
+fn expanded_import(world: &World) -> Vec<u8> {
+    let out = world.run(&["--here", "--expand", ORIG]);
+    let fields = here_fields(&out);
+    fs::read(world.work_folder().join(format!("{}.jsonl", fields[1]))).unwrap()
+}
+
+#[test]
+fn the_import_holds_the_full_history_without_the_compaction() {
+    let world = compacted_world();
+    let import = expanded_import(&world);
+
+    // The last message first, the first message last: each message once.
+    let expected: Vec<String> = AFTER
+        .iter()
+        .rev()
+        .chain(BEFORE.iter().rev())
+        .map(|uuid| (*uuid).to_string())
+        .collect();
+    assert_eq!(walk(&import), expected);
+
+    for line in String::from_utf8(import).unwrap().lines() {
+        let value: Value = serde_json::from_str(line).unwrap();
+        assert_ne!(value["subtype"], json!("compact_boundary"), "{line}");
+        assert_ne!(value["isCompactSummary"], json!(true), "{line}");
+    }
+}
