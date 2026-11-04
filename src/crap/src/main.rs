@@ -2330,6 +2330,34 @@ fn format_no_compaction_note(session_id: &str) -> String {
     )
 }
 
+/// The note that `crap` prints after it expanded a session. Up to four lines,
+/// each ended with a newline.
+///
+/// `compactions` is the count of compactions that `crap` undid.
+/// `last_pre_tokens` is the size of the context before the last compaction. The
+/// line about it is left out when the transcript does not give the size.
+fn format_expand_note(
+    session_id: &str,
+    compactions: usize,
+    last_pre_tokens: Option<u64>,
+) -> String {
+    let plural = if compactions == 1 { "" } else { "s" };
+    let mut note = format!(
+        "{} crap expanded {compactions} compaction{plural} of session {session_id}.\n",
+        "Note:".bold()
+    );
+    if let Some(tokens) = last_pre_tokens {
+        note.push_str(&format!(
+            "{NOTE_INDENT}Before the last compaction, the context held {tokens} tokens.\n"
+        ));
+    }
+    note.push_str(&format!(
+        "{NOTE_INDENT}The expanded history can be larger than the context window.\n\
+         {NOTE_INDENT}If it is larger, use /rewind before you send the first message.\n"
+    ));
+    note
+}
+
 /// The `--expand` part of `crap --here --expand <id>`.
 ///
 /// It locates the transcript, undoes each compaction in memory, and writes the
@@ -2377,6 +2405,10 @@ fn expand_here_or_continue(
             Ok(path) => path,
             Err(err) => write_failure(&err),
         };
+    eprint!(
+        "{}",
+        format_expand_note(session_id, expansion.compactions, expansion.last_pre_tokens)
+    );
     log_fork(
         fork_log,
         &fork_log::ForkRecord {
