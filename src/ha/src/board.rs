@@ -90,8 +90,8 @@ pub struct JobCounts {
 }
 
 impl JobCounts {
-    /// Adds one job in `state` to the count of that state. A job in any other
-    /// state is in no count.
+    /// Adds one job in `state` to the count of that state. A job in the state
+    /// `Other` is in no count.
     fn add(&mut self, state: RunState) {
         match state {
             RunState::Queued => self.queued += 1,
@@ -99,7 +99,8 @@ impl JobCounts {
             RunState::Passed => self.passed += 1,
             RunState::Failed => self.failed += 1,
             RunState::Skipped => self.skipped += 1,
-            RunState::Cancelled | RunState::Other => {}
+            RunState::Cancelled => self.cancelled += 1,
+            RunState::Other => {}
         }
     }
 }
