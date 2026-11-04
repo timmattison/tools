@@ -2454,7 +2454,7 @@ fn expand_here_or_continue(
             source_dir: recorded_cwd(&source),
             fork_dir: pwd.to_string_lossy().into_owned(),
             kind: fork_log::ForkKind::Here,
-            expanded: false,
+            expanded: true,
         },
     );
     print!(
@@ -2916,7 +2916,7 @@ fn run_resume(
                     source_dir: Some(dir.to_string_lossy().into_owned()),
                     fork_dir: dir.to_string_lossy().into_owned(),
                     kind: fork_log::ForkKind::ForkAt,
-                    expanded: false,
+                    expanded: true,
                 },
             );
             print!(
