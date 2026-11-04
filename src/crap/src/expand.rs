@@ -1,3 +1,7 @@
+#![allow(
+    dead_code,
+    reason = "the CLI of issue 637 calls this module in a later commit"
+)]
 //! Undo the compactions of a Claude Code transcript.
 //!
 //! `expand_transcript` takes the bytes of a transcript and gives back the
@@ -87,6 +91,8 @@ const KEY_PARENT_UUID: &str = "parentUuid";
 const KEY_LOGICAL_PARENT_UUID: &str = "logicalParentUuid";
 const KEY_TYPE: &str = "type";
 const DROPPED_TYPES: [&str; 2] = ["bridge-session", "queue-operation"];
+const KEY_COMPACT_METADATA: &str = "compactMetadata";
+const KEY_PRE_TOKENS: &str = "preTokens";
 const KEY_SESSION_ID: &str = "sessionId";
 const KEY_SUBTYPE: &str = "subtype";
 const KEY_IS_COMPACT_SUMMARY: &str = "isCompactSummary";
@@ -155,6 +161,12 @@ impl<'a> Line<'a> {
     fn is_dropped_type(&self) -> bool {
         self.value::<String>(KEY_TYPE)
             .is_some_and(|kind| DROPPED_TYPES.contains(&kind.as_str()))
+    }
+
+    /// `compactMetadata.preTokens`, when it is a u64.
+    fn pre_tokens(&self) -> Option<u64> {
+        let metadata = self.value::<serde_json::Value>(KEY_COMPACT_METADATA)?;
+        metadata.get(KEY_PRE_TOKENS)?.as_u64()
     }
 
     fn is_boundary(&self) -> bool {
@@ -423,8 +435,12 @@ pub fn expand_transcript(transcript: &[u8], import_id: &str) -> Result<ExpandOut
 
     Ok(ExpandOutcome::Expanded(Expansion {
         transcript: output,
-        compactions: 0,
-        last_pre_tokens: None,
+        compactions: boundary_order.len(),
+        last_pre_tokens: lines
+            .iter()
+            .rev()
+            .find(|l| l.is_boundary())
+            .and_then(Line::pre_tokens),
     }))
 }
 
