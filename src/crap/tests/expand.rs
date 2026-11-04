@@ -654,3 +654,133 @@ fn expand_fails_closed_in_default_mode() {
     );
     assert!(!world.fork_log().exists(), "nothing is logged");
 }
+
+/// A world with two users: the current user (`home`, with an empty projects
+/// tree) and a sibling (`other`) that holds the original transcript.
+struct CrossWorld {
+    _tmp: tempfile::TempDir,
+    root: PathBuf,
+    /// The directory that the lines of the original record as `cwd`.
+    session_dir: PathBuf,
+    /// The directory that `crap` runs in.
+    work: PathBuf,
+}
+
+impl CrossWorld {
+    fn new() -> Self {
+        let tmp = tempfile::Builder::new()
+            .prefix("crap-expand-cu-")
+            .tempdir()
+            .unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let session_dir = root.join("session-dir");
+        let work = root.join("work");
+        fs::create_dir_all(&session_dir).unwrap();
+        fs::create_dir_all(&work).unwrap();
+        fs::create_dir_all(root.join("home/.claude/projects")).unwrap();
+        let folder = root.join("other/.claude/projects/-proj");
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(
+            folder.join(format!("{ORIG}.jsonl")),
+            transcript_bytes(&one_compaction(&session_dir.to_string_lossy())),
+        )
+        .unwrap();
+        Self {
+            _tmp: tmp,
+            root,
+            session_dir,
+            work,
+        }
+    }
+
+    fn run(&self, args: &[&str]) -> Output {
+        common::crap_command(&self.root.join("home"))
+            .current_dir(&self.work)
+            .args(args)
+            .output()
+            .expect("crap binary should run")
+    }
+
+    fn own_projects(&self) -> PathBuf {
+        self.root.join("home/.claude/projects")
+    }
+
+    /// Every file under `dir`: the relative path and the bytes.
+    fn snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut files = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(current) = stack.pop() {
+            for entry in fs::read_dir(&current).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    files.push((
+                        path.strip_prefix(dir).unwrap().to_path_buf(),
+                        fs::read(&path).unwrap(),
+                    ));
+                }
+            }
+        }
+        files.sort();
+        files
+    }
+
+    /// Whether a file named `<id>.jsonl` exists anywhere in the own tree.
+    fn own_tree_has(&self, id: &str) -> bool {
+        Self::snapshot(&self.own_projects())
+            .iter()
+            .any(|(path, _)| {
+                path.file_name().and_then(|n| n.to_str()) == Some(&format!("{id}.jsonl"))
+            })
+    }
+}
+
+#[test]
+fn cross_user_expand_writes_the_import_in_the_own_tree() {
+    for args in [
+        vec!["--expand", ORIG, "--user", "other"],
+        // No `--user`: the own tree has no such id, so the search falls back.
+        vec!["--expand", ORIG],
+    ] {
+        let world = CrossWorld::new();
+        let other = world.root.join("other");
+        let before = CrossWorld::snapshot(&other);
+
+        let out = world.run(&args);
+        let fields = fork_at_fields(&out);
+
+        let import = world
+            .own_projects()
+            .join(encode_project_dir(&world.session_dir))
+            .join(format!("{}.jsonl", fields[1]));
+        assert_eq!(fields[3], import.display().to_string(), "{args:?}");
+        assert_eq!(fields[4], world.session_dir.display().to_string());
+        assert_eq!(
+            walk(&fs::read(&import).unwrap()),
+            full_history(),
+            "{args:?}"
+        );
+        assert!(!world.own_tree_has(ORIG), "no plain copy of the original");
+        assert_eq!(CrossWorld::snapshot(&other), before, "{args:?}");
+    }
+}
+
+#[test]
+fn cross_user_here_expand_writes_the_import_in_the_own_tree() {
+    let world = CrossWorld::new();
+    let other = world.root.join("other");
+    let before = CrossWorld::snapshot(&other);
+
+    let out = world.run(&["--here", "--expand", ORIG, "--user", "other"]);
+    let fields = here_fields(&out);
+
+    let import = world
+        .own_projects()
+        .join(encode_project_dir(&world.work.canonicalize().unwrap()))
+        .join(format!("{}.jsonl", fields[1]));
+    assert_eq!(fields[3], import.display().to_string());
+    assert_eq!(walk(&fs::read(&import).unwrap()), full_history());
+    assert!(!world.own_tree_has(ORIG), "no plain copy of the original");
+    assert_eq!(CrossWorld::snapshot(&other), before);
+}
