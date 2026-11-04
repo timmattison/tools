@@ -784,3 +784,43 @@ fn cross_user_here_expand_writes_the_import_in_the_own_tree() {
     assert!(!world.own_tree_has(ORIG), "no plain copy of the original");
     assert_eq!(CrossWorld::snapshot(&other), before);
 }
+
+/// The lines of the fork log of `world`, as JSON values.
+fn fork_log_lines(world: &World) -> Vec<Value> {
+    let log = world.fork_log();
+    fs::read_to_string(&log)
+        .unwrap_or_else(|err| panic!("fork log {} unreadable: {err}", log.display()))
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("each log line is JSON"))
+        .collect()
+}
+
+#[test]
+fn here_expand_logs_an_expanded_fork_of_the_original() {
+    let world = compacted_world();
+
+    let out = world.run(&["--here", "--expand", ORIG]);
+    let fields = here_fields(&out);
+
+    let lines = fork_log_lines(&world);
+    assert_eq!(lines.len(), 1, "exactly one line: {lines:?}");
+    assert_eq!(lines[0]["source_id"], ORIG, "never the import id");
+    assert_eq!(lines[0]["fork_id"], fields[2].as_str());
+    assert_eq!(lines[0]["kind"], "here");
+    assert_eq!(lines[0]["expanded"], true);
+}
+
+#[test]
+fn expand_logs_an_expanded_fork_at_the_original_directory() {
+    let world = compacted_world();
+
+    let out = world.run(&["--expand", ORIG]);
+    let fields = fork_at_fields(&out);
+
+    let lines = fork_log_lines(&world);
+    assert_eq!(lines.len(), 1, "exactly one line: {lines:?}");
+    assert_eq!(lines[0]["source_id"], ORIG, "never the import id");
+    assert_eq!(lines[0]["fork_id"], fields[2].as_str());
+    assert_eq!(lines[0]["kind"], "fork-at");
+    assert_eq!(lines[0]["expanded"], true);
+}
