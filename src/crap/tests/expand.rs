@@ -388,3 +388,37 @@ fn a_session_without_compaction_continues_as_without_expand() {
         vec![format!("{ORIG}.jsonl")]
     );
 }
+
+#[test]
+fn the_size_note_names_the_compactions_and_the_last_context_size() {
+    // Two compactions: the context held 1000 tokens, then 2000 tokens.
+    let world = World::new(|cwd| {
+        let mut lines = chain(&BEFORE, None, cwd);
+        lines.push(boundary("b1", "m4", 1000, cwd));
+        lines.push(summary("s1", "b1", cwd));
+        lines.extend(chain(&AFTER, Some("s1"), cwd));
+        lines.push(boundary("b2", "m6", 2000, cwd));
+        lines.push(summary("s2", "b2", cwd));
+        lines.extend(chain(&["m7", "m8"], Some("s2"), cwd));
+        lines
+    });
+
+    let out = world.run(&["--here", "--expand", ORIG]);
+    let fields = here_fields(&out);
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(&format!("crap expanded 2 compactions of session {ORIG}")),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("the context held 2000 tokens"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("If it is larger, use /rewind before you send the first message."),
+        "stderr: {stderr}"
+    );
+    let import = fs::read(world.work_folder().join(format!("{}.jsonl", fields[1]))).unwrap();
+    assert_eq!(walk(&import).len(), 8, "all eight messages, once each");
+}
