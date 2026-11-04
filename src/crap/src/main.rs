@@ -3278,6 +3278,59 @@ mod tests {
         }
     }
 
+    /// The glyphs of `render`, with the color codes forced on and taken out.
+    fn glyphs(render: impl FnOnce() -> String) -> String {
+        testcolor::strip_ansi(&testcolor::with_forced_ansi(render))
+    }
+
+    #[test]
+    fn format_no_compaction_note_has_two_lines() {
+        assert_eq!(
+            glyphs(|| format_no_compaction_note(ID_A)),
+            format!(
+                "Note: session {ID_A} has no compaction, so there is nothing to expand.\n\
+                 \x20     crap continues as without --expand.\n"
+            )
+        );
+    }
+
+    #[test]
+    fn format_expand_note_uses_the_singular_for_one_compaction() {
+        assert_eq!(
+            glyphs(|| format_expand_note(ID_A, 1, Some(480_231))),
+            format!(
+                "Note: crap expanded 1 compaction of session {ID_A}.\n\
+                 \x20     Before the last compaction, the context held 480231 tokens.\n\
+                 \x20     The expanded history can be larger than the context window.\n\
+                 \x20     If it is larger, use /rewind before you send the first message.\n"
+            )
+        );
+    }
+
+    #[test]
+    fn format_expand_note_uses_the_plural_for_more_compactions() {
+        let note = glyphs(|| format_expand_note(ID_A, 3, Some(2000)));
+        assert!(
+            note.starts_with(&format!(
+                "Note: crap expanded 3 compactions of session {ID_A}.\n"
+            )),
+            "{note}"
+        );
+        assert!(note.contains("the context held 2000 tokens.\n"), "{note}");
+    }
+
+    #[test]
+    fn format_expand_note_leaves_out_the_tokens_line_without_a_size() {
+        assert_eq!(
+            glyphs(|| format_expand_note(ID_A, 2, None)),
+            format!(
+                "Note: crap expanded 2 compactions of session {ID_A}.\n\
+                 \x20     The expanded history can be larger than the context window.\n\
+                 \x20     If it is larger, use /rewind before you send the first message.\n"
+            )
+        );
+    }
+
     #[test]
     fn describe_fork_id_error_keeps_the_messages_for_a_supplied_id() {
         // The messages and exit codes of a supplied id do not change. The
