@@ -6,6 +6,9 @@
 
 use std::fmt;
 
+use serde::de::{Deserialize, Deserializer, MapAccess, Visitor};
+use serde_json::value::RawValue;
+
 /// What `expand_transcript` made of a transcript.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExpandOutcome {
@@ -78,11 +81,89 @@ impl fmt::Display for ExpandError {
 
 impl std::error::Error for ExpandError {}
 
+const KEY_SUBTYPE: &str = "subtype";
+const KEY_IS_COMPACT_SUMMARY: &str = "isCompactSummary";
+const SUBTYPE_COMPACT_BOUNDARY: &str = "compact_boundary";
+
+/// The top-level pairs of a JSON object, in file order.
+struct Pairs<'a>(Vec<(String, &'a RawValue)>);
+
+impl<'de> Deserialize<'de> for Pairs<'de> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct PairsVisitor;
+
+        impl<'de> Visitor<'de> for PairsVisitor {
+            type Value = Pairs<'de>;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a JSON object")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut pairs = Vec::new();
+                while let Some((key, value)) = map.next_entry::<String, &'de RawValue>()? {
+                    pairs.push((key, value));
+                }
+                Ok(Pairs(pairs))
+            }
+        }
+
+        deserializer.deserialize_map(PairsVisitor)
+    }
+}
+
+/// One line of a transcript: its bytes, and its pairs when it is a JSON object.
+struct Line<'a> {
+    /// The whole line, terminator included.
+    raw: &'a [u8],
+    /// The pairs of the line. `None` marks an opaque line.
+    pairs: Option<Vec<(String, &'a RawValue)>>,
+}
+
+impl<'a> Line<'a> {
+    fn parse(raw: &'a [u8]) -> Self {
+        let pairs = std::str::from_utf8(raw)
+            .ok()
+            .and_then(|text| {
+                let body = text.strip_suffix('\n').unwrap_or(text);
+                let body = body.strip_suffix('\r').unwrap_or(body);
+                serde_json::from_str::<Pairs<'_>>(body).ok()
+            })
+            .map(|pairs| pairs.0);
+        Self { raw, pairs }
+    }
+
+    fn value<T: serde::de::DeserializeOwned>(&self, key: &str) -> Option<T> {
+        let (_, raw) = self.pairs.as_ref()?.iter().find(|(k, _)| k == key)?;
+        serde_json::from_str(raw.get()).ok()
+    }
+
+    fn is_boundary(&self) -> bool {
+        self.value::<String>(KEY_SUBTYPE).as_deref() == Some(SUBTYPE_COMPACT_BOUNDARY)
+    }
+
+    fn is_summary(&self) -> bool {
+        self.value::<bool>(KEY_IS_COMPACT_SUMMARY) == Some(true)
+    }
+}
+
+/// Split `transcript` on `\n`. Each line keeps its terminator. An empty last segment is no line.
+fn split_lines(transcript: &[u8]) -> Vec<&[u8]> {
+    transcript.split_inclusive(|byte| *byte == b'\n').collect()
+}
+
 /// Undo each compaction of `transcript`. Every `sessionId` of the output is `import_id`.
 pub fn expand_transcript(
-    _transcript: &[u8],
+    transcript: &[u8],
     _import_id: &str,
 ) -> Result<ExpandOutcome, ExpandError> {
+    let lines: Vec<Line<'_>> = split_lines(transcript)
+        .into_iter()
+        .map(Line::parse)
+        .collect();
+    if !lines.iter().any(|l| l.is_boundary() || l.is_summary()) {
+        return Ok(ExpandOutcome::NoCompaction);
+    }
     Ok(ExpandOutcome::Expanded(Expansion {
         transcript: Vec::new(),
         compactions: 0,
@@ -116,11 +197,7 @@ mod tests {
 
     #[test]
     fn a_transcript_without_compaction_is_reported_as_such() {
-        let transcript = [
-            line(&message("m1", None)),
-            line(&message("m2", Some("m1"))),
-        ]
-        .concat();
+        let transcript = [line(&message("m1", None)), line(&message("m2", Some("m1")))].concat();
 
         let outcome = expand_transcript(transcript.as_bytes(), IMPORT_ID);
 
