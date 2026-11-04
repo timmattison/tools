@@ -46,6 +46,13 @@ pub struct ForkRecord {
     pub fork_dir: String,
     /// The way the fork was made.
     pub kind: ForkKind,
+    /// Whether crap forked an expanded import of the source (crap --expand).
+    #[serde(default = "stub_true", skip_serializing_if = "std::ops::Not::not")]
+    pub expanded: bool,
+}
+
+fn stub_true() -> bool {
+    true
 }
 
 /// The records of a log, and the count of lines that could not be read.
@@ -268,6 +275,7 @@ mod tests {
             source_dir: source_dir.map(str::to_string),
             fork_dir: "/work/here".to_string(),
             kind,
+            expanded: false,
         }
     }
 
@@ -574,5 +582,20 @@ mod tests {
                  \x20 The chain stops: the fork log names {ID_A} again.\n"
             )
         );
+    }
+
+    #[test]
+    fn a_line_from_before_the_expanded_key_reads_as_not_expanded() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let log = dir.path().join(LOG_FILE_NAME);
+        std::fs::write(
+            &log,
+            "{\"time\":\"2026-10-28T01:51:22Z\",\"source_id\":\"s\",\"fork_id\":\"f\",\"source_user\":\"alice\",\"source_dir\":null,\"fork_dir\":\"/d\",\"kind\":\"here\"}\n",
+        )
+        .unwrap();
+        let read = read_fork_log(&log).unwrap();
+        assert_eq!(read.unreadable_lines, 0);
+        assert_eq!(read.records.len(), 1);
+        assert!(!read.records[0].expanded);
     }
 }
