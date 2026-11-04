@@ -706,4 +706,33 @@ mod tests {
             .replace("\"parentUuid\":\"s1\"", "\"parentUuid\":\"m2\"");
         assert!(output.contains(&expected_p1));
     }
+
+    #[test]
+    fn the_report_counts_compactions_and_names_the_last_pre_tokens() {
+        let mut values = chain(&["m1", "m2", "m3"]);
+        values.push(boundary("b1", "m3", Some(1000), "s1"));
+        values.push(summary("s1", "b1"));
+        values.push(message("p1", Some("s1")));
+        values.push(boundary("b2", "p1", Some(2000), "s2"));
+        values.push(summary("s2", "b2"));
+        values.push(message("q1", Some("s2")));
+
+        let expansion = expanded(&join(&values));
+
+        assert_eq!(expansion.compactions, 2);
+        assert_eq!(expansion.last_pre_tokens, Some(2000));
+    }
+
+    #[test]
+    fn a_boundary_without_pre_tokens_gives_none() {
+        let mut values = chain(&["m1", "m2"]);
+        values.push(boundary("b1", "m2", None, "s1"));
+        values.push(summary("s1", "b1"));
+        values.push(message("p1", Some("s1")));
+
+        let expansion = expanded(&join(&values));
+
+        assert_eq!(expansion.compactions, 1);
+        assert_eq!(expansion.last_pre_tokens, None);
+    }
 }
