@@ -359,3 +359,32 @@ fn a_compaction_that_cannot_be_undone_fails_closed() {
     assert_eq!(names_in(&world.work_folder()), Vec::<String>::new());
     assert!(!world.fork_log().exists(), "nothing is logged");
 }
+
+#[test]
+fn a_session_without_compaction_continues_as_without_expand() {
+    let world = World::new(|cwd| chain(&BEFORE, None, cwd));
+
+    let out = world.run(&["--here", "--expand", ORIG, NEW]);
+
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("has no compaction, so there is nothing to expand"),
+        "stderr: {stderr}"
+    );
+    let link = world.work_folder().join(format!("{ORIG}.jsonl"));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("{HERE_SENTINEL}\n{ORIG}\n{NEW}\n{}\n", link.display())
+    );
+    assert_eq!(fs::read_link(&link).unwrap(), world.original);
+    // No import was written: the folder holds only the symlink.
+    assert_eq!(
+        names_in(&world.work_folder()),
+        vec![format!("{ORIG}.jsonl")]
+    );
+}
