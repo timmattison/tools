@@ -3171,6 +3171,65 @@ mod tests {
     }
 
     #[test]
+    fn describe_expand_error_names_the_session_and_says_no_import_was_written() {
+        let failure = describe_expand_error(
+            ID_A,
+            &expand::ExpandError::NoSummary {
+                boundary: "b1".to_string(),
+            },
+        );
+        assert_eq!(
+            failure.headline,
+            format!("cannot expand session '{ID_A}': compact boundary b1 has no compact summary")
+        );
+        assert_eq!(failure.detail, "       No import was written.\n");
+        assert_eq!(failure.code, exit_codes::EXPAND_FAILED);
+        assert_eq!(failure.code, 13);
+    }
+
+    #[test]
+    fn describe_expand_error_adds_the_fork_hint_only_for_missing_history() {
+        let missing = describe_expand_error(
+            ID_A,
+            &expand::ExpandError::HistoryMissing {
+                boundary: "b1".to_string(),
+            },
+        );
+        assert_eq!(
+            missing.detail,
+            format!(
+                "       A fork that Claude made after a compaction starts at the summary.\n\
+                 \x20      Expand the session that the fork came from. 'crap --forks {ID_A}' names it when crap made the fork.\n\
+                 \x20      No import was written.\n"
+            )
+        );
+        assert_eq!(missing.code, exit_codes::EXPAND_FAILED);
+
+        let others = [
+            expand::ExpandError::MissingUuid { line: 3 },
+            expand::ExpandError::MissingLogicalParent {
+                boundary: "b1".to_string(),
+            },
+            expand::ExpandError::UnknownLogicalParent {
+                boundary: "b1".to_string(),
+                logical_parent: "gone".to_string(),
+            },
+            expand::ExpandError::NoSummary {
+                boundary: "b1".to_string(),
+            },
+            expand::ExpandError::OrphanSummary {
+                summary: "s1".to_string(),
+            },
+            expand::ExpandError::SummaryMissingUuid { line: 4 },
+        ];
+        for err in &others {
+            let failure = describe_expand_error(ID_A, err);
+            assert!(!failure.detail.contains("--forks"), "{err}");
+            assert_eq!(failure.detail, "       No import was written.\n", "{err}");
+        }
+    }
+
+    #[test]
     fn describe_fork_id_error_keeps_the_messages_for_a_supplied_id() {
         // The messages and exit codes of a supplied id do not change. The
         // integration tests in `here_new_id.rs` read these words.
