@@ -2316,6 +2316,20 @@ fn exit_for_here_error(err: &HereResolveError, session_id: &str, roots: &[UserPr
     }
 }
 
+/// The hanging indent of the lines that follow `Note:` on stderr: the width of
+/// `Note: `.
+const NOTE_INDENT: &str = "      ";
+
+/// The note that `crap` prints when `--expand` finds no compaction in the
+/// session. Two lines, each ended with a newline.
+fn format_no_compaction_note(session_id: &str) -> String {
+    format!(
+        "{} session {session_id} has no compaction, so there is nothing to expand.\n\
+         {NOTE_INDENT}crap continues as without --expand.\n",
+        "Note:".bold()
+    )
+}
+
 /// The `--expand` part of `crap --here --expand <id>`.
 ///
 /// It locates the transcript, undoes each compaction in memory, and writes the
@@ -2352,7 +2366,10 @@ fn expand_here_or_continue(
     };
     let expansion = match expand::expand_transcript(&bytes, import_id.as_str()) {
         Ok(expand::ExpandOutcome::Expanded(expansion)) => expansion,
-        Ok(expand::ExpandOutcome::NoCompaction) => return,
+        Ok(expand::ExpandOutcome::NoCompaction) => {
+            eprint!("{}", format_no_compaction_note(session_id));
+            return;
+        }
         Err(err) => exit_with_failure(&describe_expand_error(session_id, &err)),
     };
     let import =
