@@ -639,4 +639,32 @@ mod tests {
             .replace("\"parentUuid\":\"s1\"", "\"parentUuid\":\"m2\"");
         assert_eq!(kept_lines[2], expected_p1);
     }
+
+    #[test]
+    fn bridge_session_and_queue_operation_lines_are_dropped() {
+        let bridge = json!({
+            "type": "bridge-session",
+            "sessionId": OLD_SESSION_ID,
+            "bridgeSessionId": "cse_0123456789",
+            "lastSequenceNum": 0,
+        });
+        let queue = json!({
+            "type": "queue-operation",
+            "operation": "enqueue",
+            "timestamp": "2026-11-01T10:00:02.000Z",
+            "sessionId": OLD_SESSION_ID,
+        });
+        let mut values = chain(&["m1", "m2"]);
+        values.push(bridge);
+        values.push(boundary("b1", "m2", Some(1000), "s1"));
+        values.push(queue);
+        values.push(summary("s1", "b1"));
+        values.push(message("p1", Some("s1")));
+
+        let output = String::from_utf8(expanded(&join(&values)).transcript).unwrap();
+
+        assert!(!output.contains("bridge-session"));
+        assert!(!output.contains("queue-operation"));
+        assert_eq!(output.lines().count(), 3);
+    }
 }
