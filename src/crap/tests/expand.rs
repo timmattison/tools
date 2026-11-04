@@ -837,3 +837,29 @@ fn here_without_expand_logs_a_record_with_no_expanded_key() {
     assert_eq!(lines[0]["source_id"], ORIG);
     assert!(lines[0].get("expanded").is_none(), "line: {}", lines[0]);
 }
+
+#[test]
+fn forks_report_shows_the_expanded_mark_end_to_end() {
+    let world = compacted_world();
+    let fields = here_fields(&world.run(&["--here", "--expand", ORIG]));
+    let fork_id = &fields[2];
+
+    let forks = world.run(&["--forks", ORIG]);
+    assert!(forks.status.success(), "{forks:?}");
+    let stdout = String::from_utf8_lossy(&forks.stdout);
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.contains(fork_id.as_str()) && line.ends_with("(expanded)")),
+        "stdout: {stdout}"
+    );
+
+    let chain = world.run(&["--forks", fork_id]);
+    assert!(chain.status.success(), "{chain:?}");
+    let stdout = String::from_utf8_lossy(&chain.stdout);
+    assert!(
+        stdout.contains(&format!("is a fork of {ORIG}")),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("(here, expanded)"), "stdout: {stdout}");
+}
