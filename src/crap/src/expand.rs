@@ -601,4 +601,34 @@ mod tests {
 
         assert_eq!(walk(&output), texts(&["q1", "m3", "m2", "m1"]));
     }
+
+    #[test]
+    fn only_session_id_changes_and_the_key_order_stays() {
+        // The first line is written by hand, with keys in an order that is not
+        // alphabetical, and with a snake case `session_id` beside `sessionId`.
+        let first = format!(
+            "{{\"uuid\":\"m1\",\"sessionId\":\"{OLD_SESSION_ID}\",\"parentUuid\":null,\"type\":\"user\",\"session_id\":\"{OLD_SESSION_ID}\",\"cwd\":\"/work/project\"}}\n"
+        );
+        let mut values = chain(&["m1", "m2"]);
+        values.push(boundary("b1", "m2", Some(1000), "s1"));
+        values.push(summary("s1", "b1"));
+        values.push(message("p1", Some("s1")));
+        let mut input = first.clone();
+        input.push_str(&join(&values[1..]));
+
+        let output = String::from_utf8(expanded(&input).transcript).unwrap();
+
+        let old_pair = format!("\"sessionId\":\"{OLD_SESSION_ID}\"");
+        let new_pair = format!("\"sessionId\":\"{IMPORT_ID}\"");
+        let kept_lines: Vec<String> = output.split_inclusive('\n').map(str::to_string).collect();
+        assert_eq!(kept_lines.len(), 3);
+        // m1: only the sessionId value differs, byte for byte. session_id stays.
+        assert_eq!(kept_lines[0], first.replace(&old_pair, &new_pair));
+        assert!(kept_lines[0].contains(&format!("\"session_id\":\"{OLD_SESSION_ID}\"")));
+        // p1: the sessionId and the parentUuid differ, and nothing else.
+        let expected_p1 = line(&values[4])
+            .replace(&old_pair, &new_pair)
+            .replace("\"parentUuid\":\"s1\"", "\"parentUuid\":\"m2\"");
+        assert_eq!(kept_lines[2], expected_p1);
+    }
 }
