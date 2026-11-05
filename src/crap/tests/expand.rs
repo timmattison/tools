@@ -8,6 +8,7 @@ mod common;
 
 use std::collections::HashMap;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
@@ -269,6 +270,22 @@ fn compacted_world() -> World {
     World::new(one_compaction)
 }
 
+/// Asserts that only the owner can read or write the import at `path`.
+///
+/// The import is a full copy of a transcript, which can hold secrets, and two
+/// accounts share the machine. A mode wider than 0600 lets the other account
+/// read every expanded transcript while the fork runs.
+fn assert_owner_only(path: &Path) {
+    let meta = fs::metadata(path).expect("the import exists");
+    let mode = meta.permissions().mode() & 0o777;
+    assert_eq!(
+        mode,
+        0o600,
+        "the import {} has mode {mode:o}, not 600",
+        path.display()
+    );
+}
+
 #[test]
 fn here_expand_prints_the_wire_shape_and_writes_the_import() {
     let world = compacted_world();
@@ -288,6 +305,7 @@ fn here_expand_prints_the_wire_shape_and_writes_the_import() {
     assert_eq!(fields[3], link.display().to_string());
     let meta = fs::symlink_metadata(&link).expect("the import exists");
     assert!(meta.file_type().is_file(), "the import is a regular file");
+    assert_owner_only(&link);
 
     assert_eq!(
         fs::read(&world.original).unwrap(),
@@ -756,6 +774,7 @@ fn cross_user_expand_writes_the_import_in_the_own_tree() {
             .join(format!("{}.jsonl", fields[1]));
         assert_eq!(fields[3], import.display().to_string(), "{args:?}");
         assert_eq!(fields[4], world.session_dir.display().to_string());
+        assert_owner_only(&import);
         assert_eq!(
             walk(&fs::read(&import).unwrap()),
             full_history(),
