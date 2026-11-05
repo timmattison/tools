@@ -494,7 +494,9 @@ cannot hang the caller. Used by `cwt` and `ha`.
     context into a different working tree.
     After you gave the fork new input, the shell function prints
     `Resume this fork with: crap <new-id>` when Claude exits. Thus you know the id of the fork and
-    not only the id of the original. If
+    not only the id of the original. `--expand` forks a session with each compaction undone, thus
+    `/rewind` in the fork lists the prompts from before each `/compact`. The original transcript is
+    only read. If
     the id belongs to another account on the machine, `crap` finds it automatically — searching your
     own sessions first, then other users' as a self-first fallback — and resumes a private fork of
     it (or target a specific account with `--user <name>`, which fails up front and lists the real
@@ -4143,7 +4145,7 @@ The symlink is only needed while Claude reads the transcript at startup. A backg
 A couple of things to know:
 
 - The replayed history still references the *original* directory's paths. Claude works in your current directory from here on, but the conversation it inherits talks about the old one.
-- It still won't resume a session that's open elsewhere unless you pass `--force` (forking reads the live transcript, which can be mid-write).
+- A live original never blocks `--here`, because the fork only reads the original transcript. Thus `--here` ignores `--force`.
 
 `--here` also accepts a cross-user source. Combine it with [`--user`](#resume-another-users-session---user) — `crap --here <id> --user alice` — to fork another account's session right here in your current directory. Because a transcript in someone else's home can never be found by a `claude --resume` you run yourself, `crap` **copies** it into your own tree rather than symlinking (nothing is ever linked into another user's home), then forks and cleans the copy up the same way it removes the symlink. A same-user `--here` still symlinks exactly as before. This is the escape hatch when the session's original directory is gone or you can't enter it: `--here` ignores that directory entirely.
 
@@ -4172,6 +4174,50 @@ The new id must be a valid UUID, and `crap` refuses it if it already names a ses
 The cross-user resume (below) forks too, so it gets a generated id and the same line.
 
 After you upgrade `crap`, run `crap --shell-setup` again. The resume line comes from the shell function, and an older function does not print it.
+
+### Resume with the full history: `--expand`
+
+`/compact` does not delete history. It adds a compact boundary and a summary to the end of the transcript, and the messages from before the compaction stay in the file. But a resume loads only the summary and the messages after it. Thus `/rewind` cannot go back to a prompt from before the compaction, and a plain resume cannot get the full history back.
+
+`--expand` resumes a fork of the session with each compaction undone:
+
+```bash
+crap --here --expand 57570685-2d64-4431-8ab6-c021a12fa1af   # fork it in the current directory
+crap --expand 57570685-2d64-4431-8ab6-c021a12fa1af          # fork it in its original directory
+```
+
+In the fork, `/rewind` lists every prompt of the session, also the prompts from before each compaction. A short alias helps: `alias che='crap --here --expand'`.
+
+`crap` writes an **expanded import**: a new transcript under a new id, in the project folder where the fork runs. The import is the original transcript with these changes:
+
+1. The boundary and the summary of each compaction are removed. Each message that came after them is linked to the last message before the compaction (the `logicalParentUuid` of the boundary).
+2. The `sessionId` of each line is the id of the import.
+3. The `bridge-session` lines are removed, so the fork does not attach to the Remote Control session of the original, which can be live.
+4. The `queue-operation` lines are removed, so old queued input does not play again.
+
+Each other line stays byte-identical. The shell function resumes the import with `--fork-session`, and it removes the import when the fork appears, the same as the symlink of `--here`. Thus the shell function needs no change.
+
+- The original transcript is only read. Thus `--expand` works also when the original session is live, and it ignores `--force`.
+- `crap --expand <id>` forks too, at the original directory. A plain resume writes to the original transcript, and `--expand` never changes the original.
+- `--expand` works with `--user <name>`, with the automatic cross-user fallback, and with the second argument of `--here`. For a cross-user source, the expanded import replaces the plain copy, and `crap` writes nothing in the other home.
+- If the session has no compaction, `crap` says so on stderr and does the same as the command without `--expand`.
+
+The expanded history can be larger than the context window. `crap` prints its size on stderr:
+
+```text
+Note: crap expanded 1 compaction of session 57570685-2d64-4431-8ab6-c021a12fa1af.
+      Before the last compaction, the context held 480231 tokens.
+      The expanded history can be larger than the context window.
+      If it is larger, use /rewind before you send the first message.
+```
+
+`crap` refuses a transcript that it cannot expand, and it writes no import (exit code `13`). It names the boundary or the summary that stopped it. The causes are:
+
+- A boundary has no `logicalParentUuid`, or no line of the transcript has that uuid.
+- A boundary has no summary, or a summary has no boundary. A boundary or a summary has no `uuid`.
+- The transcript does not hold the messages from before a compaction. This occurs in a fork that Claude made after the compaction, because Claude copies only the summary and the messages after it into the fork. Expand the session that the fork came from. `crap --forks <id>` names that session when `crap` made the fork.
+
+Two limits: "Restore code" in the fork does not find the file backups, because they are under the id of the original session (`--here` has the same limit). `crap` does not expand subagent transcripts.
 
 ### Resume another user's session: automatic, or `--user`
 
@@ -4322,7 +4368,7 @@ crap --status --json | jq -r '.[] | select(.state == "waiting-for-user") | .sess
 
 ### Find the forks of a session: `--forks`
 
-Each fork that `crap` starts adds one line to a fork log. That is each `crap --here <id>` (an alias such as `ch` for `crap --here` too) and each cross-user resume. Claude Code records no link between a fork and its source, so without the log you cannot find which sessions came from a session, or which session a fork came from.
+Each fork that `crap` starts adds one line to a fork log. That is each `crap --here <id>` (an alias such as `ch` for `crap --here` too), each `--expand` fork, and each cross-user resume. Claude Code records no link between a fork and its source, so without the log you cannot find which sessions came from a session, or which session a fork came from.
 
 The log is `forks.jsonl` in the `crap` directory of your data directory: `~/Library/Application Support/crap/forks.jsonl` on macOS, and `$XDG_DATA_HOME/crap/forks.jsonl` (else `~/.local/share/crap/forks.jsonl`) on Linux. Each line is one JSON object:
 
@@ -4331,11 +4377,12 @@ The log is `forks.jsonl` in the `crap` directory of your data directory: `~/Libr
 ```
 
 - `time`: when `crap` started the fork, in RFC 3339 and UTC.
-- `source_id`: the session that was forked. `fork_id`: the new session.
+- `source_id`: the session that was forked. `fork_id`: the new session. For an `--expand` fork, `source_id` is the original session, not the expanded import.
 - `source_user`: the account that owns the source transcript.
 - `source_dir`: the directory that the source transcript records, or `null` when it records none.
 - `fork_dir`: the directory where the fork runs.
-- `kind`: `here` for `--here`, and `fork-at` for a cross-user resume.
+- `kind`: `here` for `--here`, and `fork-at` for a fork in the original directory (a cross-user resume, or `crap --expand <id>`).
+- `expanded`: `true` for an `--expand` fork. The other lines do not have this key, and a line without it reads as `false`.
 
 A cross-user fork writes to your own log, never into the other home. If `crap` cannot write the log, it shows a warning and starts the fork, because the log must not stop a resume. `crap` writes each line with one `write` call in append mode, so two forks at the same time cannot mix their lines. `crap` writes the line before Claude starts, but Claude writes the fork transcript only after your first new input. Thus the log can name a fork that has no transcript.
 
@@ -4354,8 +4401,8 @@ Sources of 9f8e7d6c-5b4a-4210-8edc-ba9876543210 in the fork log:
   57570685-2d64-4431-8ab6-c021a12fa1af is not a fork in the fork log.
 ```
 
-- If the session is a source, the report lists each fork with its time, `saved` or `not saved`, and its directory. `saved` means that `crap --status <fork-id>` finds the fork transcript, so `crap <fork-id>` can resume the fork.
-- If the session is a fork, the report shows its source, then the source of that source, up to a session that is not a fork.
+- If the session is a source, the report lists each fork with its time, `saved` or `not saved`, and its directory. `saved` means that `crap --status <fork-id>` finds the fork transcript, so `crap <fork-id>` can resume the fork. An `--expand` fork has `(expanded)` after its directory.
+- If the session is a fork, the report shows its source, then the source of that source, up to a session that is not a fork. An `--expand` fork shows `(here, expanded)` or `(fork-at, expanded)`.
 - If the session is both, the report shows both sections.
 
 `--forks` resumes nothing and writes nothing. It exits `1` when no transcript and no line of the log has the id. If a line of the log cannot be read, `--forks` shows a warning and uses the other lines.
@@ -4392,6 +4439,7 @@ If you installed the shell function before `--forks` existed, run `crap --shell-
 - `[SESSION_ID]`: The Claude session id to resume (optional with `--status`, which then lists every session for the current directory). The lookup is **self-first** — your own tree first, then, only on a miss, every sibling home that has run Claude — so an id belonging to another account is found and forked automatically, with no flag
 - `-f, --force`: Resume even if the session appears to be running in another process
 - `--here`: Resume the session in the current directory (as a forked, new-id session) instead of its original one; also accepts a cross-user source (combined with `--user`), which is copied into your own tree rather than symlinked
+- `--expand`: Resume a fork of the session with each compaction undone, so `/rewind` in the fork lists the prompts from before each compaction. With `--here`, the fork runs in the current directory. Without it, the fork runs in the original directory. It works with `--user`, it ignores `--force`, and it prints the size of the history on stderr. See [Resume with the full history](#resume-with-the-full-history---expand)
 - `--user <name>`: Resume another user's session from a specific account — **not required** for a cross-user resume, since the no-flag path already falls back on its own; reach for it when you want to force one account in particular. `<name>` is resolved as a sibling of your home (`<home>/../<name>` — `/Users/<name>` on macOS, `/home/<name>` on Linux), and only that user's `~/.claude/projects` tree is searched (your own is skipped, so `--user` also disambiguates an id on purpose). The foreign transcript is copied into your own tree and resumed as a fork (fresh id) at its original directory — or in the current directory instead when combined with `--here` — the original is only ever read. Naming your own account is a same-user hit and resumes in place
 - `--status`: Print the session's conversational state (`waiting-for-user`, `busy`, `awaiting-assistant`, or `empty`; or `<status> (live, pid <pid>)` when open elsewhere) and exit, without resuming. With no id, lists every session for the current directory with its state and start/last times
 - `--json`: With `--status`, emit JSON instead of text (one object for an id, an array for the directory listing)
@@ -4518,8 +4566,8 @@ If you add the function manually, paste it again after each upgrade of `crap`. A
 The binary prints one of three output shapes on stdout:
 
 - **Default:** `<session-id>\n<dir>`. The function uses the first line as the session id and all of the remaining text as the directory. Thus a path that contains a newline stays whole. The function goes into that directory with `cd` and resumes the session.
-- **`--here`:** `__CRAP_HERE__\n<session-id>\n<new-id>\n<link-or-__CRAP_NO_LINK__>`. The binary already put the session into the project folder of the current directory. This import is a symlink for a same-user source, or a copy for a cross-user source. The function stays in the current directory.
-- **Cross-user:** `__CRAP_FORK_AT__\n<session-id>\n<new-id>\n<link-or-__CRAP_NO_LINK__>\n<dir>`. The binary already copied the transcript of the other user into your own tree. A cross-user resume from `--user` or from the automatic fallback gives this shape. The function goes into `<dir>` with `cd`. `<dir>` is the original directory of the session.
+- **`--here`:** `__CRAP_HERE__\n<session-id>\n<new-id>\n<link-or-__CRAP_NO_LINK__>`. The binary already put the session into the project folder of the current directory. This import is a symlink for a same-user source, or a copy for a cross-user source. With `--expand`, the import is an expanded import, and `<session-id>` is the id of the import, not of the original. The function stays in the current directory.
+- **Cross-user:** `__CRAP_FORK_AT__\n<session-id>\n<new-id>\n<link-or-__CRAP_NO_LINK__>\n<dir>`. The binary already copied the transcript of the other user into your own tree. A cross-user resume from `--user` or from the automatic fallback gives this shape, and so does `crap --expand <id>`, with the id of the expanded import as `<session-id>`. The function goes into `<dir>` with `cd`. `<dir>` is the original directory of the session.
 
 The two fork shapes use one path through the function. The only difference is the `cd` for the cross-user shape. The field that can hold any text is always the last field, so a newline in a path does not break the fields.
 
@@ -4541,11 +4589,12 @@ The function sends `--status`, `--forks`, `--help`, `-h`, `--version`, `-V`, and
 - `5`: Shell setup failed
 - `6`: Could not determine your home directory
 - `7`: The session is already running in another process (use `--force` to override)
-- `8`: `--here` or a cross-user resume (whether `--user` asked for one or the automatic fallback found it): could not import the session into the project folder (create the folder, or make the symlink for a same-user source / copy the transcript for a cross-user source)
+- `8`: `--here`, `--expand`, or a cross-user resume (whether `--user` asked for one or the automatic fallback found it): could not import the session into the project folder (create the folder, or make the symlink for a same-user source / copy the transcript for a cross-user source / read the transcript and write the expanded import for `--expand`)
 - `9`: `--here`: could not determine the current working directory
 - `10`: `--here`: the requested new session id already names an existing session (choose a fresh id so the fork can't overwrite it)
 - `11`: The session's original directory exists but can't be entered from this account (a sealed parent, or a missing search bit) — use `crap --here <id>` to fork it in the current directory instead
 - `12`: `--user <name>` named no account with a `.claude/projects` tree (a typo, or an account that never ran Claude); the message lists the accounts you can resume from
+- `13`: `--expand`: the transcript has a compaction that `crap` cannot undo; the message names the boundary or the summary, and no import was written
 
 ## bm (bulk move)
 

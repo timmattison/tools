@@ -17,7 +17,7 @@ comfy-table.workspace = true
 dirs.workspace = true
 rayon.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 shellsetup.workspace = true
 tempfile.workspace = true
 uuid.workspace = true
@@ -25,6 +25,7 @@ uuid.workspace = true
 [dev-dependencies]
 serde_json.workspace = true
 shellquote.workspace = true
+testcolor.workspace = true
 
 [lints]
 workspace = true

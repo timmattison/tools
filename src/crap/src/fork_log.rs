@@ -23,7 +23,8 @@ pub const LOG_FILE_NAME: &str = "forks.jsonl";
 pub enum ForkKind {
     /// `crap --here <id>`: the fork of a session into the current directory.
     Here,
-    /// A fork made for a cross-user resume.
+    /// A fork that runs in the original directory of the source: a cross-user
+    /// resume, or `crap --expand <id>`.
     ForkAt,
 }
 
@@ -46,6 +47,10 @@ pub struct ForkRecord {
     pub fork_dir: String,
     /// The way the fork was made.
     pub kind: ForkKind,
+    /// Whether crap forked an expanded import of the source (`crap --expand`).
+    /// An old line has no key and reads as false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub expanded: bool,
 }
 
 /// The records of a log, and the count of lines that could not be read.
@@ -216,9 +221,14 @@ pub fn format_log_report(id: &str, forks: &[ForkLine<'_>], chain: &SourceChain<'
         let _ = writeln!(out, "Forks of {id} in the fork log:");
         for fork in forks {
             let status = if fork.saved { "saved" } else { "not saved" };
+            let mark = if fork.record.expanded {
+                "  (expanded)"
+            } else {
+                ""
+            };
             let _ = writeln!(
                 out,
-                "  {}  {}  {status:<9}  {}",
+                "  {}  {}  {status:<9}  {}{mark}",
                 fork.record.fork_id, fork.record.time, fork.record.fork_dir
             );
         }
@@ -232,6 +242,11 @@ pub fn format_log_report(id: &str, forks: &[ForkLine<'_>], chain: &SourceChain<'
             let kind = match record.kind {
                 ForkKind::Here => "here",
                 ForkKind::ForkAt => "fork-at",
+            };
+            let kind = if record.expanded {
+                format!("{kind}, expanded")
+            } else {
+                kind.to_string()
             };
             let _ = writeln!(
                 out,
@@ -268,6 +283,7 @@ mod tests {
             source_dir: source_dir.map(str::to_string),
             fork_dir: "/work/here".to_string(),
             kind,
+            expanded: false,
         }
     }
 
@@ -572,6 +588,90 @@ mod tests {
                  \x20 {ID_A} is a fork of {ID_B}, made 2026-10-28T01:51:22Z (here) in /w/a\n\
                  \x20 {ID_B} is a fork of {ID_A}, made 2026-10-28T01:51:22Z (here) in /w/b\n\
                  \x20 The chain stops: the fork log names {ID_A} again.\n"
+            )
+        );
+    }
+
+    #[test]
+    fn a_line_from_before_the_expanded_key_reads_as_not_expanded() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let log = dir.path().join(LOG_FILE_NAME);
+        std::fs::write(
+            &log,
+            "{\"time\":\"2026-10-28T01:51:22Z\",\"source_id\":\"s\",\"fork_id\":\"f\",\"source_user\":\"alice\",\"source_dir\":null,\"fork_dir\":\"/d\",\"kind\":\"here\"}\n",
+        )
+        .unwrap();
+        let read = read_fork_log(&log).unwrap();
+        assert_eq!(read.unreadable_lines, 0);
+        assert_eq!(read.records.len(), 1);
+        assert!(!read.records[0].expanded);
+    }
+
+    #[test]
+    fn append_writes_the_expanded_key_only_for_an_expanded_record() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let log = dir.path().join(LOG_FILE_NAME);
+        let mut expanded = sample("f1", ForkKind::Here, None);
+        expanded.expanded = true;
+        append_fork_record(&log, &expanded).unwrap();
+        append_fork_record(&log, &sample("f2", ForkKind::Here, None)).unwrap();
+        let text = std::fs::read_to_string(&log).unwrap();
+        let values: Vec<serde_json::Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(values.len(), 2);
+        assert_eq!(values[0].as_object().unwrap().len(), 8);
+        assert_eq!(values[0]["expanded"], true);
+        assert_eq!(values[1].as_object().unwrap().len(), 7);
+        assert!(values[1].get("expanded").is_none());
+    }
+
+    #[test]
+    fn report_marks_an_expanded_fork_line() {
+        let mut one = made(ID_A, ID_B, ForkKind::Here, "/w/one");
+        one.expanded = true;
+        let two = made(ID_A, ID_C, ForkKind::Here, "/w/two");
+        let forks = [
+            ForkLine {
+                record: &one,
+                saved: true,
+            },
+            ForkLine {
+                record: &two,
+                saved: true,
+            },
+        ];
+        let chain = SourceChain {
+            links: Vec::new(),
+            looped_at: None,
+        };
+        assert_eq!(
+            format_log_report(ID_A, &forks, &chain),
+            format!(
+                "Forks of {ID_A} in the fork log:\n\
+                 \x20 {ID_B}  2026-10-28T01:51:22Z  saved      /w/one  (expanded)\n\
+                 \x20 {ID_C}  2026-10-28T01:51:22Z  saved      /w/two\n"
+            )
+        );
+    }
+
+    #[test]
+    fn report_marks_an_expanded_chain_line() {
+        let mut first = made(ID_B, ID_C, ForkKind::ForkAt, "/w/c");
+        first.expanded = true;
+        let second = made(ID_A, ID_B, ForkKind::Here, "/w/b");
+        let chain = SourceChain {
+            links: vec![&first, &second],
+            looped_at: None,
+        };
+        assert_eq!(
+            format_log_report(ID_C, &[], &chain),
+            format!(
+                "Sources of {ID_C} in the fork log:\n\
+                 \x20 {ID_C} is a fork of {ID_B}, made 2026-10-28T01:51:22Z (fork-at, expanded) in /w/c\n\
+                 \x20 {ID_B} is a fork of {ID_A}, made 2026-10-28T01:51:22Z (here) in /w/b\n\
+                 \x20 {ID_A} is not a fork in the fork log.\n"
             )
         );
     }

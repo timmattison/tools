@@ -21,13 +21,28 @@
 //! `Resume this fork with: crap <new-id>`, and that command works from any
 //! directory. It prints the line only when Claude saved the fork. Claude
 //! writes the fork transcript only after the first new input, so a fork that
-//! got no input has nothing to resume. The cross-user resume below gets the
-//! same id and the same line.
+//! got no input has nothing to resume. The cross-user resume below and
+//! `crap --expand <id>` get the same id and the same line.
 //!
 //! `--here` also accepts a cross-user source
 //! (`crap --here <id> --user <name>`): the foreign transcript is *copied* into
 //! your own tree instead of symlinked, so nothing is ever linked into another
 //! user's home, and the copy is cleaned up the same way the symlink is.
+//!
+//! With `--expand`, the fork gets the full history of a compacted session.
+//! `/compact` keeps the old messages in the transcript, but a resume starts at
+//! the last message, follows `parentUuid` back, and stops at the compact
+//! boundary, whose `parentUuid` is `null`. Thus `crap` writes an expanded
+//! import: a copy of the transcript under a new id, in the project folder where
+//! the fork runs, with each boundary and summary removed and the messages
+//! linked to the `logicalParentUuid` of the boundary (see [`expand`]). The wire
+//! output names the import as the session to resume, and the shell function
+//! forks it and removes it as it removes any import, so the function does not
+//! change. `crap --here --expand <id>` forks in the current directory, and
+//! `crap --expand <id>` forks in the original directory. The original is only
+//! read, so `--expand` never refuses a live session. A transcript that `crap`
+//! cannot expand stops the run, and no import stays. The size of the expanded
+//! history goes to stderr, because it can be larger than the context window.
 //!
 //! With `--status`, it resumes nothing: it classifies where the session left
 //! off — `waiting-for-user`, `busy`, `awaiting-assistant`, or `empty`, inferred
@@ -47,7 +62,8 @@
 //!
 //! Each fork that `crap` starts adds one line to a fork log: `forks.jsonl` in
 //! the `crap` directory of the data directory of the current user (see
-//! [`fork_log`]). That is each `--here` fork and each cross-user resume. The
+//! [`fork_log`]). That is each `--here` fork, each `--expand` fork, and each
+//! cross-user resume. The
 //! binary writes the line immediately before it prints the fork output, so
 //! the line names the source, the fork id, the account that owns the source,
 //! both directories, and the kind of fork. Claude Code records no link between
@@ -120,9 +136,9 @@
 //! the shell alias that `CRAP_LAUNCHER` can name), the user-facing `crap`
 //! command is a shell function installed via `crap --shell-setup`. This binary
 //! resolves the session id — printing the original directory to resume from,
-//! or (for `--here`, and for a cross-user hit) importing the transcript into
-//! the right project folder and printing what the function should run and
-//! clean up.
+//! or (for `--here`, for `--expand`, and for a cross-user hit) importing the
+//! transcript into the right project folder and printing what the function
+//! should run and clean up.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -135,6 +151,7 @@ use comfy_table::{presets::UTF8_FULL, ContentArrangement, Table};
 use serde::Serialize;
 use shellsetup::ShellIntegration;
 
+mod expand;
 mod fork_log;
 mod fork_scan;
 
@@ -154,7 +171,9 @@ mod exit_codes {
     pub const NO_HOME_DIR: i32 = 6;
     /// The session is already running in another process.
     pub const SESSION_ALREADY_RUNNING: i32 = 7;
-    /// `--here`: the project folder or the symlink/copy could not be created.
+    /// `--here`, `--expand`, or a cross-user resume: the project folder or the
+    /// import (a symlink, a copy, or an expanded import) could not be made, or
+    /// `--expand` could not read the transcript.
     pub const HERE_LINK_ERROR: i32 = 8;
     /// `--here`: the current working directory could not be determined.
     pub const HERE_PWD_UNAVAILABLE: i32 = 9;
@@ -166,6 +185,8 @@ mod exit_codes {
     /// `--user <name>` named a sibling that does not exist, or exists but has no
     /// `.claude/projects` tree — so there is nothing for `--user` to search.
     pub const INVALID_USER: i32 = 12;
+    /// `--expand`: the transcript has a compaction that crap cannot undo.
+    pub const EXPAND_FAILED: i32 = 13;
 }
 
 /// Why a located session transcript could not be resolved to an existing
@@ -1079,6 +1100,42 @@ fn placed_or_lost_race(
     }
 }
 
+/// Writes the bytes of an expanded import into the project folder of
+/// `target_dir` under `dest_projects_dir`, as `<import id>.jsonl`, and returns
+/// the path of the file.
+///
+/// The bytes go to a temp file in the same folder first. A rename then puts
+/// the file in place, and the rename never replaces a file. Thus the import
+/// appears complete or not at all. The temp file has mode 0600, as a Claude
+/// transcript has. If a step fails, the temp file is removed, so no import
+/// stays. The import is a regular file. It is never a symlink to the original.
+///
+/// # Errors
+///
+/// Returns the underlying [`std::io::Error`] if the folder, the temp file, or
+/// the final file cannot be made.
+fn write_expanded_import(
+    dest_projects_dir: &Path,
+    target_dir: &Path,
+    import_id: &ImportId,
+    transcript: &[u8],
+) -> std::io::Result<PathBuf> {
+    use std::io::Write;
+
+    let folder = dest_projects_dir.join(encode_project_dir(target_dir));
+    std::fs::create_dir_all(&folder)?;
+    let final_path = folder.join(format!("{}.jsonl", import_id.as_str()));
+    let mut temp = tempfile::Builder::new()
+        .prefix(&format!(".{}.jsonl.", import_id.as_str()))
+        .suffix(".tmp")
+        .tempfile_in(&folder)?;
+    temp.write_all(transcript)?;
+    temp.flush()?;
+    temp.persist_noclobber(&final_path)
+        .map_err(|err| err.error)?;
+    Ok(final_path)
+}
+
 /// Why `--here` could not place a session under the current directory.
 #[derive(Debug)]
 enum HereResolveError {
@@ -1110,6 +1167,28 @@ struct HereImport {
     source_user: String,
 }
 
+/// Validates `session_id` and locates its transcript across `roots`.
+///
+/// `--here` and `--here --expand` both start with this lookup.
+///
+/// # Errors
+///
+/// Returns [`HereResolveError::InvalidSessionId`] if the id is not a valid
+/// session id, and [`HereResolveError::SessionNotFound`] if no readable root
+/// holds the transcript.
+fn locate_here_source(
+    roots: &[UserProjects],
+    session_id: &str,
+) -> Result<(PathBuf, UserProjects), HereResolveError> {
+    if !is_valid_session_id(session_id) {
+        return Err(HereResolveError::InvalidSessionId);
+    }
+    match find_session_across(roots, session_id) {
+        FoundSession::Found { path, root } => Ok((path, root)),
+        FoundSession::NotFound { skipped } => Err(HereResolveError::SessionNotFound { skipped }),
+    }
+}
+
 /// Validates `session_id`, locates its transcript across `roots`, and imports it
 /// into `pwd`'s project folder under `dest_projects_dir` so `claude --resume`
 /// will find it from there.
@@ -1134,15 +1213,7 @@ fn resolve_here_import(
     pwd: &Path,
     session_id: &str,
 ) -> Result<HereImport, HereResolveError> {
-    if !is_valid_session_id(session_id) {
-        return Err(HereResolveError::InvalidSessionId);
-    }
-    let (path, root) = match find_session_across(roots, session_id) {
-        FoundSession::Found { path, root } => (path, root),
-        FoundSession::NotFound { skipped } => {
-            return Err(HereResolveError::SessionNotFound { skipped });
-        }
-    };
+    let (path, root) = locate_here_source(roots, session_id)?;
     // Same-user hit → symlink (unchanged). Cross-user hit → copy, so nothing is
     // symlinked into another user's home and the import is a self-contained
     // snapshot owned by the current user.
@@ -1160,7 +1231,7 @@ fn resolve_here_import(
     })
 }
 
-/// The id of the fork that `--here` and the cross-user resume make.
+/// The id of the fork that `--here`, `--expand`, and the cross-user resume make.
 ///
 /// This module holds [`ForkId`] and the one function that makes it. The field
 /// of `ForkId` is private to this module, so no other code can make a
@@ -1251,19 +1322,85 @@ mod fork_id {
         }
         Ok(ForkId(id))
     }
+
+    /// The id of an expanded import: the copy of a transcript that
+    /// `crap --expand` writes with each compaction undone.
+    ///
+    /// Invariant: the id is a valid session id, and it named no transcript in
+    /// the current user's projects tree when [`choose_import_id`] chose it.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ImportId(String);
+
+    impl ImportId {
+        /// Returns the id as text.
+        pub fn as_str(&self) -> &str {
+            &self.0
+        }
+    }
+
+    /// Why [`choose_import_id`] refused an id. `crap` generates the id, thus
+    /// the user never supplies it.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum ImportIdError {
+        /// The generated id is not a valid session id.
+        Invalid {
+            /// The refused id.
+            id: String,
+        },
+        /// The generated id already names a transcript in the current user's
+        /// projects tree.
+        Exists {
+            /// The refused id.
+            id: String,
+        },
+    }
+
+    /// Chooses the id of an expanded import. `generate` makes it.
+    ///
+    /// The two checks are the checks of [`choose_fork_id`]: the id must be a
+    /// valid session id, and it must not name a transcript under
+    /// `projects_dir`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ImportIdError::Invalid`] if the id is not a valid session
+    /// id, and [`ImportIdError::Exists`] if a transcript under `projects_dir`
+    /// has that id.
+    pub fn choose_import_id(
+        projects_dir: &Path,
+        generate: impl FnOnce() -> String,
+    ) -> Result<ImportId, ImportIdError> {
+        match choose_fork_id(projects_dir, None, generate) {
+            Ok(id) => Ok(ImportId(id.0)),
+            Err(ForkIdError::Invalid { id, .. }) => Err(ImportIdError::Invalid { id }),
+            Err(ForkIdError::Exists { id, .. }) => Err(ImportIdError::Exists { id }),
+        }
+    }
 }
 
-use fork_id::{choose_fork_id, ForkId, ForkIdError, ForkIdOrigin};
+use fork_id::{choose_fork_id, ForkId, ForkIdError, ForkIdOrigin, ImportId};
 
 /// Chooses the fork id with [`choose_fork_id`] and a UUID v4 generator, or
 /// prints why the id is refused and exits.
 ///
-/// `--here` and the cross-user resume both call this before they import
+/// `--here`, `--expand`, and the cross-user resume call this before they import
 /// anything, so a refusal leaves no stray symlink or copy.
 fn fork_id_or_exit(projects_dir: &Path, supplied: Option<&str>) -> ForkId {
     match choose_fork_id(projects_dir, supplied, || uuid::Uuid::new_v4().to_string()) {
         Ok(id) => id,
         Err(err) => exit_with_failure(&describe_fork_id_error(&err)),
+    }
+}
+
+/// Chooses the id of an expanded import with [`fork_id::choose_import_id`] and
+/// a UUID v4 generator, or prints why the id is refused and exits.
+///
+/// The caller chooses the fork id first, then the import id, both before any
+/// write.
+fn import_id_or_exit(projects_dir: &Path) -> ImportId {
+    match fork_id::choose_import_id(projects_dir, || uuid::Uuid::new_v4().to_string()) {
+        Ok(id) => id,
+        Err(err) => exit_with_failure(&describe_import_id_error(&err)),
     }
 }
 
@@ -1663,10 +1800,11 @@ const HERE_SENTINEL: &str = "__CRAP_HERE__";
 /// function can tell "nothing to clean up" apart from a real path.
 const NO_LINK_SENTINEL: &str = "__CRAP_NO_LINK__";
 
-/// Leading token marking cross-user default-resume output: unlike [`HERE_SENTINEL`]
-/// (which stays in the current directory), this tells the shell function to
-/// `cd` into the session's original recorded directory *and then* fork, so a
-/// foreign session resumes where it originally ran.
+/// Leading token marking cross-user default-resume output and the output of
+/// `crap --expand <id>`, for a same-user or a cross-user session: unlike
+/// [`HERE_SENTINEL`] (which stays in the current directory), this tells the
+/// shell function to `cd` into the session's original recorded directory *and
+/// then* fork, so a foreign session resumes where it originally ran.
 const FORK_AT_SENTINEL: &str = "__CRAP_FORK_AT__";
 
 /// Formats `--here` output for the shell function: the [`HERE_SENTINEL`], then
@@ -1691,11 +1829,12 @@ fn format_here_output(
     format!("{HERE_SENTINEL}\n{session_id}\n{new_id}\n{link}\n")
 }
 
-/// Formats cross-user default-resume output for the shell function: the
-/// [`FORK_AT_SENTINEL`], then the session id, then the fork id that the shell
-/// function pins the fork to with `--session-id`, then the imported transcript
-/// to remove once the session ends (or [`NO_LINK_SENTINEL`]), and finally the
-/// session's original directory to `cd` into before forking.
+/// Formats cross-user default-resume output, and the output of
+/// `crap --expand <id>`, for the shell function: the [`FORK_AT_SENTINEL`],
+/// then the session id, then the fork id that the shell function pins the fork
+/// to with `--session-id`, then the imported transcript to remove once the
+/// session ends (or [`NO_LINK_SENTINEL`]), and finally the session's original
+/// directory to `cd` into before forking.
 ///
 /// The directory is emitted **last** so — like [`format_output`] — a path
 /// containing a newline survives intact as "everything after the final field
@@ -1915,9 +2054,10 @@ struct Cli {
     /// elsewhere, because two processes writing the same session log can
     /// corrupt it.
     ///
-    /// This guard applies only to the default resume mode. `--here` forks a
-    /// fresh session (it only reads the original transcript), so it is never
-    /// blocked by a live original and ignores `--force`.
+    /// This guard applies only when `crap` resumes the session in place.
+    /// `--here`, and `--expand` when the session has a compaction, fork a
+    /// fresh session that only reads the original transcript. Thus a live
+    /// original never blocks them, and they ignore `--force`.
     #[arg(short, long)]
     force: bool,
 
@@ -1934,6 +2074,26 @@ struct Cli {
     /// home; a same-user source is symlinked exactly as above.
     #[arg(long)]
     here: bool,
+
+    /// Resume a fork of the session with each compaction undone.
+    ///
+    /// `/compact` keeps the old messages in the transcript, but a resume loads
+    /// only the summary and the messages after it. With `--expand`, `crap` writes
+    /// an expanded import: a copy of the transcript under a new id, with each
+    /// compaction removed and the messages linked again. Claude resumes that copy
+    /// as a fork, thus `/rewind` in the fork lists the prompts from before each
+    /// compaction. The original transcript is only read.
+    ///
+    /// Use it with `--here` to fork in the current directory, or alone to fork in
+    /// the original directory. It works with `--user`, and it ignores `--force`.
+    /// If the session has no compaction, `crap` says so and continues as without
+    /// `--expand`.
+    ///
+    /// The expanded history can be larger than the context window. `crap` prints
+    /// its size on stderr. If it is larger, use `/rewind` before you send the
+    /// first message. A short alias: `alias che='crap --here --expand'`.
+    #[arg(long, conflicts_with_all = ["status", "forks", "shell_setup"])]
+    expand: bool,
 
     /// Resume another user's session from a specific account.
     ///
@@ -1973,8 +2133,9 @@ struct Cli {
     ///
     /// The report lists each fork of the session, with `saved` or `not saved`,
     /// and the chain of sessions that it was forked from. It resumes nothing and
-    /// writes nothing. The log has only the forks that `crap` started: `--here`
-    /// and the cross-user resume.
+    /// writes nothing. The log has only the forks that `crap` started: `--here`,
+    /// `--expand`, and the cross-user resume. An `--expand` fork shows
+    /// `(expanded)`.
     ///
     /// Each such fork adds one JSON line to `forks.jsonl` in the `crap`
     /// directory of your data directory: `~/Library/Application Support/crap`
@@ -2018,6 +2179,8 @@ struct Cli {
 /// resumes with `--fork-session`, which only *reads* the original transcript
 /// and writes a fresh file, so a live original can never be corrupted by it —
 /// `--here` therefore never blocks (and `--force` is irrelevant to it).
+/// `--expand` with a compaction forks too, and `run_resume` returns before it
+/// asks this function.
 fn should_block_for_live(here: bool, force: bool) -> bool {
     !here && !force
 }
@@ -2098,6 +2261,7 @@ fn run_here(
     session_id: &str,
     new_session_id: Option<&str>,
     force: bool,
+    expand: bool,
     fork_log: Option<&Path>,
 ) -> ! {
     let Ok(pwd) = std::env::current_dir() else {
@@ -2112,6 +2276,19 @@ fn run_here(
     // no stray import. The fork lands in our own tree, so the collision check
     // looks there.
     let fork_id = fork_id_or_exit(dest_projects_dir, new_session_id);
+
+    if expand {
+        // Exits unless the session has no compaction. Then the run continues
+        // as without `--expand`.
+        expand_here_or_continue(
+            roots,
+            dest_projects_dir,
+            &pwd,
+            session_id,
+            &fork_id,
+            fork_log,
+        );
+    }
 
     // Guard before creating anything, so an aborted resume leaves no stray link.
     abort_if_session_live(session_id, true, force);
@@ -2128,6 +2305,7 @@ fn run_here(
                     source_dir: recorded_cwd(&import.source_transcript),
                     fork_dir: pwd.to_string_lossy().into_owned(),
                     kind: fork_log::ForkKind::Here,
+                    expanded: false,
                 },
             );
             print!(
@@ -2136,17 +2314,24 @@ fn run_here(
             );
             exit(0);
         }
-        Err(HereResolveError::InvalidSessionId) => {
+        Err(err) => exit_for_here_error(&err, session_id, roots),
+    }
+}
+
+/// Prints why `--here` could not place `session_id`, and exits.
+fn exit_for_here_error(err: &HereResolveError, session_id: &str, roots: &[UserProjects]) -> ! {
+    match err {
+        HereResolveError::InvalidSessionId => {
             eprintln!(
                 "{} '{session_id}' is not a valid session id",
                 "Error:".red().bold()
             );
             exit(exit_codes::INVALID_SESSION_ID);
         }
-        Err(HereResolveError::SessionNotFound { skipped }) => {
-            exit_session_not_found(session_id, roots, &skipped);
+        HereResolveError::SessionNotFound { skipped } => {
+            exit_session_not_found(session_id, roots, skipped);
         }
-        Err(HereResolveError::Io(err)) => {
+        HereResolveError::Io(err) => {
             eprintln!(
                 "{} could not prepare this directory for '{session_id}': {err}",
                 "Error:".red().bold()
@@ -2154,6 +2339,153 @@ fn run_here(
             exit(exit_codes::HERE_LINK_ERROR);
         }
     }
+}
+
+/// The hanging indent of the lines that follow `Note:` on stderr: the width of
+/// `Note: `.
+const NOTE_INDENT: &str = "      ";
+
+/// The note that `crap` prints when `--expand` finds no compaction in the
+/// session. Two lines, each ended with a newline.
+fn format_no_compaction_note(session_id: &str) -> String {
+    format!(
+        "{} session {session_id} has no compaction, so there is nothing to expand.\n\
+         {NOTE_INDENT}crap continues as without --expand.\n",
+        "Note:".bold()
+    )
+}
+
+/// The note that `crap` prints after it expanded a session. Up to four lines,
+/// each ended with a newline.
+///
+/// `compactions` is the count of compactions that `crap` undid.
+/// `last_pre_tokens` is the size of the context before the last compaction. The
+/// line about it is left out when the transcript does not give the size.
+fn format_expand_note(
+    session_id: &str,
+    compactions: usize,
+    last_pre_tokens: Option<u64>,
+) -> String {
+    let plural = if compactions == 1 { "" } else { "s" };
+    let mut note = format!(
+        "{} crap expanded {compactions} compaction{plural} of session {session_id}.\n",
+        "Note:".bold()
+    );
+    if let Some(tokens) = last_pre_tokens {
+        note.push_str(&format!(
+            "{NOTE_INDENT}Before the last compaction, the context held {tokens} tokens.\n"
+        ));
+    }
+    note.push_str(&format!(
+        "{NOTE_INDENT}The expanded history can be larger than the context window.\n\
+         {NOTE_INDENT}If it is larger, use /rewind before you send the first message.\n"
+    ));
+    note
+}
+
+/// An expanded import that [`write_expansion_or_exit`] wrote.
+#[derive(Debug)]
+struct WrittenImport {
+    /// The session id of the import. It is the first field of the wire output.
+    id: ImportId,
+    /// The path of the import file, in the project folder of the target
+    /// directory.
+    path: PathBuf,
+}
+
+/// The one shared step of both `--expand` modes: expands the transcript at
+/// `source` and writes the import into the project folder of `target_dir`
+/// under `dest_projects_dir`.
+///
+/// The function chooses the import id, reads the source, undoes each
+/// compaction in memory, writes the import, and prints the size note on
+/// stderr. It returns the import id and the path of the import. When the
+/// transcript has no compaction, it prints the no-compaction note, writes
+/// nothing, and returns `None`, so the caller continues as without
+/// `--expand`. On every failure it prints the failure and exits: a read
+/// failure of the source, an expansion that `crap` cannot do
+/// ([`exit_codes::EXPAND_FAILED`]), a refused import id, and a write failure.
+/// No failure leaves an import.
+fn write_expansion_or_exit(
+    source: &Path,
+    dest_projects_dir: &Path,
+    target_dir: &Path,
+    session_id: &str,
+) -> Option<WrittenImport> {
+    // Choose the import id before any write, as the fork id was chosen.
+    let id = import_id_or_exit(dest_projects_dir);
+    let fail = |action: &str, err: &dyn std::fmt::Display| -> ! {
+        eprintln!(
+            "{} could not {action} of '{session_id}': {err}",
+            "Error:".red().bold()
+        );
+        exit(exit_codes::HERE_LINK_ERROR);
+    };
+    let bytes = match std::fs::read(source) {
+        Ok(bytes) => bytes,
+        Err(err) => fail("read the transcript", &err),
+    };
+    let expansion = match expand::expand_transcript(&bytes, id.as_str()) {
+        Ok(expand::ExpandOutcome::Expanded(expansion)) => expansion,
+        Ok(expand::ExpandOutcome::NoCompaction) => {
+            eprint!("{}", format_no_compaction_note(session_id));
+            return None;
+        }
+        Err(err) => exit_with_failure(&describe_expand_error(session_id, &err)),
+    };
+    let path =
+        match write_expanded_import(dest_projects_dir, target_dir, &id, &expansion.transcript) {
+            Ok(path) => path,
+            Err(err) => fail("write the expanded import", &err),
+        };
+    eprint!(
+        "{}",
+        format_expand_note(session_id, expansion.compactions, expansion.last_pre_tokens)
+    );
+    Some(WrittenImport { id, path })
+}
+
+/// The `--expand` part of `crap --here --expand <id>`.
+///
+/// It locates the transcript and calls [`write_expansion_or_exit`] with the
+/// current directory `pwd` as the target. On success it logs the fork, prints
+/// the here-mode output for the import, and exits. The fork log names the
+/// ORIGINAL session as the source. When the transcript has no compaction, the
+/// function writes nothing and returns, and the caller continues as without
+/// `--expand`.
+fn expand_here_or_continue(
+    roots: &[UserProjects],
+    dest_projects_dir: &Path,
+    pwd: &Path,
+    session_id: &str,
+    fork_id: &ForkId,
+    fork_log: Option<&Path>,
+) {
+    let (source, root) = match locate_here_source(roots, session_id) {
+        Ok(found) => found,
+        Err(err) => exit_for_here_error(&err, session_id, roots),
+    };
+    let Some(import) = write_expansion_or_exit(&source, dest_projects_dir, pwd, session_id) else {
+        return;
+    };
+    log_fork(
+        fork_log,
+        &fork_log::ForkRecord {
+            time: fork_time_now(),
+            source_id: session_id.to_string(),
+            fork_id: fork_id.as_str().to_string(),
+            source_user: root.user,
+            source_dir: recorded_cwd(&source),
+            fork_dir: pwd.to_string_lossy().into_owned(),
+            kind: fork_log::ForkKind::Here,
+            expanded: true,
+        },
+    );
+    print!(
+        "{}",
+        format_here_output(import.id.as_str(), fork_id, Some(&import.path))
+    );
+    exit(0);
 }
 
 /// Adds `record` to the fork log at `log`, or shows a warning on stderr.
@@ -2385,7 +2717,8 @@ struct ResolveFailure {
     code: i32,
 }
 
-/// Maps a [`ResolveError`] to the failure it should produce.
+/// Maps a [`ResolveError`] to the failure it should produce, for the form of
+/// the command that failed.
 ///
 /// The two directory variants carry the `crap --here <id>` escape hatch because
 /// `--here` ignores the recorded directory entirely, so it succeeds in exactly
@@ -2394,7 +2727,20 @@ struct ResolveFailure {
 /// not something `--here` can route around, and dangling the hint there would
 /// be a false lead. That "only the directory failures get the hint" rule lives
 /// here, in one place, precisely so it cannot be half-applied.
-fn describe_resolve_error(session_id: &str, err: &ResolveError) -> ResolveFailure {
+///
+/// With `expand`, the hint for a directory failure names `crap --here
+/// --expand <id>`, so the user keeps the expansion when the fork moves to
+/// the current directory.
+fn describe_resolve_error_for(
+    session_id: &str,
+    err: &ResolveError,
+    expand: bool,
+) -> ResolveFailure {
+    let here_command = if expand {
+        format!("crap --here --expand {session_id}")
+    } else {
+        format!("crap --here {session_id}")
+    };
     /// The hanging indent that aligns a detail line under the `Error:` prefix,
     /// matching every other multi-line message in this binary.
     const INDENT: &str = "       ";
@@ -2406,7 +2752,7 @@ fn describe_resolve_error(session_id: &str, err: &ResolveError) -> ResolveFailur
         headline,
         detail: format!(
             "{INDENT}{}\n\
-             {INDENT}use 'crap --here {session_id}' to fork it in the current directory instead.\n",
+             {INDENT}use '{here_command}' to fork it in the current directory instead.\n",
             path.display()
         ),
         code,
@@ -2477,6 +2823,49 @@ fn describe_fork_id_error(err: &ForkIdError) -> ResolveFailure {
     }
 }
 
+/// Maps a [`fork_id::ImportIdError`] to the failure that `crap` prints and
+/// exits with. `crap` generates the import id, so both messages say so.
+fn describe_import_id_error(err: &fork_id::ImportIdError) -> ResolveFailure {
+    match err {
+        fork_id::ImportIdError::Invalid { id } => ResolveFailure {
+            headline: format!("the generated import id '{id}' is not a valid session id"),
+            detail: String::new(),
+            code: exit_codes::INVALID_SESSION_ID,
+        },
+        fork_id::ImportIdError::Exists { id } => ResolveFailure {
+            headline: format!("the generated import id '{id}' already names a session"),
+            detail: "       run the command again to get a new id\n".to_string(),
+            code: exit_codes::NEW_SESSION_ID_EXISTS,
+        },
+    }
+}
+
+/// Maps an [`expand::ExpandError`] to the failure that `crap` prints and exits
+/// with ([`exit_codes::EXPAND_FAILED`]).
+///
+/// Every error ends with the line `No import was written.`, because `crap`
+/// writes the import only after the expansion succeeds. `HistoryMissing`
+/// gets two more lines: it names the case of a fork that Claude made after a
+/// compaction, and the way to find the session that holds the full history.
+fn describe_expand_error(session_id: &str, err: &expand::ExpandError) -> ResolveFailure {
+    /// The hanging indent that aligns a detail line under the `Error:` prefix,
+    /// matching every other multi-line message in this binary.
+    const INDENT: &str = "       ";
+
+    let hint = match err {
+        expand::ExpandError::HistoryMissing { .. } => format!(
+            "{INDENT}A fork that Claude made after a compaction starts at the summary.\n\
+             {INDENT}Expand the session that the fork came from. 'crap --forks {session_id}' names it when crap made the fork.\n"
+        ),
+        _ => String::new(),
+    };
+    ResolveFailure {
+        headline: format!("cannot expand session '{session_id}': {err}"),
+        detail: format!("{hint}{INDENT}No import was written.\n"),
+        code: exit_codes::EXPAND_FAILED,
+    }
+}
+
 /// Prints `failure` to stderr, with a red `Error:` prefix on the headline, and
 /// exits with its code.
 fn exit_with_failure(failure: &ResolveFailure) -> ! {
@@ -2496,11 +2885,19 @@ fn exit_with_failure(failure: &ResolveFailure) -> ! {
 /// current user's home. That fork is pinned to a UUID v4 that `crap` generates
 /// and checks with [`fork_id_or_exit`]. Emits the output the shell function
 /// consumes.
+///
+/// With `expand` (`crap --expand <id>`), a session with a compaction always
+/// forks, also a same-user hit: [`write_expansion_or_exit`] writes the expanded
+/// import into the project folder of the original directory, and the output is
+/// the cross-user shape with the import as the session to resume. The live
+/// check does not apply, because a fork never writes to the original. A session
+/// with no compaction continues as without `expand`.
 fn run_resume(
     roots: &[UserProjects],
     dest_projects_dir: &Path,
     session_id: &str,
     force: bool,
+    expand: bool,
     fork_log: Option<&Path>,
 ) -> ! {
     if !is_valid_session_id(session_id) {
@@ -2525,8 +2922,36 @@ fn run_resume(
         // `Error:` prefix and prints what it is handed. Keeping the mapping out of
         // this `match` is what stops the four cases — and in particular the
         // `--here` hint that only two of them carry — from drifting apart.
-        Err(err) => exit_with_failure(&describe_resolve_error(session_id, &err)),
+        Err(err) => exit_with_failure(&describe_resolve_error_for(session_id, &err, expand)),
     };
+
+    if expand {
+        // A fork never writes to the original, so a live original never
+        // blocks it. Choose the fork id first, so a refused id leaves no
+        // import. When the session has no compaction, the run continues as
+        // without `--expand`.
+        let fork_id = fork_id_or_exit(dest_projects_dir, None);
+        if let Some(import) = write_expansion_or_exit(&path, dest_projects_dir, &dir, session_id) {
+            log_fork(
+                fork_log,
+                &fork_log::ForkRecord {
+                    time: fork_time_now(),
+                    source_id: session_id.to_string(),
+                    fork_id: fork_id.as_str().to_string(),
+                    source_user: root.user,
+                    source_dir: Some(dir.to_string_lossy().into_owned()),
+                    fork_dir: dir.to_string_lossy().into_owned(),
+                    kind: fork_log::ForkKind::ForkAt,
+                    expanded: true,
+                },
+            );
+            print!(
+                "{}",
+                format_fork_at_output(import.id.as_str(), &fork_id, Some(&import.path), &dir)
+            );
+            exit(0);
+        }
+    }
 
     if root.is_self {
         // Same-user hit: resume the very session in place, as today.
@@ -2554,6 +2979,7 @@ fn run_resume(
                     source_dir: Some(dir.to_string_lossy().into_owned()),
                     fork_dir: dir.to_string_lossy().into_owned(),
                     kind: fork_log::ForkKind::ForkAt,
+                    expanded: false,
                 },
             );
             print!(
@@ -2701,6 +3127,7 @@ fn main() {
             &session_id,
             cli.new_session_id.as_deref(),
             cli.force,
+            cli.expand,
             fork_log.as_deref(),
         );
     }
@@ -2710,6 +3137,7 @@ fn main() {
         &projects_dir,
         &session_id,
         cli.force,
+        cli.expand,
         fork_log.as_deref(),
     );
 }
@@ -2726,6 +3154,12 @@ mod tests {
     /// Builds a single JSONL line recording `cwd`.
     fn cwd_line(cwd: &str) -> String {
         format!("{}\n", serde_json::json!({ "cwd": cwd }))
+    }
+
+    /// The failure that a command without `--expand` gives. The tests of the
+    /// old hint read the failure through this helper.
+    fn describe_resolve_error(session_id: &str, err: &ResolveError) -> ResolveFailure {
+        describe_resolve_error_for(session_id, err, false)
     }
 
     #[test]
@@ -2751,6 +3185,34 @@ mod tests {
     fn new_session_id_positional_requires_here() {
         // A forked id is meaningless without --here, so clap must reject it.
         assert!(Cli::try_parse_from(["crap", ID_A, ID_B]).is_err());
+    }
+
+    #[test]
+    fn expand_conflicts_with_status_forks_and_shell_setup() {
+        for other in ["--status", "--forks", "--shell-setup"] {
+            let err = Cli::try_parse_from(["crap", "--expand", ID_A, other])
+                .err()
+                .unwrap_or_else(|| panic!("--expand with {other} must not parse"));
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ArgumentConflict,
+                "--expand with {other}"
+            );
+        }
+    }
+
+    #[test]
+    fn expand_composes_with_here_a_new_id_and_user() {
+        let cli =
+            Cli::try_parse_from(["crap", "--here", "--expand", ID_A, ID_B]).expect("should parse");
+        assert!(cli.here && cli.expand);
+        assert_eq!(cli.session_id.as_deref(), Some(ID_A));
+        assert_eq!(cli.new_session_id.as_deref(), Some(ID_B));
+
+        let cli =
+            Cli::try_parse_from(["crap", "--expand", ID_A, "--user", "x"]).expect("should parse");
+        assert!(cli.expand && !cli.here);
+        assert_eq!(cli.user.as_deref(), Some("x"));
     }
 
     /// Makes a projects tree that holds one transcript for each id in `ids`.
@@ -2839,6 +3301,179 @@ mod tests {
                 id: "not-a-uuid".to_string(),
                 origin: ForkIdOrigin::Generated,
             })
+        );
+    }
+
+    #[test]
+    fn choose_import_id_accepts_a_generated_valid_id() {
+        // A transcript with another id is not a collision.
+        let projects = projects_with_transcripts(&[ID_A]);
+        let id = fork_id::choose_import_id(projects.path(), || ID_B.to_string()).unwrap();
+        assert_eq!(id.as_str(), ID_B);
+    }
+
+    #[test]
+    fn choose_import_id_refuses_a_generated_invalid_id() {
+        let projects = projects_with_transcripts(&[]);
+        assert_eq!(
+            fork_id::choose_import_id(projects.path(), || "not-a-uuid".to_string()),
+            Err(fork_id::ImportIdError::Invalid {
+                id: "not-a-uuid".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn choose_import_id_refuses_an_id_that_names_a_transcript() {
+        // The import is written as `<id>.jsonl`. An id of a transcript that
+        // exists thus would replace that conversation.
+        let projects = projects_with_transcripts(&[ID_B]);
+        assert_eq!(
+            fork_id::choose_import_id(projects.path(), || ID_B.to_string()),
+            Err(fork_id::ImportIdError::Exists {
+                id: ID_B.to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn describe_import_id_error_says_the_id_is_generated_and_not_valid() {
+        let failure = describe_import_id_error(&fork_id::ImportIdError::Invalid {
+            id: "not-a-uuid".to_string(),
+        });
+        assert_eq!(
+            failure.headline,
+            "the generated import id 'not-a-uuid' is not a valid session id"
+        );
+        assert_eq!(failure.detail, "");
+        assert_eq!(failure.code, exit_codes::INVALID_SESSION_ID);
+    }
+
+    #[test]
+    fn describe_import_id_error_for_a_collision_asks_for_a_new_run() {
+        let failure = describe_import_id_error(&fork_id::ImportIdError::Exists {
+            id: ID_B.to_string(),
+        });
+        assert_eq!(
+            failure.headline,
+            format!("the generated import id '{ID_B}' already names a session")
+        );
+        assert_eq!(
+            failure.detail,
+            "       run the command again to get a new id\n"
+        );
+        assert_eq!(failure.code, exit_codes::NEW_SESSION_ID_EXISTS);
+    }
+
+    #[test]
+    fn describe_expand_error_names_the_session_and_says_no_import_was_written() {
+        let failure = describe_expand_error(
+            ID_A,
+            &expand::ExpandError::NoSummary {
+                boundary: "b1".to_string(),
+            },
+        );
+        assert_eq!(
+            failure.headline,
+            format!("cannot expand session '{ID_A}': compact boundary b1 has no compact summary")
+        );
+        assert_eq!(failure.detail, "       No import was written.\n");
+        assert_eq!(failure.code, exit_codes::EXPAND_FAILED);
+        assert_eq!(failure.code, 13);
+    }
+
+    #[test]
+    fn describe_expand_error_adds_the_fork_hint_only_for_missing_history() {
+        let missing = describe_expand_error(
+            ID_A,
+            &expand::ExpandError::HistoryMissing {
+                boundary: "b1".to_string(),
+            },
+        );
+        assert_eq!(
+            missing.detail,
+            format!(
+                "       A fork that Claude made after a compaction starts at the summary.\n\
+                 \x20      Expand the session that the fork came from. 'crap --forks {ID_A}' names it when crap made the fork.\n\
+                 \x20      No import was written.\n"
+            )
+        );
+        assert_eq!(missing.code, exit_codes::EXPAND_FAILED);
+
+        let others = [
+            expand::ExpandError::MissingUuid { line: 3 },
+            expand::ExpandError::MissingLogicalParent {
+                boundary: "b1".to_string(),
+            },
+            expand::ExpandError::UnknownLogicalParent {
+                boundary: "b1".to_string(),
+                logical_parent: "gone".to_string(),
+            },
+            expand::ExpandError::NoSummary {
+                boundary: "b1".to_string(),
+            },
+            expand::ExpandError::OrphanSummary {
+                summary: "s1".to_string(),
+            },
+            expand::ExpandError::SummaryMissingUuid { line: 4 },
+        ];
+        for err in &others {
+            let failure = describe_expand_error(ID_A, err);
+            assert!(!failure.detail.contains("--forks"), "{err}");
+            assert_eq!(failure.detail, "       No import was written.\n", "{err}");
+        }
+    }
+
+    /// The glyphs of `render`, with the color codes forced on and taken out.
+    fn glyphs(render: impl FnOnce() -> String) -> String {
+        testcolor::strip_ansi(&testcolor::with_forced_ansi(render))
+    }
+
+    #[test]
+    fn format_no_compaction_note_has_two_lines() {
+        assert_eq!(
+            glyphs(|| format_no_compaction_note(ID_A)),
+            format!(
+                "Note: session {ID_A} has no compaction, so there is nothing to expand.\n\
+                 \x20     crap continues as without --expand.\n"
+            )
+        );
+    }
+
+    #[test]
+    fn format_expand_note_uses_the_singular_for_one_compaction() {
+        assert_eq!(
+            glyphs(|| format_expand_note(ID_A, 1, Some(480_231))),
+            format!(
+                "Note: crap expanded 1 compaction of session {ID_A}.\n\
+                 \x20     Before the last compaction, the context held 480231 tokens.\n\
+                 \x20     The expanded history can be larger than the context window.\n\
+                 \x20     If it is larger, use /rewind before you send the first message.\n"
+            )
+        );
+    }
+
+    #[test]
+    fn format_expand_note_uses_the_plural_for_more_compactions() {
+        let note = glyphs(|| format_expand_note(ID_A, 3, Some(2000)));
+        assert!(
+            note.starts_with(&format!(
+                "Note: crap expanded 3 compactions of session {ID_A}.\n"
+            )),
+            "{note}"
+        );
+        assert!(note.contains("the context held 2000 tokens.\n"), "{note}");
+    }
+
+    #[test]
+    fn format_expand_note_leaves_out_the_tokens_line_without_a_size() {
+        assert_eq!(
+            glyphs(|| format_expand_note(ID_A, 2, None)),
+            format!(
+                "Note: crap expanded 2 compactions of session {ID_A}.\n\
+                 \x20     The expanded history can be larger than the context window.\n\
+                 \x20     If it is larger, use /rewind before you send the first message.\n"
+            )
         );
     }
 
@@ -4405,6 +5040,37 @@ mod tests {
             "must say what --here does differently: {:?}",
             failure.detail
         );
+    }
+
+    #[test]
+    fn describe_resolve_error_for_expand_names_here_expand_in_both_directory_variants() {
+        for err in [
+            ResolveError::DirectoryMissing(PathBuf::from("/was/here/once")),
+            ResolveError::DirectoryUnreadable(PathBuf::from("/locked/out")),
+        ] {
+            let failure = describe_resolve_error_for(SAMPLE_ID, &err, true);
+            assert!(
+                failure.detail.contains(&format!(
+                    "use 'crap --here --expand {SAMPLE_ID}' to fork it in the current directory instead."
+                )),
+                "{:?}",
+                failure.detail
+            );
+        }
+    }
+
+    #[test]
+    fn describe_resolve_error_for_without_expand_keeps_the_old_hint() {
+        let err = ResolveError::DirectoryMissing(PathBuf::from("/was/here/once"));
+        let failure = describe_resolve_error_for(SAMPLE_ID, &err, false);
+        assert!(
+            failure.detail.contains(&format!(
+                "use 'crap --here {SAMPLE_ID}' to fork it in the current directory instead."
+            )),
+            "{:?}",
+            failure.detail
+        );
+        assert!(!failure.detail.contains("--expand"), "{:?}", failure.detail);
     }
 
     #[test]
