@@ -21,8 +21,8 @@
 //! `Resume this fork with: crap <new-id>`, and that command works from any
 //! directory. It prints the line only when Claude saved the fork. Claude
 //! writes the fork transcript only after the first new input, so a fork that
-//! got no input has nothing to resume. The cross-user resume below gets the
-//! same id and the same line.
+//! got no input has nothing to resume. The cross-user resume below and
+//! `crap --expand <id>` get the same id and the same line.
 //!
 //! `--here` also accepts a cross-user source
 //! (`crap --here <id> --user <name>`): the foreign transcript is *copied* into
@@ -136,7 +136,7 @@
 //! the shell alias that `CRAP_LAUNCHER` can name), the user-facing `crap`
 //! command is a shell function installed via `crap --shell-setup`. This binary
 //! resolves the session id — printing the original directory to resume from,
-//! or (for `--here`, and for a cross-user hit) importing the transcript into
+//! or (for `--here`, for `--expand`, and for a cross-user hit) importing the transcript into
 //! the right project folder and printing what the function should run and
 //! clean up.
 
@@ -1231,7 +1231,7 @@ fn resolve_here_import(
     })
 }
 
-/// The id of the fork that `--here` and the cross-user resume make.
+/// The id of the fork that `--here`, `--expand`, and the cross-user resume make.
 ///
 /// This module holds [`ForkId`] and the one function that makes it. The field
 /// of `ForkId` is private to this module, so no other code can make a
@@ -1383,7 +1383,7 @@ use fork_id::{choose_fork_id, ForkId, ForkIdError, ForkIdOrigin, ImportId};
 /// Chooses the fork id with [`choose_fork_id`] and a UUID v4 generator, or
 /// prints why the id is refused and exits.
 ///
-/// `--here` and the cross-user resume both call this before they import
+/// `--here`, `--expand`, and the cross-user resume call this before they import
 /// anything, so a refusal leaves no stray symlink or copy.
 fn fork_id_or_exit(projects_dir: &Path, supplied: Option<&str>) -> ForkId {
     match choose_fork_id(projects_dir, supplied, || uuid::Uuid::new_v4().to_string()) {
@@ -1796,11 +1796,12 @@ const HERE_SENTINEL: &str = "__CRAP_HERE__";
 
 /// Placeholder used in the link field when no import was created — because
 /// `--here`'s target directory already is the session's own folder, or, via
-/// [`format_fork_at_output`], a cross-user resume needed none — so the shell
+/// [`format_fork_at_output`], a cross-user resume or `--expand` needed none — so the shell
 /// function can tell "nothing to clean up" apart from a real path.
 const NO_LINK_SENTINEL: &str = "__CRAP_NO_LINK__";
 
-/// Leading token marking cross-user default-resume output: unlike [`HERE_SENTINEL`]
+/// Leading token marking cross-user default-resume output and the output of
+/// `crap --expand <id>`, for a same-user or a cross-user session: unlike [`HERE_SENTINEL`]
 /// (which stays in the current directory), this tells the shell function to
 /// `cd` into the session's original recorded directory *and then* fork, so a
 /// foreign session resumes where it originally ran.
@@ -1828,7 +1829,8 @@ fn format_here_output(
     format!("{HERE_SENTINEL}\n{session_id}\n{new_id}\n{link}\n")
 }
 
-/// Formats cross-user default-resume output for the shell function: the
+/// Formats cross-user default-resume output, and the output of `crap --expand <id>`,
+/// for the shell function: the
 /// [`FORK_AT_SENTINEL`], then the session id, then the fork id that the shell
 /// function pins the fork to with `--session-id`, then the imported transcript
 /// to remove once the session ends (or [`NO_LINK_SENTINEL`]), and finally the
