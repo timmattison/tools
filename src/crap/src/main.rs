@@ -136,9 +136,9 @@
 //! the shell alias that `CRAP_LAUNCHER` can name), the user-facing `crap`
 //! command is a shell function installed via `crap --shell-setup`. This binary
 //! resolves the session id — printing the original directory to resume from,
-//! or (for `--here`, for `--expand`, and for a cross-user hit) importing the transcript into
-//! the right project folder and printing what the function should run and
-//! clean up.
+//! or (for `--here`, for `--expand`, and for a cross-user hit) importing the
+//! transcript into the right project folder and printing what the function
+//! should run and clean up.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -1796,15 +1796,15 @@ const HERE_SENTINEL: &str = "__CRAP_HERE__";
 
 /// Placeholder used in the link field when no import was created — because
 /// `--here`'s target directory already is the session's own folder, or, via
-/// [`format_fork_at_output`], a cross-user resume or `--expand` needed none — so the shell
+/// [`format_fork_at_output`], a cross-user resume needed none — so the shell
 /// function can tell "nothing to clean up" apart from a real path.
 const NO_LINK_SENTINEL: &str = "__CRAP_NO_LINK__";
 
 /// Leading token marking cross-user default-resume output and the output of
-/// `crap --expand <id>`, for a same-user or a cross-user session: unlike [`HERE_SENTINEL`]
-/// (which stays in the current directory), this tells the shell function to
-/// `cd` into the session's original recorded directory *and then* fork, so a
-/// foreign session resumes where it originally ran.
+/// `crap --expand <id>`, for a same-user or a cross-user session: unlike
+/// [`HERE_SENTINEL`] (which stays in the current directory), this tells the
+/// shell function to `cd` into the session's original recorded directory *and
+/// then* fork, so a foreign session resumes where it originally ran.
 const FORK_AT_SENTINEL: &str = "__CRAP_FORK_AT__";
 
 /// Formats `--here` output for the shell function: the [`HERE_SENTINEL`], then
@@ -1829,12 +1829,12 @@ fn format_here_output(
     format!("{HERE_SENTINEL}\n{session_id}\n{new_id}\n{link}\n")
 }
 
-/// Formats cross-user default-resume output, and the output of `crap --expand <id>`,
-/// for the shell function: the
-/// [`FORK_AT_SENTINEL`], then the session id, then the fork id that the shell
-/// function pins the fork to with `--session-id`, then the imported transcript
-/// to remove once the session ends (or [`NO_LINK_SENTINEL`]), and finally the
-/// session's original directory to `cd` into before forking.
+/// Formats cross-user default-resume output, and the output of
+/// `crap --expand <id>`, for the shell function: the [`FORK_AT_SENTINEL`],
+/// then the session id, then the fork id that the shell function pins the fork
+/// to with `--session-id`, then the imported transcript to remove once the
+/// session ends (or [`NO_LINK_SENTINEL`]), and finally the session's original
+/// directory to `cd` into before forking.
 ///
 /// The directory is emitted **last** so — like [`format_output`] — a path
 /// containing a newline survives intact as "everything after the final field
