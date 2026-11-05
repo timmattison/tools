@@ -2052,9 +2052,10 @@ struct Cli {
     /// elsewhere, because two processes writing the same session log can
     /// corrupt it.
     ///
-    /// This guard applies only to the default resume mode. `--here` forks a
-    /// fresh session (it only reads the original transcript), so it is never
-    /// blocked by a live original and ignores `--force`.
+    /// This guard applies only when `crap` resumes the session in place.
+    /// `--here`, and `--expand` when the session has a compaction, fork a
+    /// fresh session that only reads the original transcript. Thus a live
+    /// original never blocks them, and they ignore `--force`.
     #[arg(short, long)]
     force: bool,
 
@@ -2176,6 +2177,8 @@ struct Cli {
 /// resumes with `--fork-session`, which only *reads* the original transcript
 /// and writes a fresh file, so a live original can never be corrupted by it —
 /// `--here` therefore never blocks (and `--force` is irrelevant to it).
+/// `--expand` with a compaction forks too, and `run_resume` returns before it
+/// asks this function.
 fn should_block_for_live(here: bool, force: bool) -> bool {
     !here && !force
 }
