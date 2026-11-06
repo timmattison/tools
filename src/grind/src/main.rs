@@ -41,6 +41,10 @@ struct Args {
     #[clap(value_name = "BRANCH")]
     branch: Option<String>,
 
+    /// Replay only BRANCH..HEAD, onto NEWBASE, as `git rebase --onto NEWBASE BRANCH` does
+    #[clap(long, value_name = "NEWBASE")]
+    onto: Option<String>,
+
     /// Print nothing about the rebase - the exit code is the answer
     #[clap(short, long)]
     quiet: bool,
@@ -150,7 +154,10 @@ fn run(args: &Args, console: &Console) -> Result<Conflicts> {
     let unworded = Report::for_tool(TOOL);
     // The chosen name, so this line tells the developer which branch got
     // measured on a run that named none.
-    let action = format!("replaying HEAD onto {branch}");
+    let action = match args.onto.as_deref() {
+        Some(new_base) => format!("replaying {branch}..HEAD onto {new_base}"),
+        None => format!("replaying HEAD onto {branch}"),
+    };
     let report = unworded.describing(&action);
 
     // Read here and printed later, which is two decisions rather than one.
@@ -190,7 +197,11 @@ fn run(args: &Args, console: &Console) -> Result<Conflicts> {
         let (conflicts, diffs) = scratch.replay_rebase_with_diffs(&branch)?;
         (conflicts, Some(diffs))
     } else {
-        (scratch.replay_rebase(&branch)?, None)
+        let conflicts = match args.onto.as_deref() {
+            Some(new_base) => scratch.replay_rebase_onto(new_base, &branch)?,
+            None => scratch.replay_rebase(&branch)?,
+        };
+        (conflicts, None)
     };
 
     // There is a verdict now, so the caveat has something to qualify.

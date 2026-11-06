@@ -1443,7 +1443,7 @@ fn the_long_spelling_of_quiet_answers_exactly_as_the_short_one_does() {
 /// there is no repository here to answer from.
 #[test]
 fn quiet_leaves_the_usage_error_to_the_parser_that_answers_before_grind_starts() {
-    const REFUSED_FLAG: &str = "--onto";
+    const REFUSED_FLAG: &str = "--no-such-flag";
     let elsewhere = not_a_repository();
 
     let (code, stdout, stderr) = streams(&grind(elsewhere.path(), &["-q", REFUSED_FLAG, "main"]));
