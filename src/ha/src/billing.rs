@@ -351,8 +351,17 @@ pub struct Read {
 /// appearance. `Lock-Free-Labs` and `lock-free-labs/x` name one account.
 #[must_use]
 pub fn accounts_of(targets: &[Target]) -> Vec<OwnerName> {
-    let _ = targets;
-    Vec::new()
+    let mut accounts: Vec<OwnerName> = Vec::new();
+    for target in targets {
+        let owner = match target {
+            Target::Repo(repo) => repo.owner(),
+            Target::Owner(owner) => owner,
+        };
+        if !accounts.contains(owner) {
+            accounts.push(owner.clone());
+        }
+    }
+    accounts
 }
 
 /// Plans the reads that give the usage of `accounts`.
@@ -368,8 +377,31 @@ pub fn plan_reads(
     enterprises: &BTreeMap<OwnerName, EnterpriseSlug>,
     kinds: &BTreeMap<OwnerName, AccountKind>,
 ) -> Vec<Read> {
-    let _ = (accounts, enterprises, kinds);
-    Vec::new()
+    let mut reads: Vec<Read> = Vec::new();
+    for account in accounts {
+        if let Some(enterprise) = enterprises.get(account) {
+            let shared = reads.iter_mut().find(
+                |read| matches!(&read.endpoint, Endpoint::Enterprise(slug) if slug == enterprise),
+            );
+            match shared {
+                Some(read) => read.accounts.push(account.clone()),
+                None => reads.push(Read {
+                    endpoint: Endpoint::Enterprise(enterprise.clone()),
+                    accounts: vec![account.clone()],
+                }),
+            }
+        } else if let Some(kind) = kinds.get(account) {
+            let endpoint = match kind {
+                AccountKind::Organization => Endpoint::Organization(account.clone()),
+                AccountKind::User => Endpoint::User(account.clone()),
+            };
+            reads.push(Read {
+                endpoint,
+                accounts: vec![account.clone()],
+            });
+        }
+    }
+    reads
 }
 
 #[cfg(test)]
