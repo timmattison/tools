@@ -43,8 +43,45 @@ pub enum ForeignLink {
 
 /// Finds out what is at `link`. `main_clone` is the place of the main clone.
 #[must_use]
-pub fn inspect_link(_git: &Git, _link: &Path, _main_clone: &Path) -> LinkState {
-    LinkState::Missing
+pub fn inspect_link(git: &Git, link: &Path, main_clone: &Path) -> LinkState {
+    let metadata = match std::fs::symlink_metadata(link) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return LinkState::Missing,
+        Err(_) => return LinkState::Foreign(ForeignLink::File),
+    };
+    if !metadata.file_type().is_symlink() {
+        return LinkState::Foreign(if metadata.is_dir() {
+            ForeignLink::Directory
+        } else {
+            ForeignLink::File
+        });
+    }
+    let Ok(raw) = std::fs::read_link(link) else {
+        return LinkState::Foreign(ForeignLink::File);
+    };
+    let target = match link.parent() {
+        Some(parent) => parent.join(raw),
+        None => raw,
+    };
+    if std::fs::metadata(link).is_err() {
+        return LinkState::Broken { target };
+    }
+    let canonical_clone = std::fs::canonicalize(main_clone).ok();
+    if canonical_clone.is_some() && std::fs::canonicalize(&target).ok() == canonical_clone {
+        return LinkState::MainClone;
+    }
+    let common = git.run(
+        &target,
+        ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    );
+    let expected = std::fs::canonicalize(main_clone.join(".git")).ok();
+    if common.ok && expected.is_some() && std::fs::canonicalize(&common.stdout).ok() == expected {
+        let head = git.run(&target, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+        return LinkState::Worktree {
+            branch: head.ok.then_some(head.stdout),
+        };
+    }
+    LinkState::Foreign(ForeignLink::OtherTarget(target))
 }
 
 /// Points `link` at `target` in one atomic step. The function makes the parent
