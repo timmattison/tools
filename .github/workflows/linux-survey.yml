@@ -1,0 +1,48 @@
+# TEMPORARY. Remove this file before the merge of PR #646 (branch
+# github-actions-ci).
+#
+# The CI workflow stops at the first crate that fails clippy, and it runs no
+# test until clippy passes. This survey finds each Linux clippy error and each
+# Linux test failure in one run, so that one branch can fix all of them.
+name: Linux survey
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  CARGO_PROFILE_DEV_DEBUG: "0"
+
+jobs:
+  survey:
+    name: Linux survey
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends libasound2-dev libssl-dev pkg-config
+
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
+
+      - name: Clippy, all errors
+        continue-on-error: true
+        run: cargo clippy --keep-going --all-targets --workspace -- -D warnings
+
+      - name: Tests, all failures
+        env:
+          CLICOLOR_FORCE: "1"
+        run: cargo test --workspace --no-fail-fast
