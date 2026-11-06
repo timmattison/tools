@@ -454,14 +454,20 @@ impl GhSource {
         GhSource::with_program("gh", Duration::from_secs(30))
     }
 
-    /// Runs `gh` with `args` and returns what it printed.
-    fn run_gh(&self, args: &[&str]) -> Result<Output, SourceError> {
+    /// The child that runs `gh` with `args`, before it starts.
+    fn command(&self, args: &[&str]) -> Command {
         let mut command = Command::new(&self.program);
         gitscratch::shed_inherited_git_environment_keeping_user_intent(&mut command);
         command
             .env("GH_NO_UPDATE_NOTIFIER", "1")
             .env("GH_PROMPT_DISABLED", "1")
             .args(args);
+        command
+    }
+
+    /// Runs `gh` with `args` and returns what it printed.
+    fn run_gh(&self, args: &[&str]) -> Result<Output, SourceError> {
+        let mut command = self.command(args);
         run_with_limit(&mut command, self.limit).map_err(|failure| match failure {
             RunFailure::NotInstalled => SourceError::NotInstalled,
             RunFailure::TimedOut(limit) => SourceError::TimedOut(limit),
