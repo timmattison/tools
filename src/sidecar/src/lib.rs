@@ -6,3 +6,4 @@
 //! rules that the `sidecar` binary uses.
 
 pub mod name;
+pub mod registry;
