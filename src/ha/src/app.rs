@@ -267,6 +267,7 @@ where
                     entries.map_err(|error| error.to_string()),
                     history.map_err(|error| error.to_string()),
                 ),
+                Update::Billing(_) => {}
                 Update::Repos {
                     repos,
                     owner_errors,
