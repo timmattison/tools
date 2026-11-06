@@ -148,3 +148,27 @@ fn main_points_the_link_at_the_main_clone_and_makes_no_worktree() {
     assert_eq!(worktree_records(&fixture), before_records);
     assert!(run.stdout.contains("(branch main)"), "{run:?}");
 }
+
+#[test]
+fn two_host_worktrees_share_one_sidecar_worktree() {
+    let fixture = after_setup();
+    let a = fixture.add_host_worktree("a");
+    let b = fixture.add_host_worktree("b");
+    set_up_in(&fixture, &a);
+    set_up_in(&fixture, &b);
+
+    let first = fixture.run(&a, &["worktree", NAME, "shared"]);
+    let second = fixture.run(&b, &["worktree", NAME, "shared"]);
+
+    assert_eq!(first.code, 0, "{first:?}");
+    assert_eq!(second.code, 0, "{second:?}");
+    assert_eq!(
+        link_target(&fixture, &a, NAME),
+        link_target(&fixture, &b, NAME)
+    );
+    let on_shared = worktree_records(&fixture)
+        .iter()
+        .filter(|record| record.iter().any(|field| field == "branch refs/heads/shared"))
+        .count();
+    assert_eq!(on_shared, 1);
+}
