@@ -160,3 +160,82 @@ fn rule_4b_leaves_a_link_to_a_worktree_of_the_main_clone() {
     assert_eq!(run.stdout, "", "{run:?}");
     assert_eq!(fs::read_link(&link).unwrap(), sidecar_worktree);
 }
+
+#[test]
+fn rule_5_points_a_broken_link_at_the_main_clone() {
+    let fixture = Fixture::new(&[NAME]);
+    let host = fixture.main_checkout();
+    let link = fixture.link(&host, NAME);
+    fs::create_dir_all(link.parent().unwrap()).unwrap();
+    symlink(fixture.root().join("does-not-exist"), &link).unwrap();
+
+    let run = fixture.run(&host, &["setup"]);
+
+    assert_eq!(run.code, 0, "{run:?}");
+    assert_eq!(
+        fs::read_link(&link).unwrap(),
+        canon(&fixture.main_clone(NAME))
+    );
+    assert!(
+        run.stdout
+            .contains("Pointed the broken link data/testdata at "),
+        "{run:?}"
+    );
+}
+
+/// Asserts that the run refused to touch the link and said so.
+fn assert_warned_about_the_link(run: &support::Run) {
+    assert_eq!(run.code, 1, "{run:?}");
+    assert!(
+        run.stderr
+            .lines()
+            .any(|line| line.starts_with("warning: ") && line.contains("data/testdata")),
+        "{run:?}"
+    );
+}
+
+#[test]
+fn rule_6_does_not_touch_a_real_directory_at_the_link() {
+    let fixture = Fixture::new(&[NAME]);
+    let host = fixture.main_checkout();
+    let link = fixture.link(&host, NAME);
+    fixture.write(&link.join("keep.txt"), "mine\n");
+
+    let run = fixture.run(&host, &["setup"]);
+
+    assert_warned_about_the_link(&run);
+    assert_eq!(fs::read_to_string(link.join("keep.txt")).unwrap(), "mine\n");
+    assert!(!fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+}
+
+#[test]
+fn rule_6_does_not_touch_a_regular_file_at_the_link() {
+    let fixture = Fixture::new(&[NAME]);
+    let host = fixture.main_checkout();
+    let link = fixture.link(&host, NAME);
+    fixture.write(&link, "mine\n");
+
+    let run = fixture.run(&host, &["setup"]);
+
+    assert_warned_about_the_link(&run);
+    assert_eq!(fs::read_to_string(&link).unwrap(), "mine\n");
+}
+
+#[test]
+fn rule_6_does_not_touch_a_link_to_a_different_directory() {
+    let fixture = Fixture::new(&[NAME]);
+    let host = fixture.main_checkout();
+    let elsewhere = fixture.root().join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    let link = fixture.link(&host, NAME);
+    fs::create_dir_all(link.parent().unwrap()).unwrap();
+    symlink(&elsewhere, &link).unwrap();
+
+    let run = fixture.run(&host, &["setup"]);
+
+    assert_warned_about_the_link(&run);
+    assert_eq!(fs::read_link(&link).unwrap(), elsewhere);
+}
