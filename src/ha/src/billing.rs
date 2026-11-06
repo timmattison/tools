@@ -8,6 +8,7 @@
 //! and no time of day. No window is shorter than one day.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::iter::Sum;
 use std::ops::{Add, AddAssign};
 
@@ -214,6 +215,68 @@ pub fn months_to_fetch(today: NaiveDate) -> Vec<YearMonth> {
         vec![newest]
     } else {
         vec![oldest, newest]
+    }
+}
+
+/// The kind of a GitHub account, which decides the usage endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum AccountKind {
+    /// An organization, read at `organizations/{org}/settings/billing/usage`.
+    Organization,
+    /// A user, read at `users/{user}/settings/billing/usage`.
+    User,
+}
+
+/// The slug of a GitHub Enterprise account, for example `some-enterprise`.
+///
+/// Slugs are case-insensitive like owner names: they compare, order and hash
+/// on the ASCII lowercase form and keep the case as given for display.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EnterpriseSlug(String);
+
+/// The reasons why a text is not an enterprise slug. Each message quotes the
+/// input.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum EnterpriseSlugError {
+    /// The text has no characters.
+    #[error("\"{input}\" is empty. An enterprise slug holds letters, digits, and \"-\".")]
+    Empty {
+        /// The text as given, after the trim.
+        input: String,
+    },
+    /// The text holds a character that a slug cannot hold.
+    #[error(
+        "\"{input}\" holds the character {character:?}. An enterprise slug holds only letters, digits, and \"-\"."
+    )]
+    BadCharacter {
+        /// The text as given, after the trim.
+        input: String,
+        /// The first character that is not allowed.
+        character: char,
+    },
+}
+
+impl EnterpriseSlug {
+    /// Parses a slug. Spaces around the text are ignored.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`EnterpriseSlugError`] when the text is empty or holds a
+    /// character other than an ASCII letter, an ASCII digit, or `-`.
+    pub fn parse(input: &str) -> Result<EnterpriseSlug, EnterpriseSlugError> {
+        Ok(EnterpriseSlug(input.to_owned()))
+    }
+
+    /// The slug as given, with its case.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for EnterpriseSlug {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
     }
 }
 
@@ -484,5 +547,80 @@ mod tests {
             months_to_fetch(day("2026-12-29")),
             [ym(2026, 11), ym(2026, 12)]
         );
+    }
+
+    fn slug(text: &str) -> EnterpriseSlug {
+        EnterpriseSlug::parse(text).expect("a valid slug")
+    }
+
+    #[test]
+    fn a_slug_parses_and_keeps_its_case() {
+        let parsed = slug("Some-Enterprise-2");
+        assert_eq!(parsed.as_str(), "Some-Enterprise-2");
+        assert_eq!(parsed.to_string(), "Some-Enterprise-2");
+    }
+
+    #[test]
+    fn spaces_around_a_slug_are_ignored() {
+        assert_eq!(slug("  some-enterprise\t").as_str(), "some-enterprise");
+    }
+
+    #[test]
+    fn an_empty_slug_is_refused_with_the_input_quoted() {
+        for input in ["", "   "] {
+            let error = EnterpriseSlug::parse(input).expect_err("empty");
+            assert_eq!(
+                error,
+                EnterpriseSlugError::Empty {
+                    input: String::new()
+                }
+            );
+        }
+        assert_eq!(
+            EnterpriseSlug::parse("").expect_err("empty").to_string(),
+            "\"\" is empty. An enterprise slug holds letters, digits, and \"-\"."
+        );
+    }
+
+    #[test]
+    fn a_character_outside_the_allowed_set_is_refused() {
+        let cases = [
+            ("a/b", '/'),
+            ("a b", ' '),
+            ("café", 'é'),
+            ("日本語", '日'),
+            ("a_b", '_'),
+            ("🎉", '🎉'),
+        ];
+        for (input, character) in cases {
+            assert_eq!(
+                EnterpriseSlug::parse(input),
+                Err(EnterpriseSlugError::BadCharacter {
+                    input: input.to_owned(),
+                    character
+                }),
+                "input {input:?}"
+            );
+        }
+        assert_eq!(
+            EnterpriseSlug::parse("a/b").expect_err("refused").to_string(),
+            "\"a/b\" holds the character '/'. An enterprise slug holds only letters, digits, and \"-\"."
+        );
+    }
+
+    #[test]
+    fn slugs_that_differ_only_in_case_are_one_slug() {
+        use std::collections::{BTreeSet, HashSet};
+        assert_eq!(slug("Acme"), slug("aCME"));
+        assert_ne!(slug("acme"), slug("acme2"));
+        let mut ordered = BTreeSet::new();
+        ordered.insert(slug("Acme"));
+        ordered.insert(slug("acme"));
+        assert_eq!(ordered.len(), 1);
+        let mut hashed = HashSet::new();
+        hashed.insert(slug("Acme"));
+        hashed.insert(slug("acme"));
+        assert_eq!(hashed.len(), 1);
+        assert!(slug("b") > slug("A"));
     }
 }
