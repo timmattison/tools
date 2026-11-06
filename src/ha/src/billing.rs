@@ -17,7 +17,7 @@ use std::ops::{Add, AddAssign};
 use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 
 use crate::money::Usd;
-use crate::target::{folded, hash_folded, OwnerName};
+use crate::target::{folded, hash_folded, OwnerName, Target};
 
 /// The product name that the billing box counts. Copilot and the other
 /// products of the report never count. The match ignores ASCII case.
@@ -321,6 +321,55 @@ impl fmt::Display for EnterpriseSlug {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
+}
+
+/// The GitHub endpoint that one billing read asks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Endpoint {
+    /// `organizations/{org}/settings/billing/usage`.
+    Organization(OwnerName),
+    /// `users/{user}/settings/billing/usage`.
+    User(OwnerName),
+    /// `enterprises/{slug}/settings/billing/usage`.
+    Enterprise(EnterpriseSlug),
+}
+
+/// One billing read: an endpoint, and the accounts that its answer serves.
+///
+/// An organization read or a user read serves one account. An enterprise read
+/// serves each account of that enterprise, because one report holds them all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Read {
+    /// The endpoint to ask.
+    pub endpoint: Endpoint,
+    /// The accounts that take their usage from the answer, in the order of
+    /// first appearance.
+    pub accounts: Vec<OwnerName>,
+}
+
+/// The owner of each target, each owner one time, in the order of first
+/// appearance. `Lock-Free-Labs` and `lock-free-labs/x` name one account.
+#[must_use]
+pub fn accounts_of(targets: &[Target]) -> Vec<OwnerName> {
+    let _ = targets;
+    Vec::new()
+}
+
+/// Plans the reads that give the usage of `accounts`.
+///
+/// An account in `enterprises` takes the enterprise endpoint, and two accounts
+/// of one enterprise share one [`Read`]. Any other account takes the endpoint
+/// of its kind in `kinds`. An account in neither map gets no read, because the
+/// caller must look up its kind first. The reads come in the order of the
+/// first account that each one serves.
+#[must_use]
+pub fn plan_reads(
+    accounts: &[OwnerName],
+    enterprises: &BTreeMap<OwnerName, EnterpriseSlug>,
+    kinds: &BTreeMap<OwnerName, AccountKind>,
+) -> Vec<Read> {
+    let _ = (accounts, enterprises, kinds);
+    Vec::new()
 }
 
 #[cfg(test)]
@@ -665,5 +714,132 @@ mod tests {
         hashed.insert(slug("acme"));
         assert_eq!(hashed.len(), 1);
         assert!(slug("b") > slug("A"));
+    }
+
+    fn targets(texts: &[&str]) -> Vec<Target> {
+        texts
+            .iter()
+            .map(|text| Target::parse(text).expect("a valid target"))
+            .collect()
+    }
+
+    fn names(owners: &[OwnerName]) -> Vec<&str> {
+        owners.iter().map(OwnerName::as_str).collect()
+    }
+
+    #[test]
+    fn a_repository_and_its_owner_give_one_account() {
+        let accounts = accounts_of(&targets(&["acme/tools", "acme"]));
+        assert_eq!(names(&accounts), ["acme"]);
+    }
+
+    #[test]
+    fn owners_that_differ_only_in_case_give_one_account() {
+        let accounts = accounts_of(&targets(&["Lock-Free-Labs", "lock-free-labs/x"]));
+        assert_eq!(names(&accounts), ["Lock-Free-Labs"]);
+    }
+
+    #[test]
+    fn accounts_come_in_the_order_of_first_appearance() {
+        let accounts = accounts_of(&targets(&["zeta/a", "alpha", "zeta", "mid/b", "ALPHA/c"]));
+        assert_eq!(names(&accounts), ["zeta", "alpha", "mid"]);
+    }
+
+    #[test]
+    fn no_targets_give_no_accounts() {
+        assert!(accounts_of(&[]).is_empty());
+    }
+
+    fn enterprises(pairs: &[(&str, &str)]) -> BTreeMap<OwnerName, EnterpriseSlug> {
+        pairs
+            .iter()
+            .map(|(org, enterprise)| (owner(org), slug(enterprise)))
+            .collect()
+    }
+
+    fn kinds(pairs: &[(&str, AccountKind)]) -> BTreeMap<OwnerName, AccountKind> {
+        pairs.iter().map(|(name, kind)| (owner(name), *kind)).collect()
+    }
+
+    fn read(endpoint: Endpoint, accounts: &[&str]) -> Read {
+        Read {
+            endpoint,
+            accounts: accounts.iter().map(|name| owner(name)).collect(),
+        }
+    }
+
+    #[test]
+    fn an_organization_in_the_enterprises_map_reads_the_enterprise_endpoint() {
+        let reads = plan_reads(
+            &[owner("acme")],
+            &enterprises(&[("Acme", "big-corp")]),
+            &BTreeMap::new(),
+        );
+        assert_eq!(
+            reads,
+            [read(Endpoint::Enterprise(slug("big-corp")), &["acme"])]
+        );
+    }
+
+    #[test]
+    fn the_enterprise_endpoint_wins_over_the_kind() {
+        let reads = plan_reads(
+            &[owner("acme")],
+            &enterprises(&[("acme", "big-corp")]),
+            &kinds(&[("acme", AccountKind::Organization)]),
+        );
+        assert_eq!(
+            reads,
+            [read(Endpoint::Enterprise(slug("big-corp")), &["acme"])]
+        );
+    }
+
+    #[test]
+    fn two_organizations_of_one_enterprise_share_one_read() {
+        let reads = plan_reads(
+            &[owner("one"), owner("solo"), owner("two")],
+            &enterprises(&[("one", "Big-Corp"), ("two", "big-corp")]),
+            &kinds(&[("solo", AccountKind::User)]),
+        );
+        assert_eq!(
+            reads,
+            [
+                read(Endpoint::Enterprise(slug("big-corp")), &["one", "two"]),
+                read(Endpoint::User(owner("solo")), &["solo"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_kind_decides_between_an_organization_and_a_user_read() {
+        let reads = plan_reads(
+            &[owner("acme"), owner("tim")],
+            &BTreeMap::new(),
+            &kinds(&[
+                ("tim", AccountKind::User),
+                ("acme", AccountKind::Organization),
+            ]),
+        );
+        assert_eq!(
+            reads,
+            [
+                read(Endpoint::Organization(owner("acme")), &["acme"]),
+                read(Endpoint::User(owner("tim")), &["tim"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_account_in_neither_map_gets_no_read() {
+        let reads = plan_reads(
+            &[owner("unknown"), owner("acme")],
+            &BTreeMap::new(),
+            &kinds(&[("acme", AccountKind::Organization)]),
+        );
+        assert_eq!(
+            reads,
+            [read(Endpoint::Organization(owner("acme")), &["acme"])]
+        );
+        assert!(plan_reads(&[owner("unknown")], &BTreeMap::new(), &BTreeMap::new()).is_empty());
     }
 }
