@@ -7542,6 +7542,49 @@ mod tests {
         assert_eq!(all[y - 3].chars().count(), 60);
     }
 
+    /// The text of a login with no billing role. It is wider than the frame.
+    const LONG_ERROR_TEXT: &str = "no access: the login has no billing role for the account, or the account is not on the enhanced billing platform";
+
+    #[test]
+    fn a_long_error_text_does_not_cut_an_account_name_that_fits() {
+        let mut board = Board::new(Duration::from_hours(8));
+        // A no access text beside a ready row.
+        let mut view = two_account_view();
+        view.accounts[1].cell = crate::billing::AccountCell::NoAccess(LONG_ERROR_TEXT.to_owned());
+        let all = lines(&render_billing(100, 30, &mut board, Some(&view)));
+        assert!(
+            all.iter().any(|line| line.contains("│ Lock-Free-Labs  $")),
+            "{all:?}"
+        );
+        let row = all
+            .iter()
+            .find(|line| line.contains("timmattison"))
+            .expect("the row shows");
+        assert!(row.ends_with("… │"), "{row:?}");
+        // A warning line beside a ready row.
+        let mut view = two_account_view();
+        view.accounts[1] = ready(
+            "timmattison",
+            [
+                amounts(1.25, 1.25),
+                amounts(2.5, 2.5),
+                amounts(10.0, 10.0),
+                amounts(40.0, 40.0),
+            ],
+            Some(LONG_ERROR_TEXT),
+        );
+        let all = lines(&render_billing(100, 30, &mut board, Some(&view)));
+        assert!(
+            all.iter().any(|line| line.contains("│ Lock-Free-Labs  $")),
+            "{all:?}"
+        );
+        let row = all
+            .iter()
+            .find(|line| line.contains('⚠'))
+            .expect("the warning shows");
+        assert!(row.ends_with("… │"), "{row:?}");
+    }
+
     #[test]
     fn a_narrow_frame_first_lowers_the_name_width_and_cuts_the_names() {
         let mut view = two_account_view();
