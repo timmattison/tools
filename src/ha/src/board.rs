@@ -247,8 +247,11 @@ fn last_good_jobs(answer: Option<&Jobs>) -> &[Job] {
 /// the latest `completed_at` of the last good jobs. It gives `run.updated_at`
 /// when no job has a `completed_at`.
 fn run_end(run: &Run, answer: Option<&Jobs>) -> DateTime<Utc> {
-    last_good_jobs(answer)
-        .iter()
+    let jobs = last_good_jobs(answer);
+    if jobs.iter().any(|job| job.state.is_active()) {
+        return run.updated_at;
+    }
+    jobs.iter()
         .filter_map(|job| job.completed_at)
         .max()
         .unwrap_or(run.updated_at)
