@@ -3030,6 +3030,122 @@ mod tests {
         assert_eq!(job_calls(&fake), 1, "a good fetch is not done again");
     }
 
+    /// The IDs as text, in order, for the runs `first..=last`.
+    fn id_texts(first: u64, last: u64) -> Vec<String> {
+        (first..=last).map(|id| id.to_string()).collect()
+    }
+
+    #[test]
+    fn a_cycle_fetches_at_most_32_new_finished_runs_of_the_recent_list_in_its_order() {
+        let fake = fake_with_runs((1..=40).map(|id| run("acme/a", id)).collect());
+        let mut state = State::new(SLOW_CADENCE);
+        cycle_once(&fake, &mut state);
+        // The list order is the order of the board: here run 40 is the newest.
+        let ids: Vec<u64> = (1..=40).rev().collect();
+        send_recent(&mut state, &ids);
+
+        // The pool runs the fetches at the same time, thus the order of the
+        // calls within one cycle is free. The set of one cycle is not.
+        cycle_once(&fake, &mut state);
+        assert_eq!(sorted_job_ids(&fake), (9..=40).collect::<Vec<u64>>());
+
+        cycle_once(&fake, &mut state);
+        assert_eq!(sorted_job_ids(&fake), (1..=40).collect::<Vec<u64>>());
+
+        cycle_once(&fake, &mut state);
+        assert_eq!(job_calls(&fake), 40, "each run is fetched one time");
+    }
+
+    /// The IDs of all `jobs` calls so far, sorted.
+    fn sorted_job_ids(fake: &FakeSource) -> Vec<u64> {
+        let mut ids: Vec<u64> = calls_of(fake, "jobs")
+            .iter()
+            .map(|id| id.parse().expect("a run id"))
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    #[test]
+    fn a_failed_fetch_of_a_recent_run_is_done_again_on_the_next_cycle() {
+        let fake = fake_with_runs(vec![run("acme/a", 5)]);
+        fake.script()
+            .jobs
+            .insert(RunId(5), Err(SourceError::Failed("boom".to_owned())));
+        let mut state = State::new(SLOW_CADENCE);
+        cycle_once(&fake, &mut state);
+        send_recent(&mut state, &[5]);
+
+        cycle_once(&fake, &mut state);
+        cycle_once(&fake, &mut state);
+        assert_eq!(
+            calls_of(&fake, "jobs"),
+            vec!["5".to_owned(), "5".to_owned()]
+        );
+
+        fake.script().jobs.insert(RunId(5), Ok(vec![job(1)]));
+        cycle_once(&fake, &mut state);
+        cycle_once(&fake, &mut state);
+        assert_eq!(job_calls(&fake), 3, "a good fetch ends the retries");
+    }
+
+    #[test]
+    fn a_recent_run_that_left_the_list_gets_no_fetch() {
+        let fake = fake_with_runs((1..=40).map(|id| run("acme/a", id)).collect());
+        let mut state = State::new(SLOW_CADENCE);
+        cycle_once(&fake, &mut state);
+        let ids: Vec<u64> = (1..=40).rev().collect();
+        send_recent(&mut state, &ids);
+        cycle_once(&fake, &mut state);
+        assert_eq!(job_calls(&fake), 32);
+
+        let kept: Vec<u64> = (9..=40).rev().collect();
+        send_recent(&mut state, &kept);
+        cycle_once(&fake, &mut state);
+
+        assert_eq!(job_calls(&fake), 32, "runs 1 to 8 left the list");
+    }
+
+    #[test]
+    fn a_recent_runs_command_fetches_nothing_at_once() {
+        let fake = fake_with_runs(vec![run("acme/a", 5), run("acme/a", 6)]);
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+        let _ = one_cycle(&worker);
+
+        worker
+            .commands
+            .send(Command::RecentRuns(vec![(repo("acme/a"), RunId(5))]))
+            .expect("the worker listens");
+        // The worker reads commands in order. The fetch at once of run 6 shows
+        // that it applied the list before, and that it fetched nothing for it.
+        watch(&worker, &[6]);
+
+        assert!(matches!(
+            next_update(&worker),
+            Update::Jobs { run: RunId(6), .. }
+        ));
+        assert_eq!(calls_of(&fake, "jobs"), id_texts(6, 6));
+    }
+
+    #[test]
+    fn a_watched_run_still_gets_its_fetch_at_once_when_a_recent_list_is_in_place() {
+        let fake = fake_with_runs(vec![run("acme/a", 5)]);
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+        let _ = one_cycle(&worker);
+        worker
+            .commands
+            .send(Command::RecentRuns(vec![(repo("acme/a"), RunId(5))]))
+            .expect("the worker listens");
+
+        watch(&worker, &[5]);
+
+        assert!(matches!(
+            next_update(&worker),
+            Update::Jobs { run: RunId(5), .. }
+        ));
+        assert_eq!(calls_of(&fake, "jobs"), id_texts(5, 5));
+    }
+
     #[test]
     fn a_failed_job_fetch_gives_jobs_failed_with_the_error_text() {
         let fake = fake_with_runs(vec![run("acme/a", 5)]);
