@@ -72,6 +72,11 @@ pub(crate) fn walk_ancestors(
     chain
 }
 
+/// The real chain of this process, one PID lookup at a time.
+pub(crate) fn ancestors_of_this_process() -> Vec<Ancestor> {
+    vec![]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,5 +197,19 @@ mod tests {
         assert!(command.len() <= 1024, "{} bytes", command.len());
         assert!(!command.is_empty());
         assert!(long.starts_with(command));
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn this_process_chain_starts_at_the_real_parent() {
+        let chain = ancestors_of_this_process();
+        let parent = std::os::unix::process::parent_id();
+        assert_eq!(chain.first().map(|a| a.pid), Some(parent));
+        assert!(!chain[0].name.is_empty());
+        assert!(chain.len() <= 32);
+        let mut seen = chain.iter().map(|a| a.pid).collect::<Vec<_>>();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), chain.len(), "a pid repeats");
     }
 }
