@@ -284,3 +284,107 @@ fn a_failed_fetch_warns_and_continues_with_the_local_branches() {
         commit_of(&fixture, &fixture.main_clone(NAME), "main")
     );
 }
+
+/// Asserts that the run failed with exit 1 and that stderr holds every text in `parts`.
+fn assert_fails_naming(run: &support::Run, parts: &[&str]) {
+    assert_eq!(run.code, 1, "{run:?}");
+    assert_eq!(run.stdout, "", "{run:?}");
+    assert!(run.stderr.starts_with("sidecar: "), "{run:?}");
+    for part in parts {
+        assert!(run.stderr.contains(part), "{part:?} not in {run:?}");
+    }
+}
+
+#[test]
+fn an_unregistered_name_lists_the_registered_names() {
+    let fixture = Fixture::new(&[NAME, "pics"]);
+    let host = fixture.main_checkout();
+    let run = fixture.run(&host, &["worktree", "nothing"]);
+    assert_fails_naming(&run, &["\"nothing\"", "testdata", "pics"]);
+}
+
+#[test]
+fn a_missing_main_clone_names_sidecar_setup() {
+    let fixture = Fixture::new(&[NAME]);
+    let host = fixture.main_checkout();
+    let run = fixture.run(&host, &["worktree", NAME, "x"]);
+    assert_fails_naming(&run, &["missing", "`sidecar setup`"]);
+    assert!(!fixture.main_clone(NAME).exists());
+    assert!(!fixture.worktrees_dir(NAME).exists());
+}
+
+#[test]
+fn a_detached_head_asks_for_a_branch() {
+    let fixture = after_setup();
+    let host = fixture.add_host_worktree("detached");
+    set_up_in(&fixture, &host);
+    fixture.git(&host, &["checkout", "--quiet", "--detach"]);
+    let before = link_target(&fixture, &host, NAME);
+
+    let run = fixture.run(&host, &["worktree", NAME]);
+
+    assert_fails_naming(
+        &run,
+        &["detached HEAD", "sidecar worktree testdata <branch>"],
+    );
+    assert_eq!(link_target(&fixture, &host, NAME), before);
+}
+
+#[test]
+fn a_branch_name_that_git_refuses_is_an_error() {
+    let fixture = after_setup();
+    let host = fixture.main_checkout();
+    let run = fixture.run(&host, &["worktree", NAME, "bad..name"]);
+    assert_fails_naming(&run, &["git refuses the branch name \"bad..name\""]);
+    assert!(!fixture.worktrees_dir(NAME).exists());
+}
+
+#[test]
+fn a_real_directory_at_the_link_is_not_touched() {
+    let fixture = after_setup();
+    let host = fixture.main_checkout();
+    let link = fixture.link(&host, NAME);
+    fs::remove_file(&link).unwrap();
+    fs::create_dir(&link).unwrap();
+    fixture.write(&link.join("mine.txt"), "mine");
+
+    let run = fixture.run(&host, &["worktree", NAME, "x"]);
+
+    assert_fails_naming(
+        &run,
+        &["data/testdata is a real directory", "does not touch it"],
+    );
+    assert_eq!(fs::read_to_string(link.join("mine.txt")).unwrap(), "mine");
+    assert!(!fixture.worktrees_dir(NAME).exists());
+}
+
+#[test]
+fn a_file_at_the_link_is_not_touched() {
+    let fixture = after_setup();
+    let host = fixture.main_checkout();
+    let link = fixture.link(&host, NAME);
+    fs::remove_file(&link).unwrap();
+    fs::write(&link, "mine").unwrap();
+
+    let run = fixture.run(&host, &["worktree", NAME, "x"]);
+
+    assert_fails_naming(&run, &["data/testdata is a real file", "does not touch it"]);
+    assert_eq!(fs::read_to_string(&link).unwrap(), "mine");
+    assert!(!fixture.worktrees_dir(NAME).exists());
+}
+
+#[test]
+fn something_at_the_new_worktree_path_is_not_touched() {
+    let fixture = after_setup();
+    let host = fixture.main_checkout();
+    let busy = fixture.worktrees_dir(NAME).join("busy");
+    fixture.write(&busy.join("mine.txt"), "mine");
+    let before = link_target(&fixture, &host, NAME);
+
+    let run = fixture.run(&host, &["worktree", NAME, "busy"]);
+
+    assert_fails_naming(&run, &["busy", "already exists", "does not touch it"]);
+    assert_eq!(fs::read_to_string(busy.join("mine.txt")).unwrap(), "mine");
+    assert_eq!(entries(&busy), ["mine.txt"]);
+    assert_eq!(link_target(&fixture, &host, NAME), before);
+}
