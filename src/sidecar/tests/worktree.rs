@@ -245,6 +245,12 @@ fn origin_branch_is_taken_after_a_fetch() {
 fn a_new_branch_from_main_is_the_last_choice() {
     let fixture = after_setup();
     let host = fixture.main_checkout();
+    // HEAD of the main clone is on another branch, thus only the name `main` is right.
+    let clone = fixture.main_clone(NAME);
+    fixture.git(&clone, &["checkout", "--quiet", "-b", "elsewhere"]);
+    fixture.write(&clone.join("elsewhere.txt"), "x");
+    fixture.git(&clone, &["add", "elsewhere.txt"]);
+    fixture.git(&clone, &["commit", "--quiet", "-m", "elsewhere"]);
 
     let run = fixture.run(&host, &["worktree", NAME, "fresh"]);
 
