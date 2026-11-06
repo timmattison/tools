@@ -616,4 +616,36 @@ mod notification {
         assert_eq!(output.stdout, sentinel.as_bytes());
         assert_eq!(osascript_calls(&fixture), vec![]);
     }
+
+    #[test]
+    fn retries_number_the_attempt_in_the_title() {
+        let fixture = Fixture::new();
+        install_fake_osascript(&fixture, "exit 0");
+        let runs = fixture.path("op-runs");
+        fixture.install_fake_op(&format!(
+            "echo run >> '{runs}'\n{wait}\necho 'op failed' >&2\nexit 1",
+            runs = runs.display(),
+            wait = wait_for_records(&fixture, &format!("\"$(wc -l < '{}')\"", runs.display())),
+        ));
+
+        let output = notifying_command(&fixture)
+            .args(["read", REFERENCE])
+            .output()
+            .expect("run op-cache");
+
+        assert!(!output.status.success());
+        let mut titles: Vec<String> = osascript_calls(&fixture)
+            .into_iter()
+            .map(|(_, args)| args[6].clone())
+            .collect();
+        titles.sort();
+        assert_eq!(
+            titles,
+            [
+                "op-cache → 1Password",
+                "op-cache → 1Password (attempt 2 of 3)",
+                "op-cache → 1Password (attempt 3 of 3)",
+            ]
+        );
+    }
 }
