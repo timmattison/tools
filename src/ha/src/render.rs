@@ -3170,6 +3170,128 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_job_row_a_queue_row_and_a_history_row_leave_the_job_sum_blank() {
+        let mut board = job_sum_board();
+        board.expand(now());
+        let text = lines(&render_with(120, 10, &mut board, &loaded()));
+        assert_eq!(job_sum_cells(&text, 4), "18m 28s");
+        for y in [5, 6] {
+            assert!(
+                text[y].contains('├') || text[y].contains('└'),
+                "line {y} is not a job row: {:?}",
+                text[y]
+            );
+            assert_eq!(job_sum_cells(&text, y), "", "job row at line {y}");
+        }
+        let mut board = queue_frame_board();
+        let text = lines(&render_with(120, 20, &mut board, &loaded()));
+        for pull in ["16012", "16020", "16001", "15998", "15990"] {
+            let y = row_holding(&text, pull);
+            assert!(text[y].contains("rust-lang/cargo"), "{:?}", text[y]);
+            assert_eq!(job_sum_cells(&text, y), "", "the row of {pull}");
+        }
+    }
+
+    #[test]
+    fn the_job_sum_of_a_finished_run_row_fades_as_its_time_cell_does() {
+        let mut board = job_sum_board();
+        // A running run stands first and takes the highlight. A highlighted
+        // row has no fade.
+        board.replace(
+            repo("b/y"),
+            vec![run(
+                2,
+                "b/y",
+                "CI",
+                "main",
+                "t",
+                RunState::Running,
+                "2026-10-14T11:50:00Z",
+                "2026-10-14T11:59:00Z",
+            )],
+            now(),
+        );
+        let buffer = render_with(120, 8, &mut board, &loaded());
+        let text = lines(&buffer);
+        let y = row_holding(&text, "41966278012");
+        let row = u16::try_from(y).expect("a row index fits in u16");
+        let time_x = u16::try_from(header_column(&text, "TIME")).expect("a column fits in u16");
+        let sum_x = u16::try_from(header_column(&text, "JOB SUM")).expect("a column fits in u16");
+        let fade = buffer[(time_x, row)].fg;
+        assert!(matches!(fade, Color::Indexed(_)), "{fade:?}");
+        for x in sum_x..sum_x + 7 {
+            assert_eq!(buffer[(x, row)].fg, fade, "cell {x} of {:?}", text[y]);
+        }
+    }
+
+    #[test]
+    fn the_job_sum_of_an_active_run_row_keeps_the_default_color() {
+        let mut board = Board::new(Duration::from_hours(8));
+        board.replace(
+            repo("a/x"),
+            vec![run(
+                1,
+                "a/x",
+                "CI",
+                "main",
+                "t",
+                RunState::Running,
+                "2026-10-14T11:50:00Z",
+                "2026-10-14T11:59:00Z",
+            )],
+            now(),
+        );
+        board.set_jobs(
+            RunId(1),
+            vec![job(
+                1,
+                "test",
+                RunState::Running,
+                Some("2026-10-14T11:50:10Z"),
+                None,
+            )],
+        );
+        let buffer = render_with(120, 8, &mut board, &loaded());
+        let text = lines(&buffer);
+        assert_eq!(job_sum_cells(&text, 2), "9m 50s");
+        let sum_x = u16::try_from(header_column(&text, "JOB SUM")).expect("a column fits in u16");
+        for x in sum_x..sum_x + 7 {
+            assert_eq!(buffer[(x, 2)].fg, Color::Reset, "cell {x} of {:?}", text[2]);
+        }
+    }
+
+    #[test]
+    fn a_narrow_frame_keeps_the_whole_job_sum_column() {
+        for width in [FIXED_COLUMNS, 60] {
+            let width = u16::try_from(width).expect("the width fits in u16");
+            let mut board = job_sum_board();
+            let text = lines(&render_with(width, 8, &mut board, &loaded()));
+            assert!(text[0].ends_with("JOB SUM"), "width {width}: {:?}", text[0]);
+            assert_eq!(job_sum_cells(&text, 4), "18m 28s", "width {width}");
+            assert!(text[4].ends_with("18m 28s"), "width {width}: {:?}", text[4]);
+            for line in &text {
+                assert!(
+                    display_width(line) <= usize::from(width),
+                    "width {width}: the line is too wide: {line:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_job_sum_column_ends_at_the_right_edge_at_every_width() {
+        for width in u16::try_from(FIXED_COLUMNS).expect("fits")..=200 {
+            let mut board = job_sum_board();
+            let text = lines(&render_with(width, 8, &mut board, &loaded()));
+            assert_eq!(
+                header_column(&text, "JOB SUM"),
+                usize::from(width) - JOB_SUM_WIDTH,
+                "width {width}"
+            );
+        }
+    }
+
     /// A job with the state `state`. `None` times stand for a job that GitHub
     /// gives no time for.
     fn job(
