@@ -7,6 +7,8 @@ mod support;
 use std::fs;
 use std::path::Path;
 
+use sidecar::registry::Registry;
+
 use support::Fixture;
 
 /// The name of the new sidecar in these tests.
@@ -104,4 +106,53 @@ fn without_a_terminal_and_without_yes_add_refuses_and_changes_nothing() {
     assert_eq!(before, edited_files(&checkout));
     assert!(!fixture.remote(&format!("megarepo-data-{NAME}")).exists());
     assert!(!fixture.main_clone(NAME).exists());
+}
+
+/// The names that the file `sidecar.toml` of `worktree` registers.
+fn registered(worktree: &Path) -> Vec<String> {
+    Registry::parse(&read(&worktree.join("sidecar.toml")))
+        .expect("sidecar.toml is a valid registry")
+        .sidecars()
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+#[test]
+fn a_new_name_makes_a_private_repository_and_links_it() {
+    let fixture = Fixture::new(&[]);
+    let worktree = fixture.add_host_worktree("feature");
+    let run = fixture.run(&worktree, &["add", NAME, "--yes"]);
+    assert_eq!(run.code, 0, "{run:?}");
+    assert!(
+        fixture.gh_calls().contains(
+            &"api -X POST user/repos -f name=megarepo-data-pics -F private=true --jq .full_name"
+                .to_string()
+        ),
+        "{:?}",
+        fixture.gh_calls()
+    );
+    let remote = fixture.sidecar_remote(NAME);
+    let files = fixture.git(&remote, &["ls-tree", "--name-only", "main"]);
+    let mut files: Vec<&str> = files.lines().collect();
+    files.sort_unstable();
+    assert_eq!(files, [".gitattributes", "README.md"]);
+    let attributes = fixture.try_git(&remote, &["show", "main:.gitattributes"]);
+    assert_eq!(String::from_utf8_lossy(&attributes.stdout), "* -text\n");
+    let readme = fixture.git(&remote, &["show", "main:README.md"]);
+    assert!(
+        readme.contains("megarepo") && readme.contains(NAME),
+        "{readme}"
+    );
+    assert_eq!(registered(&worktree), [NAME]);
+    let clone = fixture.main_clone(NAME);
+    assert!(clone.join(".git").exists());
+    assert_eq!(
+        fs::canonicalize(fixture.link(&worktree, NAME)).unwrap(),
+        fs::canonicalize(&clone).unwrap()
+    );
+    assert!(fixture
+        .try_git(&worktree, &["check-ignore", "-q", "data/"])
+        .status
+        .success());
 }
