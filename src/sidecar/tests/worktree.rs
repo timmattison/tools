@@ -388,3 +388,115 @@ fn something_at_the_new_worktree_path_is_not_touched() {
     assert_eq!(entries(&busy), ["mine.txt"]);
     assert_eq!(link_target(&fixture, &host, NAME), before);
 }
+
+#[test]
+fn the_link_changes_atomically() {
+    let fixture = after_setup();
+    let host = fixture.main_checkout();
+    let before = fixture.link(&host, NAME);
+
+    let run = fixture.run(&host, &["worktree", NAME, "atomic"]);
+
+    assert_eq!(run.code, 0, "{run:?}");
+    // The link is renamed over the old link, thus it is a link at every moment and no
+    // scratch entry stays in the link directory.
+    let names = entries(before.parent().unwrap());
+    assert_eq!(names, [NAME], "{names:?}");
+    assert!(names
+        .iter()
+        .all(|n| !n.starts_with(".testdata.sidecar-link-")));
+    assert!(fs::symlink_metadata(&before)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+}
+
+#[test]
+fn only_the_link_of_the_name_in_this_worktree_changes() {
+    let fixture = Fixture::new(&[NAME, "pics"]);
+    let a = fixture.add_host_worktree("a");
+    let b = fixture.add_host_worktree("b");
+    set_up_in(&fixture, &a);
+    set_up_in(&fixture, &b);
+    let others = [
+        link_target(&fixture, &a, "pics"),
+        link_target(&fixture, &b, NAME),
+        link_target(&fixture, &b, "pics"),
+    ];
+
+    let run = fixture.run(&a, &["worktree", NAME, "x"]);
+
+    assert_eq!(run.code, 0, "{run:?}");
+    assert_ne!(link_target(&fixture, &a, NAME), others[1]);
+    assert_eq!(
+        [
+            link_target(&fixture, &a, "pics"),
+            link_target(&fixture, &b, NAME),
+            link_target(&fixture, &b, "pics"),
+        ],
+        others
+    );
+}
+
+#[test]
+fn never_deletes_a_worktree_a_branch_or_a_change() {
+    let fixture = after_setup();
+    let host = fixture.main_checkout();
+    let run = fixture.run(&host, &["worktree", NAME, "keep"]);
+    assert_eq!(run.code, 0, "{run:?}");
+    let keep = fixture.worktrees_dir(NAME).join("keep");
+    fixture.write(&keep.join("new-file.txt"), "new");
+    fixture.write(&keep.join("data.txt"), "changed\n");
+
+    for branch in ["main", "other"] {
+        let moved = fixture.run(&host, &["worktree", NAME, branch]);
+        assert_eq!(moved.code, 0, "{moved:?}");
+    }
+
+    assert_eq!(
+        fs::read_to_string(keep.join("new-file.txt")).unwrap(),
+        "new"
+    );
+    assert_eq!(
+        fs::read_to_string(keep.join("data.txt")).unwrap(),
+        "changed\n"
+    );
+    assert_eq!(branch_of(&fixture, &keep), "keep");
+    let branches = fixture.git(
+        &fixture.main_clone(NAME),
+        &["branch", "--list", "keep", "--format=%(refname:short)"],
+    );
+    assert_eq!(branches, "keep");
+}
+
+#[test]
+fn works_from_a_subdirectory_of_the_host_worktree() {
+    let fixture = after_setup();
+    let host = fixture.main_checkout();
+    let inner = host.join("some").join("deep");
+    fs::create_dir_all(&inner).unwrap();
+
+    let run = fixture.run(&inner, &["worktree", NAME, "deep"]);
+
+    assert_pointed_at_new_worktree(&fixture, &host, &run, "deep");
+}
+
+#[test]
+fn checkout_and_switch_keep_the_link() {
+    let fixture = after_setup();
+    let host = fixture.add_host_worktree("old");
+    set_up_in(&fixture, &host);
+    let run = fixture.run(&host, &["worktree", NAME, "feature"]);
+    assert_eq!(run.code, 0, "{run:?}");
+    let target = link_target(&fixture, &host, NAME);
+
+    // The post-checkout hook runs this command after `git checkout` and `git switch`.
+    let hook = fixture.run(&host, &["setup", "--hook", "old", "new", "1"]);
+
+    assert_eq!(hook.code, 0, "{hook:?}");
+    assert_eq!(link_target(&fixture, &host, NAME), target);
+    assert_eq!(
+        target,
+        fs::canonicalize(fixture.worktrees_dir(NAME).join("feature")).unwrap()
+    );
+}
