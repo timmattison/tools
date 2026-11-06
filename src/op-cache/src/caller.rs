@@ -22,6 +22,28 @@ pub(crate) struct ClaudeSession {
     pub(crate) name: Option<String>,
 }
 
+/// Who asked: the working directory, the Claude session and the ancestors.
+pub(crate) struct Caller {
+    pub(crate) cwd: Option<String>,
+    pub(crate) claude: Option<ClaudeSession>,
+    pub(crate) ancestors: Vec<Ancestor>,
+}
+
+/// Gathers the caller context. The environment values come from the caller,
+/// so this function never reads the process environment.
+pub(crate) fn gather(claude_config_dir_value: Option<&OsStr>, home: Option<&OsStr>) -> Caller {
+    let ancestors = ancestors_of_this_process();
+    let claude = claude_config_dir(claude_config_dir_value, home)
+        .and_then(|dir| claude_session(&ancestors, &dir.join("sessions")));
+    Caller {
+        cwd: std::env::current_dir()
+            .ok()
+            .map(|dir| dir.to_string_lossy().into_owned()),
+        claude,
+        ancestors,
+    }
+}
+
 /// What one lookup of one PID gives.
 pub(crate) struct ProcessFacts {
     pub(crate) parent: Option<u32>,
