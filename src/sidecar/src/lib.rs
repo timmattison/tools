@@ -5,7 +5,9 @@
 //! A host repository names its sidecars in `sidecar.toml`. This library holds the
 //! rules that the `sidecar` binary uses.
 
+pub mod clone;
 pub mod git;
+pub mod host;
 pub mod link;
 pub mod name;
 pub mod registry;

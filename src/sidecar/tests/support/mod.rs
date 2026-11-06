@@ -2,6 +2,10 @@
     dead_code,
     reason = "each test binary uses a different part of the shared fixture"
 )]
+#![allow(
+    clippy::unused_self,
+    reason = "path helpers keep one receiver so a test reads fixture.link(..) like the others"
+)]
 //! The shared fixture of the `sidecar` tests.
 //!
 //! A fixture makes one directory under the temporary directory. The directory holds a

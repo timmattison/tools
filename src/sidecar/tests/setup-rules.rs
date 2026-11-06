@@ -5,7 +5,6 @@
 mod support;
 
 use std::fs;
-use std::os::unix::fs::symlink;
 use std::path::Path;
 
 use support::Fixture;

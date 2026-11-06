@@ -5,6 +5,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::git::Git;
 
@@ -54,7 +55,33 @@ pub fn inspect_link(_git: &Git, _link: &Path, _main_clone: &Path) -> LinkState {
 ///
 /// Returns the I/O error of the first step that fails. The function removes its
 /// scratch link when the rename fails.
-pub fn point_link(_link: &Path, _target: &Path) -> io::Result<()> {
+pub fn point_link(link: &Path, target: &Path) -> io::Result<()> {
+    let dir = link.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("the link {} has no parent directory", link.display()),
+        )
+    })?;
+    let name = link.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("the link {} has no name", link.display()),
+        )
+    })?;
+    std::fs::create_dir_all(dir)?;
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    let scratch = dir.join(format!(
+        ".{}.sidecar-link-{}-{nanos}",
+        name.to_string_lossy(),
+        std::process::id()
+    ));
+    std::os::unix::fs::symlink(target, &scratch)?;
+    if let Err(error) = std::fs::rename(&scratch, link) {
+        let _ = std::fs::remove_file(&scratch);
+        return Err(error);
+    }
     Ok(())
 }
 

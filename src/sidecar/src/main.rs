@@ -8,6 +8,8 @@ use std::process::ExitCode;
 
 use buildinfo::version_string;
 use clap::{Parser, Subcommand};
+use sidecar::host::{Host, RegistryPolicy};
+use sidecar::setup::{ignore_refusal, run_setup};
 
 /// The command line of `sidecar`.
 #[derive(Debug, Parser)]
@@ -72,14 +74,40 @@ impl Command {
 }
 
 /// Runs the subcommand that the user chose.
-fn run(cli: &Cli) -> anyhow::Result<()> {
-    anyhow::bail!("{} is not implemented yet", cli.command.word())
+fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
+    match &cli.command {
+        Command::Setup { hook: false, .. } => run_setup_command(),
+        Command::Setup { hook: true, .. } => anyhow::bail!("setup --hook is not implemented yet"),
+        other => anyhow::bail!("{} is not implemented yet", other.word()),
+    }
+}
+
+/// Runs `sidecar setup` without `--hook`. Actions go to standard output and warnings
+/// to standard error. The exit code is 1 when a sidecar stays unlinked.
+fn run_setup_command() -> anyhow::Result<ExitCode> {
+    let cwd = std::env::current_dir()?;
+    let host = Host::discover(&cwd, RegistryPolicy::Required)?;
+    if let Some(refusal) = ignore_refusal(&host) {
+        anyhow::bail!("{refusal}");
+    }
+    let report = run_setup(&host, None);
+    for action in &report.actions {
+        println!("{action}");
+    }
+    for warning in &report.warnings {
+        eprintln!("warning: {warning}");
+    }
+    Ok(if report.unlinked.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match run(&cli) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(error) => {
             eprintln!("sidecar: {error:#}");
             ExitCode::from(1)
