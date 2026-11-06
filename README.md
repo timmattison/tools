@@ -2219,6 +2219,34 @@ cannot hang the caller. Used by `cwt` and `ha`.
   - Each run row and each job row shows its marker two times: in the first column, and after
     the time column. Thus the marker is next to the time that it explains, and on a wide terminal
     you do not have to read across the full row. The two markers of a row are always the same.
+  - The `JOB SUM` column, after the second marker, shows the sum of the job times of each run.
+    It shows how much runner time the run used. The `TIME` column shows the wall-clock time of
+    the run. A run with two parallel jobs of 15 minutes shows `15m 00s` under `TIME` and
+    `30m 00s` under `JOB SUM`. Thus you can find the runs that use many runners in parallel,
+    and how much runner time a change costs.
+    - The time of one job is the time that its job row shows after the job starts: from its
+      start to its finish, or to now while it runs. Thus the sum of an active run increases
+      each second. A job that waits for a runner or for an approval (`⏳`) adds nothing, because
+      a wait uses no runner. A job that did not start adds nothing, for example a skipped job.
+    - The sum covers the jobs of the latest attempt of the run, the jobs that an expanded run
+      shows. The `TIME` cell starts at the start of the latest attempt too, thus the two cells
+      cover the same attempt.
+    - The sum uses whole seconds. It is not the billed time, because GitHub rounds each job up
+      to a whole minute. A job on a self-hosted runner counts too, because the column shows
+      runner time, not cost.
+    - The cell is empty until `ha` has the jobs of the run, and when GitHub gives no job for the
+      run. When a later request for the jobs fails, the cell keeps the sum of the last good jobs.
+      A job row, a merge queue row, and a merge history row show an empty cell.
+    - `ha` reads the jobs of each finished run in "Last 8h" one time, also when you do not
+      expand the run, thus each row of the section gets a sum. It reads at most 32 new runs in
+      each refresh, the newest finish first, thus the top rows fill first. At the start, the
+      rows fill from the second refresh on.
+    - The cell has the color of its row, thus it fades with a finished row. The column is 7
+      columns wide, the width of the `TIME` column. On a narrow terminal, the text columns give
+      up their columns first.
+    - A finished run can show a `JOB SUM` smaller than its `TIME`, also when its jobs ran in
+      parallel. The `TIME` cell of a finished run ends at the last update of the run, and GitHub
+      sometimes makes that update some minutes after the last job finished.
   - The text of each finished row fades from light gray to dark gray as the row gets older, as
     the commit rows of `gsw` do. Thus a new result is bright, and you can tell the age of a row
     before you read the finish time under `FINISHED`. The age of a run is the time since it
@@ -2296,6 +2324,8 @@ cannot hang the caller. Used by `cwt` and `ha`.
       once. The jobs of a finished run load one time only, until a re-run changes the run. If
       GitHub still shows an active job in a finished run, the jobs of that run refresh with the
       board until each job finishes. Left removes the job rows, and the board keeps the jobs.
+      The jobs of a run in "Last 8h" also load one time for its `JOB SUM` while the run is
+      collapsed, thus Right then shows them at once.
     - Press Right two times fast, on any row, to expand every run on the board. Press Left two
       times fast to collapse every run. Two presses are fast when the second press comes 500 ms
       or less after the first, with no other key between them. The first press acts at once on the
@@ -2451,7 +2481,13 @@ cannot hang the caller. Used by `cwt` and `ha`.
     request for each page of 100 jobs, also when the run is collapsed. The requests for jobs also
     send the `ETag`, thus an answer that did not change costs nothing. With 8 active runs at a
     60 s interval, the worst case is 480 more requests each hour. A finished run gets one more
-    request for its jobs, and then no more until a re-run changes it.
+    request for its jobs, and then no more until a re-run changes it. For the `JOB SUM` column,
+    each finished run in "Last 8h" gets one request for its jobs, also when `ha` did not see it
+    active and the run is collapsed. A refresh sends at most 32 of these one-time requests, the
+    newest finish first. Thus at a start with 200 finished runs in the window, the 7 refreshes
+    after the first one send the 200 requests. A later refresh sends one only for a new run in
+    the section whose jobs `ha` does not have yet. A failed request goes again on the next
+    refresh.
     At most 8 `gh` children run at the same time, for runs and jobs together. The status line
     shows the remaining budget. When less than 10% remains, `ha` waits until the reset of the budget and says so.
   - Billing budget: the billing refreshes at start, every 10 minutes, and when you push `r`.

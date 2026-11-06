@@ -43,9 +43,9 @@ const STARTED_WIDTH: usize = 11;
 const TIME_WIDTH: usize = 7;
 /// The header word of the job-sum column.
 const JOB_SUM_HEADER: &str = "JOB SUM";
-/// The width of the job-sum column. The width of the time column. Both cells
-/// hold a `format_elapsed` text, which is never wider than 7 columns, and the
-/// header word fills the cell.
+/// The width of the job-sum column. It is the width of the time column,
+/// because both cells hold a `format_elapsed` text, which is never wider than
+/// 7 columns. The header word fills the cell.
 const JOB_SUM_WIDTH: usize = TIME_WIDTH;
 /// The columns that the text columns do not share: the two marker cells, the
 /// ID part, the started, time, and job-sum columns, and the nine spaces between
