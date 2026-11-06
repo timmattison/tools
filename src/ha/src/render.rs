@@ -1425,6 +1425,10 @@ const BILLING_MIN_NAME_WIDTH: usize = 12;
 /// The largest width of the name column of the billing box.
 const BILLING_MAX_NAME_WIDTH: usize = 24;
 
+/// The fewest board rows that the billing box leaves. A frame with fewer rows
+/// left shows no box and keeps its full board.
+const BILLING_MIN_BOARD_ROWS: usize = 10;
+
 /// The columns that a side of the billing box takes: the border and one column
 /// of padding.
 const BILLING_SIDE_COLUMNS: usize = 2;
@@ -1526,7 +1530,10 @@ fn pad_left(text: &str, width: usize) -> String {
 /// The name column is as wide as the widest account name, between 12 and 24
 /// columns. Each amount column is as wide as its header word or its widest
 /// amount. The box is as wide as its widest line plus the borders and the
-/// padding.
+/// padding. A frame that is narrower, or that would leave fewer than
+/// [`BILLING_MIN_BOARD_ROWS`] board rows, gets no box. A box wider than the
+/// frame first lowers the name column to 12 columns, then cuts each line that
+/// is still too wide so that it ends in `…`.
 fn billing_box(view: &BillingView, area: Rect) -> Option<BillingBox> {
     let mut contents = vec![BillingContent::Header];
     for account in &view.accounts {
@@ -1575,6 +1582,13 @@ fn billing_box(view: &BillingView, area: Rect) -> Option<BillingBox> {
             BillingContent::Text(name, _) => widest_name = widest_name.max(name.width()),
             BillingContent::Header | BillingContent::Warning(_) => {}
         }
+    }
+    let box_height = contents.len() + BILLING_BORDER_ROWS;
+    let board_rows = usize::from(area.height)
+        .saturating_sub(FIXED_LINES)
+        .saturating_sub(box_height);
+    if board_rows < BILLING_MIN_BOARD_ROWS {
+        return None;
     }
     let frame_columns = 2 * BILLING_SIDE_COLUMNS;
     let amount_columns: usize = columns
@@ -4472,7 +4486,7 @@ mod tests {
                     &utc(),
                     Some(prompt),
                     None,
-                )
+                );
             })
             .expect("a test frame draws");
         terminal.backend().buffer().clone()
@@ -7598,8 +7612,8 @@ mod tests {
         lines
             .iter()
             .filter_map(|line| {
-                let start = line.find("run-")?;
-                Some(line[start..start + 6].to_owned())
+                let (_, rest) = line.split_once("run-")?;
+                Some(format!("run-{}", rest.chars().take(2).collect::<String>()))
             })
             .collect()
     }
