@@ -46,8 +46,21 @@
 //! costs no GraphQL point. The head branch of a pull request that left the
 //! queue comes from its live entry when the worker saw one. Else the worker
 //! looks it up one time.
+//!
+//! When `billing` is true, the worker also reads the Actions billing of each
+//! account (the owner of each target), at the end of a cycle, after the jobs.
+//! It reads at the start, on the slow cadence, and when the person presses
+//! `r`. It asks the kind of each account one time (an organization or a
+//! user), except an account in `billing_enterprises`, and it asks again after
+//! a failed lookup. It asks those kinds through the same pool as the reads,
+//! before it plans the reads. For each read, it asks the usage report of each month that
+//! the last 30 days touch, and sends one [`Update::Billing`]. Two accounts of
+//! one enterprise share one read. Billing requests share the [`CONCURRENCY`]
+//! limit with every other request. With `billing = false`, the worker sends
+//! no billing request.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Mutex, PoisonError};
@@ -55,6 +68,10 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 
+use crate::billing::{
+    accounts_of, months_to_fetch, plan_reads, AccountKind, BillingError, DailyUsage, Endpoint,
+    Read, UsageItem, YearMonth,
+};
 use crate::github::{RepoList, RunList, RunQuery, Source, SourceError, QUEUE_CHECK_BATCH};
 use crate::job::Job;
 use crate::queue::{read_events, Departure, History, PullNumber, QueueEntry};
@@ -168,6 +185,10 @@ pub enum Update {
         /// events), or the error of the read of the events.
         history: Result<History, SourceError>,
     },
+    /// The Actions billing usage of some accounts, or the reason that an
+    /// account has none. One update comes for each billing read, and one for
+    /// the accounts whose kind lookup failed.
+    Billing(Vec<(OwnerName, Result<DailyUsage, BillingError>)>),
     /// A cycle ended.
     CycleDone {
         /// When the cycle ended.
@@ -340,6 +361,14 @@ struct State {
     /// live entry or from a lookup. An empty text is a pull request that
     /// GitHub did not find, thus the worker does not look it up again.
     branches: Mutex<HashMap<(RepoName, PullNumber), String>>,
+    /// The cadence of the billing step.
+    billing_cadence: Cadence,
+    /// Set by a refresh command. The next billing step takes it, and runs
+    /// whatever the cadence says.
+    billing_requested: bool,
+    /// The kind of each account that a lookup answered. The worker asks each
+    /// account one time.
+    billing_kinds: BTreeMap<OwnerName, AccountKind>,
 }
 
 impl State {
@@ -362,6 +391,9 @@ impl State {
             sent_queues: (BTreeSet::new(), None),
             entries_due: Mutex::new(HashMap::new()),
             branches: Mutex::new(HashMap::new()),
+            billing_cadence: Cadence::new(slow),
+            billing_requested: false,
+            billing_kinds: BTreeMap::new(),
         }
     }
 
@@ -507,7 +539,10 @@ fn apply_command(
     added: &mut BTreeSet<RunKey>,
 ) {
     match command {
-        Command::RefreshNow => *requested = true,
+        Command::RefreshNow => {
+            *requested = true;
+            state.billing_requested = true;
+        }
         Command::WatchJobs(set) => added.extend(state.watch(set)),
     }
 }
@@ -571,6 +606,7 @@ fn cycle<S: Source>(
         .retain(|(repo, run), _| facts.get(repo).is_some_and(|runs| runs.contains_key(run)));
     let due = state.due_jobs();
     fetch_jobs(source, state, &due, updates)?;
+    refresh_billing(source, settings, state, updates)?;
     let now = Utc::now();
     let rate = source.rate_limit();
     let (delay, backoff_until) = next_delay(settings.interval, rate, now);
@@ -582,6 +618,112 @@ fn cycle<S: Source>(
         })
         .map_err(|_| ReceiverGone)?;
     Ok((delay, backoff_until.is_some()))
+}
+
+/// Reads the Actions billing usage when it is due: when `settings.billing` is
+/// true and the billing cadence is due or a refresh asked for it.
+///
+/// The step first looks up the kind of each account that has no kind yet and
+/// is not in `billing_enterprises`. It looks up those kinds through the same
+/// pool as the reads, under the [`CONCURRENCY`] limit, before it plans the
+/// reads. A failed lookup goes into one [`Update::Billing`] in the order of the
+/// accounts. The step then plans the reads and runs them through
+/// [`run_pool`], so billing shares the [`CONCURRENCY`] limit with every other
+/// request. Each read sends one [`Update::Billing`].
+fn refresh_billing<S: Source>(
+    source: &S,
+    settings: &Settings,
+    state: &mut State,
+    updates: &Sender<Update>,
+) -> Result<(), ReceiverGone> {
+    let now = Instant::now();
+    if !settings.billing || !(state.billing_requested || state.billing_cadence.due(now)) {
+        return Ok(());
+    }
+    state.billing_cadence.mark(now);
+    state.billing_requested = false;
+    let accounts = accounts_of(&settings.targets);
+    let to_ask: Vec<(usize, &OwnerName)> = accounts
+        .iter()
+        .enumerate()
+        .filter(|(_, account)| {
+            !settings.billing_enterprises.contains_key(*account)
+                && !state.billing_kinds.contains_key(*account)
+        })
+        .collect();
+    // No thread holds this lock during a call of the source.
+    let answers = Mutex::new(Vec::new());
+    // The closure never gives `Break`, thus the result carries no information.
+    let _ = for_each_pooled(&to_ask, |(index, account)| {
+        let answer = source.account_kind(account);
+        answers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((*index, (*account).clone(), answer));
+        ControlFlow::Continue(())
+    });
+    let mut answers = answers.into_inner().unwrap_or_else(PoisonError::into_inner);
+    answers.sort_by_key(|(index, _, _)| *index);
+    let mut unknown = Vec::new();
+    for (_, account, answer) in answers {
+        match answer {
+            Ok(kind) => {
+                state.billing_kinds.insert(account, kind);
+            }
+            Err(error) => unknown.push((account, Err(BillingError::Source(error)))),
+        }
+    }
+    let reads = plan_reads(
+        &accounts,
+        &settings.billing_enterprises,
+        &state.billing_kinds,
+    );
+    let months = months_to_fetch(Utc::now().date_naive());
+    run_pool(&reads, updates, |read| read_billing(source, read, &months))?;
+    if !unknown.is_empty() {
+        updates
+            .send(Update::Billing(unknown))
+            .map_err(|_| ReceiverGone)?;
+    }
+    Ok(())
+}
+
+/// Runs one billing read: asks each month and sums the items.
+fn read_billing<S: Source>(source: &S, read: &Read, months: &[YearMonth]) -> Update {
+    let mut items = Vec::new();
+    for month in months {
+        match source.billing_usage(&read.endpoint, *month) {
+            Ok(mut month_items) => items.append(&mut month_items),
+            Err(error) => {
+                return Update::Billing(
+                    read.accounts
+                        .iter()
+                        .map(|account| (account.clone(), Err(error.clone())))
+                        .collect(),
+                );
+            }
+        }
+    }
+    Update::Billing(
+        read.accounts
+            .iter()
+            .map(|account| (account.clone(), usage_of(read, account, &items)))
+            .collect(),
+    )
+}
+
+/// The usage of one account from the items of its read. An enterprise report
+/// holds every organization, so the account takes only its own items.
+fn usage_of(
+    read: &Read,
+    account: &OwnerName,
+    items: &[UsageItem],
+) -> Result<DailyUsage, BillingError> {
+    match read.endpoint {
+        Endpoint::Organization(_) | Endpoint::User(_) => Ok(DailyUsage::from_items(items)),
+        Endpoint::Enterprise(_) => DailyUsage::for_organization(items, account)
+            .map_err(|error| BillingError::Source(SourceError::BadResponse(error.to_string()))),
+    }
 }
 
 /// What every fetch of one cycle shares.
@@ -1009,37 +1151,60 @@ fn forget_jobs_with_no_active_mark<S: Source>(source: &S, state: &State) {
 
 /// Turns each item into one [`Update`] with a pool of threads, and sends it.
 ///
-/// The threads take items from one shared queue. No thread holds the queue
-/// lock while it works. The pool uses [`CONCURRENCY`] threads at most, so every
-/// kind of request shares the same limit. When the receiver of the updates is
-/// gone, the threads stop and the function returns [`ReceiverGone`].
+/// The pool is [`for_each_pooled`], thus every kind of request shares the same
+/// [`CONCURRENCY`] limit. When the receiver of the updates is gone, the threads
+/// stop and the function returns [`ReceiverGone`].
 fn run_pool<T: Sync>(
     items: &[T],
     updates: &Sender<Update>,
     work: impl Fn(&T) -> Update + Sync,
 ) -> Result<(), ReceiverGone> {
+    let outcome = for_each_pooled(items, |item| {
+        if updates.send(work(item)).is_err() {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    });
+    match outcome {
+        ControlFlow::Continue(()) => Ok(()),
+        ControlFlow::Break(()) => Err(ReceiverGone),
+    }
+}
+
+/// Runs `work` on each item, on at most [`CONCURRENCY`] threads at the same
+/// time.
+///
+/// The threads take items from one shared queue. No thread holds the queue
+/// lock while it works. The pool uses [`CONCURRENCY`] threads at most, so every
+/// kind of request shares the same limit. A `Break` from `work` stops the
+/// threads from taking more items, and the result is then `Break`.
+fn for_each_pooled<T: Sync>(
+    items: &[T],
+    work: impl Fn(&T) -> ControlFlow<()> + Sync,
+) -> ControlFlow<()> {
     let queue = Mutex::new(items.iter().collect::<VecDeque<_>>());
-    let gone = AtomicBool::new(false);
+    let stopped = AtomicBool::new(false);
     std::thread::scope(|scope| {
         for _ in 0..CONCURRENCY.min(items.len()) {
             scope.spawn(|| {
-                while !gone.load(Ordering::Relaxed) {
+                while !stopped.load(Ordering::Relaxed) {
                     let next = queue
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
                         .pop_front();
                     let Some(item) = next else { break };
-                    if updates.send(work(item)).is_err() {
-                        gone.store(true, Ordering::Relaxed);
+                    if work(item).is_break() {
+                        stopped.store(true, Ordering::Relaxed);
                     }
                 }
             });
         }
     });
-    if gone.load(Ordering::Relaxed) {
-        Err(ReceiverGone)
+    if stopped.load(Ordering::Relaxed) {
+        ControlFlow::Break(())
     } else {
-        Ok(())
+        ControlFlow::Continue(())
     }
 }
 
@@ -1438,6 +1603,7 @@ mod tests {
     use std::sync::{Arc, Mutex, PoisonError};
 
     use super::*;
+    use crate::billing::{AccountKind, BillingError, Endpoint, UsageItem, YearMonth};
     use crate::github::{EventList, RepoList, RunList, RunQuery, SourceError};
     use crate::job::Job;
     use crate::queue::{EntryState, EventKind, Outcome, PullNumber, QueueEntry, QueueEvent};
@@ -1500,6 +1666,25 @@ mod tests {
         branches: HashMap<RepoName, Result<BTreeMap<PullNumber, String>, SourceError>>,
         /// The pull requests of each branch lookup, in order.
         branch_asks: Vec<Vec<PullNumber>>,
+        /// The answer of `account_kind` for each owner. An owner with no entry
+        /// gets a failure.
+        kinds: HashMap<OwnerName, Result<AccountKind, SourceError>>,
+        /// The owner of each `account_kind` call, in order.
+        kind_asks: Vec<OwnerName>,
+        /// The number of `account_kind` calls that run now.
+        kinds_in_flight: usize,
+        /// The most `account_kind` calls that ran at the same time.
+        max_kinds_in_flight: usize,
+        /// The answer of `billing_usage`, by the key of `usage_key`. A read
+        /// with no entry gets `NoBillingRole`.
+        usage: HashMap<String, Result<Vec<UsageItem>, BillingError>>,
+        /// The endpoint and the month of each `billing_usage` call, in order.
+        usage_asks: Vec<(Endpoint, YearMonth)>,
+    }
+
+    /// The key of one `billing_usage` answer in the script.
+    fn usage_key(endpoint: &Endpoint, month: YearMonth) -> String {
+        format!("{endpoint:?} {month:?}")
     }
 
     /// A [`Source`] that answers from a script and logs each call.
@@ -1574,6 +1759,38 @@ mod tests {
             let mut script = self.script();
             script.calls.push(("forget", run.0.to_string()));
             script.held.remove(&(repo.clone(), run));
+        }
+
+        fn account_kind(&self, owner: &OwnerName) -> Result<AccountKind, SourceError> {
+            let mut script = self.script();
+            script.calls.push(("kind", owner.to_string()));
+            script.kind_asks.push(owner.clone());
+            let answer = script.kinds.get(owner).cloned().unwrap_or_else(|| {
+                Err(SourceError::Failed(
+                    "the fake has no account kinds".to_owned(),
+                ))
+            });
+            script.kinds_in_flight += 1;
+            script.max_kinds_in_flight = script.max_kinds_in_flight.max(script.kinds_in_flight);
+            drop(script);
+            std::thread::sleep(self.delay);
+            self.script().kinds_in_flight -= 1;
+            answer
+        }
+
+        fn billing_usage(
+            &self,
+            endpoint: &Endpoint,
+            month: YearMonth,
+        ) -> Result<Vec<UsageItem>, BillingError> {
+            let mut script = self.script();
+            script.calls.push(("billing", usage_key(endpoint, month)));
+            script.usage_asks.push((endpoint.clone(), month));
+            script
+                .usage
+                .get(&usage_key(endpoint, month))
+                .cloned()
+                .unwrap_or(Err(BillingError::NoBillingRole))
         }
 
         fn repo_is_listable(&self, repo: &RepoName) -> Result<bool, SourceError> {
@@ -1703,6 +1920,8 @@ mod tests {
                 .collect(),
             window: Duration::from_hours(8),
             interval: Duration::from_hours(1),
+            billing: false,
+            billing_enterprises: std::collections::BTreeMap::new(),
         }
     }
 
@@ -4497,5 +4716,374 @@ mod tests {
         assert_eq!(since.len(), 1, "{since:?}");
         let off = (since[0] - expected).abs();
         assert!(off < chrono::TimeDelta::seconds(60), "off by {off}");
+    }
+
+    // ---- Actions billing ----
+
+    use crate::billing::{months_to_fetch, DailyUsage, EnterpriseSlug};
+    use crate::money::Usd;
+    use chrono::TimeZone;
+
+    /// A short cycle interval, so a test sees several cycles in a short time.
+    /// The slow cadence stays long, so the billing cadence is not due again.
+    const FAST_INTERVAL: Duration = Duration::from_millis(50);
+
+    /// A cadence that never comes due in a test.
+    const NEVER: Duration = Duration::from_secs(3600);
+
+    fn billing_settings(targets: &[&str]) -> Settings {
+        Settings {
+            billing: true,
+            interval: FAST_INTERVAL,
+            ..settings(targets)
+        }
+    }
+
+    fn months_now() -> Vec<YearMonth> {
+        months_to_fetch(Utc::now().date_naive())
+    }
+
+    /// One billed item in the middle of `month`.
+    fn billed_item(month: YearMonth, organization: Option<&str>, net: f64) -> UsageItem {
+        UsageItem {
+            date: Utc
+                .with_ymd_and_hms(month.year, month.month, 15, 12, 0, 0)
+                .single()
+                .expect("a moment"),
+            product: "actions".to_owned(),
+            gross: Usd::from_f64(net * 2.0).expect("an amount"),
+            net: Usd::from_f64(net).expect("an amount"),
+            organization: organization.map(str::to_owned),
+        }
+    }
+
+    /// Gives `endpoint` one item for each month of `months_now`, and returns
+    /// all the items.
+    fn script_usage(
+        fake: &FakeSource,
+        endpoint: &Endpoint,
+        organization: Option<&str>,
+        net: f64,
+    ) -> Vec<UsageItem> {
+        let mut all = Vec::new();
+        for month in months_now() {
+            let items = vec![billed_item(month, organization, net)];
+            all.extend(items.clone());
+            fake.script()
+                .usage
+                .insert(usage_key(endpoint, month), Ok(items));
+        }
+        all
+    }
+
+    fn billing_updates(updates: &[Update]) -> Vec<(OwnerName, Result<DailyUsage, BillingError>)> {
+        updates
+            .iter()
+            .filter_map(|update| match update {
+                Update::Billing(results) => Some(results.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
+    #[test]
+    fn with_billing_off_the_worker_makes_no_billing_call() {
+        let fake = Arc::new(FakeSource::default());
+        let mut off = billing_settings(&["Lock-Free-Labs", "timmattison/tools"]);
+        off.billing = false;
+        let worker = spawn_with(Arc::clone(&fake), &off, NEVER);
+
+        let mut updates = one_cycle(&worker);
+        updates.extend(one_cycle(&worker));
+        updates.extend(refresh_now(&worker));
+
+        assert!(billing_updates(&updates).is_empty(), "{updates:?}");
+        let script = fake.script();
+        assert!(script.kind_asks.is_empty(), "{:?}", script.kind_asks);
+        assert!(script.usage_asks.is_empty(), "{:?}", script.usage_asks);
+    }
+
+    #[test]
+    fn the_worker_looks_up_the_kinds_of_several_accounts_at_once_but_not_too_many() {
+        let fake = Arc::new(FakeSource {
+            delay: Duration::from_millis(100),
+            ..FakeSource::default()
+        });
+        let names: Vec<String> = (0..12).map(|n| format!("acme{n}")).collect();
+        for name in &names {
+            fake.script()
+                .kinds
+                .insert(owner(name), Ok(AccountKind::Organization));
+        }
+        let targets: Vec<&str> = names.iter().map(String::as_str).collect();
+        let worker = spawn_with(Arc::clone(&fake), &billing_settings(&targets), NEVER);
+
+        one_cycle(&worker);
+
+        let script = fake.script();
+        let most = script.max_kinds_in_flight;
+        assert!(most >= 2, "only {most} lookup in flight");
+        assert!(most <= CONCURRENCY, "{most} lookups in flight at once");
+        let mut asked: Vec<String> = script.kind_asks.iter().map(ToString::to_string).collect();
+        asked.sort();
+        let mut expected = names.clone();
+        expected.sort();
+        assert_eq!(asked, expected, "each owner asked exactly once");
+    }
+
+    #[test]
+    fn the_first_cycle_reads_the_billing_of_each_account_before_it_is_done() {
+        let fake = Arc::new(FakeSource::default());
+        let org = Endpoint::Organization(owner("Lock-Free-Labs"));
+        let user = Endpoint::User(owner("timmattison"));
+        fake.script()
+            .kinds
+            .insert(owner("Lock-Free-Labs"), Ok(AccountKind::Organization));
+        fake.script()
+            .kinds
+            .insert(owner("timmattison"), Ok(AccountKind::User));
+        let org_items = script_usage(&fake, &org, None, 1.25);
+        let user_items = script_usage(&fake, &user, None, 0.5);
+        let worker = spawn_with(
+            Arc::clone(&fake),
+            &billing_settings(&["Lock-Free-Labs", "timmattison/tools"]),
+            NEVER,
+        );
+
+        let updates = one_cycle(&worker);
+
+        let mut results = billing_updates(&updates);
+        results.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            results,
+            vec![
+                (
+                    owner("Lock-Free-Labs"),
+                    Ok(DailyUsage::from_items(&org_items))
+                ),
+                (
+                    owner("timmattison"),
+                    Ok(DailyUsage::from_items(&user_items))
+                ),
+            ]
+        );
+        assert!(matches!(updates.last(), Some(Update::CycleDone { .. })));
+        let script = fake.script();
+        let mut kind_asks = script.kind_asks.clone();
+        kind_asks.sort_by_key(ToString::to_string);
+        assert_eq!(
+            kind_asks,
+            vec![owner("Lock-Free-Labs"), owner("timmattison")]
+        );
+        let mut asks = script.usage_asks.clone();
+        asks.sort_by_key(|(_, month)| *month);
+        let mut expected: Vec<(Endpoint, YearMonth)> = Vec::new();
+        for month in months_now() {
+            expected.push((org.clone(), month));
+            expected.push((user.clone(), month));
+        }
+        assert_eq!(asks.len(), expected.len(), "{asks:?}");
+        for ask in &expected {
+            assert!(asks.contains(ask), "{ask:?} missing from {asks:?}");
+        }
+    }
+
+    #[test]
+    fn billing_waits_for_the_slow_cadence_and_a_refresh_reads_it_without_asking_the_kinds() {
+        let fake = Arc::new(FakeSource::default());
+        let org = Endpoint::Organization(owner("acme"));
+        fake.script()
+            .kinds
+            .insert(owner("acme"), Ok(AccountKind::Organization));
+        script_usage(&fake, &org, None, 1.0);
+        let worker = spawn_with(Arc::clone(&fake), &billing_settings(&["acme"]), NEVER);
+        let months = months_now().len();
+
+        let first = one_cycle(&worker);
+        let second = one_cycle(&worker);
+
+        assert_eq!(billing_updates(&first).len(), 1, "{first:?}");
+        assert!(billing_updates(&second).is_empty(), "{second:?}");
+        assert_eq!(fake.script().usage_asks.len(), months);
+
+        worker
+            .commands
+            .send(Command::RefreshNow)
+            .expect("the worker listens");
+        let mut found = Vec::new();
+        for _ in 0..20 {
+            found = billing_updates(&one_cycle(&worker));
+            if !found.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(found.len(), 1, "a refresh read no billing");
+        let script = fake.script();
+        assert_eq!(script.usage_asks.len(), 2 * months);
+        assert_eq!(script.kind_asks, vec![owner("acme")], "kinds asked again");
+    }
+
+    #[test]
+    fn a_repository_target_and_an_owner_target_of_one_owner_give_one_account() {
+        let fake = Arc::new(FakeSource::default());
+        let org = Endpoint::Organization(owner("acme"));
+        fake.script()
+            .kinds
+            .insert(owner("acme"), Ok(AccountKind::Organization));
+        script_usage(&fake, &org, None, 1.0);
+        let worker = spawn_with(
+            Arc::clone(&fake),
+            &billing_settings(&["acme", "ACME/a"]),
+            NEVER,
+        );
+
+        let updates = one_cycle(&worker);
+
+        let results = billing_updates(&updates);
+        assert_eq!(results.len(), 1, "{results:?}");
+        assert_eq!(results[0].0, owner("acme"));
+        let script = fake.script();
+        assert_eq!(script.kind_asks.len(), 1);
+        assert_eq!(script.usage_asks.len(), months_now().len());
+    }
+
+    #[test]
+    fn two_organizations_of_one_enterprise_share_one_read_and_each_gets_its_own_items() {
+        let fake = Arc::new(FakeSource::default());
+        let slug = EnterpriseSlug::parse("big-co").expect("a slug");
+        let endpoint = Endpoint::Enterprise(slug.clone());
+        let mut items = Vec::new();
+        for month in months_now() {
+            let month_items = vec![
+                billed_item(month, Some("alpha"), 1.0),
+                billed_item(month, Some("beta"), 4.0),
+            ];
+            items.extend(month_items.clone());
+            fake.script()
+                .usage
+                .insert(usage_key(&endpoint, month), Ok(month_items));
+        }
+        let mut cfg = billing_settings(&["alpha", "beta/x"]);
+        cfg.billing_enterprises.insert(owner("alpha"), slug.clone());
+        cfg.billing_enterprises.insert(owner("beta"), slug);
+        let worker = spawn_with(Arc::clone(&fake), &cfg, NEVER);
+
+        let updates = one_cycle(&worker);
+
+        let mut results = billing_updates(&updates);
+        results.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            results,
+            vec![
+                (
+                    owner("alpha"),
+                    Ok(DailyUsage::for_organization(&items, &owner("alpha")).expect("named"))
+                ),
+                (
+                    owner("beta"),
+                    Ok(DailyUsage::for_organization(&items, &owner("beta")).expect("named"))
+                ),
+            ]
+        );
+        assert_ne!(results[0].1, results[1].1);
+        let script = fake.script();
+        assert!(script.kind_asks.is_empty(), "{:?}", script.kind_asks);
+        assert_eq!(script.usage_asks.len(), months_now().len());
+    }
+
+    #[test]
+    fn an_enterprise_item_with_no_organization_gives_the_accounts_an_error() {
+        let fake = Arc::new(FakeSource::default());
+        let slug = EnterpriseSlug::parse("big-co").expect("a slug");
+        let endpoint = Endpoint::Enterprise(slug.clone());
+        script_usage(&fake, &endpoint, None, 1.0);
+        let mut cfg = billing_settings(&["alpha"]);
+        cfg.billing_enterprises.insert(owner("alpha"), slug);
+        let worker = spawn_with(Arc::clone(&fake), &cfg, NEVER);
+
+        let results = billing_updates(&one_cycle(&worker));
+
+        assert_eq!(results.len(), 1, "{results:?}");
+        assert!(
+            matches!(
+                &results[0].1,
+                Err(BillingError::Source(SourceError::BadResponse(_)))
+            ),
+            "{results:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_month_gives_each_account_of_the_read_the_error() {
+        let fake = Arc::new(FakeSource::default());
+        let slug = EnterpriseSlug::parse("big-co").expect("a slug");
+        let endpoint = Endpoint::Enterprise(slug.clone());
+        let months = months_now();
+        let failing = BillingError::Source(SourceError::Failed("month broke".to_owned()));
+        for (index, month) in months.iter().enumerate() {
+            let answer = if index == 0 {
+                Err(failing.clone())
+            } else {
+                Ok(vec![billed_item(*month, Some("alpha"), 1.0)])
+            };
+            fake.script()
+                .usage
+                .insert(usage_key(&endpoint, *month), answer);
+        }
+        let mut cfg = billing_settings(&["alpha", "beta"]);
+        cfg.billing_enterprises.insert(owner("alpha"), slug.clone());
+        cfg.billing_enterprises.insert(owner("beta"), slug);
+        let worker = spawn_with(Arc::clone(&fake), &cfg, NEVER);
+
+        let mut results = billing_updates(&one_cycle(&worker));
+
+        results.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            results,
+            vec![
+                (owner("alpha"), Err(failing.clone())),
+                (owner("beta"), Err(failing)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_failed_kind_lookup_gives_the_account_an_error_and_is_asked_again() {
+        let fake = Arc::new(FakeSource::default());
+        let org = Endpoint::Organization(owner("good"));
+        fake.script()
+            .kinds
+            .insert(owner("good"), Ok(AccountKind::Organization));
+        script_usage(&fake, &org, None, 1.0);
+        let broke = SourceError::Failed("lookup broke".to_owned());
+        fake.script().kinds.insert(owner("bad"), Err(broke.clone()));
+        let worker = spawn_with(
+            Arc::clone(&fake),
+            &billing_settings(&["bad", "good"]),
+            NEVER,
+        );
+
+        let first = billing_updates(&one_cycle(&worker));
+
+        assert_eq!(first.len(), 2, "{first:?}");
+        assert!(first.contains(&(owner("bad"), Err(BillingError::Source(broke)))));
+        assert!(first
+            .iter()
+            .any(|(account, result)| *account == owner("good") && result.is_ok()));
+
+        worker
+            .commands
+            .send(Command::RefreshNow)
+            .expect("the worker listens");
+        for _ in 0..20 {
+            if !billing_updates(&one_cycle(&worker)).is_empty() {
+                break;
+            }
+        }
+        assert_eq!(
+            fake.script().kind_asks,
+            vec![owner("bad"), owner("good"), owner("bad")]
+        );
     }
 }

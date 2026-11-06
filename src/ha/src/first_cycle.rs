@@ -88,6 +88,7 @@ impl FirstCycle {
             | Update::JobsFailed { .. }
             | Update::MergeQueues { .. }
             | Update::MergeQueue { .. }
+            | Update::Billing(_)
             | Update::CycleDone { .. } => {}
         }
     }

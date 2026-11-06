@@ -13,6 +13,7 @@ use ratatui::Frame;
 use textfit::{pad_right, truncate_left_to_budget, truncate_to_budget};
 use unicode_width::UnicodeWidthStr;
 
+use crate::billing::{AccountCell, BillingView, Total};
 use crate::board::{Board, Header, JobCounts, Row, Section};
 use crate::cancel::Confirm;
 use crate::job::{Job, RunnerName};
@@ -1295,6 +1296,7 @@ pub fn draw<Tz: TimeZone>(
     now: DateTime<Utc>,
     tz: &Tz,
     prompt: Option<&Confirm>,
+    billing: Option<&BillingView>,
 ) where
     Tz::Offset: Display,
 {
@@ -1303,7 +1305,11 @@ pub fn draw<Tz: TimeZone>(
         return;
     }
     let widths = Widths::for_width(usize::from(area.width));
-    let height = usize::from(area.height).saturating_sub(FIXED_LINES);
+    let mut height = usize::from(area.height).saturating_sub(FIXED_LINES);
+    let billing_box = billing.and_then(|view| billing_box(view, area));
+    if let Some(shown) = &billing_box {
+        height = height.saturating_sub(shown.lines.len() + BILLING_BORDER_ROWS);
+    }
     let spans = Spans {
         window: board.window(),
         history_reach: board.history_reach(now),
@@ -1389,8 +1395,277 @@ pub fn draw<Tz: TimeZone>(
             );
         }
     }
+    if let Some(shown) = &billing_box {
+        draw_billing_box(buffer, area, shown);
+    }
     if let Some(prompt) = prompt {
         draw_prompt(buffer, area, prompt);
+    }
+}
+
+/// The title in the top border of the billing box.
+const BILLING_TITLE: &str = " Actions billing · UTC days ";
+
+/// The rows of the top and the bottom border of the billing box.
+const BILLING_BORDER_ROWS: usize = 2;
+
+/// The box of the Actions billing numbers: its text lines and its size.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BillingBox {
+    /// The text lines inside the borders, each one padded to the inner width.
+    lines: Vec<String>,
+    /// The outer width of the box in columns.
+    width: u16,
+}
+
+/// The smallest width of the name column of the billing box. It is the width
+/// of the longest label, `list price ≥`.
+const BILLING_MIN_NAME_WIDTH: usize = 12;
+
+/// The largest width of the name column of the billing box.
+const BILLING_MAX_NAME_WIDTH: usize = 24;
+
+/// The fewest board rows that the billing box leaves. A frame with fewer rows
+/// left shows no box and keeps its full board.
+const BILLING_MIN_BOARD_ROWS: usize = 10;
+
+/// The columns that a side of the billing box takes: the border and one column
+/// of padding.
+const BILLING_SIDE_COLUMNS: usize = 2;
+
+/// The gap in front of each amount column of the billing box.
+const BILLING_COLUMN_GAP: &str = "  ";
+
+/// The words over the four amount columns: today, yesterday, 7 days, 30 days.
+const BILLING_HEADERS: [&str; 4] = ["today", "yesterday", "7d", "30d"];
+
+/// What the box shows for an account that is still loading.
+const BILLING_LOADING: &str = "loading…";
+
+/// The mark in front of the error text of a stale account.
+const BILLING_WARNING_MARK: &str = "⚠ ";
+
+/// The label of the total of the billed amounts.
+const BILLING_BILLED_LABEL: &str = "billed";
+
+/// The label of the total of the amounts at list price.
+const BILLING_LIST_LABEL: &str = "list price";
+
+/// The sign that a partial total adds to its label.
+const BILLING_PARTIAL_SIGN: &str = " ≥";
+
+/// The four amount texts of a total.
+fn total_texts(total: &Total) -> [String; 4] {
+    [
+        total.today.to_string(),
+        total.yesterday.to_string(),
+        total.last_7_days.to_string(),
+        total.last_30_days.to_string(),
+    ]
+}
+
+/// The label of a total line: the word, and the sign when the total is partial.
+fn total_label(word: &str, total: &Total) -> String {
+    if total.partial {
+        format!("{word}{BILLING_PARTIAL_SIGN}")
+    } else {
+        word.to_owned()
+    }
+}
+
+/// One line of the billing box before the columns are laid out.
+enum BillingContent {
+    /// The column header.
+    Header,
+    /// A label and four amounts.
+    Amounts(String, [String; 4]),
+    /// A label and one text that spans the amount columns.
+    Text(String, String),
+    /// A stale error: the text after the mark.
+    Warning(String),
+}
+
+/// Lays `content` out in a name column of `name_width` and amount columns of
+/// `columns`. Both are widths in display columns.
+fn billing_line(content: &BillingContent, name_width: usize, columns: [usize; 4]) -> String {
+    let name_cell = |text: &str| pad_right(&truncate_to_budget(text, name_width), name_width);
+    match content {
+        BillingContent::Header => {
+            let mut line = name_cell("");
+            for (word, width) in BILLING_HEADERS.iter().zip(columns) {
+                line.push_str(BILLING_COLUMN_GAP);
+                line.push_str(&pad_left(word, width));
+            }
+            line
+        }
+        BillingContent::Amounts(name, texts) => {
+            let mut line = name_cell(name);
+            for (text, width) in texts.iter().zip(columns) {
+                line.push_str(BILLING_COLUMN_GAP);
+                line.push_str(&pad_left(text, width));
+            }
+            line
+        }
+        BillingContent::Text(name, text) => {
+            format!("{}{BILLING_COLUMN_GAP}{text}", name_cell(name))
+        }
+        BillingContent::Warning(text) => {
+            format!(
+                "{}{BILLING_COLUMN_GAP}{BILLING_WARNING_MARK}{text}",
+                name_cell("")
+            )
+        }
+    }
+}
+
+/// Pads `text` on the left with spaces to `width` display columns.
+fn pad_left(text: &str, width: usize) -> String {
+    let missing = width.saturating_sub(text.width());
+    format!("{}{text}", " ".repeat(missing))
+}
+
+/// Computes the billing box for a frame of `area`, or `None` when it does not
+/// show.
+///
+/// The name column is as wide as the widest account name, between 12 and 24
+/// columns. Each amount column is as wide as its header word or its widest
+/// amount. The box is as wide as its widest line plus the borders and the
+/// padding. A frame that is narrower, or that would leave fewer than
+/// [`BILLING_MIN_BOARD_ROWS`] board rows, gets no box. A box wider than the
+/// frame first lowers the name column to 12 columns, as far as the header and
+/// the amount lines need, then cuts each line that is still too wide so that it
+/// ends in `…`. A long text line or warning line does not lower the name column.
+fn billing_box(view: &BillingView, area: Rect) -> Option<BillingBox> {
+    let mut contents = vec![BillingContent::Header];
+    for account in &view.accounts {
+        let name = account.name.to_string();
+        match &account.cell {
+            AccountCell::Loading => {
+                contents.push(BillingContent::Text(name, BILLING_LOADING.to_owned()));
+            }
+            AccountCell::NoAccess(text) => contents.push(BillingContent::Text(name, text.clone())),
+            AccountCell::Ready { windows, error } => {
+                contents.push(BillingContent::Amounts(
+                    name,
+                    [
+                        windows.today.billed.to_string(),
+                        windows.yesterday.billed.to_string(),
+                        windows.last_7_days.billed.to_string(),
+                        windows.last_30_days.billed.to_string(),
+                    ],
+                ));
+                if let Some(text) = error {
+                    contents.push(BillingContent::Warning(text.clone()));
+                }
+            }
+        }
+    }
+    contents.push(BillingContent::Amounts(
+        total_label(BILLING_BILLED_LABEL, &view.billed),
+        total_texts(&view.billed),
+    ));
+    contents.push(BillingContent::Amounts(
+        total_label(BILLING_LIST_LABEL, &view.list_price),
+        total_texts(&view.list_price),
+    ));
+    let mut columns = BILLING_HEADERS.map(UnicodeWidthStr::width);
+    let mut widest_name = 0;
+    for content in &contents {
+        match content {
+            BillingContent::Amounts(name, texts) => {
+                for (column, text) in columns.iter_mut().zip(texts) {
+                    *column = (*column).max(text.width());
+                }
+                if !matches!(name.as_str(), BILLING_BILLED_LABEL | BILLING_LIST_LABEL) {
+                    widest_name = widest_name.max(name.width());
+                }
+            }
+            BillingContent::Text(name, _) => widest_name = widest_name.max(name.width()),
+            BillingContent::Header | BillingContent::Warning(_) => {}
+        }
+    }
+    let box_height = contents.len() + BILLING_BORDER_ROWS;
+    let board_rows = usize::from(area.height)
+        .saturating_sub(FIXED_LINES)
+        .saturating_sub(box_height);
+    if board_rows < BILLING_MIN_BOARD_ROWS {
+        return None;
+    }
+    let frame_columns = 2 * BILLING_SIDE_COLUMNS;
+    let amount_columns: usize = columns
+        .iter()
+        .map(|width| BILLING_COLUMN_GAP.len() + width)
+        .sum();
+    let max_width = usize::from(area.width);
+    if max_width < frame_columns + BILLING_MIN_NAME_WIDTH + amount_columns {
+        return None;
+    }
+    let layout = |name_width: usize| -> Vec<String> {
+        contents
+            .iter()
+            .map(|content| billing_line(content, name_width, columns))
+            .collect()
+    };
+    let widest = |lines: &[String]| lines.iter().map(|line| line.width()).max().unwrap_or(0);
+    let mut name_width = widest_name.clamp(BILLING_MIN_NAME_WIDTH, BILLING_MAX_NAME_WIDTH);
+    let mut lines = layout(name_width);
+    // Only the header and the amount lines can fit when the name column
+    // decreases. A text line or a warning line stays as wide, and the cut to
+    // the inner width shortens it. Thus only the header and the amount lines
+    // set the excess, and the name column gives up that many columns, down to
+    // its minimum.
+    let fitting: Vec<String> = contents
+        .iter()
+        .zip(&lines)
+        .filter(|(content, _)| {
+            matches!(
+                content,
+                BillingContent::Header | BillingContent::Amounts(..)
+            )
+        })
+        .map(|(_, line)| line.clone())
+        .collect();
+    let excess = (widest(&fitting) + frame_columns).saturating_sub(max_width);
+    if excess > 0 {
+        name_width = name_width
+            .saturating_sub(excess)
+            .max(BILLING_MIN_NAME_WIDTH);
+        lines = layout(name_width);
+    }
+    let inner = widest(&lines).min(max_width - frame_columns);
+    let lines = lines
+        .iter()
+        .map(|line| pad_right(&truncate_to_budget(line, inner), inner))
+        .collect();
+    Some(BillingBox {
+        lines,
+        width: to_u16(inner + 2 * BILLING_SIDE_COLUMNS),
+    })
+}
+
+/// Draws the billing box at the right edge of the frame, with its bottom
+/// border on the row just above the status line.
+fn draw_billing_box(buffer: &mut Buffer, area: Rect, shown: &BillingBox) {
+    let height = to_u16(shown.lines.len() + BILLING_BORDER_ROWS);
+    let width = shown.width.min(area.width);
+    let bottom = area.y + area.height.saturating_sub(1);
+    let top = bottom.saturating_sub(height);
+    let rect = Rect::new(area.x + area.width - width, top, width, height);
+    clear_overlay(buffer, rect);
+    Block::bordered()
+        .title(Span::styled(
+            BILLING_TITLE,
+            Style::default().add_modifier(Modifier::BOLD),
+        ))
+        .render(rect, buffer);
+    for (index, line) in shown.lines.iter().enumerate() {
+        buffer.set_stringn(
+            rect.x + 2,
+            rect.y + 1 + to_u16(index),
+            line,
+            usize::from(width).saturating_sub(2 * BILLING_SIDE_COLUMNS),
+            Style::default(),
+        );
     }
 }
 
@@ -1755,7 +2030,7 @@ mod tests {
         let mut terminal =
             Terminal::new(TestBackend::new(width, height)).expect("a test terminal opens");
         terminal
-            .draw(|frame| draw(frame, board, status, now(), tz, None))
+            .draw(|frame| draw(frame, board, status, now(), tz, None, None))
             .expect("a test frame draws");
         terminal.backend().buffer().clone()
     }
@@ -4217,7 +4492,17 @@ mod tests {
         let mut terminal =
             Terminal::new(TestBackend::new(width, height)).expect("a test terminal opens");
         terminal
-            .draw(|frame| draw(frame, &mut board, &loaded(), now(), &utc(), Some(prompt)))
+            .draw(|frame| {
+                draw(
+                    frame,
+                    &mut board,
+                    &loaded(),
+                    now(),
+                    &utc(),
+                    Some(prompt),
+                    None,
+                );
+            })
             .expect("a test frame draws");
         terminal.backend().buffer().clone()
     }
@@ -7033,5 +7318,436 @@ mod tests {
             };
             assert_eq!(buffer[(x, y)].fg, want, "cell {x}");
         }
+    }
+
+    // ---- The Actions billing box (issue #553) ----
+
+    fn usd(value: f64) -> crate::money::Usd {
+        crate::money::Usd::from_f64(value).expect("a finite amount")
+    }
+
+    fn amounts(billed: f64, list_price: f64) -> crate::billing::Amounts {
+        crate::billing::Amounts {
+            billed: usd(billed),
+            list_price: usd(list_price),
+        }
+    }
+
+    fn ready(
+        name: &str,
+        windows: [crate::billing::Amounts; 4],
+        error: Option<&str>,
+    ) -> crate::billing::AccountLine {
+        crate::billing::AccountLine {
+            name: owner(name),
+            cell: crate::billing::AccountCell::Ready {
+                windows: crate::billing::Windows {
+                    today: windows[0],
+                    yesterday: windows[1],
+                    last_7_days: windows[2],
+                    last_30_days: windows[3],
+                },
+                error: error.map(str::to_owned),
+            },
+        }
+    }
+
+    fn total(values: [f64; 4], partial: bool) -> crate::billing::Total {
+        crate::billing::Total {
+            today: usd(values[0]),
+            yesterday: usd(values[1]),
+            last_7_days: usd(values[2]),
+            last_30_days: usd(values[3]),
+            partial,
+        }
+    }
+
+    /// Two ready accounts and whole totals.
+    fn two_account_view() -> BillingView {
+        BillingView {
+            accounts: vec![
+                ready(
+                    "Lock-Free-Labs",
+                    [
+                        amounts(0.0, 0.0),
+                        amounts(0.0, 0.59),
+                        amounts(0.0, 3.60),
+                        amounts(0.0, 5.81),
+                    ],
+                    None,
+                ),
+                ready(
+                    "timmattison",
+                    [
+                        amounts(1.25, 1.25),
+                        amounts(2.5, 2.5),
+                        amounts(10.0, 10.0),
+                        amounts(40.0, 40.0),
+                    ],
+                    None,
+                ),
+            ],
+            billed: total([1.25, 2.5, 10.0, 40.0], false),
+            list_price: total([1.25, 3.09, 13.6, 45.81], false),
+        }
+    }
+
+    fn render_billing(
+        width: u16,
+        height: u16,
+        board: &mut Board,
+        billing: Option<&BillingView>,
+    ) -> Buffer {
+        let mut terminal =
+            Terminal::new(TestBackend::new(width, height)).expect("a test terminal opens");
+        terminal
+            .draw(|frame| draw(frame, board, &loaded(), now(), &utc(), None, billing))
+            .expect("a test frame draws");
+        terminal.backend().buffer().clone()
+    }
+
+    /// The text of a row from column `x` on.
+    fn row_from(buffer: &Buffer, y: usize, x: usize) -> String {
+        lines(buffer)[y].chars().skip(x).collect()
+    }
+
+    #[test]
+    fn the_billing_box_sits_at_the_lower_right_above_the_status_line() {
+        let mut board = Board::new(Duration::from_hours(8));
+        let view = two_account_view();
+        let buffer = render_billing(100, 30, &mut board, Some(&view));
+        let all = lines(&buffer);
+        // Outer width 52, so the box starts at column 48. Seven rows, the
+        // bottom border on row 28.
+        let want = [
+            "┌ Actions billing · UTC days ──────────────────────┐",
+            "│                 today  yesterday      7d     30d │",
+            "│ Lock-Free-Labs  $0.00      $0.00   $0.00   $0.00 │",
+            "│ timmattison     $1.25      $2.50  $10.00  $40.00 │",
+            "│ billed          $1.25      $2.50  $10.00  $40.00 │",
+            "│ list price      $1.25      $3.09  $13.60  $45.81 │",
+            "└──────────────────────────────────────────────────┘",
+        ];
+        for (index, line) in want.iter().enumerate() {
+            let y = 22 + index;
+            assert_eq!(row_from(&buffer, y, 48), *line, "row {y}");
+            assert_eq!(
+                all[y].chars().take(48).collect::<String>().trim(),
+                "",
+                "row {y}"
+            );
+        }
+        // The status line stays on the last row, as without the box.
+        let plain = lines(&render_billing(
+            100,
+            30,
+            &mut Board::new(Duration::from_hours(8)),
+            None,
+        ));
+        assert!(!all[29].is_empty());
+        assert_eq!(all[29], plain[29]);
+    }
+
+    #[test]
+    fn a_loading_account_shows_loading_and_a_no_access_account_shows_its_text() {
+        let mut view = two_account_view();
+        view.accounts[0].cell = crate::billing::AccountCell::Loading;
+        view.accounts[1].cell =
+            crate::billing::AccountCell::NoAccess("no access: token needs \"user\"".to_owned());
+        let mut board = Board::new(Duration::from_hours(8));
+        let buffer = render_billing(100, 30, &mut board, Some(&view));
+        let all = lines(&buffer).join("\n");
+        assert!(all.contains("│ Lock-Free-Labs  loading…"), "{all}");
+        assert!(
+            all.contains("│ timmattison     no access: token needs \"user\""),
+            "{all}"
+        );
+    }
+
+    #[test]
+    fn a_partial_total_shows_the_at_least_sign_and_a_whole_total_does_not() {
+        let mut board = Board::new(Duration::from_hours(8));
+        let mut view = two_account_view();
+        let whole = lines(&render_billing(100, 30, &mut board, Some(&view))).join("\n");
+        assert!(whole.contains("│ billed  "), "{whole}");
+        assert!(whole.contains("│ list price  "), "{whole}");
+        assert!(!whole.contains('≥'), "{whole}");
+        view.billed.partial = true;
+        view.list_price.partial = true;
+        let partial = lines(&render_billing(100, 30, &mut board, Some(&view))).join("\n");
+        assert!(partial.contains("│ billed ≥  "), "{partial}");
+        assert!(partial.contains("│ list price ≥  "), "{partial}");
+    }
+
+    #[test]
+    fn a_stale_account_shows_its_amounts_and_a_warning_line() {
+        let mut view = two_account_view();
+        view.accounts[1] = ready(
+            "timmattison",
+            [
+                amounts(1.25, 1.25),
+                amounts(2.5, 2.5),
+                amounts(10.0, 10.0),
+                amounts(40.0, 40.0),
+            ],
+            Some("HTTP 500"),
+        );
+        let mut board = Board::new(Duration::from_hours(8));
+        let buffer = render_billing(100, 30, &mut board, Some(&view));
+        let all = lines(&buffer);
+        // The box is one line higher: top border on row 21.
+        assert_eq!(row_from(&buffer, 21, 48).chars().next(), Some('┌'));
+        assert!(row_from(&buffer, 24, 48).starts_with("│ timmattison     $1.25"));
+        assert_eq!(
+            row_from(&buffer, 25, 48),
+            "│                 ⚠ HTTP 500                       │",
+            "{all:?}"
+        );
+    }
+
+    const LONG_NO_ACCESS: &str =
+        "no access: token needs \"user\". Run gh auth refresh -h github.com -s user";
+
+    #[test]
+    fn an_account_name_of_30_characters_is_cut_to_24_columns_and_ends_in_an_ellipsis() {
+        let mut view = two_account_view();
+        view.accounts[0] = ready(
+            "abcdefghijklmnopqrstuvwxyz0123",
+            [
+                amounts(1.0, 1.0),
+                amounts(1.0, 1.0),
+                amounts(1.0, 1.0),
+                amounts(1.0, 1.0),
+            ],
+            None,
+        );
+        let mut board = Board::new(Duration::from_hours(8));
+        let buffer = render_billing(100, 30, &mut board, Some(&view));
+        let all = lines(&buffer);
+        assert!(
+            all.iter()
+                .any(|line| line.contains("│ abcdefghijklmnopqrstuvw…  $1.00")),
+            "{all:?}"
+        );
+    }
+
+    #[test]
+    fn a_no_access_text_wider_than_the_frame_ends_in_an_ellipsis_and_the_box_fills_the_frame() {
+        let mut view = two_account_view();
+        view.accounts[1].cell = crate::billing::AccountCell::NoAccess(LONG_NO_ACCESS.to_owned());
+        let mut board = Board::new(Duration::from_hours(8));
+        let buffer = render_billing(60, 30, &mut board, Some(&view));
+        let all = lines(&buffer);
+        let y = all
+            .iter()
+            .position(|line| line.contains("timmattison"))
+            .expect("the row shows");
+        assert_eq!(all[y].chars().count(), 60, "{:?}", all[y]);
+        assert!(
+            all[y].starts_with("│ timmattison     no access: token needs"),
+            "{:?}",
+            all[y]
+        );
+        assert!(all[y].ends_with("… │"), "{:?}", all[y]);
+        assert!(
+            all[y - 3].starts_with("┌ Actions billing"),
+            "{:?}",
+            all[y - 3]
+        );
+        assert_eq!(all[y - 3].chars().count(), 60);
+    }
+
+    /// The text of a login with no billing role. It is wider than the frame.
+    const LONG_ERROR_TEXT: &str = "no access: the login has no billing role for the account, or the account is not on the enhanced billing platform";
+
+    #[test]
+    fn a_long_error_text_does_not_cut_an_account_name_that_fits() {
+        let mut board = Board::new(Duration::from_hours(8));
+        // A no access text beside a ready row.
+        let mut view = two_account_view();
+        view.accounts[1].cell = crate::billing::AccountCell::NoAccess(LONG_ERROR_TEXT.to_owned());
+        let all = lines(&render_billing(100, 30, &mut board, Some(&view)));
+        assert!(
+            all.iter().any(|line| line.contains("│ Lock-Free-Labs  $")),
+            "{all:?}"
+        );
+        let row = all
+            .iter()
+            .find(|line| line.contains("timmattison"))
+            .expect("the row shows");
+        assert!(row.ends_with("… │"), "{row:?}");
+        // A warning line beside a ready row.
+        let mut view = two_account_view();
+        view.accounts[1] = ready(
+            "timmattison",
+            [
+                amounts(1.25, 1.25),
+                amounts(2.5, 2.5),
+                amounts(10.0, 10.0),
+                amounts(40.0, 40.0),
+            ],
+            Some(LONG_ERROR_TEXT),
+        );
+        let all = lines(&render_billing(100, 30, &mut board, Some(&view)));
+        assert!(
+            all.iter().any(|line| line.contains("│ Lock-Free-Labs  $")),
+            "{all:?}"
+        );
+        let row = all
+            .iter()
+            .find(|line| line.contains('⚠'))
+            .expect("the warning shows");
+        assert!(row.ends_with("… │"), "{row:?}");
+    }
+
+    #[test]
+    fn a_narrow_frame_first_lowers_the_name_width_and_cuts_the_names() {
+        let mut view = two_account_view();
+        view.accounts[0] = ready(
+            "abcdefghijklmnopqrstuvwx",
+            [
+                amounts(1.0, 1.0),
+                amounts(1.0, 1.0),
+                amounts(1.0, 1.0),
+                amounts(1.0, 1.0),
+            ],
+            None,
+        );
+        let mut board = Board::new(Duration::from_hours(8));
+        // The natural outer width is 62, so a frame of 56 lowers the name
+        // column from 24 to 18 columns.
+        let buffer = render_billing(56, 30, &mut board, Some(&view));
+        let all = lines(&buffer);
+        assert!(
+            all.iter()
+                .any(|line| line.starts_with("│ abcdefghijklmnopq…  $1.00")),
+            "{all:?}"
+        );
+        let top = all
+            .iter()
+            .find(|line| line.starts_with('┌'))
+            .expect("a box");
+        assert_eq!(top.chars().count(), 56);
+    }
+
+    #[test]
+    fn a_frame_narrower_than_the_name_and_amount_columns_shows_no_box() {
+        let view = two_account_view();
+        let mut board = Board::new(Duration::from_hours(8));
+        let shown = lines(&render_billing(50, 30, &mut board, Some(&view)));
+        assert!(shown.iter().any(|line| line.starts_with('┌')), "{shown:?}");
+        let hidden = lines(&render_billing(49, 30, &mut board, Some(&view)));
+        assert!(
+            hidden.iter().all(|line| !line.contains("Actions billing")),
+            "{hidden:?}"
+        );
+        assert!(hidden.iter().all(|line| !line.contains('│')), "{hidden:?}");
+    }
+
+    /// A board of 40 finished runs whose titles are `run-00` to `run-39`.
+    fn long_board() -> Board {
+        let mut board = Board::new(Duration::from_hours(8));
+        let runs = (0..40_u64)
+            .map(|index| {
+                run(
+                    100 + index,
+                    "timmattison/tools",
+                    "CI",
+                    "main",
+                    &format!("run-{index:02}"),
+                    RunState::Passed,
+                    "2026-10-14T09:00:00Z",
+                    &format!("2026-10-14T10:{index:02}:00Z"),
+                )
+            })
+            .collect();
+        board.replace(repo("timmattison/tools"), runs, at("2026-10-14T11:59:30Z"));
+        board
+    }
+
+    /// The run titles in the order of the rows of `lines`.
+    fn titles_in(lines: &[String]) -> Vec<String> {
+        lines
+            .iter()
+            .filter_map(|line| {
+                let (_, rest) = line.split_once("run-")?;
+                Some(format!("run-{}", rest.chars().take(2).collect::<String>()))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_box_shows_when_ten_board_rows_remain_and_not_one_row_lower() {
+        let view = two_account_view();
+        let mut board = long_board();
+        // Seven box rows: 19 - 2 - 7 = 10 board rows.
+        let shown = lines(&render_billing(100, 19, &mut board, Some(&view)));
+        assert!(
+            shown.iter().any(|line| line.contains("Actions billing")),
+            "{shown:?}"
+        );
+        assert!(shown[10].contains("run-33"), "{shown:?}");
+        assert!(shown[11].contains("Actions billing"), "{shown:?}");
+        let mut board = long_board();
+        let hidden = lines(&render_billing(100, 18, &mut board, Some(&view)));
+        assert!(
+            hidden.iter().all(|line| !line.contains("Actions billing")),
+            "{hidden:?}"
+        );
+        // The board keeps its full height: header row, 15 board rows.
+        let mut board = long_board();
+        let plain = lines(&render_billing(100, 18, &mut board, None));
+        assert_eq!(hidden, plain);
+    }
+
+    #[test]
+    fn the_board_gives_up_the_rows_of_the_box() {
+        let view = two_account_view();
+        let mut board = long_board();
+        let buffer = render_billing(100, 30, &mut board, Some(&view));
+        let all = lines(&buffer);
+        // Board rows 1 to 21, the box on rows 22 to 28.
+        assert!(all[21].contains("run-"), "{:?}", all[21]);
+        for (y, line) in all.iter().enumerate().take(29).skip(22) {
+            assert!(!line.contains("run-"), "row {y}: {line:?}");
+            assert_eq!(
+                line.chars().take(48).collect::<String>().trim(),
+                "",
+                "row {y}"
+            );
+        }
+        assert!(all[22].contains("Actions billing"));
+    }
+
+    #[test]
+    fn page_down_moves_by_the_board_height_that_the_box_leaves() {
+        let view = two_account_view();
+        let order = titles_in(&lines(&render_billing(100, 60, &mut long_board(), None)));
+        assert_eq!(order.len(), 40);
+        let mut board = long_board();
+        render_billing(100, 30, &mut board, Some(&view));
+        board.select_next(now());
+        let selected_title = |board: &mut Board| {
+            let buffer = render_billing(100, 30, board, Some(&view));
+            let all = lines(&buffer);
+            let y = (0..30_u16)
+                .find(|y| buffer[(60, *y)].modifier.contains(Modifier::REVERSED))
+                .expect("a row is selected");
+            titles_in(&all[usize::from(y)..=usize::from(y)])[0].clone()
+        };
+        let before = selected_title(&mut board);
+        board.select_next_page(now());
+        let after = selected_title(&mut board);
+        let index = |title: &String| order.iter().position(|t| t == title).expect("known title");
+        // 30 - 2 - 7 = 21 board rows, so a page is 20 rows.
+        assert_eq!(index(&after) - index(&before), 20);
+    }
+
+    #[test]
+    fn without_billing_the_board_keeps_the_full_height_and_no_box_shows() {
+        let mut board = long_board();
+        let all = lines(&render_billing(100, 30, &mut board, None));
+        assert!(all[28].contains("run-"), "{:?}", all[28]);
+        assert!(all.iter().all(|line| !line.contains("Actions billing")));
     }
 }

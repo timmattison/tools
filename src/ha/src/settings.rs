@@ -6,11 +6,13 @@
 //! sources, and checks every value. Each error names the key, the value, and
 //! the file, so a person can find the mistake at once.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::billing::{EnterpriseSlug, EnterpriseSlugError};
 use crate::target::{OwnerName, RepoName, Target, TargetError};
 
 /// The window `ha` uses when nothing sets one: the finished runs of 8 hours.
@@ -69,6 +71,31 @@ pub enum SettingsError {
         /// Why the value is not valid.
         source: TargetError,
     },
+    /// An entry of the `billing_enterprises` table in the config file is not
+    /// valid.
+    #[error("billing_enterprises entry \"{entry}\" in {path}: {source}")]
+    FileBillingEnterprise {
+        /// The entry as typed, as `owner = enterprise`.
+        entry: String,
+        /// The config file.
+        path: String,
+        /// Why the owner or the enterprise slug is not valid.
+        source: BillingEnterpriseError,
+    },
+    /// Two keys of the `billing_enterprises` table in the config file name one
+    /// owner. Owner names do not depend on case, thus `Acme` and `acme` are one
+    /// owner.
+    #[error(
+        "billing_enterprises entries \"{first}\" and \"{second}\" in {path} name the same owner"
+    )]
+    FileBillingEnterpriseDuplicate {
+        /// The entry that came first, as `owner = enterprise`.
+        first: String,
+        /// The entry that names the same owner again, as `owner = enterprise`.
+        second: String,
+        /// The config file.
+        path: String,
+    },
     /// A target on the command line is not valid.
     #[error("target on the command line: {source}")]
     CliTarget {
@@ -84,6 +111,18 @@ pub enum SettingsError {
     },
 }
 
+/// Why an entry of the `billing_enterprises` table is not valid: its key is
+/// not an owner, or its value is not an enterprise slug.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum BillingEnterpriseError {
+    /// The key is not an owner name.
+    #[error(transparent)]
+    Owner(#[from] TargetError),
+    /// The value is not an enterprise slug.
+    #[error(transparent)]
+    Slug(#[from] EnterpriseSlugError),
+}
+
 /// What `ha` needs to run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
@@ -93,6 +132,10 @@ pub struct Settings {
     pub window: Duration,
     /// How long `ha` waits between two refreshes.
     pub interval: Duration,
+    /// Whether `ha` shows the Actions billing box and sends billing requests.
+    pub billing: bool,
+    /// The organizations whose billing is read from an enterprise, by owner.
+    pub billing_enterprises: BTreeMap<OwnerName, EnterpriseSlug>,
 }
 
 /// The settings that the command line gave. The command line wins over the
@@ -108,6 +151,9 @@ pub struct CommandLine {
     pub window: Option<Duration>,
     /// The `--interval` value.
     pub interval: Option<Duration>,
+    /// The `--no-billing` flag. It replaces the `billing` key of the config
+    /// file.
+    pub no_billing: bool,
 }
 
 /// Builds the settings from the command line and the text of the config file.
@@ -170,6 +216,8 @@ fn resolve_with(
         targets,
         window: cli.window.unwrap_or(file_window),
         interval: cli.interval.unwrap_or(file_interval),
+        billing: parsed.billing.unwrap_or(true) && !cli.no_billing,
+        billing_enterprises: file_billing_enterprises(&parsed, &shown_path)?,
     })
 }
 
@@ -243,8 +291,13 @@ pub fn help_after(config_path: Option<&Path>) -> String {
          \x20   owners = [\"Lock-Free-Labs\"]\n\
          \x20   window = \"8h\"\n\
          \x20   interval = \"60s\"\n\
+         \x20   billing = true\n\
          \n\
-         A window or interval is a whole number and a unit: s, m, h, or d."
+         \x20   [billing_enterprises]\n\
+         \x20   \"some-org\" = \"some-enterprise\"\n\
+         \n\
+         A window or interval is a whole number and a unit: s, m, h, or d.\n\
+         An organization in [billing_enterprises] reads the billing of its enterprise."
     )
 }
 
@@ -269,6 +322,38 @@ fn file_targets(config: &FileConfig, path: &str) -> Result<Vec<Target>, Settings
             })
     });
     repos.chain(owners).collect()
+}
+
+/// Parses the `billing_enterprises` table of the config file.
+///
+/// Two keys that name one owner give `SettingsError::FileBillingEnterpriseDuplicate`.
+fn file_billing_enterprises(
+    config: &FileConfig,
+    path: &str,
+) -> Result<BTreeMap<OwnerName, EnterpriseSlug>, SettingsError> {
+    let mut parsed: BTreeMap<OwnerName, (EnterpriseSlug, String)> = BTreeMap::new();
+    for (key, value) in &config.billing_enterprises {
+        let entry = format!("{key} = {value}");
+        let entry_error = |source: BillingEnterpriseError| SettingsError::FileBillingEnterprise {
+            entry: entry.clone(),
+            path: path.to_owned(),
+            source,
+        };
+        let owner = OwnerName::parse(key).map_err(|e| entry_error(e.into()))?;
+        let slug = EnterpriseSlug::parse(value).map_err(|e| entry_error(e.into()))?;
+        if let Some((_, first)) = parsed.get(&owner) {
+            return Err(SettingsError::FileBillingEnterpriseDuplicate {
+                first: first.clone(),
+                second: entry,
+                path: path.to_owned(),
+            });
+        }
+        parsed.insert(owner, (slug, entry));
+    }
+    Ok(parsed
+        .into_iter()
+        .map(|(owner, (slug, _))| (owner, slug))
+        .collect())
 }
 
 /// Names the config file for a message, when no file was read.
@@ -298,6 +383,9 @@ struct FileConfig {
     owners: Vec<String>,
     window: Option<String>,
     interval: Option<String>,
+    billing: Option<bool>,
+    #[serde(default)]
+    billing_enterprises: BTreeMap<String, String>,
 }
 
 /// Reads a duration such as `30s`, `15m`, `8h`, or `2d`.
@@ -505,6 +593,87 @@ mod tests {
         assert_eq!(settings.interval, Duration::from_secs(60));
     }
 
+    #[test]
+    fn billing_is_on_unless_the_file_turns_it_off() {
+        let off =
+            resolve_file(&CommandLine::default(), "owners = [\"a\"]\nbilling = false").unwrap();
+        assert!(!off.billing);
+        let on = resolve_file(&CommandLine::default(), "owners = [\"a\"]\nbilling = true").unwrap();
+        assert!(on.billing);
+        let unset = resolve_file(&CommandLine::default(), "owners = [\"a\"]").unwrap();
+        assert!(unset.billing);
+        assert!(unset.billing_enterprises.is_empty());
+    }
+
+    #[test]
+    fn no_billing_on_the_command_line_wins_over_the_file() {
+        let cli = CommandLine {
+            no_billing: true,
+            ..CommandLine::default()
+        };
+        let from_true = resolve_file(&cli, "owners = [\"a\"]\nbilling = true").unwrap();
+        assert!(!from_true.billing);
+        let from_unset = resolve_file(&cli, "owners = [\"a\"]").unwrap();
+        assert!(!from_unset.billing);
+    }
+
+    #[test]
+    fn a_billing_value_that_is_not_a_boolean_names_the_key_and_the_file() {
+        let error = resolve_file(
+            &CommandLine::default(),
+            "owners = [\"a\"]\nbilling = \"no\"",
+        )
+        .unwrap_err();
+        assert!(matches!(error, SettingsError::Toml { .. }), "{error}");
+        assert_names(&error, &["billing", CONFIG_PATH]);
+    }
+
+    fn owner(text: &str) -> OwnerName {
+        OwnerName::parse(text).unwrap()
+    }
+
+    #[test]
+    fn a_billing_enterprises_table_maps_owners_to_enterprises() {
+        let text = "owners = [\"a\"]\n[billing_enterprises]\n\"some-org\" = \"some-enterprise\"";
+        let settings = resolve_file(&CommandLine::default(), text).unwrap();
+        assert_eq!(settings.billing_enterprises.len(), 1);
+        let slug = settings
+            .billing_enterprises
+            .get(&owner("Some-Org"))
+            .unwrap();
+        assert_eq!(slug.as_str(), "some-enterprise");
+    }
+
+    #[test]
+    fn a_bad_billing_enterprises_slug_names_the_table_the_entry_and_the_file() {
+        let text = "owners = [\"a\"]\n[billing_enterprises]\n\"some-org\" = \"bad slug\"";
+        let error = resolve_file(&CommandLine::default(), text).unwrap_err();
+        assert_names(&error, &["billing_enterprises", "bad slug", CONFIG_PATH]);
+    }
+
+    #[test]
+    fn a_bad_billing_enterprises_owner_names_the_table_the_entry_and_the_file() {
+        let text = "owners = [\"a\"]\n[billing_enterprises]\n\"a/b\" = \"x\"";
+        let error = resolve_file(&CommandLine::default(), text).unwrap_err();
+        assert_names(&error, &["billing_enterprises", "a/b", CONFIG_PATH]);
+    }
+
+    #[test]
+    fn two_billing_enterprises_keys_that_name_one_owner_are_refused() {
+        let text = "owners = [\"a\"]\n[billing_enterprises]\n\"Acme\" = \"first-ent\"\n\"acme\" = \"second-ent\"";
+        let error = resolve_file(&CommandLine::default(), text)
+            .expect_err("two keys that name one owner must be refused");
+        assert_names(
+            &error,
+            &[
+                "billing_enterprises",
+                "Acme = first-ent",
+                "acme = second-ent",
+                CONFIG_PATH,
+            ],
+        );
+    }
+
     /// Asserts that `error` names every one of `needles`.
     fn assert_names(error: &SettingsError, needles: &[&str]) {
         let message = error.to_string();
@@ -673,6 +842,43 @@ mod tests {
         ] {
             assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
         }
+    }
+
+    /// The example config file of the help text, without the indent.
+    fn help_example(text: &str) -> String {
+        let (_, after) = text
+            .split_once("Example config file:\n")
+            .expect("the help holds an example");
+        after
+            .lines()
+            .skip_while(|line| line.trim().is_empty())
+            .take_while(|line| line.trim().is_empty() || line.starts_with("    "))
+            .map(|line| line.strip_prefix("    ").unwrap_or(line))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn the_help_example_is_a_config_that_ha_accepts() {
+        let text = help_after(Some(Path::new(CONFIG_PATH)));
+        let example = help_example(&text);
+        for needle in [
+            "billing = true",
+            "[billing_enterprises]",
+            "\"some-org\" = \"some-enterprise\"",
+        ] {
+            assert!(
+                example.contains(needle),
+                "missing {needle:?} in:\n{example}"
+            );
+        }
+        let settings = resolve_file(&CommandLine::default(), &example).unwrap();
+        assert!(settings.billing);
+        assert_eq!(settings.billing_enterprises.len(), 1);
+        assert!(
+            text.contains("reads the billing of its enterprise"),
+            "{text}"
+        );
     }
 
     #[test]

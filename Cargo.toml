@@ -146,6 +146,7 @@ num-format = "0.4"
 human_bytes = "0.4"
 unicode-width = "0.2"
 regex = "1.12"
+rust_decimal = { version = "1.43", default-features = false, features = ["std"] }
 wait-timeout = "0.2"
 memchr = "2.8"
 # Multi-pattern substring search; the crap fork scan

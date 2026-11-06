@@ -204,13 +204,13 @@ fn check_part(input: &str, part: &str) -> Result<(), TargetError> {
 
 /// The bytes of `text` in ASCII lowercase. GitHub names are case-insensitive,
 /// thus every comparison and every hash goes through this view.
-fn folded(text: &str) -> impl Iterator<Item = u8> + '_ {
+pub(crate) fn folded(text: &str) -> impl Iterator<Item = u8> + '_ {
     text.bytes().map(|byte| byte.to_ascii_lowercase())
 }
 
 /// Feeds the folded form of `text` to `state`, with the end marker that
 /// `str` uses. The marker keeps `("ab", "c")` apart from `("a", "bc")`.
-fn hash_folded<H: Hasher>(text: &str, state: &mut H) {
+pub(crate) fn hash_folded<H: Hasher>(text: &str, state: &mut H) {
     for byte in folded(text) {
         state.write_u8(byte);
     }

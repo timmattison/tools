@@ -12,6 +12,7 @@ use std::time::Duration;
 use chrono::{Local, Utc};
 use clap::{CommandFactory, FromArgMatches, Parser};
 use ha::app::{App, RunError, TerminalEvents};
+use ha::billing::{accounts_of, BillingBoard};
 use ha::board::Board;
 use ha::browser::BrowserOpener;
 use ha::cancel::GhCanceller;
@@ -57,6 +58,12 @@ struct Cli {
     /// The default is 60s. The config key is `interval`.
     #[arg(long, value_name = "DURATION", value_parser = settings::parse_duration)]
     interval: Option<Duration>,
+
+    /// Hide the Actions billing box and send no billing requests.
+    ///
+    /// The config key is `billing`.
+    #[arg(long)]
+    no_billing: bool,
 }
 
 impl From<Cli> for CommandLine {
@@ -66,6 +73,7 @@ impl From<Cli> for CommandLine {
             config: cli.config,
             window: cli.window,
             interval: cli.interval,
+            no_billing: cli.no_billing,
         }
     }
 }
@@ -144,6 +152,9 @@ fn run_view(settings: &Settings, rate: RateLimit, worker: &Worker) -> Result<(),
         worker,
         &Utc::now,
         &tz,
+        settings
+            .billing
+            .then(|| BillingBoard::new(accounts_of(&settings.targets))),
     );
     app.run(&mut terminal, &mut TerminalEvents)
 }

@@ -13,6 +13,19 @@
 //! events. A GraphQL answer states the GraphQL budget, which is not the core
 //! budget that the status line shows, thus `ha` does not keep it.
 //!
+//! The Actions billing box reads the usage report of one calendar month from
+//! `organizations/{org}`, `users/{user}` or `enterprises/{slug}` under
+//! `settings/billing/usage`, through the `ETag` cache. `GET users/{owner}`
+//! tells an organization from a user. A 403 or 404 that carries the scope
+//! headers of GitHub becomes a missing scope or a missing billing role, so the
+//! box can tell a person what to change.
+//!
+//! A `gh` child gets only the token variables that the source captured:
+//! `run_gh` removes `GH_TOKEN` and `GITHUB_TOKEN` from the child and sets the
+//! captured values. `GhSource::new` captures them from the process, and
+//! `GhSource::with_program` captures none, thus a stub in a test never sees the
+//! token of the test run.
+//!
 //! The bounded run of the `gh` child comes from the `runlimit` crate. Its
 //! `run_with_limit` starts a program and kills it when the time limit ends.
 
@@ -26,7 +39,11 @@ use chrono::{DateTime, Utc};
 use runlimit::{run_with_limit, RunFailure};
 use serde::Deserialize;
 
+use crate::billing::{
+    needed_scope, AccountKind, BillingError, Endpoint, TokenOrigin, UsageItem, YearMonth,
+};
 use crate::job::{Job, JobId, RunnerName};
+use crate::money::Usd;
 use crate::queue::{EntryState, EventKind, PullNumber, QueueEntry, QueueEvent, QUEUE_BOT};
 use crate::run::{keep_first_of_each_id, Run, RunId, RunState};
 use crate::status::RateLimit;
@@ -93,6 +110,13 @@ struct RunJson {
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     html_url: String,
+}
+
+/// The JSON body of one account. Only the `type` is read.
+#[derive(Deserialize)]
+struct AccountJson {
+    #[serde(rename = "type")]
+    kind: String,
 }
 
 /// The JSON body of one repository. Only the fields that `ha` reads are here.
@@ -345,6 +369,28 @@ pub trait Source: Send + Sync {
     /// Returns a [`SourceError`] when the page cannot be fetched.
     fn newest_run(&self, repo: &RepoName) -> Result<Option<Run>, SourceError>;
 
+    /// Asks GitHub whether `owner` is an organization or a user. The request
+    /// is `GET users/{owner}`, and it sends no `ETag`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`SourceError`] when the request fails, or when the `type`
+    /// of the answer is neither `Organization` nor `User`.
+    fn account_kind(&self, owner: &OwnerName) -> Result<AccountKind, SourceError>;
+
+    /// Reads the usage report of one calendar month from the billing endpoint
+    /// of `endpoint`, through the `ETag` cache.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`BillingError`]: a missing scope or billing role when GitHub
+    /// refuses the token, else the [`SourceError`] of the request.
+    fn billing_usage(
+        &self,
+        endpoint: &Endpoint,
+        month: YearMonth,
+    ) -> Result<Vec<UsageItem>, BillingError>;
+
     /// Tells the source that the worker doubts the answers of `query` for a
     /// repository.
     ///
@@ -414,6 +460,78 @@ pub trait Source: Send + Sync {
 /// GraphQL budget (measured on 2026-10-22).
 pub const QUEUE_CHECK_BATCH: usize = 100;
 
+/// The name of the first token variable that `gh` reads.
+const GH_TOKEN_VARIABLE: &str = "GH_TOKEN";
+/// The name of the second token variable that `gh` reads.
+const GITHUB_TOKEN_VARIABLE: &str = "GITHUB_TOKEN";
+
+/// The values of `GH_TOKEN` and `GITHUB_TOKEN` that a `gh` child gets.
+///
+/// A source captures these once. `run_gh` removes both variables from each
+/// child and sets only the captured values, thus the token of the process that
+/// runs a test never reaches a stub. An empty value counts as unset.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TokenEnvironment {
+    gh_token: Option<String>,
+    github_token: Option<String>,
+}
+
+impl TokenEnvironment {
+    /// The values that the real environment of this process holds.
+    #[must_use]
+    pub fn from_process() -> TokenEnvironment {
+        TokenEnvironment::from_lookup(|name| std::env::var(name).ok())
+    }
+
+    /// The values that `lookup` gives for the two variable names.
+    fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> TokenEnvironment {
+        TokenEnvironment {
+            gh_token: lookup(GH_TOKEN_VARIABLE).filter(|value| !value.is_empty()),
+            github_token: lookup(GITHUB_TOKEN_VARIABLE).filter(|value| !value.is_empty()),
+        }
+    }
+
+    /// The same environment with this `GH_TOKEN`. An empty value means unset.
+    #[must_use]
+    pub fn with_gh_token(mut self, value: impl Into<String>) -> TokenEnvironment {
+        self.gh_token = Some(value.into()).filter(|value| !value.is_empty());
+        self
+    }
+
+    /// The same environment with this `GITHUB_TOKEN`. An empty value means unset.
+    #[must_use]
+    pub fn with_github_token(mut self, value: impl Into<String>) -> TokenEnvironment {
+        self.github_token = Some(value.into()).filter(|value| !value.is_empty());
+        self
+    }
+
+    /// Where the token of a child comes from: `GH_TOKEN` when set, else
+    /// `GITHUB_TOKEN` when set, else the login of `gh`.
+    #[must_use]
+    pub fn origin(&self) -> TokenOrigin {
+        if self.gh_token.is_some() {
+            TokenOrigin::Variable(GH_TOKEN_VARIABLE)
+        } else if self.github_token.is_some() {
+            TokenOrigin::Variable(GITHUB_TOKEN_VARIABLE)
+        } else {
+            TokenOrigin::GhLogin
+        }
+    }
+
+    /// Makes `command` see these token variables and no others.
+    fn apply(&self, command: &mut Command) {
+        command
+            .env_remove(GH_TOKEN_VARIABLE)
+            .env_remove(GITHUB_TOKEN_VARIABLE);
+        if let Some(value) = &self.gh_token {
+            command.env(GH_TOKEN_VARIABLE, value);
+        }
+        if let Some(value) = &self.github_token {
+            command.env(GITHUB_TOKEN_VARIABLE, value);
+        }
+    }
+}
+
 /// A `Source` that runs the `gh` program.
 ///
 /// One value serves many threads. The `ETag` cache and the rate limit sit behind
@@ -423,6 +541,7 @@ pub struct GhSource {
     limit: Duration,
     etags: Mutex<HashMap<String, Cached>>,
     rate: Mutex<Option<RateLimit>>,
+    tokens: TokenEnvironment,
 }
 
 /// One answer in the `ETag` cache.
@@ -452,16 +571,31 @@ impl GhSource {
     #[must_use]
     pub fn new() -> GhSource {
         GhSource::with_program("gh", Duration::from_secs(30))
+            .with_token_environment(TokenEnvironment::from_process())
     }
 
-    /// Runs `gh` with `args` and returns what it printed.
-    fn run_gh(&self, args: &[&str]) -> Result<Output, SourceError> {
+    /// The same source, with the token variables that its children get.
+    #[must_use]
+    pub fn with_token_environment(mut self, tokens: TokenEnvironment) -> GhSource {
+        self.tokens = tokens;
+        self
+    }
+
+    /// The child that runs `gh` with `args`, before it starts.
+    fn command(&self, args: &[&str]) -> Command {
         let mut command = Command::new(&self.program);
         gitscratch::shed_inherited_git_environment_keeping_user_intent(&mut command);
         command
             .env("GH_NO_UPDATE_NOTIFIER", "1")
             .env("GH_PROMPT_DISABLED", "1")
             .args(args);
+        self.tokens.apply(&mut command);
+        command
+    }
+
+    /// Runs `gh` with `args` and returns what it printed.
+    fn run_gh(&self, args: &[&str]) -> Result<Output, SourceError> {
+        let mut command = self.command(args);
         run_with_limit(&mut command, self.limit).map_err(|failure| match failure {
             RunFailure::NotInstalled => SourceError::NotInstalled,
             RunFailure::TimedOut(limit) => SourceError::TimedOut(limit),
@@ -472,15 +606,21 @@ impl GhSource {
 
     /// Fetches `path` with `gh api -i` and splits the answer.
     ///
-    /// With an `etag`, the request carries an `If-None-Match` header.
+    /// With an `etag`, the request carries an `If-None-Match` header. A status
+    /// of 400 or more gives the error of [`http_error`].
     fn request(&self, path: &str, etag: Option<&str>) -> Result<Response, SourceError> {
+        refuse_http_error(self.request_raw(path, etag)?)
+    }
+
+    /// Like [`GhSource::request`], and the answer comes back for any status.
+    fn request_raw(&self, path: &str, etag: Option<&str>) -> Result<Response, SourceError> {
         let condition = etag.map(|etag| format!("If-None-Match: {etag}"));
         let mut args = vec!["api", "-i"];
         if let Some(condition) = &condition {
             args.extend(["-H", condition]);
         }
         args.push(path);
-        self.send(&args)
+        self.send_raw(&args)
     }
 
     /// Runs `gh` with `args` and reads the answer of `gh api -i`.
@@ -488,15 +628,19 @@ impl GhSource {
     /// The rate limit headers go to the budget. A status of 400 or more gives
     /// the error of [`http_error`].
     fn send(&self, args: &[&str]) -> Result<Response, SourceError> {
+        refuse_http_error(self.send_raw(args)?)
+    }
+
+    /// Runs `gh` with `args` and reads the answer of `gh api -i`, for any
+    /// status. The rate limit headers go to the budget. Only an output with no
+    /// HTTP answer is an error.
+    fn send_raw(&self, args: &[&str]) -> Result<Response, SourceError> {
         let output = self.run_gh(args)?;
         let text = String::from_utf8_lossy(&output.stdout);
         let Some(response) = parse_response(&text) else {
             return Err(no_answer_error(&output));
         };
         self.note_rate(&response);
-        if response.status >= 400 {
-            return Err(http_error(&response));
-        }
         Ok(response)
     }
 
@@ -548,22 +692,41 @@ impl GhSource {
 
     /// Fetches `path` and parses the body, with the `ETag` cache.
     ///
-    /// The `ETag` goes out only when the cached path is the same as `path`. On
-    /// a `304`, the function parses the cached body. On a `200`, it parses the
-    /// new body, and it stores the body and the `ETag` only after the parse
-    /// succeeds, thus an unreadable body never stays in the cache.
+    /// See [`GhSource::cached_read`]. A status of 400 or more gives the error
+    /// of [`http_error`].
     fn cached_get<T>(
         &self,
         key: &str,
         path: &str,
         parse: impl Fn(&str) -> Result<T, SourceError>,
     ) -> Result<T, SourceError> {
+        self.cached_read(key, path, parse, http_error)
+    }
+
+    /// Fetches `path` and parses the body, with the `ETag` cache. This is the
+    /// one place that holds the cache rules, for every caller.
+    ///
+    /// The `ETag` goes out only when the cached path is the same as `path`. On
+    /// a `304`, the function parses the cached body. On a `200`, it parses the
+    /// new body, and it stores the body and the `ETag` only after the parse
+    /// succeeds, thus an unreadable body never stays in the cache. A status of
+    /// 400 or more gives `refuse(response)`.
+    fn cached_read<T, E: From<SourceError>>(
+        &self,
+        key: &str,
+        path: &str,
+        parse: impl Fn(&str) -> Result<T, E>,
+        refuse: impl Fn(&Response) -> E,
+    ) -> Result<T, E> {
         let etag = self
             .lock_etags()
             .get(key)
             .filter(|cached| cached.path == path)
             .map(|cached| cached.etag.clone());
-        let response = self.request(path, etag.as_deref())?;
+        let response = self.request_raw(path, etag.as_deref())?;
+        if response.status >= 400 {
+            return Err(refuse(&response));
+        }
         if response.status == 304 {
             let body = self
                 .lock_etags()
@@ -716,6 +879,7 @@ impl GhSource {
             limit,
             etags: Mutex::new(HashMap::new()),
             rate: Mutex::new(None),
+            tokens: TokenEnvironment::default(),
         }
     }
 }
@@ -821,6 +985,34 @@ impl Source for GhSource {
             Err(SourceError::Http { status: 404, .. }) => Ok(None),
             Err(error) => Err(error),
         }
+    }
+
+    fn account_kind(&self, owner: &OwnerName) -> Result<AccountKind, SourceError> {
+        let path = format!("users/{owner}");
+        let response = self.request(&path, None)?;
+        let account: AccountJson = serde_json::from_str(&response.body)
+            .map_err(|error| SourceError::BadResponse(error.to_string()))?;
+        match account.kind.as_str() {
+            "Organization" => Ok(AccountKind::Organization),
+            "User" => Ok(AccountKind::User),
+            other => Err(SourceError::BadResponse(format!(
+                "{owner} has the account type {other}, which has no billing report"
+            ))),
+        }
+    }
+
+    fn billing_usage(
+        &self,
+        endpoint: &Endpoint,
+        month: YearMonth,
+    ) -> Result<Vec<UsageItem>, BillingError> {
+        let path = billing_path(endpoint, month);
+        self.cached_read(
+            &path,
+            &path,
+            |body| Ok(parse_usage(body)?),
+            |response| billing_refusal(response, self.tokens.origin()),
+        )
     }
 
     fn newest_run(&self, repo: &RepoName) -> Result<Option<Run>, SourceError> {
@@ -1366,6 +1558,101 @@ fn no_answer_error(output: &Output) -> SourceError {
     SourceError::Failed(line)
 }
 
+/// Gives the answer back, or the error of [`http_error`] for a status of 400
+/// or more.
+fn refuse_http_error(response: Response) -> Result<Response, SourceError> {
+    if response.status >= 400 {
+        return Err(http_error(&response));
+    }
+    Ok(response)
+}
+
+/// Maps the JSON body of a billing usage report to its items.
+fn parse_usage(body: &str) -> Result<Vec<UsageItem>, SourceError> {
+    let parsed: UsageBody =
+        serde_json::from_str(body).map_err(|error| SourceError::BadResponse(error.to_string()))?;
+    Ok(parsed
+        .usage_items
+        .into_iter()
+        .map(|json| UsageItem {
+            date: json.date,
+            product: json.product,
+            gross: json.gross_amount,
+            net: json.net_amount,
+            organization: json.organization_name,
+        })
+        .collect())
+}
+
+/// The JSON body of a billing usage report.
+#[derive(Deserialize)]
+struct UsageBody {
+    #[serde(rename = "usageItems")]
+    usage_items: Vec<UsageJson>,
+}
+
+/// One element of `usageItems`. Only the fields that `ha` reads are here.
+#[derive(Deserialize)]
+struct UsageJson {
+    date: DateTime<Utc>,
+    product: String,
+    #[serde(rename = "grossAmount")]
+    gross_amount: Usd,
+    #[serde(rename = "netAmount")]
+    net_amount: Usd,
+    #[serde(rename = "organizationName")]
+    organization_name: Option<String>,
+}
+
+/// Splits a scope header at the commas and trims each scope. Empty scopes
+/// are dropped.
+fn scope_list(value: &str) -> Vec<&str> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|scope| !scope.is_empty())
+        .collect()
+}
+
+/// The error for a billing answer with a status of 400 or more.
+///
+/// A 403 or 404 that comes with both scope headers says why GitHub refused.
+/// The token holds none of the accepted scopes (`MissingScope`), or it holds
+/// one and the account still refuses (`NoBillingRole`). Without the headers,
+/// or with an empty accepted list, the error is the plain one of
+/// [`http_error`].
+fn billing_refusal(response: &Response, origin: TokenOrigin) -> BillingError {
+    let refused = matches!(response.status, 403 | 404);
+    let held = response.header("x-oauth-scopes").map(scope_list);
+    let accepted = response.header("x-accepted-oauth-scopes").map(scope_list);
+    match (refused, held, accepted) {
+        (true, Some(held), Some(accepted)) if !accepted.is_empty() => {
+            if accepted.iter().any(|scope| held.contains(scope)) {
+                BillingError::NoBillingRole
+            } else {
+                BillingError::MissingScope {
+                    needed: needed_scope(&accepted),
+                    token: origin,
+                }
+            }
+        }
+        _ => BillingError::Source(http_error(response)),
+    }
+}
+
+/// The path of the usage report of `month` at `endpoint`.
+fn billing_path(endpoint: &Endpoint, month: YearMonth) -> String {
+    let account = match endpoint {
+        Endpoint::Organization(org) => format!("organizations/{org}"),
+        Endpoint::User(user) => format!("users/{user}"),
+        Endpoint::Enterprise(slug) => format!("enterprises/{slug}"),
+    };
+    format!(
+        "{account}/settings/billing/usage?year={}&month={}",
+        month.year, month.month
+    )
+}
+
 /// The error for an HTTP answer with a status of 400 or more.
 ///
 /// The message is the `message` field of the JSON body. The reason phrase of
@@ -1470,6 +1757,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::billing::EnterpriseSlug;
 
     /// A time limit that no stub that finishes comes near.
     const GENEROUS_LIMIT: Duration = Duration::from_secs(60);
@@ -1811,6 +2099,95 @@ mod tests {
             }
             calls
         }
+    }
+
+    /// What a stub `gh` sees of the two token variables, one per line.
+    const SHOW_TOKENS: &str =
+        "printf '%s\\n%s\\n' \"${GH_TOKEN-unset}\" \"${GITHUB_TOKEN-unset}\" > \"$dir/tokens.log\"; cat \"$dir/page1.out\"";
+
+    fn tokens_seen(stub: &Stub) -> Vec<String> {
+        std::fs::read_to_string(stub.dir.path().join("tokens.log"))
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn a_source_with_only_a_program_gives_the_child_no_token() {
+        let stub = Stub::new(SHOW_TOKENS);
+        stub.file("page1.out", &ok_output("{}"));
+        stub.source().preflight().expect("a preflight");
+        assert_eq!(tokens_seen(&stub), ["unset", "unset"]);
+    }
+
+    #[test]
+    fn a_captured_token_reaches_the_child_and_nothing_else_does() {
+        let stub = Stub::new(SHOW_TOKENS);
+        stub.file("page1.out", &ok_output("{}"));
+        let tokens = TokenEnvironment::default().with_gh_token("test-token");
+        stub.source()
+            .with_token_environment(tokens)
+            .preflight()
+            .expect("a preflight");
+        assert_eq!(tokens_seen(&stub), ["test-token", "unset"]);
+        let tokens = TokenEnvironment::default().with_github_token("other");
+        stub.source()
+            .with_token_environment(tokens)
+            .preflight()
+            .expect("a preflight");
+        assert_eq!(tokens_seen(&stub), ["unset", "other"]);
+    }
+
+    #[test]
+    fn the_child_command_removes_both_token_variables_when_none_is_captured() {
+        let source = GhSource::with_program("gh", GENEROUS_LIMIT);
+        let command = source.command(&["api"]);
+        let envs: Vec<_> = command.get_envs().collect();
+        for name in ["GH_TOKEN", "GITHUB_TOKEN"] {
+            assert!(
+                envs.iter()
+                    .any(|(key, value)| *key == std::ffi::OsStr::new(name) && value.is_none()),
+                "{name} is not removed: {envs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_child_command_sets_only_the_captured_token_variables() {
+        let tokens = TokenEnvironment::default().with_gh_token("test-token");
+        let source = GhSource::with_program("gh", GENEROUS_LIMIT).with_token_environment(tokens);
+        let command = source.command(&["api"]);
+        let envs: Vec<_> = command.get_envs().collect();
+        assert!(envs.contains(&(
+            std::ffi::OsStr::new("GH_TOKEN"),
+            Some(std::ffi::OsStr::new("test-token"))
+        )));
+        assert!(envs.contains(&(std::ffi::OsStr::new("GITHUB_TOKEN"), None)));
+    }
+
+    #[test]
+    fn the_token_origin_is_the_first_variable_that_is_set() {
+        let none = TokenEnvironment::default();
+        assert_eq!(none.origin(), TokenOrigin::GhLogin);
+        let github = none.with_github_token("y");
+        assert_eq!(github.origin(), TokenOrigin::Variable("GITHUB_TOKEN"));
+        let both = github.with_gh_token("x");
+        assert_eq!(both.origin(), TokenOrigin::Variable("GH_TOKEN"));
+    }
+
+    #[test]
+    fn an_empty_token_value_counts_as_unset() {
+        let empty = TokenEnvironment::default()
+            .with_gh_token("")
+            .with_github_token("");
+        assert_eq!(empty, TokenEnvironment::default());
+        let looked_up = TokenEnvironment::from_lookup(|name| match name {
+            "GH_TOKEN" => Some(String::new()),
+            "GITHUB_TOKEN" => Some("y".to_owned()),
+            _ => None,
+        });
+        assert_eq!(looked_up.origin(), TokenOrigin::Variable("GITHUB_TOKEN"));
     }
 
     /// The body that GitHub gives for one repository.
@@ -2878,6 +3255,424 @@ mod tests {
 
     fn http_output(status_line: &str, body: &str) -> String {
         format!("{status_line}\nContent-Type: application/json\r\n\r\n{body}")
+    }
+
+    #[test]
+    fn an_organization_and_a_user_have_their_kinds_and_the_request_names_the_owner() {
+        let stub = Stub::new("cat \"$dir/account.out\"");
+        let owner = OwnerName::parse("Lock-Free-Labs").unwrap();
+        stub.file(
+            "account.out",
+            &ok_output("{\"login\":\"x\",\"type\":\"Organization\"}"),
+        );
+        assert_eq!(
+            stub.source().account_kind(&owner),
+            Ok(AccountKind::Organization)
+        );
+        stub.file(
+            "account.out",
+            &ok_output("{\"login\":\"x\",\"type\":\"User\"}"),
+        );
+        assert_eq!(stub.source().account_kind(&owner), Ok(AccountKind::User));
+        let requests = stub.requests();
+        assert_eq!(requests.len(), 2);
+        for request in requests {
+            assert_eq!(request, ["api", "-i", "users/Lock-Free-Labs"]);
+        }
+    }
+
+    #[test]
+    fn an_unknown_account_type_or_a_bad_body_is_a_bad_response() {
+        let stub = Stub::new("cat \"$dir/account.out\"");
+        let owner = OwnerName::parse("acme").unwrap();
+        for body in ["{\"type\":\"Bot\"}", "not json", "{}"] {
+            stub.file("account.out", &ok_output(body));
+            let result = stub.source().account_kind(&owner);
+            assert!(
+                matches!(result, Err(SourceError::BadResponse(_))),
+                "{body:?} gave {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_account_is_an_http_error() {
+        let stub = Stub::new("cat \"$dir/account.out\"");
+        stub.file(
+            "account.out",
+            &http_output("HTTP/2.0 404 Not Found", "{\"message\":\"Not Found\"}"),
+        );
+        let owner = OwnerName::parse("acme").unwrap();
+        assert!(matches!(
+            stub.source().account_kind(&owner),
+            Err(SourceError::Http { status: 404, .. })
+        ));
+    }
+
+    /// The measured body of the organization report (2026-11-06).
+    const ORG_USAGE_JSON: &str = r#"{"usageItems":[{"date":"2026-11-01T18:01:16Z","discountAmount":0.126,"grossAmount":0.126,"netAmount":0,"organizationName":"Lock-Free-Labs","pricePerUnit":0.006,"product":"actions","quantity":21,"repositoryName":"issue-fleet-scratch","sku":"Actions Linux","unitType":"Minutes"}]}"#;
+
+    /// A user report: its items have no `organizationName`.
+    const USER_USAGE_JSON: &str = r#"{"usageItems":[{"date":"2026-11-02T00:00:00Z","discountAmount":0,"grossAmount":1.5,"netAmount":1.5,"product":"Actions","quantity":250,"sku":"Actions Linux","unitType":"Minutes"}]}"#;
+
+    /// The output of `gh api -i` for a billing read: the status line, the two
+    /// scope headers, an `ETag`, and the body.
+    fn billing_output(status_line: &str, accepted: &str, token: &str, body: &str) -> String {
+        format!(
+            "{status_line}\n\
+             X-Accepted-Oauth-Scopes: {accepted}\r\n\
+             X-Oauth-Scopes: {token}\r\n\
+             Etag: W/\"4c00158b\"\r\n\
+             \r\n{body}"
+        )
+    }
+
+    const TOKEN_SCOPES: &str = "gist, read:org, repo, workflow";
+
+    fn november() -> YearMonth {
+        YearMonth {
+            year: 2026,
+            month: 11,
+        }
+    }
+
+    fn acme() -> OwnerName {
+        OwnerName::parse("acme").unwrap()
+    }
+
+    #[test]
+    fn each_endpoint_kind_asks_its_own_path_with_the_year_and_month() {
+        let stub = Stub::new("cat \"$dir/usage.out\"");
+        stub.file(
+            "usage.out",
+            &billing_output(
+                "HTTP/2.0 200 OK",
+                "admin:org, repo",
+                TOKEN_SCOPES,
+                ORG_USAGE_JSON,
+            ),
+        );
+        let source = stub.source();
+        let slug = EnterpriseSlug::parse("big-corp").unwrap();
+        for endpoint in [
+            Endpoint::Organization(acme()),
+            Endpoint::User(acme()),
+            Endpoint::Enterprise(slug),
+        ] {
+            source
+                .billing_usage(&endpoint, november())
+                .expect("a report");
+        }
+        let paths: Vec<String> = stub
+            .requests()
+            .into_iter()
+            .map(|mut request| request.pop().unwrap())
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "organizations/acme/settings/billing/usage?year=2026&month=11",
+                "users/acme/settings/billing/usage?year=2026&month=11",
+                "enterprises/big-corp/settings/billing/usage?year=2026&month=11",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_measured_organization_report_maps_to_one_item() {
+        let stub = Stub::new("cat \"$dir/usage.out\"");
+        stub.file(
+            "usage.out",
+            &billing_output(
+                "HTTP/2.0 200 OK",
+                "admin:org, repo",
+                TOKEN_SCOPES,
+                ORG_USAGE_JSON,
+            ),
+        );
+        let items = stub
+            .source()
+            .billing_usage(&Endpoint::Organization(acme()), november())
+            .expect("a report");
+        assert_eq!(
+            items,
+            [UsageItem {
+                date: "2026-11-01T18:01:16Z".parse().unwrap(),
+                product: "actions".to_owned(),
+                gross: Usd::from_f64(0.126).unwrap(),
+                net: Usd::from_f64(0.0).unwrap(),
+                organization: Some("Lock-Free-Labs".to_owned()),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_user_item_with_no_organization_name_maps_to_none() {
+        let stub = Stub::new("cat \"$dir/usage.out\"");
+        stub.file(
+            "usage.out",
+            &billing_output("HTTP/2.0 200 OK", "user", TOKEN_SCOPES, USER_USAGE_JSON),
+        );
+        let items = stub
+            .source()
+            .billing_usage(&Endpoint::User(acme()), november())
+            .expect("a report");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].organization, None);
+        assert_eq!(items[0].product, "Actions");
+        assert_eq!(items[0].net, Usd::from_f64(1.5).unwrap());
+    }
+
+    #[test]
+    fn a_second_read_of_a_month_sends_the_etag_and_reuses_the_report_on_304() {
+        let stub = Stub::new(ETAG_CASES);
+        stub.file(
+            "page1.out",
+            &billing_output(
+                "HTTP/2.0 200 OK",
+                "admin:org, repo",
+                TOKEN_SCOPES,
+                ORG_USAGE_JSON,
+            ),
+        );
+        stub.file("not-modified.out", NOT_MODIFIED);
+        let source = stub.source();
+        let endpoint = Endpoint::Organization(acme());
+        let first = source.billing_usage(&endpoint, november());
+        assert_eq!(first.as_ref().map(Vec::len), Ok(1));
+        let second = source.billing_usage(&endpoint, november());
+        assert_eq!(second, first);
+        let requests = stub.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[1][..4],
+            ["api", "-i", "-H", "If-None-Match: W/\"4c00158b\""]
+        );
+        assert_eq!(requests[1][4], requests[0][2]);
+    }
+
+    #[test]
+    fn another_month_does_not_send_the_etag_of_this_month() {
+        let stub = Stub::new(ETAG_CASES);
+        stub.file(
+            "page1.out",
+            &billing_output(
+                "HTTP/2.0 200 OK",
+                "admin:org, repo",
+                TOKEN_SCOPES,
+                ORG_USAGE_JSON,
+            ),
+        );
+        stub.file("not-modified.out", NOT_MODIFIED);
+        let source = stub.source();
+        let endpoint = Endpoint::Organization(acme());
+        source
+            .billing_usage(&endpoint, november())
+            .expect("a report");
+        let october = YearMonth {
+            year: 2026,
+            month: 10,
+        };
+        source.billing_usage(&endpoint, october).expect("a report");
+        let requests = stub.requests();
+        assert_eq!(requests[1].len(), 3, "{:?}", requests[1]);
+    }
+
+    /// The error of a billing read that GitHub answered with `status_line`.
+    fn billing_error_of(
+        status_line: &str,
+        accepted: &str,
+        token: &str,
+        tokens: TokenEnvironment,
+    ) -> BillingError {
+        let stub = Stub::new("cat \"$dir/usage.out\"");
+        let body = "{\"message\":\"Not Found\",\"status\":\"404\"}";
+        stub.file(
+            "usage.out",
+            &billing_output(status_line, accepted, token, body),
+        );
+        stub.source()
+            .with_token_environment(tokens)
+            .billing_usage(&Endpoint::User(acme()), november())
+            .expect_err("an error")
+    }
+
+    const NOT_FOUND: &str = "HTTP/2.0 404 Not Found";
+
+    #[test]
+    fn a_404_without_the_user_scope_says_which_scope_and_how_to_get_it() {
+        let error = billing_error_of(NOT_FOUND, "user", TOKEN_SCOPES, TokenEnvironment::default());
+        assert_eq!(
+            error,
+            BillingError::MissingScope {
+                needed: "user".to_owned(),
+                token: TokenOrigin::GhLogin,
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "no access: token needs \"user\". Run gh auth refresh -h github.com -s user"
+        );
+    }
+
+    #[test]
+    fn a_token_from_a_variable_is_named_in_the_missing_scope_error() {
+        let gh = TokenEnvironment::default().with_gh_token("x");
+        let error = billing_error_of(NOT_FOUND, "user", TOKEN_SCOPES, gh);
+        assert_eq!(
+            error,
+            BillingError::MissingScope {
+                needed: "user".to_owned(),
+                token: TokenOrigin::Variable("GH_TOKEN"),
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "no access: token needs \"user\". Make a new GH_TOKEN with that scope."
+        );
+        let github = TokenEnvironment::default().with_github_token("y");
+        let error = billing_error_of(NOT_FOUND, "user", TOKEN_SCOPES, github);
+        assert_eq!(
+            error,
+            BillingError::MissingScope {
+                needed: "user".to_owned(),
+                token: TokenOrigin::Variable("GITHUB_TOKEN"),
+            }
+        );
+    }
+
+    #[test]
+    fn a_403_with_a_missing_scope_is_a_missing_scope_too() {
+        let error = billing_error_of(
+            "HTTP/2.0 403 Forbidden",
+            "user",
+            TOKEN_SCOPES,
+            TokenEnvironment::default(),
+        );
+        assert!(
+            matches!(error, BillingError::MissingScope { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_token_with_an_accepted_scope_and_a_404_has_no_billing_role() {
+        let error = billing_error_of(
+            NOT_FOUND,
+            "admin:org, repo",
+            TOKEN_SCOPES,
+            TokenEnvironment::default(),
+        );
+        assert_eq!(error, BillingError::NoBillingRole);
+        assert_eq!(
+            error.to_string(),
+            "no access: no billing role for this account, or it is not on the enhanced billing platform"
+        );
+    }
+
+    #[test]
+    fn the_needed_scope_follows_the_rule_of_the_design() {
+        let repo_needed = billing_error_of(
+            NOT_FOUND,
+            "admin:org, repo",
+            "gist, read:org",
+            TokenEnvironment::default(),
+        );
+        assert!(
+            matches!(&repo_needed, BillingError::MissingScope { needed, .. } if needed == "repo"),
+            "{repo_needed:?}"
+        );
+        let enterprise = billing_error_of(
+            NOT_FOUND,
+            "admin:enterprise, manage_billing:enterprise",
+            TOKEN_SCOPES,
+            TokenEnvironment::default(),
+        );
+        assert!(
+            matches!(
+                &enterprise,
+                BillingError::MissingScope { needed, .. } if needed == "manage_billing:enterprise"
+            ),
+            "{enterprise:?}"
+        );
+    }
+
+    #[test]
+    fn a_404_with_no_scope_headers_is_a_plain_http_error() {
+        let stub = Stub::new("cat \"$dir/usage.out\"");
+        stub.file(
+            "usage.out",
+            &http_output(NOT_FOUND, "{\"message\":\"Not Found\"}"),
+        );
+        let error = stub
+            .source()
+            .billing_usage(&Endpoint::User(acme()), november())
+            .expect_err("an error");
+        assert!(
+            matches!(
+                error,
+                BillingError::Source(SourceError::Http { status: 404, .. })
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_404_with_an_empty_accepted_list_is_a_plain_http_error() {
+        let error = billing_error_of(NOT_FOUND, "", TOKEN_SCOPES, TokenEnvironment::default());
+        assert!(
+            matches!(
+                error,
+                BillingError::Source(SourceError::Http { status: 404, .. })
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_500_is_an_http_error_and_a_401_is_not_logged_in() {
+        let server = billing_error_of(
+            "HTTP/2.0 500 Internal Server Error",
+            "user",
+            TOKEN_SCOPES,
+            TokenEnvironment::default(),
+        );
+        assert!(
+            matches!(
+                server,
+                BillingError::Source(SourceError::Http { status: 500, .. })
+            ),
+            "{server:?}"
+        );
+        let login = billing_error_of(
+            "HTTP/2.0 401 Unauthorized",
+            "user",
+            TOKEN_SCOPES,
+            TokenEnvironment::default(),
+        );
+        assert!(
+            matches!(login, BillingError::Source(SourceError::NotLoggedIn(_))),
+            "{login:?}"
+        );
+    }
+
+    #[test]
+    fn a_report_that_is_not_json_or_has_no_items_is_a_bad_response() {
+        for body in ["not json", "{}", "{\"usageItems\":5}", ""] {
+            let stub = Stub::new("cat \"$dir/usage.out\"");
+            stub.file(
+                "usage.out",
+                &billing_output("HTTP/2.0 200 OK", "user", TOKEN_SCOPES, body),
+            );
+            let error = stub
+                .source()
+                .billing_usage(&Endpoint::User(acme()), november())
+                .expect_err("an error");
+            assert!(
+                matches!(error, BillingError::Source(SourceError::BadResponse(_))),
+                "{body:?} gave {error:?}"
+            );
+        }
     }
 
     #[test]

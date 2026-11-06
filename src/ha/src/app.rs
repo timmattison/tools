@@ -9,6 +9,7 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::backend::Backend;
 use ratatui::Terminal;
 
+use crate::billing::BillingBoard;
 use crate::board::Board;
 use crate::cancel::{Canceller, Confirm};
 use crate::first_cycle::{FirstCycle, NoTargetRead, Verdict};
@@ -80,6 +81,8 @@ pub struct App<'a, O: Opener, C: Canceller, Tz: TimeZone> {
     pub board: Board,
     /// The text for the status line.
     pub status: Status,
+    /// The Actions billing box. It is `None` when billing is off.
+    pub billing: Option<BillingBoard>,
     opener: &'a O,
     canceller: &'a C,
     worker: &'a Worker,
@@ -131,8 +134,13 @@ where
     Tz::Offset: std::fmt::Display,
 {
     /// Builds the state of a run. `now` gives the current time and `tz` is
-    /// the time zone for the clock times on screen.
+    /// the time zone for the clock times on screen. `billing` is the board of
+    /// the Actions billing box, or `None` when billing is off.
     #[must_use]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is a distinct collaborator of the run; a parameter struct would only rename them"
+    )]
     pub fn new(
         board: Board,
         status: Status,
@@ -141,10 +149,12 @@ where
         worker: &'a Worker,
         now: &'a dyn Fn() -> DateTime<Utc>,
         tz: &'a Tz,
+        billing: Option<BillingBoard>,
     ) -> Self {
         App {
             board,
             status,
+            billing,
             opener,
             canceller,
             worker,
@@ -191,6 +201,10 @@ where
             self.apply_updates()?;
             self.sync_watch();
             let now = (self.now)();
+            let billing = self
+                .billing
+                .as_ref()
+                .map(|board| board.view(now.date_naive()));
             terminal
                 .draw(|frame| {
                     render::draw(
@@ -200,6 +214,7 @@ where
                         now,
                         self.tz,
                         self.confirm.as_ref(),
+                        billing.as_ref(),
                     );
                 })
                 .map_err(std::io::Error::other)?;
@@ -267,6 +282,11 @@ where
                     entries.map_err(|error| error.to_string()),
                     history.map_err(|error| error.to_string()),
                 ),
+                Update::Billing(results) => {
+                    if let Some(board) = self.billing.as_mut() {
+                        board.apply(results);
+                    }
+                }
                 Update::Repos {
                     repos,
                     owner_errors,
@@ -723,12 +743,52 @@ mod tests {
             &channels.worker,
             &clock,
             &tz,
+            None,
         );
         let result = app.run(
             &mut terminal,
             &mut script(events.into_iter().map(Some).collect()),
         );
         (result, lines(terminal.backend().buffer()))
+    }
+
+    #[test]
+    fn a_billing_update_reaches_the_billing_board() {
+        use crate::billing::{AccountCell, DailyUsage};
+        let channels = channels();
+        let opener = opener(false);
+        let canceller = canceller();
+        let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
+        let tz = FixedOffset::east_opt(0).unwrap();
+        let clock = now;
+        let acme = OwnerName::parse("acme").unwrap();
+        let mut app = App::new(
+            Board::new(Duration::from_hours(8)),
+            Status::default(),
+            &opener,
+            &canceller,
+            &channels.worker,
+            &clock,
+            &tz,
+            Some(BillingBoard::new(vec![acme.clone()])),
+        );
+        channels
+            .updates
+            .send(Update::Billing(vec![(
+                acme,
+                Ok(DailyUsage::from_items(&[])),
+            )]))
+            .unwrap();
+        let result = app.run(
+            &mut terminal,
+            &mut script(vec![Some(press(KeyCode::Char('q')))]),
+        );
+        assert!(result.is_ok(), "{result:?}");
+        let view = app.billing.as_ref().unwrap().view(now().date_naive());
+        assert!(matches!(
+            view.accounts[0].cell,
+            AccountCell::Ready { error: None, .. }
+        ));
     }
 
     #[test]
@@ -1766,6 +1826,7 @@ mod tests {
             &channels.worker,
             &clock,
             &tz,
+            None,
         );
         let events = vec![
             None,
@@ -1888,6 +1949,7 @@ mod tests {
             &channels.worker,
             &clock,
             &tz,
+            None,
         );
         let mut events = StepEvents {
             steps: steps.into(),
@@ -2563,6 +2625,7 @@ mod tests {
             &channels.worker,
             &clock,
             &tz,
+            None,
         );
         let mut events = StepEvents {
             steps: steps.into(),
@@ -2958,6 +3021,7 @@ mod tests {
             &channels.worker,
             &clock,
             &tz,
+            None,
         );
         let events = vec![press(KeyCode::Char('q')).into()];
         let result = app.run(&mut terminal, &mut script(events));
