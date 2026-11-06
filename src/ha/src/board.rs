@@ -4648,4 +4648,16 @@ mod tests {
             Some(at("2026-11-04T17:40:55Z"))
         );
     }
+
+    #[test]
+    fn a_failed_fetch_keeps_the_end_of_the_last_good_jobs() {
+        let run = late_run();
+        let id = run.id;
+        let mut board = late_board(run, Some(late_jobs()));
+        board.fail_jobs(id, "HTTP 502".to_owned());
+        assert_eq!(
+            ended(&mut board, late_now(), id),
+            Some(at("2026-11-04T17:22:45Z"))
+        );
+    }
 }
