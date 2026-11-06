@@ -828,6 +828,20 @@ const LSOF_MIN_FIELDS: usize = 9;
 /// the reader that the process holds no files, which is worse than an error.
 fn get_open_files(pid: u32) -> Result<Vec<OpenFile>, String> {
     let stdout = run_lsof(&["-p", &pid.to_string()])?;
+    parse_open_files(pid, &stdout)
+}
+
+/// Parses the output of `lsof -p <pid>` into the open files of the process.
+///
+/// # Arguments
+///
+/// * `pid` - The process ID that lsof read
+/// * `stdout` - The standard output of lsof, with its header line
+///
+/// # Returns
+///
+/// The open files, or a sentence that says why there are none.
+fn parse_open_files(_pid: u32, stdout: &str) -> Result<Vec<OpenFile>, String> {
     let mut files = Vec::new();
 
     // Skip the header line and parse each subsequent line
