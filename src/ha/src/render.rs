@@ -501,6 +501,10 @@ where
 /// `None`. The line holds the spans of `cells`: the two marker cells keep
 /// `Color::Reset`, and the text cells take the style that the caller gives
 /// the line.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is a distinct fact of the run row or of the view; a parameter struct would only rename them"
+)]
 fn run_line<Tz: TimeZone>(
     run: &Run,
     state: RunState,
