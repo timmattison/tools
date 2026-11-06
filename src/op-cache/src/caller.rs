@@ -2,6 +2,7 @@
 
 use crate::audit;
 use serde::Serialize;
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 /// One process in the chain above op-cache.
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
@@ -72,9 +73,31 @@ pub(crate) fn walk_ancestors(
     chain
 }
 
-/// The real chain of this process, one PID lookup at a time.
+/// The real chain of this process.
+///
+/// It asks the system about one PID at a time, and never scans all processes.
 pub(crate) fn ancestors_of_this_process() -> Vec<Ancestor> {
-    vec![]
+    let mut system = System::new();
+    walk_ancestors(std::process::id(), |pid| {
+        let pid = Pid::from_u32(pid);
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            false,
+            ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
+        );
+        let process = system.process(pid)?;
+        let command = process
+            .cmd()
+            .iter()
+            .map(|argument| argument.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ");
+        Some(ProcessFacts {
+            parent: process.parent().map(Pid::as_u32),
+            name: process.name().to_string_lossy().into_owned(),
+            command: (!command.is_empty()).then_some(command),
+        })
+    })
 }
 
 #[cfg(test)]
