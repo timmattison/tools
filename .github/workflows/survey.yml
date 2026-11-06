@@ -34,11 +34,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install the system libraries
+      - name: Install the system packages
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends libasound2-dev libssl-dev pkg-config
+          sudo apt-get install --yes --no-install-recommends libasound2-dev libssl-dev pkg-config zsh
 
       - name: Install the pinned Rust toolchain
         run: rustup toolchain install
