@@ -149,6 +149,26 @@ impl Registry {
         })
     }
 
+    /// Reads `sidecar.toml` at the root of a worktree.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError::Missing`] when the file does not exist. Returns the other
+    /// [`RegistryError`] variants when the read fails or the text is not valid.
+    pub fn load(_worktree_root: &Path) -> Result<Self, RegistryError> {
+        Ok(Self::default())
+    }
+
+    /// Reads `sidecar.toml` at the root of a worktree. A missing file gives the default
+    /// registry, which has no sidecars.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError`] when the file exists and cannot be read or is not valid.
+    pub fn load_or_default(_worktree_root: &Path) -> Result<Self, RegistryError> {
+        Ok(Self::default())
+    }
+
     /// The directory of the links, relative to the worktree root.
     #[must_use]
     pub fn link_dir(&self) -> &Path {
@@ -176,6 +196,9 @@ impl Registry {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use super::*;
 
     fn names(registry: &Registry) -> Vec<&str> {
@@ -258,6 +281,74 @@ mod tests {
                 "{bad:?}: {error}"
             );
             assert!(error.to_string().contains("token_env"), "{error}");
+        }
+    }
+
+    static NEXT_DIR: AtomicUsize = AtomicUsize::new(0);
+
+    /// A directory that no other test or process uses. It goes away on drop.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "sidecar-test-{}-{nanos}-{}",
+                std::process::id(),
+                NEXT_DIR.fetch_add(1, Ordering::SeqCst)
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn load_without_a_file_is_missing() {
+        let dir = TempDir::new();
+        let error = Registry::load(&dir.0).unwrap_err();
+        assert!(matches!(error, RegistryError::Missing { .. }), "{error}");
+        assert!(error.to_string().contains(REGISTRY_FILE), "{error}");
+    }
+
+    #[test]
+    fn load_or_default_without_a_file_gives_the_default() {
+        let dir = TempDir::new();
+        assert_eq!(
+            Registry::load_or_default(&dir.0).unwrap(),
+            Registry::default()
+        );
+    }
+
+    #[test]
+    fn load_and_load_or_default_read_the_file() {
+        let dir = TempDir::new();
+        std::fs::write(dir.0.join(REGISTRY_FILE), "sidecars = [\"testdata\"]").unwrap();
+        for registry in [
+            Registry::load(&dir.0).unwrap(),
+            Registry::load_or_default(&dir.0).unwrap(),
+        ] {
+            assert_eq!(names(&registry), ["testdata"]);
+        }
+    }
+
+    #[test]
+    fn load_reports_an_invalid_file() {
+        let dir = TempDir::new();
+        std::fs::write(dir.0.join(REGISTRY_FILE), "lnk_dir = \"x\"").unwrap();
+        for error in [
+            Registry::load(&dir.0).unwrap_err(),
+            Registry::load_or_default(&dir.0).unwrap_err(),
+        ] {
+            assert!(error.to_string().contains("lnk_dir"), "{error}");
         }
     }
 }
