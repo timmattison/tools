@@ -96,7 +96,8 @@ That name is the one that cost the most. Git knows `--root` as an option of
 conflict, and reported `grind: clean` at exit 0 — a clean verdict for a branch
 that does not exist.
 
-**Both** revisions are resolved up front, not just the one you typed. A replay
+**Every** revision is resolved up front, not just the ones you typed: `HEAD`,
+BRANCH, and NEWBASE when [`--onto`](#a-stacked-branch---onto) names one. A replay
 starts from `HEAD`, so an empty repository or a fresh `git checkout --orphan` has
 nothing to replay — and being told that is worth more than watching a scratch
 worktree get built for a rebase that could never have started:
@@ -114,16 +115,20 @@ $ echo $?
 
 ```console
 grind [-q | --diff] [BRANCH]
+grind [-q | --diff] --onto NEWBASE BRANCH
 ```
 
 | Argument | Meaning |
 | --- | --- |
-| `[BRANCH]` | What to rebase HEAD onto. Anything git resolves to a commit works — a branch, a remote-tracking ref, a tag, a raw sha. Leave it out for `main`, or `master` in a repository with no `main`. |
+| `[BRANCH]` | What to rebase HEAD onto. Anything git resolves to a commit works — a branch, a remote-tracking ref, a tag, a raw sha. Leave it out for `main`, or `master` in a repository with no `main`. With `--onto`, BRANCH is the upstream, and you must name it. |
+| `--onto NEWBASE` | Replay only `BRANCH..HEAD`, onto NEWBASE, as `git rebase --onto NEWBASE BRANCH` does. See [A stacked branch: `--onto`](#a-stacked-branch---onto). |
 | `-q`, `--quiet` | Print nothing about the rebase. The exit code is still the answer. |
 | `--diff` | Print the diff of each stop after the breakdown. It cannot go with `-q`. On a terminal, the diff is in color. See [The diff of each stop](#the-diff-of-each-stop). |
 
-One positional argument and no `--onto`. `grind` simulates from `HEAD`, which is
-the only thing it *can* simulate from, so there is no second ref to give it.
+`grind` replays from `HEAD`, which is the only thing it *can* replay from. That
+fixes the optional `<branch>` argument of `git rebase`, which selects the commits
+to replay. It does not fix `--onto`, which is a different argument: the new base
+where the commits land.
 
 Unlike `grist`, `grind` has no answer to pipe — the answer *is* the exit code —
 so `-q` means silence rather than a terser rendering. It covers both streams:
@@ -132,8 +137,9 @@ caller redirecting stdout to `/dev/null` and getting chatter on the terminal
 anyway has not been given a quiet tool.
 
 `-q` silences everything `grind` itself says, and stops there. The argument
-parser answers before `grind` starts. So `grind -q --onto main` still prints a
-usage error and exits `2`, and `grind -q --version` still prints the version and
+parser answers before `grind` starts. So `grind -q --onto main`, which names no
+BRANCH, still prints a usage error and exits `2`, and `grind -q --version` still
+prints the version and
 exits `0`. Both answer about the tool rather than about a rebase. A caller left
 with a bare `2` and no word about which part of the command line was refused is
 worse off.
@@ -206,6 +212,50 @@ measured behind a name you never typed.
 The choice itself lives in [`gitscratch`](../gitscratch/README.md), which every
 tool built on that harness shares, so no two of them can drift into measuring
 different branches for the same command line.
+
+## A stacked branch: `--onto`
+
+`grind --onto NEWBASE BRANCH` measures `git rebase --onto NEWBASE BRANCH`. It
+replays only the commits of `BRANCH..HEAD`, and it puts them on NEWBASE.
+
+That is the rebase that moves a stacked branch. Branch `child` starts on branch
+`parent`, and then `parent` gets a squash merge into `main`. The squash commit
+holds the change of each commit of `parent`, but under a different patch. Git
+thus does not drop those commits, and a plain rebase of `child` onto `main`
+stops on each one:
+
+```console
+$ grind main
+grind: conflicts - replaying HEAD onto main
+       2 hunks across 1 file, 2 stops
+
+  shared.txt    2 hunks
+$ grind --onto main parent
+grind: clean - replaying parent..HEAD onto main hit no conflicts
+```
+
+The first answer is about a rebase that you do not intend to do. The second is
+about `git rebase --onto main parent`, which replays only the commits of
+`child`. `grind parent` does not help either: it replays nothing onto `main`.
+
+The verdict line names the range and the new base, so the answer says which
+rebase it measured. `--diff` and `-q` work with `--onto` as they work without
+it, and the three exit codes keep their meanings. A run without `--onto` prints
+the same bytes as before.
+
+The rules:
+
+- **`--onto` needs BRANCH.** BRANCH is the upstream that bounds the replay. The
+  default branch in its place turns `grind --onto main` into a plain rebase onto
+  `main`, under a verdict that names `--onto`. So the argument parser refuses
+  that command line with its usage error and exit `2`, also under `-q`.
+- **NEWBASE is resolved up front**, beside `HEAD` and BRANCH, before a scratch
+  worktree exists. A NEWBASE that does not resolve gets exit `2` and the same
+  `could not resolve` message as a BRANCH that does not resolve.
+- **A NEWBASE that starts with a dash is a revision.** Git knows `--root` as an
+  option of `rebase`, so `grind --onto=--root parent` is the dangerous case. It
+  is refused with exit `2`. It never replays onto the root, and it never reports
+  clean.
 
 ## The three numbers
 
@@ -499,6 +549,21 @@ each run, and a test reads the removal back off the built command, as it reads
 the locale pin. Without the removal, a developer who exports one of them gets
 tests of the paint that fail on that machine only. A test that needs one of the
 three sets it on its own run.
+
+The `--onto` tests hold the rules of
+[A stacked branch: `--onto`](#a-stacked-branch---onto). They use the
+`squash_merged_parent_repo` fixture of `gitscratch`, where `parent` got a
+squash merge into `main`:
+
+- From `child`, a control run of `grind main` reports the false conflicts first,
+  so the clean verdict of `grind --onto main parent` is not vacuous.
+- From `contested-child`, `grind --onto main parent` gives one golden: one stop,
+  in `stacked.txt` only, and no hunk from the commits of `parent`.
+- A NEWBASE that does not resolve, and `--onto=--root`, are refused before a
+  scratch worktree exists. The proof is the poisoned `TMPDIR`, as for BRANCH.
+- `--onto` without BRANCH gets the usage error of the parser, also under `-q`.
+- `--diff --onto main parent` prints exactly one halt diff, for the commit of
+  `contested-child`. One golden holds the whole of stdout.
 
 The `--diff` tests hold the rules of
 [The diff of each stop](#the-diff-of-each-stop):

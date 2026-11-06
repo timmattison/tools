@@ -30,7 +30,7 @@ const TOOL: &str = "grind";
 #[derive(Parser, Debug)]
 #[clap(author, version = version_string!())]
 struct Args {
-    /// Branch to rebase HEAD onto [default: main, else master]
+    /// Branch to rebase HEAD onto, or the upstream with --onto [default: main, else master]
     ///
     // The default is stated in the doc comment above rather than through clap's
     // `default_value`, and the difference is the refusal. A `default_value` of
