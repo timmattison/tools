@@ -4702,4 +4702,31 @@ mod tests {
             Some(at("2026-11-04T17:22:45Z"))
         );
     }
+
+    #[test]
+    fn jobs_with_no_finish_time_give_no_end() {
+        let run = late_run();
+        let id = run.id;
+        let jobs = vec![
+            timed_job(
+                126_730_108_923,
+                "Full check list (Linux)",
+                RunState::Passed,
+                Some("2026-11-04T17:07:51Z"),
+                None,
+            ),
+            timed_job(
+                126_730_109_123,
+                "Clippy (Windows)",
+                RunState::Passed,
+                Some("2026-11-04T17:07:53Z"),
+                None,
+            ),
+        ];
+        let mut board = late_board(run, Some(jobs));
+        assert_eq!(
+            ended(&mut board, late_now(), id),
+            Some(at("2026-11-04T17:40:55Z"))
+        );
+    }
 }
