@@ -7,6 +7,7 @@
 
 pub mod add;
 pub mod clone;
+pub mod gh;
 pub mod git;
 pub mod host;
 pub mod link;
