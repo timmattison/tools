@@ -17,7 +17,12 @@
 //! `updated_at` changed since the last good fetch. So `ha` fetches
 //! the jobs of a finished run one time only, when all of its jobs are finished.
 //! Each active run costs one more jobs request on each cycle. An `ETag` 304
-//! answer makes that request free. Job requests and run requests share the
+//! answer makes that request free. The screen also sends the runs of its
+//! recent section, with [`Command::RecentRuns`]. The worker fetches the jobs
+//! of each finished run of that list one time, so the screen can show the job
+//! sum of the run. This costs one request for each finished run, at most
+//! [`RECENT_JOBS_PER_CYCLE`] new runs in each cycle, the newest finish first.
+//! Job requests and run requests share the
 //! [`CONCURRENCY`] limit and the rate limit backoff.
 //!
 //! GitHub can answer with success and still leave runs out. The worker keeps
@@ -155,7 +160,8 @@ pub enum Update {
         reason: Suspicion,
     },
     /// The jobs of one run. The worker sends them for a run that the screen
-    /// shows expanded and for every active run.
+    /// shows expanded, for every active run, and for each finished run of the
+    /// recent list (see [`Command::RecentRuns`]).
     Jobs {
         /// The run that holds the jobs.
         run: RunId,
@@ -344,6 +350,9 @@ struct State {
     created_answers: Mutex<HashMap<RepoName, Vec<Run>>>,
     /// The runs whose jobs the screen shows now (the last `WatchJobs`).
     watched: BTreeSet<RunKey>,
+    /// The runs of the last `RecentRuns` list, in its order (the newest finish
+    /// first).
+    recent: Vec<RunKey>,
     /// The facts of each run of the last shown runs, for each repository. A good
     /// fetch and a fetch with a suspect sweep replace the entry.
     facts: Mutex<HashMap<RepoName, HashMap<RunId, RunFacts>>>,
@@ -395,6 +404,7 @@ impl State {
             stale_sweeps: Mutex::new(HashSet::new()),
             created_answers: Mutex::new(HashMap::new()),
             watched: BTreeSet::new(),
+            recent: Vec::new(),
             facts: Mutex::new(HashMap::new()),
             job_marks: Mutex::new(HashMap::new()),
             held_jobs: Mutex::new(BTreeSet::new()),
@@ -434,6 +444,10 @@ impl State {
     /// watched its last fetch: its mark is active, so it is due one more time.
     /// A run whose fetch failed is due again through its active mark.
     ///
+    /// The fourth source is the new runs of the last `RecentRuns` list. They
+    /// have no mark, thus this function does not consider them.
+    /// [`State::due_recent`] gives them, and the cycle appends them.
+    ///
     /// A run with no facts is never due. It left the list of runs, or its
     /// repository left the repository set. The board ignores a job answer for
     /// a run that it does not hold, so a fetch of such a run is wasted.
@@ -463,6 +477,38 @@ impl State {
                     Some(mark) => mark.active || now.updated_at != mark.updated_at,
                 }
             })
+            .collect()
+    }
+
+    /// The runs of the recent list that get their first job fetch in this
+    /// cycle. The function walks `self.recent` in its order (the newest finish
+    /// first). It keeps each run that has facts, has no mark, and is not in
+    /// `due`. It stops after [`RECENT_JOBS_PER_CYCLE`] runs. So the top rows of
+    /// the recent section fill first, and the next cycle takes the next runs.
+    ///
+    /// These are exactly the recent runs that [`State::due_jobs`] never
+    /// considers. A recent run with a mark is never new, because `due_jobs`
+    /// already decides it: an active mark makes it due, and an inactive mark
+    /// makes it due only when its `updated_at` changed. A retry after a failed
+    /// fetch thus goes through `due_jobs`, outside the cap of new runs. A run
+    /// with no facts is not due, as in `due_jobs`.
+    fn due_recent(&mut self, due: &[RunKey]) -> Vec<RunKey> {
+        let facts = self.facts.get_mut().unwrap_or_else(PoisonError::into_inner);
+        let marks = self
+            .job_marks
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner);
+        self.recent
+            .iter()
+            .filter(|key| {
+                facts
+                    .get(&key.0)
+                    .is_some_and(|runs| runs.contains_key(&key.1))
+                    && !marks.contains_key(*key)
+                    && !due.contains(key)
+            })
+            .take(RECENT_JOBS_PER_CYCLE)
+            .cloned()
             .collect()
     }
 }
@@ -498,6 +544,9 @@ enum Wake {
 /// applies each command that arrived during the last cycle, in order. A refresh
 /// command in that backlog starts the next cycle at once. A refresh command
 /// also ends a wait for a rate limit reset, because the person asked for it.
+///
+/// A [`Command::RecentRuns`] fetches nothing at once. The cycle fetches the
+/// new runs of the list.
 ///
 /// A [`Command::WatchJobs`] changes the watched set. The function fetches the
 /// jobs of each run that is new in the set at once, and it sends the answers.
@@ -543,7 +592,8 @@ fn wait_for_next_cycle<S: Source>(
 }
 
 /// Applies one command. A refresh sets `requested`. A new watched set adds its
-/// new runs to `added`. The set holds a run one time, even when two commands
+/// new runs to `added`. A `RecentRuns` list replaces `state.recent` and touches
+/// neither `requested` nor `added`, so nothing is fetched at once. The set holds a run one time, even when two commands
 /// add it.
 fn apply_command(
     command: Command,
@@ -557,15 +607,16 @@ fn apply_command(
             state.billing_requested = true;
         }
         Command::WatchJobs(set) => added.extend(state.watch(set)),
-        Command::RecentRuns(_) => {}
+        Command::RecentRuns(list) => state.recent = list,
     }
 }
 
 /// Runs one cycle: lists the owners that need it, checks for merge queues,
 /// reads each merge queue, fetches every repository, fetches the jobs of the
 /// runs that are due (the watched runs, the active runs, and the runs with a
-/// mark, when the list of runs holds the run), and reports the end of the
-/// cycle. A mark whose run left the list of runs is removed. The reconcile at
+/// mark, when the list of runs holds the run, and the new finished runs of the
+/// recent list, at most [`RECENT_JOBS_PER_CYCLE`]), all in one job fetch, and
+/// reports the end of the cycle. A mark whose run left the list of runs is removed. The reconcile at
 /// the end of the job fetch then tells the source to forget the pages of each
 /// run whose mark went away. A failed or suspect repository fetch keeps its
 /// old facts, thus its marks stay. Returns how long to wait before the next
@@ -618,7 +669,9 @@ fn cycle<S: Source>(
         .get_mut()
         .unwrap_or_else(PoisonError::into_inner)
         .retain(|(repo, run), _| facts.get(repo).is_some_and(|runs| runs.contains_key(run)));
-    let due = state.due_jobs();
+    let mut due = state.due_jobs();
+    let recent = state.due_recent(&due);
+    due.extend(recent);
     fetch_jobs(source, state, &due, updates)?;
     refresh_billing(source, settings, state, updates)?;
     let now = Utc::now();
