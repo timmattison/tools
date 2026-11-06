@@ -149,6 +149,11 @@ pub fn run(cwd: &Path, raw_name: &str, yes: bool) -> anyhow::Result<bool> {
     let name = SidecarName::parse(raw_name)?;
     let host = Host::discover(cwd, RegistryPolicy::DefaultWhenMissing)?;
     let facts = read_facts(&host, &name)?;
+    if facts.steps.is_empty() {
+        println!("The sidecar {name} is ready. sidecar add changes nothing.");
+        print_manual_steps(&facts.owner, &facts.repo, &name);
+        return Ok(true);
+    }
     println!("sidecar add will do these steps:");
     for step in &facts.steps {
         println!("  - {}", describe(*step, &host, &name, &facts));
