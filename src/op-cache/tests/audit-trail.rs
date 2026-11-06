@@ -370,3 +370,78 @@ fn blocked_audit_directory_gives_one_warning_and_the_read_succeeds() {
     assert_eq!(stderr.lines().count(), 1, "stderr: {stderr}");
     assert!(stderr.contains("warning:"), "stderr: {stderr}");
 }
+
+const SESSION_NAME: &str = "name with \" and \\ in it";
+
+#[test]
+fn op_start_names_the_ancestors_the_claude_session_and_the_terminal() {
+    let fixture = Fixture::new();
+    fixture.install_fake_op("echo value");
+    let session_id = unique_token("session").replace("SENTINEL", "sess");
+    let zellij_session = unique_token("zellij").replace("SENTINEL", "zs");
+    let test_pid = std::process::id();
+    let sessions = fixture.path("claude").join("sessions");
+    fs::create_dir_all(&sessions).expect("create sessions dir");
+    let session = serde_json::json!({
+        "pid": test_pid,
+        "sessionId": session_id,
+        "name": SESSION_NAME,
+    });
+    fs::write(
+        sessions.join(format!("{test_pid}.json")),
+        session.to_string(),
+    )
+    .expect("write session file");
+
+    let output = fixture
+        .command()
+        .args(["read", REFERENCE])
+        .env("ZELLIJ_SESSION_NAME", &zellij_session)
+        .env("ZELLIJ_PANE_ID", "7")
+        .env("TERM_PROGRAM", "WezTerm")
+        .output()
+        .expect("run op-cache");
+
+    assert!(
+        output.status.success(),
+        "op-cache failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let records = records(&audit_text(&fixture));
+    let start = &records[0];
+    assert_eq!(start["event"], "op_start");
+    let ancestors = start["ancestors"].as_array().expect("ancestors array");
+    assert!(!ancestors.is_empty(), "no ancestors");
+    assert!(ancestors.len() <= 32, "{} ancestors", ancestors.len());
+    assert_eq!(ancestors[0]["pid"], test_pid);
+    assert!(ancestors[0]["name"]
+        .as_str()
+        .is_some_and(|name| !name.is_empty()));
+    assert_eq!(
+        start["claude"],
+        serde_json::json!({
+            "pid": test_pid,
+            "session_id": session_id,
+            "name": SESSION_NAME,
+        })
+    );
+    assert_eq!(start["zellij_session"], zellij_session.as_str());
+    assert_eq!(start["zellij_pane"], "7");
+    assert_eq!(start["term_program"], "WezTerm");
+}
+
+#[test]
+fn op_start_has_no_claude_without_a_session_file() {
+    let fixture = Fixture::new();
+    fixture.install_fake_op("echo value");
+
+    let output = fixture.read(REFERENCE);
+
+    assert!(output.status.success());
+    let records = records(&audit_text(&fixture));
+    assert!(
+        records[0]["claude"].is_null(),
+        "claude: {}",
+        records[0]["claude"]
+    );
+}
