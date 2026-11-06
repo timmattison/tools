@@ -2071,6 +2071,22 @@ mod tests {
         render_in(width, height, board, status, &utc())
     }
 
+    /// Draws one frame in UTC at the time `now` and returns the buffer.
+    fn render_at(
+        width: u16,
+        height: u16,
+        board: &mut Board,
+        status: &Status,
+        now: DateTime<Utc>,
+    ) -> Buffer {
+        let mut terminal =
+            Terminal::new(TestBackend::new(width, height)).expect("a test terminal opens");
+        terminal
+            .draw(|frame| draw(frame, board, status, now, &utc(), None))
+            .expect("a test frame draws");
+        terminal.backend().buffer().clone()
+    }
+
     /// Reads each line of a buffer as text. A wide glyph fills one cell and
     /// the cell after it holds a blank that is not part of the text.
     fn lines(buffer: &Buffer) -> Vec<String> {
@@ -5709,6 +5725,62 @@ mod tests {
         text.iter()
             .position(|line| line.contains(needle))
             .unwrap_or_else(|| panic!("no row holds {needle:?}: {text:?}"))
+    }
+
+    // GitHub changed `updated_at` of this run 18 minutes after its last job
+    // ended. The row shows the end of the last job, not `updated_at`.
+    #[test]
+    fn a_finished_run_shows_the_end_of_its_last_job() {
+        let now = at("2026-11-04T18:00:00Z");
+        let mut board = Board::new(Duration::from_hours(8));
+        board.replace(
+            repo("Lock-Free-Labs/nvr-tools"),
+            vec![run(
+                41_874_496_263,
+                "Lock-Free-Labs/nvr-tools",
+                "CI",
+                "issue-325",
+                "Late update",
+                RunState::Passed,
+                "2026-11-04T17:07:48Z",
+                "2026-11-04T17:40:55Z",
+            )],
+            now,
+        );
+        board.set_jobs(
+            RunId(41_874_496_263),
+            vec![
+                job(
+                    126_730_108_923,
+                    "Full check list (Linux)",
+                    RunState::Passed,
+                    Some("2026-11-04T17:07:51Z"),
+                    Some("2026-11-04T17:22:45Z"),
+                ),
+                job(
+                    126_730_109_123,
+                    "Clippy (Windows)",
+                    RunState::Passed,
+                    Some("2026-11-04T17:07:53Z"),
+                    Some("2026-11-04T17:12:05Z"),
+                ),
+            ],
+        );
+        let buffer = render_at(120, 10, &mut board, &loaded(), now);
+        let text = lines(&buffer);
+        let y = row_holding(&text, "41874496263");
+        assert_eq!(
+            started_cells(&text, y),
+            "17:22:45",
+            "FINISHED is the end of the last job: {:?}",
+            text[y]
+        );
+        assert_eq!(
+            time_cells(&text, y),
+            "14m 57s",
+            "TIME runs to the end of the last job: {:?}",
+            text[y]
+        );
     }
 
     #[test]
