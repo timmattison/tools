@@ -251,10 +251,10 @@ fn run_end(run: &Run, answer: Option<&Jobs>) -> DateTime<Utc> {
     if jobs.iter().any(|job| job.state.is_active()) {
         return run.updated_at;
     }
-    jobs.iter()
-        .filter_map(|job| job.completed_at)
-        .max()
-        .unwrap_or(run.updated_at)
+    match jobs.iter().filter_map(|job| job.completed_at).max() {
+        Some(latest) if latest >= run.started_at => latest,
+        _ => run.updated_at,
+    }
 }
 
 /// One row that the selection can mark, other than a job row, in the order of
