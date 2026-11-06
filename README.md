@@ -2586,6 +2586,13 @@ cannot hang the caller. Used by `cwt` and `ha`.
   - To install: `cargo install --git https://github.com/timmattison/tools ha`
 - sidecar (data repositories beside a host repository)
   - Makes, clones, and links the private data repositories (sidecars) of a host repository. The host lists its sidecars in `sidecar.toml`.
+  - `sidecar setup` clones each sidecar once and links it into the worktree. `sidecar setup --hook` never fails, for a post-checkout hook.
+  - `sidecar add <name>` makes a private sidecar on GitHub, registers it, clones it, and links it.
+  - `sidecar status` shows the state of each clone and link, and the sidecars that `sidecar.toml` does not name.
+  - `sidecar path <name>` prints the path of a link, or stops with a message that names the fix.
+  - `sidecar worktree <name> [<branch>]` points a link at a worktree of the sidecar for a branch.
+  - `sidecar` never deletes a repository, a clone, a worktree, a branch, or a change.
+  - See [docs/sidecar.md](./docs/sidecar.md) for the pattern, the rules, and the setup of a host.
   - To install: `cargo install --git https://github.com/timmattison/tools sidecar`
 
 ## dirhash
