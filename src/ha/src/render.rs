@@ -2042,6 +2042,26 @@ mod tests {
         board
     }
 
+    /// Draws one frame in the time zone `tz` at the time `now` and returns the buffer.
+    fn render_at_in<Tz: TimeZone>(
+        width: u16,
+        height: u16,
+        board: &mut Board,
+        status: &Status,
+        now: DateTime<Utc>,
+        tz: &Tz,
+    ) -> Buffer
+    where
+        Tz::Offset: Display,
+    {
+        let mut terminal =
+            Terminal::new(TestBackend::new(width, height)).expect("a test terminal opens");
+        terminal
+            .draw(|frame| draw(frame, board, status, now, tz, None, None))
+            .expect("a test frame draws");
+        terminal.backend().buffer().clone()
+    }
+
     /// Draws one frame in the time zone `tz` and returns the buffer.
     fn render_in<Tz: TimeZone>(
         width: u16,
@@ -2053,12 +2073,7 @@ mod tests {
     where
         Tz::Offset: Display,
     {
-        let mut terminal =
-            Terminal::new(TestBackend::new(width, height)).expect("a test terminal opens");
-        terminal
-            .draw(|frame| draw(frame, board, status, now(), tz, None, None))
-            .expect("a test frame draws");
-        terminal.backend().buffer().clone()
+        render_at_in(width, height, board, status, now(), tz)
     }
 
     /// Draws one frame in UTC and returns the buffer.
@@ -2074,12 +2089,7 @@ mod tests {
         status: &Status,
         now: DateTime<Utc>,
     ) -> Buffer {
-        let mut terminal =
-            Terminal::new(TestBackend::new(width, height)).expect("a test terminal opens");
-        terminal
-            .draw(|frame| draw(frame, board, status, now, &utc(), None))
-            .expect("a test frame draws");
-        terminal.backend().buffer().clone()
+        render_at_in(width, height, board, status, now, &utc())
     }
 
     /// Reads each line of a buffer as text. A wide glyph fills one cell and
