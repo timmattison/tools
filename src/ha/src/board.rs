@@ -154,6 +154,13 @@ pub enum Row<'a> {
         /// was suspect (issue #599). The run is then the last good one, and
         /// it can be old.
         stale: bool,
+        /// The sum of the runner times (see `Job::runner_time`) of the jobs
+        /// that the board holds for the run, at the time of the view. It is
+        /// `None` when the board holds no good job for the run: before the
+        /// first answer, after a failed first fetch, and when the answer
+        /// holds no job. A failed fetch after a good one keeps the sum of
+        /// the last good jobs.
+        job_sum: Option<Duration>,
     },
     /// One job of an expanded run.
     Job {
@@ -783,15 +790,16 @@ impl Board {
     ///
     /// The order of the sections is: the merge queue, the active runs, the
     /// merge history, and the recent runs. The two merge sections show only
-    /// when [`Board::shows_merge_sections`] is true. The header of the active section
-    /// counts the jobs of the active runs by state and names the runners of the
-    /// jobs that wait or run. The selected row carries the
-    /// selection mark. This is the row of the selected item, or the row of
-    /// its selected job. The block of each expanded run follows the row of
-    /// that run. The item rows come in the order of `shown_items`, and the
-    /// selection finds the row of an item by the position of that item in
-    /// `shown_items`. The list also holds header rows, empty rows, and job
-    /// rows, thus the index of a row is not the position of its item.
+    /// when [`Board::shows_merge_sections`] is true. The header of the active
+    /// section counts the jobs of the active runs by state and names the
+    /// runners of the jobs that wait or run. The selected row carries the
+    /// selection mark. This is the row of the selected item, or the row of its
+    /// selected job. The block of each expanded run follows the row of that
+    /// run. The item rows come in the order of `shown_items`, and the selection
+    /// finds the row of an item by the position of that item in `shown_items`.
+    /// The list also holds header rows, empty rows, and job rows, thus the
+    /// index of a row is not the position of its item. The `job_sum` of each
+    /// run row is the sum of the runner times of its last good jobs at `now`.
     fn build_rows(&self, now: DateTime<Utc>) -> Vec<Row<'_>> {
         let selected = self.selected.as_ref();
         let mut rows = Vec::new();
@@ -803,6 +811,7 @@ impl Board {
             jobs: &self.jobs,
             errors: &self.errors,
             expanded: &self.expanded,
+            now,
         };
         if has_queue {
             rows.push(Row::Header(Header {
@@ -1005,6 +1014,19 @@ impl Board {
             .collect()
     }
 
+    /// The repository and the ID of each run that the recent section shows at
+    /// `now`, in the order of the section (the newest finish first).
+    /// `Board::sections` decides the list. The app sends it to the worker each
+    /// time it changes (`Command::RecentRuns`).
+    #[must_use]
+    pub fn recent_runs(&self, now: DateTime<Utc>) -> Vec<(RepoName, RunId)> {
+        self.sections(now)
+            .1
+            .into_iter()
+            .map(|run| (run.repo.clone(), run.id))
+            .collect()
+    }
+
     /// Moves the selection to the next row: an item row or a job row.
     pub fn select_next(&mut self, now: DateTime<Utc>) {
         self.settle(now);
@@ -1202,16 +1224,34 @@ struct JobView<'a> {
     errors: &'a BTreeMap<RepoName, String>,
     /// The runs that show their job rows.
     expanded: &'a BTreeSet<RunId>,
+    /// The time of the view. The job sum of a run reads it.
+    now: DateTime<Utc>,
+}
+
+/// The sum of the runner times of `jobs` at `now`, or `None` for no job.
+///
+/// A job that adds nothing (`Job::runner_time` gives `None`) counts as zero.
+/// An empty slice gives `None`, because a run with no good job has no sum.
+fn job_sum(jobs: &[Job], now: DateTime<Utc>) -> Option<Duration> {
+    if jobs.is_empty() {
+        return None;
+    }
+    Some(
+        jobs.iter()
+            .map(|job| job.runner_time(now).unwrap_or(Duration::ZERO))
+            .sum(),
+    )
 }
 
 /// Adds the runs of one section to `rows`, or the empty row when there is none.
 ///
 /// `first` is the position of the first run of `runs` among all items. The row
 /// of the run at the position of `selected` gets the mark when the selection
-/// has no job part. Otherwise the job row at the selected job position gets
-/// the mark. The state of each run row comes from the job answer of the run,
-/// expanded or not. The block of jobs of each run in `view.expanded` follows
-/// the row of that run.
+/// has no job part. Otherwise the job row at the selected job position gets the
+/// mark. The state of each run row comes from the job answer of the run,
+/// expanded or not. The `job_sum` of each run row is the sum of the runner
+/// times of the last good jobs at `view.now`, see `job_sum`. The block of jobs
+/// of each run in `view.expanded` follows the row of that run.
 fn push_runs<'a>(
     rows: &mut Vec<Row<'a>>,
     runs: &[&'a Run],
@@ -1232,6 +1272,7 @@ fn push_runs<'a>(
             state: run.state.shown_with_jobs(jobs.iter().map(|job| job.state)),
             selected: here.is_some_and(|selection| selection.job.is_none()),
             stale: view.errors.contains_key(&run.repo),
+            job_sum: job_sum(jobs, view.now),
         });
         if view.expanded.contains(&run.id) {
             push_jobs(rows, run, answer, here.and_then(|selection| selection.job));
@@ -2788,6 +2829,108 @@ mod tests {
         })
     }
 
+    /// The job sum that the row of run `id` shows. It panics when no row
+    /// holds the run.
+    fn run_job_sum(rows: &[Row<'_>], id: u64) -> Option<Duration> {
+        rows.iter()
+            .find_map(|row| match row {
+                Row::Run { run, job_sum, .. } if run.id == RunId(id) => Some(*job_sum),
+                _ => None,
+            })
+            .expect("a row for the run")
+    }
+
+    /// Builds a job that ran for `seconds` seconds and ended before `now()`.
+    fn finished_job(id: u64, seconds: i64) -> Job {
+        let ended = now() - Span::minutes(5);
+        Job {
+            started_at: Some(ended - Span::seconds(seconds)),
+            completed_at: Some(ended),
+            ..job(id, RunState::Passed)
+        }
+    }
+
+    #[test]
+    fn the_job_sum_of_a_run_is_the_sum_of_the_runner_times_of_its_jobs() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(41_966_278_012, "a/x", RunState::Passed, 60, 10)],
+            now(),
+        );
+        board.set_jobs(
+            RunId(41_966_278_012),
+            vec![finished_job(1, 211), finished_job(2, 897)],
+        );
+        assert_eq!(
+            run_job_sum(&board.rows(now()), 41_966_278_012),
+            Some(Duration::from_secs(1108))
+        );
+    }
+
+    #[test]
+    fn the_job_sum_of_an_active_run_increases_from_one_frame_to_the_next() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Running, 30, 1)],
+            now(),
+        );
+        board.set_jobs(
+            RunId(1),
+            vec![Job {
+                started_at: Some(now() - Span::minutes(10)),
+                ..job(11, RunState::Running)
+            }],
+        );
+        assert_eq!(
+            run_job_sum(&board.rows(now()), 1),
+            Some(Duration::from_secs(600))
+        );
+        assert_eq!(
+            run_job_sum(&board.rows(now() + Span::seconds(1)), 1),
+            Some(Duration::from_secs(601))
+        );
+    }
+
+    #[test]
+    fn a_run_with_no_good_job_has_no_job_sum() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Running, 20, 1),
+                run(3, "a/x", RunState::Running, 10, 1),
+            ],
+            now(),
+        );
+        // Run 1 has no answer. Run 2 has a failed first fetch.
+        board.fail_jobs(RunId(2), "boom".to_owned());
+        // Run 3 has an answer with no job.
+        board.set_jobs(RunId(3), vec![]);
+        let rows = board.rows(now());
+        assert_eq!(run_job_sum(&rows, 1), None);
+        assert_eq!(run_job_sum(&rows, 2), None);
+        assert_eq!(run_job_sum(&rows, 3), None);
+    }
+
+    #[test]
+    fn a_failed_fetch_keeps_the_job_sum_of_the_last_good_jobs() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Passed, 60, 10)],
+            now(),
+        );
+        board.set_jobs(RunId(1), vec![finished_job(1, 211), finished_job(2, 897)]);
+        board.fail_jobs(RunId(1), "boom".to_owned());
+        assert_eq!(
+            run_job_sum(&board.rows(now()), 1),
+            Some(Duration::from_secs(1108))
+        );
+    }
+
     #[test]
     fn a_collapsed_run_keeps_the_running_marker_of_its_jobs() {
         let mut board = board();
@@ -3225,6 +3368,29 @@ mod tests {
                 .into_iter()
                 .collect();
         assert_eq!(board.expanded(now()), expected);
+    }
+
+    #[test]
+    fn recent_runs_gives_the_finished_runs_of_the_window_newest_finish_first() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Passed, 100, 60),
+                run(2, "a/x", RunState::Running, 30, 1),
+                run(3, "a/x", RunState::Failed, 600, 540),
+            ],
+            now(),
+        );
+        board.replace(
+            repo("b/y"),
+            vec![run(4, "b/y", RunState::Failed, 50, 10)],
+            now(),
+        );
+        assert_eq!(
+            board.recent_runs(now()),
+            [(repo("b/y"), RunId(4)), (repo("a/x"), RunId(1))]
+        );
     }
 
     #[test]

@@ -91,6 +91,9 @@ pub struct App<'a, O: Opener, C: Canceller, Tz: TimeZone> {
     /// The set of the last `Command::WatchJobs` that the app sent. It is
     /// empty at the start.
     watched: BTreeSet<(RepoName, RunId)>,
+    /// The list of the last `Command::RecentRuns` that the app sent. It is
+    /// empty at the start.
+    recent: Vec<(RepoName, RunId)>,
     /// The box that asks the user to cancel a run. It is `None` when no box
     /// shows.
     confirm: Option<Confirm>,
@@ -161,6 +164,7 @@ where
             now,
             tz,
             watched: BTreeSet::new(),
+            recent: Vec::new(),
             confirm: None,
             first_cycle: Some(FirstCycle::default()),
             last_arrow: None,
@@ -200,6 +204,7 @@ where
         loop {
             self.apply_updates()?;
             self.sync_watch();
+            self.sync_recent();
             let now = (self.now)();
             let billing = self
                 .billing
@@ -330,6 +335,23 @@ where
                 .commands
                 .send(Command::WatchJobs(expanded.clone()));
             self.watched = expanded;
+        }
+    }
+
+    /// Tells the worker which runs the recent section shows.
+    ///
+    /// It reads the list from the board. When the list differs from the last
+    /// list that it sent, it sends the whole list in a `Command::RecentRuns`
+    /// and keeps it. When the list is the same, it sends nothing. A worker
+    /// that has ended is not an error.
+    fn sync_recent(&mut self) {
+        let recent = self.board.recent_runs((self.now)());
+        if recent != self.recent {
+            let _ = self
+                .worker
+                .commands
+                .send(Command::RecentRuns(recent.clone()));
+            self.recent = recent;
         }
     }
 
@@ -1287,10 +1309,10 @@ mod tests {
         let channels = channels();
         let (result, before) = run_app(&opener(false), &channels, quit());
         assert!(result.is_ok(), "{result:?}");
-        // The started column starts at column 98 of 120, thus the text gets 97.
-        let recent_before = format!("{:<97} FINISHED", "Last 8h");
+        // The started column starts at column 90 of 120, thus the text gets 89.
+        let recent_before = format!("{:<89} FINISHED", "Last 8h");
         let recent_after = format!(
-            "{:<97} FINISHED",
+            "{:<89} FINISHED",
             "Last 8h · 0 passed · 0 failed · 0 cancelled"
         );
         assert_eq!(
@@ -1973,6 +1995,21 @@ mod tests {
         Command::WatchJobs(ids.iter().map(|id| (repo(), RunId(*id))).collect())
     }
 
+    /// A passed run that started `started` minutes before `now` and finished
+    /// `finished` minutes before `now`.
+    fn finished_run(id: u64, started: i64, finished: i64) -> Run {
+        Run {
+            state: RunState::Passed,
+            updated_at: now() - chrono::Duration::minutes(finished),
+            ..active_run(id, started)
+        }
+    }
+
+    /// The list that `Command::RecentRuns` carries for runs with these IDs.
+    fn recent(ids: &[u64]) -> Command {
+        Command::RecentRuns(ids.iter().map(|id| (repo(), RunId(*id))).collect())
+    }
+
     fn job(id: u64, name: &str) -> crate::job::Job {
         crate::job::Job {
             id: crate::job::JobId(id),
@@ -1991,6 +2028,44 @@ mod tests {
             .iter()
             .position(|line| line.contains(needle))
             .unwrap_or_else(|| panic!("no line with {needle:?} in {frame:?}"))
+    }
+
+    #[test]
+    fn the_app_sends_the_recent_runs_in_the_order_of_the_section_one_time() {
+        let channels = channels();
+        send_runs(
+            &channels,
+            vec![
+                finished_run(1, 100, 60),
+                active_run(2, 5),
+                finished_run(3, 50, 10),
+            ],
+        );
+        let steps = vec![Step::Idle, Step::Idle, key(KeyCode::Char('q'))];
+        let (_, commands) = run_steps(&channels, steps);
+        assert_eq!(commands, [recent(&[3, 1])]);
+    }
+
+    #[test]
+    fn the_app_sends_the_recent_runs_again_when_the_list_changes() {
+        let channels = channels();
+        send_runs(&channels, vec![finished_run(1, 100, 60)]);
+        let steps = vec![
+            Step::Idle,
+            Step::Send(Update::Runs {
+                repo: repo(),
+                runs: vec![finished_run(1, 100, 60), finished_run(2, 30, 5)],
+            }),
+            Step::Idle,
+            Step::Send(Update::Runs {
+                repo: repo(),
+                runs: vec![finished_run(2, 30, 5)],
+            }),
+            Step::Idle,
+            key(KeyCode::Char('q')),
+        ];
+        let (_, commands) = run_steps(&channels, steps);
+        assert_eq!(commands, [recent(&[1]), recent(&[2, 1]), recent(&[2])]);
     }
 
     #[test]
@@ -2086,7 +2161,7 @@ mod tests {
             key(KeyCode::Char('q')),
         ];
         let (_, commands) = run_steps(&channels, steps);
-        assert_eq!(commands, [watch(&[2]), watch(&[1, 2, 3])]);
+        assert_eq!(commands, [recent(&[3]), watch(&[2]), watch(&[1, 2, 3])]);
     }
 
     #[test]
@@ -2110,6 +2185,7 @@ mod tests {
         assert_eq!(
             commands,
             [
+                recent(&[3]),
                 watch(&[2]),
                 watch(&[1, 2]),
                 watch(&[1, 2, 3]),
