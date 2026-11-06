@@ -1242,27 +1242,26 @@ fn layout_status(left: &str, mark: Option<&str>, width: usize) -> StatusLayout {
 /// [`ROW_RAMP`], from index 253 at age zero to index 238 at an age of
 /// [`ROW_FADE_END`] (2 hours). An older row keeps index 238. The window of
 /// the board does not change the fade. The age of a run row is the time since
-/// the run ended. The age of a departure row is the time since the pull
-/// request left the queue. Live work (an active run and a queue entry) and the
+/// the end of the run (`Row::Run::ended`). The age of a departure row is the
+/// time since the pull request left the queue. Live work (an active run and a queue entry) and the
 /// highlighted row keep the default color, because a reversed dark gray gives
 /// a dark bar that is hard to see. A job row of a finished run fades with its
-/// run, by the time since the run ended. A job row of an active run keeps the
+/// run, by the same end. A job row of an active run keeps the
 /// default color. Every other row keeps the default color too.
 fn age_style(row: &Row<'_>, now: DateTime<Utc>) -> Style {
     let faded =
         |ended: DateTime<Utc>| Style::default().fg(ROW_RAMP.color(span(ended, now), ROW_FADE_END));
     match row {
         Row::Run {
-            run,
-            state,
+            ended: Some(end),
             selected: false,
             ..
-        } if state.is_finished() => faded(run.updated_at),
-        Row::Job {
-            run,
+        }
+        | Row::Job {
+            run_ended: Some(end),
             selected: false,
             ..
-        } if run.state.is_finished() => faded(run.updated_at),
+        } => faded(*end),
         Row::Departure {
             departure,
             selected: false,
@@ -1373,6 +1372,7 @@ pub fn draw<Tz: TimeZone>(
                 last,
                 selected,
                 run,
+                ..
             } => {
                 let line = job_line(job, run, *last, now, tz, widths);
                 let y = put_line(buffer, index + 1, &line.style(age_style(row, now)));
@@ -7560,8 +7560,8 @@ mod tests {
                         9001 + index,
                         &format!("job-{index}"),
                         RunState::Passed,
-                        Some("2026-10-14T07:01:00Z"),
-                        Some("2026-10-14T07:05:00Z"),
+                        Some("2026-10-14T10:55:00Z"),
+                        Some("2026-10-14T11:00:00Z"),
                     );
                     if index == 0 {
                         on("mbp", built)

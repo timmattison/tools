@@ -174,9 +174,12 @@ pub enum Row<'a> {
         last: bool,
         /// True for the one row that the selection marks.
         selected: bool,
-        /// The run that the job belongs to. The render reads its state and
-        /// end time to fade the job row with its run.
+        /// The run that the job belongs to. The render reads its state for
+        /// the started cell. The fade reads `run_ended`.
         run: &'a Run,
+        /// The end of its run (the `ended` of the run row). `None` for a job
+        /// of an active run.
+        run_ended: Option<DateTime<Utc>>,
     },
     /// The row of an expanded run before the first answer: "Loading jobs…".
     JobsLoading,
@@ -1305,16 +1308,23 @@ fn push_runs<'a>(
         let here = selected.filter(|selection| selection.item.1 == first + offset);
         let answer = view.jobs.get(&run.id);
         let jobs = last_good_jobs(answer);
+        let ended = run.state.is_finished().then(|| run_end(run, answer));
         rows.push(Row::Run {
             run,
             state: run.state.shown_with_jobs(jobs.iter().map(|job| job.state)),
             selected: here.is_some_and(|selection| selection.job.is_none()),
             stale: view.errors.contains_key(&run.repo),
             job_sum: job_sum(jobs, view.now),
-            ended: run.state.is_finished().then(|| run_end(run, answer)),
+            ended,
         });
         if view.expanded.contains(&run.id) {
-            push_jobs(rows, run, answer, here.and_then(|selection| selection.job));
+            push_jobs(
+                rows,
+                run,
+                ended,
+                answer,
+                here.and_then(|selection| selection.job),
+            );
         }
     }
 }
@@ -1322,11 +1332,13 @@ fn push_runs<'a>(
 /// Adds the block of rows of one expanded run to `rows`.
 ///
 /// `run` is the run that owns the block, and each job row carries it.
-/// `answer` is the job answer that the board holds for the run. `None` gives
+/// `run_ended` is the end of the run (`None` for an active run), and each job
+/// row carries it too. `answer` is the job answer that the board holds for the run. `None` gives
 /// the loading row. The job row at the position of `selected` gets the mark.
 fn push_jobs<'a>(
     rows: &mut Vec<Row<'a>>,
     run: &'a Run,
+    run_ended: Option<DateTime<Utc>>,
     answer: Option<&'a Jobs>,
     selected: Option<(JobId, usize)>,
 ) {
@@ -1340,6 +1352,7 @@ fn push_jobs<'a>(
                 last: index + 1 == list.len(),
                 selected: marked(index),
                 run,
+                run_ended,
             }));
         }
         Some(Jobs::Failed { jobs, error }) => {
@@ -1348,6 +1361,7 @@ fn push_jobs<'a>(
                 last: false,
                 selected: marked(index),
                 run,
+                run_ended,
             }));
             rows.push(Row::JobsError(error));
         }
