@@ -2047,6 +2047,28 @@ mod tests {
     }
 
     #[test]
+    fn the_app_sends_the_recent_runs_again_when_the_list_changes() {
+        let channels = channels();
+        send_runs(&channels, vec![finished_run(1, 100, 60)]);
+        let steps = vec![
+            Step::Idle,
+            Step::Send(Update::Runs {
+                repo: repo(),
+                runs: vec![finished_run(1, 100, 60), finished_run(2, 30, 5)],
+            }),
+            Step::Idle,
+            Step::Send(Update::Runs {
+                repo: repo(),
+                runs: vec![finished_run(2, 30, 5)],
+            }),
+            Step::Idle,
+            key(KeyCode::Char('q')),
+        ];
+        let (_, commands) = run_steps(&channels, steps);
+        assert_eq!(commands, [recent(&[1]), recent(&[2, 1]), recent(&[2])]);
+    }
+
+    #[test]
     fn right_watches_the_highlighted_run_and_shows_loading() {
         let channels = channels();
         send_runs(&channels, vec![active_run(1, 5)]);
