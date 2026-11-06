@@ -8,6 +8,9 @@ use std::path::Path;
 use std::process::{Command, Output};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+/// The most bytes of `op` standard error that one `op_end` record keeps.
+const OP_STDERR_MAX_BYTES: usize = 512;
+
 /// What to ask `op` for.
 pub(crate) enum Operation<'a> {
     /// `op read <reference>`
@@ -123,7 +126,11 @@ impl<'a> OpRun<'a> {
                 (
                     output.status.code(),
                     Outcome::Failed {
-                        op_stderr: stderr.trim_end().to_owned(),
+                        op_stderr: audit::truncate_at_char_boundary(
+                            stderr.trim_end(),
+                            OP_STDERR_MAX_BYTES,
+                        )
+                        .to_owned(),
                     },
                 )
             }
