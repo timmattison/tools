@@ -25,18 +25,25 @@ pub(crate) fn compose(
     zellij_session: Option<&str>,
     repo_dir_name: Option<&str>,
 ) -> Notification {
-    let _ = (
-        attempt,
-        max_attempts,
-        reference,
-        claude_name,
-        zellij_session,
-        repo_dir_name,
-    );
+    let title = if attempt <= 1 {
+        TITLE.to_owned()
+    } else {
+        format!("{TITLE} (attempt {attempt} of {max_attempts})")
+    };
+    let parts: Vec<&str> = [claude_name, zellij_session]
+        .into_iter()
+        .flatten()
+        .filter(|part| !part.is_empty())
+        .collect();
+    let subtitle = if parts.is_empty() {
+        repo_dir_name.unwrap_or_default().to_owned()
+    } else {
+        parts.join(" · ")
+    };
     Notification {
-        title: String::new(),
-        subtitle: String::new(),
-        message: String::new(),
+        title,
+        subtitle,
+        message: reference.to_owned(),
     }
 }
 
