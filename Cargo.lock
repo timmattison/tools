@@ -5972,6 +5972,7 @@ dependencies = [
  "buildinfo",
  "chrono",
  "clap",
+ "gitscratch",
  "serde",
  "serde_json",
  "tempfile",
