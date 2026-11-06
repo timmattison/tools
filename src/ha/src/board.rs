@@ -4812,4 +4812,41 @@ mod tests {
             ["Run(41874500000)", "Run(41874496263)"]
         );
     }
+
+    #[test]
+    fn a_run_that_ended_before_the_window_stays_while_its_update_is_in_it() {
+        // The window is 8 hours, thus at `late_now` it starts at 10:00:00.
+        let run = Run {
+            id: RunId(41_874_600_000),
+            started_at: at("2026-11-04T09:40:00Z"),
+            created_at: at("2026-11-04T09:40:00Z"),
+            updated_at: at("2026-11-04T10:30:00Z"),
+            ..late_run()
+        };
+        let id = run.id;
+        let mut board = late_board(run, None);
+        assert_eq!(
+            ended(&mut board, late_now(), id),
+            Some(at("2026-11-04T10:30:00Z"))
+        );
+        board.set_jobs(
+            id,
+            vec![timed_job(
+                1,
+                "job",
+                RunState::Passed,
+                Some("2026-11-04T09:41:00Z"),
+                Some("2026-11-04T09:50:00Z"),
+            )],
+        );
+        // If the window used the end, the first call drops the run and its
+        // jobs. The second call then shows the run again, with its update as
+        // the end. Both calls must give the end of the job.
+        for _ in 0..2 {
+            assert_eq!(
+                ended(&mut board, late_now(), id),
+                Some(at("2026-11-04T09:50:00Z"))
+            );
+        }
+    }
 }
