@@ -209,3 +209,28 @@ fn failed_op_writes_three_failed_pairs_with_its_stderr() {
     request_ids.dedup();
     assert_eq!(request_ids.len(), 3, "each attempt has its own request_id");
 }
+
+#[test]
+fn op_stderr_is_truncated_to_512_bytes_on_a_char_boundary() {
+    let fixture = Fixture::new();
+    let full = "日".repeat(300);
+    fixture.install_fake_op(&format!("printf '%s' '{full}' >&2\nexit 1"));
+
+    let output = fixture.read(REFERENCE);
+
+    assert!(!output.status.success(), "op-cache should fail");
+    let records = records(&audit_text(&fixture));
+    let ends: Vec<_> = records
+        .iter()
+        .filter(|record| record["event"] == "op_end")
+        .collect();
+    assert_eq!(ends.len(), 3);
+    for end in ends {
+        let stderr = end["op_stderr"].as_str().expect("op_stderr is text");
+        assert!(!stderr.is_empty(), "op_stderr is empty");
+        assert!(stderr.len() <= 512, "op_stderr has {} bytes", stderr.len());
+        assert!(full.starts_with(stderr), "op_stderr is not a prefix");
+        assert_eq!(stderr.len(), 510);
+        assert_eq!(stderr.chars().count(), 170);
+    }
+}
