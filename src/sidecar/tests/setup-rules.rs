@@ -7,6 +7,7 @@ mod support;
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::Path;
+use std::process::Stdio;
 
 use support::Fixture;
 
@@ -358,4 +359,58 @@ fn a_second_run_makes_no_network_call_and_writes_nothing() {
     assert_eq!(second.code, 0, "{second:?}");
     assert_eq!(second.stdout, "", "{second:?}");
     assert_eq!(second.stderr, "", "{second:?}");
+}
+
+/// The names in `dir` that start with `prefix`.
+fn entries_starting_with(dir: &Path, prefix: &str) -> Vec<String> {
+    fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(prefix))
+        .collect()
+}
+
+#[test]
+fn two_runs_at_the_same_time_make_one_main_clone() {
+    for round in 0..3 {
+        let fixture = Fixture::new(&[NAME]);
+        let first = fixture.add_host_worktree("first");
+        let second = fixture.add_host_worktree("second");
+
+        let child_one = fixture
+            .sidecar(&first, &["setup"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let child_two = fixture
+            .sidecar(&second, &["setup"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let output_one = child_one.wait_with_output().unwrap();
+        let output_two = child_two.wait_with_output().unwrap();
+
+        for output in [&output_one, &output_two] {
+            assert_eq!(output.status.code(), Some(0), "round {round}: {output:?}");
+        }
+        let code_dir = fixture.root().join("code");
+        assert_eq!(
+            entries_starting_with(&code_dir, "megarepo-data-testdata"),
+            vec!["megarepo-data-testdata".to_string()],
+            "round {round}"
+        );
+        assert!(
+            entries_starting_with(&code_dir, ".megarepo-data-testdata.sidecar-clone-").is_empty(),
+            "round {round}"
+        );
+        for worktree in [&first, &second] {
+            assert_eq!(
+                canon(&fixture.link(worktree, NAME)),
+                canon(&fixture.main_clone(NAME)),
+                "round {round}"
+            );
+        }
+    }
 }
