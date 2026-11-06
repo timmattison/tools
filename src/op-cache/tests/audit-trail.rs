@@ -648,4 +648,47 @@ mod notification {
             ]
         );
     }
+
+    #[test]
+    fn a_notification_that_outlives_op_is_killed() {
+        let fixture = Fixture::new();
+        let sentinel = unique_token("kill");
+        install_fake_osascript(&fixture, "exec sleep 120");
+        fixture.install_fake_op(&format!(
+            "{}\necho '{sentinel}'",
+            wait_for_records(&fixture, "1")
+        ));
+
+        let started = std::time::Instant::now();
+        let output = notifying_command(&fixture)
+            .args(["read", REFERENCE])
+            .output()
+            .expect("run op-cache");
+        let elapsed = started.elapsed();
+
+        let calls = osascript_calls(&fixture);
+        let pid = calls.first().map(|(pid, _)| pid.clone());
+        let alive = pid.as_deref().is_some_and(|pid| {
+            Command::new("ps")
+                .args(["-p", pid])
+                .output()
+                .expect("run ps")
+                .status
+                .success()
+        });
+        if alive {
+            // Never leave a `sleep` behind, whatever the assertions say.
+            if let Some(pid) = pid.as_deref() {
+                let _ = Command::new("kill").args(["-9", pid]).status();
+            }
+        }
+        assert!(output.status.success());
+        assert_eq!(output.stdout, sentinel.as_bytes());
+        assert!(
+            elapsed < std::time::Duration::from_secs(60),
+            "took {elapsed:?}"
+        );
+        assert_eq!(calls.len(), 1, "calls: {calls:?}");
+        assert!(!alive, "osascript {pid:?} outlived op-cache");
+    }
 }
