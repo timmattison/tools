@@ -6,7 +6,7 @@
 
 use std::process::{Command, Output, Stdio};
 
-use anyhow::{anyhow, Context};
+use anyhow::{anyhow, bail, Context};
 
 /// The text that `gh` prints on standard error when the repository does not exist.
 const NOT_FOUND_TEXT: &str = "HTTP 404";
@@ -66,4 +66,60 @@ pub fn repository_visibility(owner: &str, repo: &str) -> anyhow::Result<Option<V
         return Ok(None);
     }
     Err(anyhow!("gh api {path} failed: {message}"))
+}
+
+/// Asks GitHub for the login of the authenticated user.
+///
+/// # Errors
+///
+/// Returns an error when `gh` cannot start, when it fails, or when it gives no login.
+pub fn authenticated_user() -> anyhow::Result<String> {
+    let output = gh(&["api", "user", "--jq", ".login"])?;
+    if !output.status.success() {
+        bail!("gh api user failed: {}", stderr_line(&output));
+    }
+    let login = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if login.is_empty() {
+        bail!("gh api user gave no login");
+    }
+    Ok(login)
+}
+
+/// Makes the private repository `<owner>/<repo>`. The repository belongs to the
+/// authenticated user when `owner_is_user` is true, and to the organization `owner`
+/// otherwise.
+///
+/// # Errors
+///
+/// Returns an error when `gh` cannot start or when GitHub refuses the new repository.
+pub fn create_private_repository(
+    owner: &str,
+    repo: &str,
+    owner_is_user: bool,
+) -> anyhow::Result<()> {
+    let path = if owner_is_user {
+        "user/repos".to_string()
+    } else {
+        format!("orgs/{owner}/repos")
+    };
+    let name = format!("name={repo}");
+    let output = gh(&[
+        "api",
+        "-X",
+        "POST",
+        &path,
+        "-f",
+        &name,
+        "-F",
+        "private=true",
+        "--jq",
+        ".full_name",
+    ])?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "gh cannot make the repository {owner}/{repo}: {}",
+        stderr_line(&output)
+    ))
 }

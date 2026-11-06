@@ -9,8 +9,9 @@ use crate::git::MAIN_BRANCH;
 use crate::host::{Host, RegistryPolicy};
 use crate::link::{inspect_link, LinkState};
 use crate::name::SidecarName;
-use crate::registry::REGISTRY_FILE;
-use crate::remote;
+use crate::registry::{self, REGISTRY_FILE};
+use crate::remote::{self, DATA_INFIX};
+use crate::setup::run_setup;
 
 /// The question that `sidecar add` asks on standard error.
 const QUESTION: &str = "Do these steps? [y/N] ";
@@ -163,7 +164,81 @@ pub fn run(cwd: &Path, raw_name: &str, yes: bool) -> anyhow::Result<bool> {
             return Ok(false);
         }
     }
-    anyhow::bail!("the steps are not done yet")
+    do_steps(&host, &name, &facts)
+}
+
+/// The text of `.gitattributes` in the first commit. It stops git from changing line
+/// endings, so a file with `\r\n` keeps its bytes.
+const GITATTRIBUTES_TEXT: &str = "* -text\n";
+
+/// The text of `README.md` in the first commit.
+fn readme_text(host: &Host, name: &SidecarName) -> String {
+    let host_name = host.name();
+    let link = host.link_shown(name);
+    format!(
+        "# {host_name}{DATA_INFIX}{name}\n\n\
+         The data of the sidecar `{name}` of the repository `{host_name}`.\n\n\
+         `sidecar` links this repository at `{link}` in each worktree of `{host_name}`. \
+         Run `sidecar setup` in a worktree of `{host_name}` to clone and link it.\n\n\
+         Keep each file below 100 MB, because GitHub refuses a larger file. \
+         This repository does not use Git LFS.\n"
+    )
+}
+
+/// Runs git in `cwd` and turns a failure into an error.
+fn git_must(host: &Host, cwd: &Path, args: &[&str]) -> anyhow::Result<()> {
+    let result = host.git().run(cwd, args);
+    if result.ok {
+        Ok(())
+    } else {
+        anyhow::bail!("git {} failed: {}", args.join(" "), result.stderr)
+    }
+}
+
+/// Makes the first commit in a scratch repository and pushes it to the sidecar.
+fn push_first_commit(host: &Host, name: &SidecarName, url: &str) -> anyhow::Result<()> {
+    let scratch = tempfile::tempdir()?;
+    let dir = scratch.path();
+    std::fs::write(dir.join("README.md"), readme_text(host, name))?;
+    std::fs::write(dir.join(".gitattributes"), GITATTRIBUTES_TEXT)?;
+    git_must(host, dir, &["init", "--quiet", "-b", MAIN_BRANCH])?;
+    git_must(host, dir, &["add", "README.md", ".gitattributes"])?;
+    let message = format!("Start the sidecar {name} of {}", host.name());
+    git_must(host, dir, &["commit", "--quiet", "-m", &message])?;
+    git_must(
+        host,
+        dir,
+        &[
+            "push",
+            "--quiet",
+            url,
+            &format!("{MAIN_BRANCH}:refs/heads/{MAIN_BRANCH}"),
+        ],
+    )
+}
+
+/// Does the steps of the plan in order. Returns true when the new link is correct.
+fn do_steps(host: &Host, name: &SidecarName, facts: &Facts) -> anyhow::Result<bool> {
+    if facts.steps.contains(&Step::MakeRepository) {
+        let login = gh::authenticated_user()?;
+        let owner_is_user = facts.owner.eq_ignore_ascii_case(&login);
+        gh::create_private_repository(&facts.owner, &facts.repo, owner_is_user)?;
+    }
+    if facts.steps.contains(&Step::FirstCommit) {
+        push_first_commit(host, name, &facts.url)?;
+    }
+    if facts.steps.contains(&Step::Register) {
+        registry::add_name_to_file(&host.worktree_root().join(REGISTRY_FILE), name)?;
+    }
+    let reloaded = Host::discover(host.worktree_root(), RegistryPolicy::DefaultWhenMissing)?;
+    let report = run_setup(&reloaded, Some(name));
+    for action in &report.actions {
+        println!("{action}");
+    }
+    for warning in &report.warnings {
+        eprintln!("warning: {warning}");
+    }
+    Ok(report.unlinked.is_empty())
 }
 
 /// Decides whether to do the steps of the plan.
