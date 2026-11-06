@@ -116,9 +116,42 @@ pub(crate) fn claude_config_dir(
 }
 
 /// The nearest ancestor that has `<sessions_dir>/<pid>.json`.
+///
+/// A missing file moves on to the next ancestor. A file that cannot be read,
+/// or is not JSON, still names the ancestor, with no fields. The executable
+/// name is never matched.
 pub(crate) fn claude_session(chain: &[Ancestor], sessions_dir: &Path) -> Option<ClaudeSession> {
-    let _ = (chain, sessions_dir);
+    for ancestor in chain {
+        let file = sessions_dir.join(format!("{}.json", ancestor.pid));
+        let text = match std::fs::read_to_string(&file) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return Some(session_without_fields(ancestor.pid)),
+        };
+        let Ok(serde_json::Value::Object(fields)) = serde_json::from_str(&text) else {
+            return Some(session_without_fields(ancestor.pid));
+        };
+        let text_field = |key: &str| {
+            fields
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        };
+        return Some(ClaudeSession {
+            pid: ancestor.pid,
+            session_id: text_field("sessionId"),
+            name: text_field("name"),
+        });
+    }
     None
+}
+
+fn session_without_fields(pid: u32) -> ClaudeSession {
+    ClaudeSession {
+        pid,
+        session_id: None,
+        name: None,
+    }
 }
 
 #[cfg(test)]
