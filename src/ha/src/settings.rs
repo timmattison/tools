@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::billing::EnterpriseSlug;
+use crate::billing::{EnterpriseSlug, EnterpriseSlugError};
 use crate::target::{OwnerName, RepoName, Target, TargetError};
 
 /// The window `ha` uses when nothing sets one: the finished runs of 8 hours.
@@ -71,6 +71,17 @@ pub enum SettingsError {
         /// Why the value is not valid.
         source: TargetError,
     },
+    /// An entry of the `billing_enterprises` table in the config file is not
+    /// valid.
+    #[error("billing_enterprises entry \"{entry}\" in {path}: {source}")]
+    FileBillingEnterprise {
+        /// The entry as typed, as `owner = enterprise`.
+        entry: String,
+        /// The config file.
+        path: String,
+        /// Why the owner or the enterprise slug is not valid.
+        source: BillingEnterpriseError,
+    },
     /// A target on the command line is not valid.
     #[error("target on the command line: {source}")]
     CliTarget {
@@ -84,6 +95,18 @@ pub enum SettingsError {
         /// path.
         config: String,
     },
+}
+
+/// Why an entry of the `billing_enterprises` table is not valid: its key is
+/// not an owner, or its value is not an enterprise slug.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum BillingEnterpriseError {
+    /// The key is not an owner name.
+    #[error(transparent)]
+    Owner(#[from] TargetError),
+    /// The value is not an enterprise slug.
+    #[error(transparent)]
+    Slug(#[from] EnterpriseSlugError),
 }
 
 /// What `ha` needs to run.
@@ -180,7 +203,7 @@ fn resolve_with(
         window: cli.window.unwrap_or(file_window),
         interval: cli.interval.unwrap_or(file_interval),
         billing: parsed.billing.unwrap_or(true) && !cli.no_billing,
-        billing_enterprises: BTreeMap::new(),
+        billing_enterprises: file_billing_enterprises(&parsed, &shown_path)?,
     })
 }
 
@@ -280,6 +303,28 @@ fn file_targets(config: &FileConfig, path: &str) -> Result<Vec<Target>, Settings
             })
     });
     repos.chain(owners).collect()
+}
+
+/// Parses the `billing_enterprises` table of the config file.
+fn file_billing_enterprises(
+    config: &FileConfig,
+    path: &str,
+) -> Result<BTreeMap<OwnerName, EnterpriseSlug>, SettingsError> {
+    config
+        .billing_enterprises
+        .iter()
+        .map(|(key, value)| {
+            let entry_error =
+                |source: BillingEnterpriseError| SettingsError::FileBillingEnterprise {
+                    entry: format!("{key} = {value}"),
+                    path: path.to_owned(),
+                    source,
+                };
+            let owner = OwnerName::parse(key).map_err(|e| entry_error(e.into()))?;
+            let slug = EnterpriseSlug::parse(value).map_err(|e| entry_error(e.into()))?;
+            Ok((owner, slug))
+        })
+        .collect()
 }
 
 /// Names the config file for a message, when no file was read.
@@ -563,7 +608,10 @@ mod tests {
         let text = "owners = [\"a\"]\n[billing_enterprises]\n\"some-org\" = \"some-enterprise\"";
         let settings = resolve_file(&CommandLine::default(), text).unwrap();
         assert_eq!(settings.billing_enterprises.len(), 1);
-        let slug = settings.billing_enterprises.get(&owner("Some-Org")).unwrap();
+        let slug = settings
+            .billing_enterprises
+            .get(&owner("Some-Org"))
+            .unwrap();
         assert_eq!(slug.as_str(), "some-enterprise");
     }
 
