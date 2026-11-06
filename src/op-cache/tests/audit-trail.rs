@@ -280,3 +280,34 @@ fn unstartable_op_writes_spawn_error_pairs() {
         );
     }
 }
+
+#[test]
+fn read_binary_writes_a_pair_with_operation_read_binary() {
+    let fixture = Fixture::new();
+    let bytes = unique_token("binary");
+    // Called as: op read --out-file <path> <reference>
+    fixture.install_fake_op(&format!("printf '%s' '{bytes}' > \"$3\""));
+
+    let output = fixture
+        .command()
+        .args(["read-binary", "op://Private/Item/file.png", "out/file.png"])
+        .output()
+        .expect("run op-cache");
+
+    assert!(
+        output.status.success(),
+        "op-cache failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let written = fs::read(fixture.path("repo").join("out").join("file.png")).expect("out file");
+    assert_eq!(written, bytes.as_bytes());
+    let text = audit_text(&fixture);
+    assert!(!text.contains(&bytes), "the file bytes reached the trail");
+    let records = records(&text);
+    assert_eq!(records.len(), 2, "audit file: {text}");
+    assert_eq!(records[0]["event"], "op_start");
+    assert_eq!(records[0]["operation"], "read-binary");
+    assert_eq!(records[0]["reference"], "op://Private/Item/file.png");
+    assert_eq!(records[1]["event"], "op_end");
+    assert_eq!(records[1]["outcome"], "ok");
+}
