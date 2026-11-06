@@ -82,6 +82,20 @@ pub enum SettingsError {
         /// Why the owner or the enterprise slug is not valid.
         source: BillingEnterpriseError,
     },
+    /// Two keys of the `billing_enterprises` table in the config file name one
+    /// owner. Owner names do not depend on case, thus `Acme` and `acme` are one
+    /// owner.
+    #[error(
+        "billing_enterprises entries \"{first}\" and \"{second}\" in {path} name the same owner"
+    )]
+    FileBillingEnterpriseDuplicate {
+        /// The entry that came first, as `owner = enterprise`.
+        first: String,
+        /// The entry that names the same owner again, as `owner = enterprise`.
+        second: String,
+        /// The config file.
+        path: String,
+    },
     /// A target on the command line is not valid.
     #[error("target on the command line: {source}")]
     CliTarget {
@@ -311,25 +325,35 @@ fn file_targets(config: &FileConfig, path: &str) -> Result<Vec<Target>, Settings
 }
 
 /// Parses the `billing_enterprises` table of the config file.
+///
+/// Two keys that name one owner give `SettingsError::FileBillingEnterpriseDuplicate`.
 fn file_billing_enterprises(
     config: &FileConfig,
     path: &str,
 ) -> Result<BTreeMap<OwnerName, EnterpriseSlug>, SettingsError> {
-    config
-        .billing_enterprises
-        .iter()
-        .map(|(key, value)| {
-            let entry_error =
-                |source: BillingEnterpriseError| SettingsError::FileBillingEnterprise {
-                    entry: format!("{key} = {value}"),
-                    path: path.to_owned(),
-                    source,
-                };
-            let owner = OwnerName::parse(key).map_err(|e| entry_error(e.into()))?;
-            let slug = EnterpriseSlug::parse(value).map_err(|e| entry_error(e.into()))?;
-            Ok((owner, slug))
-        })
-        .collect()
+    let mut parsed: BTreeMap<OwnerName, (EnterpriseSlug, String)> = BTreeMap::new();
+    for (key, value) in &config.billing_enterprises {
+        let entry = format!("{key} = {value}");
+        let entry_error = |source: BillingEnterpriseError| SettingsError::FileBillingEnterprise {
+            entry: entry.clone(),
+            path: path.to_owned(),
+            source,
+        };
+        let owner = OwnerName::parse(key).map_err(|e| entry_error(e.into()))?;
+        let slug = EnterpriseSlug::parse(value).map_err(|e| entry_error(e.into()))?;
+        if let Some((_, first)) = parsed.get(&owner) {
+            return Err(SettingsError::FileBillingEnterpriseDuplicate {
+                first: first.clone(),
+                second: entry,
+                path: path.to_owned(),
+            });
+        }
+        parsed.insert(owner, (slug, entry));
+    }
+    Ok(parsed
+        .into_iter()
+        .map(|(owner, (slug, _))| (owner, slug))
+        .collect())
 }
 
 /// Names the config file for a message, when no file was read.

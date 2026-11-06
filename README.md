@@ -2424,6 +2424,8 @@ cannot hang the caller. Used by `cwt` and `ha`.
 
     - An organization in this table reads the enterprise endpoint and keeps only its own items.
       Two organizations of one enterprise share one read.
+    - Owner names do not depend on case. Two keys that name one owner, such as `Acme` and `acme`,
+      stop `ha` with a message that names both entries.
     - An organization that is not in the table reads the organization endpoint. There is no
       fallback from one endpoint to another.
     - The enterprise endpoint gives only the usage that has no cost center. An enterprise that
