@@ -168,7 +168,90 @@ fn two_host_worktrees_share_one_sidecar_worktree() {
     );
     let on_shared = worktree_records(&fixture)
         .iter()
-        .filter(|record| record.iter().any(|field| field == "branch refs/heads/shared"))
+        .filter(|record| {
+            record
+                .iter()
+                .any(|field| field == "branch refs/heads/shared")
+        })
         .count();
     assert_eq!(on_shared, 1);
+}
+
+/// The commit that `rev` names in `place`.
+fn commit_of(fixture: &Fixture, place: &Path, rev: &str) -> String {
+    fixture.git(place, &["rev-parse", rev])
+}
+
+/// Makes a commit on a new branch `branch` of a scratch clone of the bare sidecar
+/// remote and pushes it. Returns the commit.
+fn push_branch_to_remote(fixture: &Fixture, branch: &str) -> String {
+    let scratch = fixture.root().join(format!("scratch-{branch}"));
+    fixture.git(
+        fixture.root(),
+        &[
+            "clone",
+            "--quiet",
+            &fixture.sidecar_remote(NAME).to_string_lossy(),
+            &scratch.to_string_lossy(),
+        ],
+    );
+    fixture.git(&scratch, &["checkout", "--quiet", "-b", branch]);
+    fixture.write(&scratch.join("from-remote.txt"), branch);
+    fixture.git(&scratch, &["add", "from-remote.txt"]);
+    fixture.git(&scratch, &["commit", "--quiet", "-m", branch]);
+    fixture.git(&scratch, &["push", "--quiet", "origin", branch]);
+    commit_of(fixture, &scratch, "HEAD")
+}
+
+#[test]
+fn a_local_branch_is_taken_first() {
+    let fixture = after_setup();
+    let host = fixture.main_checkout();
+    let clone = fixture.main_clone(NAME);
+    fixture.git(&clone, &["branch", "feature"]);
+    fixture.git(&clone, &["checkout", "--quiet", "feature"]);
+    fixture.write(&clone.join("local-only.txt"), "local");
+    fixture.git(&clone, &["add", "local-only.txt"]);
+    fixture.git(&clone, &["commit", "--quiet", "-m", "local"]);
+    let local = commit_of(&fixture, &clone, "HEAD");
+    fixture.git(&clone, &["checkout", "--quiet", "main"]);
+    push_branch_to_remote(&fixture, "feature");
+
+    let run = fixture.run(&host, &["worktree", NAME, "feature"]);
+
+    assert_pointed_at_new_worktree(&fixture, &host, &run, "feature");
+    let target = fixture.worktrees_dir(NAME).join("feature");
+    assert_eq!(commit_of(&fixture, &target, "HEAD"), local);
+}
+
+#[test]
+fn origin_branch_is_taken_after_a_fetch() {
+    let fixture = after_setup();
+    let host = fixture.main_checkout();
+    let pushed = push_branch_to_remote(&fixture, "remote-only");
+
+    let run = fixture.run(&host, &["worktree", NAME, "remote-only"]);
+
+    assert_pointed_at_new_worktree(&fixture, &host, &run, "remote-only");
+    let target = fixture.worktrees_dir(NAME).join("remote-only");
+    assert_eq!(commit_of(&fixture, &target, "HEAD"), pushed);
+    assert_eq!(
+        fixture.git(&target, &["rev-parse", "--abbrev-ref", "@{upstream}"]),
+        "origin/remote-only"
+    );
+}
+
+#[test]
+fn a_new_branch_from_main_is_the_last_choice() {
+    let fixture = after_setup();
+    let host = fixture.main_checkout();
+
+    let run = fixture.run(&host, &["worktree", NAME, "fresh"]);
+
+    assert_pointed_at_new_worktree(&fixture, &host, &run, "fresh");
+    let target = fixture.worktrees_dir(NAME).join("fresh");
+    assert_eq!(
+        commit_of(&fixture, &target, "HEAD"),
+        commit_of(&fixture, &fixture.main_clone(NAME), "main")
+    );
 }
