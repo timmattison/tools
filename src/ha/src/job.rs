@@ -81,6 +81,9 @@ impl Job {
     /// of the rule.
     #[must_use]
     pub fn runner_time(&self, now: DateTime<Utc>) -> Option<std::time::Duration> {
+        if self.state == RunState::Queued {
+            return None;
+        }
         let started = self.started_at?;
         if self.state == RunState::Running {
             Some(span(started, now))
