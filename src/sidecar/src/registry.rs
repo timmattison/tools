@@ -206,6 +206,19 @@ impl Registry {
     }
 }
 
+/// Adds `name` to `sidecars` of the file at `path`. Keeps the comments and the order.
+/// Makes the file when it is missing. Returns `Ok(true)` when it changed the file and
+/// `Ok(false)` when the name is there already.
+///
+/// # Errors
+///
+/// Returns an error when the file cannot be read or written, when the text is not a
+/// valid registry, or when `sidecars` is not an array of strings.
+pub fn add_name_to_file(path: &Path, name: &SidecarName) -> anyhow::Result<bool> {
+    let _ = (path, name);
+    Ok(false)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -362,5 +375,88 @@ mod tests {
         ] {
             assert!(error.to_string().contains("lnk_dir"), "{error}");
         }
+    }
+
+    const COMMENTED: &str = "# The sidecars of the project.\n\
+        link_dir = \"data\" # where the links go\n\
+        sidecars = [\"testdata\"] # the first\n";
+
+    fn parsed_names(path: &Path) -> Vec<String> {
+        let registry = Registry::parse(&std::fs::read_to_string(path).unwrap()).unwrap();
+        registry
+            .sidecars()
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn add_name_keeps_comments_and_order() {
+        let dir = TempDir::new();
+        let path = dir.0.join(REGISTRY_FILE);
+        std::fs::write(&path, COMMENTED).unwrap();
+        let changed = add_name_to_file(&path, &SidecarName::parse("pics").unwrap()).unwrap();
+        assert!(changed);
+        let text = std::fs::read_to_string(&path).unwrap();
+        for comment in [
+            "# The sidecars of the project.",
+            "# where the links go",
+            "# the first",
+        ] {
+            assert!(text.contains(comment), "{comment} is gone from:\n{text}");
+        }
+        assert_eq!(parsed_names(&path), ["testdata", "pics"]);
+    }
+
+    #[test]
+    fn add_name_makes_a_missing_file() {
+        let dir = TempDir::new();
+        let path = dir.0.join(REGISTRY_FILE);
+        assert!(add_name_to_file(&path, &SidecarName::parse("pics").unwrap()).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "sidecars = [\"pics\"]\n"
+        );
+    }
+
+    #[test]
+    fn add_name_changes_nothing_when_the_name_is_there() {
+        let dir = TempDir::new();
+        let path = dir.0.join(REGISTRY_FILE);
+        std::fs::write(&path, COMMENTED).unwrap();
+        let changed = add_name_to_file(&path, &SidecarName::parse("testdata").unwrap()).unwrap();
+        assert!(!changed);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), COMMENTED);
+    }
+
+    #[test]
+    fn add_name_makes_the_array_when_the_key_is_missing() {
+        let dir = TempDir::new();
+        let path = dir.0.join(REGISTRY_FILE);
+        std::fs::write(&path, "# top\nlink_dir = \"vendor\"\n").unwrap();
+        assert!(add_name_to_file(&path, &SidecarName::parse("pics").unwrap()).unwrap());
+        assert!(std::fs::read_to_string(&path).unwrap().contains("# top"));
+        assert_eq!(parsed_names(&path), ["pics"]);
+    }
+
+    #[test]
+    fn add_name_refuses_a_sidecars_key_that_is_not_an_array_of_strings() {
+        for bad in ["sidecars = \"pics\"\n", "sidecars = [1, 2]\n"] {
+            let dir = TempDir::new();
+            let path = dir.0.join(REGISTRY_FILE);
+            std::fs::write(&path, bad).unwrap();
+            let error = add_name_to_file(&path, &SidecarName::parse("x").unwrap()).unwrap_err();
+            assert!(error.to_string().contains("sidecars"), "{error}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), bad);
+        }
+    }
+
+    #[test]
+    fn add_name_refuses_text_that_is_not_a_registry() {
+        let dir = TempDir::new();
+        let path = dir.0.join(REGISTRY_FILE);
+        std::fs::write(&path, "lnk_dir = \"x\"\n").unwrap();
+        let error = add_name_to_file(&path, &SidecarName::parse("x").unwrap()).unwrap_err();
+        assert!(error.to_string().contains("lnk_dir"), "{error}");
     }
 }
