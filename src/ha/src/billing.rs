@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::iter::Sum;
 use std::ops::{Add, AddAssign};
 
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 
 use crate::money::Usd;
 use crate::target::OwnerName;
@@ -33,6 +33,21 @@ pub struct UsageItem {
     pub net: Usd,
     /// The organization that used the product. An enterprise report names it.
     pub organization: Option<String>,
+}
+
+impl UsageItem {
+    /// The money of this one item.
+    fn amounts(&self) -> Amounts {
+        Amounts {
+            billed: self.net,
+            list_price: self.gross,
+        }
+    }
+}
+
+/// Whether the box counts the item: its product is [`BILLED_PRODUCT`].
+fn is_billed(item: &UsageItem) -> bool {
+    item.product.eq_ignore_ascii_case(BILLED_PRODUCT)
 }
 
 /// The money of a span of days, at two prices.
@@ -70,8 +85,11 @@ pub struct DailyUsage(BTreeMap<NaiveDate, Amounts>);
 impl Add for Amounts {
     type Output = Amounts;
 
-    fn add(self, _other: Amounts) -> Amounts {
-        self
+    fn add(self, other: Amounts) -> Amounts {
+        Amounts {
+            billed: self.billed + other.billed,
+            list_price: self.list_price + other.list_price,
+        }
     }
 }
 
@@ -90,8 +108,13 @@ impl Sum for Amounts {
 impl Add for Windows {
     type Output = Windows;
 
-    fn add(self, _other: Windows) -> Windows {
-        self
+    fn add(self, other: Windows) -> Windows {
+        Windows {
+            today: self.today + other.today,
+            yesterday: self.yesterday + other.yesterday,
+            last_7_days: self.last_7_days + other.last_7_days,
+            last_30_days: self.last_30_days + other.last_30_days,
+        }
     }
 }
 
@@ -112,8 +135,11 @@ impl DailyUsage {
     /// day. An item of another product is left out.
     #[must_use]
     pub fn from_items(items: &[UsageItem]) -> DailyUsage {
-        let _ = items;
-        DailyUsage::default()
+        let mut days: BTreeMap<NaiveDate, Amounts> = BTreeMap::new();
+        for item in items.iter().filter(|item| is_billed(item)) {
+            *days.entry(item.date.date_naive()).or_default() += item.amounts();
+        }
+        DailyUsage(days)
     }
 
     /// Sums the billed items of one organization from an enterprise report.
@@ -127,15 +153,37 @@ impl DailyUsage {
         items: &[UsageItem],
         organization: &OwnerName,
     ) -> Result<DailyUsage, MissingOrganization> {
-        let _ = (items, organization);
-        Ok(DailyUsage::default())
+        let mut own = Vec::new();
+        for item in items.iter().filter(|item| is_billed(item)) {
+            match item.organization.as_deref() {
+                None => return Err(MissingOrganization),
+                Some(name) if name.eq_ignore_ascii_case(organization.as_str()) => {
+                    own.push(item.clone());
+                }
+                Some(_) => {}
+            }
+        }
+        Ok(DailyUsage::from_items(&own))
     }
 
     /// Sums the days into the four windows of the box.
     #[must_use]
     pub fn windows(&self, today: NaiveDate) -> Windows {
-        let _ = today;
-        Windows::default()
+        let sum_of = |days_back: i64| -> Amounts {
+            let first = today
+                .checked_sub_signed(Duration::days(days_back))
+                .unwrap_or(NaiveDate::MIN);
+            self.0.range(first..=today).map(|(_, amounts)| *amounts).sum()
+        };
+        Windows {
+            today: sum_of(0),
+            yesterday: today
+                .pred_opt()
+                .and_then(|day| self.0.get(&day).copied())
+                .unwrap_or_default(),
+            last_7_days: sum_of(6),
+            last_30_days: sum_of(29),
+        }
     }
 }
 
