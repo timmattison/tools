@@ -169,3 +169,36 @@ fn a_new_name_for_an_organization_uses_the_org_path() {
     );
     assert!(fixture.sidecar_remote(NAME).exists());
 }
+
+/// Asserts that `sidecar add` adds `/data/` on its own line to a `.gitignore` that
+/// starts with `before`.
+fn assert_ignore_line_added(before: &str) {
+    let fixture = Fixture::new(&[]);
+    let checkout = fixture.main_checkout();
+    fixture.write(&checkout.join(".gitignore"), before);
+    let run = fixture.run(&checkout, &["add", NAME, "--yes"]);
+    assert_eq!(run.code, 0, "{run:?}");
+    assert!(
+        run.stdout.contains("add \"/data/\" to .gitignore"),
+        "{run:?}"
+    );
+    let lines: Vec<String> = read(&checkout.join(".gitignore"))
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(lines, ["target/", "/data/"]);
+    assert!(fixture
+        .try_git(&checkout, &["check-ignore", "-q", "data/"])
+        .status
+        .success());
+}
+
+#[test]
+fn a_missing_gitignore_line_is_added() {
+    assert_ignore_line_added("target/\n");
+}
+
+#[test]
+fn a_missing_gitignore_line_is_added_after_a_last_line_with_no_newline() {
+    assert_ignore_line_added("target/");
+}
