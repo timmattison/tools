@@ -839,8 +839,9 @@ of the size of the target directory, and the disk of a Linux runner is small.
   the workflow.
 - If the check needs a tool that the runner does not have, add an install step
   to the workflow.
-- If a crate needs a system library on Linux, add its package to the
-  `apt-get install` step.
+- If a crate or a test needs a system library or a tool on Linux, add its
+  package to the `apt-get install` step. The tests of `crap` need `zsh`, for
+  example.
 - Pin each third-party action to a full commit SHA, and write its release tag
   in a comment. A tag can move, but a commit SHA cannot.
 - Run `actionlint .github/workflows/ci.yml` after each change to the workflow.

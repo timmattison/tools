@@ -49,12 +49,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install the system libraries (Linux)
+      - name: Install the system packages (Linux)
         if: runner.os == 'Linux'
-        # alsa-sys (audio) and openssl-sys link against these libraries.
+        # alsa-sys (audio) and openssl-sys link against these libraries. The
+        # tests of crap run its shell function in zsh.
         run: |
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends libasound2-dev libssl-dev pkg-config
+          sudo apt-get install --yes --no-install-recommends libasound2-dev libssl-dev pkg-config zsh
 
       - name: Install the pinned Rust toolchain
         # With no argument, rustup installs the toolchain and the components
