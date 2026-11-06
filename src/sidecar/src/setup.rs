@@ -61,17 +61,36 @@ fn set_up_one(host: &Host, name: &SidecarName, report: &mut SetupReport) -> bool
             return false;
         }
     };
+    let shown = host.link_shown(name);
     match ensure_clone(host.git(), &url, &main_clone) {
         CloneOutcome::Made => report
             .actions
             .push(format!("Cloned {url} into {}.", main_clone.display())),
         CloneOutcome::Present => {}
-        CloneOutcome::Incomplete | CloneOutcome::Foreign { .. } | CloneOutcome::Failed { .. } => {
+        CloneOutcome::Failed { reason } => {
+            report.warnings.push(format!(
+                "The clone of {} from {url} into {} failed: {reason} The setup made no {shown}. Run `{SETUP_COMMAND}` to try again.",
+                host.sidecar_repository(name),
+                main_clone.display()
+            ));
+            return false;
+        }
+        CloneOutcome::Incomplete => {
+            report.warnings.push(format!(
+                "{clone} holds a clone of {url} that did not end: another setup can clone it now, or a clone stopped before its end. The setup made no {shown}. When the other setup ends, run `{SETUP_COMMAND}`. If this warning comes again, remove {clone}, and run `{SETUP_COMMAND}`.",
+                clone = main_clone.display()
+            ));
+            return false;
+        }
+        CloneOutcome::Foreign { reason } => {
+            report.warnings.push(format!(
+                "{clone} is not a clone of {url}: {reason} The setup does not touch it and made no {shown}. Move it away, and run `{SETUP_COMMAND}`.",
+                clone = main_clone.display()
+            ));
             return false;
         }
     }
     let link = host.link(name);
-    let shown = host.link_shown(name);
     match inspect_link(host.git(), &link, &main_clone) {
         LinkState::Missing => point_and_report(&link, &main_clone, report, || {
             format!("Linked {shown} to {}.", main_clone.display())

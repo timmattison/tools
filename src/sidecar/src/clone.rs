@@ -139,15 +139,29 @@ pub fn ensure_clone_with(
         CloneState::Foreign { reason } => return CloneOutcome::Foreign { reason },
     }
     let temp = scratch_path(place);
-    match clone(&temp) {
+    let failure = match clone(&temp) {
         Ok(()) => match std::fs::rename(&temp, place) {
-            Ok(()) => CloneOutcome::Made,
-            Err(error) => CloneOutcome::Failed {
-                reason: error.to_string(),
-            },
+            Ok(()) => return CloneOutcome::Made,
+            Err(error) => error.to_string(),
         },
-        Err(reason) => CloneOutcome::Failed { reason },
+        Err(reason) => reason,
+    };
+    // The scratch directory is the own work of this run. It is never a main clone.
+    let _ = std::fs::remove_dir_all(&temp);
+    settle_after_failure(git, url, place, failure)
+}
+
+/// A clone step failed. Another run can have made the clone in the meantime, thus
+/// look at the place again and use what is usable there.
+fn settle_after_failure(git: &Git, url: &str, place: &Path, reason: String) -> CloneOutcome {
+    if std::fs::symlink_metadata(place).is_ok() {
+        match inspect_clone(git, url, place) {
+            CloneState::Ready => return CloneOutcome::Present,
+            CloneState::Incomplete => return CloneOutcome::Incomplete,
+            CloneState::Missing | CloneState::Foreign { .. } => {}
+        }
     }
+    CloneOutcome::Failed { reason }
 }
 
 /// The scratch path of one clone: `<parent>/.<name>.sidecar-clone-<pid>-<nanos>`.
