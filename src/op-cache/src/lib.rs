@@ -33,6 +33,7 @@ use tempfile::NamedTempFile;
 
 mod audit;
 mod caller;
+mod notify;
 mod op_run;
 
 /// Maximum number of retries for 1Password CLI operations.
