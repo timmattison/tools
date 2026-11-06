@@ -255,3 +255,18 @@ fn a_second_add_changes_nothing_and_exits_0() {
         );
     }
 }
+
+#[test]
+fn an_existing_private_repository_is_used_and_nothing_is_made() {
+    let fixture = Fixture::new(&[]);
+    fixture.make_sidecar_remote(NAME);
+    let main_before = remote_main(&fixture);
+    let worktree = fixture.add_host_worktree("feature");
+    let run = fixture.run(&worktree, &["add", NAME, "--yes"]);
+    assert_eq!(run.code, 0, "{run:?}");
+    assert!(posts(&fixture).is_empty(), "{:?}", fixture.gh_calls());
+    assert_eq!(remote_main(&fixture), main_before);
+    assert_eq!(registered(&worktree), [NAME]);
+    assert!(fs::symlink_metadata(fixture.link(&worktree, NAME)).is_ok());
+    assert!(fixture.main_clone(NAME).join(".git").exists());
+}
