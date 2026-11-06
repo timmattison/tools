@@ -50,6 +50,15 @@ impl AuditTrail {
             options.mode(0o600);
         }
         let file = options.open(path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // An older or hand-made file may be open to the group or others.
+            let mode = file.metadata()?.permissions().mode();
+            if mode & 0o077 != 0 {
+                file.set_permissions(fs::Permissions::from_mode(0o600))?;
+            }
+        }
         Ok(Self { file })
     }
 
