@@ -553,29 +553,69 @@ impl BillingBoard {
     /// Takes the results of one billing read. A result for an account that
     /// the board does not hold is ignored.
     pub fn apply(&mut self, results: Vec<(OwnerName, Result<DailyUsage, BillingError>)>) {
-        let _ = results;
+        for (name, result) in results {
+            let Some((_, state)) = self.accounts.iter_mut().find(|(held, _)| *held == name) else {
+                continue;
+            };
+            *state = match (result, std::mem::replace(state, AccountState::Loading)) {
+                (Ok(usage), _) => AccountState::Ready { usage, error: None },
+                (Err(error), AccountState::Ready { usage, .. }) => AccountState::Ready {
+                    usage,
+                    error: Some(error.to_string()),
+                },
+                (Err(error), _) => AccountState::NoAccess(error.to_string()),
+            };
+        }
     }
 
     /// The rows and the totals for the UTC day `today`.
     #[must_use]
     pub fn view(&self, today: NaiveDate) -> BillingView {
-        let _ = today;
-        BillingView {
-            accounts: self
-                .accounts
-                .iter()
-                .map(|(name, _)| AccountLine {
+        let mut sum = Windows::default();
+        let mut partial = false;
+        let accounts = self
+            .accounts
+            .iter()
+            .map(|(name, state)| {
+                let cell = match state {
+                    AccountState::Loading => {
+                        partial = true;
+                        AccountCell::Loading
+                    }
+                    AccountState::Ready { usage, error } => {
+                        let windows = usage.windows(today);
+                        sum += windows;
+                        AccountCell::Ready {
+                            windows,
+                            error: error.clone(),
+                        }
+                    }
+                    AccountState::NoAccess(text) => {
+                        partial = true;
+                        AccountCell::NoAccess(text.clone())
+                    }
+                };
+                AccountLine {
                     name: name.clone(),
-                    cell: AccountCell::Loading,
-                })
-                .collect(),
+                    cell,
+                }
+            })
+            .collect();
+        BillingView {
+            accounts,
             billed: Total {
-                partial: true,
-                ..Total::default()
+                today: sum.today.billed,
+                yesterday: sum.yesterday.billed,
+                last_7_days: sum.last_7_days.billed,
+                last_30_days: sum.last_30_days.billed,
+                partial,
             },
             list_price: Total {
-                partial: true,
-                ..Total::default()
+                today: sum.today.list_price,
+                yesterday: sum.yesterday.list_price,
+                last_7_days: sum.last_7_days.list_price,
+                last_30_days: sum.last_30_days.list_price,
+                partial,
             },
         }
     }
