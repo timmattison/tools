@@ -2486,8 +2486,8 @@ cannot hang the caller. Used by `cwt` and `ha`.
     active and the run is collapsed. A refresh sends at most 32 of these one-time requests, the
     newest finish first. Thus at a start with 200 finished runs in the window, the 7 refreshes
     after the first one send the 200 requests. A later refresh sends one only for a new run in
-    the section whose jobs `ha` does not have yet. A failed request goes again on the next
-    refresh.
+    the section whose jobs `ha` does not have yet. A failed request of a finished run goes again
+    on the next refresh, under the same limit of 32.
     At most 8 `gh` children run at the same time, for runs and jobs together. The status line
     shows the remaining budget. When less than 10% remains, `ha` waits until the reset of the budget and says so.
   - Billing budget: the billing refreshes at start, every 10 minutes, and when you push `r`.

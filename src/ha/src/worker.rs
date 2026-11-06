@@ -21,7 +21,8 @@
 //! recent section, with [`Command::RecentRuns`]. The worker fetches the jobs
 //! of each finished run of that list one time, so the screen can show the job
 //! sum of the run. This costs one request for each finished run, at most
-//! [`RECENT_JOBS_PER_CYCLE`] new runs in each cycle, the newest finish first.
+//! [`RECENT_JOBS_PER_CYCLE`] runs in each cycle, the newest finish first. A
+//! retry of a failed recent run goes under the same cap.
 //! Job requests and run requests share the
 //! [`CONCURRENCY`] limit and the rate limit backoff.
 //!
@@ -437,12 +438,25 @@ impl State {
         added
     }
 
+    /// Whether a failed fetch of a run with the given facts leaves an active
+    /// mark. The mark makes `due_jobs` give the run again in each cycle, with
+    /// no cap. A finished run of the recent list that nobody watches needs no
+    /// such mark. [`State::due_recent`] gives it again under the cap of
+    /// [`RECENT_JOBS_PER_CYCLE`]. Every other run keeps the mark: a run that is
+    /// active, a run that is watched, and a run outside the recent list. The
+    /// last one has no other path to a retry.
+    fn keeps_active_mark_after_failure(&self, key: &RunKey, facts: RunFacts) -> bool {
+        facts.active || self.watched.contains(key) || !self.recent.contains(key)
+    }
+
     /// The runs whose jobs the next cycle fetches, each one time, in a stable
     /// order. The function considers three sets: the watched runs, every run
     /// whose facts say it is active, and every run that has a mark. It applies
     /// the due rule to each of them. The third set gives a run that is not
     /// watched its last fetch: its mark is active, so it is due one more time.
-    /// A run whose fetch failed is due again through its active mark.
+    /// A run whose fetch failed is due again through its active mark, unless
+    /// it is a finished run of the recent list that nobody watches. Then
+    /// [`State::due_recent`] gives it again, under its cap.
     ///
     /// The fourth source is the new runs of the last `RecentRuns` list. They
     /// have no mark, thus this function does not consider them.
@@ -489,9 +503,11 @@ impl State {
     /// These are exactly the recent runs that [`State::due_jobs`] never
     /// considers. A recent run with a mark is never new, because `due_jobs`
     /// already decides it: an active mark makes it due, and an inactive mark
-    /// makes it due only when its `updated_at` changed. A retry after a failed
-    /// fetch thus goes through `due_jobs`, outside the cap of new runs. A run
-    /// with no facts is not due, as in `due_jobs`.
+    /// makes it due only when its `updated_at` changed. A failed fetch of a
+    /// finished recent run that nobody watches leaves no mark
+    /// ([`State::keeps_active_mark_after_failure`]). The retry thus goes
+    /// through this function, under the same cap as a first fetch. A run with
+    /// no facts is not due, as in `due_jobs`.
     fn due_recent(&mut self, due: &[RunKey]) -> Vec<RunKey> {
         let facts = self.facts.get_mut().unwrap_or_else(PoisonError::into_inner);
         let marks = self
@@ -1117,9 +1133,10 @@ fn fetch_all<S: Source>(
 /// A good fetch sends [`Update::Jobs`] and marks the run with its current
 /// facts. The mark is active when the run or one of its jobs is active. A run
 /// with no facts gets no mark. A failed fetch sends [`Update::JobsFailed`]. A
-/// run with facts then gets an active mark, so the next cycle tries again, also
-/// when the run is not watched and not active. A run with no facts loses its
-/// mark.
+/// run with facts then gets an active mark, so the next cycle tries again. The
+/// exception is a finished run of the recent list that nobody watches. It gets
+/// no mark, and the recent list gives it again under the cap of
+/// [`RECENT_JOBS_PER_CYCLE`]. A run with no facts loses its mark.
 ///
 /// Each call of the source can leave pages in its cache, also a failed call.
 /// Thus the function records each fetched run in `held_jobs`. After the
@@ -1164,14 +1181,15 @@ fn fetch_jobs<S: Source>(
             (Err(error), facts) => {
                 let key = (repo.clone(), *run);
                 match facts {
-                    Some(facts) => marks.insert(
-                        key,
-                        RunFacts {
-                            active: true,
-                            ..facts
-                        },
-                    ),
-                    None => marks.remove(&key),
+                    Some(facts) if state.keeps_active_mark_after_failure(&key, facts) => marks
+                        .insert(
+                            key,
+                            RunFacts {
+                                active: true,
+                                ..facts
+                            },
+                        ),
+                    _ => marks.remove(&key),
                 };
                 Update::JobsFailed {
                     run: *run,
@@ -1186,8 +1204,11 @@ fn fetch_jobs<S: Source>(
 
 /// Tells the source to forget the pages of each held run with no active mark.
 ///
-/// Only an active mark makes the worker fetch a run again. A held run with no
-/// mark, or with an inactive mark, is thus a run that the worker stops fetching.
+/// Only an active mark or the recent list makes the worker fetch a run again.
+/// A held run with no mark, or with an inactive mark, is thus a run that the
+/// worker stops fetching, unless it is in the recent list. A failed recent run
+/// has no mark and the worker fetches it again. Its cached pages are forgotten,
+/// and the retry fetches its pages again.
 /// The function takes the runs in order and removes them from `held_jobs`. It
 /// drops both locks before the first call of the source.
 fn forget_jobs_with_no_active_mark<S: Source>(source: &S, state: &State) {
@@ -3113,8 +3134,12 @@ mod tests {
             );
             before = after;
         }
-        let ids = sorted_job_ids(&fake);
-        let second_cycle: Vec<u64> = ids[32..64].to_vec();
+        let calls: Vec<u64> = calls_of(&fake, "jobs")
+            .iter()
+            .map(|id| id.parse().expect("a run id"))
+            .collect();
+        let mut second_cycle: Vec<u64> = calls[32..64].to_vec();
+        second_cycle.sort_unstable();
         assert_eq!(
             second_cycle,
             (9..=40).collect::<Vec<u64>>(),
