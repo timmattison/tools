@@ -154,6 +154,13 @@ pub enum Row<'a> {
         /// was suspect (issue #599). The run is then the last good one, and
         /// it can be old.
         stale: bool,
+        /// The sum of the runner times (see `Job::runner_time`) of the jobs
+        /// that the board holds for the run, at the time of the view. It is
+        /// `None` when the board holds no good job for the run: before the
+        /// first answer, after a failed first fetch, and when the answer
+        /// holds no job. A failed fetch after a good one keeps the sum of
+        /// the last good jobs.
+        job_sum: Option<Duration>,
     },
     /// One job of an expanded run.
     Job {
@@ -1232,6 +1239,7 @@ fn push_runs<'a>(
             state: run.state.shown_with_jobs(jobs.iter().map(|job| job.state)),
             selected: here.is_some_and(|selection| selection.job.is_none()),
             stale: view.errors.contains_key(&run.repo),
+            job_sum: None,
         });
         if view.expanded.contains(&run.id) {
             push_jobs(rows, run, answer, here.and_then(|selection| selection.job));
@@ -2786,6 +2794,43 @@ mod tests {
             Row::Run { run, state, .. } if run.id == RunId(id) => Some(*state),
             _ => None,
         })
+    }
+
+    /// The job sum that the row of run `id` shows. The outer `None` means that
+    /// no row holds the run.
+    fn run_job_sum(rows: &[Row<'_>], id: u64) -> Option<Option<Duration>> {
+        rows.iter().find_map(|row| match row {
+            Row::Run { run, job_sum, .. } if run.id == RunId(id) => Some(*job_sum),
+            _ => None,
+        })
+    }
+
+    /// Builds a job that ran for `seconds` seconds and ended before `now()`.
+    fn finished_job(id: u64, seconds: i64) -> Job {
+        let ended = now() - Span::minutes(5);
+        Job {
+            started_at: Some(ended - Span::seconds(seconds)),
+            completed_at: Some(ended),
+            ..job(id, RunState::Passed)
+        }
+    }
+
+    #[test]
+    fn the_job_sum_of_a_run_is_the_sum_of_the_runner_times_of_its_jobs() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(41_966_278_012, "a/x", RunState::Passed, 60, 10)],
+            now(),
+        );
+        board.set_jobs(
+            RunId(41_966_278_012),
+            vec![finished_job(1, 211), finished_job(2, 897)],
+        );
+        assert_eq!(
+            run_job_sum(&board.rows(now()), 41_966_278_012),
+            Some(Some(Duration::from_secs(1108)))
+        );
     }
 
     #[test]

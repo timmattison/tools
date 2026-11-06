@@ -1322,6 +1322,7 @@ pub fn draw<Tz: TimeZone>(
                 state,
                 selected,
                 stale,
+                job_sum: _,
             } => {
                 let line = run_line(run, *state, *stale, now, tz, widths);
                 let y = put_line(buffer, index + 1, &line.style(age_style(row, now)));
