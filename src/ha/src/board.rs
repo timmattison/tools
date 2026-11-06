@@ -4535,4 +4535,106 @@ mod tests {
         board.select_previous_page(now());
         assert_eq!(selected_text(&mut board).as_deref(), Some("Run(2)*"));
     }
+
+    /// Parses the RFC 3339 time `text`.
+    fn at(text: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(text)
+            .expect("a valid time")
+            .with_timezone(&Utc)
+    }
+
+    /// The time of the real run of issue 643, 2026-11-04 at 18:00:00 UTC. It
+    /// is after the run ended.
+    fn late_now() -> DateTime<Utc> {
+        at("2026-11-04T18:00:00Z")
+    }
+
+    /// Run 41874496263 of `Lock-Free-Labs/nvr-tools`. It passed. GitHub
+    /// changed its `updated_at` 18 minutes after the last job ended.
+    fn late_run() -> Run {
+        Run {
+            id: RunId(41_874_496_263),
+            repo: repo("Lock-Free-Labs/nvr-tools"),
+            workflow: "ci".to_owned(),
+            branch: "main".to_owned(),
+            title: "late run".to_owned(),
+            state: RunState::Passed,
+            started_at: at("2026-11-04T17:07:48Z"),
+            created_at: at("2026-11-04T17:07:48Z"),
+            updated_at: at("2026-11-04T17:40:55Z"),
+            url: "https://example.test/Lock-Free-Labs/nvr-tools/runs/41874496263".to_owned(),
+        }
+    }
+
+    /// Builds a job with a name and optional start and finish times, as
+    /// RFC 3339 text.
+    fn timed_job(
+        id: u64,
+        name: &str,
+        state: RunState,
+        started: Option<&str>,
+        completed: Option<&str>,
+    ) -> Job {
+        Job {
+            name: name.to_owned(),
+            started_at: started.map(at),
+            completed_at: completed.map(at),
+            ..job(id, state)
+        }
+    }
+
+    /// The two jobs of `late_run`. The last one ends at 17:22:45.
+    fn late_jobs() -> Vec<Job> {
+        vec![
+            timed_job(
+                126_730_108_923,
+                "Full check list (Linux)",
+                RunState::Passed,
+                Some("2026-11-04T17:07:51Z"),
+                Some("2026-11-04T17:22:45Z"),
+            ),
+            timed_job(
+                126_730_109_123,
+                "Clippy (Windows)",
+                RunState::Passed,
+                Some("2026-11-04T17:07:53Z"),
+                Some("2026-11-04T17:12:05Z"),
+            ),
+        ]
+    }
+
+    /// The `ended` value of the row of run `id` at `now`. The function panics
+    /// when the board shows no row of that run.
+    fn ended(board: &mut Board, now: DateTime<Utc>, id: RunId) -> Option<DateTime<Utc>> {
+        board
+            .rows(now)
+            .into_iter()
+            .find_map(|row| match row {
+                Row::Run { run, ended, .. } if run.id == id => Some(ended),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the board shows no row of run {}", id.0))
+    }
+
+    /// A board that holds `late_run` and the jobs `jobs`.
+    fn late_board(run: Run, jobs: Option<Vec<Job>>) -> Board {
+        let mut board = board();
+        let id = run.id;
+        board.replace(repo("Lock-Free-Labs/nvr-tools"), vec![run], late_now());
+        if let Some(jobs) = jobs {
+            board.set_jobs(id, jobs);
+        }
+        board
+    }
+
+    #[test]
+    fn a_finished_run_ends_when_its_last_job_ends() {
+        let run = late_run();
+        let id = run.id;
+        let mut board = late_board(run, Some(late_jobs()));
+        assert_eq!(
+            ended(&mut board, late_now(), id),
+            Some(at("2026-11-04T17:22:45Z"))
+        );
+    }
 }
