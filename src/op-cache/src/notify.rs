@@ -1,5 +1,7 @@
 //! The macOS notification that op-cache shows before it asks 1Password.
 
+use std::ffi::OsStr;
+
 /// The title of the first attempt.
 pub(crate) const TITLE: &str = "op-cache → 1Password";
 
@@ -45,6 +47,13 @@ pub(crate) fn compose(
         subtitle,
         message: reference.to_owned(),
     }
+}
+
+/// False only when `OP_CACHE_NOTIFY` is exactly `0`. The caller passes the
+/// value, so this function never reads the process environment.
+pub(crate) fn notifications_enabled(op_cache_notify: Option<&OsStr>) -> bool {
+    let _ = op_cache_notify;
+    true
 }
 
 #[cfg(test)]
@@ -110,5 +119,14 @@ mod tests {
     fn the_message_is_the_reference() {
         let n = compose(1, 3, REFERENCE, None, None, None);
         assert_eq!(n.message, REFERENCE);
+    }
+
+    #[test]
+    fn only_an_exact_zero_turns_notifications_off() {
+        assert!(notifications_enabled(None));
+        assert!(notifications_enabled(Some(OsStr::new("1"))));
+        assert!(notifications_enabled(Some(OsStr::new(""))));
+        assert!(notifications_enabled(Some(OsStr::new("false"))));
+        assert!(!notifications_enabled(Some(OsStr::new("0"))));
     }
 }
