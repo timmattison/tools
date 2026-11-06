@@ -9,6 +9,7 @@
     reason = "types such as run::RunState repeat the module name on purpose"
 )]
 pub mod app;
+pub mod billing;
 pub mod board;
 pub mod browser;
 pub mod cancel;
