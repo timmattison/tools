@@ -4745,4 +4745,18 @@ mod tests {
             Some(at("2026-11-04T17:40:55Z"))
         );
     }
+
+    #[test]
+    fn the_end_is_never_later_than_the_update() {
+        let run = Run {
+            updated_at: at("2026-11-04T17:20:00Z"),
+            ..late_run()
+        };
+        let id = run.id;
+        let mut board = late_board(run, Some(late_jobs()));
+        assert_eq!(
+            ended(&mut board, late_now(), id),
+            Some(at("2026-11-04T17:20:00Z"))
+        );
+    }
 }
