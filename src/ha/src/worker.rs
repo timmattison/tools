@@ -4902,4 +4902,38 @@ mod tests {
             "{results:?}"
         );
     }
+
+    #[test]
+    fn a_failed_month_gives_each_account_of_the_read_the_error() {
+        let fake = Arc::new(FakeSource::default());
+        let slug = EnterpriseSlug::parse("big-co").expect("a slug");
+        let endpoint = Endpoint::Enterprise(slug.clone());
+        let months = months_now();
+        let failing = BillingError::Source(SourceError::Failed("month broke".to_owned()));
+        for (index, month) in months.iter().enumerate() {
+            let answer = if index == 0 {
+                Err(failing.clone())
+            } else {
+                Ok(vec![billed_item(*month, Some("alpha"), 1.0)])
+            };
+            fake.script()
+                .usage
+                .insert(usage_key(&endpoint, *month), answer);
+        }
+        let mut cfg = billing_settings(&["alpha", "beta"]);
+        cfg.billing_enterprises.insert(owner("alpha"), slug.clone());
+        cfg.billing_enterprises.insert(owner("beta"), slug);
+        let worker = spawn_with(Arc::clone(&fake), &cfg, NEVER);
+
+        let mut results = billing_updates(&one_cycle(&worker));
+
+        results.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            results,
+            vec![
+                (owner("alpha"), Err(failing.clone())),
+                (owner("beta"), Err(failing)),
+            ]
+        );
+    }
 }
