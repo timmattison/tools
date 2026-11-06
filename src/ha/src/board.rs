@@ -600,6 +600,8 @@ impl Board {
     /// Splits the shown runs into the active list and the recent list.
     ///
     /// Both lists are sorted. A run that is not shown at `now` is in neither.
+    /// The recent list is in order of the end of each run (`run_end`), newest
+    /// first. The window still uses `updated_at`.
     fn sections(&self, now: DateTime<Utc>) -> (Vec<&Run>, Vec<&Run>) {
         let mut active: Vec<&Run> = self
             .runs
@@ -615,7 +617,9 @@ impl Board {
             .flatten()
             .filter(|run| run.state.is_finished() && run.updated_at >= oldest)
             .collect();
-        recent.sort_by_key(|run| std::cmp::Reverse((run.updated_at, run.id)));
+        recent.sort_by_cached_key(|run| {
+            std::cmp::Reverse((run_end(run, self.jobs.get(&run.id)), run.id))
+        });
         (active, recent)
     }
 
