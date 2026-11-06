@@ -2,6 +2,8 @@
 
 use crate::audit;
 use serde::Serialize;
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 /// One process in the chain above op-cache.
@@ -98,6 +100,16 @@ pub(crate) fn ancestors_of_this_process() -> Vec<Ancestor> {
             command: (!command.is_empty()).then_some(command),
         })
     })
+}
+
+/// The Claude config directory: a non-empty `CLAUDE_CONFIG_DIR`, else
+/// `$HOME/.claude`, else `None`. Pure.
+pub(crate) fn claude_config_dir(
+    claude_config_dir: Option<&OsStr>,
+    home: Option<&OsStr>,
+) -> Option<PathBuf> {
+    let _ = (claude_config_dir, home);
+    None
 }
 
 #[cfg(test)]
@@ -234,5 +246,28 @@ mod tests {
         seen.sort_unstable();
         seen.dedup();
         assert_eq!(seen.len(), chain.len(), "a pid repeats");
+    }
+
+    #[test]
+    fn config_dir_prefers_a_non_empty_claude_config_dir() {
+        let dir = claude_config_dir(Some(OsStr::new("/c")), Some(OsStr::new("/h")));
+        assert_eq!(dir, Some(PathBuf::from("/c")));
+    }
+
+    #[test]
+    fn config_dir_falls_back_to_home_when_empty_or_unset() {
+        let home = Some(OsStr::new("/h"));
+        let expected = Some(PathBuf::from("/h/.claude"));
+        assert_eq!(claude_config_dir(Some(OsStr::new("")), home), expected);
+        assert_eq!(claude_config_dir(None, home), expected);
+    }
+
+    #[test]
+    fn config_dir_is_none_without_a_usable_source() {
+        assert_eq!(claude_config_dir(None, None), None);
+        assert_eq!(
+            claude_config_dir(Some(OsStr::new("")), Some(OsStr::new(""))),
+            None
+        );
     }
 }
