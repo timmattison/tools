@@ -10,6 +10,7 @@ use buildinfo::version_string;
 use clap::{Parser, Subcommand};
 use sidecar::host::{Host, RegistryPolicy};
 use sidecar::setup::{ignore_refusal, is_ci, run_setup, CI_VARIABLE};
+use sidecar::status::{render, rows, Row};
 
 /// The command line of `sidecar`.
 #[derive(Debug, Parser)]
@@ -81,6 +82,7 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             hook: true,
             hook_args,
         } => Ok(run_setup_hook(hook_args)),
+        Command::Status => run_status_command(),
         other => anyhow::bail!("{} is not implemented yet", other.word()),
     }
 }
@@ -101,6 +103,24 @@ fn run_setup_command() -> anyhow::Result<ExitCode> {
         eprintln!("warning: {warning}");
     }
     Ok(if report.unlinked.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
+}
+
+/// Runs `sidecar status`. The table goes to standard output. The exit code is 1 when a
+/// row is not ready.
+fn run_status_command() -> anyhow::Result<ExitCode> {
+    let cwd = std::env::current_dir()?;
+    let host = Host::discover(&cwd, RegistryPolicy::Required)?;
+    let table = rows(&host);
+    if table.is_empty() {
+        println!("sidecar.toml names no sidecar.");
+        return Ok(ExitCode::SUCCESS);
+    }
+    print!("{}", render(&table));
+    Ok(if table.iter().all(Row::is_ready) {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)

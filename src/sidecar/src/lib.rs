@@ -13,3 +13,4 @@ pub mod name;
 pub mod registry;
 pub mod remote;
 pub mod setup;
+pub mod status;
