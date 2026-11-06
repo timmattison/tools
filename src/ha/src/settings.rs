@@ -277,8 +277,13 @@ pub fn help_after(config_path: Option<&Path>) -> String {
          \x20   owners = [\"Lock-Free-Labs\"]\n\
          \x20   window = \"8h\"\n\
          \x20   interval = \"60s\"\n\
+         \x20   billing = true\n\
          \n\
-         A window or interval is a whole number and a unit: s, m, h, or d."
+         \x20   [billing_enterprises]\n\
+         \x20   \"some-org\" = \"some-enterprise\"\n\
+         \n\
+         A window or interval is a whole number and a unit: s, m, h, or d.\n\
+         An organization in [billing_enterprises] reads the billing of its enterprise."
     )
 }
 
@@ -822,12 +827,18 @@ mod tests {
             "[billing_enterprises]",
             "\"some-org\" = \"some-enterprise\"",
         ] {
-            assert!(example.contains(needle), "missing {needle:?} in:\n{example}");
+            assert!(
+                example.contains(needle),
+                "missing {needle:?} in:\n{example}"
+            );
         }
         let settings = resolve_file(&CommandLine::default(), &example).unwrap();
         assert!(settings.billing);
         assert_eq!(settings.billing_enterprises.len(), 1);
-        assert!(text.contains("reads the billing of its enterprise"), "{text}");
+        assert!(
+            text.contains("reads the billing of its enterprise"),
+            "{text}"
+        );
     }
 
     #[test]
