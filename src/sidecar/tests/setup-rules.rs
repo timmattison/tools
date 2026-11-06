@@ -313,3 +313,30 @@ fn rule_8_warns_when_the_remote_has_no_main_branch() {
         .collect();
     assert!(leftovers.is_empty(), "{leftovers:?}");
 }
+
+#[test]
+fn rule_8_continues_with_the_next_name_when_a_clone_fails() {
+    let fixture = Fixture::new(&[NAME, "pics"]);
+    let host = fixture.main_checkout();
+    fs::rename(
+        fixture.sidecar_remote(NAME),
+        fixture.root().join("moved-away-testdata.git"),
+    )
+    .unwrap();
+
+    let run = fixture.run(&host, &["setup"]);
+
+    assert_eq!(run.code, 1, "{run:?}");
+    assert!(
+        run.stderr.lines().any(|line| line.starts_with("warning: ")
+            && line.contains("testdata")
+            && line.contains("sidecar setup")),
+        "{run:?}"
+    );
+    assert!(!fixture.main_clone(NAME).exists());
+    assert!(fixture.main_clone("pics").join("data.txt").is_file());
+    assert_eq!(
+        canon(&fixture.link(&host, "pics")),
+        canon(&fixture.main_clone("pics"))
+    );
+}
