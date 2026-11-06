@@ -129,7 +129,14 @@ pub(crate) struct OpEnd {
 /// The longest prefix of `text` that is at most `max_bytes` bytes and ends on
 /// a char boundary. It never slices inside a multi-byte character.
 pub(crate) fn truncate_at_char_boundary(text: &str, max_bytes: usize) -> &str {
-    text
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 #[cfg(test)]
