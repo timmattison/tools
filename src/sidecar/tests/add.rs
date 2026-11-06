@@ -9,6 +9,9 @@ use std::path::Path;
 
 use support::Fixture;
 
+/// The name of the new sidecar in these tests.
+const NAME: &str = "pics";
+
 /// The text of a file, or an empty string when the file is missing.
 fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_default()
@@ -39,4 +42,19 @@ fn an_invalid_name_is_refused_before_any_call() {
         )
     );
     assert!(!fixture.main_clone("Bad_Name").exists());
+}
+
+#[test]
+fn sidecar_add_prints_the_plan_before_it_does_it() {
+    let fixture = Fixture::new(&[]);
+    let run = fixture.run(&fixture.main_checkout(), &["add", NAME, "--yes"]);
+    assert!(
+        run.stdout.contains("sidecar add will do these steps:"),
+        "{run:?}"
+    );
+    assert!(
+        run.stdout
+            .contains("  - make the private repository fixture-owner/megarepo-data-pics on GitHub"),
+        "{run:?}"
+    );
 }
