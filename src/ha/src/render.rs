@@ -1532,8 +1532,9 @@ fn pad_left(text: &str, width: usize) -> String {
 /// amount. The box is as wide as its widest line plus the borders and the
 /// padding. A frame that is narrower, or that would leave fewer than
 /// [`BILLING_MIN_BOARD_ROWS`] board rows, gets no box. A box wider than the
-/// frame first lowers the name column to 12 columns, then cuts each line that
-/// is still too wide so that it ends in `…`.
+/// frame first lowers the name column to 12 columns, as far as the header and
+/// the amount lines need, then cuts each line that is still too wide so that it
+/// ends in `…`. A long text line or warning line does not lower the name column.
 fn billing_box(view: &BillingView, area: Rect) -> Option<BillingBox> {
     let mut contents = vec![BillingContent::Header];
     for account in &view.accounts {
@@ -1608,9 +1609,23 @@ fn billing_box(view: &BillingView, area: Rect) -> Option<BillingBox> {
     let widest = |lines: &[String]| lines.iter().map(|line| line.width()).max().unwrap_or(0);
     let mut name_width = widest_name.clamp(BILLING_MIN_NAME_WIDTH, BILLING_MAX_NAME_WIDTH);
     let mut lines = layout(name_width);
-    // Every line holds the name column, thus the name column gives up the
-    // columns that the box is too wide by, down to its minimum.
-    let excess = (widest(&lines) + frame_columns).saturating_sub(max_width);
+    // Only the header and the amount lines can fit when the name column
+    // decreases. A text line or a warning line stays as wide, and the cut to
+    // the inner width shortens it. Thus only the header and the amount lines
+    // set the excess, and the name column gives up that many columns, down to
+    // its minimum.
+    let fitting: Vec<String> = contents
+        .iter()
+        .zip(&lines)
+        .filter(|(content, _)| {
+            matches!(
+                content,
+                BillingContent::Header | BillingContent::Amounts(..)
+            )
+        })
+        .map(|(_, line)| line.clone())
+        .collect();
+    let excess = (widest(&fitting) + frame_columns).saturating_sub(max_width);
     if excess > 0 {
         name_width = name_width
             .saturating_sub(excess)
@@ -7529,7 +7544,7 @@ mod tests {
             .expect("the row shows");
         assert_eq!(all[y].chars().count(), 60, "{:?}", all[y]);
         assert!(
-            all[y].starts_with("│ timmattison   no access: token needs"),
+            all[y].starts_with("│ timmattison     no access: token needs"),
             "{:?}",
             all[y]
         );
