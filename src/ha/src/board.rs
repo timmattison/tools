@@ -1015,6 +1015,15 @@ impl Board {
             .collect()
     }
 
+    /// The repository and the ID of each run that the recent section shows at
+    /// `now`, in the order of the section (the newest finish first).
+    /// `Board::sections` decides the list. The app sends it to the worker each
+    /// time it changes (`Command::RecentRuns`).
+    #[must_use]
+    pub fn recent_runs(&self, now: DateTime<Utc>) -> Vec<(RepoName, RunId)> {
+        Vec::new()
+    }
+
     /// Moves the selection to the next row: an item row or a job row.
     pub fn select_next(&mut self, now: DateTime<Utc>) {
         self.settle(now);
@@ -3356,6 +3365,29 @@ mod tests {
                 .into_iter()
                 .collect();
         assert_eq!(board.expanded(now()), expected);
+    }
+
+    #[test]
+    fn recent_runs_gives_the_finished_runs_of_the_window_newest_finish_first() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Succeeded, 100, 60),
+                run(2, "a/x", RunState::Running, 30, 1),
+                run(3, "a/x", RunState::Failed, 600, 540),
+            ],
+            now(),
+        );
+        board.replace(
+            repo("b/y"),
+            vec![run(4, "b/y", RunState::Failed, 50, 10)],
+            now(),
+        );
+        assert_eq!(
+            board.recent_runs(now()),
+            [(repo("b/y"), RunId(4)), (repo("a/x"), RunId(1))]
+        );
     }
 
     #[test]
