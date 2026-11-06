@@ -2857,6 +2857,69 @@ mod tests {
     }
 
     #[test]
+    fn the_job_sum_of_an_active_run_increases_from_one_frame_to_the_next() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Running, 30, 1)],
+            now(),
+        );
+        board.set_jobs(
+            RunId(1),
+            vec![Job {
+                started_at: Some(now() - Span::minutes(10)),
+                ..job(11, RunState::Running)
+            }],
+        );
+        assert_eq!(
+            run_job_sum(&board.rows(now()), 1),
+            Some(Duration::from_secs(600))
+        );
+        assert_eq!(
+            run_job_sum(&board.rows(now() + Span::seconds(1)), 1),
+            Some(Duration::from_secs(601))
+        );
+    }
+
+    #[test]
+    fn a_run_with_no_good_job_has_no_job_sum() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Running, 20, 1),
+                run(3, "a/x", RunState::Running, 10, 1),
+            ],
+            now(),
+        );
+        // Run 1 has no answer. Run 2 has a failed first fetch.
+        board.fail_jobs(RunId(2), "boom".to_owned());
+        // Run 3 has an answer with no job.
+        board.set_jobs(RunId(3), vec![]);
+        let rows = board.rows(now());
+        assert_eq!(run_job_sum(&rows, 1), None);
+        assert_eq!(run_job_sum(&rows, 2), None);
+        assert_eq!(run_job_sum(&rows, 3), None);
+    }
+
+    #[test]
+    fn a_failed_fetch_keeps_the_job_sum_of_the_last_good_jobs() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Passed, 60, 10)],
+            now(),
+        );
+        board.set_jobs(RunId(1), vec![finished_job(1, 211), finished_job(2, 897)]);
+        board.fail_jobs(RunId(1), "boom".to_owned());
+        assert_eq!(
+            run_job_sum(&board.rows(now()), 1),
+            Some(Duration::from_secs(1108))
+        );
+    }
+
+    #[test]
     fn a_collapsed_run_keeps_the_running_marker_of_its_jobs() {
         let mut board = board();
         board.replace(
