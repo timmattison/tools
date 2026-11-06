@@ -4637,4 +4637,15 @@ mod tests {
             Some(at("2026-11-04T17:22:45Z"))
         );
     }
+
+    #[test]
+    fn a_finished_run_with_no_jobs_ends_at_its_update() {
+        let run = late_run();
+        let id = run.id;
+        let mut board = late_board(run, None);
+        assert_eq!(
+            ended(&mut board, late_now(), id),
+            Some(at("2026-11-04T17:40:55Z"))
+        );
+    }
 }
