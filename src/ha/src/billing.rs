@@ -7,8 +7,8 @@
 //! All windows count whole UTC days, because the report of GitHub has a date
 //! and no time of day. No window is shorter than one day.
 
-use std::collections::BTreeMap;
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::iter::Sum;
@@ -176,7 +176,10 @@ impl DailyUsage {
             let first = today
                 .checked_sub_signed(Duration::days(days_back))
                 .unwrap_or(NaiveDate::MIN);
-            self.0.range(first..=today).map(|(_, amounts)| *amounts).sum()
+            self.0
+                .range(first..=today)
+                .map(|(_, amounts)| *amounts)
+                .sum()
         };
         Windows {
             today: sum_of(0),
@@ -790,7 +793,10 @@ mod tests {
     }
 
     fn kinds(pairs: &[(&str, AccountKind)]) -> BTreeMap<OwnerName, AccountKind> {
-        pairs.iter().map(|(name, kind)| (owner(name), *kind)).collect()
+        pairs
+            .iter()
+            .map(|(name, kind)| (owner(name), *kind))
+            .collect()
     }
 
     fn read(endpoint: Endpoint, accounts: &[&str]) -> Read {
