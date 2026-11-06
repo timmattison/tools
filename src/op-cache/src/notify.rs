@@ -1,7 +1,7 @@
 //! The macOS notification that op-cache shows before it asks 1Password.
 
 use std::ffi::OsStr;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 
 /// The title of the first attempt.
 pub(crate) const TITLE: &str = "op-cache → 1Password";
@@ -69,6 +69,10 @@ pub(crate) const SCRIPT: [&str; 3] = [
 /// then `-e <line>` for each [`SCRIPT`] line, then the title, the subtitle and
 /// the message as three separate arguments. All three standard streams are
 /// null. This function does not start the command.
+#[cfg_attr(
+    not(target_os = "macos"),
+    expect(dead_code, reason = "only the macOS `start` builds the command")
+)]
 pub(crate) fn notification_command(notification: &Notification) -> Command {
     let mut command = Command::new("osascript");
     for line in SCRIPT {
@@ -82,6 +86,39 @@ pub(crate) fn notification_command(notification: &Notification) -> Command {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     command
+}
+
+/// Starts the notification without waiting for it. Returns the child, or
+/// `None` on a platform that has no notifications. A spawn error is a
+/// notification failure, never a failure of the read.
+#[cfg(target_os = "macos")]
+pub(crate) fn start(notification: &Notification) -> std::io::Result<Option<Child>> {
+    notification_command(notification).spawn().map(Some)
+}
+
+/// Starts the notification without waiting for it. This platform has none.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn start(notification: &Notification) -> std::io::Result<Option<Child>> {
+    let _ = notification;
+    Ok(None)
+}
+
+/// Reaps a notification after `op` returned. A child that still runs is
+/// killed and waited for, so none outlives the read. A child that exited with
+/// a failure status, or that cannot be reaped, gives an `Err` with the reason.
+pub(crate) fn finish(mut child: Child) -> Result<(), String> {
+    match child.try_wait() {
+        Ok(Some(status)) if status.success() => Ok(()),
+        Ok(Some(status)) => Err(format!("osascript failed: {status}")),
+        Ok(None) => {
+            let killed = child.kill();
+            let waited = child.wait();
+            killed
+                .and(waited.map(|_| ()))
+                .map_err(|error| format!("cannot stop osascript: {error}"))
+        }
+        Err(error) => Err(format!("cannot check osascript: {error}")),
+    }
 }
 
 #[cfg(test)]

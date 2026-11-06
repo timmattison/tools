@@ -341,7 +341,7 @@ fn ensure_op_available() -> Result<()> {
 
 fn fetch_from_1password(op_path: &OpPath, cache_path: &Path) -> Result<String> {
     ensure_op_available()?;
-    let mut run = OpRun::new(Operation::Read, op_path, cache_path);
+    let mut run = OpRun::new(Operation::Read, op_path, cache_path, OP_MAX_RETRIES);
 
     for attempt in 1..=OP_MAX_RETRIES {
         match run.attempt(attempt) {
@@ -373,7 +373,12 @@ fn fetch_binary_from_1password(
     cache_path: &Path,
 ) -> Result<()> {
     ensure_op_available()?;
-    let mut run = OpRun::new(Operation::ReadBinary { output_path }, op_path, cache_path);
+    let mut run = OpRun::new(
+        Operation::ReadBinary { output_path },
+        op_path,
+        cache_path,
+        OP_MAX_RETRIES,
+    );
 
     for attempt in 1..=OP_MAX_RETRIES {
         match run.attempt(attempt) {

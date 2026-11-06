@@ -3,6 +3,7 @@
 
 use crate::audit::{self, AuditTrail, OpEnd, OpStart, Outcome};
 use crate::caller::{self, Caller};
+use crate::notify;
 use crate::OpPath;
 use std::ffi::OsString;
 use std::path::Path;
@@ -51,6 +52,7 @@ struct Environment {
     zellij_session_name: Option<OsString>,
     zellij_pane_id: Option<OsString>,
     term_program: Option<OsString>,
+    op_cache_notify: Option<OsString>,
 }
 
 impl Environment {
@@ -62,6 +64,7 @@ impl Environment {
             zellij_session_name: std::env::var_os("ZELLIJ_SESSION_NAME"),
             zellij_pane_id: std::env::var_os("ZELLIJ_PANE_ID"),
             term_program: std::env::var_os("TERM_PROGRAM"),
+            op_cache_notify: std::env::var_os("OP_CACHE_NOTIFY"),
         }
     }
 }
@@ -75,22 +78,33 @@ pub(crate) struct OpRun<'a> {
     operation: Operation<'a>,
     op_path: &'a OpPath,
     cache_path: &'a Path,
+    max_attempts: u32,
     environment: Environment,
     caller: Option<Caller>,
     trail: Option<AuditTrail>,
     trail_given_up: bool,
+    notification_warned: bool,
 }
 
 impl<'a> OpRun<'a> {
-    pub(crate) fn new(operation: Operation<'a>, op_path: &'a OpPath, cache_path: &'a Path) -> Self {
+    /// `max_attempts` is the number the caller will try at most. The
+    /// notification title shows it on a retry.
+    pub(crate) fn new(
+        operation: Operation<'a>,
+        op_path: &'a OpPath,
+        cache_path: &'a Path,
+        max_attempts: u32,
+    ) -> Self {
         Self {
             operation,
             op_path,
             cache_path,
+            max_attempts,
             environment: Environment::snapshot(),
             caller: None,
             trail: None,
             trail_given_up: false,
+            notification_warned: false,
         }
     }
 
@@ -122,10 +136,17 @@ impl<'a> OpRun<'a> {
         };
         self.record(&start);
 
+        let notification = self.start_notification(attempt);
+
         let started = Instant::now();
         let result = Command::new("op")
             .args(self.operation.args(self.op_path.as_ref()))
             .output();
+        if let Some(child) = notification {
+            if let Err(what) = notify::finish(child) {
+                self.warn_notification(&what);
+            }
+        }
         let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
         let (exit_code, outcome) = match &result {
@@ -162,6 +183,53 @@ impl<'a> OpRun<'a> {
         self.record(&end);
 
         result
+    }
+
+    /// Starts the notification of one attempt, unless `OP_CACHE_NOTIFY=0`.
+    /// A failure prints one warning for the whole process and never stops the
+    /// read.
+    fn start_notification(&mut self, attempt: u32) -> Option<std::process::Child> {
+        if !notify::notifications_enabled(self.environment.op_cache_notify.as_deref()) {
+            return None;
+        }
+        let claude_name = self
+            .caller
+            .as_ref()
+            .and_then(|caller| caller.claude.as_ref())
+            .and_then(|claude| claude.name.as_deref());
+        let zellij_session = self
+            .environment
+            .zellij_session_name
+            .as_ref()
+            .map(|name| name.to_string_lossy());
+        let repo_dir_name = self
+            .cache_path
+            .parent()
+            .and_then(Path::file_name)
+            .map(|name| name.to_string_lossy());
+        let notification = notify::compose(
+            attempt,
+            self.max_attempts,
+            self.op_path.as_ref(),
+            claude_name,
+            zellij_session.as_deref(),
+            repo_dir_name.as_deref(),
+        );
+        match notify::start(&notification) {
+            Ok(child) => child,
+            Err(error) => {
+                self.warn_notification(&format!("cannot start osascript: {error}"));
+                None
+            }
+        }
+    }
+
+    /// Prints the first notification failure of the process, and no other.
+    fn warn_notification(&mut self, what: &str) {
+        if !self.notification_warned {
+            self.notification_warned = true;
+            eprintln!("warning: op-cache: notification: {what}");
+        }
     }
 
     /// Appends a record. A failure prints a warning and never stops the read.
