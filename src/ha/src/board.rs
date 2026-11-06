@@ -4590,8 +4590,8 @@ mod tests {
             .with_timezone(&Utc)
     }
 
-    /// The time of the real run of issue 643, 2026-11-04 at 18:00:00 UTC. It
-    /// is after the run ended.
+    /// The time now in the tests of the late run, 2026-11-04 at 18:00:00 UTC.
+    /// It is after the run ended.
     fn late_now() -> DateTime<Utc> {
         at("2026-11-04T18:00:00Z")
     }
@@ -4663,7 +4663,8 @@ mod tests {
             .unwrap_or_else(|| panic!("the board shows no row of run {}", id.0))
     }
 
-    /// A board that holds `late_run` and the jobs `jobs`.
+    /// A board that holds the run `run` and the jobs `jobs`, at the time
+    /// [`late_now`]. With no `jobs`, the board holds no jobs of the run.
     fn late_board(run: Run, jobs: Option<Vec<Job>>) -> Board {
         let mut board = board();
         let id = run.id;
