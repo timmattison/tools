@@ -172,5 +172,17 @@ mod tests {
             assert_eq!(mode_of(file.parent().unwrap()), 0o700);
             assert_eq!(mode_of(&file), 0o600);
         }
+
+        #[test]
+        fn open_narrows_an_existing_file_to_0600() {
+            let root = tempfile::tempdir().unwrap();
+            let file = root.path().join("audit.jsonl");
+            std::fs::write(&file, "").unwrap();
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+            AuditTrail::open(&file).unwrap();
+
+            assert_eq!(mode_of(&file), 0o600);
+        }
     }
 }
