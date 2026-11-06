@@ -43,6 +43,11 @@ jobs:
       - name: Install the pinned Rust toolchain
         run: rustup toolchain install
 
+      - name: Show the git configuration and the environment
+        run: |
+          git config --list --show-origin --show-scope || true
+          env | grep -E "^(GIT|COLOR|TERM|CI=|LANG|LC_|HOME)" | sort || true
+
       - name: Clippy, all errors
         continue-on-error: true
         run: cargo clippy --keep-going --all-targets --workspace -- -D warnings
@@ -50,4 +55,5 @@ jobs:
       - name: Tests, all failures
         env:
           CLICOLOR_FORCE: "1"
+          COLORTERM: truecolor
         run: cargo test --workspace --no-fail-fast
