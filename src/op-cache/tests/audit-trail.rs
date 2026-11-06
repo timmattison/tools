@@ -234,3 +234,49 @@ fn op_stderr_is_truncated_to_512_bytes_on_a_char_boundary() {
         assert_eq!(stderr.chars().count(), 170);
     }
 }
+
+#[test]
+fn unstartable_op_writes_spawn_error_pairs() {
+    let fixture = Fixture::new();
+    let interpreter = unique_token("interpreter");
+    let script = fixture.path("bin").join("op");
+    fs::write(&script, format!("#!/nonexistent/{interpreter}\n")).expect("write script");
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("chmod script");
+
+    // A failed execve of one PATH entry makes execvp go on to the next entry,
+    // so a real `op` further along PATH would run. PATH holds the fixture and the
+    // system directories (for `git`), which have no `op`.
+    let mut path = fixture.path("bin").into_os_string();
+    path.push(":/usr/bin:/bin");
+    let output = fixture
+        .command()
+        .env("PATH", path)
+        .args(["read", REFERENCE])
+        .output()
+        .expect("run op-cache");
+
+    assert!(!output.status.success(), "op-cache should fail");
+    let records = records(&audit_text(&fixture));
+    assert_eq!(records.len(), 6, "three pairs expected: {records:?}");
+    for pair in records.chunks(2) {
+        let (start, end) = (&pair[0], &pair[1]);
+        assert_eq!(start["event"], "op_start");
+        assert_eq!(end["event"], "op_end");
+        assert_eq!(start["request_id"], end["request_id"]);
+        assert_eq!(end["outcome"], "spawn_error");
+        assert!(
+            end["error"].as_str().is_some_and(|text| !text.is_empty()),
+            "error: {}",
+            end["error"]
+        );
+        assert!(
+            end["exit_code"].is_null(),
+            "exit_code: {}",
+            end["exit_code"]
+        );
+        assert!(
+            end.get("op_stderr").is_none(),
+            "no op_stderr on a spawn error"
+        );
+    }
+}
