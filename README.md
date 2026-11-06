@@ -1001,6 +1001,43 @@ cannot hang the caller. Used by `cwt` and `ha`.
     so repeated calls don't re-hit 1Password (or trigger Touch ID) for every secret. Supports text and
     binary secrets, env-var overrides, cache invalidation, and includes worktree hooks for automatic
     setup. Required by other tools in this repo (e.g. `vpn-tunnel`).
+  - The 1Password prompt names only the application above the caller. In a zellij pane, it names
+    "zellij", whichever of the sessions asked. Thus, before each run of `op`, op-cache names the
+    caller itself. A cache hit and an `--env-var` override run no `op`, thus they do neither step.
+    A failure of either step prints one warning on stderr and never stops the read. The stdout of
+    op-cache does not change.
+  - On macOS, op-cache shows a notification at the same time as the 1Password prompt:
+
+    ```text
+    op-cache → 1Password
+    earth-science-d4 · earth-science
+    op://Private/cloudflare-fastip-deploy/credential
+    ```
+
+    The subtitle is the Claude Code session and the zellij session. When both are absent, it is the
+    name of the repo directory. A retry adds `(attempt 2 of 3)` to the title. Set
+    `OP_CACHE_NOTIFY=0` to turn the notification off. If no notification appears, find the entry
+    that controls `osascript` in System Settings → Notifications, and allow it.
+  - op-cache writes an audit trail to `$XDG_STATE_HOME/op-cache/audit.jsonl`. When
+    `XDG_STATE_HOME` is unset, empty, or relative, the file is `~/.local/state/op-cache/audit.jsonl`.
+    The audit trail has no switch. Each line is one JSON record, of one of two kinds:
+    - `op_start`, before `op` runs: the time, the `request_id`, the attempt, the operation (`read` or
+      `read-binary`), the reference, the working directory, the cache file, the zellij session and
+      pane, `TERM_PROGRAM`, the Claude Code session, and the chain of ancestor processes (at most 32,
+      each command line cut to 1024 bytes). The Claude Code session is the nearest ancestor that has
+      a file `sessions/<pid>.json` in `$CLAUDE_CONFIG_DIR`, else in `~/.claude`.
+    - `op_end`, after `op` returns, with the same `request_id`: the `outcome` (`ok`, `failed`, or
+      `spawn_error`), the `exit_code`, and the `duration_ms`. A `failed` record holds the first 512
+      bytes of the stderr of `op`, in `op_stderr`. That text shows if the person denied or dismissed
+      the prompt. A `spawn_error` record holds the reason in `error`.
+  - The audit trail never holds a secret or the stdout of `op`. But a command line of an ancestor can
+    hold a secret of a different program, thus the directory has mode 0700 and the file mode 0600.
+    To see who asked recently:
+
+    ```sh
+    jq -c 'select(.event=="op_start") | {time, reference, claude: .claude.name, zellij_session}' ~/.local/state/op-cache/audit.jsonl | tail
+    ```
+
   - To install: `cargo install --git https://github.com/timmattison/tools op-cache`
 - kitchen-sync
   - Installs every Rust binary from a git repository with a single command. Clones the repo, parses
