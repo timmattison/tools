@@ -9,6 +9,7 @@ use std::process::ExitCode;
 use buildinfo::version_string;
 use clap::{Parser, Subcommand};
 use sidecar::host::{Host, RegistryPolicy};
+use sidecar::locate::locate;
 use sidecar::setup::{ignore_refusal, is_ci, run_setup, CI_VARIABLE};
 use sidecar::status::{render, rows, Row};
 
@@ -83,6 +84,7 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             hook_args,
         } => Ok(run_setup_hook(hook_args)),
         Command::Status => run_status_command(),
+        Command::Path { name } => run_path_command(name),
         other => anyhow::bail!("{} is not implemented yet", other.word()),
     }
 }
@@ -125,6 +127,16 @@ fn run_status_command() -> anyhow::Result<ExitCode> {
     } else {
         ExitCode::from(1)
     })
+}
+
+/// Runs `sidecar path <name>`. The path of the link goes to standard output. A sidecar
+/// with no good link is an error.
+fn run_path_command(name: &str) -> anyhow::Result<ExitCode> {
+    let cwd = std::env::current_dir()?;
+    let host = Host::discover(&cwd, RegistryPolicy::DefaultWhenMissing)?;
+    let path = locate(&host, name)?;
+    println!("{}", path.display());
+    Ok(ExitCode::SUCCESS)
 }
 
 /// The third argument of a `post-checkout` hook when the checkout changed only a file.

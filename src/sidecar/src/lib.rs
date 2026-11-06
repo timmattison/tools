@@ -9,6 +9,7 @@ pub mod clone;
 pub mod git;
 pub mod host;
 pub mod link;
+pub mod locate;
 pub mod name;
 pub mod registry;
 pub mod remote;
