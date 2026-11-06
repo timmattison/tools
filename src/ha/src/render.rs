@@ -585,10 +585,8 @@ where
 /// started cell of a job of an active run shows when the job started. A job
 /// that waits did not start, thus its started cell is empty. The time cell of
 /// a job that waits shows how long it waited, from its creation until `now`,
-/// and is empty when the job has no creation time. The time cells of each
-/// other job follow the rules of [`run_line`], with the finish time of the job
-/// in place of the update time. Such a job with no start time has an empty
-/// time cell.
+/// and is empty when the job has no creation time. The time cell of each other
+/// job shows [`Job::runner_time`], and is empty when that time is `None`.
 fn job_line<Tz: TimeZone>(
     job: &Job,
     run: &Run,
@@ -619,14 +617,7 @@ where
             .map(|created| format_elapsed(span(created, now)))
             .unwrap_or_default()
     } else {
-        job.started_at.map_or_else(String::new, |began| {
-            if job.state.is_active() {
-                format_elapsed(span(began, now))
-            } else {
-                job.completed_at
-                    .map_or_else(String::new, |done| format_elapsed(span(began, done)))
-            }
-        })
+        job.runner_time(now).map(format_elapsed).unwrap_or_default()
     };
     let glyph = if last { TREE_LAST } else { TREE_MIDDLE };
     job_cells(
