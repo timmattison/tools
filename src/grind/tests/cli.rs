@@ -1784,6 +1784,70 @@ index {y_ours},{y_theirs}..0000000
     );
 }
 
+/// Stand on `contested-child` in [`squash_merged_parent_repo`] and replay
+/// `parent..HEAD` onto `main` with `--diff`.
+///
+/// `--diff` obeys `--onto`. The replay stops once, on the one commit of
+/// `contested-child`, so the run prints exactly one halt diff, and that diff
+/// is in `stacked.txt`. A run that captured its diffs from a plain rebase
+/// would give a halt diff in `shared.txt` for each commit of `parent`, or no
+/// halt diff at all.
+///
+/// The golden is the whole of stdout, byte for byte, with `NO_COLOR` set so
+/// the text is plain. Each id in it comes from the git of the fixture through
+/// [`short_id`].
+#[test]
+fn diff_with_onto_prints_one_halt_diff_for_the_commit_above_the_upstream() {
+    let repo = squash_merged_parent_repo();
+    repo.checkout("contested-child");
+
+    let stopped = short_id(&repo, "contested-child");
+    let ours = short_id(&repo, "main:stacked.txt");
+    let theirs = short_id(&repo, "contested-child:stacked.txt");
+
+    let output = grind_command(repo.path(), &[DIFF_FLAG, ONTO_FLAG, "main", "parent"])
+        .env(NO_COLOR, "1")
+        .output()
+        .expect("failed to run grind");
+    let (code, stdout, stderr) = streams(&output);
+
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "the commit of contested-child collides with main, with the diff as \
+         without it\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!(
+            "grind: conflicts - replaying parent..HEAD onto main
+       1 hunk across 1 file, 1 stop
+
+  stacked.txt    1 hunk
+
+stop 1 of 1 - {stopped} contested-child rewrites line 15 of stacked.txt
+diff --cc stacked.txt
+index {ours},{theirs}..0000000
+--- a/stacked.txt
++++ b/stacked.txt
+@@@ -12,7 -12,7 +12,11 @@@ line1
+  line12
+  line13
+  line14
+++<<<<<<< HEAD
+ +main-edit
+++=======
++ contested-child-edit
+++>>>>>>> {stopped} (contested-child rewrites line 15 of stacked.txt)
+  line16
+  line17
+  line18
+"
+        ),
+        "stderr:\n{stderr}"
+    );
+}
+
 /// A run that cannot answer prints no diff. The diff is part of the answer,
 /// and a run that fails has no answer.
 ///
