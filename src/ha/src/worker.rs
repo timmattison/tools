@@ -55,7 +55,10 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 
-use crate::billing::{AccountKind, BillingError, DailyUsage};
+use crate::billing::{
+    accounts_of, months_to_fetch, plan_reads, AccountKind, BillingError, DailyUsage, Read,
+    YearMonth,
+};
 use crate::github::{RepoList, RunList, RunQuery, Source, SourceError, QUEUE_CHECK_BATCH};
 use crate::job::Job;
 use crate::queue::{read_events, Departure, History, PullNumber, QueueEntry};
@@ -604,14 +607,61 @@ fn cycle<S: Source>(
     Ok((delay, backoff_until.is_some()))
 }
 
-/// Reads the Actions billing usage when it is due.
+/// Reads the Actions billing usage when it is due: when `settings.billing` is
+/// true and the billing cadence is due or a refresh asked for it.
+///
+/// The step first looks up the kind of each account that has no kind yet and
+/// is not in `billing_enterprises`, one account at a time. It then plans the
+/// reads and runs them through [`run_pool`], so billing shares the
+/// [`CONCURRENCY`] limit with every other request. Each read sends one
+/// [`Update::Billing`].
 fn refresh_billing<S: Source>(
-    _source: &S,
-    _settings: &Settings,
-    _state: &mut State,
-    _updates: &Sender<Update>,
+    source: &S,
+    settings: &Settings,
+    state: &mut State,
+    updates: &Sender<Update>,
 ) -> Result<(), ReceiverGone> {
-    Ok(())
+    let now = Instant::now();
+    if !settings.billing || !(state.billing_requested || state.billing_cadence.due(now)) {
+        return Ok(());
+    }
+    state.billing_cadence.mark(now);
+    state.billing_requested = false;
+    let accounts = accounts_of(&settings.targets);
+    for account in &accounts {
+        if settings.billing_enterprises.contains_key(account)
+            || state.billing_kinds.contains_key(account)
+        {
+            continue;
+        }
+        if let Ok(kind) = source.account_kind(account) {
+            state.billing_kinds.insert(account.clone(), kind);
+        }
+    }
+    let reads = plan_reads(
+        &accounts,
+        &settings.billing_enterprises,
+        &state.billing_kinds,
+    );
+    let months = months_to_fetch(Utc::now().date_naive());
+    run_pool(&reads, updates, |read| read_billing(source, read, &months))
+}
+
+/// Runs one billing read: asks each month and sums the items.
+fn read_billing<S: Source>(source: &S, read: &Read, months: &[YearMonth]) -> Update {
+    let mut items = Vec::new();
+    for month in months {
+        match source.billing_usage(&read.endpoint, *month) {
+            Ok(mut month_items) => items.append(&mut month_items),
+            Err(_) => return Update::Billing(Vec::new()),
+        }
+    }
+    Update::Billing(
+        read.accounts
+            .iter()
+            .map(|account| (account.clone(), Ok(DailyUsage::from_items(&items))))
+            .collect(),
+    )
 }
 
 /// What every fetch of one cycle shares.
