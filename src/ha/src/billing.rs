@@ -187,6 +187,25 @@ impl DailyUsage {
     }
 }
 
+/// One calendar month, as the usage endpoints of GitHub take it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct YearMonth {
+    /// The year, for example `2026`.
+    pub year: i32,
+    /// The month from 1 (January) to 12 (December).
+    pub month: u32,
+}
+
+/// The months that the 30 days `today - 29 ..= today` touch, oldest first.
+///
+/// The usage endpoints take one month for each request. The result holds one
+/// month or two.
+#[must_use]
+pub fn months_to_fetch(today: NaiveDate) -> Vec<YearMonth> {
+    let _ = today;
+    Vec::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,5 +417,61 @@ mod tests {
         let usage = DailyUsage::for_organization(&items, &owner("acme"))
             .expect("a copilot item needs no organization");
         assert_eq!(usage.windows(today()).today.billed, amount(1.0));
+    }
+
+    fn ym(year: i32, month: u32) -> YearMonth {
+        YearMonth { year, month }
+    }
+
+    #[test]
+    fn mid_month_reaches_back_into_the_month_before() {
+        assert_eq!(
+            months_to_fetch(day("2026-11-20")),
+            [ym(2026, 10), ym(2026, 11)]
+        );
+    }
+
+    #[test]
+    fn the_first_day_of_a_month_needs_the_month_before() {
+        assert_eq!(
+            months_to_fetch(day("2026-11-01")),
+            [ym(2026, 10), ym(2026, 11)]
+        );
+    }
+
+    #[test]
+    fn january_reaches_back_into_december_of_the_year_before() {
+        assert_eq!(
+            months_to_fetch(day("2026-01-05")),
+            [ym(2025, 12), ym(2026, 1)]
+        );
+    }
+
+    #[test]
+    fn a_leap_day_reaches_back_to_the_last_day_of_january() {
+        // 29 days before 2028-02-29 is 2028-01-31.
+        assert_eq!(
+            months_to_fetch(day("2028-02-29")),
+            [ym(2028, 1), ym(2028, 2)]
+        );
+    }
+
+    #[test]
+    fn the_30th_day_of_a_30_day_month_needs_only_that_month() {
+        // 29 days before 2026-11-30 is 2026-11-01.
+        assert_eq!(months_to_fetch(day("2026-11-30")), [ym(2026, 11)]);
+    }
+
+    #[test]
+    fn a_31_day_month_needs_only_itself_from_its_30th_day() {
+        // 29 days before 2026-12-31 is 2026-12-02, so one month is enough.
+        assert_eq!(months_to_fetch(day("2026-12-31")), [ym(2026, 12)]);
+        // 29 days before 2026-12-30 is 2026-12-01.
+        assert_eq!(months_to_fetch(day("2026-12-30")), [ym(2026, 12)]);
+        // 29 days before 2026-12-29 is 2026-11-30.
+        assert_eq!(
+            months_to_fetch(day("2026-12-29")),
+            [ym(2026, 11), ym(2026, 12)]
+        );
     }
 }
