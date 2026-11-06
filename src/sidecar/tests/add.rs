@@ -202,3 +202,20 @@ fn a_missing_gitignore_line_is_added() {
 fn a_missing_gitignore_line_is_added_after_a_last_line_with_no_newline() {
     assert_ignore_line_added("target/");
 }
+
+#[test]
+fn add_prints_the_token_step_with_the_settings_url() {
+    let fixture = Fixture::new(&[]);
+    let run = fixture.run(&fixture.main_checkout(), &["add", NAME, "--yes"]);
+    assert_eq!(run.code, 0, "{run:?}");
+    assert!(run.stdout.contains("Do these steps by hand:"), "{run:?}");
+    assert!(
+        run.stdout
+            .contains("https://github.com/settings/personal-access-tokens"),
+        "{run:?}"
+    );
+    assert!(
+        run.stdout.contains("fixture-owner/megarepo-data-pics"),
+        "{run:?}"
+    );
+}
