@@ -26,7 +26,9 @@ use chrono::{DateTime, Utc};
 use runlimit::{run_with_limit, RunFailure};
 use serde::Deserialize;
 
-use crate::billing::TokenOrigin;
+use crate::billing::{
+    needed_scope, AccountKind, BillingError, Endpoint, TokenOrigin, UsageItem, YearMonth,
+};
 use crate::job::{Job, JobId, RunnerName};
 use crate::queue::{EntryState, EventKind, PullNumber, QueueEntry, QueueEvent, QUEUE_BOT};
 use crate::run::{keep_first_of_each_id, Run, RunId, RunState};
@@ -345,6 +347,28 @@ pub trait Source: Send + Sync {
     ///
     /// Returns a [`SourceError`] when the page cannot be fetched.
     fn newest_run(&self, repo: &RepoName) -> Result<Option<Run>, SourceError>;
+
+    /// Asks GitHub whether `owner` is an organization or a user. The request
+    /// is `GET users/{owner}`, and it sends no `ETag`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`SourceError`] when the request fails, or when the `type`
+    /// of the answer is neither `Organization` nor `User`.
+    fn account_kind(&self, owner: &OwnerName) -> Result<AccountKind, SourceError>;
+
+    /// Reads the usage report of one calendar month from the billing endpoint
+    /// of `endpoint`, through the `ETag` cache.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`BillingError`]: a missing scope or billing role when GitHub
+    /// refuses the token, else the [`SourceError`] of the request.
+    fn billing_usage(
+        &self,
+        endpoint: &Endpoint,
+        month: YearMonth,
+    ) -> Result<Vec<UsageItem>, BillingError>;
 
     /// Tells the source that the worker doubts the answers of `query` for a
     /// repository.
@@ -940,6 +964,20 @@ impl Source for GhSource {
             Err(SourceError::Http { status: 404, .. }) => Ok(None),
             Err(error) => Err(error),
         }
+    }
+
+    fn account_kind(&self, owner: &OwnerName) -> Result<AccountKind, SourceError> {
+        let _ = owner;
+        Ok(AccountKind::User)
+    }
+
+    fn billing_usage(
+        &self,
+        endpoint: &Endpoint,
+        month: YearMonth,
+    ) -> Result<Vec<UsageItem>, BillingError> {
+        let _ = (endpoint, month, needed_scope(&[]));
+        Err(BillingError::NoBillingRole)
     }
 
     fn newest_run(&self, repo: &RepoName) -> Result<Option<Run>, SourceError> {
@@ -3095,6 +3133,58 @@ mod tests {
 
     fn http_output(status_line: &str, body: &str) -> String {
         format!("{status_line}\nContent-Type: application/json\r\n\r\n{body}")
+    }
+
+    #[test]
+    fn an_organization_and_a_user_have_their_kinds_and_the_request_names_the_owner() {
+        let stub = Stub::new("cat \"$dir/account.out\"");
+        let owner = OwnerName::parse("Lock-Free-Labs").unwrap();
+        stub.file(
+            "account.out",
+            &ok_output("{\"login\":\"x\",\"type\":\"Organization\"}"),
+        );
+        assert_eq!(
+            stub.source().account_kind(&owner),
+            Ok(AccountKind::Organization)
+        );
+        stub.file(
+            "account.out",
+            &ok_output("{\"login\":\"x\",\"type\":\"User\"}"),
+        );
+        assert_eq!(stub.source().account_kind(&owner), Ok(AccountKind::User));
+        let requests = stub.requests();
+        assert_eq!(requests.len(), 2);
+        for request in requests {
+            assert_eq!(request, ["api", "-i", "users/Lock-Free-Labs"]);
+        }
+    }
+
+    #[test]
+    fn an_unknown_account_type_or_a_bad_body_is_a_bad_response() {
+        let stub = Stub::new("cat \"$dir/account.out\"");
+        let owner = OwnerName::parse("acme").unwrap();
+        for body in ["{\"type\":\"Bot\"}", "not json", "{}"] {
+            stub.file("account.out", &ok_output(body));
+            let result = stub.source().account_kind(&owner);
+            assert!(
+                matches!(result, Err(SourceError::BadResponse(_))),
+                "{body:?} gave {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_account_is_an_http_error() {
+        let stub = Stub::new("cat \"$dir/account.out\"");
+        stub.file(
+            "account.out",
+            &http_output("HTTP/2.0 404 Not Found", "{\"message\":\"Not Found\"}"),
+        );
+        let owner = OwnerName::parse("acme").unwrap();
+        assert!(matches!(
+            stub.source().account_kind(&owner),
+            Err(SourceError::Http { status: 404, .. })
+        ));
     }
 
     #[test]

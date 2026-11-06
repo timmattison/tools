@@ -1438,6 +1438,7 @@ mod tests {
     use std::sync::{Arc, Mutex, PoisonError};
 
     use super::*;
+    use crate::billing::{AccountKind, BillingError, Endpoint, UsageItem, YearMonth};
     use crate::github::{EventList, RepoList, RunList, RunQuery, SourceError};
     use crate::job::Job;
     use crate::queue::{EntryState, EventKind, Outcome, PullNumber, QueueEntry, QueueEvent};
@@ -1574,6 +1575,20 @@ mod tests {
             let mut script = self.script();
             script.calls.push(("forget", run.0.to_string()));
             script.held.remove(&(repo.clone(), run));
+        }
+
+        fn account_kind(&self, _owner: &OwnerName) -> Result<AccountKind, SourceError> {
+            Err(SourceError::Failed(
+                "the fake has no account kinds".to_owned(),
+            ))
+        }
+
+        fn billing_usage(
+            &self,
+            _endpoint: &Endpoint,
+            _month: YearMonth,
+        ) -> Result<Vec<UsageItem>, BillingError> {
+            Err(BillingError::NoBillingRole)
         }
 
         fn repo_is_listable(&self, repo: &RepoName) -> Result<bool, SourceError> {
