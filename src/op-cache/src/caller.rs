@@ -1,5 +1,6 @@
 //! Who asked: the ancestors of this process and the Claude session.
 
+use crate::audit;
 use serde::Serialize;
 
 /// One process in the chain above op-cache.
@@ -32,12 +33,43 @@ const MAX_ANCESTORS: usize = 32;
 const COMMAND_MAX_BYTES: usize = 1024;
 
 /// Walks up the process tree from `start`, which is not in the result.
+///
+/// `lookup(start)` gives the first parent. The result then holds that parent,
+/// its parent, and so on. PID 1 is the last element when the walk reaches it.
+/// The walk stops when a lookup gives `None`, when a parent is `None` or 0,
+/// before a PID that it saw before (a cycle), and after 32 elements. A parent
+/// whose own lookup gives `None` is not added, because there are no facts to
+/// write. Each command is cut to 1024 bytes on a char boundary.
 pub(crate) fn walk_ancestors(
     start: u32,
-    lookup: impl FnMut(u32) -> Option<ProcessFacts>,
+    mut lookup: impl FnMut(u32) -> Option<ProcessFacts>,
 ) -> Vec<Ancestor> {
-    let _ = (start, lookup, MAX_ANCESTORS, COMMAND_MAX_BYTES);
-    vec![]
+    let mut chain = Vec::new();
+    let mut seen = vec![start];
+    let Some(mut parent) = lookup(start).and_then(|facts| facts.parent) else {
+        return chain;
+    };
+    while chain.len() < MAX_ANCESTORS {
+        if parent == 0 || seen.contains(&parent) {
+            break;
+        }
+        let Some(facts) = lookup(parent) else {
+            break;
+        };
+        seen.push(parent);
+        chain.push(Ancestor {
+            pid: parent,
+            name: facts.name,
+            command: facts.command.map(|command| {
+                audit::truncate_at_char_boundary(&command, COMMAND_MAX_BYTES).to_owned()
+            }),
+        });
+        match facts.parent {
+            Some(next) if parent != 1 => parent = next,
+            _ => break,
+        }
+    }
+    chain
 }
 
 #[cfg(test)]
