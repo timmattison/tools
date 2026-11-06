@@ -52,8 +52,7 @@ pub(crate) fn compose(
 /// False only when `OP_CACHE_NOTIFY` is exactly `0`. The caller passes the
 /// value, so this function never reads the process environment.
 pub(crate) fn notifications_enabled(op_cache_notify: Option<&OsStr>) -> bool {
-    let _ = op_cache_notify;
-    true
+    op_cache_notify != Some(OsStr::new("0"))
 }
 
 #[cfg(test)]
