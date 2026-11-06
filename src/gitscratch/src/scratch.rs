@@ -510,7 +510,7 @@ impl Scratch {
     /// or if the rebase is still unfinished once `MAX_RESOLUTION_ROUNDS` rounds
     /// have been spent trying to advance it.
     pub fn replay_rebase(&self, onto: &str) -> Result<Conflicts> {
-        self.replay_rebase_within(onto, MAX_RESOLUTION_ROUNDS, Capture::Nothing)
+        self.replay_rebase_within(None, onto, MAX_RESOLUTION_ROUNDS, Capture::Nothing)
             .map(|(conflicts, _)| conflicts)
     }
 
@@ -548,7 +548,30 @@ impl Scratch {
     /// Returns an error in each case [`Scratch::replay_rebase`] does, and in no
     /// other.
     pub fn replay_rebase_with_diffs(&self, onto: &str) -> Result<(Conflicts, HaltDiffs)> {
-        self.replay_rebase_within(onto, MAX_RESOLUTION_ROUNDS, Capture::Diffs)
+        self.replay_rebase_within(None, onto, MAX_RESOLUTION_ROUNDS, Capture::Diffs)
+    }
+
+    /// Rebase the checked-out HEAD as `git rebase --onto new_base upstream`
+    /// does: replay the commits of `upstream..HEAD` and put them on `new_base`.
+    ///
+    /// The one-revision [`Scratch::replay_rebase`] uses its revision as both
+    /// values. The two-revision form matters for a stacked branch whose parent
+    /// got a squash merge. A plain rebase onto the target replays the commits
+    /// of the parent too, and reports false conflicts. With the parent as
+    /// `upstream`, the replay holds only the commits of the branch itself.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error in each case [`Scratch::replay_rebase`] does, and when
+    /// `new_base` does not name a commit.
+    pub fn replay_rebase_onto(&self, new_base: &str, upstream: &str) -> Result<Conflicts> {
+        self.replay_rebase_within(
+            Some(new_base),
+            upstream,
+            MAX_RESOLUTION_ROUNDS,
+            Capture::Nothing,
+        )
+        .map(|(conflicts, _)| conflicts)
     }
 
     /// [`Scratch::replay_rebase`] with the round budget named rather than baked
@@ -567,6 +590,7 @@ impl Scratch {
     /// empty [`HaltDiffs`] and drops it.
     fn replay_rebase_within(
         &self,
+        new_base: Option<&str>,
         onto: &str,
         max_rounds: usize,
         capture: Capture,
@@ -584,7 +608,13 @@ impl Scratch {
         // too, so nothing downstream tells the two apart. With it git refuses
         // the upstream by name. Pinned by
         // `refuses_an_upstream_that_starts_with_a_dash_rather_than_replaying_onto_the_root`.
-        let mut outcome = git.try_run("rebase", &["--end-of-options", onto])?;
+        //
+        // `--onto=` is joined to its value, so the value binds to the option
+        // whatever its first character is.
+        let onto_option = new_base.map(|base| format!("--onto={base}"));
+        let mut rebase_args: Vec<&str> = onto_option.as_deref().into_iter().collect();
+        rebase_args.extend(["--end-of-options", onto]);
+        let mut outcome = git.try_run("rebase", &rebase_args)?;
         let mut rounds = 0;
 
         loop {
@@ -1551,7 +1581,7 @@ mod tests {
             .run("checkout", &["-q", "--detach", "iterated"])
             .expect("check out the branch detached in the scratch worktree");
         scratch
-            .replay_rebase_within("single", max_rounds, Capture::Nothing)
+            .replay_rebase_within(None, "single", max_rounds, Capture::Nothing)
             .map(|(conflicts, _)| conflicts)
     }
 
