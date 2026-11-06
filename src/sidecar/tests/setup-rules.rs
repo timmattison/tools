@@ -239,3 +239,77 @@ fn rule_6_does_not_touch_a_link_to_a_different_directory() {
     assert_warned_about_the_link(&run);
     assert_eq!(fs::read_link(&link).unwrap(), elsewhere);
 }
+
+#[test]
+fn rule_2_warns_about_a_foreign_directory_at_the_main_clone() {
+    let fixture = Fixture::new(&[NAME]);
+    let host = fixture.main_checkout();
+    let place = fixture.main_clone(NAME);
+    fixture.write(&place.join("other.txt"), "not a clone\n");
+
+    let run = fixture.run(&host, &["setup"]);
+
+    assert_eq!(run.code, 1, "{run:?}");
+    assert!(
+        run.stderr
+            .lines()
+            .any(|line| line.starts_with("warning: ") && line.contains("is not a clone of")),
+        "{run:?}"
+    );
+    assert!(place.join("other.txt").is_file());
+    assert!(fs::symlink_metadata(fixture.link(&host, NAME)).is_err());
+}
+
+#[test]
+fn rule_2_warns_about_a_clone_that_did_not_end() {
+    let fixture = Fixture::new(&[NAME]);
+    let host = fixture.main_checkout();
+    let place = fixture.main_clone(NAME);
+    fixture.git(
+        fixture.root(),
+        &[
+            "clone",
+            "--quiet",
+            "--no-checkout",
+            &fixture.sidecar_remote(NAME).to_string_lossy(),
+            &place.to_string_lossy(),
+        ],
+    );
+
+    let run = fixture.run(&host, &["setup"]);
+
+    assert_eq!(run.code, 1, "{run:?}");
+    assert!(
+        run.stderr
+            .lines()
+            .any(|line| line.starts_with("warning: ") && line.contains("sidecar setup")),
+        "{run:?}"
+    );
+    assert!(fs::symlink_metadata(fixture.link(&host, NAME)).is_err());
+}
+
+#[test]
+fn rule_8_warns_when_the_remote_has_no_main_branch() {
+    let fixture = Fixture::new(&[NAME]);
+    let host = fixture.main_checkout();
+    fs::remove_dir_all(fixture.sidecar_remote(NAME)).unwrap();
+    fixture.make_empty_sidecar_remote(NAME);
+
+    let run = fixture.run(&host, &["setup"]);
+
+    assert_eq!(run.code, 1, "{run:?}");
+    assert!(
+        run.stderr.lines().any(|line| line.starts_with("warning: ")
+            && line.contains("megarepo-data-testdata")
+            && line.contains("sidecar setup")),
+        "{run:?}"
+    );
+    assert!(!fixture.main_clone(NAME).exists());
+    assert!(fs::symlink_metadata(fixture.link(&host, NAME)).is_err());
+    let leftovers: Vec<_> = fs::read_dir(fixture.root().join("code"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains("sidecar-clone"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}

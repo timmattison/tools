@@ -164,3 +164,161 @@ fn scratch_path(place: &Path) -> PathBuf {
         std::process::id()
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    /// The options that give a commit an identity and turn signing off.
+    const IDENTITY: [&str; 6] = [
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "-c",
+        "commit.gpgsign=false",
+    ];
+
+    /// A unique scratch directory with a bare remote that holds one commit on `main`.
+    struct Scratch {
+        dir: PathBuf,
+        remote: PathBuf,
+    }
+
+    impl Scratch {
+        fn new() -> Scratch {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("the clock is after the epoch")
+                .as_nanos();
+            let dir = std::env::temp_dir().join(format!(
+                "sidecar-clone-test-{}-{nanos}-{}",
+                std::process::id(),
+                COUNTER.fetch_add(1, Ordering::SeqCst)
+            ));
+            let seed = dir.join("seed");
+            std::fs::create_dir_all(&seed).expect("make the seed directory");
+            let dir = std::fs::canonicalize(&dir).expect("canonicalize the scratch directory");
+            let seed = dir.join("seed");
+            let git = Git::without_token();
+            assert!(git.run(&seed, ["init", "--quiet", "-b", "main"]).ok);
+            std::fs::write(seed.join("data.txt"), "1\n").expect("write the seed file");
+            assert!(git.run(&seed, ["add", "data.txt"]).ok);
+            let mut commit = IDENTITY.to_vec();
+            commit.extend(["commit", "--quiet", "-m", "seed"]);
+            assert!(git.run(&seed, commit).ok);
+            let remote = dir.join("remote.git");
+            let cloned = git.run(
+                &dir,
+                [
+                    std::ffi::OsStr::new("clone"),
+                    "--quiet".as_ref(),
+                    "--bare".as_ref(),
+                    seed.as_os_str(),
+                    remote.as_os_str(),
+                ],
+            );
+            assert!(cloned.ok, "{cloned:?}");
+            Scratch { dir, remote }
+        }
+
+        fn url(&self) -> String {
+            self.remote.to_string_lossy().into_owned()
+        }
+
+        /// A clone of the remote at `place`, like the one that a setup at the same time makes.
+        fn clone_to(&self, place: &Path) -> Result<(), String> {
+            let result = Git::without_token().run(
+                &self.dir,
+                [
+                    std::ffi::OsStr::new("clone"),
+                    "--quiet".as_ref(),
+                    "--branch".as_ref(),
+                    "main".as_ref(),
+                    self.remote.as_os_str(),
+                    place.as_os_str(),
+                ],
+            );
+            if result.ok {
+                Ok(())
+            } else {
+                Err(result.stderr)
+            }
+        }
+
+        /// The names in the directory `dir` that start with a dot.
+        fn scratch_names(&self) -> Vec<String> {
+            std::fs::read_dir(&self.dir)
+                .expect("read the scratch directory")
+                .map(|entry| entry.expect("read an entry").file_name())
+                .map(|name| name.to_string_lossy().into_owned())
+                .filter(|name| name.starts_with('.'))
+                .collect()
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[test]
+    fn a_failed_clone_uses_a_clone_that_another_run_made_meanwhile() {
+        let scratch = Scratch::new();
+        let place = scratch.dir.join("main-clone");
+        let outcome = ensure_clone_with(&Git::without_token(), &scratch.url(), &place, |_| {
+            scratch.clone_to(&place).expect("the other run clones");
+            Err("the clone lost the race".to_string())
+        });
+        assert_eq!(outcome, CloneOutcome::Present);
+    }
+
+    #[test]
+    fn the_loser_of_the_rename_uses_the_clone_of_the_winner() {
+        let scratch = Scratch::new();
+        let place = scratch.dir.join("main-clone");
+        let outcome = ensure_clone_with(&Git::without_token(), &scratch.url(), &place, |temp| {
+            scratch.clone_to(temp)?;
+            scratch.clone_to(&place)
+        });
+        assert_eq!(outcome, CloneOutcome::Present);
+        assert!(place.join("data.txt").is_file());
+        assert_eq!(scratch.scratch_names(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_failed_clone_removes_its_scratch_directory() {
+        let scratch = Scratch::new();
+        let place = scratch.dir.join("main-clone");
+        let outcome = ensure_clone_with(&Git::without_token(), &scratch.url(), &place, |temp| {
+            std::fs::create_dir_all(temp.join("half")).expect("make half a clone");
+            Err("no network".to_string())
+        });
+        assert_eq!(
+            outcome,
+            CloneOutcome::Failed {
+                reason: "no network".to_string()
+            }
+        );
+        assert!(!place.exists());
+        assert_eq!(scratch.scratch_names(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_made_clone_lands_at_the_place_and_leaves_no_scratch() {
+        let scratch = Scratch::new();
+        let place = scratch.dir.join("日本語-clone");
+        let outcome = ensure_clone(&Git::without_token(), &scratch.url(), &place);
+        assert_eq!(outcome, CloneOutcome::Made);
+        assert_eq!(
+            inspect_clone(&Git::without_token(), &scratch.url(), &place),
+            CloneState::Ready
+        );
+        assert_eq!(scratch.scratch_names(), Vec::<String>::new());
+    }
+}
