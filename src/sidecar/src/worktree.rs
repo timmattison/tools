@@ -37,7 +37,7 @@ pub fn point(host: &Host, raw_name: &str, branch: Option<&str>) -> anyhow::Resul
         Some(branch) => branch.to_string(),
         None => current_branch(host)?,
     };
-    let warnings = Vec::new();
+    let mut warnings = Vec::new();
     if branch == MAIN_BRANCH {
         point_link(&host.link(&name), &main_clone)
             .with_context(|| format!("cannot change {}", host.link_shown(&name)))?;
@@ -64,16 +64,31 @@ pub fn point(host: &Host, raw_name: &str, branch: Option<&str>) -> anyhow::Resul
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    add_worktree(
-        host,
-        &main_clone,
-        &[
-            "-b",
-            &branch,
-            &target.to_string_lossy(),
-            &format!("refs/heads/{MAIN_BRANCH}"),
-        ],
-    )?;
+    let path = target.to_string_lossy();
+    let local_ref = format!("refs/heads/{branch}");
+    if ref_exists(host, &main_clone, &local_ref) {
+        add_worktree(host, &main_clone, &[&path, &branch])?;
+    } else {
+        let fetched = host.git().run(&main_clone, ["fetch", "--quiet", "origin"]);
+        if !fetched.ok {
+            warnings.push(format!(
+                "The fetch of origin in {} failed: {}. sidecar continues with the local branches.",
+                main_clone.display(),
+                fetched.stderr
+            ));
+        }
+        let remote = format!("origin/{branch}");
+        if ref_exists(host, &main_clone, &format!("refs/remotes/{remote}")) {
+            add_worktree(
+                host,
+                &main_clone,
+                &["--track", "-b", &branch, &path, &remote],
+            )?;
+        } else {
+            let base = format!("refs/heads/{MAIN_BRANCH}");
+            add_worktree(host, &main_clone, &["-b", &branch, &path, &base])?;
+        }
+    }
     point_link(&host.link(&name), &target)
         .with_context(|| format!("cannot change {}", host.link_shown(&name)))?;
     Ok(Pointed {
@@ -143,4 +158,11 @@ fn worktree_on_branch(
         }
     }
     Ok(None)
+}
+
+/// True when the reference `name` exists in the repository at `place`.
+fn ref_exists(host: &Host, place: &Path, name: &str) -> bool {
+    host.git()
+        .run(place, ["rev-parse", "--verify", "--quiet", name])
+        .ok
 }
