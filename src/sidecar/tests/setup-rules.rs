@@ -9,6 +9,8 @@ use std::os::unix::fs::symlink;
 use std::path::Path;
 use std::process::Stdio;
 
+use base64::Engine;
+
 use support::Fixture;
 
 /// The name of the sidecar in these tests.
@@ -413,4 +415,73 @@ fn two_runs_at_the_same_time_make_one_main_clone() {
             );
         }
     }
+}
+
+/// Runs setup with the token `token` in the variable `variable` and checks that the
+/// token is in no output, no config file, and no remote URL.
+fn assert_token_stays_secret(fixture: &Fixture, host: &Path, variable: &str, token: &str) {
+    let run = fixture.run_with_env(host, &["setup"], &[(variable, token)]);
+    assert_eq!(run.code, 0, "{run:?}");
+    let clone = fixture.main_clone(NAME);
+    assert!(clone.join("data.txt").is_file());
+    let encoded =
+        base64::engine::general_purpose::STANDARD.encode(format!("x-access-token:{token}"));
+    let config =
+        String::from_utf8_lossy(&fs::read(clone.join(".git").join("config")).unwrap()).into_owned();
+    let remotes = fixture.git(&clone, &["remote", "-v"]);
+    for (place, text) in [
+        ("stdout", &run.stdout),
+        ("stderr", &run.stderr),
+        (".git/config", &config),
+        ("git remote -v", &remotes),
+    ] {
+        assert!(!text.contains(token), "the token is in {place}: {text}");
+        assert!(
+            !text.contains(&encoded),
+            "the encoded token is in {place}: {text}"
+        );
+    }
+}
+
+/// A token value that no other run uses.
+fn unique_token() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    format!("tok-{}-{nanos}", std::process::id())
+}
+
+#[test]
+fn a_token_is_never_in_the_output_the_config_or_a_remote_url() {
+    let fixture = Fixture::new(&[NAME]);
+    let host = fixture.main_checkout();
+    assert_token_stays_secret(&fixture, &host, "SIDECAR_TOKEN", &unique_token());
+}
+
+#[test]
+fn a_token_from_a_named_variable_is_never_in_the_output_the_config_or_a_remote_url() {
+    let fixture = Fixture::new(&[NAME]);
+    let host = fixture.main_checkout();
+    fixture.write(
+        &host.join("sidecar.toml"),
+        "token_env = \"MY_DATA_TOKEN\"\nsidecars = [\"testdata\"]\n",
+    );
+    assert_token_stays_secret(&fixture, &host, "MY_DATA_TOKEN", &unique_token());
+}
+
+#[test]
+fn without_hook_an_unlinked_sidecar_gives_exit_1() {
+    let fixture = Fixture::new(&[NAME]);
+    let host = fixture.main_checkout();
+    fs::rename(
+        fixture.sidecar_remote(NAME),
+        fixture.root().join("moved-away-testdata.git"),
+    )
+    .unwrap();
+
+    let run = fixture.run(&host, &["setup"]);
+
+    assert_eq!(run.code, 1, "{run:?}");
+    assert!(!fixture.main_clone(NAME).exists());
 }
