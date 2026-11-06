@@ -1,8 +1,11 @@
 //! `sidecar worktree`: point the link of a sidecar at a worktree of its main clone.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use anyhow::{bail, Context};
 
 use crate::host::Host;
+use crate::link::point_link;
 use crate::name::SidecarName;
 
 /// What `point` did.
@@ -27,6 +30,57 @@ pub struct Pointed {
 ///
 /// Returns an error that names the fix when a check fails.
 pub fn point(host: &Host, raw_name: &str, branch: Option<&str>) -> anyhow::Result<Pointed> {
-    let _ = (host, raw_name, branch);
-    anyhow::bail!("stub")
+    let name = SidecarName::parse(raw_name)?;
+    let main_clone = host.main_clone(&name);
+    let branch = match branch {
+        Some(branch) => branch.to_string(),
+        None => current_branch(host)?,
+    };
+    let warnings = Vec::new();
+    let target = host.worktrees_dir(&name).join(&branch);
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    add_worktree(
+        host,
+        &main_clone,
+        &["-b", &branch, &target.to_string_lossy(), "refs/heads/main"],
+    )?;
+    point_link(&host.link(&name), &target)
+        .with_context(|| format!("cannot change {}", host.link_shown(&name)))?;
+    Ok(Pointed {
+        name,
+        branch,
+        target,
+        made_worktree: true,
+        warnings,
+    })
+}
+
+/// The current branch of the host worktree.
+fn current_branch(host: &Host) -> anyhow::Result<String> {
+    let head = host.git().run(
+        host.worktree_root(),
+        ["symbolic-ref", "--quiet", "--short", "HEAD"],
+    );
+    if head.ok {
+        Ok(head.stdout)
+    } else {
+        bail!(
+            "cannot read the current branch of {}",
+            host.worktree_root().display()
+        )
+    }
+}
+
+/// Runs `git worktree add --quiet` in the main clone with `args`.
+fn add_worktree(host: &Host, main_clone: &Path, args: &[&str]) -> anyhow::Result<()> {
+    let mut full = vec!["worktree", "add", "--quiet"];
+    full.extend_from_slice(args);
+    let added = host.git().run(main_clone, full);
+    if added.ok {
+        Ok(())
+    } else {
+        bail!("git cannot make the worktree: {}", added.stderr)
+    }
 }
