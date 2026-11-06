@@ -29,12 +29,27 @@ pub(crate) struct AuditTrail {
 }
 
 impl AuditTrail {
-    /// Creates the parent directory and opens the file for appending.
+    /// Creates the parent directory (mode 0700 on Unix) and opens the file for
+    /// appending (mode 0600 on Unix).
     pub(crate) fn open(path: &Path) -> std::io::Result<Self> {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+            let mut directories = fs::DirBuilder::new();
+            directories.recursive(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                directories.mode(0o700);
+            }
+            directories.create(parent)?;
         }
-        let file = OpenOptions::new().append(true).create(true).open(path)?;
+        let mut options = OpenOptions::new();
+        options.append(true).create(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options.open(path)?;
         Ok(Self { file })
     }
 
