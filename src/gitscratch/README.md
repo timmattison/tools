@@ -84,9 +84,33 @@ branch name that resolves to nothing is the other — because that sentence is t
 only part of the answer that says which refusal this was. `replay_rebase`
 refuses the same shape of state for the same reason.
 
+A rebase has two roles that `replay_rebase` gives to one revision. The upstream
+sets which commits git replays, which are the commits of `upstream..HEAD`. The
+new base sets where they land. `replay_rebase(upstream)` uses one revision for
+both, as `git rebase <upstream>` does. `replay_rebase_onto(new_base, upstream)`
+gives the two roles to two revisions, as `git rebase --onto <new_base>
+<upstream>` does:
+
+```rust
+// `feature` started on `parent`, and `parent` got a squash merge into `main`.
+// The squash commit holds the change of each commit of `parent` under a
+// different patch, so git does not drop them, and a plain replay onto `main`
+// stops on each one. With `parent` as the upstream, only the commits of
+// `feature` replay.
+scratch.check_out_detached("feature")?;
+let conflicts = scratch.replay_rebase_onto("main", "parent")?;
+```
+
+The arguments come in the order git takes them. The new base goes to git joined
+to its option, as `--onto=<new_base>`, so the value binds to the option whatever
+its first character is. The upstream goes after `--end-of-options`, as it does
+in the one-revision form. Both forms run the same loop, so they count stops,
+hunks and files by the same rules.
+
 A replay can also capture the **halt diff** of each halt: the text `git diff`
-shows at that halt in a real rebase or merge. Two entrances capture it, one
-beside each plain entrance:
+shows at that halt in a real rebase or merge. Three entrances capture it, one
+beside each plain entrance — `replay_rebase_with_diffs`,
+`replay_rebase_onto_with_diffs` and `replay_merge_with_diffs`:
 
 ```rust
 let (conflicts, diffs) = scratch.replay_rebase_with_diffs("main")?;
@@ -192,7 +216,8 @@ A `compile_fail` doc-test holds the derive out — see **Testing** below.
 `Scratch` is the only way to get a worktree, and `Repo::scratch` is the only way
 to get a `Scratch`. A `Scratch` answers the operations it names —
 `check_out_detached`, `replay_rebase`, `replay_rebase_with_diffs`,
-`replay_merge`, `replay_merge_with_diffs`, `head_tree`, `commit_tree` — and
+`replay_rebase_onto`, `replay_rebase_onto_with_diffs`, `replay_merge`,
+`replay_merge_with_diffs`, `head_tree`, `commit_tree` — and
 each of them builds its own git call under the whole safety configuration. So there is no way to get a worktree from here without also
 getting the hardening — nor without first having established that the directory
 is a repository at all, which is the pre-flight's job below.
@@ -1661,6 +1686,7 @@ process can open a terminal before the close-on-exec flag is set.
 | --- | --- |
 | `contested_region_repo()` | `iterated` rewrites one region across three commits, `single` touches it once — the asymmetry that makes a stop count worth printing. |
 | `stacked_branches_repo()` | `built-on-top` branched from `groundwork`, not from main. |
+| `squash_merged_parent_repo()` | `child` and `contested-child` branched from `parent`, and `parent` got a squash merge into `main`. `parent` rewrote one line of `shared.txt` in two commits, and the squash commit holds them under a different patch, so a plain rebase of either child onto `main` stops on each of them. `child` adds its own file, so `--onto main parent` replays it clean. `contested-child` rewrites the line of `stacked.txt` that `main` also rewrote, so `--onto main parent` stops once, in `stacked.txt` only. |
 | `equal_hunks_unequal_stops_repo()` | Two branches making the same two edits, packaged as one commit and as two, so they tie on hunks and differ on stops. |
 | `independent_branches_repo()` | Two branches that each add a file of their own, so nothing can conflict. |
 | `conflicting_repo()` | Two branches rewriting the same line, so a replay is guaranteed to conflict and resolve. |
