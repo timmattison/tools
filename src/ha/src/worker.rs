@@ -653,7 +653,14 @@ fn read_billing<S: Source>(source: &S, read: &Read, months: &[YearMonth]) -> Upd
     for month in months {
         match source.billing_usage(&read.endpoint, *month) {
             Ok(mut month_items) => items.append(&mut month_items),
-            Err(_) => return Update::Billing(Vec::new()),
+            Err(error) => {
+                return Update::Billing(
+                    read.accounts
+                        .iter()
+                        .map(|account| (account.clone(), Err(error.clone())))
+                        .collect(),
+                );
+            }
         }
     }
     Update::Billing(
