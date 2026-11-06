@@ -8,8 +8,9 @@
 use std::fmt;
 use std::iter::Sum;
 use std::ops::{Add, AddAssign};
+use std::str::FromStr;
 
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, RoundingStrategy};
 use serde::{Deserialize, Deserializer};
 
 /// An amount of US dollars with full decimal precision.
@@ -48,8 +49,17 @@ impl Usd {
     /// Returns a [`MoneyError`] when the number is NaN or infinite, or when
     /// it does not fit in a decimal value.
     pub fn from_f64(value: f64) -> Result<Usd, MoneyError> {
-        let _ = value;
-        Ok(Usd::ZERO)
+        if !value.is_finite() {
+            return Err(MoneyError::NotFinite {
+                value: value.to_string(),
+            });
+        }
+        // The `Display` text of an `f64` is the shortest text that reads back
+        // as the same number, and it never uses an exponent.
+        let text = value.to_string();
+        Decimal::from_str(&text)
+            .map(Usd)
+            .map_err(|_| MoneyError::OutOfRange { value: text })
     }
 }
 
@@ -57,8 +67,7 @@ impl Add for Usd {
     type Output = Usd;
 
     fn add(self, other: Usd) -> Usd {
-        let _ = other;
-        self
+        Usd(self.0 + other.0)
     }
 }
 
@@ -82,14 +91,23 @@ impl<'a> Sum<&'a Usd> for Usd {
 
 impl fmt::Display for Usd {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("$0.00")
+        let cents = self
+            .0
+            .round_dp_with_strategy(2, RoundingStrategy::MidpointAwayFromZero);
+        // A negative amount that rounds to zero shows no sign.
+        let sign = if cents.is_sign_negative() && !cents.is_zero() {
+            "-"
+        } else {
+            ""
+        };
+        write!(f, "{sign}${:.2}", cents.abs())
     }
 }
 
 impl<'de> Deserialize<'de> for Usd {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Usd, D::Error> {
-        let _ = f64::deserialize(deserializer)?;
-        Ok(Usd::ZERO)
+        let value = f64::deserialize(deserializer)?;
+        Usd::from_f64(value).map_err(serde::de::Error::custom)
     }
 }
 
