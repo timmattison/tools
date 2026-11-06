@@ -63,9 +63,26 @@ impl AuditTrail {
     }
 
     /// Writes `record` as one JSON line.
+    ///
+    /// The record and its newline go into one buffer, and one `write` call
+    /// sends the buffer. The file is opened for appending, so the kernel puts
+    /// one write at the end of the file as a unit, and records from several
+    /// writers never interleave. A short write is an error.
     pub(crate) fn append<T: Serialize>(&mut self, record: &T) -> std::io::Result<()> {
-        serde_json::to_writer(&mut self.file, record).map_err(std::io::Error::other)?;
-        self.file.write_all(b"\n")
+        let mut line = serde_json::to_vec(record).map_err(std::io::Error::other)?;
+        line.push(b'\n');
+        let written = self.file.write(&line)?;
+        if written == line.len() {
+            Ok(())
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                format!(
+                    "short write to the audit trail: {written} of {} bytes",
+                    line.len()
+                ),
+            ))
+        }
     }
 }
 
