@@ -10,6 +10,13 @@ use chrono::{DateTime, Utc};
 
 use crate::target::RepoName;
 
+/// The time from one instant to a later one. A clock that runs behind makes
+/// a negative span, and that gives zero.
+#[must_use]
+pub fn span(from: DateTime<Utc>, to: DateTime<Utc>) -> std::time::Duration {
+    std::time::Duration::from_secs(u64::try_from((to - from).num_seconds()).unwrap_or(0))
+}
+
 /// The database ID that GitHub gives to one workflow run.
 ///
 /// The run URL (`/actions/runs/<ID>`) and the jobs endpoint take this ID. The

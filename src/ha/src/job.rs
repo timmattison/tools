@@ -5,7 +5,7 @@
 
 use chrono::{DateTime, Utc};
 
-use crate::run::RunState;
+use crate::run::{span, RunState};
 
 /// The name of the runner that has a job. The name is never empty.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -81,7 +81,8 @@ impl Job {
     /// of the rule.
     #[must_use]
     pub fn runner_time(&self, _now: DateTime<Utc>) -> Option<std::time::Duration> {
-        None
+        let started = self.started_at?;
+        self.completed_at.map(|done| span(started, done))
     }
 }
 

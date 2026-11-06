@@ -18,7 +18,7 @@ use crate::board::{Board, Header, JobCounts, Row, Section};
 use crate::cancel::Confirm;
 use crate::job::{Job, RunnerName};
 use crate::queue::{Departure, EntryState, Outcome, PullNumber, QueueEntry};
-use crate::run::{Run, RunState};
+use crate::run::{span, Run, RunState};
 use crate::settings::format_duration_setting;
 use crate::status::{OwnerProblem, Status, MESSAGE_LIFETIME};
 
@@ -442,12 +442,6 @@ fn departure_look(outcome: Outcome) -> (&'static str, &'static str) {
 /// The text of a pull request number in the ID part, for example `#16012`.
 fn pull_text(pull: PullNumber) -> String {
     format!("#{}", pull.0)
-}
-
-/// The time from one instant to a later one. A clock that runs behind makes
-/// a negative span, and that gives zero.
-fn span(from: DateTime<Utc>, to: DateTime<Utc>) -> Duration {
-    Duration::from_secs(u64::try_from((to - from).num_seconds()).unwrap_or(0))
 }
 
 /// The text of one instant in the started column: the clock (`HH:MM:SS`) for
