@@ -445,7 +445,7 @@ pub enum BillingError {
     NoBillingRole,
     /// Every other failure.
     #[error("{0}")]
-    Source(SourceError),
+    Source(#[from] SourceError),
 }
 
 /// The scopes that `needed_scope` prefers, in order.

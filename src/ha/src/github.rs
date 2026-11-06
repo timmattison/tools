@@ -26,10 +26,9 @@ use chrono::{DateTime, Utc};
 use runlimit::{run_with_limit, RunFailure};
 use serde::Deserialize;
 
-use crate::billing::{
-    needed_scope, AccountKind, BillingError, Endpoint, TokenOrigin, UsageItem, YearMonth,
-};
+use crate::billing::{AccountKind, BillingError, Endpoint, TokenOrigin, UsageItem, YearMonth};
 use crate::job::{Job, JobId, RunnerName};
+use crate::money::Usd;
 use crate::queue::{EntryState, EventKind, PullNumber, QueueEntry, QueueEvent, QUEUE_BOT};
 use crate::run::{keep_first_of_each_id, Run, RunId, RunState};
 use crate::status::RateLimit;
@@ -992,8 +991,13 @@ impl Source for GhSource {
         endpoint: &Endpoint,
         month: YearMonth,
     ) -> Result<Vec<UsageItem>, BillingError> {
-        let _ = (endpoint, month, needed_scope(&[]));
-        Err(BillingError::NoBillingRole)
+        let path = billing_path(endpoint, month);
+        self.cached_read(
+            &path,
+            &path,
+            |body| Ok(parse_usage(body)?),
+            |response| BillingError::Source(http_error(response)),
+        )
     }
 
     fn newest_run(&self, repo: &RepoName) -> Result<Option<Run>, SourceError> {
@@ -1550,8 +1554,52 @@ fn refuse_http_error(response: Response) -> Result<Response, SourceError> {
 
 /// Maps the JSON body of a billing usage report to its items.
 fn parse_usage(body: &str) -> Result<Vec<UsageItem>, SourceError> {
-    let _ = body;
-    Ok(Vec::new())
+    let parsed: UsageBody =
+        serde_json::from_str(body).map_err(|error| SourceError::BadResponse(error.to_string()))?;
+    Ok(parsed
+        .usage_items
+        .into_iter()
+        .map(|json| UsageItem {
+            date: json.date,
+            product: json.product,
+            gross: json.gross_amount,
+            net: json.net_amount,
+            organization: json.organization_name,
+        })
+        .collect())
+}
+
+/// The JSON body of a billing usage report.
+#[derive(Deserialize)]
+struct UsageBody {
+    #[serde(rename = "usageItems")]
+    usage_items: Vec<UsageJson>,
+}
+
+/// One element of `usageItems`. Only the fields that `ha` reads are here.
+#[derive(Deserialize)]
+struct UsageJson {
+    date: DateTime<Utc>,
+    product: String,
+    #[serde(rename = "grossAmount")]
+    gross_amount: Usd,
+    #[serde(rename = "netAmount")]
+    net_amount: Usd,
+    #[serde(rename = "organizationName")]
+    organization_name: Option<String>,
+}
+
+/// The path of the usage report of `month` at `endpoint`.
+fn billing_path(endpoint: &Endpoint, month: YearMonth) -> String {
+    let account = match endpoint {
+        Endpoint::Organization(org) => format!("organizations/{org}"),
+        Endpoint::User(user) => format!("users/{user}"),
+        Endpoint::Enterprise(slug) => format!("enterprises/{slug}"),
+    };
+    format!(
+        "{account}/settings/billing/usage?year={}&month={}",
+        month.year, month.month
+    )
 }
 
 /// The error for an HTTP answer with a status of 400 or more.
@@ -1659,7 +1707,6 @@ mod tests {
 
     use super::*;
     use crate::billing::EnterpriseSlug;
-    use crate::money::Usd;
 
     /// A time limit that no stub that finishes comes near.
     const GENEROUS_LIMIT: Duration = Duration::from_secs(60);
