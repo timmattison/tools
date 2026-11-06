@@ -9,7 +9,7 @@ use std::process::ExitCode;
 use buildinfo::version_string;
 use clap::{Parser, Subcommand};
 use sidecar::host::{Host, RegistryPolicy};
-use sidecar::setup::{ignore_refusal, run_setup};
+use sidecar::setup::{ignore_refusal, is_ci, run_setup, CI_VARIABLE};
 
 /// The command line of `sidecar`.
 #[derive(Debug, Parser)]
@@ -77,7 +77,10 @@ impl Command {
 fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
     match &cli.command {
         Command::Setup { hook: false, .. } => run_setup_command(),
-        Command::Setup { hook: true, .. } => anyhow::bail!("setup --hook is not implemented yet"),
+        Command::Setup {
+            hook: true,
+            hook_args,
+        } => Ok(run_setup_hook(hook_args)),
         other => anyhow::bail!("{} is not implemented yet", other.word()),
     }
 }
@@ -102,6 +105,23 @@ fn run_setup_command() -> anyhow::Result<ExitCode> {
     } else {
         ExitCode::from(1)
     })
+}
+
+/// The third argument of a `post-checkout` hook when the checkout changed only a file.
+const FILE_CHECKOUT_FLAG: &str = "0";
+
+/// Runs `sidecar setup --hook`. The exit code is always 0. A checkout of a file and a
+/// run in CI do nothing. Each error and each refusal becomes a warning.
+fn run_setup_hook(hook_args: &[String]) -> ExitCode {
+    let file_checkout = hook_args.len() == 3 && hook_args[2] == FILE_CHECKOUT_FLAG;
+    let in_ci = is_ci(std::env::var(CI_VARIABLE).ok().as_deref());
+    if file_checkout || in_ci {
+        return ExitCode::SUCCESS;
+    }
+    if let Err(error) = run_setup_command() {
+        eprintln!("warning: {error:#}");
+    }
+    ExitCode::SUCCESS
 }
 
 fn main() -> ExitCode {
