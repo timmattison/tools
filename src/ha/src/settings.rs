@@ -179,7 +179,7 @@ fn resolve_with(
         targets,
         window: cli.window.unwrap_or(file_window),
         interval: cli.interval.unwrap_or(file_interval),
-        billing: true,
+        billing: parsed.billing.unwrap_or(true) && !cli.no_billing,
         billing_enterprises: BTreeMap::new(),
     })
 }
