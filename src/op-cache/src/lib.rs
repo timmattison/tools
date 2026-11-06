@@ -30,6 +30,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::NamedTempFile;
 
+mod audit;
+
 /// Maximum number of retries for 1Password CLI operations.
 const OP_MAX_RETRIES: u32 = 3;
 
