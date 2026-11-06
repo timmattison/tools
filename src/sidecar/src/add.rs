@@ -264,7 +264,18 @@ fn do_steps(host: &Host, name: &SidecarName, facts: &Facts) -> anyhow::Result<bo
     for warning in &report.warnings {
         eprintln!("warning: {warning}");
     }
+    print_manual_steps(&facts.owner, &facts.repo, name);
     Ok(report.unlinked.is_empty())
+}
+
+/// Prints the steps that a person does by hand.
+fn print_manual_steps(owner: &str, repo: &str, name: &SidecarName) {
+    println!("Do these steps by hand:");
+    println!("  1. Give the CI token read access to {owner}/{repo}: {PAT_SETTINGS_URL}");
+    println!("  2. Name the sidecar {name} in the README of the project.");
+    println!(
+        "  3. Commit {REGISTRY_FILE} and {IGNORE_FILE}, and merge them through a pull request."
+    );
 }
 
 /// Decides whether to do the steps of the plan.
