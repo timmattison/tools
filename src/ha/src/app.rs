@@ -1973,6 +1973,21 @@ mod tests {
         Command::WatchJobs(ids.iter().map(|id| (repo(), RunId(*id))).collect())
     }
 
+    /// A passed run that started `started` minutes before `now` and finished
+    /// `finished` minutes before `now`.
+    fn finished_run(id: u64, started: i64, finished: i64) -> Run {
+        Run {
+            state: RunState::Passed,
+            updated_at: now() - chrono::Duration::minutes(finished),
+            ..active_run(id, started)
+        }
+    }
+
+    /// The list that `Command::RecentRuns` carries for runs with these IDs.
+    fn recent(ids: &[u64]) -> Command {
+        Command::RecentRuns(ids.iter().map(|id| (repo(), RunId(*id))).collect())
+    }
+
     fn job(id: u64, name: &str) -> crate::job::Job {
         crate::job::Job {
             id: crate::job::JobId(id),
@@ -1991,6 +2006,22 @@ mod tests {
             .iter()
             .position(|line| line.contains(needle))
             .unwrap_or_else(|| panic!("no line with {needle:?} in {frame:?}"))
+    }
+
+    #[test]
+    fn the_app_sends_the_recent_runs_in_the_order_of_the_section_one_time() {
+        let channels = channels();
+        send_runs(
+            &channels,
+            vec![
+                finished_run(1, 100, 60),
+                active_run(2, 5),
+                finished_run(3, 50, 10),
+            ],
+        );
+        let steps = vec![Step::Idle, Step::Idle, key(KeyCode::Char('q'))];
+        let (_, commands) = run_steps(&channels, steps);
+        assert_eq!(commands, [recent(&[3, 1])]);
     }
 
     #[test]
