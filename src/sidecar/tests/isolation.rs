@@ -116,3 +116,88 @@ fn each_command_passes_under_a_decoy_git_dir_and_the_decoy_stays_byte_identical(
     let registry = fs::read_to_string(host.join("sidecar.toml")).unwrap();
     assert!(registry.contains("\"pics\""), "{registry}");
 }
+
+/// The escape byte that starts each ANSI color code.
+const ESCAPE: char = '\u{1b}';
+
+/// The variables that ask a program to paint its output.
+const FORCE_COLOR_VARIABLES: [(&str, &str); 3] = [
+    ("CARGO_TERM_COLOR", "always"),
+    ("FORCE_COLOR", "1"),
+    ("CLICOLOR_FORCE", "1"),
+];
+
+/// Writes `<root>/home/color.gitconfig`. It holds the fixture configuration and
+/// forces color for every git command that reads it. Returns its path.
+fn write_color_gitconfig(fixture: &Fixture) -> PathBuf {
+    let path = fixture.root().join("home").join("color.gitconfig");
+    let plain = fs::read_to_string(fixture.gitconfig()).unwrap();
+    fixture.write(
+        &path,
+        &format!(
+            "{plain}[color]\n\tui = always\n\tbranch = always\n\tstatus = always\n\tdiff = always\n"
+        ),
+    );
+    path
+}
+
+#[test]
+fn parsed_git_output_is_the_same_under_forced_color() {
+    let fixture = Fixture::new(&[NAME]);
+    let color_config = write_color_gitconfig(&fixture);
+    let color_config = color_config.to_string_lossy().into_owned();
+    let mut colored_env = FORCE_COLOR_VARIABLES.to_vec();
+    colored_env.push(("GIT_CONFIG_GLOBAL", &color_config));
+    let host = fixture.main_checkout();
+    let setup = fixture.run(&host, &["setup"]);
+    assert_eq!(setup.code, 0, "{setup:?}");
+    for args in [&["status"][..], &["path", NAME][..]] {
+        let plain = fixture.run(&host, args);
+        let colored = fixture.run_with_env(&host, args, &colored_env);
+        assert_eq!(plain.code, 0, "{plain:?}");
+        assert_eq!(colored.code, 0, "{colored:?}");
+        assert_eq!(plain.stdout, colored.stdout, "sidecar {args:?}");
+        assert!(!colored.stdout.contains(ESCAPE), "{colored:?}");
+    }
+    let worktree = fixture.run_with_env(&host, &["worktree", NAME, "feature"], &colored_env);
+    assert_eq!(worktree.code, 0, "{worktree:?}");
+    assert!(!worktree.stdout.contains(ESCAPE), "{worktree:?}");
+    assert!(worktree.stdout.contains("(branch feature)"), "{worktree:?}");
+    let target = fixture.worktrees_dir(NAME).join("feature");
+    assert_eq!(
+        fs::canonicalize(fixture.link(&host, NAME)).unwrap(),
+        fs::canonicalize(target).unwrap()
+    );
+    let status = fixture.run_with_env(&host, &["status"], &colored_env);
+    assert_eq!(status.code, 0, "{status:?}");
+    assert!(!status.stdout.contains(ESCAPE), "{status:?}");
+    assert!(
+        status.stdout.contains("at a worktree on branch feature"),
+        "{status:?}"
+    );
+}
+
+#[test]
+fn no_test_touches_the_network() {
+    let fixture = Fixture::new(&[NAME]);
+    let host = fixture.main_checkout();
+    let command = fixture.sidecar(&host, &["status"]);
+    let path = command
+        .get_envs()
+        .find(|(key, _)| *key == "PATH")
+        .and_then(|(_, value)| value)
+        .expect("the fixture sets PATH");
+    let first = std::env::split_paths(path)
+        .next()
+        .expect("PATH has an entry");
+    assert_eq!(first, fixture.root().join("bin"));
+    assert!(first.join("gh").is_file(), "the fake gh is missing");
+    let setup = fixture.run(&host, &["setup"]);
+    assert_eq!(setup.code, 0, "{setup:?}");
+    for repository in [host, fixture.main_clone(NAME)] {
+        let url = fixture.git(&repository, &["remote", "get-url", "origin"]);
+        assert!(Path::new(&url).is_absolute(), "{url} is not a local path");
+        assert!(Path::new(&url).exists(), "{url} does not exist");
+        assert!(url.starts_with(&*fixture.root().to_string_lossy()), "{url}");
+    }
+}
