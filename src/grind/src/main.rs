@@ -42,7 +42,12 @@ struct Args {
     branch: Option<String>,
 
     /// Replay only BRANCH..HEAD, onto NEWBASE, as `git rebase --onto NEWBASE BRANCH` does
-    #[clap(long, value_name = "NEWBASE")]
+    ///
+    // `requires`, because BRANCH is the upstream that bounds the replay. A
+    // default branch in its place replays `main..HEAD` onto `main`, which is a
+    // plain rebase under a verdict that names `--onto`. The parser refuses the
+    // command line instead, with its usage error and exit 2.
+    #[clap(long, value_name = "NEWBASE", requires = "branch")]
     onto: Option<String>,
 
     /// Print nothing about the rebase - the exit code is the answer
