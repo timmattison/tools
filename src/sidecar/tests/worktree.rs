@@ -91,3 +91,60 @@ fn a_branch_with_a_slash_makes_nested_directories() {
     assert_pointed_at_new_worktree(&fixture, &host, &run, "team/topic");
     assert!(fixture.worktrees_dir(NAME).join("team").is_dir());
 }
+
+/// The names in `dir`, sorted. The list is empty when `dir` is missing.
+fn entries(dir: &Path) -> Vec<String> {
+    let Ok(read) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = read
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// The records of `git worktree list --porcelain -z` in the main clone. A record is
+/// the list of fields up to an empty field.
+fn worktree_records(fixture: &Fixture) -> Vec<Vec<String>> {
+    let output = fixture.try_git(
+        &fixture.main_clone(NAME),
+        &["worktree", "list", "--porcelain", "-z"],
+    );
+    assert!(output.status.success());
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    let mut records = Vec::new();
+    let mut current = Vec::new();
+    for field in text.split('\0') {
+        if field.is_empty() {
+            if !current.is_empty() {
+                records.push(std::mem::take(&mut current));
+            }
+        } else {
+            current.push(field.to_string());
+        }
+    }
+    records
+}
+
+#[test]
+fn main_points_the_link_at_the_main_clone_and_makes_no_worktree() {
+    let fixture = after_setup();
+    let host = fixture.add_host_worktree("issue-123");
+    set_up_in(&fixture, &host);
+    let first = fixture.run(&host, &["worktree", NAME]);
+    assert_eq!(first.code, 0, "{first:?}");
+    let before_entries = entries(&fixture.worktrees_dir(NAME));
+    let before_records = worktree_records(&fixture);
+
+    let run = fixture.run(&host, &["worktree", NAME, "main"]);
+
+    assert_eq!(run.code, 0, "{run:?}");
+    assert_eq!(
+        link_target(&fixture, &host, NAME),
+        fs::canonicalize(fixture.main_clone(NAME)).unwrap()
+    );
+    assert_eq!(entries(&fixture.worktrees_dir(NAME)), before_entries);
+    assert_eq!(worktree_records(&fixture), before_records);
+    assert!(run.stdout.contains("(branch main)"), "{run:?}");
+}
