@@ -310,6 +310,8 @@ struct FileConfig {
     window: Option<String>,
     interval: Option<String>,
     billing: Option<bool>,
+    #[serde(default)]
+    billing_enterprises: BTreeMap<String, String>,
 }
 
 /// Reads a duration such as `30s`, `15m`, `8h`, or `2d`.
@@ -550,6 +552,33 @@ mod tests {
         .unwrap_err();
         assert!(matches!(error, SettingsError::Toml { .. }), "{error}");
         assert_names(&error, &["billing", CONFIG_PATH]);
+    }
+
+    fn owner(text: &str) -> OwnerName {
+        OwnerName::parse(text).unwrap()
+    }
+
+    #[test]
+    fn a_billing_enterprises_table_maps_owners_to_enterprises() {
+        let text = "owners = [\"a\"]\n[billing_enterprises]\n\"some-org\" = \"some-enterprise\"";
+        let settings = resolve_file(&CommandLine::default(), text).unwrap();
+        assert_eq!(settings.billing_enterprises.len(), 1);
+        let slug = settings.billing_enterprises.get(&owner("Some-Org")).unwrap();
+        assert_eq!(slug.as_str(), "some-enterprise");
+    }
+
+    #[test]
+    fn a_bad_billing_enterprises_slug_names_the_table_the_entry_and_the_file() {
+        let text = "owners = [\"a\"]\n[billing_enterprises]\n\"some-org\" = \"bad slug\"";
+        let error = resolve_file(&CommandLine::default(), text).unwrap_err();
+        assert_names(&error, &["billing_enterprises", "bad slug", CONFIG_PATH]);
+    }
+
+    #[test]
+    fn a_bad_billing_enterprises_owner_names_the_table_the_entry_and_the_file() {
+        let text = "owners = [\"a\"]\n[billing_enterprises]\n\"a/b\" = \"x\"";
+        let error = resolve_file(&CommandLine::default(), text).unwrap_err();
+        assert_names(&error, &["billing_enterprises", "a/b", CONFIG_PATH]);
     }
 
     /// Asserts that `error` names every one of `needles`.
