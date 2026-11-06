@@ -2584,6 +2584,9 @@ cannot hang the caller. Used by `cwt` and `ha`.
   - The Home Assistant CLI also installs a binary named `ha`. When you have both tools, the one
     that comes first on `PATH` runs.
   - To install: `cargo install --git https://github.com/timmattison/tools ha`
+- sidecar (data repositories beside a host repository)
+  - Makes, clones, and links the private data repositories (sidecars) of a host repository. The host lists its sidecars in `sidecar.toml`.
+  - To install: `cargo install --git https://github.com/timmattison/tools sidecar`
 
 ## dirhash
 
