@@ -12,6 +12,7 @@ use sidecar::host::{Host, RegistryPolicy};
 use sidecar::locate::locate;
 use sidecar::setup::{ignore_refusal, is_ci, run_setup, CI_VARIABLE};
 use sidecar::status::{render, rows, Row};
+use sidecar::worktree::point;
 
 /// The command line of `sidecar`.
 #[derive(Debug, Parser)]
@@ -85,6 +86,7 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
         } => Ok(run_setup_hook(hook_args)),
         Command::Status => run_status_command(),
         Command::Path { name } => run_path_command(name),
+        Command::Worktree { name, branch } => run_worktree_command(name, branch.as_deref()),
         other => anyhow::bail!("{} is not implemented yet", other.word()),
     }
 }
@@ -136,6 +138,24 @@ fn run_path_command(name: &str) -> anyhow::Result<ExitCode> {
     let host = Host::discover(&cwd, RegistryPolicy::DefaultWhenMissing)?;
     let path = locate(&host, name)?;
     println!("{}", path.display());
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Runs `sidecar worktree <name> [<branch>]`. Warnings go to standard error. The line
+/// that names the link, the target, and the branch goes to standard output.
+fn run_worktree_command(name: &str, branch: Option<&str>) -> anyhow::Result<ExitCode> {
+    let cwd = std::env::current_dir()?;
+    let host = Host::discover(&cwd, RegistryPolicy::Required)?;
+    let pointed = point(&host, name, branch)?;
+    for warning in &pointed.warnings {
+        eprintln!("warning: {warning}");
+    }
+    println!(
+        "Pointed {} at {} (branch {}).",
+        host.link_shown(&pointed.name),
+        pointed.target.display(),
+        pointed.branch
+    );
     Ok(ExitCode::SUCCESS)
 }
 
