@@ -7451,4 +7451,100 @@ mod tests {
             "{all:?}"
         );
     }
+
+    const LONG_NO_ACCESS: &str =
+        "no access: token needs \"user\". Run gh auth refresh -h github.com -s user";
+
+    #[test]
+    fn an_account_name_of_30_characters_is_cut_to_24_columns_and_ends_in_an_ellipsis() {
+        let mut view = two_account_view();
+        view.accounts[0] = ready(
+            "abcdefghijklmnopqrstuvwxyz0123",
+            [
+                amounts(1.0, 1.0),
+                amounts(1.0, 1.0),
+                amounts(1.0, 1.0),
+                amounts(1.0, 1.0),
+            ],
+            None,
+        );
+        let mut board = Board::new(Duration::from_hours(8));
+        let buffer = render_billing(100, 30, &mut board, Some(&view));
+        let all = lines(&buffer);
+        assert!(
+            all.iter()
+                .any(|line| line.contains("│ abcdefghijklmnopqrstuvw…  $1.00")),
+            "{all:?}"
+        );
+    }
+
+    #[test]
+    fn a_no_access_text_wider_than_the_frame_ends_in_an_ellipsis_and_the_box_fills_the_frame() {
+        let mut view = two_account_view();
+        view.accounts[1].cell = crate::billing::AccountCell::NoAccess(LONG_NO_ACCESS.to_owned());
+        let mut board = Board::new(Duration::from_hours(8));
+        let buffer = render_billing(60, 30, &mut board, Some(&view));
+        let all = lines(&buffer);
+        let y = all
+            .iter()
+            .position(|line| line.contains("timmattison"))
+            .expect("the row shows");
+        assert_eq!(all[y].chars().count(), 60, "{:?}", all[y]);
+        assert!(
+            all[y].starts_with("│ timmattison     no access: token needs"),
+            "{:?}",
+            all[y]
+        );
+        assert!(all[y].ends_with("… │"), "{:?}", all[y]);
+        assert!(
+            all[y - 2].starts_with("┌ Actions billing"),
+            "{:?}",
+            all[y - 2]
+        );
+        assert_eq!(all[y - 2].chars().count(), 60);
+    }
+
+    #[test]
+    fn a_narrow_frame_first_lowers_the_name_width_and_cuts_the_names() {
+        let mut view = two_account_view();
+        view.accounts[0] = ready(
+            "abcdefghijklmnopqrstuvwx",
+            [
+                amounts(1.0, 1.0),
+                amounts(1.0, 1.0),
+                amounts(1.0, 1.0),
+                amounts(1.0, 1.0),
+            ],
+            None,
+        );
+        let mut board = Board::new(Duration::from_hours(8));
+        // The natural outer width is 62, so a frame of 56 lowers the name
+        // column from 24 to 18 columns.
+        let buffer = render_billing(56, 30, &mut board, Some(&view));
+        let all = lines(&buffer);
+        assert!(
+            all.iter()
+                .any(|line| line.starts_with("│ abcdefghijklmnopq…  $1.00")),
+            "{all:?}"
+        );
+        let top = all
+            .iter()
+            .find(|line| line.starts_with('┌'))
+            .expect("a box");
+        assert_eq!(top.chars().count(), 56);
+    }
+
+    #[test]
+    fn a_frame_narrower_than_the_name_and_amount_columns_shows_no_box() {
+        let view = two_account_view();
+        let mut board = Board::new(Duration::from_hours(8));
+        let shown = lines(&render_billing(50, 30, &mut board, Some(&view)));
+        assert!(shown.iter().any(|line| line.starts_with('┌')), "{shown:?}");
+        let hidden = lines(&render_billing(49, 30, &mut board, Some(&view)));
+        assert!(
+            hidden.iter().all(|line| !line.contains("Actions billing")),
+            "{hidden:?}"
+        );
+        assert!(hidden.iter().all(|line| !line.contains('│')), "{hidden:?}");
+    }
 }
