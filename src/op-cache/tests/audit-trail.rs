@@ -311,3 +311,70 @@ fn read_binary_writes_a_pair_with_operation_read_binary() {
     assert_eq!(records[1]["event"], "op_end");
     assert_eq!(records[1]["outcome"], "ok");
 }
+
+const OP_MUST_NOT_RUN: &str = "echo 'op must not run' >&2\nexit 1";
+
+#[test]
+fn cache_hit_writes_no_record() {
+    let fixture = Fixture::new();
+    fixture.install_fake_op(OP_MUST_NOT_RUN);
+    fs::write(
+        fixture.path("repo").join(".op-cache.json"),
+        format!(
+            r#"{{"{REFERENCE}":{{"value":"cached-value","fetchedAt":"2026-01-01T00:00:00Z"}}}}"#
+        ),
+    )
+    .expect("write cache");
+
+    let output = fixture.read(REFERENCE);
+
+    assert!(
+        output.status.success(),
+        "op-cache failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"cached-value");
+    assert!(!fixture.audit_file().exists(), "a cache hit wrote a record");
+}
+
+#[test]
+fn env_var_override_writes_no_record() {
+    let fixture = Fixture::new();
+    fixture.install_fake_op(OP_MUST_NOT_RUN);
+    let variable = unique_token("ENVVAR").replace('-', "_");
+
+    let output = fixture
+        .command()
+        .args(["read", REFERENCE, "--env-var", &variable])
+        .env(&variable, "from-env")
+        .output()
+        .expect("run op-cache");
+
+    assert!(
+        output.status.success(),
+        "op-cache failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"from-env");
+    assert!(!fixture.audit_file().exists(), "an override wrote a record");
+}
+
+#[test]
+fn blocked_audit_directory_gives_one_warning_and_the_read_succeeds() {
+    let fixture = Fixture::new();
+    let sentinel = unique_token("blocked");
+    fixture.install_fake_op(&format!("echo '{sentinel}'"));
+    fs::write(fixture.path("state").join("op-cache"), "not a directory").expect("block dir");
+
+    let output = fixture.read(REFERENCE);
+
+    assert!(
+        output.status.success(),
+        "op-cache failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, sentinel.as_bytes());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(stderr.lines().count(), 1, "stderr: {stderr}");
+    assert!(stderr.contains("warning:"), "stderr: {stderr}");
+}
