@@ -3373,7 +3373,7 @@ mod tests {
         board.replace(
             repo("a/x"),
             vec![
-                run(1, "a/x", RunState::Succeeded, 100, 60),
+                run(1, "a/x", RunState::Passed, 100, 60),
                 run(2, "a/x", RunState::Running, 30, 1),
                 run(3, "a/x", RunState::Failed, 600, 540),
             ],
