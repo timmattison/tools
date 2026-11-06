@@ -1243,11 +1243,11 @@ fn layout_status(left: &str, mark: Option<&str>, width: usize) -> StatusLayout {
 /// [`ROW_FADE_END`] (2 hours). An older row keeps index 238. The window of
 /// the board does not change the fade. The age of a run row is the time since
 /// the end of the run (`Row::Run::ended`). The age of a departure row is the
-/// time since the pull request left the queue. Live work (an active run and a queue entry) and the
-/// highlighted row keep the default color, because a reversed dark gray gives
-/// a dark bar that is hard to see. A job row of a finished run fades with its
-/// run, by the same end. A job row of an active run keeps the
-/// default color. Every other row keeps the default color too.
+/// time since the pull request left the queue. Live work (an active run and a
+/// queue entry) and the highlighted row keep the default color, because a
+/// reversed dark gray gives a dark bar that is hard to see. A job row of a
+/// finished run fades with its run, by the same end. A job row of an active
+/// run keeps the default color. Every other row keeps the default color too.
 fn age_style(row: &Row<'_>, now: DateTime<Utc>) -> Style {
     let faded =
         |ended: DateTime<Utc>| Style::default().fg(ROW_RAMP.color(span(ended, now), ROW_FADE_END));

@@ -36,7 +36,8 @@ pub enum Section {
     Active,
     /// Pull requests that left a merge queue inside the window.
     History,
-    /// Runs that finished inside the window.
+    /// Finished runs whose last update (`Run::updated_at`) is inside the
+    /// window.
     Recent,
 }
 
@@ -409,8 +410,9 @@ const QUEUE_ERROR_PREFIX: &str = "merge queue: ";
 const HISTORY_ERROR_PREFIX: &str = "merge history: ";
 
 impl Board {
-    /// Makes an empty board. A finished run shows while it ended inside
-    /// `window`, and so does a pull request that left a merge queue.
+    /// Makes an empty board. A finished run shows while its last update is
+    /// inside `window` (see `Board::sections`). A pull request that left a
+    /// merge queue shows while it left inside `window`.
     #[must_use]
     pub fn new(window: Duration) -> Board {
         Board {
@@ -592,7 +594,7 @@ impl Board {
         }
     }
 
-    /// The oldest finish time that the window holds at `now`.
+    /// The start of the window at `now`: the oldest time that the window holds.
     fn window_start(&self, now: DateTime<Utc>) -> DateTime<Utc> {
         chrono::Duration::from_std(self.window)
             .ok()
@@ -603,8 +605,17 @@ impl Board {
     /// Splits the shown runs into the active list and the recent list.
     ///
     /// Both lists are sorted. A run that is not shown at `now` is in neither.
-    /// The recent list is in order of the end of each run (`run_end`), newest
-    /// first. The window still uses `updated_at`.
+    /// The active list is in order of the start, oldest first. The recent
+    /// list is in order of the end of each run ([`run_end`]), newest first,
+    /// then by the run ID.
+    ///
+    /// The window does not use the end. A finished run is in the recent list
+    /// while its `updated_at` is inside the window. If the window used the
+    /// end, a run at the oldest edge of the window can leave the list when its
+    /// jobs arrive. [`Board::settle`] then drops the jobs of the run, the run
+    /// comes back with its update as the end, and the worker does not fetch
+    /// the jobs again. Thus such a run keeps its row, and its finish time can
+    /// be older than the start of the window.
     fn sections(&self, now: DateTime<Utc>) -> (Vec<&Run>, Vec<&Run>) {
         let mut active: Vec<&Run> = self
             .runs
@@ -1333,8 +1344,9 @@ fn push_runs<'a>(
 ///
 /// `run` is the run that owns the block, and each job row carries it.
 /// `run_ended` is the end of the run (`None` for an active run), and each job
-/// row carries it too. `answer` is the job answer that the board holds for the run. `None` gives
-/// the loading row. The job row at the position of `selected` gets the mark.
+/// row carries it too. `answer` is the job answer that the board holds for the
+/// run. `None` gives the loading row. The job row at the position of
+/// `selected` gets the mark.
 fn push_jobs<'a>(
     rows: &mut Vec<Row<'a>>,
     run: &'a Run,
