@@ -4822,4 +4822,70 @@ mod tests {
         assert_eq!(script.kind_asks.len(), 1);
         assert_eq!(script.usage_asks.len(), months_now().len());
     }
+
+    #[test]
+    fn two_organizations_of_one_enterprise_share_one_read_and_each_gets_its_own_items() {
+        let fake = Arc::new(FakeSource::default());
+        let slug = EnterpriseSlug::parse("big-co").expect("a slug");
+        let endpoint = Endpoint::Enterprise(slug.clone());
+        let mut items = Vec::new();
+        for month in months_now() {
+            let month_items = vec![
+                billed_item(month, Some("alpha"), 1.0),
+                billed_item(month, Some("beta"), 4.0),
+            ];
+            items.extend(month_items.clone());
+            fake.script()
+                .usage
+                .insert(usage_key(&endpoint, month), Ok(month_items));
+        }
+        let mut cfg = billing_settings(&["alpha", "beta/x"]);
+        cfg.billing_enterprises.insert(owner("alpha"), slug.clone());
+        cfg.billing_enterprises.insert(owner("beta"), slug);
+        let worker = spawn_with(Arc::clone(&fake), &cfg, NEVER);
+
+        let updates = one_cycle(&worker);
+
+        let mut results = billing_updates(&updates);
+        results.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            results,
+            vec![
+                (
+                    owner("alpha"),
+                    Ok(DailyUsage::for_organization(&items, &owner("alpha")).expect("named"))
+                ),
+                (
+                    owner("beta"),
+                    Ok(DailyUsage::for_organization(&items, &owner("beta")).expect("named"))
+                ),
+            ]
+        );
+        assert_ne!(results[0].1, results[1].1);
+        let script = fake.script();
+        assert!(script.kind_asks.is_empty(), "{:?}", script.kind_asks);
+        assert_eq!(script.usage_asks.len(), months_now().len());
+    }
+
+    #[test]
+    fn an_enterprise_item_with_no_organization_gives_the_accounts_an_error() {
+        let fake = Arc::new(FakeSource::default());
+        let slug = EnterpriseSlug::parse("big-co").expect("a slug");
+        let endpoint = Endpoint::Enterprise(slug.clone());
+        script_usage(&fake, &endpoint, None, 1.0);
+        let mut cfg = billing_settings(&["alpha"]);
+        cfg.billing_enterprises.insert(owner("alpha"), slug);
+        let worker = spawn_with(Arc::clone(&fake), &cfg, NEVER);
+
+        let results = billing_updates(&one_cycle(&worker));
+
+        assert_eq!(results.len(), 1, "{results:?}");
+        assert!(
+            matches!(
+                &results[0].1,
+                Err(BillingError::Source(SourceError::BadResponse(_)))
+            ),
+            "{results:?}"
+        );
+    }
 }
