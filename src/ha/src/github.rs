@@ -464,7 +464,26 @@ impl TokenEnvironment {
     /// `GITHUB_TOKEN` when set, else the login of `gh`.
     #[must_use]
     pub fn origin(&self) -> TokenOrigin {
-        TokenOrigin::GhLogin
+        if self.gh_token.is_some() {
+            TokenOrigin::Variable(GH_TOKEN_VARIABLE)
+        } else if self.github_token.is_some() {
+            TokenOrigin::Variable(GITHUB_TOKEN_VARIABLE)
+        } else {
+            TokenOrigin::GhLogin
+        }
+    }
+
+    /// Makes `command` see these token variables and no others.
+    fn apply(&self, command: &mut Command) {
+        command
+            .env_remove(GH_TOKEN_VARIABLE)
+            .env_remove(GITHUB_TOKEN_VARIABLE);
+        if let Some(value) = &self.gh_token {
+            command.env(GH_TOKEN_VARIABLE, value);
+        }
+        if let Some(value) = &self.github_token {
+            command.env(GITHUB_TOKEN_VARIABLE, value);
+        }
     }
 }
 
@@ -525,6 +544,7 @@ impl GhSource {
             .env("GH_NO_UPDATE_NOTIFIER", "1")
             .env("GH_PROMPT_DISABLED", "1")
             .args(args);
+        self.tokens.apply(&mut command);
         command
     }
 
