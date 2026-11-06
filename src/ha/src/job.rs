@@ -150,4 +150,24 @@ mod tests {
         let waiting = job(RunState::Queued, Some(at(12, 0, 0)), Some(at(12, 3, 31)));
         assert_eq!(waiting.runner_time(at(12, 5, 0)), None);
     }
+
+    #[test]
+    fn a_job_with_no_start_time_gives_nothing() {
+        let skipped = job(RunState::Skipped, None, None);
+        assert_eq!(skipped.runner_time(at(12, 5, 0)), None);
+        let running = job(RunState::Running, None, None);
+        assert_eq!(running.runner_time(at(12, 5, 0)), None);
+    }
+
+    #[test]
+    fn a_finished_job_with_no_finish_time_gives_nothing() {
+        let finished = job(RunState::Failed, Some(at(12, 0, 0)), None);
+        assert_eq!(finished.runner_time(at(12, 5, 0)), None);
+    }
+
+    #[test]
+    fn a_finish_time_before_the_start_time_gives_zero() {
+        let behind = job(RunState::Passed, Some(at(12, 3, 0)), Some(at(12, 0, 0)));
+        assert_eq!(behind.runner_time(at(12, 5, 0)), Some(Duration::ZERO));
+    }
 }
