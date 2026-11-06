@@ -108,7 +108,8 @@ impl<'a> OpRun<'a> {
         }
     }
 
-    /// One attempt: writes `op_start`, runs `op`, writes `op_end`. Returns what
+    /// One attempt: writes `op_start`, starts the notification, runs `op`,
+    /// reaps the notification, and writes `op_end`. Returns what
     /// `Command::output()` returned, unchanged.
     pub(crate) fn attempt(&mut self, attempt: u32) -> std::io::Result<Output> {
         let request_id = new_request_id();
@@ -142,12 +143,14 @@ impl<'a> OpRun<'a> {
         let result = Command::new("op")
             .args(self.operation.args(self.op_path.as_ref()))
             .output();
+        // Read the clock before the reap, so that `duration_ms` measures `op`
+        // alone and not the time to stop osascript.
+        let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         if let Some(child) = notification {
             if let Err(what) = notify::finish(child) {
                 self.warn_notification(&what);
             }
         }
-        let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
         let (exit_code, outcome) = match &result {
             Ok(output) if output.status.success() => (output.status.code(), Outcome::Ok),

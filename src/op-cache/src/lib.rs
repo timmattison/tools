@@ -9,6 +9,27 @@
 //!
 //! **Important:** Add `.op-cache.json` to your project's `.gitignore`.
 //!
+//! # Who asked
+//!
+//! The 1Password prompt names only the application above the caller. In a
+//! zellij pane, that application is the zellij server. Thus, before each run
+//! of `op`, op-cache names the caller itself:
+//!
+//! - On macOS, it shows a notification through `osascript`. The subtitle
+//!   names the Claude Code session and the zellij session. A retry adds
+//!   `(attempt 2 of 3)` to the title. `OP_CACHE_NOTIFY=0` turns the
+//!   notification off.
+//! - It appends an `op_start` record to `$XDG_STATE_HOME/op-cache/audit.jsonl`,
+//!   and an `op_end` record after `op` returns. When `XDG_STATE_HOME` is
+//!   unset, empty, or relative, the file is
+//!   `~/.local/state/op-cache/audit.jsonl`. The two records of one attempt
+//!   share a `request_id`. The file holds JSON Lines and has mode 0600. It
+//!   never holds a secret or the standard output of `op`.
+//!
+//! A cache hit and an environment-variable override run no `op`, thus they
+//! do neither step. A failure of either step prints one warning on standard
+//! error and never stops the read.
+//!
 //! # Usage
 //!
 //! ```rust,ignore
