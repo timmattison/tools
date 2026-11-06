@@ -13,6 +13,19 @@
 //! events. A GraphQL answer states the GraphQL budget, which is not the core
 //! budget that the status line shows, thus `ha` does not keep it.
 //!
+//! The Actions billing box reads the usage report of one calendar month from
+//! `organizations/{org}`, `users/{user}` or `enterprises/{slug}` under
+//! `settings/billing/usage`, through the `ETag` cache. `GET users/{owner}`
+//! tells an organization from a user. A 403 or 404 that carries the scope
+//! headers of GitHub becomes a missing scope or a missing billing role, so the
+//! box can tell a person what to change.
+//!
+//! A `gh` child gets only the token variables that the source captured:
+//! `run_gh` removes `GH_TOKEN` and `GITHUB_TOKEN` from the child and sets the
+//! captured values. `GhSource::new` captures them from the process, and
+//! `GhSource::with_program` captures none, thus a stub in a test never sees the
+//! token of the test run.
+//!
 //! The bounded run of the `gh` child comes from the `runlimit` crate. Its
 //! `run_with_limit` starts a program and kills it when the time limit ends.
 
@@ -26,7 +39,9 @@ use chrono::{DateTime, Utc};
 use runlimit::{run_with_limit, RunFailure};
 use serde::Deserialize;
 
-use crate::billing::{AccountKind, BillingError, Endpoint, TokenOrigin, UsageItem, YearMonth};
+use crate::billing::{
+    needed_scope, AccountKind, BillingError, Endpoint, TokenOrigin, UsageItem, YearMonth,
+};
 use crate::job::{Job, JobId, RunnerName};
 use crate::money::Usd;
 use crate::queue::{EntryState, EventKind, PullNumber, QueueEntry, QueueEvent, QUEUE_BOT};
@@ -996,7 +1011,7 @@ impl Source for GhSource {
             &path,
             &path,
             |body| Ok(parse_usage(body)?),
-            |response| BillingError::Source(http_error(response)),
+            |response| billing_refusal(response, self.tokens.origin()),
         )
     }
 
@@ -1587,6 +1602,42 @@ struct UsageJson {
     net_amount: Usd,
     #[serde(rename = "organizationName")]
     organization_name: Option<String>,
+}
+
+/// Splits a scope header at the commas and trims each scope. Empty scopes
+/// are dropped.
+fn scope_list(value: &str) -> Vec<&str> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|scope| !scope.is_empty())
+        .collect()
+}
+
+/// The error for a billing answer with a status of 400 or more.
+///
+/// A 403 or 404 that comes with both scope headers says why GitHub refused.
+/// The token holds none of the accepted scopes (`MissingScope`), or it holds
+/// one and the account still refuses (`NoBillingRole`). Without the headers,
+/// or with an empty accepted list, the error is the plain one of
+/// [`http_error`].
+fn billing_refusal(response: &Response, origin: TokenOrigin) -> BillingError {
+    let refused = matches!(response.status, 403 | 404);
+    let held = response.header("x-oauth-scopes").map(scope_list);
+    let accepted = response.header("x-accepted-oauth-scopes").map(scope_list);
+    match (refused, held, accepted) {
+        (true, Some(held), Some(accepted)) if !accepted.is_empty() => {
+            if accepted.iter().any(|scope| held.contains(scope)) {
+                BillingError::NoBillingRole
+            } else {
+                BillingError::MissingScope {
+                    needed: needed_scope(&accepted),
+                    token: origin,
+                }
+            }
+        }
+        _ => BillingError::Source(http_error(response)),
+    }
 }
 
 /// The path of the usage report of `month` at `endpoint`.
