@@ -223,7 +223,7 @@ impl OpCache {
         }
 
         // Fetch from 1Password with retry
-        fetch_binary_from_1password(op_path, &resolved)?;
+        fetch_binary_from_1password(op_path, &resolved, &self.cache_path)?;
 
         // Cache the output path
         cache.insert(
@@ -366,19 +366,16 @@ fn fetch_from_1password(op_path: &OpPath, cache_path: &Path) -> Result<String> {
     Err(Error::OpReadFailed(op_path.to_string()))
 }
 
-fn fetch_binary_from_1password(op_path: &OpPath, output_path: &Path) -> Result<()> {
+fn fetch_binary_from_1password(
+    op_path: &OpPath,
+    output_path: &Path,
+    cache_path: &Path,
+) -> Result<()> {
     ensure_op_available()?;
+    let mut run = OpRun::new(Operation::ReadBinary { output_path }, op_path, cache_path);
 
     for attempt in 1..=OP_MAX_RETRIES {
-        match Command::new("op")
-            .args([
-                "read",
-                "--out-file",
-                &output_path.to_string_lossy(),
-                op_path.as_ref(),
-            ])
-            .output()
-        {
+        match run.attempt(attempt) {
             Ok(output)
                 if output.status.success()
                     && output_path.exists()
