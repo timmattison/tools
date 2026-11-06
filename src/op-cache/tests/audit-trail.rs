@@ -592,4 +592,28 @@ mod notification {
         assert_eq!(calls[0].1, expected_args("op-cache → 1Password", "repo"));
         assert_eq!(output.stdout, sentinel.as_bytes());
     }
+
+    #[test]
+    fn op_cache_notify_0_shows_no_notification() {
+        let fixture = Fixture::new();
+        let sentinel = unique_token("quiet");
+        install_fake_osascript(&fixture, "exit 0");
+        // Waits 2 seconds at most for a record that must never come.
+        let dir = record_dir(&fixture);
+        fixture.install_fake_op(&format!(
+            "i=0\nwhile [ \"$(ls '{dir}' | wc -l)\" -lt 1 ] && [ \"$i\" -lt 20 ]; do sleep 0.1; i=$((i+1)); done\necho '{sentinel}'",
+            dir = dir.display()
+        ));
+        assert!(fixture.path("bin").join("osascript").exists());
+
+        let output = fixture
+            .command()
+            .args(["read", REFERENCE])
+            .env("OP_CACHE_NOTIFY", "0")
+            .output()
+            .expect("run op-cache");
+
+        assert_eq!(output.stdout, sentinel.as_bytes());
+        assert_eq!(osascript_calls(&fixture), vec![]);
+    }
 }
