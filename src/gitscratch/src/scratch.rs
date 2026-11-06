@@ -574,6 +574,31 @@ impl Scratch {
         .map(|(conflicts, _)| conflicts)
     }
 
+    /// [`Scratch::replay_rebase_onto`], and the halt diff of each stop beside
+    /// the counts.
+    ///
+    /// This entrance is to [`Scratch::replay_rebase_onto`] what
+    /// [`Scratch::replay_rebase_with_diffs`] is to [`Scratch::replay_rebase`].
+    /// It runs the same loop with the capture turned on, so the two entrances
+    /// count the same stops the same way.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error in each case [`Scratch::replay_rebase_onto`] does, and
+    /// in no other.
+    pub fn replay_rebase_onto_with_diffs(
+        &self,
+        new_base: &str,
+        upstream: &str,
+    ) -> Result<(Conflicts, HaltDiffs)> {
+        self.replay_rebase_within(
+            Some(new_base),
+            upstream,
+            MAX_RESOLUTION_ROUNDS,
+            Capture::Diffs,
+        )
+    }
+
     /// [`Scratch::replay_rebase`] with the round budget named rather than baked
     /// in, so the boundary can be pinned on a three-stop fixture instead of a
     /// thousand-commit one.
