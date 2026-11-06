@@ -1,18 +1,22 @@
 //! The audit trail: a JSON Lines file that records each run of `op`.
 
 use std::ffi::OsStr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// `<state home>/op-cache/audit.jsonl`, or `None` when no state home resolves.
 ///
 /// `XDG_STATE_HOME` wins when it is set, not empty, and an absolute path.
 /// Otherwise `$HOME/.local/state` is the state home, when `HOME` is set and
 /// not empty. This function is pure: it never reads the process environment.
-pub(crate) fn audit_path(
-    _xdg_state_home: Option<&OsStr>,
-    _home: Option<&OsStr>,
-) -> Option<PathBuf> {
-    None
+pub(crate) fn audit_path(xdg_state_home: Option<&OsStr>, home: Option<&OsStr>) -> Option<PathBuf> {
+    let state_home = match xdg_state_home.map(Path::new) {
+        Some(xdg) if xdg.is_absolute() => xdg.to_path_buf(),
+        _ => {
+            let home = home.filter(|value| !value.is_empty())?;
+            Path::new(home).join(".local").join("state")
+        }
+    };
+    Some(state_home.join("op-cache").join("audit.jsonl"))
 }
 
 #[cfg(test)]
