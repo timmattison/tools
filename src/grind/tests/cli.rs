@@ -1135,6 +1135,43 @@ fn an_onto_that_starts_with_a_dash_is_refused_rather_than_replayed_onto_the_root
     assert_eq!(worktree_count(&repo), 1, "no worktree may remain");
 }
 
+/// `--onto` without BRANCH is a usage error from the parser, also under `-q`.
+///
+/// Without this rule, BRANCH gets the default branch. From `child`, the run
+/// then replays `main..HEAD` onto `main`, which is a plain rebase onto `main`.
+/// That run reports the false conflicts of the commits of `parent` under a
+/// verdict that names `--onto`. So the parser refuses the command line before
+/// `grind` starts, and `-q` does not reach the refusal.
+///
+/// The refusal starts with `error:`, which is how clap opens its errors.
+/// `grind` opens its own errors with `grind: error:`, so this prefix shows
+/// that the parser answered.
+#[test]
+fn onto_without_an_upstream_is_a_usage_error_from_the_parser() {
+    let repo = squash_merged_parent_repo();
+
+    for args in [&[ONTO_FLAG, "main"][..], &["-q", ONTO_FLAG, "main"][..]] {
+        let output = run_raw(&repo, "child", args);
+        let (code, stdout, stderr) = streams(&output);
+
+        assert_eq!(
+            code,
+            Some(ERROR),
+            "{args:?} has no upstream to bound the replay, so it is a usage error\n\
+             stdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            stderr.starts_with("error:") && stderr.contains("BRANCH"),
+            "{args:?} must get the usage error of the parser, which names the \
+             missing BRANCH:\n{stderr}"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "{args:?} printed a verdict for a command line it cannot read:\n{stdout}"
+        );
+    }
+}
+
 /// One of the three build-state words `CLAUDE.md` allows after the hash.
 const BUILD_STATES: [&str; 3] = ["clean", "dirty", "unknown"];
 
