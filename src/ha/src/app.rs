@@ -91,6 +91,9 @@ pub struct App<'a, O: Opener, C: Canceller, Tz: TimeZone> {
     /// The set of the last `Command::WatchJobs` that the app sent. It is
     /// empty at the start.
     watched: BTreeSet<(RepoName, RunId)>,
+    /// The list of the last `Command::RecentRuns` that the app sent. It is
+    /// empty at the start.
+    recent: Vec<(RepoName, RunId)>,
     /// The box that asks the user to cancel a run. It is `None` when no box
     /// shows.
     confirm: Option<Confirm>,
@@ -161,6 +164,7 @@ where
             now,
             tz,
             watched: BTreeSet::new(),
+            recent: Vec::new(),
             confirm: None,
             first_cycle: Some(FirstCycle::default()),
             last_arrow: None,
@@ -200,6 +204,7 @@ where
         loop {
             self.apply_updates()?;
             self.sync_watch();
+            self.sync_recent();
             let now = (self.now)();
             let billing = self
                 .billing
@@ -330,6 +335,23 @@ where
                 .commands
                 .send(Command::WatchJobs(expanded.clone()));
             self.watched = expanded;
+        }
+    }
+
+    /// Tells the worker which runs the recent section shows.
+    ///
+    /// It reads the list from the board. When the list differs from the last
+    /// list that it sent, it sends the whole list in a `Command::RecentRuns`
+    /// and keeps it. When the list is the same, it sends nothing. A worker
+    /// that has ended is not an error.
+    fn sync_recent(&mut self) {
+        let recent = self.board.recent_runs((self.now)());
+        if recent != self.recent {
+            let _ = self
+                .worker
+                .commands
+                .send(Command::RecentRuns(recent.clone()));
+            self.recent = recent;
         }
     }
 
@@ -2117,7 +2139,7 @@ mod tests {
             key(KeyCode::Char('q')),
         ];
         let (_, commands) = run_steps(&channels, steps);
-        assert_eq!(commands, [watch(&[2]), watch(&[1, 2, 3])]);
+        assert_eq!(commands, [recent(&[3]), watch(&[2]), watch(&[1, 2, 3])]);
     }
 
     #[test]
@@ -2141,6 +2163,7 @@ mod tests {
         assert_eq!(
             commands,
             [
+                recent(&[3]),
                 watch(&[2]),
                 watch(&[1, 2]),
                 watch(&[1, 2, 3]),
