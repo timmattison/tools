@@ -7829,6 +7829,7 @@ dependencies = [
  "clap",
  "gitscratch",
  "serde",
+ "shellquote",
  "thiserror 2.0.21",
  "toml",
  "url",

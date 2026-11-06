@@ -6,6 +6,8 @@
 //! rules that the `sidecar` binary uses.
 
 pub mod git;
+pub mod link;
 pub mod name;
 pub mod registry;
 pub mod remote;
+pub mod setup;
