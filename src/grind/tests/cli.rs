@@ -588,21 +588,22 @@ fn a_branch_that_rewrote_one_region_across_three_commits_stops_more_than_once() 
     );
 }
 
-/// Run `grind` with nowhere to put a temporary directory, so creating a scratch
-/// worktree is guaranteed to fail and everything before it is not.
+/// Run `grind` with the given arguments and nowhere to put a temporary
+/// directory, so creating a scratch worktree is guaranteed to fail and
+/// everything before it is not.
 ///
 /// `TMPDIR` is set on the child process only. `std::env::set_var` is
 /// process-global and Rust runs the tests in this binary as threads of one
 /// process, so poisoning it there would sabotage every other test in the file.
 fn grind_with_nowhere_to_put_a_scratch(
     repo: &TestRepo,
-    branch: &str,
+    args: &[&str],
 ) -> (Option<i32>, String, String) {
     // Under the fixture's own `TempDir`, so two concurrent copies of this test
     // cannot name the same path - and never created, so it stays missing.
     let missing = repo.path().join("tmpdir-that-does-not-exist");
 
-    let output = grind_command(repo.path(), &[branch])
+    let output = grind_command(repo.path(), args)
         .env("TMPDIR", missing)
         .output()
         .expect("failed to run grind");
@@ -641,7 +642,8 @@ fn a_branch_that_does_not_resolve_is_refused_before_any_scratch_worktree_exists(
     let repo = independent_branches_repo();
     repo.write_file("scratch-notes.txt", "untracked work in progress\n");
 
-    let (code, stdout, stderr) = grind_with_nowhere_to_put_a_scratch(&repo, "nonexistent-branch");
+    let (code, stdout, stderr) =
+        grind_with_nowhere_to_put_a_scratch(&repo, &["nonexistent-branch"]);
 
     assert_eq!(
         code,
@@ -670,7 +672,7 @@ fn a_branch_that_does_not_resolve_is_refused_before_any_scratch_worktree_exists(
     );
 
     let (control_code, control_stdout, control_stderr) =
-        grind_with_nowhere_to_put_a_scratch(&repo, "beta");
+        grind_with_nowhere_to_put_a_scratch(&repo, &["beta"]);
 
     assert_eq!(
         control_code,
@@ -1025,6 +1027,112 @@ fn onto_counts_the_hunks_of_the_commits_above_the_upstream_and_no_others() {
         !stdout.contains("shared.txt"),
         "the commits of parent are already in main and must cost nothing:\n{stdout}"
     );
+}
+
+/// How many worktrees the repository lists, the main one included.
+///
+/// This is the literal check that the issue asks for. Alone it proves nothing,
+/// because a scratch removes itself on drop, so the count is 1 whether a scratch
+/// was built or not. The poisoned `TMPDIR` of
+/// `grind_with_nowhere_to_put_a_scratch` is the real discriminator.
+fn worktree_count(repo: &TestRepo) -> usize {
+    repo.git(&["worktree", "list", "--porcelain"])
+        .lines()
+        .filter(|line| line.starts_with("worktree "))
+        .count()
+}
+
+/// A NEWBASE that does not resolve is a bad argument, and answering it must not
+/// cost a scratch worktree.
+///
+/// The proof is the poisoned `TMPDIR` of `grind_with_nowhere_to_put_a_scratch`.
+/// If the message names the NEWBASE and not the scratch directory, resolution
+/// ran first. The control run uses a NEWBASE that resolves. It has to fail at
+/// the scratch, or the main assertions prove nothing.
+#[test]
+fn an_onto_that_does_not_resolve_is_refused_before_any_scratch_worktree_exists() {
+    let repo = squash_merged_parent_repo();
+    repo.checkout("child");
+
+    let (code, stdout, stderr) =
+        grind_with_nowhere_to_put_a_scratch(&repo, &[ONTO_FLAG, "nope", "parent"]);
+
+    assert_eq!(code, Some(ERROR), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        stderr.contains("could not resolve 'nope'"),
+        "the message must name the NEWBASE that did not resolve\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("scratch directory"),
+        "resolution must happen before a scratch worktree is built\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("clean") && !stderr.contains("clean"),
+        "a bad NEWBASE must not report clean\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("conflicts") && !stderr.contains("conflicts"),
+        "a bad NEWBASE must not report conflicts\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(worktree_count(&repo), 1, "no worktree may remain");
+
+    let (control_code, control_stdout, control_stderr) =
+        grind_with_nowhere_to_put_a_scratch(&repo, &[ONTO_FLAG, "main", "parent"]);
+
+    assert_eq!(
+        control_code,
+        Some(ERROR),
+        "stdout:\n{control_stdout}\nstderr:\n{control_stderr}"
+    );
+    assert!(
+        control_stderr.contains("could not create a scratch directory"),
+        "a NEWBASE that resolves must fail at the scratch under the same poisoned \
+         TMPDIR, or the assertions above prove nothing\nstdout:\n{control_stdout}\nstderr:\n{control_stderr}"
+    );
+}
+
+/// A NEWBASE that starts with a dash is refused, not replayed onto the root.
+///
+/// Git knows `--root` as an option of `rebase`. The one-revision form already
+/// had a defect where `--root` was reported clean, see
+/// `a_branch_name_that_starts_with_a_dash_is_refused_rather_than_reported_clean`.
+/// The joined `--onto=` spelling is how a user passes a dash-leading value to
+/// clap. The second run uses the real `TMPDIR` and pins that `grind` never
+/// replays onto the root and never reports clean.
+#[test]
+fn an_onto_that_starts_with_a_dash_is_refused_rather_than_replayed_onto_the_root() {
+    let repo = squash_merged_parent_repo();
+    repo.checkout("child");
+
+    let (code, stdout, stderr) =
+        grind_with_nowhere_to_put_a_scratch(&repo, &["--onto=--root", "parent"]);
+
+    assert_eq!(code, Some(ERROR), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        stderr.contains("could not resolve '--root'"),
+        "the message must name the NEWBASE that did not resolve\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("scratch directory"),
+        "resolution must happen before a scratch worktree is built\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("clean") && !stderr.contains("clean"),
+        "a dash-leading NEWBASE must not report clean\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    let output = run_raw(&repo, "child", &["--onto=--root", "parent"]);
+    let (real_code, real_stdout, real_stderr) = streams(&output);
+    assert_eq!(
+        real_code,
+        Some(ERROR),
+        "stdout:\n{real_stdout}\nstderr:\n{real_stderr}"
+    );
+    assert!(
+        !real_stdout.contains("clean") && !real_stderr.contains("clean"),
+        "a dash-leading NEWBASE must never report clean\nstdout:\n{real_stdout}\nstderr:\n{real_stderr}"
+    );
+    assert_eq!(worktree_count(&repo), 1, "no worktree may remain");
 }
 
 /// One of the three build-state words `CLAUDE.md` allows after the hash.
