@@ -9,6 +9,27 @@
 //!
 //! **Important:** Add `.op-cache.json` to your project's `.gitignore`.
 //!
+//! # Who asked
+//!
+//! The 1Password prompt names only the application above the caller. In a
+//! zellij pane, that application is the zellij server. Thus, before each run
+//! of `op`, op-cache names the caller itself:
+//!
+//! - On macOS, it shows a notification through `osascript`. The subtitle
+//!   names the Claude Code session and the zellij session. A retry adds
+//!   `(attempt 2 of 3)` to the title. `OP_CACHE_NOTIFY=0` turns the
+//!   notification off.
+//! - It appends an `op_start` record to `$XDG_STATE_HOME/op-cache/audit.jsonl`,
+//!   and an `op_end` record after `op` returns. When `XDG_STATE_HOME` is
+//!   unset, empty, or relative, the file is
+//!   `~/.local/state/op-cache/audit.jsonl`. The two records of one attempt
+//!   share a `request_id`. The file holds JSON Lines and has mode 0600. It
+//!   never holds a secret or the standard output of `op`.
+//!
+//! A cache hit and an environment-variable override run no `op`, thus they
+//! do neither step. A failure of either step prints one warning on standard
+//! error and never stops the read.
+//!
 //! # Usage
 //!
 //! ```rust,ignore
@@ -19,6 +40,7 @@
 //! let value = cache.read(&path, None)?;
 //! ```
 
+use crate::op_run::{OpRun, Operation};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -29,6 +51,11 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::NamedTempFile;
+
+mod audit;
+mod caller;
+mod notify;
+mod op_run;
 
 /// Maximum number of retries for 1Password CLI operations.
 const OP_MAX_RETRIES: u32 = 3;
@@ -175,7 +202,7 @@ impl OpCache {
         }
 
         // 3. Fetch from 1Password and cache
-        let value = fetch_from_1password(op_path)?;
+        let value = fetch_from_1password(op_path, &self.cache_path)?;
         cache.insert(
             op_path.as_ref().to_string(),
             CacheEntry {
@@ -218,7 +245,7 @@ impl OpCache {
         }
 
         // Fetch from 1Password with retry
-        fetch_binary_from_1password(op_path, &resolved)?;
+        fetch_binary_from_1password(op_path, &resolved, &self.cache_path)?;
 
         // Cache the output path
         cache.insert(
@@ -333,11 +360,12 @@ fn ensure_op_available() -> Result<()> {
     Ok(())
 }
 
-fn fetch_from_1password(op_path: &OpPath) -> Result<String> {
+fn fetch_from_1password(op_path: &OpPath, cache_path: &Path) -> Result<String> {
     ensure_op_available()?;
+    let mut run = OpRun::new(Operation::Read, op_path, cache_path, OP_MAX_RETRIES);
 
     for attempt in 1..=OP_MAX_RETRIES {
-        match Command::new("op").args(["read", op_path.as_ref()]).output() {
+        match run.attempt(attempt) {
             Ok(output) if output.status.success() => {
                 let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if !value.is_empty() {
@@ -360,19 +388,21 @@ fn fetch_from_1password(op_path: &OpPath) -> Result<String> {
     Err(Error::OpReadFailed(op_path.to_string()))
 }
 
-fn fetch_binary_from_1password(op_path: &OpPath, output_path: &Path) -> Result<()> {
+fn fetch_binary_from_1password(
+    op_path: &OpPath,
+    output_path: &Path,
+    cache_path: &Path,
+) -> Result<()> {
     ensure_op_available()?;
+    let mut run = OpRun::new(
+        Operation::ReadBinary { output_path },
+        op_path,
+        cache_path,
+        OP_MAX_RETRIES,
+    );
 
     for attempt in 1..=OP_MAX_RETRIES {
-        match Command::new("op")
-            .args([
-                "read",
-                "--out-file",
-                &output_path.to_string_lossy(),
-                op_path.as_ref(),
-            ])
-            .output()
-        {
+        match run.attempt(attempt) {
             Ok(output)
                 if output.status.success()
                     && output_path.exists()
