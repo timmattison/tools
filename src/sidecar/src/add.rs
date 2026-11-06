@@ -1,6 +1,6 @@
 //! `sidecar add <name> [--yes]`: make a sidecar repository and register it.
 
-use std::io::BufRead;
+use std::io::{BufRead, IsTerminal};
 use std::path::Path;
 
 use crate::clone::{inspect_clone, CloneState};
@@ -152,7 +152,17 @@ pub fn run(cwd: &Path, raw_name: &str, yes: bool) -> anyhow::Result<bool> {
     for step in &facts.steps {
         println!("  - {}", describe(*step, &host, &name, &facts));
     }
-    let _ = yes;
+    let stdin = std::io::stdin();
+    match confirm(yes, stdin.is_terminal(), &mut stdin.lock()) {
+        Confirmation::Proceed => {}
+        Confirmation::NeedsYes => {
+            anyhow::bail!("sidecar add needs a yes. Run it in a terminal, or add --yes.")
+        }
+        Confirmation::Declined => {
+            println!("sidecar add changes nothing.");
+            return Ok(false);
+        }
+    }
     anyhow::bail!("the steps are not done yet")
 }
 
