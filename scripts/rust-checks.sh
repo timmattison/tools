@@ -117,5 +117,13 @@ echo "$LOG_PREFIX running cargo test --workspace (CLICOLOR_FORCE=1)"
 # `colored::control::set_override` beats CLICOLOR_FORCE, so `gsw --no-color`
 # and `seescc` under NO_COLOR still print plain text, and
 # `testcolor::with_forced_ansi` still forces the codes on.
+#
+# COLORTERM=truecolor holds the other input of `colored` that comes from the
+# environment. Each time `colored` formats a 24-bit color, it reads COLORTERM.
+# If the value is not `truecolor` or `24bit`, it writes the nearest of the 16
+# basic colors. `colored` gives no API to override this read. Thus a test that
+# asserts on a 24-bit color passes in a terminal that sets COLORTERM, and fails
+# in CI and in each terminal that does not set it. The first CI run found 8
+# such tests in `gsw`.
 env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_PREFIX \
-    CLICOLOR_FORCE=1 cargo test --workspace
+    CLICOLOR_FORCE=1 COLORTERM=truecolor cargo test --workspace
