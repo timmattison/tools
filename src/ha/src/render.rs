@@ -13,7 +13,7 @@ use ratatui::Frame;
 use textfit::{pad_right, truncate_left_to_budget, truncate_to_budget};
 use unicode_width::UnicodeWidthStr;
 
-use crate::billing::BillingView;
+use crate::billing::{AccountCell, BillingView, Total};
 use crate::board::{Board, Header, JobCounts, Row, Section};
 use crate::cancel::Confirm;
 use crate::job::{Job, RunnerName};
@@ -1418,16 +1418,202 @@ struct BillingBox {
     width: u16,
 }
 
-/// Computes the billing box for a frame of `area`, or `None` when it does not
-/// show.
-fn billing_box(view: &BillingView, area: Rect) -> Option<BillingBox> {
-    let _ = (view, area);
-    None
+/// The smallest width of the name column of the billing box. It is the width
+/// of the longest label, `list price ≥`.
+const BILLING_MIN_NAME_WIDTH: usize = 12;
+
+/// The largest width of the name column of the billing box.
+const BILLING_MAX_NAME_WIDTH: usize = 24;
+
+/// The columns that a side of the billing box takes: the border and one column
+/// of padding.
+const BILLING_SIDE_COLUMNS: usize = 2;
+
+/// The gap in front of each amount column of the billing box.
+const BILLING_COLUMN_GAP: &str = "  ";
+
+/// The words over the four amount columns: today, yesterday, 7 days, 30 days.
+const BILLING_HEADERS: [&str; 4] = ["today", "yesterday", "7d", "30d"];
+
+/// What the box shows for an account that is still loading.
+const BILLING_LOADING: &str = "loading…";
+
+/// The mark in front of the error text of a stale account.
+const BILLING_WARNING_MARK: &str = "⚠ ";
+
+/// The label of the total of the billed amounts.
+const BILLING_BILLED_LABEL: &str = "billed";
+
+/// The label of the total of the amounts at list price.
+const BILLING_LIST_LABEL: &str = "list price";
+
+/// The sign that a partial total adds to its label.
+const BILLING_PARTIAL_SIGN: &str = " ≥";
+
+/// The four amount texts of a total.
+fn total_texts(total: &Total) -> [String; 4] {
+    [
+        total.today.to_string(),
+        total.yesterday.to_string(),
+        total.last_7_days.to_string(),
+        total.last_30_days.to_string(),
+    ]
 }
 
-/// Draws the billing box at the lower right of the frame.
+/// The label of a total line: the word, and the sign when the total is partial.
+fn total_label(word: &str, total: &Total) -> String {
+    if total.partial {
+        format!("{word}{BILLING_PARTIAL_SIGN}")
+    } else {
+        word.to_owned()
+    }
+}
+
+/// One line of the billing box before the columns are laid out.
+enum BillingContent {
+    /// The column header.
+    Header,
+    /// A label and four amounts.
+    Amounts(String, [String; 4]),
+    /// A label and one text that spans the amount columns.
+    Text(String, String),
+    /// A stale error: the text after the mark.
+    Warning(String),
+}
+
+/// Lays `content` out in a name column of `name_width` and amount columns of
+/// `columns`. Both are widths in display columns.
+fn billing_line(content: &BillingContent, name_width: usize, columns: [usize; 4]) -> String {
+    let name_cell = |text: &str| pad_right(&truncate_to_budget(text, name_width), name_width);
+    match content {
+        BillingContent::Header => {
+            let mut line = name_cell("");
+            for (word, width) in BILLING_HEADERS.iter().zip(columns) {
+                line.push_str(BILLING_COLUMN_GAP);
+                line.push_str(&pad_left(word, width));
+            }
+            line
+        }
+        BillingContent::Amounts(name, texts) => {
+            let mut line = name_cell(name);
+            for (text, width) in texts.iter().zip(columns) {
+                line.push_str(BILLING_COLUMN_GAP);
+                line.push_str(&pad_left(text, width));
+            }
+            line
+        }
+        BillingContent::Text(name, text) => {
+            format!("{}{BILLING_COLUMN_GAP}{text}", name_cell(name))
+        }
+        BillingContent::Warning(text) => {
+            format!(
+                "{}{BILLING_COLUMN_GAP}{BILLING_WARNING_MARK}{text}",
+                name_cell("")
+            )
+        }
+    }
+}
+
+/// Pads `text` on the left with spaces to `width` display columns.
+fn pad_left(text: &str, width: usize) -> String {
+    let missing = width.saturating_sub(text.width());
+    format!("{}{text}", " ".repeat(missing))
+}
+
+/// Computes the billing box for a frame of `area`, or `None` when it does not
+/// show.
+///
+/// The name column is as wide as the widest account name, between 12 and 24
+/// columns. Each amount column is as wide as its header word or its widest
+/// amount. The box is as wide as its widest line plus the borders and the
+/// padding.
+fn billing_box(view: &BillingView, area: Rect) -> Option<BillingBox> {
+    let _ = area;
+    let mut contents = vec![BillingContent::Header];
+    for account in &view.accounts {
+        let name = account.name.to_string();
+        match &account.cell {
+            AccountCell::Loading => {
+                contents.push(BillingContent::Text(name, BILLING_LOADING.to_owned()));
+            }
+            AccountCell::NoAccess(text) => contents.push(BillingContent::Text(name, text.clone())),
+            AccountCell::Ready { windows, error } => {
+                contents.push(BillingContent::Amounts(
+                    name,
+                    [
+                        windows.today.billed.to_string(),
+                        windows.yesterday.billed.to_string(),
+                        windows.last_7_days.billed.to_string(),
+                        windows.last_30_days.billed.to_string(),
+                    ],
+                ));
+                if let Some(text) = error {
+                    contents.push(BillingContent::Warning(text.clone()));
+                }
+            }
+        }
+    }
+    contents.push(BillingContent::Amounts(
+        total_label(BILLING_BILLED_LABEL, &view.billed),
+        total_texts(&view.billed),
+    ));
+    contents.push(BillingContent::Amounts(
+        total_label(BILLING_LIST_LABEL, &view.list_price),
+        total_texts(&view.list_price),
+    ));
+    let mut columns = BILLING_HEADERS.map(UnicodeWidthStr::width);
+    let mut widest_name = 0;
+    for content in &contents {
+        match content {
+            BillingContent::Amounts(name, texts) => {
+                for (column, text) in columns.iter_mut().zip(texts) {
+                    *column = (*column).max(text.width());
+                }
+                if !matches!(name.as_str(), BILLING_BILLED_LABEL | BILLING_LIST_LABEL) {
+                    widest_name = widest_name.max(name.width());
+                }
+            }
+            BillingContent::Text(name, _) => widest_name = widest_name.max(name.width()),
+            BillingContent::Header | BillingContent::Warning(_) => {}
+        }
+    }
+    let name_width = widest_name.clamp(BILLING_MIN_NAME_WIDTH, BILLING_MAX_NAME_WIDTH);
+    let lines: Vec<String> = contents
+        .iter()
+        .map(|content| billing_line(content, name_width, columns))
+        .collect();
+    let inner = lines.iter().map(|line| line.width()).max().unwrap_or(0);
+    let lines = lines.iter().map(|line| pad_right(line, inner)).collect();
+    Some(BillingBox {
+        lines,
+        width: to_u16(inner + 2 * BILLING_SIDE_COLUMNS),
+    })
+}
+
+/// Draws the billing box at the right edge of the frame, with its bottom
+/// border on the row just above the status line.
 fn draw_billing_box(buffer: &mut Buffer, area: Rect, shown: &BillingBox) {
-    let _ = (buffer, area, shown);
+    let height = to_u16(shown.lines.len() + BILLING_BORDER_ROWS);
+    let width = shown.width.min(area.width);
+    let bottom = area.y + area.height.saturating_sub(1);
+    let top = bottom.saturating_sub(height);
+    let rect = Rect::new(area.x + area.width - width, top, width, height);
+    clear_overlay(buffer, rect);
+    Block::bordered()
+        .title(Span::styled(
+            BILLING_TITLE,
+            Style::default().add_modifier(Modifier::BOLD),
+        ))
+        .render(rect, buffer);
+    for (index, line) in shown.lines.iter().enumerate() {
+        buffer.set_stringn(
+            rect.x + 2,
+            rect.y + 1 + to_u16(index),
+            line,
+            usize::from(width).saturating_sub(2 * BILLING_SIDE_COLUMNS),
+            Style::default(),
+        );
+    }
 }
 
 /// The part of the box of the cancel prompt, in the order of the box.
@@ -7182,11 +7368,11 @@ mod tests {
         // bottom border on row 28.
         let want = [
             "┌ Actions billing · UTC days ──────────────────────┐",
-            "│                 today  yesterday     7d     30d │",
-            "│ Lock-Free-Labs  $0.00      $0.00  $0.00   $0.00 │",
-            "│ timmattison     $1.25      $2.50 $10.00  $40.00 │",
-            "│ billed          $1.25      $2.50 $10.00  $40.00 │",
-            "│ list price      $1.25      $3.09 $13.60  $45.81 │",
+            "│                 today  yesterday      7d     30d │",
+            "│ Lock-Free-Labs  $0.00      $0.00   $0.00   $0.00 │",
+            "│ timmattison     $1.25      $2.50  $10.00  $40.00 │",
+            "│ billed          $1.25      $2.50  $10.00  $40.00 │",
+            "│ list price      $1.25      $3.09  $13.60  $45.81 │",
             "└──────────────────────────────────────────────────┘",
         ];
         for (index, line) in want.iter().enumerate() {
