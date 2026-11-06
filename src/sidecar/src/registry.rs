@@ -155,8 +155,10 @@ impl Registry {
     ///
     /// Returns [`RegistryError::Missing`] when the file does not exist. Returns the other
     /// [`RegistryError`] variants when the read fails or the text is not valid.
-    pub fn load(_worktree_root: &Path) -> Result<Self, RegistryError> {
-        Ok(Self::default())
+    pub fn load(worktree_root: &Path) -> Result<Self, RegistryError> {
+        Self::load_if_present(worktree_root)?.ok_or_else(|| RegistryError::Missing {
+            path: worktree_root.join(REGISTRY_FILE),
+        })
     }
 
     /// Reads `sidecar.toml` at the root of a worktree. A missing file gives the default
@@ -165,8 +167,18 @@ impl Registry {
     /// # Errors
     ///
     /// Returns [`RegistryError`] when the file exists and cannot be read or is not valid.
-    pub fn load_or_default(_worktree_root: &Path) -> Result<Self, RegistryError> {
-        Ok(Self::default())
+    pub fn load_or_default(worktree_root: &Path) -> Result<Self, RegistryError> {
+        Ok(Self::load_if_present(worktree_root)?.unwrap_or_default())
+    }
+
+    /// Reads the file. Gives `None` when the file does not exist.
+    fn load_if_present(worktree_root: &Path) -> Result<Option<Self>, RegistryError> {
+        let path = worktree_root.join(REGISTRY_FILE);
+        match std::fs::read_to_string(&path) {
+            Ok(text) => Self::parse(&text).map(Some),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(RegistryError::Read { path, source }),
+        }
     }
 
     /// The directory of the links, relative to the worktree root.
