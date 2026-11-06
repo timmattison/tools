@@ -1,6 +1,10 @@
 //! The audit trail: a JSON Lines file that records each run of `op`.
 
+use crate::caller::{Ancestor, ClaudeSession};
+use serde::Serialize;
 use std::ffi::OsStr;
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// `<state home>/op-cache/audit.jsonl`, or `None` when no state home resolves.
@@ -17,6 +21,68 @@ pub(crate) fn audit_path(xdg_state_home: Option<&OsStr>, home: Option<&OsStr>) -
         }
     };
     Some(state_home.join("op-cache").join("audit.jsonl"))
+}
+
+/// The trail file, opened for appending.
+pub(crate) struct AuditTrail {
+    file: File,
+}
+
+impl AuditTrail {
+    /// Creates the parent directory and opens the file for appending.
+    pub(crate) fn open(path: &Path) -> std::io::Result<Self> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let file = OpenOptions::new().append(true).create(true).open(path)?;
+        Ok(Self { file })
+    }
+
+    /// Writes `record` as one JSON line.
+    pub(crate) fn append<T: Serialize>(&mut self, record: &T) -> std::io::Result<()> {
+        serde_json::to_writer(&mut self.file, record).map_err(std::io::Error::other)?;
+        self.file.write_all(b"\n")
+    }
+}
+
+/// The record written before each run of `op`.
+#[derive(Serialize)]
+pub(crate) struct OpStart {
+    pub(crate) time: String,
+    pub(crate) event: &'static str,
+    pub(crate) request_id: String,
+    pub(crate) attempt: u32,
+    pub(crate) operation: &'static str,
+    pub(crate) reference: String,
+    pub(crate) cwd: Option<String>,
+    pub(crate) cache_path: String,
+    pub(crate) zellij_session: Option<String>,
+    pub(crate) zellij_pane: Option<String>,
+    pub(crate) term_program: Option<String>,
+    pub(crate) claude: Option<ClaudeSession>,
+    pub(crate) ancestors: Vec<Ancestor>,
+}
+
+/// How a run of `op` ended. It never holds the standard output of `op`.
+#[derive(Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub(crate) enum Outcome {
+    Ok,
+    Failed { op_stderr: String },
+    SpawnError { error: String },
+}
+
+/// The record written after each run of `op`.
+#[derive(Serialize)]
+pub(crate) struct OpEnd {
+    pub(crate) time: String,
+    pub(crate) event: &'static str,
+    pub(crate) request_id: String,
+    pub(crate) attempt: u32,
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) duration_ms: u64,
+    #[serde(flatten)]
+    pub(crate) outcome: Outcome,
 }
 
 #[cfg(test)]
