@@ -102,10 +102,13 @@ fn hook_exits_0_when_git_does_not_ignore_the_link_dir() {
     let run = fixture.run(&host, &["setup", "--hook"]);
 
     assert_eq!(run.code, 0, "{run:?}");
+    // The refusal text holds the line to add on a line of its own.
     assert!(
-        run.stderr
-            .lines()
-            .any(|line| line.starts_with("warning: ") && line.contains("/data/")),
+        run.stderr.lines().any(|line| line.starts_with("warning: ")),
+        "{run:?}"
+    );
+    assert!(
+        run.stderr.lines().any(|line| line.trim() == "/data/"),
         "{run:?}"
     );
     assert!(!fixture.main_clone(NAME).exists());
