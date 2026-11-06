@@ -2,6 +2,7 @@
 //! [`OpRun::attempt`], which writes the audit trail around it.
 
 use crate::audit::{self, AuditTrail, OpEnd, OpStart, Outcome};
+use crate::caller::{self, Caller};
 use crate::OpPath;
 use std::ffi::OsString;
 use std::path::Path;
@@ -46,6 +47,7 @@ impl Operation<'_> {
 struct Environment {
     xdg_state_home: Option<OsString>,
     home: Option<OsString>,
+    claude_config_dir: Option<OsString>,
     zellij_session_name: Option<OsString>,
     zellij_pane_id: Option<OsString>,
     term_program: Option<OsString>,
@@ -56,6 +58,7 @@ impl Environment {
         Self {
             xdg_state_home: std::env::var_os("XDG_STATE_HOME"),
             home: std::env::var_os("HOME"),
+            claude_config_dir: std::env::var_os("CLAUDE_CONFIG_DIR"),
             zellij_session_name: std::env::var_os("ZELLIJ_SESSION_NAME"),
             zellij_pane_id: std::env::var_os("ZELLIJ_PANE_ID"),
             term_program: std::env::var_os("TERM_PROGRAM"),
@@ -73,6 +76,7 @@ pub(crate) struct OpRun<'a> {
     op_path: &'a OpPath,
     cache_path: &'a Path,
     environment: Environment,
+    caller: Option<Caller>,
     trail: Option<AuditTrail>,
     trail_given_up: bool,
 }
@@ -84,6 +88,7 @@ impl<'a> OpRun<'a> {
             op_path,
             cache_path,
             environment: Environment::snapshot(),
+            caller: None,
             trail: None,
             trail_given_up: false,
         }
@@ -93,6 +98,13 @@ impl<'a> OpRun<'a> {
     /// `Command::output()` returned, unchanged.
     pub(crate) fn attempt(&mut self, attempt: u32) -> std::io::Result<Output> {
         let request_id = new_request_id();
+        let environment = &self.environment;
+        let caller = self.caller.get_or_insert_with(|| {
+            caller::gather(
+                environment.claude_config_dir.as_deref(),
+                environment.home.as_deref(),
+            )
+        });
         let start = OpStart {
             time: now(),
             event: "op_start",
@@ -100,15 +112,13 @@ impl<'a> OpRun<'a> {
             attempt,
             operation: self.operation.audit_name(),
             reference: self.op_path.to_string(),
-            cwd: std::env::current_dir()
-                .ok()
-                .map(|dir| dir.to_string_lossy().into_owned()),
+            cwd: caller.cwd.clone(),
             cache_path: self.cache_path.to_string_lossy().into_owned(),
             zellij_session: lossy(self.environment.zellij_session_name.as_ref()),
             zellij_pane: lossy(self.environment.zellij_pane_id.as_ref()),
             term_program: lossy(self.environment.term_program.as_ref()),
-            claude: None,
-            ancestors: vec![],
+            claude: caller.claude.clone(),
+            ancestors: caller.ancestors.clone(),
         };
         self.record(&start);
 
