@@ -46,6 +46,17 @@
 //! costs no GraphQL point. The head branch of a pull request that left the
 //! queue comes from its live entry when the worker saw one. Else the worker
 //! looks it up one time.
+//!
+//! When `billing` is true, the worker also reads the Actions billing of each
+//! account (the owner of each target), at the end of a cycle, after the jobs.
+//! It reads at the start, on the slow cadence, and when the person presses
+//! `r`. It asks the kind of each account one time (an organization or a
+//! user), except an account in `billing_enterprises`, and it asks again after
+//! a failed lookup. For each read, it asks the usage report of each month that
+//! the last 30 days touch, and sends one [`Update::Billing`]. Two accounts of
+//! one enterprise share one read. Billing requests share the [`CONCURRENCY`]
+//! limit with every other request. With `billing = false`, the worker sends
+//! no billing request.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -628,14 +639,18 @@ fn refresh_billing<S: Source>(
     state.billing_cadence.mark(now);
     state.billing_requested = false;
     let accounts = accounts_of(&settings.targets);
+    let mut unknown = Vec::new();
     for account in &accounts {
         if settings.billing_enterprises.contains_key(account)
             || state.billing_kinds.contains_key(account)
         {
             continue;
         }
-        if let Ok(kind) = source.account_kind(account) {
-            state.billing_kinds.insert(account.clone(), kind);
+        match source.account_kind(account) {
+            Ok(kind) => {
+                state.billing_kinds.insert(account.clone(), kind);
+            }
+            Err(error) => unknown.push((account.clone(), Err(BillingError::Source(error)))),
         }
     }
     let reads = plan_reads(
@@ -644,7 +659,13 @@ fn refresh_billing<S: Source>(
         &state.billing_kinds,
     );
     let months = months_to_fetch(Utc::now().date_naive());
-    run_pool(&reads, updates, |read| read_billing(source, read, &months))
+    run_pool(&reads, updates, |read| read_billing(source, read, &months))?;
+    if !unknown.is_empty() {
+        updates
+            .send(Update::Billing(unknown))
+            .map_err(|_| ReceiverGone)?;
+    }
+    Ok(())
 }
 
 /// Runs one billing read: asks each month and sums the items.
@@ -4963,7 +4984,7 @@ mod tests {
         let first = billing_updates(&one_cycle(&worker));
 
         assert_eq!(first.len(), 2, "{first:?}");
-        assert!(first.contains(&(owner("bad"), Err(BillingError::Source(broke.clone())))));
+        assert!(first.contains(&(owner("bad"), Err(BillingError::Source(broke)))));
         assert!(first
             .iter()
             .any(|(account, result)| *account == owner("good") && result.is_ok()));
