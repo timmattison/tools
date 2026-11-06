@@ -1398,34 +1398,54 @@ pub fn draw<Tz: TimeZone>(
             }
         }
     }
-    if usize::from(area.height) >= FIXED_LINES {
-        let layout = layout_status(
-            &status_line(board, status, now, tz, prompt.is_none()),
-            status.refreshing.then_some(REFRESH_MARK),
-            usize::from(area.width),
-        );
-        let y = put(
-            buffer,
-            usize::from(area.height) - 1,
-            &layout.text,
-            Style::default(),
-        );
-        if let Some(message) = status.message_at(now) {
-            let width = Span::raw(message.text.as_str())
-                .width()
-                .min(layout.left_room);
-            let width = u16::try_from(width).unwrap_or(u16::MAX);
-            buffer.set_style(
-                Rect::new(area.x, y, width, 1),
-                Style::default().fg(message_color(span(message.posted_at, now))),
-            );
-        }
-    }
+    draw_status_line(buffer, area, board, status, now, tz, prompt.is_none());
     if let Some(shown) = &billing_box {
         draw_billing_box(buffer, area, shown);
     }
     if let Some(prompt) = prompt {
         draw_prompt(buffer, area, prompt);
+    }
+}
+
+/// Draws the status line on the last row of `area`.
+///
+/// With `hints`, the line shows the key hints. A message of `status` takes the
+/// color of its age. The function draws nothing when the frame is shorter than
+/// [`FIXED_LINES`].
+fn draw_status_line<Tz: TimeZone>(
+    buffer: &mut Buffer,
+    area: Rect,
+    board: &Board,
+    status: &Status,
+    now: DateTime<Utc>,
+    tz: &Tz,
+    hints: bool,
+) where
+    Tz::Offset: Display,
+{
+    if usize::from(area.height) < FIXED_LINES {
+        return;
+    }
+    let layout = layout_status(
+        &status_line(board, status, now, tz, hints),
+        status.refreshing.then_some(REFRESH_MARK),
+        usize::from(area.width),
+    );
+    let y = put(
+        buffer,
+        usize::from(area.height) - 1,
+        &layout.text,
+        Style::default(),
+    );
+    if let Some(message) = status.message_at(now) {
+        let width = Span::raw(message.text.as_str())
+            .width()
+            .min(layout.left_room);
+        let width = u16::try_from(width).unwrap_or(u16::MAX);
+        buffer.set_style(
+            Rect::new(area.x, y, width, 1),
+            Style::default().fg(message_color(span(message.posted_at, now))),
+        );
     }
 }
 
