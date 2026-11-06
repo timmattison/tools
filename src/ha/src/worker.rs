@@ -84,6 +84,12 @@ use crate::target::{OwnerName, RepoName, Target};
 /// How many repositories the worker fetches at the same time.
 pub const CONCURRENCY: usize = 8;
 
+/// How many finished runs of the recent section get their first job fetch in
+/// one cycle. It is 4 rounds of the [`CONCURRENCY`] children. The top rows
+/// fill first, because the list comes with the newest finish first. Thus the
+/// first cycle does not wait for the jobs of each finished run.
+pub const RECENT_JOBS_PER_CYCLE: usize = 4 * CONCURRENCY;
+
 /// How often the worker lists the repositories of the owners, sweeps for
 /// active runs, and checks which repositories have a merge queue. The sweep
 /// finds runs that started before the window. A repository is swept again on
@@ -208,6 +214,13 @@ pub enum Command {
     /// The runs whose jobs the screen shows now. The set is whole: the screen
     /// sends the full set each time it changes.
     WatchJobs(BTreeSet<(RepoName, RunId)>),
+    /// The runs that the recent section of the screen shows, the newest finish
+    /// first. The list is whole: the screen sends the full list each time it
+    /// changes. `Board::sections` decides the list, thus the worker holds no
+    /// copy of the rule of the window or of the order. The worker does not
+    /// fetch these runs at once. It fetches the jobs of the new ones in the
+    /// cycle, at most [`RECENT_JOBS_PER_CYCLE`] in each cycle.
+    RecentRuns(Vec<(RepoName, RunId)>),
 }
 
 /// The two ends of the worker thread.
@@ -544,6 +557,7 @@ fn apply_command(
             state.billing_requested = true;
         }
         Command::WatchJobs(set) => added.extend(state.watch(set)),
+        Command::RecentRuns(_) => {}
     }
 }
 
@@ -2929,6 +2943,38 @@ mod tests {
             }
         );
         assert_eq!(job_calls(&fake), 1);
+    }
+
+    /// Runs one cycle of the state against the fake. The updates go nowhere.
+    fn cycle_once(fake: &Arc<FakeSource>, state: &mut State) {
+        let (updates_tx, _updates_rx) = mpsc::channel();
+        let settings = settings(&["acme/a"]);
+        assert!(cycle(fake, &settings, state, &updates_tx).is_ok());
+    }
+
+    /// Sends a `RecentRuns` list for the ids, all in `acme/a`, to the state.
+    fn send_recent(state: &mut State, ids: &[u64]) {
+        let list = ids.iter().map(|id| (repo("acme/a"), RunId(*id))).collect();
+        let mut requested = false;
+        let mut added = BTreeSet::new();
+        apply_command(Command::RecentRuns(list), state, &mut requested, &mut added);
+        assert!(!requested && added.is_empty(), "nothing is fetched at once");
+    }
+
+    #[test]
+    fn a_finished_run_of_the_recent_list_gets_one_job_fetch_in_the_next_cycle() {
+        let fake = fake_with_runs(vec![run("acme/a", 5)]);
+        let mut state = State::new(SLOW_CADENCE);
+        cycle_once(&fake, &mut state);
+        assert_eq!(job_calls(&fake), 0, "a finished run has no jobs yet");
+        send_recent(&mut state, &[5]);
+        assert_eq!(job_calls(&fake), 0, "the command fetches nothing");
+
+        cycle_once(&fake, &mut state);
+        assert_eq!(calls_of(&fake, "jobs"), vec!["5".to_owned()]);
+
+        cycle_once(&fake, &mut state);
+        assert_eq!(job_calls(&fake), 1, "a good fetch is not done again");
     }
 
     #[test]
