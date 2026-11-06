@@ -12,6 +12,7 @@ use std::time::Duration;
 use chrono::{Local, Utc};
 use clap::{CommandFactory, FromArgMatches, Parser};
 use ha::app::{App, RunError, TerminalEvents};
+use ha::billing::{accounts_of, BillingBoard};
 use ha::board::Board;
 use ha::browser::BrowserOpener;
 use ha::cancel::GhCanceller;
@@ -151,6 +152,9 @@ fn run_view(settings: &Settings, rate: RateLimit, worker: &Worker) -> Result<(),
         worker,
         &Utc::now,
         &tz,
+        settings
+            .billing
+            .then(|| BillingBoard::new(accounts_of(&settings.targets))),
     );
     app.run(&mut terminal, &mut TerminalEvents)
 }
