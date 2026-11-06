@@ -5728,13 +5728,6 @@ mod tests {
         }
     }
 
-    /// The checks of the ID, STARTED, and TIME columns pass before issue #581
-    /// too. They lock the layout in: a marker that is wider than its cell moves
-    /// each cell after it, and the buffer clips what stands past the right edge
-    /// without a sign. Since issue #590, the test also checks the right marker
-    /// cell, which stands in the last `MARKER_WIDTH` columns of each row. It
-    /// repeats the left marker, one blank column follows the time cell, and the
-    /// header leaves the right marker cell blank.
     /// The first column of the right marker cell in a frame of `width` columns.
     /// The cell stands before one space and the job-sum cell.
     fn right_marker_column(width: u16) -> u16 {
@@ -5743,6 +5736,13 @@ mod tests {
                 .expect("the marker and job-sum widths fit in u16")
     }
 
+    /// The checks of the ID, STARTED, and TIME columns pass before issue #581
+    /// too. They lock the layout in: a marker that is wider than its cell moves
+    /// each cell after it, and the buffer clips what stands past the right edge
+    /// without a sign. Since issue #590, the test also checks the right marker
+    /// cell, which stands before one space and the job-sum cell at the end of
+    /// each row. It repeats the left marker, one blank column follows the time
+    /// cell, and the header leaves the right marker cell blank.
     #[test]
     fn the_id_started_and_time_columns_stay_put_at_every_width() {
         let first_width = u16::try_from(FIXED_COLUMNS).expect("the fixed columns fit in u16");
