@@ -219,3 +219,39 @@ fn add_prints_the_token_step_with_the_settings_url() {
         "{run:?}"
     );
 }
+
+/// The commit that `main` names in the bare remote of the sidecar `NAME`.
+fn remote_main(fixture: &Fixture) -> String {
+    fixture.git(&fixture.sidecar_remote(NAME), &["rev-parse", "main"])
+}
+
+#[test]
+fn a_second_add_changes_nothing_and_exits_0() {
+    let fixture = Fixture::new(&[]);
+    let worktree = fixture.add_host_worktree("feature");
+    let first = fixture.run(&worktree, &["add", NAME, "--yes"]);
+    assert_eq!(first.code, 0, "{first:?}");
+    let link = fixture.link(&worktree, NAME);
+    let before = (
+        edited_files(&worktree),
+        fs::read_link(&link).unwrap(),
+        remote_main(&fixture),
+    );
+    let posts_before = posts(&fixture).len();
+    for args in [["add", NAME, "--yes"].as_slice(), ["add", NAME].as_slice()] {
+        let run = fixture.run(&worktree, args);
+        assert_eq!(run.code, 0, "{args:?}: {run:?}");
+        assert!(run.stdout.contains("changes nothing"), "{run:?}");
+        assert!(!run.stdout.contains("will do these steps"), "{run:?}");
+        assert!(run.stdout.contains("Do these steps by hand:"), "{run:?}");
+        assert_eq!(posts(&fixture).len(), posts_before);
+        assert_eq!(
+            before,
+            (
+                edited_files(&worktree),
+                fs::read_link(&link).unwrap(),
+                remote_main(&fixture)
+            )
+        );
+    }
+}
