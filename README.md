@@ -2381,7 +2381,7 @@ cannot hang the caller. Used by `cwt` and `ha`.
       gives no billing data for a period shorter than one UTC day. An hour filter gives
       `400 Hourly time period filtering is deprecated`.
     - The usage of a job shows in the report with a lag of minutes, not of a day. On 2026-11-06, a
-      poll every 2 minutes found the usage of 9 jobs between 2 and 28 minutes after each job ended.
+      poll every 2 minutes found the usage of each of 9 jobs at most 28 minutes after the job ended.
       Thus the `today` column can miss the jobs of the last half hour. The `date` of an item is
       the end of the first job of that UTC day.
     - A row shows `loading…` until the first answer comes. An account with no usage shows
