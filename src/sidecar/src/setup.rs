@@ -12,9 +12,11 @@
 //! 7. A clone that failed, with a usable directory at the place now, uses that directory.
 //! 8. A clone that failed, with nothing usable, gets a warning.
 
+use std::path::Path;
+
 use crate::clone::{ensure_clone, CloneOutcome};
 use crate::host::Host;
-use crate::link::{inspect_link, point_link, LinkState};
+use crate::link::{inspect_link, point_link, ForeignLink, LinkState};
 use crate::name::SidecarName;
 
 /// The command that runs the setup by hand. Each warning names it.
@@ -71,16 +73,73 @@ fn set_up_one(host: &Host, name: &SidecarName, report: &mut SetupReport) -> bool
     let link = host.link(name);
     let shown = host.link_shown(name);
     match inspect_link(host.git(), &link, &main_clone) {
-        LinkState::Missing => match point_link(&link, &main_clone) {
-            Ok(()) => {
-                report
-                    .actions
-                    .push(format!("Linked {shown} to {}.", main_clone.display()));
-                true
-            }
-            Err(_) => false,
-        },
-        _ => true,
+        LinkState::Missing => point_and_report(&link, &main_clone, report, || {
+            format!("Linked {shown} to {}.", main_clone.display())
+        }),
+        LinkState::MainClone | LinkState::Worktree { .. } => true,
+        LinkState::Broken { .. } => point_and_report(&link, &main_clone, report, || {
+            format!(
+                "Pointed the broken link {shown} at {}.",
+                main_clone.display()
+            )
+        }),
+        LinkState::Foreign(foreign) => {
+            report
+                .warnings
+                .push(foreign_link_warning(host, &shown, &main_clone, &foreign));
+            false
+        }
+    }
+}
+
+/// Points `link` at `main_clone`. Adds the action line on success and a warning on
+/// failure. Returns true on success.
+fn point_and_report(
+    link: &Path,
+    main_clone: &Path,
+    report: &mut SetupReport,
+    action: impl FnOnce() -> String,
+) -> bool {
+    match point_link(link, main_clone) {
+        Ok(()) => {
+            report.actions.push(action());
+            true
+        }
+        Err(error) => {
+            report.warnings.push(format!(
+                "The setup cannot point {} at {}: {error}. Run `{SETUP_COMMAND}` to try again.",
+                link.display(),
+                main_clone.display()
+            ));
+            false
+        }
+    }
+}
+
+/// The warning for a thing that sidecar does not touch at the place of a link.
+fn foreign_link_warning(
+    host: &Host,
+    shown: &str,
+    main_clone: &Path,
+    foreign: &ForeignLink,
+) -> String {
+    let clone = main_clone.display();
+    match foreign {
+        ForeignLink::Directory | ForeignLink::File => {
+            let kind = if *foreign == ForeignLink::Directory {
+                "directory"
+            } else {
+                "file"
+            };
+            format!(
+                "{shown} is a real {kind}, not a link. Git ignores {}/, thus the data in it is in no repository. The setup does not touch it. Move the data into {clone}, remove {shown}, and run `{SETUP_COMMAND}`.",
+                host.registry().link_dir().display()
+            )
+        }
+        ForeignLink::OtherTarget(target) => format!(
+            "{shown} points at {}, which is neither {clone} nor a worktree of it. The setup does not touch it.",
+            target.display()
+        ),
     }
 }
 
