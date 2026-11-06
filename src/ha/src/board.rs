@@ -4839,9 +4839,10 @@ mod tests {
                 Some("2026-11-04T09:50:00Z"),
             )],
         );
-        // If the window used the end, the first call drops the run and its
-        // jobs. The second call then shows the run again, with its update as
-        // the end. Both calls must give the end of the job.
+        // If the window used the end, the first call finds the run outside the
+        // window, and `Board::settle` drops its jobs. The same call then shows
+        // the run again, with its update as the end, and the worker does not
+        // fetch the jobs again. The second call makes sure that the jobs stay.
         for _ in 0..2 {
             assert_eq!(
                 ended(&mut board, late_now(), id),
