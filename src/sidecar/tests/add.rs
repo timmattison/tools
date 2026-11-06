@@ -300,3 +300,24 @@ fn a_crlf_file_keeps_its_crlf_bytes_in_the_blob() {
     assert!(blob.status.success());
     assert_eq!(blob.stdout, b"1\r\n2\r\n");
 }
+
+#[test]
+fn comments_in_sidecar_toml_stay() {
+    const REGISTRY: &str = "# The sidecars of the project.\n\
+        # link_dir is where the links go.\n\
+        link_dir = \"data\" # the link directory\n\
+        sidecars = [\"testdata\"] # the first\n";
+    let fixture = Fixture::new(&[]);
+    fixture.make_sidecar_remote("testdata");
+    let checkout = fixture.main_checkout();
+    fixture.write(&checkout.join("sidecar.toml"), REGISTRY);
+    let run = fixture.run(&checkout, &["add", NAME, "--yes"]);
+    assert_eq!(run.code, 0, "{run:?}");
+    let text = read(&checkout.join("sidecar.toml"));
+    for line in REGISTRY.lines().filter(|line| line.contains('#')) {
+        let (_, rest) = line.split_once('#').unwrap();
+        let comment = format!("#{rest}");
+        assert!(text.contains(&comment), "{comment} is gone from:\n{text}");
+    }
+    assert_eq!(registered(&checkout), ["testdata", NAME]);
+}
