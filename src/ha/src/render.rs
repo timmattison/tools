@@ -5753,45 +5753,55 @@ mod tests {
             .unwrap_or_else(|| panic!("no row holds {needle:?}: {text:?}"))
     }
 
+    /// The time now in the tests of the late run, 2026-11-04 at 18:00:00 UTC.
+    /// It is after the run ended.
+    fn late_now() -> DateTime<Utc> {
+        at("2026-11-04T18:00:00Z")
+    }
+
+    /// Run 41874496263 of `Lock-Free-Labs/nvr-tools`. It passed. GitHub changed
+    /// its `updated_at` 18 minutes after its last job ended.
+    fn late_run() -> Run {
+        run(
+            41_874_496_263,
+            "Lock-Free-Labs/nvr-tools",
+            "CI",
+            "issue-325",
+            "Late update",
+            RunState::Passed,
+            "2026-11-04T17:07:48Z",
+            "2026-11-04T17:40:55Z",
+        )
+    }
+
+    /// The two jobs of [`late_run`]. The last one ends at 17:22:45.
+    fn late_jobs() -> Vec<Job> {
+        vec![
+            job(
+                126_730_108_923,
+                "Full check list (Linux)",
+                RunState::Passed,
+                Some("2026-11-04T17:07:51Z"),
+                Some("2026-11-04T17:22:45Z"),
+            ),
+            job(
+                126_730_109_123,
+                "Clippy (Windows)",
+                RunState::Passed,
+                Some("2026-11-04T17:07:53Z"),
+                Some("2026-11-04T17:12:05Z"),
+            ),
+        ]
+    }
+
     // GitHub changed `updated_at` of this run 18 minutes after its last job
     // ended. The row shows the end of the last job, not `updated_at`.
     #[test]
     fn a_finished_run_shows_the_end_of_its_last_job() {
-        let now = at("2026-11-04T18:00:00Z");
+        let now = late_now();
         let mut board = Board::new(Duration::from_hours(8));
-        board.replace(
-            repo("Lock-Free-Labs/nvr-tools"),
-            vec![run(
-                41_874_496_263,
-                "Lock-Free-Labs/nvr-tools",
-                "CI",
-                "issue-325",
-                "Late update",
-                RunState::Passed,
-                "2026-11-04T17:07:48Z",
-                "2026-11-04T17:40:55Z",
-            )],
-            now,
-        );
-        board.set_jobs(
-            RunId(41_874_496_263),
-            vec![
-                job(
-                    126_730_108_923,
-                    "Full check list (Linux)",
-                    RunState::Passed,
-                    Some("2026-11-04T17:07:51Z"),
-                    Some("2026-11-04T17:22:45Z"),
-                ),
-                job(
-                    126_730_109_123,
-                    "Clippy (Windows)",
-                    RunState::Passed,
-                    Some("2026-11-04T17:07:53Z"),
-                    Some("2026-11-04T17:12:05Z"),
-                ),
-            ],
-        );
+        board.replace(repo("Lock-Free-Labs/nvr-tools"), vec![late_run()], now);
+        board.set_jobs(late_run().id, late_jobs());
         let buffer = render_at(120, 10, &mut board, &loaded(), now);
         let text = lines(&buffer);
         let y = row_holding(&text, "41874496263");
@@ -7610,7 +7620,7 @@ mod tests {
     // not from `updated_at`.
     #[test]
     fn a_finished_run_and_its_jobs_fade_from_the_end_of_its_last_job() {
-        let now = at("2026-11-04T18:00:00Z");
+        let now = late_now();
         let mut board = Board::new(Duration::from_hours(8));
         board.replace(
             repo("timmattison/tools"),
@@ -7626,41 +7636,10 @@ mod tests {
             )],
             now,
         );
-        board.replace(
-            repo("Lock-Free-Labs/nvr-tools"),
-            vec![run(
-                41_874_496_263,
-                "Lock-Free-Labs/nvr-tools",
-                "CI",
-                "issue-325",
-                "Late update",
-                RunState::Passed,
-                "2026-11-04T17:07:48Z",
-                "2026-11-04T17:40:55Z",
-            )],
-            now,
-        );
+        board.replace(repo("Lock-Free-Labs/nvr-tools"), vec![late_run()], now);
         board.select_next(now);
         board.expand(now);
-        board.set_jobs(
-            RunId(41_874_496_263),
-            vec![
-                job(
-                    126_730_108_923,
-                    "Full check list (Linux)",
-                    RunState::Passed,
-                    Some("2026-11-04T17:07:51Z"),
-                    Some("2026-11-04T17:22:45Z"),
-                ),
-                job(
-                    126_730_109_123,
-                    "Clippy (Windows)",
-                    RunState::Passed,
-                    Some("2026-11-04T17:07:53Z"),
-                    Some("2026-11-04T17:12:05Z"),
-                ),
-            ],
-        );
+        board.set_jobs(late_run().id, late_jobs());
         board.select_previous(now);
         let buffer = render_at(120, 12, &mut board, &loaded(), now);
         let from_end = ROW_RAMP.color(Duration::from_secs(37 * 60 + 15), ROW_FADE_END);
