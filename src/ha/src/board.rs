@@ -4682,4 +4682,24 @@ mod tests {
             Some(at("2026-11-04T17:40:55Z"))
         );
     }
+
+    #[test]
+    fn a_skipped_job_does_not_hold_back_the_end() {
+        let run = late_run();
+        let id = run.id;
+        let mut jobs = late_jobs();
+        // GitHub gives a skipped job the status `completed`, thus it is finished.
+        jobs.push(timed_job(
+            126_730_109_888,
+            "Release",
+            RunState::Skipped,
+            Some("2026-11-04T17:07:50Z"),
+            Some("2026-11-04T17:07:50Z"),
+        ));
+        let mut board = late_board(run, Some(jobs));
+        assert_eq!(
+            ended(&mut board, late_now(), id),
+            Some(at("2026-11-04T17:22:45Z"))
+        );
+    }
 }
