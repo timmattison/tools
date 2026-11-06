@@ -192,4 +192,44 @@ mod tests {
         assert!(matches!(error, RegistryError::Syntax { .. }));
         assert!(error.to_string().contains("lnk_dir"), "{error}");
     }
+
+    #[test]
+    fn refused_name_is_an_error_that_names_it() {
+        for bad in ["..", "Bad_Name"] {
+            let error = Registry::parse(&format!("sidecars = [\"{bad}\"]")).unwrap_err();
+            assert!(matches!(error, RegistryError::BadName { .. }), "{error}");
+            assert!(error.to_string().contains(&format!("\"{bad}\"")), "{error}");
+        }
+    }
+
+    #[test]
+    fn repeated_name_is_an_error_that_names_it() {
+        let error = Registry::parse("sidecars = [\"a\", \"b\", \"a\"]").unwrap_err();
+        assert!(matches!(error, RegistryError::Duplicate { .. }), "{error}");
+        assert!(error.to_string().contains("\"a\""), "{error}");
+    }
+
+    #[test]
+    fn bad_link_dir_is_an_error_that_names_the_key() {
+        for bad in ["../x", "/abs", "", "a/./b", "a/../b"] {
+            let error = Registry::parse(&format!("link_dir = \"{bad}\"")).unwrap_err();
+            assert!(
+                matches!(error, RegistryError::BadLinkDir { .. }),
+                "{bad:?}: {error}"
+            );
+            assert!(error.to_string().contains("link_dir"), "{error}");
+        }
+    }
+
+    #[test]
+    fn bad_token_env_is_an_error_that_names_the_key() {
+        for bad in ["", "1X", "A-B"] {
+            let error = Registry::parse(&format!("token_env = \"{bad}\"")).unwrap_err();
+            assert!(
+                matches!(error, RegistryError::BadTokenEnv { .. }),
+                "{bad:?}: {error}"
+            );
+            assert!(error.to_string().contains("token_env"), "{error}");
+        }
+    }
 }
