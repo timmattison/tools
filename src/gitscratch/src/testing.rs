@@ -34,6 +34,13 @@ use crate::scratch::Scratch;
 #[cfg(unix)]
 pub mod pty;
 
+/// The writer of a script that a test runs, with no race against a concurrent
+/// fork on Linux.
+///
+/// Unix only, because the writer is `/bin/sh` and the mode is a Unix mode.
+#[cfg(unix)]
+pub mod executable;
+
 /// The name every fixture commit is authored and committed under.
 const FIXTURE_USER_NAME: &str = "gitscratch test";
 
