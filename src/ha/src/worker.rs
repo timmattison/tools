@@ -52,13 +52,15 @@
 //! It reads at the start, on the slow cadence, and when the person presses
 //! `r`. It asks the kind of each account one time (an organization or a
 //! user), except an account in `billing_enterprises`, and it asks again after
-//! a failed lookup. For each read, it asks the usage report of each month that
+//! a failed lookup. It asks those kinds through the same pool as the reads,
+//! before it plans the reads. For each read, it asks the usage report of each month that
 //! the last 30 days touch, and sends one [`Update::Billing`]. Two accounts of
 //! one enterprise share one read. Billing requests share the [`CONCURRENCY`]
 //! limit with every other request. With `billing = false`, the worker sends
 //! no billing request.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Mutex, PoisonError};
@@ -622,10 +624,12 @@ fn cycle<S: Source>(
 /// true and the billing cadence is due or a refresh asked for it.
 ///
 /// The step first looks up the kind of each account that has no kind yet and
-/// is not in `billing_enterprises`, one account at a time. It then plans the
-/// reads and runs them through [`run_pool`], so billing shares the
-/// [`CONCURRENCY`] limit with every other request. Each read sends one
-/// [`Update::Billing`].
+/// is not in `billing_enterprises`. It looks up those kinds through the same
+/// pool as the reads, under the [`CONCURRENCY`] limit, before it plans the
+/// reads. A failed lookup goes into one [`Update::Billing`] in the order of the
+/// accounts. The step then plans the reads and runs them through
+/// [`run_pool`], so billing shares the [`CONCURRENCY`] limit with every other
+/// request. Each read sends one [`Update::Billing`].
 fn refresh_billing<S: Source>(
     source: &S,
     settings: &Settings,
@@ -639,18 +643,34 @@ fn refresh_billing<S: Source>(
     state.billing_cadence.mark(now);
     state.billing_requested = false;
     let accounts = accounts_of(&settings.targets);
+    let to_ask: Vec<(usize, &OwnerName)> = accounts
+        .iter()
+        .enumerate()
+        .filter(|(_, account)| {
+            !settings.billing_enterprises.contains_key(*account)
+                && !state.billing_kinds.contains_key(*account)
+        })
+        .collect();
+    // No thread holds this lock during a call of the source.
+    let answers = Mutex::new(Vec::new());
+    // The closure never gives `Break`, thus the result carries no information.
+    let _ = for_each_pooled(&to_ask, |(index, account)| {
+        let answer = source.account_kind(account);
+        answers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((*index, (*account).clone(), answer));
+        ControlFlow::Continue(())
+    });
+    let mut answers = answers.into_inner().unwrap_or_else(PoisonError::into_inner);
+    answers.sort_by_key(|(index, _, _)| *index);
     let mut unknown = Vec::new();
-    for account in &accounts {
-        if settings.billing_enterprises.contains_key(account)
-            || state.billing_kinds.contains_key(account)
-        {
-            continue;
-        }
-        match source.account_kind(account) {
+    for (_, account, answer) in answers {
+        match answer {
             Ok(kind) => {
-                state.billing_kinds.insert(account.clone(), kind);
+                state.billing_kinds.insert(account, kind);
             }
-            Err(error) => unknown.push((account.clone(), Err(BillingError::Source(error)))),
+            Err(error) => unknown.push((account, Err(BillingError::Source(error)))),
         }
     }
     let reads = plan_reads(
@@ -1131,37 +1151,60 @@ fn forget_jobs_with_no_active_mark<S: Source>(source: &S, state: &State) {
 
 /// Turns each item into one [`Update`] with a pool of threads, and sends it.
 ///
-/// The threads take items from one shared queue. No thread holds the queue
-/// lock while it works. The pool uses [`CONCURRENCY`] threads at most, so every
-/// kind of request shares the same limit. When the receiver of the updates is
-/// gone, the threads stop and the function returns [`ReceiverGone`].
+/// The pool is [`for_each_pooled`], thus every kind of request shares the same
+/// [`CONCURRENCY`] limit. When the receiver of the updates is gone, the threads
+/// stop and the function returns [`ReceiverGone`].
 fn run_pool<T: Sync>(
     items: &[T],
     updates: &Sender<Update>,
     work: impl Fn(&T) -> Update + Sync,
 ) -> Result<(), ReceiverGone> {
+    let outcome = for_each_pooled(items, |item| {
+        if updates.send(work(item)).is_err() {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    });
+    match outcome {
+        ControlFlow::Continue(()) => Ok(()),
+        ControlFlow::Break(()) => Err(ReceiverGone),
+    }
+}
+
+/// Runs `work` on each item, on at most [`CONCURRENCY`] threads at the same
+/// time.
+///
+/// The threads take items from one shared queue. No thread holds the queue
+/// lock while it works. The pool uses [`CONCURRENCY`] threads at most, so every
+/// kind of request shares the same limit. A `Break` from `work` stops the
+/// threads from taking more items, and the result is then `Break`.
+fn for_each_pooled<T: Sync>(
+    items: &[T],
+    work: impl Fn(&T) -> ControlFlow<()> + Sync,
+) -> ControlFlow<()> {
     let queue = Mutex::new(items.iter().collect::<VecDeque<_>>());
-    let gone = AtomicBool::new(false);
+    let stopped = AtomicBool::new(false);
     std::thread::scope(|scope| {
         for _ in 0..CONCURRENCY.min(items.len()) {
             scope.spawn(|| {
-                while !gone.load(Ordering::Relaxed) {
+                while !stopped.load(Ordering::Relaxed) {
                     let next = queue
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
                         .pop_front();
                     let Some(item) = next else { break };
-                    if updates.send(work(item)).is_err() {
-                        gone.store(true, Ordering::Relaxed);
+                    if work(item).is_break() {
+                        stopped.store(true, Ordering::Relaxed);
                     }
                 }
             });
         }
     });
-    if gone.load(Ordering::Relaxed) {
-        Err(ReceiverGone)
+    if stopped.load(Ordering::Relaxed) {
+        ControlFlow::Break(())
     } else {
-        Ok(())
+        ControlFlow::Continue(())
     }
 }
 
@@ -4827,8 +4870,10 @@ mod tests {
         );
         assert!(matches!(updates.last(), Some(Update::CycleDone { .. })));
         let script = fake.script();
+        let mut kind_asks = script.kind_asks.clone();
+        kind_asks.sort_by_key(ToString::to_string);
         assert_eq!(
-            script.kind_asks,
+            kind_asks,
             vec![owner("Lock-Free-Labs"), owner("timmattison")]
         );
         let mut asks = script.usage_asks.clone();
