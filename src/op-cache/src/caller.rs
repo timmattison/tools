@@ -115,6 +115,12 @@ pub(crate) fn claude_config_dir(
     Some(Path::new(home).join(".claude"))
 }
 
+/// The nearest ancestor that has `<sessions_dir>/<pid>.json`.
+pub(crate) fn claude_session(chain: &[Ancestor], sessions_dir: &Path) -> Option<ClaudeSession> {
+    let _ = (chain, sessions_dir);
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,6 +277,91 @@ mod tests {
         assert_eq!(
             claude_config_dir(Some(OsStr::new("")), Some(OsStr::new(""))),
             None
+        );
+    }
+
+    fn chain_100_200_300() -> Vec<Ancestor> {
+        [100, 200, 300]
+            .into_iter()
+            .map(|pid| Ancestor {
+                pid,
+                name: format!("p{pid}"),
+                command: None,
+            })
+            .collect()
+    }
+
+    fn write_session(dir: &Path, pid: u32, text: &str) {
+        std::fs::write(dir.join(format!("{pid}.json")), text).expect("write session file");
+    }
+
+    #[test]
+    fn session_comes_from_the_nearest_ancestor_with_a_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_session(dir.path(), 200, r#"{"sessionId":"s200","name":"n200"}"#);
+        write_session(dir.path(), 300, r#"{"sessionId":"s300","name":"n300"}"#);
+        let found = claude_session(&chain_100_200_300(), dir.path());
+        assert_eq!(
+            found,
+            Some(ClaudeSession {
+                pid: 200,
+                session_id: Some("s200".into()),
+                name: Some("n200".into())
+            })
+        );
+        write_session(dir.path(), 100, r#"{"sessionId":"s100","name":"n100"}"#);
+        let found = claude_session(&chain_100_200_300(), dir.path());
+        assert_eq!(found.map(|s| s.pid), Some(100));
+    }
+
+    #[test]
+    fn session_is_none_without_any_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert_eq!(claude_session(&chain_100_200_300(), dir.path()), None);
+    }
+
+    #[test]
+    fn session_with_bad_json_keeps_the_pid_and_no_fields() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_session(dir.path(), 200, "not json");
+        let found = claude_session(&chain_100_200_300(), dir.path());
+        assert_eq!(
+            found,
+            Some(ClaudeSession {
+                pid: 200,
+                session_id: None,
+                name: None
+            })
+        );
+    }
+
+    #[test]
+    fn session_without_a_name_has_no_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_session(dir.path(), 200, r#"{"sessionId":"s200"}"#);
+        let found = claude_session(&chain_100_200_300(), dir.path());
+        assert_eq!(
+            found,
+            Some(ClaudeSession {
+                pid: 200,
+                session_id: Some("s200".into()),
+                name: None
+            })
+        );
+    }
+
+    #[test]
+    fn session_field_of_the_wrong_type_is_none_for_that_field_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_session(dir.path(), 200, r#"{"sessionId":5,"name":"n200"}"#);
+        let found = claude_session(&chain_100_200_300(), dir.path());
+        assert_eq!(
+            found,
+            Some(ClaudeSession {
+                pid: 200,
+                session_id: None,
+                name: Some("n200".into())
+            })
         );
     }
 }
