@@ -9,6 +9,8 @@ use crate::name::{SidecarName, NAME_RULE};
 
 /// The name of the registry file at the root of a host worktree.
 pub const REGISTRY_FILE: &str = "sidecar.toml";
+/// The key of the array of sidecar names.
+const SIDECARS_KEY: &str = "sidecars";
 /// The directory of the links when `link_dir` is not set.
 pub const DEFAULT_LINK_DIR: &str = "data";
 /// The variable of the CI token when `token_env` is not set.
@@ -215,8 +217,44 @@ impl Registry {
 /// Returns an error when the file cannot be read or written, when the text is not a
 /// valid registry, or when `sidecars` is not an array of strings.
 pub fn add_name_to_file(path: &Path, name: &SidecarName) -> anyhow::Result<bool> {
-    let _ = (path, name);
-    Ok(false)
+    let old = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(anyhow::Error::new(error).context(format!("cannot read {}", path.display())))
+        }
+    };
+    let mut document: toml_edit::DocumentMut = old
+        .parse()
+        .map_err(|error| anyhow::anyhow!("{} is not valid TOML: {error}", path.display()))?;
+    if let Some(item) = document.get(SIDECARS_KEY) {
+        let all_strings = item
+            .as_array()
+            .is_some_and(|array| array.iter().all(toml_edit::Value::is_str));
+        if !all_strings {
+            anyhow::bail!(
+                "{SIDECARS_KEY} in {} must be an array of strings",
+                path.display()
+            );
+        }
+    }
+    if Registry::parse(&old)?.contains(name) {
+        return Ok(false);
+    }
+    match document
+        .entry(SIDECARS_KEY)
+        .or_insert_with(|| toml_edit::value(toml_edit::Array::new()))
+        .as_array_mut()
+    {
+        Some(array) => array.push(name.as_str()),
+        None => anyhow::bail!("{SIDECARS_KEY} in {} is not an array", path.display()),
+    }
+    let new = document.to_string();
+    Registry::parse(&new)?;
+    std::fs::write(path, new).map_err(|error| {
+        anyhow::Error::new(error).context(format!("cannot write {}", path.display()))
+    })?;
+    Ok(true)
 }
 
 #[cfg(test)]
