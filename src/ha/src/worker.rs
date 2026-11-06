@@ -3077,6 +3077,18 @@ mod tests {
         assert_eq!(job_calls(&fake), 40, "each run is fetched one time");
     }
 
+    #[test]
+    fn a_recent_run_with_no_facts_gets_no_job_fetch() {
+        let fake = fake_with_runs(vec![run("acme/a", 5)]);
+        let mut state = State::new(SLOW_CADENCE);
+        cycle_once(&fake, &mut state);
+        // Run 99 is in the recent list, but the repository does not list it.
+        send_recent(&mut state, &[99, 5]);
+
+        cycle_once(&fake, &mut state);
+        assert_eq!(calls_of(&fake, "jobs"), vec!["5".to_owned()]);
+    }
+
     /// The IDs of all `jobs` calls so far, sorted.
     fn sorted_job_ids(fake: &FakeSource) -> Vec<u64> {
         let mut ids: Vec<u64> = calls_of(fake, "jobs")
