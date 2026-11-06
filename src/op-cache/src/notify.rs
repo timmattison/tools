@@ -70,9 +70,18 @@ pub(crate) const SCRIPT: [&str; 3] = [
 /// the message as three separate arguments. All three standard streams are
 /// null. This function does not start the command.
 pub(crate) fn notification_command(notification: &Notification) -> Command {
-    let _ = notification;
-    let _ = Stdio::null();
-    Command::new("osascript")
+    let mut command = Command::new("osascript");
+    for line in SCRIPT {
+        command.arg("-e").arg(line);
+    }
+    command
+        .arg(&notification.title)
+        .arg(&notification.subtitle)
+        .arg(&notification.message)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
 }
 
 #[cfg(test)]
