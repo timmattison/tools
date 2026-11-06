@@ -2104,6 +2104,61 @@ mod tests {
         assert!(parse_lsof_line(line).is_none());
     }
 
+    /// The output of `lsof -p 1` on Linux, for a user who is not root. The
+    /// kernel refuses each descriptor of PID 1. lsof on Linux writes a row for
+    /// each one, with empty columns and the reason where the name goes. lsof
+    /// on macOS writes no row at all for such a process.
+    const LSOF_LINUX_EVERY_DESCRIPTOR_REFUSED: &str = "\
+COMMAND PID USER   FD      TYPE DEVICE SIZE/OFF NODE NAME
+systemd   1 root  cwd   unknown                      /proc/1/cwd (readlink: Permission denied)
+systemd   1 root  rtd   unknown                      /proc/1/root (readlink: Permission denied)
+systemd   1 root  txt   unknown                      /proc/1/exe (readlink: Permission denied)
+systemd   1 root NOFD                                /proc/1/fd (opendir: Permission denied)
+";
+
+    /// The output of `lsof -p` on Linux when the kernel refuses one
+    /// descriptor and shows the other.
+    const LSOF_LINUX_ONE_DESCRIPTOR_REFUSED: &str = "\
+COMMAND  PID USER   FD      TYPE DEVICE SIZE/OFF NODE NAME
+bash    4242 me    cwd       DIR    8,1     4096    2 /home/me
+bash    4242 me    txt   unknown                      /proc/4242/exe (readlink: Permission denied)
+";
+
+    #[test]
+    fn a_refusal_of_every_descriptor_names_the_refusal_and_the_remedy() {
+        let Err(reason) = parse_open_files(1, LSOF_LINUX_EVERY_DESCRIPTOR_REFUSED) else {
+            panic!("the kernel refused each descriptor, so there is no open file to show");
+        };
+        assert!(
+            reason.contains("refused"),
+            "the reason says that the kernel refused lsof: {reason}"
+        );
+        assert!(
+            reason.contains("sudo"),
+            "the reason names the remedy: {reason}"
+        );
+    }
+
+    #[test]
+    fn a_refused_descriptor_beside_a_readable_one_is_marked_refused() {
+        let Ok(files) = parse_open_files(4242, LSOF_LINUX_ONE_DESCRIPTOR_REFUSED) else {
+            panic!("one descriptor is readable, so there is an open file to show");
+        };
+        assert_eq!(files.len(), 2, "each descriptor gets one row");
+        assert_eq!(files[0].fd, "cwd");
+        assert_eq!(files[0].name, "/home/me");
+        assert_eq!(files[1].fd, "txt", "the refused row keeps its descriptor");
+        assert_eq!(
+            files[1].file_type, "refused",
+            "the refused row says that the kernel refused it"
+        );
+        assert!(
+            files[1].name.contains("sudo"),
+            "the refused row names the remedy: {}",
+            files[1].name
+        );
+    }
+
     #[test]
     fn test_lsof_field_constants_consistency() {
         // Verify that field constants are consistent with expected lsof format
