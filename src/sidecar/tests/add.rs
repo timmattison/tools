@@ -270,3 +270,19 @@ fn an_existing_private_repository_is_used_and_nothing_is_made() {
     assert!(fs::symlink_metadata(fixture.link(&worktree, NAME)).is_ok());
     assert!(fixture.main_clone(NAME).join(".git").exists());
 }
+
+#[test]
+fn an_existing_repository_without_main_gets_a_first_commit() {
+    let fixture = Fixture::new(&[]);
+    fixture.make_empty_sidecar_remote(NAME);
+    let run = fixture.run(&fixture.main_checkout(), &["add", NAME, "--yes"]);
+    assert_eq!(run.code, 0, "{run:?}");
+    assert!(posts(&fixture).is_empty(), "{:?}", fixture.gh_calls());
+    let files = fixture.git(
+        &fixture.sidecar_remote(NAME),
+        &["ls-tree", "--name-only", "main"],
+    );
+    let mut files: Vec<&str> = files.lines().collect();
+    files.sort_unstable();
+    assert_eq!(files, [".gitattributes", "README.md"]);
+}
