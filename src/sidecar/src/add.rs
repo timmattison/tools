@@ -2,6 +2,9 @@
 
 use std::io::BufRead;
 
+/// The question that `sidecar add` asks on standard error.
+const QUESTION: &str = "Do these steps? [y/N] ";
+
 /// What the question about the plan decided.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Confirmation {
@@ -19,8 +22,22 @@ pub enum Confirmation {
 /// On a terminal, it asks on standard error and reads one line from `input`.
 /// The answer `y` or `yes`, in any case and with spaces around, means yes.
 pub fn confirm(yes: bool, is_terminal: bool, input: &mut impl BufRead) -> Confirmation {
-    let _ = (yes, is_terminal, input);
-    Confirmation::Declined
+    if yes {
+        return Confirmation::Proceed;
+    }
+    if !is_terminal {
+        return Confirmation::NeedsYes;
+    }
+    eprint!("{QUESTION}");
+    let mut line = String::new();
+    if input.read_line(&mut line).is_err() {
+        return Confirmation::Declined;
+    }
+    if matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        Confirmation::Proceed
+    } else {
+        Confirmation::Declined
+    }
 }
 
 #[cfg(test)]
