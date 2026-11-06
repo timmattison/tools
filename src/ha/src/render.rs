@@ -13,6 +13,7 @@ use ratatui::Frame;
 use textfit::{pad_right, truncate_left_to_budget, truncate_to_budget};
 use unicode_width::UnicodeWidthStr;
 
+use crate::billing::BillingView;
 use crate::board::{Board, Header, JobCounts, Row, Section};
 use crate::cancel::Confirm;
 use crate::job::{Job, RunnerName};
@@ -1295,6 +1296,7 @@ pub fn draw<Tz: TimeZone>(
     now: DateTime<Utc>,
     tz: &Tz,
     prompt: Option<&Confirm>,
+    billing: Option<&BillingView>,
 ) where
     Tz::Offset: Display,
 {
@@ -1303,7 +1305,11 @@ pub fn draw<Tz: TimeZone>(
         return;
     }
     let widths = Widths::for_width(usize::from(area.width));
-    let height = usize::from(area.height).saturating_sub(FIXED_LINES);
+    let mut height = usize::from(area.height).saturating_sub(FIXED_LINES);
+    let billing_box = billing.and_then(|view| billing_box(view, area));
+    if let Some(shown) = &billing_box {
+        height = height.saturating_sub(shown.lines.len() + BILLING_BORDER_ROWS);
+    }
     let spans = Spans {
         window: board.window(),
         history_reach: board.history_reach(now),
@@ -1389,9 +1395,39 @@ pub fn draw<Tz: TimeZone>(
             );
         }
     }
+    if let Some(shown) = &billing_box {
+        draw_billing_box(buffer, area, shown);
+    }
     if let Some(prompt) = prompt {
         draw_prompt(buffer, area, prompt);
     }
+}
+
+/// The title in the top border of the billing box.
+const BILLING_TITLE: &str = " Actions billing · UTC days ";
+
+/// The rows of the top and the bottom border of the billing box.
+const BILLING_BORDER_ROWS: usize = 2;
+
+/// The box of the Actions billing numbers: its text lines and its size.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BillingBox {
+    /// The text lines inside the borders, each one padded to the inner width.
+    lines: Vec<String>,
+    /// The outer width of the box in columns.
+    width: u16,
+}
+
+/// Computes the billing box for a frame of `area`, or `None` when it does not
+/// show.
+fn billing_box(view: &BillingView, area: Rect) -> Option<BillingBox> {
+    let _ = (view, area);
+    None
+}
+
+/// Draws the billing box at the lower right of the frame.
+fn draw_billing_box(buffer: &mut Buffer, area: Rect, shown: &BillingBox) {
+    let _ = (buffer, area, shown);
 }
 
 /// The part of the box of the cancel prompt, in the order of the box.
@@ -1755,7 +1791,7 @@ mod tests {
         let mut terminal =
             Terminal::new(TestBackend::new(width, height)).expect("a test terminal opens");
         terminal
-            .draw(|frame| draw(frame, board, status, now(), tz, None))
+            .draw(|frame| draw(frame, board, status, now(), tz, None, None))
             .expect("a test frame draws");
         terminal.backend().buffer().clone()
     }
@@ -4217,7 +4253,17 @@ mod tests {
         let mut terminal =
             Terminal::new(TestBackend::new(width, height)).expect("a test terminal opens");
         terminal
-            .draw(|frame| draw(frame, &mut board, &loaded(), now(), &utc(), Some(prompt)))
+            .draw(|frame| {
+                draw(
+                    frame,
+                    &mut board,
+                    &loaded(),
+                    now(),
+                    &utc(),
+                    Some(prompt),
+                    None,
+                )
+            })
             .expect("a test frame draws");
         terminal.backend().buffer().clone()
     }
@@ -7033,5 +7079,190 @@ mod tests {
             };
             assert_eq!(buffer[(x, y)].fg, want, "cell {x}");
         }
+    }
+
+    // ---- The Actions billing box (issue #553) ----
+
+    fn usd(value: f64) -> crate::money::Usd {
+        crate::money::Usd::from_f64(value).expect("a finite amount")
+    }
+
+    fn amounts(billed: f64, list_price: f64) -> crate::billing::Amounts {
+        crate::billing::Amounts {
+            billed: usd(billed),
+            list_price: usd(list_price),
+        }
+    }
+
+    fn ready(
+        name: &str,
+        windows: [crate::billing::Amounts; 4],
+        error: Option<&str>,
+    ) -> crate::billing::AccountLine {
+        crate::billing::AccountLine {
+            name: owner(name),
+            cell: crate::billing::AccountCell::Ready {
+                windows: crate::billing::Windows {
+                    today: windows[0],
+                    yesterday: windows[1],
+                    last_7_days: windows[2],
+                    last_30_days: windows[3],
+                },
+                error: error.map(str::to_owned),
+            },
+        }
+    }
+
+    fn total(values: [f64; 4], partial: bool) -> crate::billing::Total {
+        crate::billing::Total {
+            today: usd(values[0]),
+            yesterday: usd(values[1]),
+            last_7_days: usd(values[2]),
+            last_30_days: usd(values[3]),
+            partial,
+        }
+    }
+
+    /// Two ready accounts and whole totals.
+    fn two_account_view() -> BillingView {
+        BillingView {
+            accounts: vec![
+                ready(
+                    "Lock-Free-Labs",
+                    [
+                        amounts(0.0, 0.0),
+                        amounts(0.0, 0.59),
+                        amounts(0.0, 3.60),
+                        amounts(0.0, 5.81),
+                    ],
+                    None,
+                ),
+                ready(
+                    "timmattison",
+                    [
+                        amounts(1.25, 1.25),
+                        amounts(2.5, 2.5),
+                        amounts(10.0, 10.0),
+                        amounts(40.0, 40.0),
+                    ],
+                    None,
+                ),
+            ],
+            billed: total([1.25, 2.5, 10.0, 40.0], false),
+            list_price: total([1.25, 3.09, 13.6, 45.81], false),
+        }
+    }
+
+    fn render_billing(
+        width: u16,
+        height: u16,
+        board: &mut Board,
+        billing: Option<&BillingView>,
+    ) -> Buffer {
+        let mut terminal =
+            Terminal::new(TestBackend::new(width, height)).expect("a test terminal opens");
+        terminal
+            .draw(|frame| draw(frame, board, &loaded(), now(), &utc(), None, billing))
+            .expect("a test frame draws");
+        terminal.backend().buffer().clone()
+    }
+
+    /// The text of a row from column `x` on.
+    fn row_from(buffer: &Buffer, y: usize, x: usize) -> String {
+        lines(buffer)[y].chars().skip(x).collect()
+    }
+
+    #[test]
+    fn the_billing_box_sits_at_the_lower_right_above_the_status_line() {
+        let mut board = Board::new(Duration::from_hours(8));
+        let view = two_account_view();
+        let buffer = render_billing(100, 30, &mut board, Some(&view));
+        let all = lines(&buffer);
+        // Outer width 52, so the box starts at column 48. Seven rows, the
+        // bottom border on row 28.
+        let want = [
+            "┌ Actions billing · UTC days ──────────────────────┐",
+            "│                 today  yesterday     7d     30d │",
+            "│ Lock-Free-Labs  $0.00      $0.00  $0.00   $0.00 │",
+            "│ timmattison     $1.25      $2.50 $10.00  $40.00 │",
+            "│ billed          $1.25      $2.50 $10.00  $40.00 │",
+            "│ list price      $1.25      $3.09 $13.60  $45.81 │",
+            "└──────────────────────────────────────────────────┘",
+        ];
+        for (index, line) in want.iter().enumerate() {
+            let y = 22 + index;
+            assert_eq!(row_from(&buffer, y, 48), *line, "row {y}");
+            assert_eq!(
+                all[y].chars().take(48).collect::<String>().trim(),
+                "",
+                "row {y}"
+            );
+        }
+        // The status line stays on the last row, as without the box.
+        let plain = lines(&render_billing(
+            100,
+            30,
+            &mut Board::new(Duration::from_hours(8)),
+            None,
+        ));
+        assert!(!all[29].is_empty());
+        assert_eq!(all[29], plain[29]);
+    }
+
+    #[test]
+    fn a_loading_account_shows_loading_and_a_no_access_account_shows_its_text() {
+        let mut view = two_account_view();
+        view.accounts[0].cell = crate::billing::AccountCell::Loading;
+        view.accounts[1].cell =
+            crate::billing::AccountCell::NoAccess("no access: token needs \"user\"".to_owned());
+        let mut board = Board::new(Duration::from_hours(8));
+        let buffer = render_billing(100, 30, &mut board, Some(&view));
+        let all = lines(&buffer).join("\n");
+        assert!(all.contains("│ Lock-Free-Labs  loading…"), "{all}");
+        assert!(
+            all.contains("│ timmattison     no access: token needs \"user\""),
+            "{all}"
+        );
+    }
+
+    #[test]
+    fn a_partial_total_shows_the_at_least_sign_and_a_whole_total_does_not() {
+        let mut board = Board::new(Duration::from_hours(8));
+        let mut view = two_account_view();
+        let whole = lines(&render_billing(100, 30, &mut board, Some(&view))).join("\n");
+        assert!(whole.contains("│ billed  "), "{whole}");
+        assert!(whole.contains("│ list price  "), "{whole}");
+        assert!(!whole.contains('≥'), "{whole}");
+        view.billed.partial = true;
+        view.list_price.partial = true;
+        let partial = lines(&render_billing(100, 30, &mut board, Some(&view))).join("\n");
+        assert!(partial.contains("│ billed ≥  "), "{partial}");
+        assert!(partial.contains("│ list price ≥  "), "{partial}");
+    }
+
+    #[test]
+    fn a_stale_account_shows_its_amounts_and_a_warning_line() {
+        let mut view = two_account_view();
+        view.accounts[1] = ready(
+            "timmattison",
+            [
+                amounts(1.25, 1.25),
+                amounts(2.5, 2.5),
+                amounts(10.0, 10.0),
+                amounts(40.0, 40.0),
+            ],
+            Some("HTTP 500"),
+        );
+        let mut board = Board::new(Duration::from_hours(8));
+        let buffer = render_billing(100, 30, &mut board, Some(&view));
+        let all = lines(&buffer);
+        // The box is one line higher: top border on row 21.
+        assert_eq!(row_from(&buffer, 21, 48).chars().next(), Some('┌'));
+        assert!(row_from(&buffer, 24, 48).starts_with("│ timmattison     $1.25"));
+        assert_eq!(
+            row_from(&buffer, 25, 48),
+            "│                 ⚠ HTTP 500                       │",
+            "{all:?}"
+        );
     }
 }

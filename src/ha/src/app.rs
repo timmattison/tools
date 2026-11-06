@@ -201,6 +201,10 @@ where
             self.apply_updates()?;
             self.sync_watch();
             let now = (self.now)();
+            let billing = self
+                .billing
+                .as_ref()
+                .map(|board| board.view(now.date_naive()));
             terminal
                 .draw(|frame| {
                     render::draw(
@@ -210,6 +214,7 @@ where
                         now,
                         self.tz,
                         self.confirm.as_ref(),
+                        billing.as_ref(),
                     );
                 })
                 .map_err(std::io::Error::other)?;
