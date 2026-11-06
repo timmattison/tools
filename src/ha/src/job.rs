@@ -141,4 +141,10 @@ mod tests {
             Some(Duration::from_secs(897))
         );
     }
+
+    #[test]
+    fn a_waiting_job_gives_nothing_even_with_times() {
+        let waiting = job(RunState::Queued, Some(at(12, 0, 0)), Some(at(12, 3, 31)));
+        assert_eq!(waiting.runner_time(at(12, 5, 0)), None);
+    }
 }
