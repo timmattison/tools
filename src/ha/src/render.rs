@@ -1528,7 +1528,6 @@ fn pad_left(text: &str, width: usize) -> String {
 /// amount. The box is as wide as its widest line plus the borders and the
 /// padding.
 fn billing_box(view: &BillingView, area: Rect) -> Option<BillingBox> {
-    let _ = area;
     let mut contents = vec![BillingContent::Header];
     for account in &view.accounts {
         let name = account.name.to_string();
@@ -1577,13 +1576,38 @@ fn billing_box(view: &BillingView, area: Rect) -> Option<BillingBox> {
             BillingContent::Header | BillingContent::Warning(_) => {}
         }
     }
-    let name_width = widest_name.clamp(BILLING_MIN_NAME_WIDTH, BILLING_MAX_NAME_WIDTH);
-    let lines: Vec<String> = contents
+    let frame_columns = 2 * BILLING_SIDE_COLUMNS;
+    let amount_columns: usize = columns
         .iter()
-        .map(|content| billing_line(content, name_width, columns))
+        .map(|width| BILLING_COLUMN_GAP.len() + width)
+        .sum();
+    let max_width = usize::from(area.width);
+    if max_width < frame_columns + BILLING_MIN_NAME_WIDTH + amount_columns {
+        return None;
+    }
+    let layout = |name_width: usize| -> Vec<String> {
+        contents
+            .iter()
+            .map(|content| billing_line(content, name_width, columns))
+            .collect()
+    };
+    let widest = |lines: &[String]| lines.iter().map(|line| line.width()).max().unwrap_or(0);
+    let mut name_width = widest_name.clamp(BILLING_MIN_NAME_WIDTH, BILLING_MAX_NAME_WIDTH);
+    let mut lines = layout(name_width);
+    // Every line holds the name column, thus the name column gives up the
+    // columns that the box is too wide by, down to its minimum.
+    let excess = (widest(&lines) + frame_columns).saturating_sub(max_width);
+    if excess > 0 {
+        name_width = name_width
+            .saturating_sub(excess)
+            .max(BILLING_MIN_NAME_WIDTH);
+        lines = layout(name_width);
+    }
+    let inner = widest(&lines).min(max_width - frame_columns);
+    let lines = lines
+        .iter()
+        .map(|line| pad_right(&truncate_to_budget(line, inner), inner))
         .collect();
-    let inner = lines.iter().map(|line| line.width()).max().unwrap_or(0);
-    let lines = lines.iter().map(|line| pad_right(line, inner)).collect();
     Some(BillingBox {
         lines,
         width: to_u16(inner + 2 * BILLING_SIDE_COLUMNS),
