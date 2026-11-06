@@ -1208,7 +1208,7 @@ mod tests {
         ]);
         board.apply(vec![
             (owner("acme"), Ok(acme.clone())),
-            (owner("bob"), Ok(bob.clone())),
+            (owner("bob"), Ok(bob)),
         ]);
         let view = board.view(today());
         assert_eq!(

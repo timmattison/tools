@@ -137,6 +137,10 @@ where
     /// the time zone for the clock times on screen. `billing` is the board of
     /// the Actions billing box, or `None` when billing is off.
     #[must_use]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is a distinct collaborator of the run; a parameter struct would only rename them"
+    )]
     pub fn new(
         board: Board,
         status: Status,
@@ -273,7 +277,11 @@ where
                     entries.map_err(|error| error.to_string()),
                     history.map_err(|error| error.to_string()),
                 ),
-                Update::Billing(_) => {}
+                Update::Billing(results) => {
+                    if let Some(board) = self.billing.as_mut() {
+                        board.apply(results);
+                    }
+                }
                 Update::Repos {
                     repos,
                     owner_errors,
