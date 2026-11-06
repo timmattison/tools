@@ -204,16 +204,20 @@ fn run(args: &Args, console: &Console) -> Result<Conflicts> {
 
     let scratch = repo.scratch("HEAD")?;
     // `--diff` asks for the capture. Without it, the replay captures nothing
-    // and costs what it cost before the flag existed.
-    let (conflicts, diffs) = if args.diff {
-        let (conflicts, diffs) = scratch.replay_rebase_with_diffs(&branch)?;
-        (conflicts, Some(diffs))
-    } else {
-        let conflicts = match args.onto.as_deref() {
-            Some(new_base) => scratch.replay_rebase_onto(new_base, &branch)?,
-            None => scratch.replay_rebase(&branch)?,
-        };
-        (conflicts, None)
+    // and costs what it cost before the flag existed. `--onto` picks the
+    // two-revision form in both cases, so the diffs come from the replay that
+    // the verdict names.
+    let (conflicts, diffs) = match (args.onto.as_deref(), args.diff) {
+        (Some(new_base), true) => {
+            let (conflicts, diffs) = scratch.replay_rebase_onto_with_diffs(new_base, &branch)?;
+            (conflicts, Some(diffs))
+        }
+        (Some(new_base), false) => (scratch.replay_rebase_onto(new_base, &branch)?, None),
+        (None, true) => {
+            let (conflicts, diffs) = scratch.replay_rebase_with_diffs(&branch)?;
+            (conflicts, Some(diffs))
+        }
+        (None, false) => (scratch.replay_rebase(&branch)?, None),
     };
 
     // There is a verdict now, so the caveat has something to qualify.
