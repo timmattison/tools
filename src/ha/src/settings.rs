@@ -634,6 +634,22 @@ mod tests {
         assert_names(&error, &["billing_enterprises", "a/b", CONFIG_PATH]);
     }
 
+    #[test]
+    fn two_billing_enterprises_keys_that_name_one_owner_are_refused() {
+        let text = "owners = [\"a\"]\n[billing_enterprises]\n\"Acme\" = \"first-ent\"\n\"acme\" = \"second-ent\"";
+        let error = resolve_file(&CommandLine::default(), text)
+            .expect_err("two keys that name one owner must be refused");
+        assert_names(
+            &error,
+            &[
+                "billing_enterprises",
+                "Acme = first-ent",
+                "acme = second-ent",
+                CONFIG_PATH,
+            ],
+        );
+    }
+
     /// Asserts that `error` names every one of `needles`.
     fn assert_names(error: &SettingsError, needles: &[&str]) {
         let message = error.to_string();
