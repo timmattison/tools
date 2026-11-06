@@ -2394,8 +2394,9 @@ cannot hang the caller. Used by `cwt` and `ha`.
       start and ends in `…`.
     - `--no-billing` and the key `billing = false` hide the box and send no billing request. The
       flag replaces the key of the file.
-  - Billing accounts. `ha` asks `GET /users/{owner}` one time for each owner, to learn if the
-    owner is an organization or a user. Then it reads the usage report of the account:
+  - Billing accounts. `ha` asks `GET /users/{owner}` one time for each owner that is not in
+    `billing_enterprises`, and again after a failed lookup, to learn if the owner is an
+    organization or a user. Then it reads the usage report of the account:
 
     | Account | Endpoint | Accepted scopes | Role |
     |---|---|---|---|
@@ -2456,8 +2457,10 @@ cannot hang the caller. Used by `cwt` and `ha`.
   - Billing budget: the billing refreshes at start, every 10 minutes, and when you push `r`.
     Each read costs one request every 10 minutes, or two when the last 30 days cross a month.
     Two organizations of one enterprise share one read. At start, `ha` also sends one
-    `GET /users/{owner}` for each owner. The read sends the `ETag`, thus a `304` answer costs
-    nothing. The billing reads share the limit of 8 `gh` children with the other requests.
+    `GET /users/{owner}` for each owner that is not in `billing_enterprises`. It sends the
+    request again after a failed lookup, at the next billing refresh. That request sends no
+    `ETag`. Each billing read sends the `ETag`, thus a `304` answer costs nothing. The kind
+    lookups and the billing reads share the limit of 8 `gh` children with the other requests.
   - Merge queue budget: GitHub gives the live queue and the head branch of a pull request only
     through GraphQL, which has its own budget of 5,000 points each hour. The check for queues is
     one GraphQL query for each 100 repositories, 1 point, at the start and every 10 minutes. A
