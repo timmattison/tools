@@ -178,3 +178,34 @@ fn read_writes_one_op_start_and_one_ok_op_end_and_never_the_value() {
         assert!(is_millisecond_utc_time(time), "bad time {time:?}");
     }
 }
+
+#[test]
+fn failed_op_writes_three_failed_pairs_with_its_stderr() {
+    let fixture = Fixture::new();
+    let message = "[ERROR] authorization prompt dismissed";
+    fixture.install_fake_op(&format!("echo '{message}' >&2\nexit 1"));
+
+    let output = fixture.read(REFERENCE);
+
+    assert!(!output.status.success(), "op-cache should fail");
+    assert!(output.stdout.is_empty(), "nothing may reach stdout");
+    let records = records(&audit_text(&fixture));
+    assert_eq!(records.len(), 6, "three pairs expected: {records:?}");
+    let mut request_ids = Vec::new();
+    for (index, pair) in records.chunks(2).enumerate() {
+        let (start, end) = (&pair[0], &pair[1]);
+        let attempt = u64::try_from(index + 1).expect("small index");
+        assert_eq!(start["event"], "op_start");
+        assert_eq!(start["attempt"], attempt);
+        assert_eq!(end["event"], "op_end");
+        assert_eq!(end["attempt"], attempt);
+        assert_eq!(start["request_id"], end["request_id"]);
+        assert_eq!(end["outcome"], "failed");
+        assert_eq!(end["exit_code"], 1);
+        assert_eq!(end["op_stderr"], message);
+        request_ids.push(start["request_id"].as_str().expect("id").to_owned());
+    }
+    request_ids.sort();
+    request_ids.dedup();
+    assert_eq!(request_ids.len(), 3, "each attempt has its own request_id");
+}
