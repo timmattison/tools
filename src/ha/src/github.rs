@@ -26,6 +26,7 @@ use chrono::{DateTime, Utc};
 use runlimit::{run_with_limit, RunFailure};
 use serde::Deserialize;
 
+use crate::billing::TokenOrigin;
 use crate::job::{Job, JobId, RunnerName};
 use crate::queue::{EntryState, EventKind, PullNumber, QueueEntry, QueueEvent, QUEUE_BOT};
 use crate::run::{keep_first_of_each_id, Run, RunId, RunState};
@@ -414,6 +415,59 @@ pub trait Source: Send + Sync {
 /// GraphQL budget (measured on 2026-10-22).
 pub const QUEUE_CHECK_BATCH: usize = 100;
 
+/// The name of the first token variable that `gh` reads.
+const GH_TOKEN_VARIABLE: &str = "GH_TOKEN";
+/// The name of the second token variable that `gh` reads.
+const GITHUB_TOKEN_VARIABLE: &str = "GITHUB_TOKEN";
+
+/// The values of `GH_TOKEN` and `GITHUB_TOKEN` that a `gh` child gets.
+///
+/// A source captures these once. `run_gh` removes both variables from each
+/// child and sets only the captured values, thus the token of the process that
+/// runs a test never reaches a stub. An empty value counts as unset.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TokenEnvironment {
+    gh_token: Option<String>,
+    github_token: Option<String>,
+}
+
+impl TokenEnvironment {
+    /// The values that the real environment of this process holds.
+    #[must_use]
+    pub fn from_process() -> TokenEnvironment {
+        TokenEnvironment::from_lookup(|name| std::env::var(name).ok())
+    }
+
+    /// The values that `lookup` gives for the two variable names.
+    fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> TokenEnvironment {
+        TokenEnvironment {
+            gh_token: lookup(GH_TOKEN_VARIABLE).filter(|value| !value.is_empty()),
+            github_token: lookup(GITHUB_TOKEN_VARIABLE).filter(|value| !value.is_empty()),
+        }
+    }
+
+    /// The same environment with this `GH_TOKEN`. An empty value means unset.
+    #[must_use]
+    pub fn with_gh_token(mut self, value: impl Into<String>) -> TokenEnvironment {
+        self.gh_token = Some(value.into()).filter(|value| !value.is_empty());
+        self
+    }
+
+    /// The same environment with this `GITHUB_TOKEN`. An empty value means unset.
+    #[must_use]
+    pub fn with_github_token(mut self, value: impl Into<String>) -> TokenEnvironment {
+        self.github_token = Some(value.into()).filter(|value| !value.is_empty());
+        self
+    }
+
+    /// Where the token of a child comes from: `GH_TOKEN` when set, else
+    /// `GITHUB_TOKEN` when set, else the login of `gh`.
+    #[must_use]
+    pub fn origin(&self) -> TokenOrigin {
+        TokenOrigin::GhLogin
+    }
+}
+
 /// A `Source` that runs the `gh` program.
 ///
 /// One value serves many threads. The `ETag` cache and the rate limit sit behind
@@ -423,6 +477,7 @@ pub struct GhSource {
     limit: Duration,
     etags: Mutex<HashMap<String, Cached>>,
     rate: Mutex<Option<RateLimit>>,
+    tokens: TokenEnvironment,
 }
 
 /// One answer in the `ETag` cache.
@@ -452,6 +507,14 @@ impl GhSource {
     #[must_use]
     pub fn new() -> GhSource {
         GhSource::with_program("gh", Duration::from_secs(30))
+            .with_token_environment(TokenEnvironment::from_process())
+    }
+
+    /// The same source, with the token variables that its children get.
+    #[must_use]
+    pub fn with_token_environment(mut self, tokens: TokenEnvironment) -> GhSource {
+        self.tokens = tokens;
+        self
     }
 
     /// The child that runs `gh` with `args`, before it starts.
@@ -722,6 +785,7 @@ impl GhSource {
             limit,
             etags: Mutex::new(HashMap::new()),
             rate: Mutex::new(None),
+            tokens: TokenEnvironment::default(),
         }
     }
 }
@@ -1817,6 +1881,95 @@ mod tests {
             }
             calls
         }
+    }
+
+    /// What a stub `gh` sees of the two token variables, one per line.
+    const SHOW_TOKENS: &str =
+        "printf '%s\\n%s\\n' \"${GH_TOKEN-unset}\" \"${GITHUB_TOKEN-unset}\" > \"$dir/tokens.log\"; cat \"$dir/page1.out\"";
+
+    fn tokens_seen(stub: &Stub) -> Vec<String> {
+        std::fs::read_to_string(stub.dir.path().join("tokens.log"))
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn a_source_with_only_a_program_gives_the_child_no_token() {
+        let stub = Stub::new(SHOW_TOKENS);
+        stub.file("page1.out", &ok_output("{}"));
+        stub.source().preflight().expect("a preflight");
+        assert_eq!(tokens_seen(&stub), ["unset", "unset"]);
+    }
+
+    #[test]
+    fn a_captured_token_reaches_the_child_and_nothing_else_does() {
+        let stub = Stub::new(SHOW_TOKENS);
+        stub.file("page1.out", &ok_output("{}"));
+        let tokens = TokenEnvironment::default().with_gh_token("test-token");
+        stub.source()
+            .with_token_environment(tokens)
+            .preflight()
+            .expect("a preflight");
+        assert_eq!(tokens_seen(&stub), ["test-token", "unset"]);
+        let tokens = TokenEnvironment::default().with_github_token("other");
+        stub.source()
+            .with_token_environment(tokens)
+            .preflight()
+            .expect("a preflight");
+        assert_eq!(tokens_seen(&stub), ["unset", "other"]);
+    }
+
+    #[test]
+    fn the_child_command_removes_both_token_variables_when_none_is_captured() {
+        let source = GhSource::with_program("gh", GENEROUS_LIMIT);
+        let command = source.command(&["api"]);
+        let envs: Vec<_> = command.get_envs().collect();
+        for name in ["GH_TOKEN", "GITHUB_TOKEN"] {
+            assert!(
+                envs.iter()
+                    .any(|(key, value)| *key == std::ffi::OsStr::new(name) && value.is_none()),
+                "{name} is not removed: {envs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_child_command_sets_only_the_captured_token_variables() {
+        let tokens = TokenEnvironment::default().with_gh_token("test-token");
+        let source = GhSource::with_program("gh", GENEROUS_LIMIT).with_token_environment(tokens);
+        let command = source.command(&["api"]);
+        let envs: Vec<_> = command.get_envs().collect();
+        assert!(envs.contains(&(
+            std::ffi::OsStr::new("GH_TOKEN"),
+            Some(std::ffi::OsStr::new("test-token"))
+        )));
+        assert!(envs.contains(&(std::ffi::OsStr::new("GITHUB_TOKEN"), None)));
+    }
+
+    #[test]
+    fn the_token_origin_is_the_first_variable_that_is_set() {
+        let none = TokenEnvironment::default();
+        assert_eq!(none.origin(), TokenOrigin::GhLogin);
+        let github = none.clone().with_github_token("y");
+        assert_eq!(github.origin(), TokenOrigin::Variable("GITHUB_TOKEN"));
+        let both = github.with_gh_token("x");
+        assert_eq!(both.origin(), TokenOrigin::Variable("GH_TOKEN"));
+    }
+
+    #[test]
+    fn an_empty_token_value_counts_as_unset() {
+        let empty = TokenEnvironment::default()
+            .with_gh_token("")
+            .with_github_token("");
+        assert_eq!(empty, TokenEnvironment::default());
+        let looked_up = TokenEnvironment::from_lookup(|name| match name {
+            "GH_TOKEN" => Some(String::new()),
+            "GITHUB_TOKEN" => Some("y".to_owned()),
+            _ => None,
+        });
+        assert_eq!(looked_up.origin(), TokenOrigin::Variable("GITHUB_TOKEN"));
     }
 
     /// The body that GitHub gives for one repository.
