@@ -16,7 +16,6 @@ pub(crate) enum Operation<'a> {
     /// `op read <reference>`
     Read,
     /// `op read --out-file <output_path> <reference>`
-    #[expect(dead_code, reason = "the read-binary wiring is a later slice")]
     ReadBinary { output_path: &'a Path },
 }
 
