@@ -1,5 +1,88 @@
 #![deny(unsafe_code)]
 #![warn(clippy::pedantic)]
 //! The `sidecar` command line.
+//!
+//! The subcommands are declared here. Each one reports that it is not implemented yet.
 
-fn main() {}
+use std::process::ExitCode;
+
+use buildinfo::version_string;
+use clap::{Parser, Subcommand};
+
+/// The command line of `sidecar`.
+#[derive(Debug, Parser)]
+#[command(
+    name = "sidecar",
+    version = version_string!(),
+    about = "Make, clone, and link the private data repositories (sidecars) of a host repository",
+    arg_required_else_help = true
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+/// The subcommands of `sidecar`.
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Clone each sidecar of `sidecar.toml` and link it into the worktree
+    Setup {
+        /// Run as a git hook: never fail, and print warnings only
+        #[arg(long)]
+        hook: bool,
+        /// The arguments that git gives to a `post-checkout` hook
+        #[arg(requires = "hook", num_args = 0..=3)]
+        hook_args: Vec<String>,
+    },
+    /// Make a new sidecar repository and register it in `sidecar.toml`
+    Add {
+        /// The name of the sidecar
+        name: String,
+        /// Do not ask for confirmation
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Show the state of each sidecar clone and link
+    Status,
+    /// Print the path of a sidecar
+    Path {
+        /// The name of the sidecar
+        name: String,
+    },
+    /// Make a worktree of a sidecar for a branch
+    Worktree {
+        /// The name of the sidecar
+        name: String,
+        /// The branch of the new worktree
+        branch: Option<String>,
+    },
+}
+
+impl Command {
+    /// The word that the user typed for this subcommand.
+    fn word(&self) -> &'static str {
+        match self {
+            Command::Setup { .. } => "setup",
+            Command::Add { .. } => "add",
+            Command::Status => "status",
+            Command::Path { .. } => "path",
+            Command::Worktree { .. } => "worktree",
+        }
+    }
+}
+
+/// Runs the subcommand that the user chose.
+fn run(cli: &Cli) -> anyhow::Result<()> {
+    anyhow::bail!("{} is not implemented yet", cli.command.word())
+}
+
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+    match run(&cli) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("sidecar: {error:#}");
+            ExitCode::from(1)
+        }
+    }
+}
