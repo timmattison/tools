@@ -7515,17 +7515,17 @@ mod tests {
             .expect("the row shows");
         assert_eq!(all[y].chars().count(), 60, "{:?}", all[y]);
         assert!(
-            all[y].starts_with("│ timmattison     no access: token needs"),
+            all[y].starts_with("│ timmattison   no access: token needs"),
             "{:?}",
             all[y]
         );
         assert!(all[y].ends_with("… │"), "{:?}", all[y]);
         assert!(
-            all[y - 2].starts_with("┌ Actions billing"),
+            all[y - 3].starts_with("┌ Actions billing"),
             "{:?}",
-            all[y - 2]
+            all[y - 3]
         );
-        assert_eq!(all[y - 2].chars().count(), 60);
+        assert_eq!(all[y - 3].chars().count(), 60);
     }
 
     #[test]
