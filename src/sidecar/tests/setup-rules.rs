@@ -340,3 +340,22 @@ fn rule_8_continues_with_the_next_name_when_a_clone_fails() {
         canon(&fixture.main_clone("pics"))
     );
 }
+
+#[test]
+fn a_second_run_makes_no_network_call_and_writes_nothing() {
+    let fixture = Fixture::new(&[NAME]);
+    let host = fixture.main_checkout();
+    let first = fixture.run(&host, &["setup"]);
+    assert_eq!(first.code, 0, "{first:?}");
+    fs::rename(
+        fixture.sidecar_remote(NAME),
+        fixture.root().join("moved-away-testdata.git"),
+    )
+    .unwrap();
+
+    let second = fixture.run(&host, &["setup"]);
+
+    assert_eq!(second.code, 0, "{second:?}");
+    assert_eq!(second.stdout, "", "{second:?}");
+    assert_eq!(second.stderr, "", "{second:?}");
+}
