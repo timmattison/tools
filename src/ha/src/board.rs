@@ -242,17 +242,31 @@ fn last_good_jobs(answer: Option<&Jobs>) -> &[Job] {
 
 /// The end of the finished run `run`, from its job answer `answer`.
 ///
-/// The end of a finished run is the end of its last job, because GitHub can
-/// change `Run::updated_at` long after the last job ended. The function gives
-/// the latest `completed_at` of the last good jobs. It gives `run.updated_at`
-/// when no job has a `completed_at`.
+/// GitHub can change `Run::updated_at` long after the last job ended, thus the
+/// end of a finished run is the end of its last job when the jobs say it. The
+/// function applies five steps in this order:
+///
+/// 1. It takes the last good jobs. A failed fetch after a good fetch keeps
+///    the jobs of the good fetch.
+/// 2. If a held job is active (queued or running), it gives `run.updated_at`.
+///    A job answer from the time when the run was active can still hold a job
+///    that runs. A job in any other state counts as finished. A skipped job
+///    counts as finished, because GitHub gives it the status `completed`.
+/// 3. It takes the latest `completed_at` of the held jobs. If no job has a
+///    `completed_at`, it gives `run.updated_at`. This is also true when there
+///    is no job.
+/// 4. If that time is before `run.started_at`, it gives `run.updated_at`. After
+///    a re-run, the board can hold the jobs of the earlier attempt, and they
+///    ended before the new attempt started.
+/// 5. Else it gives the earlier one of that time and `run.updated_at`. The end
+///    is never later than the last update of the run.
 fn run_end(run: &Run, answer: Option<&Jobs>) -> DateTime<Utc> {
     let jobs = last_good_jobs(answer);
     if jobs.iter().any(|job| job.state.is_active()) {
         return run.updated_at;
     }
     match jobs.iter().filter_map(|job| job.completed_at).max() {
-        Some(latest) if latest >= run.started_at => latest,
+        Some(latest) if latest >= run.started_at => latest.min(run.updated_at),
         _ => run.updated_at,
     }
 }
