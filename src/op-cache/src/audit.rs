@@ -194,4 +194,48 @@ mod tests {
             assert_eq!(mode_of(&file), 0o600);
         }
     }
+
+    #[derive(serde::Serialize)]
+    struct Probe {
+        thread: usize,
+        sequence: usize,
+        padding: String,
+    }
+
+    #[test]
+    fn concurrent_writers_never_interleave_records() {
+        const THREADS: usize = 16;
+        const RECORDS: usize = 50;
+        const PADDING_BYTES: usize = 2000;
+
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("op-cache").join("audit.jsonl");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+
+        std::thread::scope(|scope| {
+            for thread in 0..THREADS {
+                let file = &file;
+                scope.spawn(move || {
+                    let mut trail = AuditTrail::open(file).unwrap();
+                    for sequence in 0..RECORDS {
+                        let padding = "x".repeat(PADDING_BYTES);
+                        trail
+                            .append(&Probe {
+                                thread,
+                                sequence,
+                                padding,
+                            })
+                            .unwrap();
+                    }
+                });
+            }
+        });
+
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(text.lines().count(), THREADS * RECORDS);
+        for line in text.lines() {
+            serde_json::from_str::<serde_json::Value>(line)
+                .unwrap_or_else(|error| panic!("interleaved line: {error}"));
+        }
+    }
 }
