@@ -156,3 +156,16 @@ fn a_new_name_makes_a_private_repository_and_links_it() {
         .status
         .success());
 }
+
+#[test]
+fn a_new_name_for_an_organization_uses_the_org_path() {
+    let fixture = Fixture::new(&[]);
+    fixture.set_gh_user("someone-else");
+    let run = fixture.run(&fixture.main_checkout(), &["add", NAME, "--yes"]);
+    assert_eq!(run.code, 0, "{run:?}");
+    assert_eq!(
+        posts(&fixture),
+        ["api -X POST orgs/fixture-owner/repos -f name=megarepo-data-pics -F private=true --jq .full_name"]
+    );
+    assert!(fixture.sidecar_remote(NAME).exists());
+}
