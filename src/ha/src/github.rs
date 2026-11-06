@@ -98,6 +98,13 @@ struct RunJson {
     html_url: String,
 }
 
+/// The JSON body of one account. Only the `type` is read.
+#[derive(Deserialize)]
+struct AccountJson {
+    #[serde(rename = "type")]
+    kind: String,
+}
+
 /// The JSON body of one repository. Only the fields that `ha` reads are here.
 #[derive(Deserialize)]
 struct RepoBody {
@@ -967,8 +974,17 @@ impl Source for GhSource {
     }
 
     fn account_kind(&self, owner: &OwnerName) -> Result<AccountKind, SourceError> {
-        let _ = owner;
-        Ok(AccountKind::User)
+        let path = format!("users/{owner}");
+        let response = self.request(&path, None)?;
+        let account: AccountJson = serde_json::from_str(&response.body)
+            .map_err(|error| SourceError::BadResponse(error.to_string()))?;
+        match account.kind.as_str() {
+            "Organization" => Ok(AccountKind::Organization),
+            "User" => Ok(AccountKind::User),
+            other => Err(SourceError::BadResponse(format!(
+                "{owner} has the account type {other}, which has no billing report"
+            ))),
+        }
     }
 
     fn billing_usage(
@@ -2048,7 +2064,7 @@ mod tests {
     fn the_token_origin_is_the_first_variable_that_is_set() {
         let none = TokenEnvironment::default();
         assert_eq!(none.origin(), TokenOrigin::GhLogin);
-        let github = none.clone().with_github_token("y");
+        let github = none.with_github_token("y");
         assert_eq!(github.origin(), TokenOrigin::Variable("GITHUB_TOKEN"));
         let both = github.with_gh_token("x");
         assert_eq!(both.origin(), TokenOrigin::Variable("GH_TOKEN"));
