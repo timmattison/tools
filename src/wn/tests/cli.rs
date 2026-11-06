@@ -49,7 +49,6 @@
 
 use std::io::{Read, Write};
 use std::os::fd::{FromRawFd, OwnedFd};
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
@@ -616,8 +615,7 @@ exit {status}
             args = args_file.display(),
         );
         let gh = dir.path().join("gh");
-        std::fs::write(&gh, script).unwrap();
-        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        gitscratch::testing::executable::write_executable(&gh, script).unwrap();
         Self { dir }
     }
 
@@ -638,8 +636,7 @@ exit 1
             args = dir.path().join(ARGS_FILE).display(),
         );
         let gh = dir.path().join("gh");
-        std::fs::write(&gh, script).unwrap();
-        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        gitscratch::testing::executable::write_executable(&gh, script).unwrap();
         Self { dir }
     }
 
@@ -670,8 +667,7 @@ cat > '{prompt}'
             prompt = self.dir.path().join(PROMPT_FILE).display(),
         );
         let claude = self.dir.path().join("claude");
-        std::fs::write(&claude, script).unwrap();
-        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        gitscratch::testing::executable::write_executable(&claude, script).unwrap();
         self
     }
 
@@ -3288,13 +3284,19 @@ impl Terminal {
         // and to ask for no name of the slave device. The last pointer is the
         // size of the window, and it points at a live local variable that
         // outlives the call.
+        //
+        // The size goes in as a raw `*mut` pointer, not as `&mut size`. The
+        // `libc` crate declares that parameter `*mut winsize` on macOS and
+        // `*const winsize` on Linux. A `*mut` pointer converts to both, but a
+        // `&mut` reference to a `*const` parameter makes clippy report
+        // `unnecessary_mut_passed` on Linux.
         let opened = unsafe {
             libc::openpty(
                 &mut master,
                 &mut slave,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
-                &mut size,
+                std::ptr::from_mut(&mut size),
             )
         };
         assert_eq!(

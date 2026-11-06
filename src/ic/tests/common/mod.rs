@@ -30,7 +30,6 @@
 )]
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -214,7 +213,7 @@ impl MoshProcessTable {
         fs::create_dir_all(&directory).expect("the fake ps needs a directory to stand in");
 
         let script = directory.join("ps");
-        fs::write(
+        gitscratch::testing::executable::write_executable(
             &script,
             "#!/bin/sh\n\
              # The comm snapshot names mosh-server as the parent of whoever ran this\n\
@@ -230,8 +229,6 @@ impl MoshProcessTable {
              esac\n",
         )
         .expect("the fake ps must be written");
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o755))
-            .expect("the fake ps must be executable");
 
         Self { directory }
     }

@@ -137,7 +137,6 @@ impl Canceller for GhCanceller {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
     use std::time::{Duration, Instant};
 
     use tempfile::TempDir;
@@ -164,8 +163,8 @@ mod tests {
     /// canceller that uses it.
     fn canceller(dir: &TempDir, body: &str) -> GhCanceller {
         let path = dir.path().join("gh");
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        gitscratch::testing::executable::write_executable(&path, format!("#!/bin/sh\n{body}\n"))
+            .unwrap();
         GhCanceller::new(GhSource::with_program(path, GENEROUS_LIMIT))
     }
 

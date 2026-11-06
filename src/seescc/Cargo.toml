@@ -28,6 +28,7 @@ wait-timeout.workspace = true
 which.workspace = true
 
 [dev-dependencies]
+gitscratch = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 
 [lints]

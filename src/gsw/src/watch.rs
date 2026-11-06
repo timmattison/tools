@@ -15439,6 +15439,11 @@ mod watched_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = dir.path().join("home");
         init_repo_at(&home);
+        // gsw runs the switch with the git configuration of the user, and a
+        // configuration can turn this advice off. The image of a GitHub
+        // Actions runner does. A key in the repository wins over a global
+        // key, thus the fixture states the advice that this test reads.
+        git(&home, &["config", "advice.commitBeforeMerge", "true"]);
         git(&home, &["switch", "-q", "-c", TOPIC]);
         std::fs::write(home.join("a.txt"), "on topic\n").expect("write a.txt");
         git(

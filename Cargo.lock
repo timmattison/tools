@@ -1733,6 +1733,7 @@ dependencies = [
  "colored",
  "comfy-table",
  "dirs",
+ "gitscratch",
  "rayon",
  "serde",
  "serde_json",
@@ -3891,6 +3892,7 @@ dependencies = [
  "buildinfo",
  "chrono",
  "comfy-table",
+ "gitscratch",
  "serde",
  "serde_json",
  "tempfile",
@@ -4354,6 +4356,7 @@ dependencies = [
  "anyhow",
  "buildinfo",
  "clap",
+ "gitscratch",
  "image",
  "libc",
  "notify",
@@ -4672,6 +4675,7 @@ dependencies = [
  "buildinfo",
  "clap",
  "dirs",
+ "gitscratch",
  "tempfile",
  "thiserror 2.0.21",
  "wait-timeout",
@@ -7329,6 +7333,7 @@ dependencies = [
 name = "runlimit"
 version = "0.1.0"
 dependencies = [
+ "gitscratch",
  "tempfile",
  "wait-timeout",
 ]
@@ -7586,6 +7591,7 @@ dependencies = [
  "colored",
  "crossterm",
  "dirs",
+ "gitscratch",
  "human_bytes",
  "num-format",
  "serde",
@@ -10134,6 +10140,7 @@ dependencies = [
  "chrono",
  "clap",
  "colored",
+ "gitscratch",
  "indicatif",
  "libc",
  "regex",

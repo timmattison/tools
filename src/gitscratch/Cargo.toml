@@ -33,7 +33,8 @@ testcolor.workspace = true
 
 [features]
 # Shared git fixture builders for the test suites of crates built on gitscratch,
-# and the pseudo-terminal that the tests of `grind` and `grime` share.
+# the pseudo-terminal that the tests of `grind` and `grime` share, and the
+# writer of the executable stubs that a test runs.
 testing = ["dep:libc"]
 
 [lints]

@@ -23,6 +23,7 @@ tempfile.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+gitscratch = { workspace = true, features = ["testing"] }
 serde_json.workspace = true
 shellquote.workspace = true
 testcolor.workspace = true

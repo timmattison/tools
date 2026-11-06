@@ -9,13 +9,17 @@ anyhow.workspace = true
 buildinfo.workspace = true
 clap.workspace = true
 colored.workspace = true
-core-foundation.workspace = true
-core-foundation-sys.workspace = true
-io-kit-sys.workspace = true
 libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+
+# The IO Registry exists only on macOS, and io-kit-sys pulls in mach2, which
+# does not compile on any other platform.
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation.workspace = true
+core-foundation-sys.workspace = true
+io-kit-sys.workspace = true
 
 [lints]
 workspace = true

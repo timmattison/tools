@@ -217,6 +217,19 @@ caller. It says so at the call site with
 The exemption stays visible in the file it applies to, rather than in a central
 allowlist.
 
+### 24-bit colors read `COLORTERM`
+
+`colored` reads `COLORTERM` each time it formats a 24-bit color. If the value
+is not `truecolor` or `24bit`, it writes the nearest of the 16 basic colors.
+`colored` gives no API to override this read, and `with_forced_ansi` does not
+change it. Thus a test that asserts on a 24-bit color passes only where
+`COLORTERM` says `truecolor`.
+
+`scripts/rust-checks.sh` pins `COLORTERM=truecolor` for the test run, thus the
+hook and CI give the same result in each terminal. To run such a test by hand
+in a terminal that does not set `COLORTERM`, set it on the command:
+`COLORTERM=truecolor cargo test -p gsw`.
+
 ### Crates Currently Using testcolor
 
 - `cdva` - the long-help test of `--strict`
@@ -785,3 +798,50 @@ shellcheck scripts/update-deps.sh
 5. **Handle arguments properly**: Use `while` loops with `shift` for multi-argument parsing
 6. **Provide help text**: Include `-h`/`--help` options
 7. **Avoid emojis**: Use text indicators like `[PASS]`/`[FAIL]` instead of `✓`/`✗`
+
+## Continuous Integration
+
+Every check that CI runs **must** live in `scripts/rust-checks.sh`.
+
+### Why
+
+The pre-commit hook and CI must run the same checks. When each caller holds
+its own list, the two lists drift apart, and a check that one list lost
+reports nothing. Thus one script holds the list. `.husky/pre-commit` and
+`.github/workflows/ci.yml` each start that script.
+
+To run the full list by hand, run `./scripts/rust-checks.sh` from any
+directory. Do this at the end of a TDD run. A `git commit --allow-empty` stages
+no file, thus the hook runs no check in this repository.
+
+### What CI does
+
+`.github/workflows/ci.yml` runs for each pull request, for each push to `main`,
+and when a person starts it by hand (`workflow_dispatch`). It runs one job on
+`ubuntu-latest` and one job on `macos-latest`. Some crates hold code that
+compiles only on macOS, and a Linux job does not compile, lint, or test that
+code. GitHub does not charge for standard runners in a public repository.
+
+Each job does these steps:
+
+1. Install the toolchain and the components that `rust-toolchain.toml` names.
+2. Install `cargo-machete`.
+3. Restore the Cargo cache. Only a run on `main` saves a cache, and a pull
+   request reads that cache.
+4. Run `scripts/rust-checks.sh`.
+
+Both jobs set `CARGO_PROFILE_DEV_DEBUG=0`, because debug information is most
+of the size of the target directory, and the disk of a Linux runner is small.
+
+### To add a check
+
+- Add the check to `scripts/rust-checks.sh`. Do not add it to the hook or to
+  the workflow.
+- If the check needs a tool that the runner does not have, add an install step
+  to the workflow.
+- If a crate or a test needs a system library or a tool on Linux, add its
+  package to the `apt-get install` step. The tests of `crap` need `zsh`, for
+  example.
+- Pin each third-party action to a full commit SHA, and write its release tag
+  in a comment. A tag can move, but a commit SHA cannot.
+- Run `actionlint .github/workflows/ci.yml` after each change to the workflow.

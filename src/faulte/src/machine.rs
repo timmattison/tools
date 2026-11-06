@@ -6,8 +6,9 @@
 //! the account names, and the clock. One trait holds all of them, so a test
 //! gives each fact as a plain value and no test reads the real machine.
 //!
-//! [`macos`] holds the real reader. It is the one part of `faulte` that runs a
-//! command or calls the kernel.
+//! The module `macos` holds the real reader. It is the one part of `faulte`
+//! that runs a command or calls the kernel. It exists only on macOS, thus this
+//! text names it with no link: rustdoc on another platform cannot resolve one.
 
 use std::collections::{BTreeSet, HashMap};
 use std::time::{Duration, Instant, SystemTime};
@@ -113,8 +114,9 @@ pub enum Signal {
 /// The trait is the whole boundary between the rules of `faulte` and this Mac.
 /// The rules take the values that these functions give, so a test gives the
 /// values itself and reads no real process, no real command, and no real
-/// clock. [`macos::Mac`] reads the real machine, and macOS is the only
-/// platform that has an implementation.
+/// clock. `macos::Mac` reads the real machine, and macOS is the only
+/// platform that has an implementation. The name has no link, because the
+/// module exists only on macOS.
 pub trait Machine {
     /// Samples the page faults of every process over `interval`.
     ///

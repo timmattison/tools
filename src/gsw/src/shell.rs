@@ -1223,7 +1223,7 @@ mod run_tests {
 #[cfg(all(test, unix))]
 pub(crate) mod stub_shell {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
+    use gitscratch::testing::executable::write_executable;
     use std::path::PathBuf;
     use tempfile::TempDir;
 
@@ -1385,9 +1385,10 @@ pub(crate) mod stub_shell {
                 shell_quote(&environment.display().to_string()),
                 shell_quote(&cwd.display().to_string()),
             );
-            std::fs::write(&path, script).expect("write the stub");
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-                .expect("make the stub executable");
+            // A child process writes the stub, thus a fork on another test
+            // thread cannot hold it open for writing when gsw runs it. Linux
+            // refuses that run with ETXTBSY.
+            write_executable(&path, script.as_bytes()).expect("write the stub");
             let stub = Self {
                 _dir: dir,
                 path,
@@ -1749,7 +1750,9 @@ pub(crate) mod stub_shell {
         let dir = tempfile::tempdir().expect("tempdir");
         let own_path = std::env::var_os("PATH").unwrap_or_default();
         let program = dir.path().join("git");
-        std::fs::write(
+        // A child process writes the program, for the reason that the stub
+        // shell gives.
+        write_executable(
             &program,
             format!(
                 "#!/bin/sh\n\
@@ -1767,11 +1770,10 @@ pub(crate) mod stub_shell {
                  exec git \"$@\"\n",
                 dir = shell_quote(&dir.path().display().to_string()),
                 own_path = shell_quote(&own_path.to_string_lossy()),
-            ),
+            )
+            .as_bytes(),
         )
         .expect("write the recording git");
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
-            .expect("make the recording git executable");
         let path = std::env::join_paths(
             std::iter::once(dir.path().to_path_buf()).chain(std::env::split_paths(&own_path)),
         )

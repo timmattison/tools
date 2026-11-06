@@ -199,15 +199,12 @@ const NO_TARGET_HEADER: &str = "the first refresh could not read any target";
 #[cfg(unix)]
 #[test]
 fn a_first_refresh_that_reads_no_target_exits_1_with_the_error_after_the_terminal_is_restored() {
-    use std::os::unix::fs::PermissionsExt;
-
     let home = tempfile::tempdir().expect("a temporary directory");
     let bin = home.path().join("bin");
     std::fs::create_dir(&bin).expect("the bin directory is made");
     let gh = bin.join("gh");
-    std::fs::write(&gh, GH_STUB_404).expect("the gh stub is written");
-    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755))
-        .expect("the gh stub is executable");
+    gitscratch::testing::executable::write_executable(&gh, GH_STUB_404)
+        .expect("the gh stub is written");
 
     let mut command = Command::new("perl");
     command
