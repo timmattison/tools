@@ -49,6 +49,17 @@ pub fn point(host: &Host, raw_name: &str, branch: Option<&str>) -> anyhow::Resul
             warnings,
         });
     }
+    if let Some(existing) = worktree_on_branch(host, &main_clone, &branch)? {
+        point_link(&host.link(&name), &existing)
+            .with_context(|| format!("cannot change {}", host.link_shown(&name)))?;
+        return Ok(Pointed {
+            name,
+            branch,
+            target: existing,
+            made_worktree: false,
+            warnings,
+        });
+    }
     let target = host.worktrees_dir(&name).join(&branch);
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)?;
@@ -100,4 +111,36 @@ fn add_worktree(host: &Host, main_clone: &Path, args: &[&str]) -> anyhow::Result
     } else {
         bail!("git cannot make the worktree: {}", added.stderr)
     }
+}
+
+/// Finds the worktree of the main clone that has `branch` checked out. The function
+/// reads `git worktree list --porcelain -z`: the fields end with a NUL, and an empty
+/// field ends a record.
+fn worktree_on_branch(
+    host: &Host,
+    main_clone: &Path,
+    branch: &str,
+) -> anyhow::Result<Option<PathBuf>> {
+    let listed = host
+        .git()
+        .run(main_clone, ["worktree", "list", "--porcelain", "-z"]);
+    if !listed.ok {
+        bail!(
+            "git cannot list the worktrees of {}: {}",
+            main_clone.display(),
+            listed.stderr
+        );
+    }
+    let wanted = format!("branch refs/heads/{branch}");
+    let mut path: Option<&str> = None;
+    for field in listed.stdout.split('\0') {
+        if field.is_empty() {
+            path = None;
+        } else if let Some(found) = field.strip_prefix("worktree ") {
+            path = Some(found);
+        } else if field == wanted {
+            return Ok(path.map(PathBuf::from));
+        }
+    }
+    Ok(None)
 }
