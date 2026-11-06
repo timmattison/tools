@@ -799,6 +799,37 @@ mod tests {
         }
     }
 
+    /// The example config file of the help text, without the indent.
+    fn help_example(text: &str) -> String {
+        let (_, after) = text
+            .split_once("Example config file:\n")
+            .expect("the help holds an example");
+        after
+            .lines()
+            .skip_while(|line| line.trim().is_empty())
+            .take_while(|line| line.trim().is_empty() || line.starts_with("    "))
+            .map(|line| line.strip_prefix("    ").unwrap_or(line))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn the_help_example_is_a_config_that_ha_accepts() {
+        let text = help_after(Some(Path::new(CONFIG_PATH)));
+        let example = help_example(&text);
+        for needle in [
+            "billing = true",
+            "[billing_enterprises]",
+            "\"some-org\" = \"some-enterprise\"",
+        ] {
+            assert!(example.contains(needle), "missing {needle:?} in:\n{example}");
+        }
+        let settings = resolve_file(&CommandLine::default(), &example).unwrap();
+        assert!(settings.billing);
+        assert_eq!(settings.billing_enterprises.len(), 1);
+        assert!(text.contains("reads the billing of its enterprise"), "{text}");
+    }
+
     #[test]
     fn help_after_without_a_config_directory_says_so_and_points_at_config() {
         let text = help_after(None);
