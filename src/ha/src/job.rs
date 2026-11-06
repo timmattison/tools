@@ -63,3 +63,64 @@ pub struct Job {
     /// gives none.
     pub url: String,
 }
+
+impl Job {
+    /// The time of this job on a runner. It is the time that the `TIME` cell of
+    /// a job row shows after the job starts.
+    ///
+    /// A finished job gives the time from its start to its finish. A job that
+    /// runs gives the time from its start to `now`. A job that waits gives
+    /// `None`, because a wait uses no runner. A job with no start time gives
+    /// `None`. A finished job with no finish time gives `None`. A finish time
+    /// before the start time gives zero.
+    ///
+    /// `None` means that the job adds nothing to the `JOB SUM` of its run. The
+    /// time uses whole seconds. It is not the billed time, because GitHub
+    /// rounds each job up to a whole minute. Issue #639 rounds this time up to
+    /// whole minutes for its cost, and calls this function rather than a copy
+    /// of the rule.
+    #[must_use]
+    pub fn runner_time(&self, _now: DateTime<Utc>) -> Option<std::time::Duration> {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use chrono::TimeZone;
+
+    use super::*;
+
+    fn at(hour: u32, minute: u32, second: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 11, 6, hour, minute, second)
+            .unwrap()
+    }
+
+    fn job(
+        state: RunState,
+        started_at: Option<DateTime<Utc>>,
+        completed_at: Option<DateTime<Utc>>,
+    ) -> Job {
+        Job {
+            id: JobId(1),
+            name: "build".to_owned(),
+            state,
+            runner: None,
+            created_at: Some(at(11, 59, 0)),
+            started_at,
+            completed_at,
+            url: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_finished_job_gives_its_start_to_its_finish() {
+        let finished = job(RunState::Passed, Some(at(12, 0, 0)), Some(at(12, 3, 31)));
+        assert_eq!(
+            finished.runner_time(at(13, 0, 0)),
+            Some(Duration::from_secs(211))
+        );
+    }
+}
