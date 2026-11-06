@@ -7575,6 +7575,72 @@ mod tests {
         board
     }
 
+    // GitHub changed `updated_at` of this run 18 minutes after its last job
+    // ended. The run row and its job rows fade from the end of the last job,
+    // not from `updated_at`.
+    #[test]
+    fn a_finished_run_and_its_jobs_fade_from_the_end_of_its_last_job() {
+        let now = at("2026-11-04T18:00:00Z");
+        let mut board = Board::new(Duration::from_hours(8));
+        board.replace(
+            repo("timmattison/tools"),
+            vec![run(
+                7001,
+                "timmattison/tools",
+                "CI",
+                "main",
+                "Live work",
+                RunState::Running,
+                "2026-11-04T17:45:30Z",
+                "2026-11-04T17:59:00Z",
+            )],
+            now,
+        );
+        board.replace(
+            repo("Lock-Free-Labs/nvr-tools"),
+            vec![run(
+                41_874_496_263,
+                "Lock-Free-Labs/nvr-tools",
+                "CI",
+                "issue-325",
+                "Late update",
+                RunState::Passed,
+                "2026-11-04T17:07:48Z",
+                "2026-11-04T17:40:55Z",
+            )],
+            now,
+        );
+        board.select_next(now);
+        board.expand(now);
+        board.set_jobs(
+            RunId(41_874_496_263),
+            vec![
+                job(
+                    126_730_108_923,
+                    "Full check list (Linux)",
+                    RunState::Passed,
+                    Some("2026-11-04T17:07:51Z"),
+                    Some("2026-11-04T17:22:45Z"),
+                ),
+                job(
+                    126_730_109_123,
+                    "Clippy (Windows)",
+                    RunState::Passed,
+                    Some("2026-11-04T17:07:53Z"),
+                    Some("2026-11-04T17:12:05Z"),
+                ),
+            ],
+        );
+        board.select_previous(now);
+        let buffer = render_at(120, 12, &mut board, &loaded(), now);
+        let from_end = ROW_RAMP.color(Duration::from_secs(37 * 60 + 15), ROW_FADE_END);
+        let from_update = ROW_RAMP.color(Duration::from_secs(19 * 60 + 5), ROW_FADE_END);
+        assert_ne!(from_end, from_update, "the test must tell the two apart");
+        for id in ["41874496263", "126730108923", "126730109123"] {
+            assert_text_color(&buffer, row_of(&buffer, id), from_end);
+        }
+    }
+
     #[test]
     fn the_job_rows_of_a_finished_run_fade_with_their_run() {
         let mut board = fade_jobs_board(2);
