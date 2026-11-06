@@ -282,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_clone_uses_a_clone_that_another_run_made_meanwhile() {
+    fn rule_7_a_failed_clone_uses_a_clone_that_another_run_made_meanwhile() {
         let scratch = Scratch::new();
         let place = scratch.dir.join("main-clone");
         let outcome = ensure_clone_with(&Git::without_token(), &scratch.url(), &place, |_| {
