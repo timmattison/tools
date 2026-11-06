@@ -13,7 +13,7 @@ use std::process::{Command, Output, Stdio};
 use gitscratch::testing::{
     contested_region_repo, default_branch_choice_repo, equal_hunks_unequal_stops_repo,
     independent_branches_repo, modify_delete_repo, multi_byte_names_repo, nested_conflict_repo,
-    not_a_repository, TestRepo, CHOICE_HEAD_BRANCH,
+    not_a_repository, squash_merged_parent_repo, TestRepo, CHOICE_HEAD_BRANCH,
 };
 use gitscratch::{NoInheritedGitEnvironment, DEFAULT_BRANCHES};
 use unicode_width::UnicodeWidthStr;
@@ -955,6 +955,75 @@ fn quiet_prints_nothing_when_no_default_branch_resolves() {
         &run_raw(&repo, CHOICE_HEAD_BRANCH, &["-q"]),
         ERROR,
         "no default branch",
+    );
+}
+
+/// The flag that replays only the commits above an upstream, onto a new base.
+const ONTO_FLAG: &str = "--onto";
+
+/// A stacked branch after a squash merge of its parent replays clean with
+/// `--onto`, although a plain run reports false conflicts.
+///
+/// The control run comes first. It proves the fixture holds the false conflicts
+/// of the commits of `parent`, so the clean verdict below is not vacuous. With
+/// `--onto main parent`, `grind` replays only `parent..HEAD`, which is the
+/// commits of `child` alone, and those commits hit no conflict.
+#[test]
+fn onto_replays_only_the_commits_above_the_upstream_and_reports_clean() {
+    let repo = squash_merged_parent_repo();
+
+    let control = run_raw(&repo, "child", &["main"]);
+    assert_eq!(
+        control.status.code(),
+        Some(CONFLICTS),
+        "a plain run has to report the false conflicts of the commits of parent:\n\
+         stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&control.stdout),
+        String::from_utf8_lossy(&control.stderr)
+    );
+
+    let output = run_raw(&repo, "child", &[ONTO_FLAG, "main", "parent"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(CLEAN),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        stdout, "grind: clean - replaying parent..HEAD onto main hit no conflicts\n",
+        "stderr:\n{stderr}"
+    );
+}
+
+/// `--onto` counts the hunks of the commits above the upstream and no others.
+///
+/// `contested-child` rewrites a line of `stacked.txt` that `main` also
+/// rewrote, so one stop is real. The commits of `parent` are already in `main`
+/// through the squash merge, so `shared.txt` must not appear in the breakdown.
+#[test]
+fn onto_counts_the_hunks_of_the_commits_above_the_upstream_and_no_others() {
+    let repo = squash_merged_parent_repo();
+
+    let output = run_raw(&repo, "contested-child", &[ONTO_FLAG, "main", "parent"]);
+    let (code, stdout, stderr) = streams(&output);
+
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        stdout,
+        r"grind: conflicts - replaying parent..HEAD onto main
+       1 hunk across 1 file, 1 stop
+
+  stacked.txt    1 hunk",
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("shared.txt"),
+        "the commits of parent are already in main and must cost nothing:\n{stdout}"
     );
 }
 
