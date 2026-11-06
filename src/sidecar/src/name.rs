@@ -17,7 +17,11 @@ pub struct NameError {
 
 impl fmt::Display for NameError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.name)
+        write!(
+            f,
+            "\"{}\" is not a sidecar name. A name holds only {NAME_RULE}.",
+            self.name
+        )
     }
 }
 
@@ -30,9 +34,13 @@ impl SidecarName {
     ///
     /// Returns [`NameError`] when `raw` breaks the rule.
     pub fn parse(raw: &str) -> Result<Self, NameError> {
-        Err(NameError {
-            name: raw.to_string(),
-        })
+        if is_valid(raw) {
+            Ok(Self(raw.to_string()))
+        } else {
+            Err(NameError {
+                name: raw.to_string(),
+            })
+        }
     }
 
     /// The name as text.
@@ -40,6 +48,23 @@ impl SidecarName {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+/// True when `raw` matches `^[a-z0-9]+(?:[.-][a-z0-9]+)*$`.
+fn is_valid(raw: &str) -> bool {
+    let is_core = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit();
+    let is_mark = |c: char| c == '.' || c == '-';
+    let mut previous_was_mark = true;
+    for c in raw.chars() {
+        if is_core(c) {
+            previous_was_mark = false;
+        } else if is_mark(c) && !previous_was_mark {
+            previous_was_mark = true;
+        } else {
+            return false;
+        }
+    }
+    !raw.is_empty() && !previous_was_mark
 }
 
 impl fmt::Display for SidecarName {
