@@ -41,6 +41,12 @@ const ID_WIDTH: usize = 12;
 const STARTED_WIDTH: usize = 11;
 /// The width of the time column.
 const TIME_WIDTH: usize = 7;
+/// The header word of the job-sum column.
+const JOB_SUM_HEADER: &str = "JOB SUM";
+/// The width of the job-sum column. The width of the time column. Both cells
+/// hold a `format_elapsed` text, which is never wider than 7 columns, and the
+/// header word fills the cell.
+const JOB_SUM_WIDTH: usize = TIME_WIDTH;
 /// The columns that the text columns do not share: the two marker cells, the
 /// ID part, the started and time columns, and the eight spaces between the
 /// columns.
@@ -3049,6 +3055,64 @@ mod tests {
         );
         let text = lines(&render_with(120, 8, &mut board, &Status::default()));
         assert_eq!(time_cells(&text, 4), "3m 07s");
+    }
+
+    /// The text of the job-sum column of line `y`. The column stands where the
+    /// header of the same frame puts `JOB SUM`.
+    fn job_sum_cells(text: &[String], y: usize) -> String {
+        columns(&text[y], header_column(text, "JOB SUM"), JOB_SUM_WIDTH)
+            .trim_end()
+            .to_owned()
+    }
+
+    /// A board with one finished run (ID 41966278012) whose two finished jobs
+    /// ran 211 s and 897 s. The run is the first run row, at line 2.
+    fn job_sum_board() -> Board {
+        let mut board = Board::new(Duration::from_hours(8));
+        board.replace(
+            repo("a/x"),
+            vec![run(
+                41_966_278_012,
+                "a/x",
+                "CI",
+                "main",
+                "t",
+                RunState::Passed,
+                "2026-10-14T10:00:00Z",
+                "2026-10-14T10:20:00Z",
+            )],
+            now(),
+        );
+        board.set_jobs(
+            RunId(41_966_278_012),
+            vec![
+                job(
+                    1,
+                    "build",
+                    RunState::Passed,
+                    Some("2026-10-14T10:00:00Z"),
+                    Some("2026-10-14T10:03:31Z"),
+                ),
+                job(
+                    2,
+                    "test",
+                    RunState::Passed,
+                    Some("2026-10-14T10:03:31Z"),
+                    Some("2026-10-14T10:18:28Z"),
+                ),
+            ],
+        );
+        board
+    }
+
+    #[test]
+    fn a_run_row_shows_the_job_sum_under_the_job_sum_header() {
+        for width in [80_u16, 120, 200] {
+            let mut board = job_sum_board();
+            let text = lines(&render_with(width, 8, &mut board, &loaded()));
+            assert!(text[0].contains("JOB SUM"), "width {width}: {:?}", text[0]);
+            assert_eq!(job_sum_cells(&text, 2), "18m 28s", "width {width}");
+        }
     }
 
     /// A job with the state `state`. `None` times stand for a job that GitHub
