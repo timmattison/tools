@@ -8,14 +8,16 @@
 //! and no time of day. No window is shorter than one day.
 
 use std::collections::BTreeMap;
+use std::cmp::Ordering;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::iter::Sum;
 use std::ops::{Add, AddAssign};
 
 use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 
 use crate::money::Usd;
-use crate::target::OwnerName;
+use crate::target::{folded, hash_folded, OwnerName};
 
 /// The product name that the billing box counts. Copilot and the other
 /// products of the report never count. The match ignores ASCII case.
@@ -231,7 +233,7 @@ pub enum AccountKind {
 ///
 /// Slugs are case-insensitive like owner names: they compare, order and hash
 /// on the ASCII lowercase form and keep the case as given for display.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone)]
 pub struct EnterpriseSlug(String);
 
 /// The reasons why a text is not an enterprise slug. Each message quotes the
@@ -264,6 +266,21 @@ impl EnterpriseSlug {
     /// Returns an [`EnterpriseSlugError`] when the text is empty or holds a
     /// character other than an ASCII letter, an ASCII digit, or `-`.
     pub fn parse(input: &str) -> Result<EnterpriseSlug, EnterpriseSlugError> {
+        let input = input.trim();
+        if input.is_empty() {
+            return Err(EnterpriseSlugError::Empty {
+                input: input.to_owned(),
+            });
+        }
+        if let Some(character) = input
+            .chars()
+            .find(|c| !(c.is_ascii_alphanumeric() || *c == '-'))
+        {
+            return Err(EnterpriseSlugError::BadCharacter {
+                input: input.to_owned(),
+                character,
+            });
+        }
         Ok(EnterpriseSlug(input.to_owned()))
     }
 
@@ -271,6 +288,32 @@ impl EnterpriseSlug {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl PartialEq for EnterpriseSlug {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for EnterpriseSlug {}
+
+impl PartialOrd for EnterpriseSlug {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for EnterpriseSlug {
+    fn cmp(&self, other: &Self) -> Ordering {
+        folded(&self.0).cmp(folded(&other.0))
+    }
+}
+
+impl Hash for EnterpriseSlug {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        hash_folded(&self.0, state);
     }
 }
 
