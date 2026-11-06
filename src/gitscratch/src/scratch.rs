@@ -339,8 +339,14 @@ impl Scratch {
             .with_context(|| format!("could not write a commit holding the tree {tree}"))
     }
 
-    /// Rebase the checked-out HEAD onto `onto`, walking the whole rebase and
+    /// Rebase the checked-out HEAD onto `upstream`, walking the whole rebase and
     /// auto-resolving conflicts by staging markers verbatim.
+    ///
+    /// `upstream` is the name git gives the one revision of
+    /// `git rebase <upstream>`. It sets which commits git replays, which are
+    /// the commits of `upstream..HEAD`, and it is also the new base where they
+    /// land. [`Scratch::replay_rebase_onto`] gives the two roles to two
+    /// revisions.
     ///
     /// Every stop is measured before it is resolved, so the returned
     /// [`Conflicts`] describes what a human would have had to hand-merge to get
@@ -357,8 +363,8 @@ impl Scratch {
     /// which leaves the rebase unfinished however many times it is asked again,
     /// or if the rebase is still unfinished once `MAX_RESOLUTION_ROUNDS` rounds
     /// have been spent trying to advance it.
-    pub fn replay_rebase(&self, onto: &str) -> Result<Conflicts> {
-        self.replay_rebase_within(None, onto, MAX_RESOLUTION_ROUNDS, Capture::Nothing)
+    pub fn replay_rebase(&self, upstream: &str) -> Result<Conflicts> {
+        self.replay_rebase_within(None, upstream, MAX_RESOLUTION_ROUNDS, Capture::Nothing)
             .map(|(conflicts, _)| conflicts)
     }
 
@@ -395,8 +401,8 @@ impl Scratch {
     ///
     /// Returns an error in each case [`Scratch::replay_rebase`] does, and in no
     /// other.
-    pub fn replay_rebase_with_diffs(&self, onto: &str) -> Result<(Conflicts, HaltDiffs)> {
-        self.replay_rebase_within(None, onto, MAX_RESOLUTION_ROUNDS, Capture::Diffs)
+    pub fn replay_rebase_with_diffs(&self, upstream: &str) -> Result<(Conflicts, HaltDiffs)> {
+        self.replay_rebase_within(None, upstream, MAX_RESOLUTION_ROUNDS, Capture::Diffs)
     }
 
     /// Rebase the checked-out HEAD as `git rebase --onto new_base upstream`
@@ -461,10 +467,14 @@ impl Scratch {
     /// plain entrance and the entrance that captures share this one loop, so
     /// they count the same stops the same way. The plain entrance gets back an
     /// empty [`HaltDiffs`] and drops it.
+    ///
+    /// `new_base` is the value of `--onto`. `None` gives the one-revision
+    /// rebase, where `upstream` is also the new base, and its argv is the argv
+    /// the replay had before the two-revision form existed.
     fn replay_rebase_within(
         &self,
         new_base: Option<&str>,
-        onto: &str,
+        upstream: &str,
         max_rounds: usize,
         capture: Capture,
     ) -> Result<(Conflicts, HaltDiffs)> {
@@ -473,8 +483,8 @@ impl Scratch {
 
         let mut cost = Conflicts::nothing_replayed();
         let mut halt_diffs = HaltDiffs::nothing_captured();
-        // `--end-of-options` ahead of `onto`, because `onto` arrives from a
-        // caller and git knows `--root` as an option of `rebase`. Without it a
+        // `--end-of-options` ahead of `upstream`, because `upstream` arrives
+        // from a caller and git knows `--root` as an option of `rebase`. Without it a
         // replay onto `--root` rebases the whole history onto nothing, finishes
         // without a single conflict, and reports a cost of zero for a revision
         // that names no commit. Zero is what a genuinely free replay reports
@@ -486,7 +496,7 @@ impl Scratch {
         // whatever its first character is.
         let onto_option = new_base.map(|base| format!("--onto={base}"));
         let mut rebase_args: Vec<&str> = onto_option.as_deref().into_iter().collect();
-        rebase_args.extend(["--end-of-options", onto]);
+        rebase_args.extend(["--end-of-options", upstream]);
         let mut outcome = git.try_run("rebase", &rebase_args)?;
         let mut rounds = 0;
 
