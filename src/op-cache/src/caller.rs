@@ -108,8 +108,11 @@ pub(crate) fn claude_config_dir(
     claude_config_dir: Option<&OsStr>,
     home: Option<&OsStr>,
 ) -> Option<PathBuf> {
-    let _ = (claude_config_dir, home);
-    None
+    if let Some(dir) = claude_config_dir.filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(dir));
+    }
+    let home = home.filter(|value| !value.is_empty())?;
+    Some(Path::new(home).join(".claude"))
 }
 
 #[cfg(test)]
