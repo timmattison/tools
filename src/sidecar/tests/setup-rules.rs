@@ -5,6 +5,7 @@
 mod support;
 
 use std::fs;
+use std::os::unix::fs::symlink;
 use std::path::Path;
 
 use support::Fixture;
@@ -107,4 +108,55 @@ fn setup_in_a_subdirectory_works_like_setup_at_the_root() {
         canon(&fixture.main_clone(NAME))
     );
     assert!(!fixture.link(&subdirectory, NAME).exists());
+}
+
+/// Runs setup once so that the main clone and the link exist.
+fn set_up(fixture: &Fixture, host: &Path) {
+    let run = fixture.run(host, &["setup"]);
+    assert_eq!(run.code, 0, "{run:?}");
+}
+
+#[test]
+fn rule_4a_leaves_a_correct_link_as_it_is() {
+    let fixture = Fixture::new(&[NAME]);
+    let host = fixture.main_checkout();
+    set_up(&fixture, &host);
+    let link = fixture.link(&host, NAME);
+    let before = fs::read_link(&link).unwrap();
+
+    let run = fixture.run(&host, &["setup"]);
+
+    assert_eq!(run.code, 0, "{run:?}");
+    assert_eq!(run.stdout, "", "{run:?}");
+    assert_eq!(run.stderr, "", "{run:?}");
+    assert_eq!(fs::read_link(&link).unwrap(), before);
+}
+
+#[test]
+fn rule_4b_leaves_a_link_to_a_worktree_of_the_main_clone() {
+    let fixture = Fixture::new(&[NAME]);
+    let host = fixture.main_checkout();
+    set_up(&fixture, &host);
+    let clone = fixture.main_clone(NAME);
+    let sidecar_worktree = fixture.worktrees_dir(NAME).join("feature");
+    fixture.git(
+        &clone,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "feature",
+            &sidecar_worktree.to_string_lossy(),
+        ],
+    );
+    let link = fixture.link(&host, NAME);
+    fs::remove_file(&link).unwrap();
+    symlink(&sidecar_worktree, &link).unwrap();
+
+    let run = fixture.run(&host, &["setup"]);
+
+    assert_eq!(run.code, 0, "{run:?}");
+    assert_eq!(run.stdout, "", "{run:?}");
+    assert_eq!(fs::read_link(&link).unwrap(), sidecar_worktree);
 }
