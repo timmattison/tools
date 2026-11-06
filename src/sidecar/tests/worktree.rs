@@ -261,3 +261,26 @@ fn a_new_branch_from_main_is_the_last_choice() {
         commit_of(&fixture, &fixture.main_clone(NAME), "main")
     );
 }
+
+#[test]
+fn a_failed_fetch_warns_and_continues_with_the_local_branches() {
+    let fixture = after_setup();
+    let host = fixture.main_checkout();
+    let remote = fixture.sidecar_remote(NAME);
+    fs::rename(&remote, fixture.root().join("moved-away.git")).unwrap();
+
+    let run = fixture.run(&host, &["worktree", NAME, "fresh"]);
+
+    assert_pointed_at_new_worktree(&fixture, &host, &run, "fresh");
+    let warning = run
+        .stderr
+        .lines()
+        .find(|line| line.starts_with("warning: "))
+        .unwrap_or_else(|| panic!("no warning line: {run:?}"));
+    assert!(warning.contains("fetch"), "{warning}");
+    let target = fixture.worktrees_dir(NAME).join("fresh");
+    assert_eq!(
+        commit_of(&fixture, &target, "HEAD"),
+        commit_of(&fixture, &fixture.main_clone(NAME), "main")
+    );
+}
