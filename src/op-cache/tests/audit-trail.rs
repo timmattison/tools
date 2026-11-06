@@ -445,3 +445,151 @@ fn op_start_has_no_claude_without_a_session_file() {
         records[0]["claude"]
     );
 }
+
+/// The tests of the macOS notification. Each one puts a fake `osascript` in
+/// `<fixture>/bin` BEFORE it turns notifications on, because the real
+/// `/usr/bin/osascript` is on the PATH of the fixture and would show a real
+/// notification on the screen of whoever runs the tests.
+#[cfg(target_os = "macos")]
+mod notification {
+    use super::*;
+
+    /// Where the fake `osascript` leaves one file for each call.
+    fn record_dir(fixture: &Fixture) -> PathBuf {
+        fixture.path("osascript")
+    }
+
+    /// Installs the fake `osascript`: it writes its arguments, each ended by
+    /// a NUL byte, to a file in the record directory (atomically, through a
+    /// rename), and then runs `after`.
+    fn install_fake_osascript(fixture: &Fixture, after: &str) {
+        let dir = record_dir(fixture);
+        fs::create_dir_all(&dir).expect("create record dir");
+        let tmp = fixture.path("osascript-tmp");
+        fixture.install_script(
+            "osascript",
+            &format!(
+                "printf '%s\\0' \"$@\" > '{tmp}'-$$\nmv '{tmp}'-$$ '{dir}'/$$\n{after}",
+                tmp = tmp.display(),
+                dir = dir.display(),
+            ),
+        );
+    }
+
+    /// Shell text that waits, for 20 seconds at most, until the record
+    /// directory holds at least `count_expr` files.
+    fn wait_for_records(fixture: &Fixture, count_expr: &str) -> String {
+        let dir = record_dir(fixture);
+        format!(
+            "i=0\nwhile [ \"$(ls '{dir}' | wc -l)\" -lt {count_expr} ] && [ \"$i\" -lt 200 ]; do sleep 0.1; i=$((i+1)); done",
+            dir = dir.display(),
+        )
+    }
+
+    /// A command with notifications turned on. It refuses to build when the
+    /// fake `osascript` is missing.
+    fn notifying_command(fixture: &Fixture) -> Command {
+        let fake = fixture.path("bin").join("osascript");
+        assert!(fake.exists(), "no fake osascript at {}", fake.display());
+        let mut command = fixture.command();
+        command.env_remove("OP_CACHE_NOTIFY");
+        command
+    }
+
+    /// Each call of the fake `osascript`: (file name, arguments), by file name.
+    fn osascript_calls(fixture: &Fixture) -> Vec<(String, Vec<String>)> {
+        let mut calls: Vec<(String, Vec<String>)> = fs::read_dir(record_dir(fixture))
+            .expect("read record dir")
+            .map(|entry| {
+                let entry = entry.expect("record entry");
+                let bytes = fs::read(entry.path()).expect("read record");
+                let text = String::from_utf8_lossy(&bytes).into_owned();
+                let args = text
+                    .strip_suffix('\0')
+                    .map(|rest| rest.split('\0').map(str::to_owned).collect())
+                    .unwrap_or_default();
+                (entry.file_name().to_string_lossy().into_owned(), args)
+            })
+            .collect();
+        calls.sort();
+        calls
+    }
+
+    const SCRIPT_ARGS: [&str; 6] = [
+        "-e",
+        "on run argv",
+        "-e",
+        "display notification (item 3 of argv) with title (item 1 of argv) subtitle (item 2 of argv)",
+        "-e",
+        "end run",
+    ];
+
+    /// The three texts after the script arguments.
+    fn expected_args(title: &str, subtitle: &str) -> Vec<String> {
+        SCRIPT_ARGS
+            .iter()
+            .copied()
+            .chain([title, subtitle, REFERENCE])
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn notification_names_the_claude_session_and_the_zellij_session() {
+        let fixture = Fixture::new();
+        let sentinel = unique_token("notify");
+        install_fake_osascript(&fixture, "exit 0");
+        fixture.install_fake_op(&format!(
+            "{}\necho '{sentinel}'",
+            wait_for_records(&fixture, "1")
+        ));
+        let zellij_session = unique_token("zellij").replace("SENTINEL", "zs");
+        let test_pid = std::process::id();
+        let sessions = fixture.path("claude").join("sessions");
+        fs::create_dir_all(&sessions).expect("create sessions dir");
+        fs::write(
+            sessions.join(format!("{test_pid}.json")),
+            serde_json::json!({ "pid": test_pid, "sessionId": "s", "name": SESSION_NAME })
+                .to_string(),
+        )
+        .expect("write session file");
+
+        let output = notifying_command(&fixture)
+            .args(["read", REFERENCE])
+            .env("ZELLIJ_SESSION_NAME", &zellij_session)
+            .output()
+            .expect("run op-cache");
+
+        let calls = osascript_calls(&fixture);
+        assert_eq!(calls.len(), 1, "calls: {calls:?}");
+        assert_eq!(
+            calls[0].1,
+            expected_args(
+                "op-cache → 1Password",
+                &format!("{SESSION_NAME} · {zellij_session}")
+            )
+        );
+        assert_eq!(output.stdout, sentinel.as_bytes());
+    }
+
+    #[test]
+    fn notification_falls_back_to_the_repo_directory_name() {
+        let fixture = Fixture::new();
+        let sentinel = unique_token("notify");
+        install_fake_osascript(&fixture, "exit 0");
+        fixture.install_fake_op(&format!(
+            "{}\necho '{sentinel}'",
+            wait_for_records(&fixture, "1")
+        ));
+
+        let output = notifying_command(&fixture)
+            .args(["read", REFERENCE])
+            .output()
+            .expect("run op-cache");
+
+        let calls = osascript_calls(&fixture);
+        assert_eq!(calls.len(), 1, "calls: {calls:?}");
+        assert_eq!(calls[0].1, expected_args("op-cache → 1Password", "repo"));
+        assert_eq!(output.stdout, sentinel.as_bytes());
+    }
+}
