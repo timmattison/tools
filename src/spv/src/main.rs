@@ -841,13 +841,36 @@ fn get_open_files(pid: u32) -> Result<Vec<OpenFile>, String> {
 /// # Returns
 ///
 /// The open files, or a sentence that says why there are none.
-fn parse_open_files(_pid: u32, stdout: &str) -> Result<Vec<OpenFile>, String> {
+///
+/// # Refused descriptors
+///
+/// lsof on Linux writes a row for each descriptor that the kernel refuses to
+/// show it. The row leaves the middle columns empty and puts the reason where
+/// the name goes, as in `/proc/1/cwd (readlink: Permission denied)`. Thus its
+/// name is not at the usual field, and only its FD column is where the header
+/// says. Each such row becomes a row that says the kernel refused it. When the
+/// kernel refused every descriptor, the answer is one sentence that says so.
+/// lsof on macOS writes no row for a refused process, and the caller reports
+/// that case.
+fn parse_open_files(pid: u32, stdout: &str) -> Result<Vec<OpenFile>, String> {
     let mut files = Vec::new();
+    let mut readable = 0_usize;
 
     // Skip the header line and parse each subsequent line
     for line in stdout.lines().skip(1) {
         let fields: Vec<&str> = line.split_whitespace().collect();
+        if line.trim_end().ends_with(LSOF_REFUSED_NAME_SUFFIX) {
+            if let Some(fd) = fields.get(LSOF_FIELD_FD) {
+                files.push(OpenFile {
+                    fd: (*fd).to_string(),
+                    file_type: REFUSED_FILE_TYPE.to_string(),
+                    name: REFUSED_FILE_NAME.to_string(),
+                });
+            }
+            continue;
+        }
         if fields.len() >= LSOF_MIN_FIELDS {
+            readable += 1;
             files.push(OpenFile {
                 fd: fields[LSOF_FIELD_FD].to_string(),
                 file_type: fields[LSOF_FIELD_TYPE].to_string(),
@@ -857,8 +880,23 @@ fn parse_open_files(_pid: u32, stdout: &str) -> Result<Vec<OpenFile>, String> {
         }
     }
 
+    if readable == 0 && !files.is_empty() {
+        return Err(format!(
+            "the kernel refused lsof each descriptor of process {pid}, so run spv with sudo"
+        ));
+    }
     Ok(files)
 }
+
+/// The end of the name that lsof on Linux writes for a descriptor that the
+/// kernel refused to show it, as in `/proc/1/cwd (readlink: Permission denied)`.
+const LSOF_REFUSED_NAME_SUFFIX: &str = ": Permission denied)";
+
+/// The type that spv shows for a descriptor that the kernel refused.
+const REFUSED_FILE_TYPE: &str = "refused";
+
+/// The name that spv shows for a descriptor that the kernel refused.
+const REFUSED_FILE_NAME: &str = "the kernel refused this descriptor; run spv with sudo";
 
 /// Substrings that mark a credential wherever they appear in an uppercased name.
 ///
