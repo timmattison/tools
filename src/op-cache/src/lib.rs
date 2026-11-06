@@ -19,6 +19,7 @@
 //! let value = cache.read(&path, None)?;
 //! ```
 
+use crate::op_run::{OpRun, Operation};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -31,6 +32,8 @@ use std::process::Command;
 use tempfile::NamedTempFile;
 
 mod audit;
+mod caller;
+mod op_run;
 
 /// Maximum number of retries for 1Password CLI operations.
 const OP_MAX_RETRIES: u32 = 3;
@@ -177,7 +180,7 @@ impl OpCache {
         }
 
         // 3. Fetch from 1Password and cache
-        let value = fetch_from_1password(op_path)?;
+        let value = fetch_from_1password(op_path, &self.cache_path)?;
         cache.insert(
             op_path.as_ref().to_string(),
             CacheEntry {
@@ -335,11 +338,12 @@ fn ensure_op_available() -> Result<()> {
     Ok(())
 }
 
-fn fetch_from_1password(op_path: &OpPath) -> Result<String> {
+fn fetch_from_1password(op_path: &OpPath, cache_path: &Path) -> Result<String> {
     ensure_op_available()?;
+    let mut run = OpRun::new(Operation::Read, op_path, cache_path);
 
     for attempt in 1..=OP_MAX_RETRIES {
-        match Command::new("op").args(["read", op_path.as_ref()]).output() {
+        match run.attempt(attempt) {
             Ok(output) if output.status.success() => {
                 let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if !value.is_empty() {
