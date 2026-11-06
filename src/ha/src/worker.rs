@@ -3089,6 +3089,18 @@ mod tests {
         assert_eq!(calls_of(&fake, "jobs"), vec!["5".to_owned()]);
     }
 
+    #[test]
+    fn an_active_recent_run_that_is_due_gets_one_job_fetch_in_its_cycle() {
+        let fake = fake_with_runs(vec![active_run("acme/a", 5)]);
+        let mut state = State::new(SLOW_CADENCE);
+        // The list holds the run before its first cycle. In that cycle the run
+        // has no mark, thus `due_jobs` makes it due and `due_recent` sees it too.
+        send_recent(&mut state, &[5]);
+
+        cycle_once(&fake, &mut state);
+        assert_eq!(calls_of(&fake, "jobs"), vec!["5".to_owned()]);
+    }
+
     /// The IDs of all `jobs` calls so far, sorted.
     fn sorted_job_ids(fake: &FakeSource) -> Vec<u64> {
         let mut ids: Vec<u64> = calls_of(fake, "jobs")
