@@ -1021,7 +1021,11 @@ impl Board {
     /// time it changes (`Command::RecentRuns`).
     #[must_use]
     pub fn recent_runs(&self, now: DateTime<Utc>) -> Vec<(RepoName, RunId)> {
-        Vec::new()
+        self.sections(now)
+            .1
+            .into_iter()
+            .map(|run| (run.repo.clone(), run.id))
+            .collect()
     }
 
     /// Moves the selection to the next row: an item row or a job row.
