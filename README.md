@@ -2380,9 +2380,10 @@ cannot hang the caller. Used by `cwt` and `ha`.
       it. `7d` is today and the 6 days before. `30d` is today and the 29 days before. GitHub
       gives no billing data for a period shorter than one UTC day. An hour filter gives
       `400 Hourly time period filtering is deprecated`.
-    - The usage of a job shows in the report with a lag. On 2026-11-06, the usage of a job showed
-      less than 10 minutes after the job ended. A poll every 10 minutes could not show a shorter
-      lag. The `date` of an item is the end of the first job of that UTC day.
+    - The usage of a job shows in the report with a lag of minutes, not of a day. On 2026-11-06, a
+      poll every 2 minutes found the usage of 9 jobs between 2 and 28 minutes after each job ended.
+      Thus the `today` column can miss the jobs of the last half hour. The `date` of an item is
+      the end of the first job of that UTC day.
     - A row shows `loading…` until the first answer comes. An account with no usage shows
       `$0.00`. An account that `ha` cannot read shows the reason, never `$0.00`. A total that
       does not include all accounts shows `≥` after its label. When a refresh fails, the row
