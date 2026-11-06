@@ -3090,6 +3090,39 @@ mod tests {
     }
 
     #[test]
+    fn failed_fetches_of_recent_runs_stay_within_32_in_each_cycle() {
+        let fake = fake_with_runs((1..=40).map(|id| run("acme/a", id)).collect());
+        for id in 1..=40 {
+            fake.script()
+                .jobs
+                .insert(RunId(id), Err(SourceError::Failed("boom".to_owned())));
+        }
+        let mut state = State::new(SLOW_CADENCE);
+        cycle_once(&fake, &mut state);
+        let ids: Vec<u64> = (1..=40).rev().collect();
+        send_recent(&mut state, &ids);
+
+        let mut before = job_calls(&fake);
+        for cycle in 1..=3 {
+            cycle_once(&fake, &mut state);
+            let after = job_calls(&fake);
+            assert!(
+                after - before <= 32,
+                "cycle {cycle} sent {} fetches",
+                after - before
+            );
+            before = after;
+        }
+        let ids = sorted_job_ids(&fake);
+        let second_cycle: Vec<u64> = ids[32..64].to_vec();
+        assert_eq!(
+            second_cycle,
+            (9..=40).collect::<Vec<u64>>(),
+            "the second cycle takes the failed runs again, newest first"
+        );
+    }
+
+    #[test]
     fn a_recent_run_that_left_the_list_gets_no_fetch() {
         let fake = fake_with_runs((1..=40).map(|id| run("acme/a", id)).collect());
         let mut state = State::new(SLOW_CADENCE);
