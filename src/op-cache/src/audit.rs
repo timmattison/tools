@@ -126,6 +126,12 @@ pub(crate) struct OpEnd {
     pub(crate) outcome: Outcome,
 }
 
+/// The longest prefix of `text` that is at most `max_bytes` bytes and ends on
+/// a char boundary. It never slices inside a multi-byte character.
+pub(crate) fn truncate_at_char_boundary(text: &str, max_bytes: usize) -> &str {
+    text
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,5 +260,35 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(line)
                 .unwrap_or_else(|error| panic!("interleaved line: {error}"));
         }
+    }
+
+    #[test]
+    fn ascii_longer_than_the_limit_is_cut_to_the_limit() {
+        assert_eq!(truncate_at_char_boundary("abcdefgh", 5), "abcde");
+    }
+
+    #[test]
+    fn text_shorter_than_the_limit_is_unchanged() {
+        assert_eq!(truncate_at_char_boundary("abc", 5), "abc");
+    }
+
+    #[test]
+    fn japanese_is_cut_on_a_char_boundary() {
+        assert_eq!(truncate_at_char_boundary("日本語", 4), "日");
+    }
+
+    #[test]
+    fn emoji_is_cut_on_a_char_boundary() {
+        assert_eq!(truncate_at_char_boundary("🎉🎉", 5), "🎉");
+    }
+
+    #[test]
+    fn accented_text_is_cut_on_a_char_boundary() {
+        assert_eq!(truncate_at_char_boundary("café", 4), "caf");
+    }
+
+    #[test]
+    fn a_limit_of_zero_gives_the_empty_string() {
+        assert_eq!(truncate_at_char_boundary("日本語", 0), "");
     }
 }
