@@ -4943,4 +4943,43 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn a_failed_kind_lookup_gives_the_account_an_error_and_is_asked_again() {
+        let fake = Arc::new(FakeSource::default());
+        let org = Endpoint::Organization(owner("good"));
+        fake.script()
+            .kinds
+            .insert(owner("good"), Ok(AccountKind::Organization));
+        script_usage(&fake, &org, None, 1.0);
+        let broke = SourceError::Failed("lookup broke".to_owned());
+        fake.script().kinds.insert(owner("bad"), Err(broke.clone()));
+        let worker = spawn_with(
+            Arc::clone(&fake),
+            &billing_settings(&["bad", "good"]),
+            NEVER,
+        );
+
+        let first = billing_updates(&one_cycle(&worker));
+
+        assert_eq!(first.len(), 2, "{first:?}");
+        assert!(first.contains(&(owner("bad"), Err(BillingError::Source(broke.clone())))));
+        assert!(first
+            .iter()
+            .any(|(account, result)| *account == owner("good") && result.is_ok()));
+
+        worker
+            .commands
+            .send(Command::RefreshNow)
+            .expect("the worker listens");
+        for _ in 0..20 {
+            if !billing_updates(&one_cycle(&worker)).is_empty() {
+                break;
+            }
+        }
+        assert_eq!(
+            fake.script().kind_asks,
+            vec![owner("bad"), owner("good"), owner("bad")]
+        );
+    }
 }
