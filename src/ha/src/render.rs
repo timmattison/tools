@@ -7571,4 +7571,111 @@ mod tests {
         );
         assert!(hidden.iter().all(|line| !line.contains('│')), "{hidden:?}");
     }
+
+    /// A board of 40 finished runs whose titles are `run-00` to `run-39`.
+    fn long_board() -> Board {
+        let mut board = Board::new(Duration::from_hours(8));
+        let runs = (0..40_u64)
+            .map(|index| {
+                run(
+                    100 + index,
+                    "timmattison/tools",
+                    "CI",
+                    "main",
+                    &format!("run-{index:02}"),
+                    RunState::Passed,
+                    "2026-10-14T09:00:00Z",
+                    &format!("2026-10-14T10:{index:02}:00Z"),
+                )
+            })
+            .collect();
+        board.replace(repo("timmattison/tools"), runs, at("2026-10-14T11:59:30Z"));
+        board
+    }
+
+    /// The run titles in the order of the rows of `lines`.
+    fn titles_in(lines: &[String]) -> Vec<String> {
+        lines
+            .iter()
+            .filter_map(|line| {
+                let start = line.find("run-")?;
+                Some(line[start..start + 6].to_owned())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_box_shows_when_ten_board_rows_remain_and_not_one_row_lower() {
+        let view = two_account_view();
+        let mut board = long_board();
+        // Seven box rows: 19 - 2 - 7 = 10 board rows.
+        let shown = lines(&render_billing(100, 19, &mut board, Some(&view)));
+        assert!(
+            shown.iter().any(|line| line.contains("Actions billing")),
+            "{shown:?}"
+        );
+        assert!(shown[10].contains("run-33"), "{shown:?}");
+        assert!(shown[11].contains("Actions billing"), "{shown:?}");
+        let mut board = long_board();
+        let hidden = lines(&render_billing(100, 18, &mut board, Some(&view)));
+        assert!(
+            hidden.iter().all(|line| !line.contains("Actions billing")),
+            "{hidden:?}"
+        );
+        // The board keeps its full height: header row, 15 board rows.
+        let mut board = long_board();
+        let plain = lines(&render_billing(100, 18, &mut board, None));
+        assert_eq!(hidden, plain);
+    }
+
+    #[test]
+    fn the_board_gives_up_the_rows_of_the_box() {
+        let view = two_account_view();
+        let mut board = long_board();
+        let buffer = render_billing(100, 30, &mut board, Some(&view));
+        let all = lines(&buffer);
+        // Board rows 1 to 21, the box on rows 22 to 28.
+        assert!(all[21].contains("run-"), "{:?}", all[21]);
+        for (y, line) in all.iter().enumerate().take(29).skip(22) {
+            assert!(!line.contains("run-"), "row {y}: {line:?}");
+            assert_eq!(
+                line.chars().take(48).collect::<String>().trim(),
+                "",
+                "row {y}"
+            );
+        }
+        assert!(all[22].contains("Actions billing"));
+    }
+
+    #[test]
+    fn page_down_moves_by_the_board_height_that_the_box_leaves() {
+        let view = two_account_view();
+        let order = titles_in(&lines(&render_billing(100, 60, &mut long_board(), None)));
+        assert_eq!(order.len(), 40);
+        let mut board = long_board();
+        render_billing(100, 30, &mut board, Some(&view));
+        board.select_next(now());
+        let selected_title = |board: &mut Board| {
+            let buffer = render_billing(100, 30, board, Some(&view));
+            let all = lines(&buffer);
+            let y = (0..30_u16)
+                .find(|y| buffer[(60, *y)].modifier.contains(Modifier::REVERSED))
+                .expect("a row is selected");
+            titles_in(&all[usize::from(y)..=usize::from(y)])[0].clone()
+        };
+        let before = selected_title(&mut board);
+        board.select_next_page(now());
+        let after = selected_title(&mut board);
+        let index = |title: &String| order.iter().position(|t| t == title).expect("known title");
+        // 30 - 2 - 7 = 21 board rows, so a page is 20 rows.
+        assert_eq!(index(&after) - index(&before), 20);
+    }
+
+    #[test]
+    fn without_billing_the_board_keeps_the_full_height_and_no_box_shows() {
+        let mut board = long_board();
+        let all = lines(&render_billing(100, 30, &mut board, None));
+        assert!(all[28].contains("run-"), "{:?}", all[28]);
+        assert!(all.iter().all(|line| !line.contains("Actions billing")));
+    }
 }
