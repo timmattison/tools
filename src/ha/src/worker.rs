@@ -1703,6 +1703,8 @@ mod tests {
                 .collect(),
             window: Duration::from_hours(8),
             interval: Duration::from_hours(1),
+            billing: false,
+            billing_enterprises: std::collections::BTreeMap::new(),
         }
     }
 

@@ -61,6 +61,7 @@ fn help_lists_the_options_and_shows_the_config_file() {
         "--config",
         "--window",
         "--interval",
+        "--no-billing",
         "TARGET",
         "config.toml",
         "repos = [",
