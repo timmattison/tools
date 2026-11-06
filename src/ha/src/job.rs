@@ -124,4 +124,17 @@ mod tests {
             Some(Duration::from_secs(211))
         );
     }
+
+    #[test]
+    fn a_running_job_gives_its_start_to_now() {
+        let running = job(RunState::Running, Some(at(12, 0, 0)), None);
+        assert_eq!(
+            running.runner_time(at(12, 1, 0)),
+            Some(Duration::from_secs(60))
+        );
+        assert_eq!(
+            running.runner_time(at(12, 14, 57)),
+            Some(Duration::from_secs(897))
+        );
+    }
 }
