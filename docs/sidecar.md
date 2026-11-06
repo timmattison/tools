@@ -1,6 +1,6 @@
 # sidecar
 
-`sidecar` keeps the data of a project out of its code repository. Each name of data has its own private repository. `sidecar` clones that repository once and links it into each worktree of the project.
+`sidecar` keeps the data of a project out of its code repository. Each set of data has a name and its own private repository. `sidecar` clones that repository once and links it into each worktree of the project.
 
 ## Terms
 
@@ -44,7 +44,7 @@ sidecars = ["testdata", "remotesensing.fyi"]
 `sidecar setup` clones each sidecar and links it. For each name of the registry, in order, it applies these eight rules:
 
 1. If the main clone is missing, clone it on `main`.
-2. If a directory at the place of the main clone is not a clone of the sidecar, do not touch it. Write a warning and make no link. If its `origin` is correct but its clone did not end, do the same, and name `sidecar setup` in the warning.
+2. If a directory at the place of the main clone is not a clone of the sidecar, do not touch it. Write a warning and make no link. If its `origin` is correct but its clone did not end (`HEAD` names no commit, or the index is missing), do the same, and name `sidecar setup` in the warning.
 3. If the link is missing, make a link to the main clone.
 4. If the link points at the main clone or at a sidecar worktree, keep it.
 5. If the link is broken, point it at the main clone.
@@ -58,7 +58,7 @@ When each main clone and each link is correct, the setup makes no network call a
 
 ### The ignore check
 
-Before it starts, the setup checks that git ignores `link_dir` (`git check-ignore`). If git does not ignore it, the setup refuses and prints the `.gitignore` line to add:
+Before it starts, the setup makes sure that git ignores `link_dir` (`git check-ignore`). If git does not ignore it, the setup refuses and prints the `.gitignore` line to add:
 
 ```text
 /data/
@@ -89,7 +89,7 @@ If the variable that `token_env` names is set and not empty, `sidecar` gives the
 `sidecar add` makes a sidecar and registers it. It does these seven steps:
 
 1. Refuse a name that the name rule refuses.
-2. Show the steps that remain, and ask for a yes. `--yes` skips the question. Without a terminal and without `--yes`, refuse.
+2. Show the steps that remain, and ask for a yes. `--yes` skips the question. Without a terminal and without `--yes`, refuse. When no step remains, ask nothing.
 3. Read `repos/<owner>/<host>-data-<name>` through `gh api`. If it is private, use it. If it is public, refuse and change nothing. If it is missing, make it private.
 4. If the sidecar has no `main` branch, push a first commit with `README.md` and `.gitattributes`.
 5. Add the name to `sidecar.toml`. If git does not ignore `link_dir`, add its line to `.gitignore`.
@@ -98,9 +98,9 @@ If the variable that `token_env` names is set and not empty, `sidecar` gives the
 
 Each step does nothing when its work is already done. A second `sidecar add` of the same name thus finishes a partial one, and exits with `0` when nothing remains. For an existing private repository, `sidecar add` only registers, clones, and links it.
 
-The tool cannot do three steps with the settings URL `https://github.com/settings/personal-access-tokens`:
+The tool cannot do these three steps. It prints them at the end of each run:
 
-1. Give the CI token read access to the new repository. GitHub has no API that adds a repository to a fine-grained personal access token.
+1. Give the CI token read access to the new repository at `https://github.com/settings/personal-access-tokens`. GitHub has no API that adds a repository to a fine-grained personal access token.
 2. Name the sidecar in the README of the project.
 3. Commit `sidecar.toml` and `.gitignore`, and merge them through a pull request.
 
@@ -111,7 +111,7 @@ The tool cannot do three steps with the settings URL `https://github.com/setting
 | Column | States |
 | --- | --- |
 | `CLONE` | `missing`, `not a clone of the sidecar`, `clone did not end`, `ready` |
-| `LINK` | `missing`, `at the main clone`, `at a worktree on branch <branch>`, `broken`, `foreign` |
+| `LINK` | `missing`, `at the main clone`, `at a worktree on branch <branch>`, `at a worktree on a detached HEAD`, `broken`, `foreign` |
 
 It also prints a row marked `not registered` for each `<host>-data-*` directory next to the main checkout that the registry does not name. That row shows a half-made sidecar. The command exits with `1` when a row is not ready.
 
