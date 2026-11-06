@@ -217,6 +217,19 @@ caller. It says so at the call site with
 The exemption stays visible in the file it applies to, rather than in a central
 allowlist.
 
+### 24-bit colors read `COLORTERM`
+
+`colored` reads `COLORTERM` each time it formats a 24-bit color. If the value
+is not `truecolor` or `24bit`, it writes the nearest of the 16 basic colors.
+`colored` gives no API to override this read, and `with_forced_ansi` does not
+change it. Thus a test that asserts on a 24-bit color passes only where
+`COLORTERM` says `truecolor`.
+
+`scripts/rust-checks.sh` pins `COLORTERM=truecolor` for the test run, thus the
+hook and CI give the same result in each terminal. To run such a test by hand
+in a terminal that does not set `COLORTERM`, set it on the command:
+`COLORTERM=truecolor cargo test -p gsw`.
+
 ### Crates Currently Using testcolor
 
 - `cdva` - the long-help test of `--strict`
