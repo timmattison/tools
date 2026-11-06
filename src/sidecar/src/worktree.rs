@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context};
 
+use crate::git::MAIN_BRANCH;
 use crate::host::Host;
 use crate::link::point_link;
 use crate::name::SidecarName;
@@ -37,6 +38,17 @@ pub fn point(host: &Host, raw_name: &str, branch: Option<&str>) -> anyhow::Resul
         None => current_branch(host)?,
     };
     let warnings = Vec::new();
+    if branch == MAIN_BRANCH {
+        point_link(&host.link(&name), &main_clone)
+            .with_context(|| format!("cannot change {}", host.link_shown(&name)))?;
+        return Ok(Pointed {
+            name,
+            branch,
+            target: main_clone,
+            made_worktree: false,
+            warnings,
+        });
+    }
     let target = host.worktrees_dir(&name).join(&branch);
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)?;
@@ -44,7 +56,12 @@ pub fn point(host: &Host, raw_name: &str, branch: Option<&str>) -> anyhow::Resul
     add_worktree(
         host,
         &main_clone,
-        &["-b", &branch, &target.to_string_lossy(), "refs/heads/main"],
+        &[
+            "-b",
+            &branch,
+            &target.to_string_lossy(),
+            &format!("refs/heads/{MAIN_BRANCH}"),
+        ],
     )?;
     point_link(&host.link(&name), &target)
         .with_context(|| format!("cannot change {}", host.link_shown(&name)))?;
