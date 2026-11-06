@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::Deserialize;
 use thiserror::Error;
 
 use crate::name::{SidecarName, NAME_RULE};
@@ -74,6 +75,16 @@ pub struct Registry {
     sidecars: Vec<SidecarName>,
 }
 
+/// The keys of the file, as they are written. Unknown keys are errors.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRegistry {
+    link_dir: Option<String>,
+    token_env: Option<String>,
+    #[serde(default)]
+    sidecars: Vec<String>,
+}
+
 impl Default for Registry {
     fn default() -> Self {
         Self {
@@ -90,8 +101,24 @@ impl Registry {
     /// # Errors
     ///
     /// Returns [`RegistryError`] when the text is not a valid registry.
-    pub fn parse(_text: &str) -> Result<Self, RegistryError> {
-        Ok(Self::default())
+    pub fn parse(text: &str) -> Result<Self, RegistryError> {
+        let raw: RawRegistry = toml::from_str(text).map_err(|e| RegistryError::Syntax {
+            message: e.to_string(),
+        })?;
+        let sidecars = raw
+            .sidecars
+            .into_iter()
+            .map(|name| SidecarName::parse(&name).map_err(|_| RegistryError::BadName { name }))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            link_dir: raw
+                .link_dir
+                .map_or_else(|| PathBuf::from(DEFAULT_LINK_DIR), PathBuf::from),
+            token_env: raw
+                .token_env
+                .unwrap_or_else(|| DEFAULT_TOKEN_ENV.to_string()),
+            sidecars,
+        })
     }
 
     /// The directory of the links, relative to the worktree root.
