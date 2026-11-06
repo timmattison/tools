@@ -56,8 +56,8 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 
 use crate::billing::{
-    accounts_of, months_to_fetch, plan_reads, AccountKind, BillingError, DailyUsage, Read,
-    YearMonth,
+    accounts_of, months_to_fetch, plan_reads, AccountKind, BillingError, DailyUsage, Endpoint,
+    Read, UsageItem, YearMonth,
 };
 use crate::github::{RepoList, RunList, RunQuery, Source, SourceError, QUEUE_CHECK_BATCH};
 use crate::job::Job;
@@ -659,9 +659,23 @@ fn read_billing<S: Source>(source: &S, read: &Read, months: &[YearMonth]) -> Upd
     Update::Billing(
         read.accounts
             .iter()
-            .map(|account| (account.clone(), Ok(DailyUsage::from_items(&items))))
+            .map(|account| (account.clone(), usage_of(read, account, &items)))
             .collect(),
     )
+}
+
+/// The usage of one account from the items of its read. An enterprise report
+/// holds every organization, so the account takes only its own items.
+fn usage_of(
+    read: &Read,
+    account: &OwnerName,
+    items: &[UsageItem],
+) -> Result<DailyUsage, BillingError> {
+    match read.endpoint {
+        Endpoint::Organization(_) | Endpoint::User(_) => Ok(DailyUsage::from_items(items)),
+        Endpoint::Enterprise(_) => DailyUsage::for_organization(items, account)
+            .map_err(|error| BillingError::Source(SourceError::BadResponse(error.to_string()))),
+    }
 }
 
 /// What every fetch of one cycle shares.
