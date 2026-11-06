@@ -91,3 +91,17 @@ fn an_existing_public_repository_is_refused_and_nothing_changes() {
     assert!(fs::symlink_metadata(fixture.link(&checkout, NAME)).is_err());
     assert!(posts(&fixture).is_empty(), "{:?}", fixture.gh_calls());
 }
+
+#[test]
+fn without_a_terminal_and_without_yes_add_refuses_and_changes_nothing() {
+    let fixture = Fixture::new(&[]);
+    let checkout = fixture.main_checkout();
+    let before = edited_files(&checkout);
+    let run = fixture.run(&checkout, &["add", NAME]);
+    assert_eq!(run.code, 1, "{run:?}");
+    assert!(run.stderr.contains("--yes"), "{run:?}");
+    assert!(posts(&fixture).is_empty(), "{:?}", fixture.gh_calls());
+    assert_eq!(before, edited_files(&checkout));
+    assert!(!fixture.remote(&format!("megarepo-data-{NAME}")).exists());
+    assert!(!fixture.main_clone(NAME).exists());
+}
