@@ -125,7 +125,7 @@ fn describe(step: Step, host: &Host, name: &SidecarName, facts: &Facts) -> Strin
             format!("push a first commit on {MAIN_BRANCH} with README.md and .gitattributes")
         }
         Step::Register => format!("add \"{name}\" to {REGISTRY_FILE}"),
-        Step::Ignore => format!("add \"{}\" to .gitignore", host.ignore_line()),
+        Step::Ignore => format!("add \"{}\" to {IGNORE_FILE}", host.ignore_line()),
         Step::Clone => format!(
             "clone {} into {}",
             facts.url,
@@ -166,6 +166,9 @@ pub fn run(cwd: &Path, raw_name: &str, yes: bool) -> anyhow::Result<bool> {
     }
     do_steps(&host, &name, &facts)
 }
+
+/// The name of the file that lists the paths git ignores.
+const IGNORE_FILE: &str = ".gitignore";
 
 /// The text of `.gitattributes` in the first commit. It stops git from changing line
 /// endings, so a file with `\r\n` keeps its bytes.
@@ -217,6 +220,26 @@ fn push_first_commit(host: &Host, name: &SidecarName, url: &str) -> anyhow::Resu
     )
 }
 
+/// Adds `line` at the end of the text file `path` on a line of its own. Makes the file
+/// when it is missing. Adds a newline first when the file does not end with one.
+fn append_line(path: &Path, line: &str) -> anyhow::Result<()> {
+    let mut text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(anyhow::Error::new(error).context(format!("cannot read {}", path.display())))
+        }
+    };
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(line);
+    text.push('\n');
+    std::fs::write(path, text).map_err(|error| {
+        anyhow::Error::new(error).context(format!("cannot write {}", path.display()))
+    })
+}
+
 /// Does the steps of the plan in order. Returns true when the new link is correct.
 fn do_steps(host: &Host, name: &SidecarName, facts: &Facts) -> anyhow::Result<bool> {
     if facts.steps.contains(&Step::MakeRepository) {
@@ -229,6 +252,9 @@ fn do_steps(host: &Host, name: &SidecarName, facts: &Facts) -> anyhow::Result<bo
     }
     if facts.steps.contains(&Step::Register) {
         registry::add_name_to_file(&host.worktree_root().join(REGISTRY_FILE), name)?;
+    }
+    if facts.steps.contains(&Step::Ignore) {
+        append_line(&host.worktree_root().join(IGNORE_FILE), &host.ignore_line())?;
     }
     let reloaded = Host::discover(host.worktree_root(), RegistryPolicy::DefaultWhenMissing)?;
     let report = run_setup(&reloaded, Some(name));
