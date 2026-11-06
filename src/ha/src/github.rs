@@ -3427,6 +3427,203 @@ mod tests {
         assert_eq!(requests[1].len(), 3, "{:?}", requests[1]);
     }
 
+    /// The error of a billing read that GitHub answered with `status_line`.
+    fn billing_error_of(
+        status_line: &str,
+        accepted: &str,
+        token: &str,
+        tokens: TokenEnvironment,
+    ) -> BillingError {
+        let stub = Stub::new("cat \"$dir/usage.out\"");
+        let body = "{\"message\":\"Not Found\",\"status\":\"404\"}";
+        stub.file(
+            "usage.out",
+            &billing_output(status_line, accepted, token, body),
+        );
+        stub.source()
+            .with_token_environment(tokens)
+            .billing_usage(&Endpoint::User(acme()), november())
+            .expect_err("an error")
+    }
+
+    const NOT_FOUND: &str = "HTTP/2.0 404 Not Found";
+
+    #[test]
+    fn a_404_without_the_user_scope_says_which_scope_and_how_to_get_it() {
+        let error = billing_error_of(NOT_FOUND, "user", TOKEN_SCOPES, TokenEnvironment::default());
+        assert_eq!(
+            error,
+            BillingError::MissingScope {
+                needed: "user".to_owned(),
+                token: TokenOrigin::GhLogin,
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "no access: token needs \"user\". Run gh auth refresh -h github.com -s user"
+        );
+    }
+
+    #[test]
+    fn a_token_from_a_variable_is_named_in_the_missing_scope_error() {
+        let gh = TokenEnvironment::default().with_gh_token("x");
+        let error = billing_error_of(NOT_FOUND, "user", TOKEN_SCOPES, gh);
+        assert_eq!(
+            error,
+            BillingError::MissingScope {
+                needed: "user".to_owned(),
+                token: TokenOrigin::Variable("GH_TOKEN"),
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "no access: token needs \"user\". Make a new GH_TOKEN with that scope."
+        );
+        let github = TokenEnvironment::default().with_github_token("y");
+        let error = billing_error_of(NOT_FOUND, "user", TOKEN_SCOPES, github);
+        assert_eq!(
+            error,
+            BillingError::MissingScope {
+                needed: "user".to_owned(),
+                token: TokenOrigin::Variable("GITHUB_TOKEN"),
+            }
+        );
+    }
+
+    #[test]
+    fn a_403_with_a_missing_scope_is_a_missing_scope_too() {
+        let error = billing_error_of(
+            "HTTP/2.0 403 Forbidden",
+            "user",
+            TOKEN_SCOPES,
+            TokenEnvironment::default(),
+        );
+        assert!(
+            matches!(error, BillingError::MissingScope { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_token_with_an_accepted_scope_and_a_404_has_no_billing_role() {
+        let error = billing_error_of(
+            NOT_FOUND,
+            "admin:org, repo",
+            TOKEN_SCOPES,
+            TokenEnvironment::default(),
+        );
+        assert_eq!(error, BillingError::NoBillingRole);
+        assert_eq!(
+            error.to_string(),
+            "no access: no billing role for this account, or it is not on the enhanced billing platform"
+        );
+    }
+
+    #[test]
+    fn the_needed_scope_follows_the_rule_of_the_design() {
+        let repo_needed = billing_error_of(
+            NOT_FOUND,
+            "admin:org, repo",
+            "gist, read:org",
+            TokenEnvironment::default(),
+        );
+        assert!(
+            matches!(&repo_needed, BillingError::MissingScope { needed, .. } if needed == "repo"),
+            "{repo_needed:?}"
+        );
+        let enterprise = billing_error_of(
+            NOT_FOUND,
+            "admin:enterprise, manage_billing:enterprise",
+            TOKEN_SCOPES,
+            TokenEnvironment::default(),
+        );
+        assert!(
+            matches!(
+                &enterprise,
+                BillingError::MissingScope { needed, .. } if needed == "manage_billing:enterprise"
+            ),
+            "{enterprise:?}"
+        );
+    }
+
+    #[test]
+    fn a_404_with_no_scope_headers_is_a_plain_http_error() {
+        let stub = Stub::new("cat \"$dir/usage.out\"");
+        stub.file(
+            "usage.out",
+            &http_output(NOT_FOUND, "{\"message\":\"Not Found\"}"),
+        );
+        let error = stub
+            .source()
+            .billing_usage(&Endpoint::User(acme()), november())
+            .expect_err("an error");
+        assert!(
+            matches!(
+                error,
+                BillingError::Source(SourceError::Http { status: 404, .. })
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_404_with_an_empty_accepted_list_is_a_plain_http_error() {
+        let error = billing_error_of(NOT_FOUND, "", TOKEN_SCOPES, TokenEnvironment::default());
+        assert!(
+            matches!(
+                error,
+                BillingError::Source(SourceError::Http { status: 404, .. })
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_500_is_an_http_error_and_a_401_is_not_logged_in() {
+        let server = billing_error_of(
+            "HTTP/2.0 500 Internal Server Error",
+            "user",
+            TOKEN_SCOPES,
+            TokenEnvironment::default(),
+        );
+        assert!(
+            matches!(
+                server,
+                BillingError::Source(SourceError::Http { status: 500, .. })
+            ),
+            "{server:?}"
+        );
+        let login = billing_error_of(
+            "HTTP/2.0 401 Unauthorized",
+            "user",
+            TOKEN_SCOPES,
+            TokenEnvironment::default(),
+        );
+        assert!(
+            matches!(login, BillingError::Source(SourceError::NotLoggedIn(_))),
+            "{login:?}"
+        );
+    }
+
+    #[test]
+    fn a_report_that_is_not_json_or_has_no_items_is_a_bad_response() {
+        for body in ["not json", "{}", "{\"usageItems\":5}", ""] {
+            let stub = Stub::new("cat \"$dir/usage.out\"");
+            stub.file(
+                "usage.out",
+                &billing_output("HTTP/2.0 200 OK", "user", TOKEN_SCOPES, body),
+            );
+            let error = stub
+                .source()
+                .billing_usage(&Endpoint::User(acme()), november())
+                .expect_err("an error");
+            assert!(
+                matches!(error, BillingError::Source(SourceError::BadResponse(_))),
+                "{body:?} gave {error:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_missing_program_is_not_installed() {
         let dir = TempDir::new().unwrap();
