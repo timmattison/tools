@@ -691,4 +691,30 @@ mod notification {
         assert_eq!(calls.len(), 1, "calls: {calls:?}");
         assert!(!alive, "osascript {pid:?} outlived op-cache");
     }
+
+    #[test]
+    fn failing_notification_gives_one_warning_and_the_read_continues() {
+        let fixture = Fixture::new();
+        install_fake_osascript(&fixture, "exit 1");
+        // The sleep lets the fake osascript exit before op returns.
+        fixture.install_fake_op(&format!(
+            "{}\nsleep 1\necho 'op failed' >&2\nexit 1",
+            wait_for_records(&fixture, "1")
+        ));
+
+        let output = notifying_command(&fixture)
+            .args(["read", REFERENCE])
+            .output()
+            .expect("run op-cache");
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let warnings: Vec<&str> = stderr.lines().filter(|l| l.contains("warning:")).collect();
+        assert_eq!(warnings.len(), 1, "stderr: {stderr}");
+        assert!(warnings[0].contains("notification"), "{}", warnings[0]);
+        let ends = records(&audit_text(&fixture))
+            .into_iter()
+            .filter(|record| record["event"] == "op_end")
+            .count();
+        assert_eq!(ends, 3);
+    }
 }
