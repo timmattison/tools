@@ -80,9 +80,13 @@ impl Job {
     /// whole minutes for its cost, and calls this function rather than a copy
     /// of the rule.
     #[must_use]
-    pub fn runner_time(&self, _now: DateTime<Utc>) -> Option<std::time::Duration> {
+    pub fn runner_time(&self, now: DateTime<Utc>) -> Option<std::time::Duration> {
         let started = self.started_at?;
-        self.completed_at.map(|done| span(started, done))
+        if self.state == RunState::Running {
+            Some(span(started, now))
+        } else {
+            self.completed_at.map(|done| span(started, done))
+        }
     }
 }
 
