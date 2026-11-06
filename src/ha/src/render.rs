@@ -207,11 +207,10 @@ fn fit_right(text: &str, width: usize) -> String {
 /// Joins the cells of one row into one line. One space stands between cells.
 ///
 /// The ID part stands after the workflow cell, and `id` is right-aligned in it.
-/// The right marker cell stands after the time cell, and the job-sum cell stands
-/// after the right marker cell. The one `marker` argument
-/// fills it and the left marker cell, thus a row never shows two different
-/// markers. The header line does not come from this function. `header_cells`
-/// builds it.
+/// The right marker cell stands after the time cell, and the job-sum cell
+/// stands after the right marker cell. The one `marker` argument fills it and
+/// the left marker cell, thus a row never shows two different markers. The
+/// header line does not come from this function. `header_cells` builds it.
 ///
 /// `texts[0]` is the bare repository name. The repository cell keeps the end of
 /// a name that does not fit, and `is_stale` puts the [`STALE_MARK`] before the
@@ -288,10 +287,11 @@ const MARK_STYLE: Style = Style::new().fg(Color::Reset);
 
 /// Joins the cells of the header line. One space stands between cells.
 ///
-/// The word `WORKFLOW` fills the workflow cell, one space, and the ID part. Thus the
-/// whole word shows at every frame width, and it heads the workflow name and the ID.
-/// The other cells stand in the same columns as those of a run row. The cell of
-/// the right marker is blank. The word `JOB SUM` fills the last cell.
+/// The word `WORKFLOW` fills the workflow cell, one space, and the ID part.
+/// Thus the whole word shows at every frame width, and it heads the workflow
+/// name and the ID. The other cells stand in the same columns as those of a run
+/// row. The cell of the right marker is blank. The word `JOB SUM` fills the
+/// last cell.
 fn header_cells(widths: Widths) -> String {
     [
         pad_right(" ", MARKER_WIDTH),
@@ -3121,7 +3121,8 @@ mod tests {
     }
 
     /// A board with one finished run (ID 41966278012) whose two finished jobs
-    /// ran 211 s and 897 s. The run row stands at line 4, below the empty running section.
+    /// ran 211 s and 897 s. The run row stands at line 4, below the empty
+    /// running section.
     fn job_sum_board() -> Board {
         let mut board = Board::new(Duration::from_hours(8));
         board.replace(
@@ -3350,10 +3351,11 @@ mod tests {
 
     /// The expected line of a job row at 120 columns. The widths follow the
     /// shares of the 70 columns of room: 19 repository, 8 workflow name, 12
-    /// branch, and 31 title. The text fills 28 columns, the job ID fills 12, and
-    /// the branch and title columns are 44 blank columns. The started and time
-    /// cells fill 19 columns, and the right marker follows them after one space.
-    /// The job-sum cell after the marker is blank, thus the trim removes it.
+    /// branch, and 31 title. The text fills 28 columns, the job ID fills 12,
+    /// and the branch and title columns are 44 blank columns. The started and
+    /// time cells fill 19 columns, and the right marker follows them after one
+    /// space. The job-sum cell after the marker is blank, thus the trim removes
+    /// it.
     ///
     /// The marker is an emoji of 2 columns. `format!` pads by characters, thus
     /// the caller never pads the marker with a format width. A blank marker is
@@ -4266,12 +4268,12 @@ mod tests {
     /// `WORKFLOW`, which is 8 columns, and the branch is never wider than 12
     /// columns. The title gets each column that the two give up. The marker
     /// column is 2 columns wide since issue #581, thus each width has the entry
-    /// that the frame one column narrower had before. Since issue #590, the right
-    /// marker cell and its space take 3 columns, thus each width has the entry
-    /// that the frame three columns narrower had before. Since issue #587 the
-    /// repository gets 28 percent. Since issue #642 the job-sum cell and its
-    /// space take 8 columns, thus each width has the entry that the frame eight
-    /// columns narrower had before.
+    /// that the frame one column narrower had before. Since issue #590, the
+    /// right marker cell and its space take 3 columns, thus each width has the
+    /// entry that the frame three columns narrower had before. Since issue #587
+    /// the repository gets 28 percent. Since issue #642 the job-sum cell and
+    /// its space take 8 columns, thus each width has the entry that the frame
+    /// eight columns narrower had before.
     const TEXT_WIDTHS: [(usize, usize, usize, usize); 121] = [
         (8, 5, 6, 11),
         (8, 5, 6, 12),
@@ -6262,8 +6264,8 @@ mod tests {
     /// The time cells of [`passed_job`] in a golden line.
     const PASSED_TIMES: &str = "11:46:00    2m 00s";
 
-    /// A job name of 22 columns. Its text `└ ` plus the name is 24 columns, thus
-    /// the room for a runner name in the 28 columns of the cell is 3.
+    /// A job name of 22 columns. Its text `└ ` plus the name is 24 columns,
+    /// thus the room for a runner name in the 28 columns of the cell is 3.
     const ROOM_OF_3_NAME: &str = "abcdefghijklmnopqrstuv";
 
     #[test]

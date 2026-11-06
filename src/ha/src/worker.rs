@@ -14,17 +14,16 @@
 //! runs on each cycle when the run is due. A run is due only while the list of
 //! runs holds it. Then it is due when it has no good job fetch yet, when the
 //! run or one of its jobs was active at the last good fetch, or when its
-//! `updated_at` changed since the last good fetch. So `ha` fetches
-//! the jobs of a finished run one time only, when all of its jobs are finished.
-//! Each active run costs one more jobs request on each cycle. An `ETag` 304
-//! answer makes that request free. The screen also sends the runs of its
-//! recent section, with [`Command::RecentRuns`]. The worker fetches the jobs
-//! of each finished run of that list one time, so the screen can show the job
-//! sum of the run. This costs one request for each finished run, at most
+//! `updated_at` changed since the last good fetch. So `ha` fetches the jobs of
+//! a finished run one time only, when all of its jobs are finished. Each active
+//! run costs one more jobs request on each cycle. An `ETag` 304 answer makes
+//! that request free. The screen also sends the runs of its recent section,
+//! with [`Command::RecentRuns`]. The worker fetches the jobs of each finished
+//! run of that list one time, so the screen can show the job sum of the run.
+//! This costs one request for each finished run, at most
 //! [`RECENT_JOBS_PER_CYCLE`] runs in each cycle, the newest finish first. A
-//! retry of a failed recent run goes under the same cap.
-//! Job requests and run requests share the
-//! [`CONCURRENCY`] limit and the rate limit backoff.
+//! retry of a failed recent run goes under the same cap. Job requests and run
+//! requests share the [`CONCURRENCY`] limit and the rate limit backoff.
 //!
 //! GitHub can answer with success and still leave runs out. The worker keeps
 //! the last good created answer of each repository. A run that the new answer
@@ -609,8 +608,8 @@ fn wait_for_next_cycle<S: Source>(
 
 /// Applies one command. A refresh sets `requested`. A new watched set adds its
 /// new runs to `added`. A `RecentRuns` list replaces `state.recent` and touches
-/// neither `requested` nor `added`, so nothing is fetched at once. The set holds a run one time, even when two commands
-/// add it.
+/// neither `requested` nor `added`, so nothing is fetched at once. The set
+/// holds a run one time, even when two commands add it.
 fn apply_command(
     command: Command,
     state: &mut State,
@@ -632,11 +631,12 @@ fn apply_command(
 /// runs that are due (the watched runs, the active runs, and the runs with a
 /// mark, when the list of runs holds the run, and the new finished runs of the
 /// recent list, at most [`RECENT_JOBS_PER_CYCLE`]), all in one job fetch, and
-/// reports the end of the cycle. A mark whose run left the list of runs is removed. The reconcile at
-/// the end of the job fetch then tells the source to forget the pages of each
-/// run whose mark went away. A failed or suspect repository fetch keeps its
-/// old facts, thus its marks stay. Returns how long to wait before the next
-/// one, and whether the worker waits for a rate limit reset.
+/// reports the end of the cycle. A mark whose run left the list of runs is
+/// removed. The reconcile at the end of the job fetch then tells the source to
+/// forget the pages of each run whose mark went away. A failed or suspect
+/// repository fetch keeps its old facts, thus its marks stay. Returns how long
+/// to wait before the next one, and whether the worker waits for a rate limit
+/// reset.
 fn cycle<S: Source>(
     source: &S,
     settings: &Settings,

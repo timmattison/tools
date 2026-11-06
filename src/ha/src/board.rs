@@ -790,17 +790,16 @@ impl Board {
     ///
     /// The order of the sections is: the merge queue, the active runs, the
     /// merge history, and the recent runs. The two merge sections show only
-    /// when [`Board::shows_merge_sections`] is true. The header of the active section
-    /// counts the jobs of the active runs by state and names the runners of the
-    /// jobs that wait or run. The selected row carries the
-    /// selection mark. This is the row of the selected item, or the row of
-    /// its selected job. The block of each expanded run follows the row of
-    /// that run. The item rows come in the order of `shown_items`, and the
-    /// selection finds the row of an item by the position of that item in
-    /// `shown_items`. The list also holds header rows, empty rows, and job
-    /// rows, thus the index of a row is not the position of its item. The
-    /// `job_sum` of each run row is the sum of the runner times of its last
-    /// good jobs at `now`.
+    /// when [`Board::shows_merge_sections`] is true. The header of the active
+    /// section counts the jobs of the active runs by state and names the
+    /// runners of the jobs that wait or run. The selected row carries the
+    /// selection mark. This is the row of the selected item, or the row of its
+    /// selected job. The block of each expanded run follows the row of that
+    /// run. The item rows come in the order of `shown_items`, and the selection
+    /// finds the row of an item by the position of that item in `shown_items`.
+    /// The list also holds header rows, empty rows, and job rows, thus the
+    /// index of a row is not the position of its item. The `job_sum` of each
+    /// run row is the sum of the runner times of its last good jobs at `now`.
     fn build_rows(&self, now: DateTime<Utc>) -> Vec<Row<'_>> {
         let selected = self.selected.as_ref();
         let mut rows = Vec::new();
@@ -1248,11 +1247,11 @@ fn job_sum(jobs: &[Job], now: DateTime<Utc>) -> Option<Duration> {
 ///
 /// `first` is the position of the first run of `runs` among all items. The row
 /// of the run at the position of `selected` gets the mark when the selection
-/// has no job part. Otherwise the job row at the selected job position gets
-/// the mark. The state of each run row comes from the job answer of the run,
+/// has no job part. Otherwise the job row at the selected job position gets the
+/// mark. The state of each run row comes from the job answer of the run,
 /// expanded or not. The `job_sum` of each run row is the sum of the runner
-/// times of the last good jobs at `view.now`, see `job_sum`. The block of jobs of
-/// each run in `view.expanded` follows the row of that run.
+/// times of the last good jobs at `view.now`, see `job_sum`. The block of jobs
+/// of each run in `view.expanded` follows the row of that run.
 fn push_runs<'a>(
     rows: &mut Vec<Row<'a>>,
     runs: &[&'a Run],
