@@ -286,3 +286,17 @@ fn an_existing_repository_without_main_gets_a_first_commit() {
     files.sort_unstable();
     assert_eq!(files, [".gitattributes", "README.md"]);
 }
+
+#[test]
+fn a_crlf_file_keeps_its_crlf_bytes_in_the_blob() {
+    let fixture = Fixture::new(&[]);
+    let run = fixture.run(&fixture.main_checkout(), &["add", NAME, "--yes"]);
+    assert_eq!(run.code, 0, "{run:?}");
+    let clone = fixture.main_clone(NAME);
+    fs::write(clone.join("a.j2w"), b"1\r\n2\r\n").unwrap();
+    fixture.git(&clone, &["-c", "core.autocrlf=input", "add", "a.j2w"]);
+    fixture.git(&clone, &["commit", "--quiet", "-m", "crlf"]);
+    let blob = fixture.try_git(&clone, &["cat-file", "-p", "HEAD:a.j2w"]);
+    assert!(blob.status.success());
+    assert_eq!(blob.stdout, b"1\r\n2\r\n");
+}
