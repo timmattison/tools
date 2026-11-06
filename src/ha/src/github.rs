@@ -561,15 +561,21 @@ impl GhSource {
 
     /// Fetches `path` with `gh api -i` and splits the answer.
     ///
-    /// With an `etag`, the request carries an `If-None-Match` header.
+    /// With an `etag`, the request carries an `If-None-Match` header. A status
+    /// of 400 or more gives the error of [`http_error`].
     fn request(&self, path: &str, etag: Option<&str>) -> Result<Response, SourceError> {
+        refuse_http_error(self.request_raw(path, etag)?)
+    }
+
+    /// Like [`GhSource::request`], and the answer comes back for any status.
+    fn request_raw(&self, path: &str, etag: Option<&str>) -> Result<Response, SourceError> {
         let condition = etag.map(|etag| format!("If-None-Match: {etag}"));
         let mut args = vec!["api", "-i"];
         if let Some(condition) = &condition {
             args.extend(["-H", condition]);
         }
         args.push(path);
-        self.send(&args)
+        self.send_raw(&args)
     }
 
     /// Runs `gh` with `args` and reads the answer of `gh api -i`.
@@ -577,15 +583,19 @@ impl GhSource {
     /// The rate limit headers go to the budget. A status of 400 or more gives
     /// the error of [`http_error`].
     fn send(&self, args: &[&str]) -> Result<Response, SourceError> {
+        refuse_http_error(self.send_raw(args)?)
+    }
+
+    /// Runs `gh` with `args` and reads the answer of `gh api -i`, for any
+    /// status. The rate limit headers go to the budget. Only an output with no
+    /// HTTP answer is an error.
+    fn send_raw(&self, args: &[&str]) -> Result<Response, SourceError> {
         let output = self.run_gh(args)?;
         let text = String::from_utf8_lossy(&output.stdout);
         let Some(response) = parse_response(&text) else {
             return Err(no_answer_error(&output));
         };
         self.note_rate(&response);
-        if response.status >= 400 {
-            return Err(http_error(&response));
-        }
         Ok(response)
     }
 
@@ -637,22 +647,41 @@ impl GhSource {
 
     /// Fetches `path` and parses the body, with the `ETag` cache.
     ///
-    /// The `ETag` goes out only when the cached path is the same as `path`. On
-    /// a `304`, the function parses the cached body. On a `200`, it parses the
-    /// new body, and it stores the body and the `ETag` only after the parse
-    /// succeeds, thus an unreadable body never stays in the cache.
+    /// See [`GhSource::cached_read`]. A status of 400 or more gives the error
+    /// of [`http_error`].
     fn cached_get<T>(
         &self,
         key: &str,
         path: &str,
         parse: impl Fn(&str) -> Result<T, SourceError>,
     ) -> Result<T, SourceError> {
+        self.cached_read(key, path, parse, http_error)
+    }
+
+    /// Fetches `path` and parses the body, with the `ETag` cache. This is the
+    /// one place that holds the cache rules, for every caller.
+    ///
+    /// The `ETag` goes out only when the cached path is the same as `path`. On
+    /// a `304`, the function parses the cached body. On a `200`, it parses the
+    /// new body, and it stores the body and the `ETag` only after the parse
+    /// succeeds, thus an unreadable body never stays in the cache. A status of
+    /// 400 or more gives `refuse(response)`.
+    fn cached_read<T, E: From<SourceError>>(
+        &self,
+        key: &str,
+        path: &str,
+        parse: impl Fn(&str) -> Result<T, E>,
+        refuse: impl Fn(&Response) -> E,
+    ) -> Result<T, E> {
         let etag = self
             .lock_etags()
             .get(key)
             .filter(|cached| cached.path == path)
             .map(|cached| cached.etag.clone());
-        let response = self.request(path, etag.as_deref())?;
+        let response = self.request_raw(path, etag.as_deref())?;
+        if response.status >= 400 {
+            return Err(refuse(&response));
+        }
         if response.status == 304 {
             let body = self
                 .lock_etags()
@@ -1454,6 +1483,15 @@ fn no_answer_error(output: &Output) -> SourceError {
         return SourceError::Failed(format!("gh exited with {status} and printed nothing"));
     }
     SourceError::Failed(line)
+}
+
+/// Gives the answer back, or the error of [`http_error`] for a status of 400
+/// or more.
+fn refuse_http_error(response: Response) -> Result<Response, SourceError> {
+    if response.status >= 400 {
+        return Err(http_error(&response));
+    }
+    Ok(response)
 }
 
 /// The error for an HTTP answer with a status of 400 or more.
