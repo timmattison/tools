@@ -57,8 +57,13 @@ fn read_repository(
     repo: &str,
     url: &str,
 ) -> anyhow::Result<(bool, bool)> {
-    if gh::repository_visibility(owner, repo)?.is_none() {
-        return Ok((false, false));
+    match gh::repository_visibility(owner, repo)? {
+        None => return Ok((false, false)),
+        Some(gh::Visibility::Private) => {}
+        Some(gh::Visibility::Other(word)) => anyhow::bail!(
+            "The repository {owner}/{repo} is {word}. A sidecar must be private. \
+             sidecar add changes nothing."
+        ),
     }
     let heads = host.git().run(
         host.worktree_root(),
