@@ -419,11 +419,21 @@ pub enum TokenOrigin {
     GhLogin,
 }
 
+impl TokenOrigin {
+    /// The sentence that tells a person how to get the scope `needed`.
+    fn fix(self, needed: &str) -> String {
+        match self {
+            TokenOrigin::Variable(name) => format!("Make a new {name} with that scope."),
+            TokenOrigin::GhLogin => format!("Run gh auth refresh -h github.com -s {needed}"),
+        }
+    }
+}
+
 /// Why one billing read gave no usage.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum BillingError {
     /// The token holds none of the scopes that the endpoint accepts.
-    #[error("")]
+    #[error("no access: token needs \"{needed}\". {}", .token.fix(needed))]
     MissingScope {
         /// The scope that the person must add.
         needed: String,
@@ -431,20 +441,26 @@ pub enum BillingError {
         token: TokenOrigin,
     },
     /// The token holds an accepted scope and GitHub still refuses the read.
-    #[error("")]
+    #[error("no access: no billing role for this account, or it is not on the enhanced billing platform")]
     NoBillingRole,
     /// Every other failure.
-    #[error("")]
+    #[error("{0}")]
     Source(SourceError),
 }
+
+/// The scopes that `needed_scope` prefers, in order.
+const KNOWN_SCOPES: [&str; 3] = ["user", "repo", "manage_billing:enterprise"];
 
 /// The scope to name when a token lacks every accepted scope: the first of
 /// `user`, `repo`, `manage_billing:enterprise` that `accepted` holds, else the
 /// first accepted scope.
 #[must_use]
 pub fn needed_scope(accepted: &[&str]) -> String {
-    let _ = accepted;
-    String::new()
+    KNOWN_SCOPES
+        .iter()
+        .find(|known| accepted.contains(known))
+        .or_else(|| accepted.first())
+        .map_or_else(String::new, |scope| (*scope).to_owned())
 }
 
 #[cfg(test)]
