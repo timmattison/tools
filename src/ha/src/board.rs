@@ -4773,4 +4773,39 @@ mod tests {
             Some(at("2026-11-04T17:20:00Z"))
         );
     }
+
+    /// Run 41874500000 of `Lock-Free-Labs/nvr-tools`. It passed, and its
+    /// `updated_at` is 17:30:00. It holds no jobs in the tests, thus it ends
+    /// at its update, after the end of `late_run` with `late_jobs`.
+    fn later_run() -> Run {
+        Run {
+            id: RunId(41_874_500_000),
+            started_at: at("2026-11-04T17:10:00Z"),
+            created_at: at("2026-11-04T17:10:00Z"),
+            updated_at: at("2026-11-04T17:30:00Z"),
+            ..late_run()
+        }
+    }
+
+    /// The IDs of the run rows of `rows`, as `shape` writes them.
+    fn run_rows(rows: Vec<String>) -> Vec<String> {
+        rows.into_iter()
+            .filter(|row| row.starts_with("Run("))
+            .collect()
+    }
+
+    #[test]
+    fn the_recent_runs_are_in_order_of_their_end() {
+        let mut board = late_board(late_run(), Some(late_jobs()));
+        board.replace(
+            repo("Lock-Free-Labs/nvr-tools"),
+            vec![late_run(), later_run()],
+            late_now(),
+        );
+        // By `updated_at` the first run is newer. By the end it is older.
+        assert_eq!(
+            run_rows(shape(&board.rows(late_now()))),
+            ["Run(41874500000)", "Run(41874496263)"]
+        );
+    }
 }
