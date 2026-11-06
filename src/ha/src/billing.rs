@@ -463,6 +463,124 @@ pub fn needed_scope(accepted: &[&str]) -> String {
         .map_or_else(String::new, |scope| (*scope).to_owned())
 }
 
+/// What the board knows of one account.
+#[derive(Debug, Clone)]
+enum AccountState {
+    /// No answer yet.
+    Loading,
+    /// A good answer, and the error of the last refresh when that refresh
+    /// failed after a good one.
+    Ready {
+        usage: DailyUsage,
+        error: Option<String>,
+    },
+    /// No good answer ever, and the text of the last error.
+    NoAccess(String),
+}
+
+/// The accounts of the billing box and what the last reads gave for each.
+/// The accounts keep the order of [`BillingBoard::new`].
+#[derive(Debug, Clone)]
+pub struct BillingBoard {
+    accounts: Vec<(OwnerName, AccountState)>,
+}
+
+/// What the box shows for one account.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AccountCell {
+    /// No answer yet.
+    Loading,
+    /// The sums of the four windows. `error` holds the text of the last
+    /// refresh when it failed; the windows are then the last good ones.
+    Ready {
+        /// The sums of the four windows.
+        windows: Windows,
+        /// The error of the last refresh, when it failed after a good one.
+        error: Option<String>,
+    },
+    /// The account never gave usage. The text says why.
+    NoAccess(String),
+}
+
+/// One row of the box.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountLine {
+    /// The account.
+    pub name: OwnerName,
+    /// What to show for it.
+    pub cell: AccountCell,
+}
+
+/// The sum of one kind of amount over the ready accounts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Total {
+    /// The sum for the UTC day `today`.
+    pub today: Usd,
+    /// The sum for the day before `today`.
+    pub yesterday: Usd,
+    /// The sum for the last 7 days.
+    pub last_7_days: Usd,
+    /// The sum for the last 30 days.
+    pub last_30_days: Usd,
+    /// True when an account is loading or has no access, so the sum leaves
+    /// that account out.
+    pub partial: bool,
+}
+
+/// All that the box draws.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BillingView {
+    /// One row for each account, in board order.
+    pub accounts: Vec<AccountLine>,
+    /// The sums of the amounts that GitHub bills.
+    pub billed: Total,
+    /// The sums of the amounts at list price.
+    pub list_price: Total,
+}
+
+impl BillingBoard {
+    /// A board that holds `accounts`, each one loading.
+    #[must_use]
+    pub fn new(accounts: Vec<OwnerName>) -> BillingBoard {
+        BillingBoard {
+            accounts: accounts
+                .into_iter()
+                .map(|name| (name, AccountState::Loading))
+                .collect(),
+        }
+    }
+
+    /// Takes the results of one billing read. A result for an account that
+    /// the board does not hold is ignored.
+    pub fn apply(&mut self, results: Vec<(OwnerName, Result<DailyUsage, BillingError>)>) {
+        let _ = results;
+    }
+
+    /// The rows and the totals for the UTC day `today`.
+    #[must_use]
+    pub fn view(&self, today: NaiveDate) -> BillingView {
+        let _ = today;
+        BillingView {
+            accounts: self
+                .accounts
+                .iter()
+                .map(|(name, _)| AccountLine {
+                    name: name.clone(),
+                    cell: AccountCell::Loading,
+                })
+                .collect(),
+            billed: Total {
+                partial: true,
+                ..Total::default()
+            },
+            list_price: Total {
+                partial: true,
+                ..Total::default()
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -989,5 +1107,214 @@ mod tests {
             [read(Endpoint::Organization(owner("acme")), &["acme"])]
         );
         assert!(plan_reads(&[owner("unknown")], &BTreeMap::new(), &BTreeMap::new()).is_empty());
+    }
+
+    fn usage_of(items: &[UsageItem]) -> DailyUsage {
+        DailyUsage::from_items(items)
+    }
+
+    fn board_of(names: &[&str]) -> BillingBoard {
+        BillingBoard::new(names.iter().map(|name| owner(name)).collect())
+    }
+
+    fn money(net: f64, gross: f64) -> Amounts {
+        Amounts {
+            billed: amount(net),
+            list_price: amount(gross),
+        }
+    }
+
+    fn cell_of(view: &BillingView, name: &str) -> AccountCell {
+        view.accounts
+            .iter()
+            .find(|line| line.name == owner(name))
+            .expect("the account is in the view")
+            .cell
+            .clone()
+    }
+
+    #[test]
+    fn a_new_board_views_every_account_as_loading() {
+        let view = board_of(&["acme", "bob"]).view(today());
+        assert_eq!(
+            view.accounts
+                .iter()
+                .map(|line| (line.name.clone(), line.cell.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (owner("acme"), AccountCell::Loading),
+                (owner("bob"), AccountCell::Loading)
+            ]
+        );
+        let partial_zero = Total {
+            partial: true,
+            ..Total::default()
+        };
+        assert_eq!(view.billed, partial_zero);
+        assert_eq!(view.list_price, partial_zero);
+        assert_eq!(view.billed.today.to_string(), "$0.00");
+    }
+
+    #[test]
+    fn good_results_give_ready_accounts_and_exact_totals() {
+        let mut board = board_of(&["acme", "bob"]);
+        let acme = usage_of(&[
+            item_at("2026-11-06T00:00:00Z", "actions", 3.0, 2.0),
+            item_at("2026-11-05T00:00:00Z", "actions", 1.5, 1.0),
+        ]);
+        let bob = usage_of(&[
+            item_at("2026-11-06T00:00:00Z", "actions", 0.5, 0.25),
+            item_at("2026-10-20T00:00:00Z", "actions", 10.0, 4.0),
+        ]);
+        board.apply(vec![
+            (owner("acme"), Ok(acme.clone())),
+            (owner("bob"), Ok(bob.clone())),
+        ]);
+        let view = board.view(today());
+        assert_eq!(
+            cell_of(&view, "acme"),
+            AccountCell::Ready {
+                windows: acme.windows(today()),
+                error: None
+            }
+        );
+        assert_eq!(
+            cell_of(&view, "acme"),
+            AccountCell::Ready {
+                windows: Windows {
+                    today: money(2.0, 3.0),
+                    yesterday: money(1.0, 1.5),
+                    last_7_days: money(3.0, 4.5),
+                    last_30_days: money(3.0, 4.5),
+                },
+                error: None
+            }
+        );
+        assert_eq!(
+            view.billed,
+            Total {
+                today: amount(2.25),
+                yesterday: amount(1.0),
+                last_7_days: amount(3.25),
+                last_30_days: amount(7.25),
+                partial: false
+            }
+        );
+        assert_eq!(
+            view.list_price,
+            Total {
+                today: amount(3.5),
+                yesterday: amount(1.5),
+                last_7_days: amount(5.0),
+                last_30_days: amount(15.0),
+                partial: false
+            }
+        );
+    }
+
+    #[test]
+    fn an_account_with_no_items_is_ready_with_zero_windows() {
+        let mut board = board_of(&["acme"]);
+        board.apply(vec![(owner("acme"), Ok(usage_of(&[])))]);
+        let view = board.view(today());
+        assert_eq!(
+            cell_of(&view, "acme"),
+            AccountCell::Ready {
+                windows: Windows::default(),
+                error: None
+            }
+        );
+        assert_eq!(view.billed.today.to_string(), "$0.00");
+        assert!(!view.billed.partial);
+        assert!(!view.list_price.partial);
+    }
+
+    #[test]
+    fn a_failed_result_for_a_new_account_gives_no_access_and_a_partial_total() {
+        let mut board = board_of(&["acme", "bob"]);
+        board.apply(vec![
+            (
+                owner("acme"),
+                Ok(usage_of(&[actions_on("2026-11-06", 2.0)])),
+            ),
+            (owner("bob"), Err(BillingError::NoBillingRole)),
+        ]);
+        let view = board.view(today());
+        assert_eq!(
+            cell_of(&view, "bob"),
+            AccountCell::NoAccess(BillingError::NoBillingRole.to_string())
+        );
+        assert!(view.billed.partial);
+        assert!(view.list_price.partial);
+        assert_eq!(view.billed.today, amount(2.0));
+    }
+
+    #[test]
+    fn a_failed_result_after_a_good_one_keeps_the_windows_and_sets_the_error() {
+        let mut board = board_of(&["acme"]);
+        let usage = usage_of(&[actions_on("2026-11-06", 2.0)]);
+        board.apply(vec![(owner("acme"), Ok(usage.clone()))]);
+        board.apply(vec![(owner("acme"), Err(BillingError::NoBillingRole))]);
+        let view = board.view(today());
+        assert_eq!(
+            cell_of(&view, "acme"),
+            AccountCell::Ready {
+                windows: usage.windows(today()),
+                error: Some(BillingError::NoBillingRole.to_string())
+            }
+        );
+        assert_eq!(view.billed.today, amount(2.0));
+        assert!(!view.billed.partial);
+        assert!(!view.list_price.partial);
+    }
+
+    #[test]
+    fn a_later_good_result_clears_the_error() {
+        let mut board = board_of(&["acme"]);
+        board.apply(vec![(
+            owner("acme"),
+            Ok(usage_of(&[actions_on("2026-11-06", 2.0)])),
+        )]);
+        board.apply(vec![(owner("acme"), Err(BillingError::NoBillingRole))]);
+        let newer = usage_of(&[actions_on("2026-11-06", 5.0)]);
+        board.apply(vec![(owner("acme"), Ok(newer.clone()))]);
+        assert_eq!(
+            cell_of(&board.view(today()), "acme"),
+            AccountCell::Ready {
+                windows: newer.windows(today()),
+                error: None
+            }
+        );
+    }
+
+    #[test]
+    fn the_accounts_keep_the_order_of_new_whatever_the_order_of_the_results() {
+        let mut board = board_of(&["zed", "acme", "mid"]);
+        board.apply(vec![
+            (owner("mid"), Ok(usage_of(&[]))),
+            (owner("acme"), Ok(usage_of(&[]))),
+            (owner("zed"), Ok(usage_of(&[]))),
+        ]);
+        let names: Vec<OwnerName> = board
+            .view(today())
+            .accounts
+            .into_iter()
+            .map(|line| line.name)
+            .collect();
+        assert_eq!(names, vec![owner("zed"), owner("acme"), owner("mid")]);
+    }
+
+    #[test]
+    fn a_result_for_an_unknown_account_changes_nothing() {
+        let mut board = board_of(&["acme"]);
+        let before = board.view(today());
+        board.apply(vec![
+            (
+                owner("stranger"),
+                Ok(usage_of(&[actions_on("2026-11-06", 9.0)])),
+            ),
+            (owner("other"), Err(BillingError::NoBillingRole)),
+        ]);
+        assert_eq!(board.view(today()), before);
     }
 }
