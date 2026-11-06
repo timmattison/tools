@@ -4660,4 +4660,23 @@ mod tests {
             Some(at("2026-11-04T17:22:45Z"))
         );
     }
+
+    #[test]
+    fn a_job_that_still_runs_gives_no_end() {
+        let run = late_run();
+        let id = run.id;
+        let mut jobs = late_jobs();
+        jobs.push(timed_job(
+            126_730_109_999,
+            "Deploy",
+            RunState::Running,
+            Some("2026-11-04T17:20:00Z"),
+            None,
+        ));
+        let mut board = late_board(run, Some(jobs));
+        assert_eq!(
+            ended(&mut board, late_now(), id),
+            Some(at("2026-11-04T17:40:55Z"))
+        );
+    }
 }
