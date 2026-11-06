@@ -26,7 +26,7 @@ pub struct Token(String);
 
 impl fmt::Debug for Token {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Token({})", self.0)
+        write!(f, "Token(<redacted>)")
     }
 }
 
@@ -40,8 +40,7 @@ impl Token {
 
     /// Makes a token from the value of a variable. An absent or empty value gives `None`.
     fn from_value(value: Option<String>) -> Option<Token> {
-        let _ = value;
-        None
+        value.filter(|v| !v.is_empty()).map(Token)
     }
 }
 
@@ -78,8 +77,10 @@ impl Git {
     /// The variable stays out of the environment of each git command.
     #[must_use]
     pub fn with_token_from(token_env: &str) -> Git {
-        let _ = token_env;
-        Git::without_token()
+        Git {
+            token: Token::from_env(token_env),
+            token_env: Some(token_env.to_string()),
+        }
     }
 
     /// Makes a git command for the directory `cwd`. The caller adds the subcommand.
@@ -99,11 +100,24 @@ impl Git {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let _ = (cwd, args);
-        GitResult {
-            ok: false,
-            stdout: String::new(),
-            stderr: String::new(),
+        let mut command = self.command(cwd);
+        command.args(args);
+        match command.output() {
+            Ok(output) => GitResult {
+                ok: output.status.success(),
+                stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr)
+                    .lines()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .trim()
+                    .to_string(),
+            },
+            Err(error) => GitResult {
+                ok: false,
+                stdout: String::new(),
+                stderr: error.to_string(),
+            },
         }
     }
 }
@@ -120,10 +134,23 @@ pub(crate) fn command_with(
     token: Option<&Token>,
     token_env: Option<&str>,
 ) -> Command {
-    let _ = (sweep, token, token_env);
     let mut command = Command::new("git");
     command.current_dir(cwd).stdin(Stdio::null());
-    let _ = (STANDARD, TOKEN_USER, TOKEN_HEADER_KEY);
+    sweep(&mut command);
+    if let Some(variable) = token_env {
+        command.env_remove(variable);
+    }
+    if let Some(token) = token {
+        let encoded = STANDARD.encode(format!("{TOKEN_USER}:{}", token.0));
+        command
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", TOKEN_HEADER_KEY)
+            .env(
+                "GIT_CONFIG_VALUE_0",
+                format!("AUTHORIZATION: basic {encoded}"),
+            );
+    }
+    command.args(["-c", "color.ui=never"]);
     command
 }
 
@@ -155,13 +182,30 @@ mod tests {
         );
     }
 
-    /// The state of `key` in the command: `None` when the command does not mention it,
-    /// `Some(None)` when it removes it, `Some(Some(value))` when it sets it.
-    fn env_of(command: &Command, key: &str) -> Option<Option<String>> {
+    /// What a command does with one environment variable.
+    #[derive(Debug, PartialEq, Eq)]
+    enum EnvState {
+        /// The command does not mention the variable.
+        Absent,
+        /// The command removes the variable.
+        Removed,
+        /// The command sets the variable to this value.
+        Set(String),
+    }
+
+    fn set(value: &str) -> EnvState {
+        EnvState::Set(value.to_string())
+    }
+
+    fn env_of(command: &Command, key: &str) -> EnvState {
         command
             .get_envs()
             .find(|(name, _)| *name == OsStr::new(key))
-            .map(|(_, value)| value.map(|v| v.to_string_lossy().into_owned()))
+            .map_or(EnvState::Absent, |(_, value)| {
+                value.map_or(EnvState::Removed, |v| {
+                    EnvState::Set(v.to_string_lossy().into_owned())
+                })
+            })
     }
 
     fn temp_dir(label: &str) -> std::path::PathBuf {
@@ -207,24 +251,15 @@ mod tests {
             Some(TOKEN_VARIABLE),
         );
 
-        assert_eq!(env_of(&command, "GIT_DIR"), Some(None));
-        assert_eq!(env_of(&command, "GIT_SSH_COMMAND"), None);
-        assert_eq!(
-            env_of(&command, "GIT_CONFIG_COUNT"),
-            Some(Some("1".to_string()))
-        );
-        assert_eq!(
-            env_of(&command, "GIT_CONFIG_KEY_0"),
-            Some(Some(TOKEN_HEADER_KEY.to_string()))
-        );
+        assert_eq!(env_of(&command, "GIT_DIR"), EnvState::Removed);
+        assert_eq!(env_of(&command, "GIT_SSH_COMMAND"), EnvState::Absent);
+        assert_eq!(env_of(&command, "GIT_CONFIG_COUNT"), set("1"));
+        assert_eq!(env_of(&command, "GIT_CONFIG_KEY_0"), set(TOKEN_HEADER_KEY));
         let encoded = STANDARD.encode(format!("{TOKEN_USER}:{SECRET}"));
         let expected = format!("AUTHORIZATION: basic {encoded}");
         assert_eq!(expected, HEADER_VALUE);
-        assert_eq!(
-            env_of(&command, "GIT_CONFIG_VALUE_0"),
-            Some(Some(HEADER_VALUE.to_string()))
-        );
-        assert_eq!(env_of(&command, TOKEN_VARIABLE), Some(None));
+        assert_eq!(env_of(&command, "GIT_CONFIG_VALUE_0"), set(HEADER_VALUE));
+        assert_eq!(env_of(&command, TOKEN_VARIABLE), EnvState::Removed);
     }
 
     #[test]
@@ -245,9 +280,9 @@ mod tests {
         let command = command_with(synthetic_sweep, Path::new("."), None, None);
 
         // The sweep removes the variable, and the builder does not set it again.
-        assert_eq!(env_of(&command, "GIT_CONFIG_COUNT"), Some(None));
-        assert_eq!(env_of(&command, "GIT_CONFIG_KEY_0"), Some(None));
-        assert_eq!(env_of(&command, "GIT_CONFIG_VALUE_0"), Some(None));
+        assert_eq!(env_of(&command, "GIT_CONFIG_COUNT"), EnvState::Removed);
+        assert_eq!(env_of(&command, "GIT_CONFIG_KEY_0"), EnvState::Removed);
+        assert_eq!(env_of(&command, "GIT_CONFIG_VALUE_0"), EnvState::Removed);
     }
 
     #[test]
@@ -283,11 +318,8 @@ mod tests {
         };
         let command = git.command(Path::new("."));
 
-        assert_eq!(env_of(&command, TOKEN_VARIABLE), Some(None));
-        assert_eq!(
-            env_of(&command, "GIT_CONFIG_VALUE_0"),
-            Some(Some(HEADER_VALUE.to_string()))
-        );
+        assert_eq!(env_of(&command, TOKEN_VARIABLE), EnvState::Removed);
+        assert_eq!(env_of(&command, "GIT_CONFIG_VALUE_0"), set(HEADER_VALUE));
     }
 
     #[test]
