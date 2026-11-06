@@ -2,9 +2,9 @@
 # github-actions-ci).
 #
 # The CI workflow stops at the first crate that fails clippy, and it runs no
-# test until clippy passes. This survey finds each Linux clippy error and each
-# Linux test failure in one run, so that one branch can fix all of them.
-name: Linux survey
+# test until clippy passes. This survey finds each clippy error and each test
+# failure on Linux and on macOS in one run, so that one branch can fix all of them.
+name: Survey
 
 on:
   pull_request:
@@ -21,8 +21,12 @@ env:
 
 jobs:
   survey:
-    name: Linux survey
-    runs-on: ubuntu-latest
+    name: Survey (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     timeout-minutes: 120
     steps:
       - name: Check out the repository
@@ -31,6 +35,7 @@ jobs:
           persist-credentials: false
 
       - name: Install the system libraries
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends libasound2-dev libssl-dev pkg-config
