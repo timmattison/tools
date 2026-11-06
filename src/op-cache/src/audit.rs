@@ -133,4 +133,29 @@ mod tests {
         assert_eq!(audit_path(os(""), os("")), None);
         assert_eq!(audit_path(os("relative"), None), None);
     }
+
+    #[cfg(unix)]
+    mod modes {
+        use super::super::AuditTrail;
+        use std::os::unix::fs::PermissionsExt;
+
+        fn mode_of(path: &std::path::Path) -> u32 {
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+        }
+
+        #[test]
+        fn open_makes_the_directory_0700_and_the_file_0600() {
+            let root = tempfile::tempdir().unwrap();
+            let file = root
+                .path()
+                .join("state")
+                .join("op-cache")
+                .join("audit.jsonl");
+
+            AuditTrail::open(&file).unwrap();
+
+            assert_eq!(mode_of(file.parent().unwrap()), 0o700);
+            assert_eq!(mode_of(&file), 0o600);
+        }
+    }
 }
