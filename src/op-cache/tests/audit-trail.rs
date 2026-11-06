@@ -56,10 +56,12 @@ impl Fixture {
     fn command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_op-cache"));
         gitscratch::shed_inherited_git_environment(&mut command);
-        let inherited = std::env::var_os("PATH").unwrap_or_default();
+        // A failed execve of one PATH entry makes execvp go on to the next entry,
+        // so a real `op` further along PATH would run. /usr/bin holds `git`;
+        // neither it nor /bin holds an `op`. The PATH of the test process is
+        // never read.
         let mut path = self.path("bin").into_os_string();
-        path.push(":");
-        path.push(inherited);
+        path.push(":/usr/bin:/bin");
         command
             .env("PATH", path)
             .env("HOME", self.path("home"))
@@ -243,17 +245,7 @@ fn unstartable_op_writes_spawn_error_pairs() {
     fs::write(&script, format!("#!/nonexistent/{interpreter}\n")).expect("write script");
     fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("chmod script");
 
-    // A failed execve of one PATH entry makes execvp go on to the next entry,
-    // so a real `op` further along PATH would run. PATH holds the fixture and the
-    // system directories (for `git`), which have no `op`.
-    let mut path = fixture.path("bin").into_os_string();
-    path.push(":/usr/bin:/bin");
-    let output = fixture
-        .command()
-        .env("PATH", path)
-        .args(["read", REFERENCE])
-        .output()
-        .expect("run op-cache");
+    let output = fixture.read(REFERENCE);
 
     assert!(!output.status.success(), "op-cache should fail");
     let records = records(&audit_text(&fixture));
