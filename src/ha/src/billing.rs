@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::iter::Sum;
 use std::ops::{Add, AddAssign};
 
-use chrono::{DateTime, Duration, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 
 use crate::money::Usd;
 use crate::target::OwnerName;
@@ -202,8 +202,19 @@ pub struct YearMonth {
 /// month or two.
 #[must_use]
 pub fn months_to_fetch(today: NaiveDate) -> Vec<YearMonth> {
-    let _ = today;
-    Vec::new()
+    let first = today
+        .checked_sub_signed(Duration::days(29))
+        .unwrap_or(NaiveDate::MIN);
+    let of = |date: NaiveDate| YearMonth {
+        year: date.year(),
+        month: date.month(),
+    };
+    let (oldest, newest) = (of(first), of(today));
+    if oldest == newest {
+        vec![newest]
+    } else {
+        vec![oldest, newest]
+    }
 }
 
 #[cfg(test)]
