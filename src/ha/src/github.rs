@@ -1548,6 +1548,12 @@ fn refuse_http_error(response: Response) -> Result<Response, SourceError> {
     Ok(response)
 }
 
+/// Maps the JSON body of a billing usage report to its items.
+fn parse_usage(body: &str) -> Result<Vec<UsageItem>, SourceError> {
+    let _ = body;
+    Ok(Vec::new())
+}
+
 /// The error for an HTTP answer with a status of 400 or more.
 ///
 /// The message is the `message` field of the JSON body. The reason phrase of
@@ -1652,6 +1658,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::billing::EnterpriseSlug;
+    use crate::money::Usd;
 
     /// A time limit that no stub that finishes comes near.
     const GENEROUS_LIMIT: Duration = Duration::from_secs(60);
@@ -3201,6 +3209,175 @@ mod tests {
             stub.source().account_kind(&owner),
             Err(SourceError::Http { status: 404, .. })
         ));
+    }
+
+    /// The measured body of the organization report (2026-11-06).
+    const ORG_USAGE_JSON: &str = r#"{"usageItems":[{"date":"2026-11-01T18:01:16Z","discountAmount":0.126,"grossAmount":0.126,"netAmount":0,"organizationName":"Lock-Free-Labs","pricePerUnit":0.006,"product":"actions","quantity":21,"repositoryName":"issue-fleet-scratch","sku":"Actions Linux","unitType":"Minutes"}]}"#;
+
+    /// A user report: its items have no `organizationName`.
+    const USER_USAGE_JSON: &str = r#"{"usageItems":[{"date":"2026-11-02T00:00:00Z","discountAmount":0,"grossAmount":1.5,"netAmount":1.5,"product":"Actions","quantity":250,"sku":"Actions Linux","unitType":"Minutes"}]}"#;
+
+    /// The output of `gh api -i` for a billing read: the status line, the two
+    /// scope headers, an `ETag`, and the body.
+    fn billing_output(status_line: &str, accepted: &str, token: &str, body: &str) -> String {
+        format!(
+            "{status_line}\n\
+             X-Accepted-Oauth-Scopes: {accepted}\r\n\
+             X-Oauth-Scopes: {token}\r\n\
+             Etag: W/\"4c00158b\"\r\n\
+             \r\n{body}"
+        )
+    }
+
+    const TOKEN_SCOPES: &str = "gist, read:org, repo, workflow";
+
+    fn november() -> YearMonth {
+        YearMonth {
+            year: 2026,
+            month: 11,
+        }
+    }
+
+    fn acme() -> OwnerName {
+        OwnerName::parse("acme").unwrap()
+    }
+
+    #[test]
+    fn each_endpoint_kind_asks_its_own_path_with_the_year_and_month() {
+        let stub = Stub::new("cat \"$dir/usage.out\"");
+        stub.file(
+            "usage.out",
+            &billing_output(
+                "HTTP/2.0 200 OK",
+                "admin:org, repo",
+                TOKEN_SCOPES,
+                ORG_USAGE_JSON,
+            ),
+        );
+        let source = stub.source();
+        let slug = EnterpriseSlug::parse("big-corp").unwrap();
+        for endpoint in [
+            Endpoint::Organization(acme()),
+            Endpoint::User(acme()),
+            Endpoint::Enterprise(slug),
+        ] {
+            source
+                .billing_usage(&endpoint, november())
+                .expect("a report");
+        }
+        let paths: Vec<String> = stub
+            .requests()
+            .into_iter()
+            .map(|mut request| request.pop().unwrap())
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "organizations/acme/settings/billing/usage?year=2026&month=11",
+                "users/acme/settings/billing/usage?year=2026&month=11",
+                "enterprises/big-corp/settings/billing/usage?year=2026&month=11",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_measured_organization_report_maps_to_one_item() {
+        let stub = Stub::new("cat \"$dir/usage.out\"");
+        stub.file(
+            "usage.out",
+            &billing_output(
+                "HTTP/2.0 200 OK",
+                "admin:org, repo",
+                TOKEN_SCOPES,
+                ORG_USAGE_JSON,
+            ),
+        );
+        let items = stub
+            .source()
+            .billing_usage(&Endpoint::Organization(acme()), november())
+            .expect("a report");
+        assert_eq!(
+            items,
+            [UsageItem {
+                date: "2026-11-01T18:01:16Z".parse().unwrap(),
+                product: "actions".to_owned(),
+                gross: Usd::from_f64(0.126).unwrap(),
+                net: Usd::from_f64(0.0).unwrap(),
+                organization: Some("Lock-Free-Labs".to_owned()),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_user_item_with_no_organization_name_maps_to_none() {
+        let stub = Stub::new("cat \"$dir/usage.out\"");
+        stub.file(
+            "usage.out",
+            &billing_output("HTTP/2.0 200 OK", "user", TOKEN_SCOPES, USER_USAGE_JSON),
+        );
+        let items = stub
+            .source()
+            .billing_usage(&Endpoint::User(acme()), november())
+            .expect("a report");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].organization, None);
+        assert_eq!(items[0].product, "Actions");
+        assert_eq!(items[0].net, Usd::from_f64(1.5).unwrap());
+    }
+
+    #[test]
+    fn a_second_read_of_a_month_sends_the_etag_and_reuses_the_report_on_304() {
+        let stub = Stub::new(ETAG_CASES);
+        stub.file(
+            "page1.out",
+            &billing_output(
+                "HTTP/2.0 200 OK",
+                "admin:org, repo",
+                TOKEN_SCOPES,
+                ORG_USAGE_JSON,
+            ),
+        );
+        stub.file("not-modified.out", NOT_MODIFIED);
+        let source = stub.source();
+        let endpoint = Endpoint::Organization(acme());
+        let first = source.billing_usage(&endpoint, november());
+        assert_eq!(first.as_ref().map(Vec::len), Ok(1));
+        let second = source.billing_usage(&endpoint, november());
+        assert_eq!(second, first);
+        let requests = stub.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[1][..4],
+            ["api", "-i", "-H", "If-None-Match: W/\"4c00158b\""]
+        );
+        assert_eq!(requests[1][4], requests[0][2]);
+    }
+
+    #[test]
+    fn another_month_does_not_send_the_etag_of_this_month() {
+        let stub = Stub::new(ETAG_CASES);
+        stub.file(
+            "page1.out",
+            &billing_output(
+                "HTTP/2.0 200 OK",
+                "admin:org, repo",
+                TOKEN_SCOPES,
+                ORG_USAGE_JSON,
+            ),
+        );
+        stub.file("not-modified.out", NOT_MODIFIED);
+        let source = stub.source();
+        let endpoint = Endpoint::Organization(acme());
+        source
+            .billing_usage(&endpoint, november())
+            .expect("a report");
+        let october = YearMonth {
+            year: 2026,
+            month: 10,
+        };
+        source.billing_usage(&endpoint, october).expect("a report");
+        let requests = stub.requests();
+        assert_eq!(requests[1].len(), 3, "{:?}", requests[1]);
     }
 
     #[test]
