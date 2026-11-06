@@ -1,6 +1,7 @@
 //! The macOS notification that op-cache shows before it asks 1Password.
 
 use std::ffi::OsStr;
+use std::process::{Command, Stdio};
 
 /// The title of the first attempt.
 pub(crate) const TITLE: &str = "op-cache → 1Password";
@@ -53,6 +54,25 @@ pub(crate) fn compose(
 /// value, so this function never reads the process environment.
 pub(crate) fn notifications_enabled(op_cache_notify: Option<&OsStr>) -> bool {
     op_cache_notify != Some(OsStr::new("0"))
+}
+
+/// The constant AppleScript, one line for each `-e`. It holds no value: the
+/// three texts reach it as `argv`, so a quote or a backslash in a name cannot
+/// change the script.
+pub(crate) const SCRIPT: [&str; 3] = [
+    "on run argv",
+    "display notification (item 3 of argv) with title (item 1 of argv) subtitle (item 2 of argv)",
+    "end run",
+];
+
+/// The command that shows `notification`: `osascript`, found through PATH,
+/// then `-e <line>` for each [`SCRIPT`] line, then the title, the subtitle and
+/// the message as three separate arguments. All three standard streams are
+/// null. This function does not start the command.
+pub(crate) fn notification_command(notification: &Notification) -> Command {
+    let _ = notification;
+    let _ = Stdio::null();
+    Command::new("osascript")
 }
 
 #[cfg(test)]
@@ -127,5 +147,62 @@ mod tests {
         assert!(notifications_enabled(Some(OsStr::new(""))));
         assert!(notifications_enabled(Some(OsStr::new("false"))));
         assert!(!notifications_enabled(Some(OsStr::new("0"))));
+    }
+
+    fn arguments(command: &Command) -> Vec<String> {
+        command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn notification(subtitle: &str) -> Notification {
+        Notification {
+            title: TITLE.to_owned(),
+            subtitle: subtitle.to_owned(),
+            message: "op://Private/Item/field".to_owned(),
+        }
+    }
+
+    #[test]
+    fn the_command_is_osascript_by_name() {
+        let command = notification_command(&notification("sub"));
+        assert_eq!(command.get_program(), "osascript");
+    }
+
+    #[test]
+    fn the_arguments_are_the_script_then_the_three_texts() {
+        let command = notification_command(&notification("sub"));
+        assert_eq!(
+            arguments(&command),
+            vec![
+                "-e",
+                SCRIPT[0],
+                "-e",
+                SCRIPT[1],
+                "-e",
+                SCRIPT[2],
+                TITLE,
+                "sub",
+                "op://Private/Item/field"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_quote_and_a_backslash_in_the_subtitle_stay_in_their_own_argument() {
+        let subtitle = r#"a "quoted" \ name"#;
+        let command = notification_command(&notification(subtitle));
+        let arguments = arguments(&command);
+        assert_eq!(arguments[7], subtitle);
+        let carriers = arguments.iter().filter(|a| a.contains(subtitle)).count();
+        assert_eq!(carriers, 1);
+    }
+
+    #[test]
+    fn no_script_line_holds_a_double_quote() {
+        for line in SCRIPT {
+            assert!(!line.contains('"'), "{line}");
+        }
     }
 }
