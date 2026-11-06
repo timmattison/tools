@@ -490,9 +490,11 @@ where
 }
 
 /// The line of one run. `state` is the state that the row shows, not the state
-/// that GitHub reports. It sets the marker and the time cells. The started
-/// cell shows the start time of an active run. It shows the finish time
-/// (`Run::updated_at`) of a finished run, which stands in the recent section.
+/// that GitHub reports. It sets the marker. `ended` is the end of a finished
+/// run (`Row::Run::ended`), and `None` for an active run. The started cell
+/// shows the start time of an active run. It shows the end of a finished run,
+/// which stands in the recent section. The time cell runs from the start to
+/// the end, or to `now` for an active run.
 /// A stale run has the [`STALE_MARK`] before its repository name. `cells`
 /// puts the mark there and cuts the name at its start when the name does not
 /// fit. The job-sum cell shows `job_sum`, or it is blank when `job_sum` is
@@ -502,6 +504,7 @@ where
 fn run_line<Tz: TimeZone>(
     run: &Run,
     state: RunState,
+    ended: Option<DateTime<Utc>>,
     is_stale: bool,
     job_sum: Option<Duration>,
     now: DateTime<Utc>,
@@ -511,17 +514,8 @@ fn run_line<Tz: TimeZone>(
 where
     Tz::Offset: Display,
 {
-    let time = if state.is_active() {
-        format_elapsed(span(run.started_at, now))
-    } else {
-        format_elapsed(span(run.started_at, run.updated_at))
-    };
-    // `Board::sections` decides the section from `run.state`, thus the cell does too.
-    let clock_instant = if run.state.is_finished() {
-        run.updated_at
-    } else {
-        run.started_at
-    };
+    let time = format_elapsed(span(run.started_at, ended.unwrap_or(now)));
+    let clock_instant = ended.unwrap_or(run.started_at);
     cells(
         widths,
         marker(state),
@@ -1368,8 +1362,9 @@ pub fn draw<Tz: TimeZone>(
                 selected,
                 stale,
                 job_sum,
+                ended,
             } => {
-                let line = run_line(run, *state, *stale, *job_sum, now, tz, widths);
+                let line = run_line(run, *state, *ended, *stale, *job_sum, now, tz, widths);
                 let y = put_line(buffer, index + 1, &line.style(age_style(row, now)));
                 reverse_if(*selected, buffer, area, y);
             }
@@ -2962,7 +2957,7 @@ mod tests {
                 "Bump deps",
                 RunState::Failed,
                 "2026-10-14T09:00:00Z",
-                "2026-10-14T09:10:05Z",
+                "2026-10-14T09:04:00Z",
             )],
             now(),
         );
@@ -3008,7 +3003,7 @@ mod tests {
         assert_eq!(time_cells(&text, lint_row), "45s");
         assert_eq!(time_cells(&text, test_row), "");
         // The job rows agree with their run.
-        assert_eq!(started_cells(&text, run_row), "09:10:05");
+        assert_eq!(started_cells(&text, run_row), "09:04:00");
     }
 
     #[test]
@@ -4054,6 +4049,7 @@ mod tests {
                 let line = run_line(
                     &long,
                     RunState::Running,
+                    None,
                     is_stale,
                     None,
                     now(),
@@ -5893,7 +5889,8 @@ mod tests {
                     "2026-10-14T11:00:00Z",
                     "2026-10-14T11:30:00Z",
                 );
-                let line = run_line(&run, state, false, None, now(), &utc(), widths).to_string();
+                let line =
+                    run_line(&run, state, None, false, None, now(), &utc(), widths).to_string();
                 assert_eq!(display_width(&line), usize::from(w), "{state:?}: {line:?}");
             }
             for (id, state) in MARKER_JOB_STATES {
@@ -6616,6 +6613,7 @@ mod tests {
         let reference = run_line(
             &fresh,
             RunState::Running,
+            None,
             false,
             None,
             now(),

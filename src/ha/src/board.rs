@@ -161,6 +161,9 @@ pub enum Row<'a> {
         /// holds no job. A failed fetch after a good one keeps the sum of
         /// the last good jobs.
         job_sum: Option<Duration>,
+        /// The end of a finished run (see `run_end`). `None` for an active
+        /// run.
+        ended: Option<DateTime<Utc>>,
     },
     /// One job of an expanded run.
     Job {
@@ -235,6 +238,20 @@ fn last_good_jobs(answer: Option<&Jobs>) -> &[Job] {
         Some(Jobs::Ready(jobs) | Jobs::Failed { jobs, .. }) => jobs,
         None => &[],
     }
+}
+
+/// The end of the finished run `run`, from its job answer `answer`.
+///
+/// The end of a finished run is the end of its last job, because GitHub can
+/// change `Run::updated_at` long after the last job ended. The function gives
+/// the latest `completed_at` of the last good jobs. It gives `run.updated_at`
+/// when no job has a `completed_at`.
+fn run_end(run: &Run, answer: Option<&Jobs>) -> DateTime<Utc> {
+    last_good_jobs(answer)
+        .iter()
+        .filter_map(|job| job.completed_at)
+        .max()
+        .unwrap_or(run.updated_at)
 }
 
 /// One row that the selection can mark, other than a job row, in the order of
@@ -1273,6 +1290,7 @@ fn push_runs<'a>(
             selected: here.is_some_and(|selection| selection.job.is_none()),
             stale: view.errors.contains_key(&run.repo),
             job_sum: job_sum(jobs, view.now),
+            ended: run.state.is_finished().then(|| run_end(run, answer)),
         });
         if view.expanded.contains(&run.id) {
             push_jobs(rows, run, answer, here.and_then(|selection| selection.job));
