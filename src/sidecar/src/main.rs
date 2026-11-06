@@ -2,7 +2,7 @@
 #![warn(clippy::pedantic)]
 //! The `sidecar` command line.
 //!
-//! The subcommands are declared here. Each one reports that it is not implemented yet.
+//! The subcommands are declared here. Each one calls the library.
 
 use std::process::ExitCode;
 
@@ -63,19 +63,6 @@ enum Command {
     },
 }
 
-impl Command {
-    /// The word that the user typed for this subcommand.
-    fn word(&self) -> &'static str {
-        match self {
-            Command::Setup { .. } => "setup",
-            Command::Add { .. } => "add",
-            Command::Status => "status",
-            Command::Path { .. } => "path",
-            Command::Worktree { .. } => "worktree",
-        }
-    }
-}
-
 /// Runs the subcommand that the user chose.
 fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
     match &cli.command {
@@ -87,7 +74,7 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
         Command::Status => run_status_command(),
         Command::Path { name } => run_path_command(name),
         Command::Worktree { name, branch } => run_worktree_command(name, branch.as_deref()),
-        other => anyhow::bail!("{} is not implemented yet", other.word()),
+        Command::Add { name, yes } => run_add_command(name, *yes),
     }
 }
 
@@ -107,6 +94,17 @@ fn run_setup_command() -> anyhow::Result<ExitCode> {
         eprintln!("warning: {warning}");
     }
     Ok(if report.unlinked.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
+}
+
+/// Runs `sidecar add <name> [--yes]`. The exit code is 1 when the new link is not
+/// correct at the end.
+fn run_add_command(name: &str, yes: bool) -> anyhow::Result<ExitCode> {
+    let cwd = std::env::current_dir()?;
+    Ok(if sidecar::add::run(&cwd, name, yes)? {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)

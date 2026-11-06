@@ -9,21 +9,9 @@ use std::path::Path;
 
 use support::Fixture;
 
-/// The name of the new sidecar in these tests.
-const NAME: &str = "pics";
-
 /// The text of a file, or an empty string when the file is missing.
 fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_default()
-}
-
-/// The lines of `gh-calls.log` that are not reads.
-fn posts(fixture: &Fixture) -> Vec<String> {
-    fixture
-        .gh_calls()
-        .into_iter()
-        .filter(|call| call.contains("-X POST"))
-        .collect()
 }
 
 #[test]

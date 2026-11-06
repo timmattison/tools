@@ -1,6 +1,9 @@
 //! `sidecar add <name> [--yes]`: make a sidecar repository and register it.
 
 use std::io::BufRead;
+use std::path::Path;
+
+use crate::name::SidecarName;
 
 /// The question that `sidecar add` asks on standard error.
 const QUESTION: &str = "Do these steps? [y/N] ";
@@ -14,6 +17,18 @@ pub enum Confirmation {
     NeedsYes,
     /// Stop. The user did not answer yes.
     Declined,
+}
+
+/// Runs `sidecar add` in the directory `cwd`. Returns true when the link of the new
+/// sidecar is correct at the end.
+///
+/// # Errors
+///
+/// Returns an error when the name is not valid or when a step fails.
+pub fn run(cwd: &Path, raw_name: &str, yes: bool) -> anyhow::Result<bool> {
+    let _name = SidecarName::parse(raw_name)?;
+    let _ = (cwd, yes);
+    anyhow::bail!("add is not implemented yet")
 }
 
 /// Decides whether to do the steps of the plan.
