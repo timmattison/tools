@@ -16,6 +16,7 @@ use std::ops::{Add, AddAssign};
 
 use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 
+use crate::github::SourceError;
 use crate::money::Usd;
 use crate::target::{folded, hash_folded, OwnerName, Target};
 
@@ -407,9 +408,102 @@ pub fn plan_reads(
     reads
 }
 
+/// Where the token of a `gh` child comes from. It decides how a person gets
+/// a token with more scopes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenOrigin {
+    /// The token is the value of this environment variable: `GH_TOKEN` or
+    /// `GITHUB_TOKEN`. `gh auth refresh` cannot change it.
+    Variable(&'static str),
+    /// The token comes from the login of `gh`.
+    GhLogin,
+}
+
+/// Why one billing read gave no usage.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum BillingError {
+    /// The token holds none of the scopes that the endpoint accepts.
+    #[error("")]
+    MissingScope {
+        /// The scope that the person must add.
+        needed: String,
+        /// Where the token comes from.
+        token: TokenOrigin,
+    },
+    /// The token holds an accepted scope and GitHub still refuses the read.
+    #[error("")]
+    NoBillingRole,
+    /// Every other failure.
+    #[error("")]
+    Source(SourceError),
+}
+
+/// The scope to name when a token lacks every accepted scope: the first of
+/// `user`, `repo`, `manage_billing:enterprise` that `accepted` holds, else the
+/// first accepted scope.
+#[must_use]
+pub fn needed_scope(accepted: &[&str]) -> String {
+    let _ = accepted;
+    String::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_missing_scope_text_names_the_variable_or_the_login() {
+        let variable = BillingError::MissingScope {
+            needed: "user".to_owned(),
+            token: TokenOrigin::Variable("GH_TOKEN"),
+        };
+        assert_eq!(
+            variable.to_string(),
+            "no access: token needs \"user\". Make a new GH_TOKEN with that scope."
+        );
+        let other = BillingError::MissingScope {
+            needed: "repo".to_owned(),
+            token: TokenOrigin::Variable("GITHUB_TOKEN"),
+        };
+        assert_eq!(
+            other.to_string(),
+            "no access: token needs \"repo\". Make a new GITHUB_TOKEN with that scope."
+        );
+        let login = BillingError::MissingScope {
+            needed: "user".to_owned(),
+            token: TokenOrigin::GhLogin,
+        };
+        assert_eq!(
+            login.to_string(),
+            "no access: token needs \"user\". Run gh auth refresh -h github.com -s user"
+        );
+    }
+
+    #[test]
+    fn the_other_billing_errors_have_their_texts() {
+        assert_eq!(
+            BillingError::NoBillingRole.to_string(),
+            "no access: no billing role for this account, or it is not on the enhanced billing platform"
+        );
+        let source = SourceError::NotInstalled;
+        assert_eq!(
+            BillingError::Source(source.clone()).to_string(),
+            source.to_string()
+        );
+    }
+
+    #[test]
+    fn the_needed_scope_is_the_first_known_scope_the_list_holds() {
+        assert_eq!(needed_scope(&["user"]), "user");
+        assert_eq!(needed_scope(&["admin:org", "repo"]), "repo");
+        assert_eq!(
+            needed_scope(&["admin:enterprise", "manage_billing:enterprise"]),
+            "manage_billing:enterprise"
+        );
+        assert_eq!(needed_scope(&["repo", "user"]), "user");
+        assert_eq!(needed_scope(&["admin:org", "other"]), "admin:org");
+        assert_eq!(needed_scope(&[]), "");
+    }
 
     fn day(text: &str) -> NaiveDate {
         text.parse().expect("a date")
