@@ -22,6 +22,14 @@ const PAINT: &str = "1";
 /// The exit code that clap gives for a usage error.
 const USAGE_ERROR: i32 = 2;
 
+/// The text that `faulte` writes on a platform other than macOS.
+#[cfg(not(target_os = "macos"))]
+const UNSUPPORTED_PLATFORM: &str = "faulte supports macOS only.";
+
+/// The exit code of `faulte` on a platform other than macOS.
+#[cfg(not(target_os = "macos"))]
+const EXIT_UNSUPPORTED: i32 = 1;
+
 /// Runs the binary with `args` and returns what it wrote and how it ended.
 fn run(args: &[&str]) -> Output {
     Command::new(BIN)
@@ -76,20 +84,53 @@ fn kill_refuses_the_limit_of_the_ranking() {
         "the message names the flag that faulte kill does not take: {stderr:?}"
     );
 
-    // The ranking takes it, before the name of a command as well.
+    // The ranking takes it, before the name of a command as well. The parser
+    // decides this on each platform. Only macOS then runs the plan. Another
+    // platform stops with its refusal, which is not a usage error.
+    let before = run(&[
+        "--limit",
+        "3",
+        "kill",
+        "--interval",
+        "1s",
+        "--older-than",
+        "9999d",
+    ]);
+    #[cfg(target_os = "macos")]
     assert!(
-        run(&[
-            "--limit",
-            "3",
-            "kill",
-            "--interval",
-            "1s",
-            "--older-than",
-            "9999d"
-        ])
-        .status
-        .success(),
+        before.status.success(),
         "the ranking flag stands before the name of the command"
+    );
+    #[cfg(not(target_os = "macos"))]
+    assert_eq!(
+        before.status.code(),
+        Some(EXIT_UNSUPPORTED),
+        "the parser takes the ranking flag before the name of the command, it wrote {:?}",
+        one_line(&before.stderr)
+    );
+}
+
+/// On a platform other than macOS, `faulte` parses its command line, then
+/// says that it supports macOS only, and stops.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn another_platform_is_refused_with_a_reason() {
+    let output = run(&["--interval", "1s", "--limit", "5"]);
+
+    assert_eq!(
+        output.status.code(),
+        Some(EXIT_UNSUPPORTED),
+        "faulte refuses a platform other than macOS"
+    );
+    assert_eq!(
+        glyphs(&output.stderr).trim_end(),
+        UNSUPPORTED_PLATFORM,
+        "the refusal names the one platform that faulte supports"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "a refused run writes no ranking: {}",
+        glyphs(&output.stdout)
     );
 }
 
@@ -156,6 +197,7 @@ fn a_bad_duration_in_any_flag_is_a_usage_error_that_names_the_text() {
 /// because every number is what this Mac did while the test ran. A number that
 /// a test states here would fail on a Mac that is quiet, and on a Mac that is
 /// busy.
+#[cfg(target_os = "macos")]
 #[test]
 fn the_ranking_states_a_header_and_a_table_of_this_mac() {
     let output = run(&["--interval", "1s", "--limit", "5"]);
@@ -190,6 +232,7 @@ fn the_ranking_states_a_header_and_a_table_of_this_mac() {
 
 /// An age that no process of any Mac reaches. The oldest process of a Mac
 /// started when the Mac started, and no Mac runs for 27 years.
+#[cfg(target_os = "macos")]
 const NO_PROCESS_IS_THIS_OLD: &str = "9999d";
 
 /// The second test that reads this Mac.
@@ -198,6 +241,7 @@ const NO_PROCESS_IS_THIS_OLD: &str = "9999d";
 /// session and `faulte` asks nothing. The test states no number, because every
 /// count under the plan is what this Mac runs while the test runs. It signals
 /// nothing: a run with no candidate reaches no signal at all.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_kill_that_selects_nothing_prints_the_plan_and_exits_zero() {
     let output = run(&[
