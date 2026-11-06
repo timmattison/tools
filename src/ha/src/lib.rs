@@ -15,6 +15,7 @@ pub mod cancel;
 pub mod first_cycle;
 pub mod github;
 pub mod job;
+pub mod money;
 pub mod queue;
 pub mod render;
 pub mod run;
