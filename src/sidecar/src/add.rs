@@ -45,38 +45,34 @@ struct Facts {
     owner: String,
     repo: String,
     url: String,
-    repository_exists: bool,
-    has_main: bool,
-    registered: bool,
-    ignored: bool,
-    clone_ready: bool,
-    link_ready: bool,
+    /// The steps that are not done, in the order that `sidecar add` does them.
+    steps: Vec<Step>,
 }
 
-impl Facts {
-    /// The steps that are not done, in the order that `sidecar add` does them.
-    fn plan(&self) -> Vec<Step> {
-        let mut steps = Vec::new();
-        if !self.repository_exists {
-            steps.push(Step::MakeRepository);
-        }
-        if !self.has_main {
-            steps.push(Step::FirstCommit);
-        }
-        if !self.registered {
-            steps.push(Step::Register);
-        }
-        if !self.ignored {
-            steps.push(Step::Ignore);
-        }
-        if !self.clone_ready {
-            steps.push(Step::Clone);
-        }
-        if !self.link_ready {
-            steps.push(Step::Link);
-        }
-        steps
+/// Asks GitHub and git about the sidecar repository. Returns whether the repository
+/// exists and whether it has the branch `main`.
+fn read_repository(
+    host: &Host,
+    owner: &str,
+    repo: &str,
+    url: &str,
+) -> anyhow::Result<(bool, bool)> {
+    if gh::repository_visibility(owner, repo)?.is_none() {
+        return Ok((false, false));
     }
+    let heads = host.git().run(
+        host.worktree_root(),
+        [
+            "ls-remote",
+            "--heads",
+            url,
+            &format!("refs/heads/{MAIN_BRANCH}"),
+        ],
+    );
+    if !heads.ok {
+        anyhow::bail!("git cannot read {url}: {}", heads.stderr);
+    }
+    Ok((true, !heads.stdout.is_empty()))
 }
 
 /// Reads the state of the world. This function changes nothing.
@@ -85,38 +81,30 @@ fn read_facts(host: &Host, name: &SidecarName) -> anyhow::Result<Facts> {
         .ok_or_else(|| anyhow::anyhow!("the origin {} names no owner", host.origin()))?;
     let repo = host.sidecar_repository(name);
     let url = host.sidecar_url(name)?;
-    let (repository_exists, has_main) = match gh::repository_visibility(&owner, &repo)? {
-        None => (false, false),
-        Some(_) => {
-            let heads = host.git().run(
-                host.worktree_root(),
-                [
-                    "ls-remote",
-                    "--heads",
-                    &url,
-                    &format!("refs/heads/{MAIN_BRANCH}"),
-                ],
-            );
-            if !heads.ok {
-                anyhow::bail!("git cannot read {url}: {}", heads.stderr);
-            }
-            (true, !heads.stdout.is_empty())
-        }
-    };
+    let (repository_exists, has_main) = read_repository(host, &owner, &repo, &url)?;
     let main_clone = host.main_clone(name);
+    let clone_ready = inspect_clone(host.git(), &url, &main_clone) == CloneState::Ready;
+    let link_ready = matches!(
+        inspect_link(host.git(), &host.link(name), &main_clone),
+        LinkState::MainClone | LinkState::Worktree { .. }
+    );
+    let todo = [
+        (Step::MakeRepository, !repository_exists),
+        (Step::FirstCommit, !has_main),
+        (Step::Register, !host.registry().contains(name)),
+        (Step::Ignore, !host.ignores_link_dir()),
+        (Step::Clone, !clone_ready),
+        (Step::Link, !link_ready),
+    ];
+    let steps = todo
+        .into_iter()
+        .filter_map(|(step, needed)| needed.then_some(step))
+        .collect();
     Ok(Facts {
         owner,
         repo,
-        clone_ready: inspect_clone(host.git(), &url, &main_clone) == CloneState::Ready,
-        link_ready: matches!(
-            inspect_link(host.git(), &host.link(name), &main_clone),
-            LinkState::MainClone | LinkState::Worktree { .. }
-        ),
         url,
-        repository_exists,
-        has_main,
-        registered: host.registry().contains(name),
-        ignored: host.ignores_link_dir(),
+        steps,
     })
 }
 
@@ -155,9 +143,8 @@ pub fn run(cwd: &Path, raw_name: &str, yes: bool) -> anyhow::Result<bool> {
     let name = SidecarName::parse(raw_name)?;
     let host = Host::discover(cwd, RegistryPolicy::DefaultWhenMissing)?;
     let facts = read_facts(&host, &name)?;
-    let steps = facts.plan();
     println!("sidecar add will do these steps:");
-    for step in &steps {
+    for step in &facts.steps {
         println!("  - {}", describe(*step, &host, &name, &facts));
     }
     let _ = yes;
