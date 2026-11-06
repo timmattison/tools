@@ -2358,12 +2358,75 @@ cannot hang the caller. Used by `cwt` and `ha`.
     owners = ["Lock-Free-Labs"]
     window = "8h"
     interval = "60s"
+    billing = true
+
+    [billing_enterprises]
+    "some-org" = "some-enterprise"
     ```
 
     Targets on the command line replace all the targets of the file. `--config <PATH>` reads
-    another file, and `--window` and `--interval` replace the values of the file. A duration is a
-    whole number and a unit: `s`, `m`, `h`, or `d`. An unknown key or a bad value stops `ha` with a
-    message that names the key and the file.
+    another file, and `--window`, `--interval`, and `--no-billing` replace the values of the
+    file. A duration is a whole number and a unit: `s`, `m`, `h`, or `d`. An unknown key or a
+    bad value stops `ha` with a message that names the key and the file.
+  - The "Actions billing" box shows what the GitHub Actions runs cost. It stands in the lower
+    right corner, above the status line, and its title is `Actions billing · UTC days`.
+    - The box has one row for each billing account: the owner of each target, one time. Each row
+      shows the amount that GitHub bills for `today`, `yesterday`, `7d`, and `30d`. The `billed`
+      row is the sum of the accounts. It is the sum of `netAmount`, which is the amount that
+      GitHub bills after the included minutes. The `list price` row is the sum of
+      `grossAmount`, which is the price before the included minutes. Only the product `actions`
+      counts. Copilot, Codespaces, and Packages do not count.
+    - The windows are UTC days. `today` is the current UTC date and `yesterday` is the day before
+      it. `7d` is today and the 6 days before. `30d` is today and the 29 days before. GitHub
+      gives no billing data for a period shorter than one UTC day. An hour filter gives
+      `400 Hourly time period filtering is deprecated`.
+    - The usage of a job shows in the report with a lag. On 2026-11-06, the usage of a job showed
+      less than 10 minutes after the job ended. A poll every 10 minutes could not show a shorter
+      lag. The `date` of an item is the end of the first job of that UTC day.
+    - A row shows `loading…` until the first answer comes. An account with no usage shows
+      `$0.00`. An account that `ha` cannot read shows the reason, never `$0.00`. A total that
+      does not include all accounts shows `≥` after its label. When a refresh fails, the row
+      keeps the last good numbers, and a line under it shows `⚠` and the error.
+    - The board gives up the rows of the box, thus no row hides behind the box. Page Up and Page
+      Down use the smaller board height. The box does not show when the terminal cannot hold the
+      box and 10 board rows, or when the terminal is too narrow. A long account name keeps its
+      start and ends in `…`.
+    - `--no-billing` and the key `billing = false` hide the box and send no billing request. The
+      flag replaces the key of the file.
+  - Billing accounts. `ha` asks `GET /users/{owner}` one time for each owner, to learn if the
+    owner is an organization or a user. Then it reads the usage report of the account:
+
+    | Account | Endpoint | Accepted scopes | Role |
+    |---|---|---|---|
+    | Organization | `GET /organizations/{org}/settings/billing/usage` | `repo`, `admin:org` | owner or billing manager of the organization |
+    | User | `GET /users/{username}/settings/billing/usage` | `user` | the user |
+    | Enterprise | `GET /enterprises/{enterprise}/settings/billing/usage` | `admin:enterprise`, `manage_billing:enterprise` | admin or billing manager of the enterprise, or an owner of an organization in it |
+
+    These endpoints work only for an account on the enhanced billing platform. Fine-grained
+    personal access tokens do not work with them.
+  - Billing errors. A missing scope gives `404 Not Found`, not `403`. `ha` compares the headers
+    `X-OAuth-Scopes` and `X-Accepted-OAuth-Scopes` to name the missing scope.
+    - The row then gives `gh auth refresh -h github.com -s <scope>`. When `GH_TOKEN` or
+      `GITHUB_TOKEN` is set, the row says to make a new token with that scope instead, because
+      `gh auth refresh` does not change a token that comes from `GH_TOKEN`.
+    - The `user` scope also lets the token change the profile. GitHub accepts no narrower scope
+      for the user endpoint.
+    - When the token has the scope and GitHub still refuses, the row says that the login has no
+      billing role for the account, or that the account is not on the enhanced billing platform.
+  - `billing_enterprises`. No REST endpoint tells a member which enterprise owns an
+    organization. Thus the configuration file names it:
+
+    ```toml
+    [billing_enterprises]
+    "some-org" = "some-enterprise"
+    ```
+
+    - An organization in this table reads the enterprise endpoint and keeps only its own items.
+      Two organizations of one enterprise share one read.
+    - An organization that is not in the table reads the organization endpoint. There is no
+      fallback from one endpoint to another.
+    - The enterprise endpoint gives only the usage that has no cost center. An enterprise that
+      uses cost centers thus shows less than its bill.
   - `ha` uses the GitHub CLI, `gh`, and its login and host. It does not keep a second token. When
     `gh` is missing or not logged in, `ha` stops with a message before it draws. The cancel of a
     run is the only request of `ha` that changes something on GitHub. It needs the `repo` scope on
@@ -2387,6 +2450,11 @@ cannot hang the caller. Used by `cwt` and `ha`.
     request for its jobs, and then no more until a re-run changes it.
     At most 8 `gh` children run at the same time, for runs and jobs together. The status line
     shows the remaining budget. When less than 10% remains, `ha` waits until the reset of the budget and says so.
+  - Billing budget: the billing refreshes at start, every 10 minutes, and when you push `r`.
+    Each read costs one request every 10 minutes, or two when the last 30 days cross a month.
+    Two organizations of one enterprise share one read. At start, `ha` also sends one
+    `GET /users/{owner}` for each owner. The read sends the `ETag`, thus a `304` answer costs
+    nothing. The billing reads share the limit of 8 `gh` children with the other requests.
   - Merge queue budget: GitHub gives the live queue and the head branch of a pull request only
     through GraphQL, which has its own budget of 5,000 points each hour. The check for queues is
     one GraphQL query for each 100 repositories, 1 point, at the start and every 10 minutes. A
