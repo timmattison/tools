@@ -149,13 +149,19 @@ impl Pty {
         // and to ask for no name of the slave device. The last pointer is the
         // size of the window, and it points at a live local variable that
         // outlives the call.
+        //
+        // The size goes in as a raw `*mut` pointer, not as `&mut size`. The
+        // `libc` crate declares that parameter `*mut winsize` on macOS and
+        // `*const winsize` on Linux. A `*mut` pointer converts to both, but a
+        // `&mut` reference to a `*const` parameter makes clippy report
+        // `unnecessary_mut_passed` on Linux.
         let result = unsafe {
             libc::openpty(
                 &mut master,
                 &mut slave,
                 ptr::null_mut(),
                 ptr::null_mut(),
-                &mut size,
+                ptr::from_mut(&mut size),
             )
         };
         assert_eq!(
@@ -331,9 +337,13 @@ fn waits_for_a_byte(fd: libc::c_int, left: Duration) -> bool {
         libc::FD_ZERO(&mut watched);
         libc::FD_SET(fd, &mut watched);
     }
+    // The microseconds go through `u64`. `suseconds_t` is `i32` on macOS and
+    // `i64` on Linux, thus a conversion from `u32` can fail on macOS only, and
+    // clippy on Linux reports it as a fallible conversion that cannot fail. A
+    // conversion from `u64` can fail on both platforms.
     let mut budget = libc::timeval {
         tv_sec: libc::time_t::try_from(left.as_secs()).unwrap_or(libc::time_t::MAX),
-        tv_usec: libc::suseconds_t::try_from(left.subsec_micros()).unwrap_or(0),
+        tv_usec: libc::suseconds_t::try_from(u64::from(left.subsec_micros())).unwrap_or(0),
     };
     // SAFETY: the set and the budget are owned here, and the two pointers that
     // name no set are null, which select(2) reads as "ask nothing of them".

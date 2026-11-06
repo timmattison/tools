@@ -198,9 +198,8 @@ fn who_is_using(_path: &Path) -> Result<Vec<ProcessInfo>> {
 
 #[cfg(target_os = "linux")]
 fn get_file_users_linux(target_path: &Path) -> Result<Vec<ProcessInfo>> {
-    use procfs::process::all_processes;
+    use procfs::process::{all_processes, FDTarget, MMapPath};
     use std::collections::HashSet;
-    use std::fs;
 
     let files = collect_files_recursively(target_path)?;
     let mut canonical_files = HashSet::new();
@@ -217,7 +216,10 @@ fn get_file_users_linux(target_path: &Path) -> Result<Vec<ProcessInfo>> {
 
     for process in all_processes()? {
         let process = process?;
-        let pid = process.pid;
+        // The kernel gives each process a positive id.
+        let Ok(pid) = u32::try_from(process.pid) else {
+            continue;
+        };
 
         // Get process info
         let stat = match process.stat() {
@@ -230,62 +232,58 @@ fn get_file_users_linux(target_path: &Path) -> Result<Vec<ProcessInfo>> {
             Err(_) => continue,
         };
 
-        // Check file descriptors
+        // Check file descriptors. procfs reads the target of each descriptor
+        // link. A socket, a pipe, or an anonymous inode has no path to match.
         if let Ok(fds) = process.fd() {
-            for fd_entry in fds {
-                if let Ok(fd_info) = fd_entry {
-                    if let Ok(fd_path) = fs::read_link(&fd_info.path()) {
-                        let fd_canonical = fd_path.canonicalize().unwrap_or(fd_path.clone());
+            for fd_info in fds.flatten() {
+                let FDTarget::Path(fd_path) = fd_info.target else {
+                    continue;
+                };
+                let fd_canonical = fd_path.canonicalize().unwrap_or_else(|_| fd_path.clone());
 
-                        // Check if this fd matches any of our target files
-                        for target_file in &canonical_files {
-                            if fd_canonical == *target_file
-                                || target_file.starts_with(&fd_canonical)
-                                || fd_canonical.starts_with(target_file)
-                            {
-                                processes.push(ProcessInfo {
-                                    pid: pid as u32,
-                                    name: stat.comm.clone(),
-                                    user: status.real_uid.map(|uid| format!("{}", uid)),
-                                    access_mode: Some(format!("fd:{}", fd_info.fd)),
-                                    file_descriptor: Some(format!("{}", fd_info.fd)),
-                                    file_path: Some(fd_path.clone()),
-                                });
-                                break;
-                            }
-                        }
+                // Check if this fd matches any of our target files
+                for target_file in &canonical_files {
+                    if fd_canonical == *target_file
+                        || target_file.starts_with(&fd_canonical)
+                        || fd_canonical.starts_with(target_file)
+                    {
+                        processes.push(ProcessInfo {
+                            pid,
+                            name: stat.comm.clone(),
+                            user: Some(status.ruid.to_string()),
+                            access_mode: Some(format!("fd:{}", fd_info.fd)),
+                            file_descriptor: Some(fd_info.fd.to_string()),
+                            file_path: Some(fd_path.clone()),
+                        });
+                        break;
                     }
                 }
             }
         }
 
-        // Check memory maps
+        // Check memory maps. Only a map of a file has a path to match.
         if let Ok(maps) = process.maps() {
             for map in maps {
-                if let Some(pathname) = map.pathname {
-                    match pathname {
-                        procfs::process::MMapPath::Path(map_path) => {
-                            let map_canonical = map_path.canonicalize().unwrap_or(map_path.clone());
+                let MMapPath::Path(map_path) = map.pathname else {
+                    continue;
+                };
+                let map_canonical = map_path.canonicalize().unwrap_or_else(|_| map_path.clone());
 
-                            // Check if this mmap matches any of our target files
-                            for target_file in &canonical_files {
-                                if map_canonical == *target_file
-                                    || target_file.starts_with(&map_canonical)
-                                    || map_canonical.starts_with(target_file)
-                                {
-                                    processes.push(ProcessInfo {
-                                        pid: pid as u32,
-                                        name: stat.comm.clone(),
-                                        user: status.real_uid.map(|uid| format!("{}", uid)),
-                                        access_mode: Some("mmap".to_string()),
-                                        file_descriptor: None,
-                                        file_path: Some(map_path.clone()),
-                                    });
-                                    break;
-                                }
-                            }
-                        }
-                        _ => {} // Skip other pathname types
+                // Check if this mmap matches any of our target files
+                for target_file in &canonical_files {
+                    if map_canonical == *target_file
+                        || target_file.starts_with(&map_canonical)
+                        || map_canonical.starts_with(target_file)
+                    {
+                        processes.push(ProcessInfo {
+                            pid,
+                            name: stat.comm.clone(),
+                            user: Some(status.ruid.to_string()),
+                            access_mode: Some("mmap".to_string()),
+                            file_descriptor: None,
+                            file_path: Some(map_path.clone()),
+                        });
+                        break;
                     }
                 }
             }

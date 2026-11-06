@@ -3,6 +3,7 @@
 //! A CLI tool that provides enhanced process listing with flexible filtering
 //! and display options.
 
+#[cfg(target_os = "macos")]
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::process::Command;
@@ -655,38 +656,31 @@ fn collect_processes(
         };
 
         if matches {
-            let user = process
-                .user_id()
-                .map(|uid| {
-                    // Platform-specific handling is inline because sysinfo's Uid type
-                    // differs across platforms. On Unix, Uid implements Deref<Target = uid_t>,
-                    // allowing us to call get_username(**uid). On non-Unix platforms,
-                    // we fall back to displaying the UID directly via sysinfo's Display impl.
-                    //
-                    // NOTE: The non-Unix path relies on sysinfo::Uid implementing Display,
-                    // which it does per the sysinfo API. This has not been tested on Windows
-                    // but should work correctly.
-                    #[cfg(unix)]
-                    {
-                        get_username(**uid)
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        uid.to_string()
-                    }
-                })
-                .or_else(|| {
-                    // Fallback to sysctl data on macOS when sysinfo returns None
-                    #[cfg(target_os = "macos")]
-                    {
-                        sysctl_info.get(&pid_u32).map(|info| get_username(info.uid))
-                    }
-                    #[cfg(not(target_os = "macos"))]
-                    {
-                        None
-                    }
-                })
-                .unwrap_or_else(|| "unknown".to_string());
+            let user = process.user_id().map(|uid| {
+                // Platform-specific handling is inline because sysinfo's Uid type
+                // differs across platforms. On Unix, Uid implements Deref<Target = uid_t>,
+                // allowing us to call get_username(**uid). On non-Unix platforms,
+                // we fall back to displaying the UID directly via sysinfo's Display impl.
+                //
+                // NOTE: The non-Unix path relies on sysinfo::Uid implementing Display,
+                // which it does per the sysinfo API. This has not been tested on Windows
+                // but should work correctly.
+                #[cfg(unix)]
+                {
+                    get_username(**uid)
+                }
+                #[cfg(not(unix))]
+                {
+                    uid.to_string()
+                }
+            });
+            // Fallback to sysctl data on macOS when sysinfo returns None. The
+            // fallback is a statement of its own, so other platforms compile
+            // no empty fallback.
+            #[cfg(target_os = "macos")]
+            let user =
+                user.or_else(|| sysctl_info.get(&pid_u32).map(|info| get_username(info.uid)));
+            let user = user.unwrap_or_else(|| "unknown".to_string());
 
             let status = {
                 let sysinfo_status = format!("{:?}", process.status());
@@ -708,19 +702,12 @@ fn collect_processes(
                 }
             };
 
-            let start_time = match process.start_time() {
-                // sysinfo gives 0 for the process of another user on macOS.
-                // The kernel gives the start time to every user through sysctl.
-                0 => {
-                    #[cfg(target_os = "macos")]
-                    {
-                        sysctl_info.get(&pid_u32).map_or(0, |info| info.start_time)
-                    }
-                    #[cfg(not(target_os = "macos"))]
-                    {
-                        0
-                    }
-                }
+            let start_time = process.start_time();
+            // sysinfo gives 0 for the process of another user on macOS.
+            // The kernel gives the start time to every user through sysctl.
+            #[cfg(target_os = "macos")]
+            let start_time = match start_time {
+                0 => sysctl_info.get(&pid_u32).map_or(0, |info| info.start_time),
                 seconds => seconds,
             };
 

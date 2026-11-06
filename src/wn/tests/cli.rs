@@ -3288,13 +3288,19 @@ impl Terminal {
         // and to ask for no name of the slave device. The last pointer is the
         // size of the window, and it points at a live local variable that
         // outlives the call.
+        //
+        // The size goes in as a raw `*mut` pointer, not as `&mut size`. The
+        // `libc` crate declares that parameter `*mut winsize` on macOS and
+        // `*const winsize` on Linux. A `*mut` pointer converts to both, but a
+        // `&mut` reference to a `*const` parameter makes clippy report
+        // `unnecessary_mut_passed` on Linux.
         let opened = unsafe {
             libc::openpty(
                 &mut master,
                 &mut slave,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
-                &mut size,
+                std::ptr::from_mut(&mut size),
             )
         };
         assert_eq!(
