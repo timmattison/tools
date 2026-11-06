@@ -121,7 +121,7 @@ fn run(args: &Args, console: &Console) -> Result<Conflicts> {
     let cwd = std::env::current_dir().context("could not determine the current directory")?;
     let repo = Repo::open(&cwd)?;
 
-    // Both revisions the run depends on, before any scratch worktree exists.
+    // Each revision the run depends on (HEAD, BRANCH, and NEWBASE when `--onto` names one), before any scratch worktree exists.
     // Creating one costs a temporary directory, a real `git worktree add`, and
     // administrative state in the developer's repository - all of it wasted if a
     // revision was never going to resolve, and worse, the failure would arrive
@@ -147,6 +147,13 @@ fn run(args: &Args, console: &Console) -> Result<Conflicts> {
     // developer typed the name or the default supplied it.
     let branch = repo.branch_or_default(args.branch.as_deref())?;
     repo.resolve(&branch)?;
+    // NEWBASE is the third revision of a run with `--onto`. It resolves beside
+    // HEAD and BRANCH for the same reason: a revision that cannot resolve must
+    // not cost a scratch worktree. `Repo::resolve` passes `--end-of-options`,
+    // so a name such as `--root` is refused as a revision.
+    if let Some(new_base) = args.onto.as_deref() {
+        repo.resolve(new_base)?;
+    }
 
     // The tool's name alone. The note below reads nothing else, and the verdict
     // adds the action on the next line. `UnwordedReport` is `Copy`, so one
