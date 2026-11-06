@@ -17,6 +17,7 @@ buildinfo.workspace = true
 dirs.workspace = true
 
 [dev-dependencies]
+gitscratch = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 
 [lints]

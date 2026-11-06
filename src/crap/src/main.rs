@@ -5608,8 +5608,6 @@ mod tests {
     /// the same tick and collide, letting one run clobber the other's fakes.
     #[cfg(unix)]
     fn run_shell_function(args: &str) -> (String, bool) {
-        use std::os::unix::fs::PermissionsExt;
-
         let temp = tempfile::TempDir::new().unwrap();
         let dir = temp.path();
 
@@ -5636,8 +5634,7 @@ mod tests {
             ("c", fake_claude),
         ] {
             let path = dir.join(name);
-            fs::write(&path, body).unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            gitscratch::testing::executable::write_executable(&path, body).unwrap();
         }
 
         let script = format!("{SHELL_CODE}\ncrap {args}\n");
@@ -5768,8 +5765,6 @@ mod tests {
         launchers: Launchers,
         save_fork: bool,
     ) -> ForkShellRun {
-        use std::os::unix::fs::PermissionsExt;
-
         let wire_file = dir.join("crap_wire");
         let saved_fork = dir.join("saved_fork");
         let args_file = dir.join("claude_args");
@@ -5826,8 +5821,7 @@ mod tests {
         }
         for (name, body) in tools {
             let path = dir.join(name);
-            fs::write(&path, body).unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            gitscratch::testing::executable::write_executable(&path, body).unwrap();
         }
 
         let script = format!("{SHELL_CODE}\ncrap {args}\n");
@@ -6177,8 +6171,6 @@ mod tests {
     /// `tempfile::TempDir`.
     #[cfg(unix)]
     fn run_zsh_with_a_c_alias(alias_flags: &str, crap_launcher: Option<&str>) -> Vec<ZshAliasRun> {
-        use std::os::unix::fs::PermissionsExt;
-
         let mut runs = Vec::new();
         for (path, claude_argv) in [("here", &FORK_ARGV[..]), ("resume", &RESUME_ARGV[..])] {
             let temp = tempfile::TempDir::new().unwrap();
@@ -6214,8 +6206,7 @@ mod tests {
                 ("claude", recorder(&claude_file)),
             ] {
                 let fake = dir.join(name);
-                fs::write(&fake, body).unwrap();
-                fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+                gitscratch::testing::executable::write_executable(&fake, body).unwrap();
             }
 
             // An alias value that ends in a space makes zsh expand the next

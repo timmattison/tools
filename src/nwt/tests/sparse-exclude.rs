@@ -1291,8 +1291,6 @@ impl FakeGit {
     ///
     /// Both paths go into single quotes in the script, so neither can hold one.
     fn scripted(script: impl FnOnce(&str, &str) -> String) -> Self {
-        use std::os::unix::fs::PermissionsExt;
-
         let real = real_git();
         let real = real.to_str().expect("utf-8 git path");
         assert!(
@@ -1308,9 +1306,8 @@ impl FakeGit {
         );
 
         let fake = dir.path().join("git");
-        std::fs::write(&fake, script(real, dir_text)).expect("write the fake git");
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755))
-            .expect("make the fake git executable");
+        gitscratch::testing::executable::write_executable(&fake, script(real, dir_text))
+            .expect("write the fake git");
 
         Self { dir }
     }

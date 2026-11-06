@@ -49,7 +49,6 @@
 
 use std::io::{Read, Write};
 use std::os::fd::{FromRawFd, OwnedFd};
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
@@ -616,8 +615,7 @@ exit {status}
             args = args_file.display(),
         );
         let gh = dir.path().join("gh");
-        std::fs::write(&gh, script).unwrap();
-        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        gitscratch::testing::executable::write_executable(&gh, script).unwrap();
         Self { dir }
     }
 
@@ -638,8 +636,7 @@ exit 1
             args = dir.path().join(ARGS_FILE).display(),
         );
         let gh = dir.path().join("gh");
-        std::fs::write(&gh, script).unwrap();
-        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        gitscratch::testing::executable::write_executable(&gh, script).unwrap();
         Self { dir }
     }
 
@@ -670,8 +667,7 @@ cat > '{prompt}'
             prompt = self.dir.path().join(PROMPT_FILE).display(),
         );
         let claude = self.dir.path().join("claude");
-        std::fs::write(&claude, script).unwrap();
-        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        gitscratch::testing::executable::write_executable(&claude, script).unwrap();
         self
     }
 

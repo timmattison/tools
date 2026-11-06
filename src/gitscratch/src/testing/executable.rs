@@ -43,12 +43,18 @@ const EXECUTABLE_MODE: u32 = 0o755;
 /// Writes `contents` to `path` and makes the file executable. This process
 /// holds no write descriptor for the file at any time.
 ///
+/// The arguments are the arguments of [`std::fs::write`], thus a test that
+/// writes a stub with `std::fs::write` and then changes its mode to `0o755`
+/// replaces the two calls with this one.
+///
 /// # Errors
 ///
 /// Returns the error of the start of the writer, of the write into its
 /// standard input, or of the change of the mode. Returns an error that names
 /// the path and the exit status when the writer fails.
-pub fn write_executable(path: &Path, contents: &[u8]) -> io::Result<()> {
+pub fn write_executable(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::Result<()> {
+    let path = path.as_ref();
+    let contents = contents.as_ref();
     let mut writer = Command::new(WRITER_SHELL)
         .args(["-c", WRITER_SCRIPT, WRITER_NAME])
         .arg(path)

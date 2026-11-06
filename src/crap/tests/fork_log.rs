@@ -235,7 +235,7 @@ fn concurrent_forks_give_one_complete_line_each() {
 #[cfg(unix)]
 #[test]
 fn ch_through_the_shell_function_logs_the_fork() {
-    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::os::unix::fs::symlink;
 
     const BASE_PATH: &str = "/usr/bin:/bin";
     let tmp = unique_root("shell");
@@ -260,7 +260,7 @@ fn ch_through_the_shell_function_logs_the_fork() {
     symlink(env!("CARGO_BIN_EXE_crap"), bin.join("crap")).unwrap();
     let args_file = root.join("claude_args");
     let claude = bin.join("claude");
-    fs::write(
+    gitscratch::testing::executable::write_executable(
         &claude,
         format!(
             "#!/bin/sh\nfor arg in \"$@\"; do printf '%s\\n' \"$arg\"; done > {}\n",
@@ -268,7 +268,6 @@ fn ch_through_the_shell_function_logs_the_fork() {
         ),
     )
     .unwrap();
-    fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
 
     // 3. Run the alias path from `work`.
     let output = std::process::Command::new("bash")

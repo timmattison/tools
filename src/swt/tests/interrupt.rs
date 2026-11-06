@@ -122,8 +122,6 @@ struct TeardownShim {
 impl TeardownShim {
     /// Materializes the shim inside `scratch`.
     fn new(scratch: &Path) -> Self {
-        use std::os::unix::fs::PermissionsExt;
-
         // Resolved before the shim can shadow it, so the shim can hand over.
         let resolved = std::process::Command::new("sh")
             .arg("-c")
@@ -137,7 +135,7 @@ impl TeardownShim {
         fs::create_dir_all(&dir).expect("shim directory");
         let sentinel = dir.join("teardown-started");
         let shim = dir.join("git");
-        fs::write(
+        gitscratch::testing::executable::write_executable(
             &shim,
             format!(
                 "#!/bin/sh\n\
@@ -151,7 +149,6 @@ impl TeardownShim {
             ),
         )
         .expect("shim script");
-        fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).expect("chmod shim");
 
         Self { dir, sentinel }
     }

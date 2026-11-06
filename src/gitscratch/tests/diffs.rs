@@ -1053,8 +1053,6 @@ fn a_halt_diff_names_a_signed_stopped_commit_on_one_line_whatever_log_show_signa
 #[cfg(unix)]
 #[test]
 fn a_halt_diff_runs_no_external_diff_program_whatever_diff_external_names() {
-    use std::os::unix::fs::PermissionsExt as _;
-
     /// A program that makes a sentinel file in its own directory.
     const PROGRAM: &str = "#!/bin/sh\ntouch \"$(dirname \"$0\")/external-diff-ran\"\n";
 
@@ -1062,9 +1060,8 @@ fn a_halt_diff_runs_no_external_diff_program_whatever_diff_external_names() {
     let git_dir = repo.path().join(".git");
     let program = git_dir.join("external-diff");
     let sentinel = git_dir.join("external-diff-ran");
-    std::fs::write(&program, PROGRAM).expect("write the external diff program");
-    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
-        .expect("make the external diff program executable");
+    gitscratch::testing::executable::write_executable(&program, PROGRAM)
+        .expect("write the external diff program");
     let program_path = program
         .to_str()
         .expect("a temporary directory has a UTF-8 path");
