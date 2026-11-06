@@ -85,6 +85,21 @@ struct RawRegistry {
     sidecars: Vec<String>,
 }
 
+/// True when `value` is a relative path of normal names only.
+fn is_valid_link_dir(value: &str) -> bool {
+    // Split at the text level. `Path::components` hides a `.` in the middle of a path.
+    value
+        .split('/')
+        .all(|part| !part.is_empty() && part != "." && part != "..")
+}
+
+/// True when `value` is a portable variable name: not empty, ASCII letters, digits, and `_`,
+/// and no digit at the start.
+fn is_valid_variable_name(value: &str) -> bool {
+    value.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && value.chars().next().is_some_and(|c| !c.is_ascii_digit())
+}
+
 impl Default for Registry {
     fn default() -> Self {
         Self {
@@ -110,13 +125,26 @@ impl Registry {
             .into_iter()
             .map(|name| SidecarName::parse(&name).map_err(|_| RegistryError::BadName { name }))
             .collect::<Result<Vec<_>, _>>()?;
+        for (index, name) in sidecars.iter().enumerate() {
+            if sidecars[..index].contains(name) {
+                return Err(RegistryError::Duplicate {
+                    name: name.to_string(),
+                });
+            }
+        }
+        let link_dir = match raw.link_dir {
+            None => PathBuf::from(DEFAULT_LINK_DIR),
+            Some(value) if is_valid_link_dir(&value) => PathBuf::from(value),
+            Some(value) => return Err(RegistryError::BadLinkDir { value }),
+        };
+        let token_env = match raw.token_env {
+            None => DEFAULT_TOKEN_ENV.to_string(),
+            Some(value) if is_valid_variable_name(&value) => value,
+            Some(value) => return Err(RegistryError::BadTokenEnv { value }),
+        };
         Ok(Self {
-            link_dir: raw
-                .link_dir
-                .map_or_else(|| PathBuf::from(DEFAULT_LINK_DIR), PathBuf::from),
-            token_env: raw
-                .token_env
-                .unwrap_or_else(|| DEFAULT_TOKEN_ENV.to_string()),
+            link_dir,
+            token_env,
             sidecars,
         })
     }
