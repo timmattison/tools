@@ -6,6 +6,8 @@
 use std::path::PathBuf;
 
 use crate::host::Host;
+use crate::link::{inspect_link, LinkState};
+use crate::name::SidecarName;
 
 /// Why `locate` gives no path.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -49,8 +51,20 @@ pub enum LocateError {
 /// Returns a [`LocateError`] when the registry does not name the sidecar, or when the
 /// link is missing, broken, or foreign.
 pub fn locate(host: &Host, raw_name: &str) -> Result<PathBuf, LocateError> {
-    let _ = host;
-    Err(LocateError::NotRegistered {
+    let not_registered = || LocateError::NotRegistered {
         name: raw_name.to_string(),
-    })
+    };
+    let name = SidecarName::parse(raw_name).map_err(|_| not_registered())?;
+    if !host.registry().contains(&name) {
+        return Err(not_registered());
+    }
+    let main_clone = host.main_clone(&name);
+    let link = host.link(&name);
+    let shown = host.link_shown(&name);
+    match inspect_link(host.git(), &link, &main_clone) {
+        LinkState::MainClone | LinkState::Worktree { .. } => Ok(link),
+        LinkState::Missing => Err(LocateError::Missing { shown }),
+        LinkState::Broken { .. } => Err(LocateError::Broken { shown }),
+        LinkState::Foreign(_) => Err(LocateError::Foreign { shown, main_clone }),
+    }
 }
