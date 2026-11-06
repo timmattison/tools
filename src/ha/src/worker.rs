@@ -1628,6 +1628,10 @@ mod tests {
         kinds: HashMap<OwnerName, Result<AccountKind, SourceError>>,
         /// The owner of each `account_kind` call, in order.
         kind_asks: Vec<OwnerName>,
+        /// The number of `account_kind` calls that run now.
+        kinds_in_flight: usize,
+        /// The most `account_kind` calls that ran at the same time.
+        max_kinds_in_flight: usize,
         /// The answer of `billing_usage`, by the key of `usage_key`. A read
         /// with no entry gets `NoBillingRole`.
         usage: HashMap<String, Result<Vec<UsageItem>, BillingError>>,
@@ -1718,11 +1722,17 @@ mod tests {
             let mut script = self.script();
             script.calls.push(("kind", owner.to_string()));
             script.kind_asks.push(owner.clone());
-            script.kinds.get(owner).cloned().unwrap_or_else(|| {
+            let answer = script.kinds.get(owner).cloned().unwrap_or_else(|| {
                 Err(SourceError::Failed(
                     "the fake has no account kinds".to_owned(),
                 ))
-            })
+            });
+            script.kinds_in_flight += 1;
+            script.max_kinds_in_flight = script.max_kinds_in_flight.max(script.kinds_in_flight);
+            drop(script);
+            std::thread::sleep(self.delay);
+            self.script().kinds_in_flight -= 1;
+            answer
         }
 
         fn billing_usage(
@@ -4749,6 +4759,34 @@ mod tests {
         let script = fake.script();
         assert!(script.kind_asks.is_empty(), "{:?}", script.kind_asks);
         assert!(script.usage_asks.is_empty(), "{:?}", script.usage_asks);
+    }
+
+    #[test]
+    fn the_worker_looks_up_the_kinds_of_several_accounts_at_once_but_not_too_many() {
+        let fake = Arc::new(FakeSource {
+            delay: Duration::from_millis(100),
+            ..FakeSource::default()
+        });
+        let names: Vec<String> = (0..12).map(|n| format!("acme{n}")).collect();
+        for name in &names {
+            fake.script()
+                .kinds
+                .insert(owner(name), Ok(AccountKind::Organization));
+        }
+        let targets: Vec<&str> = names.iter().map(String::as_str).collect();
+        let worker = spawn_with(Arc::clone(&fake), &billing_settings(&targets), NEVER);
+
+        one_cycle(&worker);
+
+        let script = fake.script();
+        let most = script.max_kinds_in_flight;
+        assert!(most >= 2, "only {most} lookup in flight");
+        assert!(most <= CONCURRENCY, "{most} lookups in flight at once");
+        let mut asked: Vec<String> = script.kind_asks.iter().map(ToString::to_string).collect();
+        asked.sort();
+        let mut expected = names.clone();
+        expected.sort();
+        assert_eq!(asked, expected, "each owner asked exactly once");
     }
 
     #[test]
