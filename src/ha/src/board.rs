@@ -4849,4 +4849,25 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn the_highlight_follows_its_run_when_its_jobs_move_its_row() {
+        let mut board = board();
+        board.replace(
+            repo("Lock-Free-Labs/nvr-tools"),
+            vec![late_run(), later_run()],
+            late_now(),
+        );
+        assert_eq!(
+            run_rows(marked(&board.rows(late_now()))),
+            ["Run(41874496263)*", "Run(41874500000)"]
+        );
+        // The end of the first run is now 17:22:45. Its row moves below the
+        // other row.
+        board.set_jobs(RunId(41_874_496_263), late_jobs());
+        assert_eq!(
+            run_rows(marked(&board.rows(late_now()))),
+            ["Run(41874500000)", "Run(41874496263)*"]
+        );
+    }
 }
