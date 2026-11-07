@@ -16,7 +16,7 @@ use std::ops::{Add, AddAssign};
 
 use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 
-use crate::cost::{Prices, Sku};
+use crate::cost::{PriceBook, Prices, Sku};
 use crate::github::SourceError;
 use crate::money::Usd;
 use crate::target::{folded, hash_folded, OwnerName, Target};
@@ -597,6 +597,16 @@ impl BillingBoard {
                 (Err(error), _) => AccountState::NoAccess(error.to_string()),
             };
         }
+    }
+
+    /// The prices of the accounts that have usage.
+    ///
+    /// An account that is ready has an entry. This is also true when its last
+    /// refresh failed, because it keeps its last good prices. An account that
+    /// is loading, or that has no access, has no entry.
+    #[must_use]
+    pub fn prices(&self) -> PriceBook {
+        PriceBook::default()
     }
 
     /// The rows and the totals for the UTC day `today`.
@@ -1317,6 +1327,41 @@ mod tests {
             .expect("the account is in the view")
             .cell
             .clone()
+    }
+
+    fn linux_usage(price: f64) -> DailyUsage {
+        usage_of(&[priced(
+            "2026-11-06T10:00:00Z",
+            "actions",
+            "Actions Linux",
+            Some(price),
+        )])
+    }
+
+    fn linux_price(book: &PriceBook, name: &str) -> Option<Usd> {
+        book.of(&owner(name))
+            .and_then(|prices| prices.get(Sku::Linux))
+    }
+
+    #[test]
+    fn the_book_holds_the_prices_of_a_ready_account_only() {
+        let mut board = board_of(&["acme", "loading", "denied"]);
+        board.apply(vec![
+            (owner("acme"), Ok(linux_usage(0.006))),
+            (owner("denied"), Err(BillingError::NoBillingRole)),
+        ]);
+        let book = board.prices();
+        assert_eq!(linux_price(&book, "acme"), Some(amount(0.006)));
+        assert_eq!(book.of(&owner("loading")), None);
+        assert_eq!(book.of(&owner("denied")), None);
+    }
+
+    #[test]
+    fn a_ready_account_whose_refresh_failed_keeps_its_prices() {
+        let mut board = board_of(&["acme"]);
+        board.apply(vec![(owner("acme"), Ok(linux_usage(0.006)))]);
+        board.apply(vec![(owner("acme"), Err(BillingError::NoBillingRole))]);
+        assert_eq!(linux_price(&board.prices(), "acme"), Some(amount(0.006)));
     }
 
     #[test]
