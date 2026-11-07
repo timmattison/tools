@@ -735,8 +735,6 @@ pub fn squash_merged_parent_repo() -> TestRepo {
         &replace_line(&base, CONTESTED_LINE, "main-edit"),
         "main rewrites line 15 of stacked.txt",
     );
-
-    repo.checkout("main");
     repo
 }
 
