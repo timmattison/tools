@@ -13,6 +13,7 @@ pub mod billing;
 pub mod board;
 pub mod browser;
 pub mod cancel;
+pub mod cost;
 pub mod first_cycle;
 pub mod github;
 pub mod job;
