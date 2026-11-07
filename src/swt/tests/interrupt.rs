@@ -73,6 +73,28 @@ fn stalling_check(marker: &Path) -> String {
     )
 }
 
+/// How many 0.1 second polls the hangup check waits for its release file. The
+/// total, 60 seconds, matches [`DEADLINE`].
+const HANGUP_CHECK_POLLS: u32 = 600;
+
+/// The body of a `.swt-check` that announces itself by creating `started`,
+/// waits for `release`, sends itself SIGHUP and then exits 0.
+///
+/// The check survives its own hangup only when its parent left SIGHUP ignored,
+/// because `exec` keeps an ignored signal and resets a caught one.
+fn hangup_ignoring_check(started: &Path, release: &Path) -> String {
+    let started = shell_quote(&started.to_string_lossy());
+    let release = shell_quote(&release.to_string_lossy());
+    format!(
+        "#!/bin/sh\n\
+         : > {started}\n\
+         i=0\n\
+         while [ ! -f {release} ] && [ \"$i\" -lt {HANGUP_CHECK_POLLS} ]; do sleep 0.1; i=$((i + 1)); done\n\
+         kill -HUP $$\n\
+         exit 0\n"
+    )
+}
+
 /// The body of a `.swt-check` that stalls on its `nth` invocation and passes
 /// every other time, counting the invocations in a file of its own.
 ///
@@ -179,6 +201,19 @@ struct RunningSwt {
 impl RunningSwt {
     /// Spawns `swt` in `cwd`, optionally with `shim` prepended to its PATH.
     fn spawn(cwd: &Path, args: &[&str], shim: Option<&Path>) -> Self {
+        Self::start(cwd, args, shim, &[])
+    }
+
+    /// Spawns `swt` in `cwd` with each signal in `ignored` set to SIG_IGN, as
+    /// `nohup` does for SIGHUP.
+    fn spawn_ignoring(cwd: &Path, args: &[&str], ignored: &[c_int]) -> Self {
+        Self::start(cwd, args, None, ignored)
+    }
+
+    /// The one constructor behind [`Self::spawn`] and [`Self::spawn_ignoring`].
+    fn start(cwd: &Path, args: &[&str], shim: Option<&Path>, ignored: &[c_int]) -> Self {
+        // Copied before the closure, so the closure does not allocate after `fork`.
+        let ignored: Vec<c_int> = ignored.to_vec();
         let logs = scratch();
         let log = logs.path().join("stderr");
         let stderr = File::create(&log).expect("stderr log");
@@ -198,9 +233,10 @@ impl RunningSwt {
 
         // SAFETY: the closure runs in the forked child between `fork` and
         // `exec`, where only async-signal-safe calls are legal. `signal(2)` is
-        // one, and it touches nothing else in the child.
+        // one, and it touches nothing else in the child. The closure only reads
+        // `ignored`, a `Vec` that was built before the fork.
         unsafe {
-            command.pre_exec(|| {
+            command.pre_exec(move || {
                 // Every assertion here is stated against the *default*
                 // disposition, so each run has to start from it. A shell sets
                 // SIGINT and SIGQUIT to ignore for a background job, and a
@@ -211,6 +247,11 @@ impl RunningSwt {
                 // SIGHUP set to ignore. That disposition also survives `exec`.
                 for signal in [libc::SIGHUP, libc::SIGINT, libc::SIGTERM] {
                     if libc::signal(signal, libc::SIG_DFL) == libc::SIG_ERR {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                for &signal in &ignored {
+                    if libc::signal(signal, libc::SIG_IGN) == libc::SIG_ERR {
                         return Err(std::io::Error::last_os_error());
                     }
                 }
@@ -362,6 +403,47 @@ fn a_terminated_green_check_leaves_no_worktree_and_no_branch() {
 #[test]
 fn a_hung_up_green_check_leaves_no_worktree_and_no_branch() {
     interrupted_create_leaves_nothing_behind(libc::SIGHUP, SIGHUP_STATUS);
+}
+
+// `nohup` starts its child with SIGHUP set to ignore. The user asked for the
+// hangup to have no effect, so `swt` must keep it ignored. The `kill -HUP $$` in
+// the check is the deterministic witness. A child keeps an inherited "ignore"
+// across `exec` but loses a handler, so the check survives its own hangup only
+// when `swt` kept SIGHUP ignored. The signal to `swt` itself models the hangup
+// that a closed terminal sends to the whole job.
+#[test]
+fn a_hangup_that_nohup_ignores_leaves_the_run_alone() {
+    let repo = TestRepo::new();
+    let scratch = scratch();
+    let started = scratch.path().join("check-started");
+    let release = scratch.path().join("check-release");
+    write_swt_check(repo.path(), &hangup_ignoring_check(&started, &release));
+    let name = unique("nohup");
+
+    let mut run = RunningSwt::spawn_ignoring(repo.path(), &["create", &name], &[libc::SIGHUP]);
+    run.wait_for(&started, "the green check to start");
+    let worktree = repo.sole_created_worktree(&name);
+
+    run.signal(libc::SIGHUP);
+    fs::write(&release, "").expect("release marker");
+    let status = run.wait();
+    let stderr = run.stderr_text();
+
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "the hangup that nohup told the run to ignore changed how it ended: {status:?}\n{stderr}"
+    );
+    assert!(
+        worktree.is_dir(),
+        "the hangup that nohup told the run to ignore removed the worktree at {}:\n{stderr}",
+        worktree.display()
+    );
+    assert_eq!(
+        repo.created_branches(&name).len(),
+        1,
+        "the hangup that nohup told the run to ignore removed the branch:\n{stderr}"
+    );
 }
 
 // One interrupt asks `swt` to stop; a second, while it is still stopping, must
