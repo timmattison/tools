@@ -200,6 +200,33 @@ impl Repo {
             .with_context(|| format!("could not read the subject of '{commit}'"))
     }
 
+    /// The parents of `commit`, in the order git lists them.
+    ///
+    /// A root commit has none. A merge commit has two or more.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git could not be spawned, or if `commit` does not
+    /// name a commit.
+    pub fn parents(&self, commit: &str) -> Result<Vec<String>> {
+        let _ = commit;
+        Ok(vec!["not implemented".to_string()])
+    }
+
+    /// Whether `ancestor` is reachable from `descendant`.
+    ///
+    /// The answer is also true when the two are the same commit. A caller that
+    /// needs a strict ancestor checks the equality first.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git could not be spawned, or if either revision
+    /// does not name a commit.
+    pub fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool> {
+        let _ = (ancestor, descendant);
+        Ok(false)
+    }
+
     /// Resolve a revision to a full commit id, without creating a scratch
     /// worktree.
     ///

@@ -408,3 +408,77 @@ fn apply_patch_three_way_gives_false_on_a_conflict_and_restore_cleans_up() {
     let contents = std::fs::read_to_string(scratch.path().join("a.txt")).expect("a.txt exists");
     assert!(!contents.contains("<<<<<<<"), "{contents}");
 }
+
+/// A fixture with a root commit, a side branch, and a merge of the two.
+/// Returns the ids of `(root, side, main_tip, merge)`.
+fn merge_repo() -> (TestRepo, String, String, String, String) {
+    let fixture = TestRepo::init();
+    fixture.commit_file("a.txt", "root\n", "root");
+    let root = fixture.rev_parse("HEAD");
+    fixture.branch("side");
+    fixture.commit_file("side.txt", "side\n", "side");
+    let side = fixture.rev_parse("HEAD");
+    fixture.checkout("-");
+    fixture.commit_file("main.txt", "main\n", "main");
+    let main_tip = fixture.rev_parse("HEAD");
+    fixture.git(&["merge", "-q", "--no-ff", "-m", "merge", "side"]);
+    let merge = fixture.rev_parse("HEAD");
+    (fixture, root, side, main_tip, merge)
+}
+
+#[test]
+fn parents_of_a_root_commit_is_empty() {
+    let (fixture, root, ..) = merge_repo();
+
+    let parents = open(&fixture).parents(&root).expect("parents");
+
+    assert_eq!(parents, Vec::<String>::new());
+}
+
+#[test]
+fn parents_of_a_plain_commit_is_its_one_parent() {
+    let (fixture, root, side, ..) = merge_repo();
+
+    let parents = open(&fixture).parents(&side).expect("parents");
+
+    assert_eq!(parents, vec![root]);
+}
+
+#[test]
+fn parents_of_a_merge_commit_are_both_parents_in_order() {
+    let (fixture, _root, side, main_tip, merge) = merge_repo();
+
+    let parents = open(&fixture).parents(&merge).expect("parents");
+
+    assert_eq!(parents, vec![main_tip, side]);
+}
+
+#[test]
+fn is_ancestor_is_true_for_an_older_commit_on_the_same_line() {
+    let (fixture, root, _side, _main, merge) = merge_repo();
+
+    assert!(open(&fixture).is_ancestor(&root, &merge).expect("answer"));
+}
+
+#[test]
+fn is_ancestor_is_true_for_the_same_commit() {
+    let (fixture, _root, _side, _main, merge) = merge_repo();
+
+    assert!(open(&fixture).is_ancestor(&merge, &merge).expect("answer"));
+}
+
+#[test]
+fn is_ancestor_is_false_for_a_descendant() {
+    let (fixture, root, _side, _main, merge) = merge_repo();
+
+    assert!(!open(&fixture).is_ancestor(&merge, &root).expect("answer"));
+}
+
+#[test]
+fn is_ancestor_is_false_for_a_commit_on_a_side_branch() {
+    let (fixture, _root, side, main_tip, _merge) = merge_repo();
+
+    assert!(!open(&fixture)
+        .is_ancestor(&side, &main_tip)
+        .expect("answer"));
+}
