@@ -326,18 +326,30 @@ impl Scratch {
         Ok(output.success)
     }
 
-    /// Remove the untracked files and directories of the scratch worktree.
+    /// Put the scratch worktree back to the state of its checked-out commit.
     ///
-    /// This runs `git clean -f -d -q`. It never passes `-x`, so ignored files
-    /// stay. Build output that a `.gitignore` names thus survives between two
-    /// steps of a search, and a rebuild stays cheap. A tracked file that a
-    /// step changed is not restored here.
+    /// This runs `git reset --hard -q`, then `git clean -f -d -q`. The reset
+    /// puts back each tracked file that a step changed and clears the index.
+    /// The clean removes the untracked files, for example a file that the
+    /// patch added.
+    ///
+    /// It is not `git apply -R`. A reverse apply fails when the build changed
+    /// a tracked file, and after a `--3way` apply that failed half way. The
+    /// reset and the clean work from the commit, so they need no knowledge of
+    /// what the step did.
+    ///
+    /// The clean never passes `-x`, so ignored files stay. Build output that a
+    /// `.gitignore` names thus survives between two steps of a search, and a
+    /// rebuild stays cheap.
     ///
     /// # Errors
     ///
     /// Returns an error if git could not be spawned, or if git refused the
-    /// clean.
+    /// reset or the clean.
     pub fn restore(&self) -> Result<()> {
+        self.git()
+            .run("reset", &["--hard", "-q"])
+            .context("could not reset the tracked files of the scratch worktree")?;
         self.git()
             .run("clean", &["-f", "-d", "-q"])
             .context("could not remove the untracked files of the scratch worktree")?;
