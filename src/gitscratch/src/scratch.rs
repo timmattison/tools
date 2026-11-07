@@ -347,14 +347,34 @@ impl Scratch {
 
     /// List the commits that a bisection between `bad` and `goods` can test.
     ///
-    /// Not yet implemented.
+    /// The list holds `bad` and each commit that is reachable from `bad` and
+    /// not from any of `goods`. Git sorts it by how well a commit halves the
+    /// range, best first. Each line of git's answer can carry a decoration,
+    /// for example `<id> (HEAD -> main, dist=0)`. This method keeps only the
+    /// first field, the full commit id.
+    ///
+    /// Each good is spelled `^<good>`, an exclusion, and all revisions stand
+    /// after `--end-of-options`. A plain `--not` would be read there as a
+    /// revision name.
     ///
     /// # Errors
     ///
-    /// Returns an error if git fails.
+    /// Returns an error if git could not be spawned, or if git refused the
+    /// call. The usual cause is a revision that does not name a commit.
     pub fn bisect_all(&self, bad: &str, goods: &[&str]) -> Result<Vec<String>> {
-        let _ = (bad, goods);
-        Ok(Vec::new())
+        let output = self
+            .git()
+            .run(
+                "rev-list",
+                &as_str_slice(&bisect_arguments("--bisect-all", bad, goods)),
+            )
+            .with_context(|| format!("could not list the commits to test below '{bad}'"))?;
+
+        Ok(output
+            .lines()
+            .filter_map(|line| line.split_whitespace().next())
+            .map(str::to_string)
+            .collect())
     }
 
     /// The id of the tree the scratch worktree's HEAD points at.
@@ -744,6 +764,25 @@ impl Scratch {
     fn repo_git(&self) -> Git {
         Git::new(&self.repo, self.hooks.as_str())
     }
+}
+
+/// The arguments of a `git rev-list` bisection call over `bad` and `goods`.
+///
+/// `mode` is `--bisect-all` or `--bisect-vars`. Every revision stands after
+/// `--end-of-options`, and each good is an exclusion spelled `^<good>`.
+fn bisect_arguments(mode: &str, bad: &str, goods: &[&str]) -> Vec<String> {
+    let mut arguments = vec![
+        mode.to_string(),
+        "--end-of-options".to_string(),
+        bad.to_string(),
+    ];
+    arguments.extend(goods.iter().map(|good| format!("^{good}")));
+    arguments
+}
+
+/// Borrow each owned argument, in the shape that the git runner takes.
+fn as_str_slice(arguments: &[String]) -> Vec<&str> {
+    arguments.iter().map(String::as_str).collect()
 }
 
 impl Drop for Scratch {
