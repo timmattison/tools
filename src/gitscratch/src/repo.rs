@@ -136,6 +136,18 @@ impl Repo {
         Scratch::create(&self.path, at)
     }
 
+    /// The change that `commit` made, as a patch that `git apply` accepts.
+    ///
+    /// Not yet implemented.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git fails.
+    pub fn patch_of(&self, commit: &str) -> Result<Vec<u8>> {
+        let _ = commit;
+        Ok(Vec::new())
+    }
+
     /// Resolve a revision to a full commit id, without creating a scratch
     /// worktree.
     ///
