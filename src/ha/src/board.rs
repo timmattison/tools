@@ -21,6 +21,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use unicode_width::UnicodeWidthStr;
 
+use crate::cost::{JobCost, PriceBook, RunCost};
 use crate::job::{Job, JobId, RunnerName};
 use crate::queue::{Departure, History, Outcome, PullNumber, QueueEntry};
 use crate::run::{keep_first_of_each_id, Run, RunId, RunState};
@@ -165,6 +166,13 @@ pub enum Row<'a> {
         /// The end of a finished run (see `run_end`). `None` for an active
         /// run.
         ended: Option<DateTime<Utc>>,
+        /// The estimated list-price cost of the jobs that the board holds for
+        /// the run, at the time of the view. It is `None` when the board holds
+        /// no good job for the run: before the first answer, after a failed
+        /// first fetch, and when the answer holds no job. A failed fetch after
+        /// a good one keeps the cost of the last good jobs. The jobs are those
+        /// of the latest attempt, the same jobs that the expanded run shows.
+        cost: Option<RunCost>,
     },
     /// One job of an expanded run.
     Job {
@@ -181,6 +189,8 @@ pub enum Row<'a> {
         /// The end of its run (the `ended` of the run row). `None` for a job
         /// of an active run.
         run_ended: Option<DateTime<Utc>>,
+        /// The estimated list-price cost of the job at the time of the view.
+        cost: JobCost,
     },
     /// The row of an expanded run before the first answer: "Loading jobs…".
     JobsLoading,
@@ -389,6 +399,8 @@ pub struct Board {
     /// The merge queue of each watched repository that has one. The two merge
     /// sections show while this map holds a repository.
     queues: BTreeMap<RepoName, QueueBook>,
+    /// The billing prices of each account that `ha` could read.
+    prices: PriceBook,
 }
 
 /// What the board holds for the merge queue of one repository.
@@ -426,7 +438,15 @@ impl Board {
             jobs: BTreeMap::new(),
             expanded: BTreeSet::new(),
             queues: BTreeMap::new(),
+            prices: PriceBook::default(),
         }
+    }
+
+    /// Replaces the whole book of billing prices. The book holds the billing
+    /// prices of each account that `ha` could read. A run of an account that
+    /// is not in the book takes the prices of the table in `cost.rs`.
+    pub fn set_prices(&mut self, prices: PriceBook) {
+        let _ = prices;
     }
 
     /// The time window of the finished runs and of the merge history.
@@ -852,6 +872,8 @@ impl Board {
     /// The list also holds header rows, empty rows, and job rows, thus the
     /// index of a row is not the position of its item. The `job_sum` of each
     /// run row is the sum of the runner times of its last good jobs at `now`.
+    /// The `cost` of each run row and of each job row is the list-price cost at
+    /// `now`, with the prices of the book from [`Board::set_prices`].
     fn build_rows(&self, now: DateTime<Utc>) -> Vec<Row<'_>> {
         let selected = self.selected.as_ref();
         let mut rows = Vec::new();
@@ -863,6 +885,7 @@ impl Board {
             jobs: &self.jobs,
             errors: &self.errors,
             expanded: &self.expanded,
+            prices: &self.prices,
             now,
         };
         if has_queue {
@@ -1276,7 +1299,9 @@ struct JobView<'a> {
     errors: &'a BTreeMap<RepoName, String>,
     /// The runs that show their job rows.
     expanded: &'a BTreeSet<RunId>,
-    /// The time of the view. The job sum of a run reads it.
+    /// The billing prices of each account that `ha` could read.
+    prices: &'a PriceBook,
+    /// The time of the view. The job sum and the cost of a run read it.
     now: DateTime<Utc>,
 }
 
@@ -1302,7 +1327,8 @@ fn job_sum(jobs: &[Job], now: DateTime<Utc>) -> Option<Duration> {
 /// has no job part. Otherwise the job row at the selected job position gets the
 /// mark. The state of each run row comes from the job answer of the run,
 /// expanded or not. The `job_sum` of each run row is the sum of the runner
-/// times of the last good jobs at `view.now`, see `job_sum`. The block of jobs
+/// times of the last good jobs at `view.now`, see `job_sum`. The `cost` of each
+/// run row is the list-price cost of the same jobs, see `run_cost`. The block of jobs
 /// of each run in `view.expanded` follows the row of that run.
 fn push_runs<'a>(
     rows: &mut Vec<Row<'a>>,
@@ -1327,6 +1353,7 @@ fn push_runs<'a>(
             stale: view.errors.contains_key(&run.repo),
             job_sum: job_sum(jobs, view.now),
             ended,
+            cost: None,
         });
         if view.expanded.contains(&run.id) {
             push_jobs(
@@ -1335,6 +1362,7 @@ fn push_runs<'a>(
                 ended,
                 answer,
                 here.and_then(|selection| selection.job),
+                view,
             );
         }
     }
@@ -1346,13 +1374,16 @@ fn push_runs<'a>(
 /// `run_ended` is the end of the run (`None` for an active run), and each job
 /// row carries it too. `answer` is the job answer that the board holds for the
 /// run. `None` gives the loading row. The job row at the position of
-/// `selected` gets the mark.
+/// `selected` gets the mark. The `cost` of each job row is the list-price cost
+/// of the job at `view.now`, with the billing prices of the owner of the run
+/// from `view.prices`.
 fn push_jobs<'a>(
     rows: &mut Vec<Row<'a>>,
     run: &'a Run,
     run_ended: Option<DateTime<Utc>>,
     answer: Option<&'a Jobs>,
     selected: Option<(JobId, usize)>,
+    _view: JobView<'a>,
 ) {
     let marked = |index: usize| selected.is_some_and(|(_, position)| position == index);
     match answer {
@@ -1365,6 +1396,7 @@ fn push_jobs<'a>(
                 selected: marked(index),
                 run,
                 run_ended,
+                cost: JobCost::Unknown,
             }));
         }
         Some(Jobs::Failed { jobs, error }) => {
@@ -1374,6 +1406,7 @@ fn push_jobs<'a>(
                 selected: marked(index),
                 run,
                 run_ended,
+                cost: JobCost::Unknown,
             }));
             rows.push(Row::JobsError(error));
         }
@@ -1383,6 +1416,7 @@ fn push_jobs<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::money::Usd;
     use crate::queue::{EntryState, Outcome};
     use chrono::{Duration as Span, TimeZone};
 
@@ -2996,6 +3030,212 @@ mod tests {
             run_job_sum(&board.rows(now()), 1),
             Some(Duration::from_secs(1108))
         );
+    }
+
+    /// The cost that the row of run `id` shows. It panics when no row holds
+    /// the run.
+    fn run_cost_of(rows: &[Row<'_>], id: u64) -> Option<RunCost> {
+        rows.iter()
+            .find_map(|row| match row {
+                Row::Run { run, cost, .. } if run.id == RunId(id) => Some(*cost),
+                _ => None,
+            })
+            .expect("a row for the run")
+    }
+
+    /// The cost of each job row, in the order of the rows.
+    fn job_costs(rows: &[Row<'_>]) -> Vec<JobCost> {
+        rows.iter()
+            .filter_map(|row| match row {
+                Row::Job { cost, .. } => Some(*cost),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Builds a finished job that ran for `seconds` seconds on a runner with
+    /// the label `label`.
+    fn labelled_job(id: u64, label: &str, seconds: i64) -> Job {
+        Job {
+            labels: vec![label.to_owned()],
+            runner: RunnerName::new("GitHub Actions 1".to_owned()),
+            ..finished_job(id, seconds)
+        }
+    }
+
+    /// Builds a price in thousandths of a dollar.
+    fn mills(count: u32) -> Usd {
+        Usd::from_mills(count)
+    }
+
+    #[test]
+    fn the_cost_of_a_run_is_the_sum_of_the_costs_of_its_jobs() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(41_966_278_012, "a/x", RunState::Passed, 60, 10)],
+            now(),
+        );
+        board.set_jobs(
+            RunId(41_966_278_012),
+            vec![
+                labelled_job(1, "ubuntu-latest", 211),
+                labelled_job(2, "windows-latest", 897),
+            ],
+        );
+        assert_eq!(
+            run_cost_of(&board.rows(now()), 41_966_278_012),
+            Some(RunCost {
+                amount: mills(174),
+                partial: false
+            })
+        );
+    }
+
+    #[test]
+    fn a_run_with_a_job_of_an_unknown_label_has_a_partial_cost() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Passed, 60, 10)],
+            now(),
+        );
+        board.set_jobs(
+            RunId(1),
+            vec![
+                labelled_job(1, "ubuntu-latest", 211),
+                labelled_job(2, "mystery-runner", 897),
+            ],
+        );
+        assert_eq!(
+            run_cost_of(&board.rows(now()), 1),
+            Some(RunCost {
+                amount: mills(24),
+                partial: true
+            })
+        );
+    }
+
+    #[test]
+    fn a_run_with_no_good_job_has_no_cost() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Running, 20, 1),
+                run(3, "a/x", RunState::Running, 10, 1),
+            ],
+            now(),
+        );
+        // Run 1 has no answer. Run 2 has a failed first fetch.
+        board.fail_jobs(RunId(2), "boom".to_owned());
+        // Run 3 has an answer with no job.
+        board.set_jobs(RunId(3), vec![]);
+        let rows = board.rows(now());
+        assert_eq!(run_cost_of(&rows, 1), None);
+        assert_eq!(run_cost_of(&rows, 2), None);
+        assert_eq!(run_cost_of(&rows, 3), None);
+    }
+
+    #[test]
+    fn a_failed_fetch_keeps_the_cost_of_the_last_good_jobs() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Passed, 60, 10)],
+            now(),
+        );
+        board.set_jobs(RunId(1), vec![labelled_job(1, "ubuntu-latest", 211)]);
+        board.fail_jobs(RunId(1), "boom".to_owned());
+        assert_eq!(
+            run_cost_of(&board.rows(now()), 1),
+            Some(RunCost {
+                amount: mills(24),
+                partial: false
+            })
+        );
+    }
+
+    #[test]
+    fn the_job_rows_of_an_expanded_run_carry_the_cost_of_each_job() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Passed, 60, 10)],
+            now(),
+        );
+        board.expand(now());
+        board.set_jobs(
+            RunId(1),
+            vec![
+                labelled_job(1, "ubuntu-latest", 211),
+                labelled_job(2, "mystery-runner", 897),
+            ],
+        );
+        assert_eq!(
+            job_costs(&board.rows(now())),
+            [JobCost::Known(mills(24)), JobCost::Unknown]
+        );
+    }
+
+    #[test]
+    fn the_job_rows_after_a_failed_fetch_carry_the_cost_of_each_job() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Passed, 60, 10)],
+            now(),
+        );
+        board.expand(now());
+        board.set_jobs(RunId(1), vec![labelled_job(1, "ubuntu-latest", 211)]);
+        board.fail_jobs(RunId(1), "boom".to_owned());
+        assert_eq!(job_costs(&board.rows(now())), [JobCost::Known(mills(24))]);
+    }
+
+    #[test]
+    fn a_job_of_a_public_run_on_a_standard_runner_costs_nothing() {
+        let mut board = board();
+        let public = Run {
+            visibility: crate::run::Visibility::Public,
+            ..run(1, "a/x", RunState::Passed, 60, 10)
+        };
+        board.replace(repo("a/x"), vec![public], now());
+        board.expand(now());
+        board.set_jobs(RunId(1), vec![labelled_job(1, "ubuntu-latest", 211)]);
+        let rows = board.rows(now());
+        assert_eq!(job_costs(&rows), [JobCost::Known(Usd::ZERO)]);
+        assert_eq!(
+            run_cost_of(&rows, 1),
+            Some(RunCost {
+                amount: Usd::ZERO,
+                partial: false
+            })
+        );
+    }
+
+    #[test]
+    fn the_cost_of_an_active_run_increases_at_the_start_of_the_next_minute() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Running, 30, 1)],
+            now(),
+        );
+        board.set_jobs(
+            RunId(1),
+            vec![Job {
+                labels: vec!["ubuntu-latest".to_owned()],
+                runner: RunnerName::new("GitHub Actions 1".to_owned()),
+                started_at: Some(now()),
+                ..job(11, RunState::Running)
+            }],
+        );
+        let mut amount_at = |seconds: i64| {
+            run_cost_of(&board.rows(now() + Span::seconds(seconds)), 1).map(|cost| cost.amount)
+        };
+        assert_eq!(amount_at(60), Some(mills(6)));
+        assert_eq!(amount_at(61), Some(mills(12)));
     }
 
     #[test]
