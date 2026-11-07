@@ -35,9 +35,9 @@
 //!   taking a responsibility — never at startup, and never for its own sake — and
 //!   a signal arriving with nothing at risk gets the default action once any
 //!   teardown in flight is done, so `swt` never makes a signal mean something
-//!   new in a window where there is nothing to protect. Within that act the arming comes
-//!   *first* and the state that records the responsibility second, so the two can
-//!   never disagree in the direction that matters.
+//!   new in a window where there is nothing to protect. Within that act the
+//!   arming comes *first* and the state that records the responsibility second,
+//!   so the two can never disagree in the direction that matters.
 //! - **An inherited "ignore" stays.** A parent can start `swt` with a signal set
 //!   to ignore, and `nohup` does this for SIGHUP. A registration replaces
 //!   SIG_IGN with a handler. A child that `exec` starts keeps SIG_IGN but loses a
@@ -370,8 +370,9 @@ fn unverified_worktree() -> MutexGuard<'static, Option<UnverifiedWorktree>> {
 /// The latch below already keeps the *work* to a single run. This is the other
 /// half: the signal thread holds this across both of its endings, the
 /// `process::exit` and the default action, so a party that would otherwise have
-/// exited first waits here instead of cutting a teardown in flight in half. Deliberately not reentrant-safe — a std [`Mutex`]
-/// is not — so nothing taken under it may take it again.
+/// exited first waits here instead of cutting a teardown in flight in half.
+/// Deliberately not reentrant-safe — a std [`Mutex`] is not — so nothing taken
+/// under it may take it again.
 static TEARDOWN_SEQUENCE: Mutex<()> = Mutex::new(());
 
 /// Claims the teardown sequence, ignoring poisoning.
