@@ -1026,7 +1026,9 @@ cannot hang the caller. Used by `cwt` and `ha`.
       `read-binary`), the reference, the working directory, the cache file, the zellij session and
       pane, `TERM_PROGRAM`, the Claude Code session, and the chain of ancestor processes (at most 32,
       each command line cut to 1024 bytes). The Claude Code session is the nearest ancestor that has
-      a file `sessions/<pid>.json` in `$CLAUDE_CONFIG_DIR`, else in `~/.claude`.
+      a file `sessions/<pid>.json` in `$CLAUDE_CONFIG_DIR`, else in `~/.claude`. A file whose
+      `startedAt` is earlier than the start of that ancestor is skipped, because that PID now belongs
+      to a different process. The lookup then continues to the next ancestor.
     - `op_end`, after `op` returns, with the same `request_id`: the `outcome` (`ok`, `empty`,
       `failed`, or `spawn_error`), the `exit_code`, and the `duration_ms`. An `empty` outcome means
       `op` exited 0 but gave no value, and op-cache tries again as after a failure. An `empty` or a

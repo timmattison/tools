@@ -173,6 +173,13 @@ pub(crate) fn claude_config_dir(
 /// A missing file moves on to the next ancestor. A file that cannot be read,
 /// or is not JSON, still names the ancestor, with no fields. The executable
 /// name is never matched.
+///
+/// A file whose `startedAt` (milliseconds since the Unix epoch) is earlier
+/// than the start of the ancestor is stale. A Claude process that dies without
+/// cleanup leaves its file, and the kernel can give the PID to a new process.
+/// A stale file moves on to the next ancestor, like a missing file. A file with
+/// no `startedAt`, a `startedAt` that is not a non-negative integer, or an
+/// ancestor with an unknown start is accepted.
 pub(crate) fn claude_session(chain: &[Ancestor], sessions_dir: &Path) -> Option<ClaudeSession> {
     for ancestor in chain {
         let file = sessions_dir.join(format!("{}.json", ancestor.pid));
@@ -184,6 +191,12 @@ pub(crate) fn claude_session(chain: &[Ancestor], sessions_dir: &Path) -> Option<
         let Ok(serde_json::Value::Object(fields)) = serde_json::from_str(&text) else {
             return Some(session_without_fields(ancestor.pid));
         };
+        let started_at_ms = fields.get("startedAt").and_then(serde_json::Value::as_u64);
+        if let (Some(start), Some(started_at_ms)) = (ancestor.start, started_at_ms) {
+            if start.is_later_than_ms(started_at_ms) {
+                continue;
+            }
+        }
         let text_field = |key: &str| {
             fields
                 .get(key)
