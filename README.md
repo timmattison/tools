@@ -2265,6 +2265,58 @@ cannot hang the caller. Used by `cwt` and `ha`.
     - A finished run can show a `JOB SUM` smaller than its `TIME`, also when its jobs ran in
       parallel. The `TIME` cell of a finished run ends at the last update of the run, and GitHub
       sometimes makes that update some minutes after the last job finished.
+  - The `COST` column, after `JOB SUM`, shows what each job and each run costs at list price.
+    The cost is an estimate, not the bill. GitHub gives no cost for one job, thus `ha`
+    calculates it from the jobs and the billing data that it already reads.
+    - The cost of one job is its billed minutes times the price of one minute of its runner. The
+      billed minutes are the time from the start of the job to its finish, rounded up to a whole
+      minute, because GitHub bills each job that way. A job that runs uses the time until now,
+      thus its cost increases at the start of each minute.
+    - The labels of a job tell which runner it used, for example `ubuntu-latest` is Linux and
+      `windows-latest` is Windows. `ha` holds a table of the labels of the GitHub-hosted runners.
+      The table comes from the
+      [GitHub-hosted runners reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
+      and the
+      [larger runners reference](https://docs.github.com/en/actions/reference/runners/larger-runners),
+      read on 2026-11-07.
+    - The price of one minute comes from the billing data of the account: the `pricePerUnit` of
+      each SKU, when `ha` can read the account (see the "Actions billing" box below). Else the
+      price comes from a table in `ha`, from the
+      [Actions runner pricing](https://docs.github.com/en/billing/reference/actions-runner-pricing)
+      page, read on 2026-11-07:
+
+      | SKU | Runner | Price for each minute |
+      |---|---|---|
+      | `actions_linux_slim` | Linux, 1 core (`ubuntu-slim`) | $0.002 |
+      | `actions_linux` | Linux | $0.006 |
+      | `actions_linux_arm` | Linux arm64 | $0.005 |
+      | `actions_windows` | Windows | $0.010 |
+      | `actions_windows_arm` | Windows arm64 | $0.010 |
+      | `actions_macos` | macOS | $0.062 |
+      | `macos_l` | macOS large (`-large`) | $0.077 |
+      | `macos_xl` | macOS xlarge (`-xlarge`) | $0.102 |
+
+      On 2026-11-07, the billing data gave the same prices for Linux, Windows, and macOS. With
+      `--no-billing`, each price comes from the table.
+    - A job costs `$0` when it ran on a standard runner of a public repository, when it ran on a
+      self-hosted runner (the label `self-hosted`), and when it had no runner or did not start,
+      for example a skipped job. A macOS large or xlarge runner costs money also on a public
+      repository.
+    - A job shows `?` when none of its labels is in the table, for example a job on a larger
+      runner of an organization. `ha` never guesses a price.
+    - A job row shows the cost of its job, for example `$0.16`. A cost above $0 and below one
+      cent shows `<$0.01`.
+    - A run row shows the sum of its jobs. The sum covers the jobs of the latest attempt, the
+      jobs that an expanded run shows. A sum that includes a `?` is a lower bound: it starts
+      with `≥`, and it rounds down to cents. The cell is empty until `ha` has the jobs of the
+      run, and when GitHub gives no job for the run. A merge queue row and a merge history row
+      show an empty cell.
+    - The cost is the list price, not the bill. The included minutes of an account can make the
+      bill $0. For example, Lock-Free-Labs used $5.81 at list price in the 30 days to
+      2026-11-06, and GitHub billed $0.00.
+    - The cell has the color of its row, thus it fades with a finished row. The column is 8
+      columns wide, and each amount aligns on the right. On a narrow terminal, the text columns
+      give up their columns first.
   - The text of each finished row fades from light gray to dark gray as the row gets older, as
     the commit rows of `gsw` do. Thus a new result is bright, and you can tell the age of a row
     before you read the finish time under `FINISHED`. The age of a run is the time since it
@@ -2442,6 +2494,9 @@ cannot hang the caller. Used by `cwt` and `ha`.
       start and ends in `…`.
     - `--no-billing` and the key `billing = false` hide the box and send no billing request. The
       flag replaces the key of the file.
+    - Each item of the usage report also gives the `pricePerUnit` of its SKU. The `COST` column
+      of the board uses that price for the runs of the account. When the report holds two prices
+      for one SKU, the price of the newest item wins.
   - Billing accounts. `ha` asks `GET /users/{owner}` one time for each owner that is not in
     `billing_enterprises`, and again after a failed lookup, to learn if the owner is an
     organization or a user. Then it reads the usage report of the account:
@@ -2506,6 +2561,9 @@ cannot hang the caller. Used by `cwt` and `ha`.
     after the first one send the 200 requests. A later refresh sends one only for a new run in
     the section whose jobs `ha` does not have yet. A failed request of a finished run goes again
     on the next refresh, under the same limit of 32.
+    The `COST` column sends no request. It uses the jobs above and the prices of the billing
+    reads below. `ha` sends no request to the `timing` endpoint of a run, because GitHub is
+    closing that endpoint down, and its `billable` data is already empty.
     At most 8 `gh` children run at the same time, for runs and jobs together. The status line
     shows the remaining budget. When less than 10% remains, `ha` waits until the reset of the budget and says so.
   - Billing budget: the billing refreshes at start, every 10 minutes, and when you push `r`.
