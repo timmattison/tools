@@ -73,9 +73,13 @@ fn stalling_check(marker: &Path) -> String {
     )
 }
 
-/// How many 0.1 second polls the hangup check waits for its release file. The
-/// total, 60 seconds, matches [`DEADLINE`].
-const HANGUP_CHECK_POLLS: u32 = 600;
+/// How long the hangup check sleeps between two looks for its release file.
+const HANGUP_CHECK_POLL: Duration = Duration::from_millis(100);
+
+/// How many polls the hangup check makes before it stops waiting for its
+/// release file. It comes from [`DEADLINE`], so the check stops waiting when
+/// the test does.
+const HANGUP_CHECK_POLLS: u128 = DEADLINE.as_millis() / HANGUP_CHECK_POLL.as_millis();
 
 /// The body of a `.swt-check` that announces itself by creating `started`,
 /// waits for `release`, sends itself SIGHUP and then exits 0.
@@ -85,11 +89,12 @@ const HANGUP_CHECK_POLLS: u32 = 600;
 fn hangup_ignoring_check(started: &Path, release: &Path) -> String {
     let started = shell_quote(&started.to_string_lossy());
     let release = shell_quote(&release.to_string_lossy());
+    let poll = HANGUP_CHECK_POLL.as_secs_f64();
     format!(
         "#!/bin/sh\n\
          : > {started}\n\
          i=0\n\
-         while [ ! -f {release} ] && [ \"$i\" -lt {HANGUP_CHECK_POLLS} ]; do sleep 0.1; i=$((i + 1)); done\n\
+         while [ ! -f {release} ] && [ \"$i\" -lt {HANGUP_CHECK_POLLS} ]; do sleep {poll}; i=$((i + 1)); done\n\
          kill -HUP $$\n\
          exit 0\n"
     )
