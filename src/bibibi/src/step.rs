@@ -135,3 +135,47 @@ fn test_verdict(status: ExitStatus) -> Result<Verdict> {
         Verdict::Bad
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::ExitStatus;
+
+    use super::{test_verdict, SkipReason, Verdict};
+
+    /// The status of a process that exited with `code`.
+    fn exited(code: i32) -> ExitStatus {
+        ExitStatus::from_raw(code << 8)
+    }
+
+    #[test]
+    fn exit_0_is_good() {
+        assert_eq!(test_verdict(exited(0)).expect("verdict"), Verdict::Good);
+    }
+
+    #[test]
+    fn exit_1_is_bad() {
+        assert_eq!(test_verdict(exited(1)).expect("verdict"), Verdict::Bad);
+    }
+
+    #[test]
+    fn exit_125_is_a_skip() {
+        assert_eq!(
+            test_verdict(exited(125)).expect("verdict"),
+            Verdict::Skip(SkipReason::TestExited125)
+        );
+    }
+
+    #[test]
+    fn exit_124_from_timeout_is_bad() {
+        assert_eq!(test_verdict(exited(124)).expect("verdict"), Verdict::Bad);
+    }
+
+    #[test]
+    fn a_death_by_signal_9_is_bad() {
+        assert_eq!(
+            test_verdict(ExitStatus::from_raw(9)).expect("verdict"),
+            Verdict::Bad
+        );
+    }
+}
