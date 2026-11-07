@@ -490,7 +490,10 @@ mod tests {
         hold_unverified_worktree, remove_unverified_worktree, serialize_at_risk, UnverifiedWorktree,
     };
     #[cfg(unix)]
-    use super::{signal_disposition, take_arming_witness, Disposition, SIGINT, SIGTERM};
+    use super::{
+        signal_disposition, signals_to_read, take_arming_witness, Disposition, SIGHUP, SIGINT,
+        SIGTERM, TERMINATION_SIGNALS,
+    };
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -621,6 +624,27 @@ mod tests {
             signal_disposition(SIGTERM, true),
             Disposition::Terminate(143),
             "SIGTERM is 128 + 15"
+        );
+    }
+
+    // A parent that set a signal to ignore meant it. `swt` must not register that
+    // signal, because registering replaces SIG_IGN with a handler.
+    #[cfg(unix)]
+    #[test]
+    fn a_signal_ignored_on_entry_is_not_read() {
+        assert_eq!(
+            signals_to_read(|_| false),
+            TERMINATION_SIGNALS.to_vec(),
+            "with nothing ignored, every termination signal is read"
+        );
+        assert_eq!(
+            signals_to_read(|signal| signal == SIGHUP),
+            vec![SIGINT, SIGTERM],
+            "an ignored SIGHUP must leave the list and keep the order of the rest"
+        );
+        assert!(
+            signals_to_read(|_| true).is_empty(),
+            "with every signal ignored, nothing is read"
         );
     }
 }
