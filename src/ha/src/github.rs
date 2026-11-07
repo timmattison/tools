@@ -1594,6 +1594,8 @@ fn parse_usage(body: &str) -> Result<Vec<UsageItem>, SourceError> {
             gross: json.gross_amount,
             net: json.net_amount,
             organization: json.organization_name,
+            sku: String::new(),
+            price_per_unit: None,
         })
         .collect())
 }
@@ -3452,8 +3454,19 @@ mod tests {
                 gross: Usd::from_f64(0.126).unwrap(),
                 net: Usd::from_f64(0.0).unwrap(),
                 organization: Some("Lock-Free-Labs".to_owned()),
+                sku: "Actions Linux".to_owned(),
+                price_per_unit: Some(Usd::from_f64(0.006).unwrap()),
             }]
         );
+    }
+
+    #[test]
+    fn an_item_with_no_sku_and_no_price_maps_to_empty_text_and_none() {
+        let body = r#"{"usageItems":[{"date":"2026-11-01T18:01:16Z","grossAmount":1,"netAmount":1,"product":"actions","sku":null}]}"#;
+        let items = parse_usage(body).expect("a report");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].sku, "");
+        assert_eq!(items[0].price_per_unit, None);
     }
 
     #[test]

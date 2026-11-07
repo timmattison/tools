@@ -37,6 +37,12 @@ pub struct UsageItem {
     pub net: Usd,
     /// The organization that used the product. An enterprise report names it.
     pub organization: Option<String>,
+    /// The SKU name as GitHub writes it, for example `Actions Linux`. The text
+    /// is empty when GitHub gives none.
+    pub sku: String,
+    /// The list price of one unit of the SKU. It is `None` when GitHub gives
+    /// none.
+    pub price_per_unit: Option<Usd>,
 }
 
 impl UsageItem {
@@ -698,6 +704,8 @@ mod tests {
             gross: amount(gross),
             net: amount(net),
             organization: None,
+            sku: String::new(),
+            price_per_unit: None,
         }
     }
 

@@ -5053,6 +5053,8 @@ mod tests {
             gross: Usd::from_f64(net * 2.0).expect("an amount"),
             net: Usd::from_f64(net).expect("an amount"),
             organization: organization.map(str::to_owned),
+            sku: String::new(),
+            price_per_unit: None,
         }
     }
 
