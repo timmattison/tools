@@ -191,6 +191,7 @@ struct JobJson {
     completed_at: Option<DateTime<Utc>>,
     html_url: Option<String>,
     runner_name: Option<String>,
+    labels: Option<Vec<String>>,
 }
 
 /// Maps the JSON body of one page of jobs to a [`JobsPage`].
@@ -210,6 +211,7 @@ fn parse_jobs(body: &str) -> Result<JobsPage, SourceError> {
                 json.started_at.or(json.created_at)
             };
             Job {
+                labels: Vec::new(),
                 id: JobId(json.id),
                 name: json.name.unwrap_or_default(),
                 state,
@@ -1946,11 +1948,11 @@ mod tests {
         {"id":399444496,"run_id":29679449,"name":"build (ubuntu)","status":"completed","conclusion":"failure",
          "started_at":"2026-09-24T21:56:49Z","created_at":"2026-09-24T21:55:00Z",
          "completed_at":"2026-09-24T21:57:56Z",
-         "runner_name":"GitHub Actions 1000001050",
+         "runner_name":"GitHub Actions 1000001050","labels":["ubuntu-latest"],
          "html_url":"https://github.com/o/r/actions/runs/29679449/job/399444496","steps":[]},
         {"id":2,"name":"test","status":"in_progress","conclusion":null,
          "started_at":null,"created_at":"2026-09-25T01:02:03Z","completed_at":null,
-         "runner_name":"",
+         "runner_name":"","labels":null,
          "html_url":"https://github.com/o/r/actions/runs/29679449/job/2"},
         {"id":3,"name":null,"status":"queued","conclusion":null,
          "started_at":null,"created_at":"2026-09-25T01:04:00Z","completed_at":null,"html_url":null,"runner_name":null}]}"#;
@@ -1963,6 +1965,7 @@ mod tests {
             page.jobs,
             [
                 Job {
+                    labels: vec!["ubuntu-latest".to_owned()],
                     id: JobId(399_444_496),
                     name: "build (ubuntu)".to_owned(),
                     state: RunState::Failed,
@@ -1973,6 +1976,7 @@ mod tests {
                     url: "https://github.com/o/r/actions/runs/29679449/job/399444496".to_owned(),
                 },
                 Job {
+                    labels: Vec::new(),
                     id: JobId(2),
                     name: "test".to_owned(),
                     state: RunState::Running,
@@ -1983,6 +1987,7 @@ mod tests {
                     url: "https://github.com/o/r/actions/runs/29679449/job/2".to_owned(),
                 },
                 Job {
+                    labels: Vec::new(),
                     id: JobId(3),
                     name: String::new(),
                     state: RunState::Queued,

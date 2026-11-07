@@ -1417,6 +1417,7 @@ mod tests {
     /// Builds a job.
     fn job(id: u64, state: RunState) -> Job {
         Job {
+            labels: Vec::new(),
             id: JobId(id),
             name: format!("job {id}"),
             state,

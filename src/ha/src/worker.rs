@@ -2875,6 +2875,7 @@ mod tests {
 
     fn job(id: u64) -> Job {
         Job {
+            labels: Vec::new(),
             id: crate::job::JobId(id),
             name: format!("job {id}"),
             state: RunState::Passed,

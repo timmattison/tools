@@ -3348,6 +3348,7 @@ mod tests {
         completed: Option<&str>,
     ) -> Job {
         Job {
+            labels: Vec::new(),
             id: JobId(id),
             name: name.to_owned(),
             state,

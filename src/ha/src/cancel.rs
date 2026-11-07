@@ -211,6 +211,7 @@ mod tests {
             url: String::new(),
         };
         let job = Job {
+            labels: Vec::new(),
             id: crate::job::JobId(5),
             name: "build (ubuntu-latest)".to_owned(),
             state: crate::run::RunState::Running,

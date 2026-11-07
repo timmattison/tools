@@ -2012,6 +2012,7 @@ mod tests {
 
     fn job(id: u64, name: &str) -> crate::job::Job {
         crate::job::Job {
+            labels: Vec::new(),
             id: crate::job::JobId(id),
             name: name.to_owned(),
             state: RunState::Running,
