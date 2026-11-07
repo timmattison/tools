@@ -5,7 +5,7 @@
 //! never share a path.
 
 use gitscratch::testing::TestRepo;
-use gitscratch::Repo;
+use gitscratch::{NoInheritedGitEnvironment, Repo};
 use tempfile::TempDir;
 
 /// Open the fixture as a `Repo`.
@@ -291,4 +291,41 @@ fn bisect_steps_matches_the_count_that_git_gives_for_a_longer_range() {
     // commits in a line prints `bisect_all=8` and `bisect_steps=2`. For
     // comparison, 1 or 2 commits give 0, 3 to 5 give 1, and 12 give 3.
     assert_eq!(steps, 2);
+}
+
+#[test]
+fn restore_puts_back_a_changed_tracked_file_and_unstages_an_index_change() {
+    let fixture = TestRepo::init();
+    fixture.commit_files(&[("a.txt", "one\n"), ("b.txt", "two\n")], "first");
+    let scratch = fixture.scratch("HEAD");
+    std::fs::write(scratch.path().join("a.txt"), "changed in the tree\n").expect("write a file");
+    std::fs::write(scratch.path().join("b.txt"), "changed in the index\n").expect("write a file");
+    let staged = std::process::Command::new("git")
+        .without_inherited_git_environment()
+        .args(["add", "b.txt"])
+        .current_dir(scratch.path())
+        .status()
+        .expect("git started");
+    assert!(
+        staged.success(),
+        "git add must work in the scratch worktree"
+    );
+
+    scratch.restore().expect("restore");
+
+    let status = std::process::Command::new("git")
+        .without_inherited_git_environment()
+        .args(["status", "--porcelain"])
+        .current_dir(scratch.path())
+        .output()
+        .expect("git started");
+    assert_eq!(String::from_utf8_lossy(&status.stdout), "");
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("a.txt")).expect("read a.txt"),
+        "one\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("b.txt")).expect("read b.txt"),
+        "two\n"
+    );
 }
