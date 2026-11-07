@@ -31,7 +31,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use shellquote::shell_quote;
-use support::{git, swt_command, unique, write_swt_check, TestRepo};
+use support::{exiting_check, git, swt_command, unique, write_swt_check, TestRepo};
 use tempfile::TempDir;
 
 /// Ceiling on every wait for a child `swt`, so a wedged run fails the test
@@ -494,6 +494,64 @@ fn a_second_interrupt_cannot_truncate_the_teardown_the_first_asked_for() {
         repo.created_branches(&name).is_empty(),
         "a second interrupt truncated teardown, orphaning the branch:\n{stderr}"
     );
+}
+
+/// Runs a `swt create` whose check is red, signals `swt` alone while the
+/// shimmed `git worktree remove` of the teardown stalls, and asserts that
+/// nothing survives.
+fn signal_during_a_red_teardown_leaves_nothing_behind(signal: c_int) {
+    let repo = TestRepo::new();
+    let scratch = scratch();
+    write_swt_check(repo.path(), &exiting_check(1));
+    let shim = TeardownShim::new(scratch.path());
+    let name = unique("red-teardown");
+
+    let mut run = RunningSwt::spawn(repo.path(), &["create", &name], Some(&shim.dir));
+    run.wait_for(&shim.sentinel, "the teardown of the red check to start");
+    // The shim stalls before the real removal, so the worktree is still there.
+    let worktree = repo.sole_created_worktree(&name);
+
+    run.signal(signal);
+    let status = run.wait();
+    let stderr = run.stderr_text();
+
+    // The branch first: `git branch -D` is the command that the cut teardown never starts.
+    assert!(
+        repo.created_branches(&name).is_empty(),
+        "signal {signal} during the teardown of a red check orphaned the branch:\n{stderr}"
+    );
+    assert!(
+        !worktree.exists(),
+        "signal {signal} during the teardown of a red check orphaned the worktree at {}:\n{stderr}",
+        worktree.display()
+    );
+    assert_eq!(
+        repo.entries_beside(),
+        vec!["repo".to_string()],
+        "signal {signal} during the teardown of a red check left something beside the repository:\n{stderr}"
+    );
+    // After the teardown, the main thread and the signal thread race to end the
+    // run. Either ending is honest: exit 1 for the red check, or death by the signal.
+    assert!(
+        status.code() == Some(1) || status.signal() == Some(signal),
+        "the run ended in neither of the two honest ways: {status:?}\n{stderr}"
+    );
+}
+
+// A red check starts a teardown, and the teardown takes the hold out of the
+// registry before git runs. A signal in that window finds nothing at risk. It
+// must still wait for both git commands, or it cuts the teardown between them
+// and the branch stays behind. A user who reads "HEAD not green" and closes the
+// window sends this SIGHUP.
+#[test]
+fn a_hangup_during_the_teardown_of_a_red_check_cannot_orphan_the_branch() {
+    signal_during_a_red_teardown_leaves_nothing_behind(libc::SIGHUP);
+}
+
+// The same window for the polite kill of a supervisor.
+#[test]
+fn a_termination_during_the_teardown_of_a_red_check_cannot_orphan_the_branch() {
+    signal_during_a_red_teardown_leaves_nothing_behind(libc::SIGTERM);
 }
 
 // The scope of the whole mechanism. `swt` only gets to alter what a signal means
