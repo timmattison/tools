@@ -446,7 +446,7 @@ impl Board {
     /// prices of each account that `ha` could read. A run of an account that
     /// is not in the book takes the prices of the table in `cost.rs`.
     pub fn set_prices(&mut self, prices: PriceBook) {
-        drop(prices);
+        self.prices = prices;
     }
 
     /// The time window of the finished runs and of the merge history.
