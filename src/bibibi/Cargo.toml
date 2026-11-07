@@ -1,0 +1,18 @@
+[package]
+name = "bibibi"
+version = "0.1.0"
+edition.workspace = true
+description = "Finds the commit that caused a regression, with a test from a later commit"
+
+[dependencies]
+anyhow.workspace = true
+buildinfo.workspace = true
+clap.workspace = true
+gitscratch.workspace = true
+tempfile.workspace = true
+
+[dev-dependencies]
+gitscratch = { workspace = true, features = ["testing"] }
+
+[lints]
+workspace = true
