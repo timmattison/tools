@@ -76,3 +76,23 @@ fn patch_of_ignores_color_and_prefix_configuration() {
     assert!(text.contains("+++ b/a.txt"), "no b/ prefix: {text}");
     assert_patch_rebuilds_head(&fixture, &patch);
 }
+
+#[test]
+fn subject_gives_the_first_line_of_the_message() {
+    let fixture = TestRepo::init();
+    fixture.commit_file("a.txt", "one\n", "add the first file");
+
+    let subject = open(&fixture).subject("HEAD").expect("a subject");
+
+    assert_eq!(subject, "add the first file");
+}
+
+#[test]
+fn subject_keeps_multi_byte_characters() {
+    let fixture = TestRepo::init();
+    fixture.commit_file("a.txt", "one\n", "日本語 🎉 café");
+
+    let subject = open(&fixture).subject("HEAD").expect("a subject");
+
+    assert_eq!(subject, "日本語 🎉 café");
+}

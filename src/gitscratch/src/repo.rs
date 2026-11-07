@@ -173,6 +173,18 @@ impl Repo {
             .with_context(|| format!("could not make the patch of '{commit}'"))
     }
 
+    /// The subject line of `commit`.
+    ///
+    /// Not yet implemented.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git fails.
+    pub fn subject(&self, commit: &str) -> Result<String> {
+        let _ = commit;
+        Ok(String::new())
+    }
+
     /// Resolve a revision to a full commit id, without creating a scratch
     /// worktree.
     ///
