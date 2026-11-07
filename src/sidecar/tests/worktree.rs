@@ -544,3 +544,113 @@ fn a_locked_worktree_removed_by_hand_names_unlock() {
     let run = rerun_after_removal_by_hand(true);
     assert!(run.stderr.contains("worktree unlock"), "{run:?}");
 }
+
+/// Makes `count` commits on `main` of a scratch clone of the bare sidecar remote and
+/// pushes them. `tag` keeps the scratch directory and the file names apart.
+fn push_commits_to_remote_main(fixture: &Fixture, tag: &str, count: usize) {
+    let scratch = fixture.root().join(format!("scratch-main-{tag}"));
+    fixture.git(
+        fixture.root(),
+        &[
+            "clone",
+            "--quiet",
+            &fixture.sidecar_remote(NAME).to_string_lossy(),
+            &scratch.to_string_lossy(),
+        ],
+    );
+    for index in 0..count {
+        let file = format!("remote-{tag}-{index}.txt");
+        fixture.write(&scratch.join(&file), tag);
+        fixture.git(&scratch, &["add", &file]);
+        fixture.git(&scratch, &["commit", "--quiet", "-m", &file]);
+    }
+    fixture.git(&scratch, &["push", "--quiet", "origin", "main"]);
+}
+
+/// The first line of stderr that starts with `warning: `.
+fn warning_of(run: &support::Run) -> &str {
+    run.stderr
+        .lines()
+        .find(|line| line.starts_with("warning: "))
+        .unwrap_or_else(|| panic!("no warning line: {run:?}"))
+}
+
+#[test]
+fn main_says_when_the_main_clone_is_behind_origin() {
+    let fixture = after_setup();
+    let host = fixture.main_checkout();
+    let clone = fixture.main_clone(NAME);
+    let before = commit_of(&fixture, &clone, "refs/heads/main");
+    push_commits_to_remote_main(&fixture, "behind", 2);
+
+    let run = fixture.run(&host, &["worktree", NAME, "main"]);
+
+    assert_eq!(run.code, 0, "{run:?}");
+    assert_eq!(
+        link_target(&fixture, &host, NAME),
+        fs::canonicalize(&clone).unwrap()
+    );
+    let warning = warning_of(&run);
+    assert!(warning.contains("2 commits behind"), "{warning}");
+    assert!(
+        warning.contains(&format!(
+            "git -C {} pull --ff-only",
+            clone.to_string_lossy()
+        )),
+        "{warning}"
+    );
+    assert_eq!(commit_of(&fixture, &clone, "refs/heads/main"), before);
+}
+
+#[test]
+fn main_says_nothing_when_the_main_clone_is_current() {
+    let fixture = after_setup();
+    let host = fixture.main_checkout();
+
+    let run = fixture.run(&host, &["worktree", NAME, "main"]);
+
+    assert_eq!(run.code, 0, "{run:?}");
+    assert_eq!(run.stderr, "", "{run:?}");
+}
+
+#[test]
+fn main_names_a_diverged_main() {
+    let fixture = after_setup();
+    let host = fixture.main_checkout();
+    let clone = fixture.main_clone(NAME);
+    fixture.write(&clone.join("local-only.txt"), "local");
+    fixture.git(&clone, &["add", "local-only.txt"]);
+    fixture.git(&clone, &["commit", "--quiet", "-m", "local"]);
+    let before = commit_of(&fixture, &clone, "refs/heads/main");
+    push_commits_to_remote_main(&fixture, "diverged", 1);
+
+    let run = fixture.run(&host, &["worktree", NAME, "main"]);
+
+    assert_eq!(run.code, 0, "{run:?}");
+    let warning = warning_of(&run);
+    assert!(warning.contains("1 commit that"), "{warning}");
+    assert!(warning.contains("1 commit behind"), "{warning}");
+    assert!(warning.contains("merge or rebase"), "{warning}");
+    assert_eq!(commit_of(&fixture, &clone, "refs/heads/main"), before);
+}
+
+#[test]
+fn a_new_branch_from_an_old_main_says_so() {
+    let fixture = after_setup();
+    let host = fixture.main_checkout();
+    let clone = fixture.main_clone(NAME);
+    push_commits_to_remote_main(&fixture, "old", 1);
+
+    let run = fixture.run(&host, &["worktree", NAME, "fresh"]);
+
+    assert_pointed_at_new_worktree(&fixture, &host, &run, "fresh");
+    let target = fixture.worktrees_dir(NAME).join("fresh");
+    assert_eq!(
+        commit_of(&fixture, &target, "HEAD"),
+        commit_of(&fixture, &clone, "refs/heads/main")
+    );
+    let warning = warning_of(&run);
+    assert!(warning.contains("fresh"), "{warning}");
+    assert!(warning.contains("1 commit behind"), "{warning}");
+    assert!(warning.contains("pull --ff-only"), "{warning}");
+}
