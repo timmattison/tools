@@ -215,7 +215,10 @@ fn get_file_users_linux(target_path: &Path) -> Result<Vec<ProcessInfo>> {
     let mut processes = Vec::new();
 
     for process in all_processes()? {
-        let process = process?;
+        // A process can stop after procfs lists it. Skip it and go on.
+        let Ok(process) = process else {
+            continue;
+        };
         // The kernel gives each process a positive id.
         let Ok(pid) = u32::try_from(process.pid) else {
             continue;
