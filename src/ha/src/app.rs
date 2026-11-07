@@ -1382,10 +1382,10 @@ mod tests {
         let channels = channels();
         let (result, before) = run_app(&opener(false), &channels, quit());
         assert!(result.is_ok(), "{result:?}");
-        // The started column starts at column 90 of 120, thus the text gets 89.
-        let recent_before = format!("{:<89} FINISHED", "Last 8h");
+        // The started column starts at column 81 of 120, thus the text gets 80.
+        let recent_before = format!("{:<80} FINISHED", "Last 8h");
         let recent_after = format!(
-            "{:<89} FINISHED",
+            "{:<80} FINISHED",
             "Last 8h · 0 passed · 0 failed · 0 cancelled"
         );
         assert_eq!(
