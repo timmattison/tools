@@ -1026,10 +1026,12 @@ cannot hang the caller. Used by `cwt` and `ha`.
       pane, `TERM_PROGRAM`, the Claude Code session, and the chain of ancestor processes (at most 32,
       each command line cut to 1024 bytes). The Claude Code session is the nearest ancestor that has
       a file `sessions/<pid>.json` in `$CLAUDE_CONFIG_DIR`, else in `~/.claude`.
-    - `op_end`, after `op` returns, with the same `request_id`: the `outcome` (`ok`, `failed`, or
-      `spawn_error`), the `exit_code`, and the `duration_ms`. A `failed` record holds the first 512
-      bytes of the stderr of `op`, in `op_stderr`. That text shows if the person denied or dismissed
-      the prompt. A `spawn_error` record holds the reason in `error`.
+    - `op_end`, after `op` returns, with the same `request_id`: the `outcome` (`ok`, `empty`,
+      `failed`, or `spawn_error`), the `exit_code`, and the `duration_ms`. An `empty` outcome means
+      `op` exited 0 but gave no value, and op-cache tries again as after a failure. An `empty` or a
+      `failed` record holds the first 512 bytes of the stderr of `op`, in `op_stderr`. That text
+      shows if the person denied or dismissed the prompt. A `spawn_error` record holds the reason
+      in `error`.
   - The audit trail never holds a secret or the stdout of `op`. But a command line of an ancestor can
     hold a secret of a different program, thus the directory has mode 0700 and the file mode 0600.
     To see who asked recently:

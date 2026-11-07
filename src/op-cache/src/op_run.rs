@@ -42,6 +42,27 @@ impl Operation<'_> {
             ],
         }
     }
+
+    /// True when `output` carries the secret: `op` exited 0 and the value is
+    /// not empty. For `read`, the value is the standard output without its
+    /// surrounding whitespace. For `read-binary`, it is the file at
+    /// `output_path`.
+    fn gave_value(&self, output: &Output) -> bool {
+        output.status.success()
+            && match self {
+                Self::Read => !String::from_utf8_lossy(&output.stdout).trim().is_empty(),
+                Self::ReadBinary { output_path } => output_path
+                    .metadata()
+                    .is_ok_and(|metadata| metadata.len() > 0),
+            }
+    }
+}
+
+/// The standard error of `op` without trailing whitespace, cut to
+/// `OP_STDERR_MAX_BYTES` on a char boundary.
+fn op_stderr_excerpt(output: &Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    audit::truncate_at_char_boundary(stderr.trim_end(), OP_STDERR_MAX_BYTES).to_owned()
 }
 
 /// The environment variables op-cache reads, read once.
@@ -108,6 +129,13 @@ impl<'a> OpRun<'a> {
         }
     }
 
+    /// True when `output`, from [`OpRun::attempt`], carries the secret. The
+    /// audit trail uses the same rule, so an `ok` record and a returned value
+    /// always agree.
+    pub(crate) fn gave_value(&self, output: &Output) -> bool {
+        self.operation.gave_value(output)
+    }
+
     /// One attempt: writes `op_start`, starts the notification, runs `op`,
     /// reaps the notification, and writes `op_end`. Returns what
     /// `Command::output()` returned, unchanged.
@@ -153,20 +181,19 @@ impl<'a> OpRun<'a> {
         }
 
         let (exit_code, outcome) = match &result {
-            Ok(output) if output.status.success() => (output.status.code(), Outcome::Ok),
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                (
-                    output.status.code(),
-                    Outcome::Failed {
-                        op_stderr: audit::truncate_at_char_boundary(
-                            stderr.trim_end(),
-                            OP_STDERR_MAX_BYTES,
-                        )
-                        .to_owned(),
-                    },
-                )
-            }
+            Ok(output) if self.operation.gave_value(output) => (output.status.code(), Outcome::Ok),
+            Ok(output) if output.status.success() => (
+                output.status.code(),
+                Outcome::Empty {
+                    op_stderr: op_stderr_excerpt(output),
+                },
+            ),
+            Ok(output) => (
+                output.status.code(),
+                Outcome::Failed {
+                    op_stderr: op_stderr_excerpt(output),
+                },
+            ),
             Err(error) => (
                 None,
                 Outcome::SpawnError {

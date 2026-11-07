@@ -366,11 +366,8 @@ fn fetch_from_1password(op_path: &OpPath, cache_path: &Path) -> Result<String> {
 
     for attempt in 1..=OP_MAX_RETRIES {
         match run.attempt(attempt) {
-            Ok(output) if output.status.success() => {
-                let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !value.is_empty() {
-                    return Ok(value);
-                }
+            Ok(output) if run.gave_value(&output) => {
+                return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
             }
             _ => {}
         }
@@ -403,13 +400,7 @@ fn fetch_binary_from_1password(
 
     for attempt in 1..=OP_MAX_RETRIES {
         match run.attempt(attempt) {
-            Ok(output)
-                if output.status.success()
-                    && output_path.exists()
-                    && output_path.metadata().is_ok_and(|m| m.len() > 0) =>
-            {
-                return Ok(());
-            }
+            Ok(output) if run.gave_value(&output) => return Ok(()),
             _ => {}
         }
 

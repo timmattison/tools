@@ -108,8 +108,15 @@ pub(crate) struct OpStart {
 #[derive(Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub(crate) enum Outcome {
+    /// `op` exited 0 and gave a value.
     Ok,
+    /// `op` exited 0 but gave no value (an empty standard output for `read`,
+    /// or a missing or empty output file for `read-binary`). op-cache tries
+    /// again, as after a failure.
+    Empty { op_stderr: String },
+    /// `op` exited with a non-zero status or a signal.
     Failed { op_stderr: String },
+    /// `op` did not start.
     SpawnError { error: String },
 }
 
