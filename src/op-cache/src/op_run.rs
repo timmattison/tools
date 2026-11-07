@@ -216,8 +216,8 @@ impl<'a> OpRun<'a> {
     }
 
     /// Starts the notification of one attempt, unless `OP_CACHE_NOTIFY=0`.
-    /// A failure prints one warning for the whole process and never stops the
-    /// read.
+    /// A failure prints at most one warning for this request and never stops
+    /// the read.
     fn start_notification(&mut self, attempt: u32) -> Option<std::process::Child> {
         if !notify::notifications_enabled(self.environment.op_cache_notify.as_deref()) {
             return None;
@@ -254,7 +254,9 @@ impl<'a> OpRun<'a> {
         }
     }
 
-    /// Prints the first notification failure of the process, and no other.
+    /// Prints the first notification failure of this request, and no other.
+    /// Each cache miss makes a new [`OpRun`], thus a process that misses three
+    /// secrets can print three warnings.
     fn warn_notification(&mut self, what: &str) {
         if !self.notification_warned {
             self.notification_warned = true;
