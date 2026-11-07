@@ -11,6 +11,7 @@ clap.workspace = true
 gitscratch.workspace = true
 tempfile.workspace = true
 termbar.workspace = true
+textfit.workspace = true
 unicode-width.workspace = true
 
 [target.'cfg(unix)'.dependencies]

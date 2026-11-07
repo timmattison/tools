@@ -1,6 +1,6 @@
 //! What `bibibi` writes: the progress line and the result.
 
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 use crate::step::{SkipReason, Verdict};
 
@@ -8,7 +8,7 @@ use crate::step::{SkipReason, Verdict};
 ///
 /// The line is `bibibi: <short> <verdict> <subject> - about <n> step(s) left`.
 /// Its display width is at most `width` columns when the parts other than the
-/// subject fit. Only the subject gets shorter, see [`truncate_to_width`].
+/// subject fit. Only the subject gets shorter, see [`textfit::truncate_to_budget`].
 /// The verdict is padded to four columns. A skip adds its reason after the
 /// subject: `bibibi: <short> skip <subject> - <reason> - about <n> steps left`.
 pub fn progress_line(
@@ -26,14 +26,11 @@ pub fn progress_line(
     format!("{head}{subject}{tail}")
 }
 
-/// The `…` that ends a shortened subject. It is one column wide.
-const ELLIPSIS: char = '…';
-
 /// Give the subject the columns that the fixed parts of a line leave over.
 /// The fixed parts alone can be wider than `width`. Then the subject is empty.
 fn fit_subject(width: usize, fixed_parts: &[&str], subject: &str) -> String {
     let fixed: usize = fixed_parts.iter().map(|part| part.width()).sum();
-    truncate_to_width(subject, width.saturating_sub(fixed))
+    textfit::truncate_to_budget(subject, width.saturating_sub(fixed))
 }
 
 /// The verdict word, padded to four columns, and the skip reason with its
@@ -56,34 +53,6 @@ pub fn preflight_line(width: usize, short: &str, verdict: Verdict, subject: &str
     let tail = format!("{reason} - pre-flight");
     let subject = fit_subject(width, &[&head, &tail], subject);
     format!("{head}{subject}{tail}")
-}
-
-/// Shorten `subject` so that its display width is at most `budget` columns.
-///
-/// A subject that fits stays as it is. A longer subject loses characters from
-/// its end, and the last column holds `…` (one column wide). A character that
-/// does not fit completely is dropped, so a two-column character never gets
-/// cut in half. A budget of 0 gives an empty string.
-pub fn truncate_to_width(subject: &str, budget: usize) -> String {
-    if subject.width() <= budget {
-        return subject.to_string();
-    }
-    // The ellipsis takes one column. A budget of 0 leaves no room for it.
-    let Some(room) = budget.checked_sub(1) else {
-        return String::new();
-    };
-    let mut kept = String::new();
-    let mut used = 0;
-    for character in subject.chars() {
-        let columns = character.width().unwrap_or(0);
-        if used + columns > room {
-            break;
-        }
-        used += columns;
-        kept.push(character);
-    }
-    kept.push(ELLIPSIS);
-    kept
 }
 
 /// The result line: the full id and the subject of the first bad commit.
@@ -260,41 +229,25 @@ mod tests {
     }
 
     #[test]
-    fn a_subject_that_fits_stays_the_same() {
-        assert_eq!(truncate_to_width("commit 3", 8), "commit 3");
-        assert_eq!(truncate_to_width("commit 3", 20), "commit 3");
-        assert_eq!(truncate_to_width("日本語", 6), "日本語");
-    }
-
-    #[test]
-    fn japanese_characters_count_two_columns_each() {
-        assert_eq!(truncate_to_width("日本語テスト", 5), "日本…");
-    }
-
-    #[test]
-    fn a_wide_character_that_does_not_fit_is_dropped() {
-        assert_eq!(truncate_to_width("日本語", 4), "日…");
-    }
-
-    #[test]
     fn an_emoji_counts_two_columns() {
-        assert_eq!(truncate_to_width("🎉🎊🎁", 4), "🎉…");
+        assert_eq!(fit_subject(4, &[], "🎉🎊🎁"), "🎉…");
     }
 
     #[test]
     fn accented_text_cuts_between_characters() {
-        assert_eq!(truncate_to_width("café au lait", 6), "café …");
-    }
-
-    #[test]
-    fn a_budget_of_zero_gives_an_empty_subject() {
-        assert_eq!(truncate_to_width("commit 3", 0), "");
+        assert_eq!(fit_subject(6, &[], "café au lait"), "café …");
     }
 
     #[test]
     fn a_budget_of_one_gives_only_the_ellipsis() {
-        assert_eq!(truncate_to_width("commit 3", 1), "…");
-        assert_eq!(truncate_to_width("日本語", 1), "…");
+        assert_eq!(fit_subject(1, &[], "commit 3"), "…");
+        assert_eq!(fit_subject(1, &[], "日本語"), "…");
+    }
+
+    #[test]
+    fn fixed_parts_that_fill_the_width_leave_an_empty_subject() {
+        assert_eq!(fit_subject(10, &["0123456789"], "commit 3"), "");
+        assert_eq!(fit_subject(5, &["0123456789"], "commit 3"), "");
     }
 
     #[test]

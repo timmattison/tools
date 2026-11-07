@@ -938,6 +938,7 @@ dependencies = [
  "signal-hook 0.3.18",
  "tempfile",
  "termbar",
+ "textfit",
  "unicode-width",
 ]
 
