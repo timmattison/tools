@@ -1,7 +1,7 @@
 //! The whole run: resolve, make the patch and the scratch worktree, search,
 //! and print the result.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use gitscratch::Repo;
 use tempfile::NamedTempFile;
 
@@ -11,8 +11,9 @@ use crate::Cli;
 
 /// Search for the first bad commit and print it on standard output.
 ///
-/// The test commit is `HEAD`, the bad commit is its parent, and only the first
-/// `--good` counts.
+/// The test commit is the positional argument, or `HEAD` when it is absent.
+/// The bad commit is `--bad`, or the parent of the test commit when `--bad` is
+/// absent. Every `--good` commit bounds the search, in the order given.
 ///
 /// # Errors
 ///
@@ -22,10 +23,16 @@ pub fn run(cli: &Cli) -> Result<()> {
     use std::io::Write;
 
     let repo = Repo::open(&std::env::current_dir().context("no current directory")?)?;
-    let test = Commit(repo.resolve("HEAD")?);
-    let mut bad = Commit(repo.resolve(&format!("{test}^"))?);
-    let first_good = cli.good.first().context("no good commit was given")?;
-    let mut goods = vec![Commit(repo.resolve(first_good)?)];
+    let test = Commit(repo.resolve(cli.test_commit.as_deref().unwrap_or("HEAD"))?);
+    let mut bad = Commit(match &cli.bad {
+        Some(bad) => repo.resolve(bad)?,
+        None => repo.resolve(&format!("{test}^"))?,
+    });
+    let mut goods = cli
+        .good
+        .iter()
+        .map(|good| repo.resolve(good).map(Commit))
+        .collect::<Result<Vec<_>>>()?;
 
     let mut patch_file = NamedTempFile::new().context("could not make the patch file")?;
     patch_file
@@ -57,9 +64,6 @@ pub fn run(cli: &Cli) -> Result<()> {
         );
     }
 
-    if bad == goods[0] {
-        bail!("the bad commit is a good commit");
-    }
     println!("{}", report::result_line(&bad.0, &repo.subject(&bad.0)?));
     Ok(())
 }
