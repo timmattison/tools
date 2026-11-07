@@ -81,7 +81,13 @@ pub fn run_build(build: &str, dir: &Path) -> Result<Ended> {
 /// Give `command` its directory, no input, and the standard error of
 /// `bibibi` as its output. The child leads a new process group, and the
 /// signal thread knows that group while the child runs. Then run it and wait.
+///
+/// The child does not inherit the git environment. A `GIT_DIR` that a hook
+/// exported must not aim the test at another repository. The six names of
+/// `gitscratch::USER_INTENT_GIT_ENVIRONMENT` stay, for example the
+/// `GIT_SSH_COMMAND` of the user.
 fn run_command(mut command: Command, dir: &Path) -> Result<Ended> {
+    gitscratch::shed_inherited_git_environment_keeping_user_intent(&mut command);
     let stdout = std::io::stderr()
         .as_fd()
         .try_clone_to_owned()
