@@ -1558,10 +1558,13 @@ stop count that disagree about whether anything conflicted, in both directions:
 stops with no files would otherwise render the clean line and swallow them, and
 files with no stops would report a replay that never halted.
 
-`tests/diffs.rs` covers the halt diffs that the two capturing entrances give
+`tests/diffs.rs` covers the halt diffs that the three capturing entrances give
 beside the counts. A rebase replay of `contested_region_repo()` gives three
 halt diffs in stop order. Each one names its own stopped commit and holds the
 markers of its own region, and the counts equal those of the plain entrance.
+An `--onto` replay of `squash_merged_parent_repo()` from `contested-child` gives
+one halt diff that names `stacked.txt` only, and its counts equal those of the
+plain `--onto` entrance.
 The test on the markers is the one that fails when the capture moves below
 `git add -A`, because after that line `git diff` shows nothing. Each halt diff
 of `equal_hunks_unequal_stops_repo()` names the files the breakdown counted at
