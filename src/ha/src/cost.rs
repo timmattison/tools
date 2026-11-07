@@ -10,13 +10,15 @@
 
 use std::time::Duration;
 
+/// The number of seconds in one billed minute.
+const SECONDS_PER_MINUTE: u64 = 60;
+
 /// The whole minutes that GitHub bills for a time on a runner.
 ///
 /// GitHub rounds each job up to a whole minute. Zero seconds give zero minutes.
 #[must_use]
 pub fn billed_minutes(time: Duration) -> u64 {
-    let _ = time;
-    0
+    time.as_secs().div_ceil(SECONDS_PER_MINUTE)
 }
 
 #[cfg(test)]
