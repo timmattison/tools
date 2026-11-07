@@ -213,6 +213,54 @@ fn failed_op_writes_three_failed_pairs_with_its_stderr() {
 }
 
 #[test]
+fn op_that_gives_no_value_writes_three_empty_pairs() {
+    let fixture = Fixture::new();
+    fixture.install_fake_op("echo 'op warning text' >&2\nprintf '  \\n'\nexit 0");
+
+    let output = fixture.read(REFERENCE);
+
+    assert!(!output.status.success(), "op-cache should fail");
+    assert!(output.stdout.is_empty(), "nothing may reach stdout");
+    let records = records(&audit_text(&fixture));
+    assert_eq!(records.len(), 6, "three pairs expected: {records:?}");
+    for (index, pair) in records.chunks(2).enumerate() {
+        let (start, end) = (&pair[0], &pair[1]);
+        let attempt = u64::try_from(index + 1).expect("small index");
+        assert_eq!(start["event"], "op_start");
+        assert_eq!(start["attempt"], attempt);
+        assert_eq!(end["event"], "op_end");
+        assert_eq!(end["attempt"], attempt);
+        assert_eq!(start["request_id"], end["request_id"]);
+        assert_eq!(end["outcome"], "empty");
+        assert_eq!(end["exit_code"], 0);
+        assert_eq!(end["op_stderr"], "op warning text");
+    }
+}
+
+#[test]
+fn read_binary_that_writes_no_file_writes_three_empty_pairs() {
+    let fixture = Fixture::new();
+    fixture.install_fake_op("exit 0");
+
+    let output = fixture
+        .command()
+        .args(["read-binary", "op://Private/Item/file.png", "out/file.png"])
+        .output()
+        .expect("run op-cache");
+
+    assert!(!output.status.success(), "op-cache should fail");
+    let records = records(&audit_text(&fixture));
+    assert_eq!(records.len(), 6, "three pairs expected: {records:?}");
+    for pair in records.chunks(2) {
+        assert_eq!(pair[0]["event"], "op_start");
+        assert_eq!(pair[0]["operation"], "read-binary");
+        assert_eq!(pair[1]["event"], "op_end");
+        assert_eq!(pair[1]["outcome"], "empty");
+        assert_eq!(pair[1]["exit_code"], 0);
+    }
+}
+
+#[test]
 fn op_stderr_is_truncated_to_512_bytes_on_a_char_boundary() {
     let fixture = Fixture::new();
     let full = "日".repeat(300);
