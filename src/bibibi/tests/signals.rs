@@ -1,7 +1,9 @@
 //! Item 8 of the plan: signals.
 //!
 //! Each test starts `bibibi` in its own process group and sends one signal to
-//! the `bibibi` process alone, while a test command runs. The test command
+//! the `bibibi` process alone, while a test command runs. One test also closes
+//! the read end of the standard error pipe first, as a hangup does when the
+//! terminal is gone. The test command
 //! starts a `sleep 20`, so a run that does not stop its children ends within
 //! 20 s, also in a build where `bibibi` handles no signal.
 #![cfg(unix)]
@@ -120,8 +122,24 @@ fn is_alive(pid: i32) -> bool {
     !state.is_empty() && !state.starts_with('Z')
 }
 
+/// Where the standard error of `bibibi` goes in a scenario.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StderrMode {
+    /// A file. The test reads the message from it.
+    File,
+    /// A pipe whose read end the test closes before it sends the signal, so
+    /// the write of the message fails.
+    ClosedPipe,
+}
+
 /// Run the scenario with `signal` and check the result.
 fn interrupted_run_cleans_up(signal: i32, expected_code: i32) {
+    run_scenario(signal, expected_code, StderrMode::File);
+}
+
+/// Run the scenario with `signal`, standard error as `mode` says, and check
+/// the exit code, the checkout, and the processes of the test script.
+fn run_scenario(signal: i32, expected_code: i32, mode: StderrMode) {
     let repo = TestRepo::init();
     let ids = linear_history(&repo, &VALUES);
     add_test_commit_with(&repo, STALLING_SCRIPT);
@@ -132,7 +150,10 @@ fn interrupted_run_cleans_up(signal: i32, expected_code: i32) {
     let pids = scratch.path().join("pids");
     let stdout = File::create(scratch.path().join("stdout")).expect("stdout file");
     let stderr_path = scratch.path().join("stderr");
-    let stderr = File::create(&stderr_path).expect("stderr file");
+    let stderr = match mode {
+        StderrMode::File => Stdio::from(File::create(&stderr_path).expect("stderr file")),
+        StderrMode::ClosedPipe => Stdio::piped(),
+    };
 
     let mut command = bibibi_command(
         repo.path(),
@@ -155,6 +176,9 @@ fn interrupted_run_cleans_up(signal: i32, expected_code: i32) {
     let mut run = Run { child, pids };
 
     wait_for_file(&marker);
+    if mode == StderrMode::ClosedPipe {
+        drop(run.child.stderr.take());
+    }
     let bibibi_pid = i32::try_from(run.child.id()).expect("pid fits in i32");
     // SAFETY: `kill` takes two integers and touches no memory. The pid is the
     // child that this test started and has not yet waited for.
@@ -162,7 +186,7 @@ fn interrupted_run_cleans_up(signal: i32, expected_code: i32) {
     assert_eq!(sent, 0, "could not send the signal");
 
     let status = wait_for_exit(&mut run);
-    let stderr = fs::read_to_string(&stderr_path).expect("read stderr");
+    let stderr = fs::read_to_string(&stderr_path).unwrap_or_default();
 
     assert_eq!(
         status.code(),
@@ -170,10 +194,12 @@ fn interrupted_run_cleans_up(signal: i32, expected_code: i32) {
         "status: {status:?} (signal {:?}), stderr: {stderr}",
         status.signal()
     );
-    assert!(
-        stderr.contains(&format!("bibibi: a signal ({signal}) stopped the run")),
-        "stderr: {stderr}"
-    );
+    if mode == StderrMode::File {
+        assert!(
+            stderr.contains(&format!("bibibi: a signal ({signal}) stopped the run")),
+            "stderr: {stderr}"
+        );
+    }
     assert_eq!(snapshot(&repo), before, "the checkout of the user changed");
 
     let script_pids = run.script_pids();
@@ -198,4 +224,14 @@ fn sigint_stops_the_run_with_130_and_cleans_up() {
 #[test]
 fn sigterm_stops_the_run_with_143_and_cleans_up() {
     interrupted_run_cleans_up(libc::SIGTERM, 143);
+}
+
+#[test]
+fn sighup_stops_the_run_with_129_and_cleans_up() {
+    interrupted_run_cleans_up(libc::SIGHUP, 129);
+}
+
+#[test]
+fn a_hangup_after_the_terminal_is_gone_still_exits_129_and_cleans_up() {
+    run_scenario(libc::SIGHUP, 129, StderrMode::ClosedPipe);
 }
