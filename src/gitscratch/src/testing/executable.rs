@@ -49,9 +49,13 @@ const EXECUTABLE_MODE: u32 = 0o755;
 ///
 /// # Errors
 ///
-/// Returns the error of the start of the writer, of the write into its
-/// standard input, or of the change of the mode. Returns an error that names
-/// the path and the exit status when the writer fails.
+/// Returns the error of the start of the writer or of the change of the mode.
+/// Returns an error that names the path, the exit status, and the standard
+/// error of the writer when the writer fails. This error wins over the error
+/// of the write, because a write into the closed pipe of a failed writer
+/// returns `BrokenPipe` only as a result of that failure. Returns an error of
+/// the same kind as the write error, with the path in its message, when the
+/// writer succeeds and the write fails.
 pub fn write_executable(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::Result<()> {
     let path = path.as_ref();
     let contents = contents.as_ref();
@@ -63,15 +67,17 @@ pub fn write_executable(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> i
         .stderr(Stdio::piped())
         .spawn()?;
 
-    // The drop of the pipe at the end of this block is the end of the input
-    // of the writer.
-    {
-        let mut input = writer
-            .stdin
-            .take()
-            .ok_or_else(|| io::Error::other("the writer has no standard input"))?;
-        input.write_all(contents)?;
-    }
+    let Some(mut input) = writer.stdin.take() else {
+        // Stop the writer, so that it has stopped on this path too.
+        let _ = writer.kill();
+        let _ = writer.wait();
+        return Err(io::Error::other("the writer has no standard input"));
+    };
+    // Keep the result. The writer can stop before the write, and the write
+    // then returns `BrokenPipe`. The exit status of the writer tells why.
+    let written = input.write_all(contents);
+    // The drop of the pipe is the end of the input of the writer.
+    drop(input);
 
     let output = writer.wait_with_output()?;
     if !output.status.success() {
@@ -81,6 +87,15 @@ pub fn write_executable(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> i
             output.status,
             String::from_utf8_lossy(&output.stderr).trim()
         )));
+    }
+    if let Err(error) = written {
+        return Err(io::Error::new(
+            error.kind(),
+            format!(
+                "the write into the writer of {} failed: {error}",
+                path.display()
+            ),
+        ));
     }
 
     // chmod takes the path, thus it opens no descriptor for the file.
