@@ -13,6 +13,13 @@ use gitscratch::testing::executable::write_executable;
 /// The text that the script of these tests prints.
 const GREETING: &str = "hello from the stub";
 
+/// The size of the contents in the test of a large write. It is 1 MiB, far
+/// above the buffer of any pipe (64 KiB on Linux, 16 KiB to 64 KiB on macOS).
+/// The writer stops at once when its redirect fails, and the parent cannot
+/// finish a write of this size into the pipe before that. Thus the write
+/// always meets a closed pipe.
+const LARGE_CONTENTS_LEN: usize = 1 << 20;
+
 /// A script that prints [`GREETING`].
 fn greeting_script() -> String {
     format!("#!/bin/sh\necho '{GREETING}'\n")
@@ -63,6 +70,21 @@ fn a_path_in_a_directory_that_does_not_exist_is_an_error_that_names_it() {
     let path = dir.path().join("no-such-directory").join("stub");
 
     let error = write_executable(&path, greeting_script().as_bytes())
+        .expect_err("a path in a missing directory cannot take a file");
+
+    assert!(
+        error.to_string().contains(&path.display().to_string()),
+        "the error names the path: {error}"
+    );
+}
+
+#[test]
+fn a_large_write_into_a_missing_directory_names_the_path() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let path = dir.path().join("no-such-directory").join("stub");
+    let contents = vec![b'#'; LARGE_CONTENTS_LEN];
+
+    let error = write_executable(&path, &contents)
         .expect_err("a path in a missing directory cannot take a file");
 
     assert!(
