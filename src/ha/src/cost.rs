@@ -93,7 +93,16 @@ impl Sku {
     /// `actions_linux`.
     #[must_use]
     pub fn table_name(self) -> &'static str {
-        ""
+        match self {
+            Sku::LinuxSlim => "actions_linux_slim",
+            Sku::Linux => "actions_linux",
+            Sku::LinuxArm => "actions_linux_arm",
+            Sku::Windows => "actions_windows",
+            Sku::WindowsArm => "actions_windows_arm",
+            Sku::Macos => "actions_macos",
+            Sku::MacosLarge => "macos_l",
+            Sku::MacosXlarge => "macos_xl",
+        }
     }
 
     /// The list price of one minute on this SKU.
@@ -104,7 +113,15 @@ impl Sku {
     /// `Actions macOS 3-core` on 2026-11-07.
     #[must_use]
     pub fn list_price(self) -> Usd {
-        Usd::ZERO
+        match self {
+            Sku::LinuxSlim => Usd::from_mills(2),
+            Sku::Linux => Usd::from_mills(6),
+            Sku::LinuxArm => Usd::from_mills(5),
+            Sku::Windows | Sku::WindowsArm => Usd::from_mills(10),
+            Sku::Macos => Usd::from_mills(62),
+            Sku::MacosLarge => Usd::from_mills(77),
+            Sku::MacosXlarge => Usd::from_mills(102),
+        }
     }
 
     /// Whether this is a standard runner.
@@ -115,7 +132,7 @@ impl Sku {
     /// repositories".
     #[must_use]
     pub fn is_standard(self) -> bool {
-        false
+        !matches!(self, Sku::MacosLarge | Sku::MacosXlarge)
     }
 
     /// The SKU of a runner label, or `None` when the label is not in the table.
@@ -128,8 +145,10 @@ impl Sku {
     /// read on 2026-11-07.
     #[must_use]
     pub fn of_label(label: &str) -> Option<Sku> {
-        let _ = label;
-        None
+        LABELS
+            .iter()
+            .find(|(known, _)| known.eq_ignore_ascii_case(label))
+            .map(|(_, sku)| *sku)
     }
 
     /// The SKU that the `sku` text of a billing usage item names.
@@ -144,8 +163,22 @@ impl Sku {
     /// Any other text gives `None`, for example `Actions storage`.
     #[must_use]
     pub fn of_billing_name(name: &str) -> Option<Sku> {
-        let _ = name;
-        None
+        let table_form: String = name
+            .chars()
+            .map(|c| match c {
+                ' ' | '-' => '_',
+                other => other.to_ascii_lowercase(),
+            })
+            .collect();
+        Sku::ALL
+            .into_iter()
+            .find(|sku| sku.table_name() == table_form)
+            .or_else(|| {
+                BILLING_NAME_EXTRAS
+                    .iter()
+                    .find(|(known, _)| known.eq_ignore_ascii_case(name))
+                    .map(|(_, sku)| *sku)
+            })
     }
 }
 
