@@ -57,6 +57,9 @@ const LOCK_FILE: &str = "swt.lock";
 /// Status a run interrupted with SIGINT must report: 128 + 2.
 const SIGINT_STATUS: i32 = 130;
 
+/// Status a run that a hangup ended must report: 128 + 1.
+const SIGHUP_STATUS: i32 = 129;
+
 /// Status a run terminated with SIGTERM must report: 128 + 15.
 const SIGTERM_STATUS: i32 = 143;
 
@@ -204,8 +207,9 @@ impl RunningSwt {
                 // disposition of "ignore" survives `exec` — so a suite run in
                 // the background would otherwise hand `swt` a SIGINT it can
                 // never feel, and the test would measure the harness instead of
-                // the tool.
-                for signal in [libc::SIGINT, libc::SIGTERM] {
+                // the tool. `nohup` and some job managers start a child with
+                // SIGHUP set to ignore. That disposition also survives `exec`.
+                for signal in [libc::SIGHUP, libc::SIGINT, libc::SIGTERM] {
                     if libc::signal(signal, libc::SIG_DFL) == libc::SIG_ERR {
                         return Err(std::io::Error::last_os_error());
                     }
@@ -352,6 +356,12 @@ fn an_interrupted_green_check_leaves_no_worktree_and_no_branch() {
 #[test]
 fn a_terminated_green_check_leaves_no_worktree_and_no_branch() {
     interrupted_create_leaves_nothing_behind(libc::SIGTERM, SIGTERM_STATUS);
+}
+
+// A closed terminal window or a dropped SSH session sends SIGHUP.
+#[test]
+fn a_hung_up_green_check_leaves_no_worktree_and_no_branch() {
+    interrupted_create_leaves_nothing_behind(libc::SIGHUP, SIGHUP_STATUS);
 }
 
 // One interrupt asks `swt` to stop; a second, while it is still stopping, must
@@ -509,4 +519,10 @@ fn interrupted_merge_releases_the_lock(signal: c_int, expected_status: i32) {
 #[test]
 fn a_lock_held_when_the_signal_arrives_does_not_outlive_the_run() {
     interrupted_merge_releases_the_lock(libc::SIGINT, SIGINT_STATUS);
+}
+
+// The same guarantee for a lock: a hangup must not leave the merge lock behind.
+#[test]
+fn a_lock_held_when_a_hangup_arrives_does_not_outlive_the_run() {
+    interrupted_merge_releases_the_lock(libc::SIGHUP, SIGHUP_STATUS);
 }
