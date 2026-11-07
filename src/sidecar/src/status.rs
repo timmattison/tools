@@ -207,9 +207,23 @@ mod tests {
         ];
         assert_eq!(
             render(&rows),
+            "NAME    CLONE    LINK\n\
+             a       ready    at the main clone\n\
+             日本語  missing  missing\n"
+        );
+    }
+
+    #[test]
+    fn render_pads_emoji_and_accented_names_by_display_width() {
+        let rows = [
+            registered("🎉", CloneState::Ready, LinkState::MainClone),
+            registered("café", CloneState::Missing, LinkState::Missing),
+        ];
+        assert_eq!(
+            render(&rows),
             "NAME  CLONE    LINK\n\
-             a     ready    at the main clone\n\
-             日本語   missing  missing\n"
+             🎉    ready    at the main clone\n\
+             café  missing  missing\n"
         );
     }
 
