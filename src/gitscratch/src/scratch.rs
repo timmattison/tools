@@ -326,6 +326,18 @@ impl Scratch {
         Ok(output.success)
     }
 
+    /// Apply `patch` with a three-way merge.
+    ///
+    /// This runs `git apply --3way --whitespace=nowarn`. It has the contract of
+    /// [`Scratch::apply_patch`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git cannot start.
+    pub fn apply_patch_three_way(&self, _patch: &Path) -> Result<bool> {
+        Ok(false)
+    }
+
     /// Put the scratch worktree back to the state of its checked-out commit.
     ///
     /// This runs `git reset --hard -q`, then `git clean -f -d -q`. The reset

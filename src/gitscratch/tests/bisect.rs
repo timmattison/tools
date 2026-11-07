@@ -329,3 +329,82 @@ fn restore_puts_back_a_changed_tracked_file_and_unstages_an_index_change() {
         "two\n"
     );
 }
+
+/// Ten numbered lines, `line 1` to `line 10`.
+fn ten_lines() -> Vec<String> {
+    (1..=10).map(|number| format!("line {number}")).collect()
+}
+
+/// Join lines into file contents.
+fn joined(lines: &[String]) -> String {
+    let mut text = lines.join("\n");
+    text.push('\n');
+    text
+}
+
+/// A fixture where the patch changes line 8 of `a.txt`, and the scratch commit
+/// holds the same base with line 6 changed to `scratch_line_6` and line 8
+/// changed to `scratch_line_8`. Gives the patch bytes and the scratch.
+fn patch_and_diverged_scratch(
+    scratch_line_6: &str,
+    scratch_line_8: &str,
+) -> (TestRepo, Vec<u8>, String) {
+    let fixture = TestRepo::init();
+    let base = ten_lines();
+    fixture.commit_file("a.txt", &joined(&base), "base");
+    let base_id = fixture.rev_parse("HEAD");
+
+    let mut patched = base.clone();
+    patched[7] = "line 8 by the patch".to_string();
+    fixture.commit_file("a.txt", &joined(&patched), "the patch commit");
+    let patch = open(&fixture).patch_of("HEAD").expect("a patch");
+
+    fixture.git(&["checkout", "-q", "--detach", &base_id]);
+    let mut diverged = base;
+    diverged[5] = scratch_line_6.to_string();
+    diverged[7] = scratch_line_8.to_string();
+    fixture.commit_file("a.txt", &joined(&diverged), "the scratch commit");
+    let scratch_id = fixture.rev_parse("HEAD");
+    (fixture, patch, scratch_id)
+}
+
+#[test]
+fn apply_patch_three_way_applies_where_only_the_context_changed() {
+    // Line 6 is context of the patch hunk. Line 7 separates it from line 8.
+    let (fixture, patch, scratch_id) =
+        patch_and_diverged_scratch("line 6 by the scratch", "line 8");
+    let (_holder, path) = patch_file(&patch);
+    let scratch = fixture.scratch(&scratch_id);
+
+    let plain = scratch.apply_patch(&path).expect("git started");
+    let merged = scratch.apply_patch_three_way(&path).expect("git started");
+
+    assert!(
+        !plain,
+        "the context changed, so the plain apply must refuse"
+    );
+    assert!(merged, "the changes do not overlap, so --3way must apply");
+    let contents = std::fs::read_to_string(scratch.path().join("a.txt")).expect("a.txt exists");
+    assert!(contents.contains("line 6 by the scratch"), "{contents}");
+    assert!(contents.contains("line 8 by the patch"), "{contents}");
+}
+
+#[test]
+fn apply_patch_three_way_gives_false_on_a_conflict_and_restore_cleans_up() {
+    let (fixture, patch, scratch_id) =
+        patch_and_diverged_scratch("line 6", "line 8 by the scratch");
+    let (_holder, path) = patch_file(&patch);
+    let scratch = fixture.scratch(&scratch_id);
+
+    let merged = scratch.apply_patch_three_way(&path).expect("git started");
+    scratch.restore().expect("restore");
+
+    assert!(!merged, "both commits change line 8, so --3way must refuse");
+    let status = scratch
+        .testing_git()
+        .run("status", &["--porcelain"])
+        .expect("git status");
+    assert_eq!(status.trim(), "");
+    let contents = std::fs::read_to_string(scratch.path().join("a.txt")).expect("a.txt exists");
+    assert!(!contents.contains("<<<<<<<"), "{contents}");
+}
