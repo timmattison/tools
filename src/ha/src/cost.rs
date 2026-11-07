@@ -327,8 +327,20 @@ pub fn run_cost(
     prices: Option<&Prices>,
     now: DateTime<Utc>,
 ) -> Option<RunCost> {
-    let _ = (jobs, visibility, prices, now);
-    None
+    if jobs.is_empty() {
+        return None;
+    }
+    let mut total = RunCost {
+        amount: Usd::ZERO,
+        partial: false,
+    };
+    for job in jobs {
+        match job_cost(job, visibility, prices, now) {
+            JobCost::Known(amount) => total.amount += amount,
+            JobCost::Unknown => total.partial = true,
+        }
+    }
+    Some(total)
 }
 
 #[cfg(test)]
