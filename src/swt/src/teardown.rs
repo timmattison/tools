@@ -87,6 +87,36 @@ use crate::green_check::Outcome;
 #[cfg(unix)]
 const TERMINATION_SIGNALS: [c_int; 3] = [SIGHUP, SIGINT, SIGTERM];
 
+/// Tells whether the parent of this process set `signal` to SIG_IGN.
+///
+/// `signal_hook` replaces the current disposition when it registers a signal,
+/// also when that disposition is SIG_IGN. Nothing in `swt` changes a disposition
+/// before it arms, so the current disposition is the inherited one. The query
+/// only reads: it does not change the disposition. If the query fails, the
+/// answer is `false`, which is the behavior of a signal with no special state.
+#[cfg(unix)]
+fn inherited_as_ignored(signal: c_int) -> bool {
+    // SAFETY: an all-zero `sigaction` is a valid value for this plain C struct.
+    let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
+    // SAFETY: the new action is a null pointer, so the call only reads the
+    // current action. `current` is a valid, writable `sigaction` for the call.
+    let failed = unsafe { libc::sigaction(signal, std::ptr::null(), &raw mut current) } != 0;
+    !failed && current.sa_sigaction == libc::SIG_IGN
+}
+
+/// Lists the members of [`TERMINATION_SIGNALS`], in order, that `swt` reads.
+///
+/// A signal for which `is_ignored` is true stays out of the list. The parent
+/// set it to ignore, and `swt` keeps that choice. The function is pure, so a
+/// test can pin it without a real signal.
+#[cfg(unix)]
+fn signals_to_read(is_ignored: impl Fn(c_int) -> bool) -> Vec<c_int> {
+    TERMINATION_SIGNALS
+        .into_iter()
+        .filter(|&signal| !is_ignored(signal))
+        .collect()
+}
+
 /// The conventional shell status for a death by signal: 128 plus the signal
 /// number, so SIGINT is 130 and SIGTERM is 143.
 #[cfg(unix)]
@@ -251,7 +281,11 @@ pub fn arm_signal_teardown() {
     // process and be silent for every later responsibility.
     witness_arming();
     ARMED.get_or_init(|| {
-        let Ok(mut signals) = Signals::new(TERMINATION_SIGNALS) else {
+        let signals = signals_to_read(inherited_as_ignored);
+        if signals.is_empty() {
+            return;
+        }
+        let Ok(mut signals) = Signals::new(signals) else {
             return;
         };
         drop(
