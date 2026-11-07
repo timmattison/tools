@@ -305,6 +305,32 @@ pub fn job_cost(
     JobCost::Known(price * billed_minutes(time))
 }
 
+/// The estimated cost of one run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunCost {
+    /// The sum of the known costs of the jobs.
+    pub amount: Usd,
+    /// Whether at least one job has an unknown cost. Then `amount` is a lower
+    /// bound.
+    pub partial: bool,
+}
+
+/// The list-price cost of one run: the sum of the costs of its jobs.
+///
+/// An empty slice gives `None`. A run whose jobs did not load shows an empty
+/// cell. A job with an unknown cost adds nothing to the amount and sets
+/// `partial`.
+#[must_use]
+pub fn run_cost(
+    jobs: &[Job],
+    visibility: Visibility,
+    prices: Option<&Prices>,
+    now: DateTime<Utc>,
+) -> Option<RunCost> {
+    let _ = (jobs, visibility, prices, now);
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -633,5 +659,70 @@ mod tests {
         assert_eq!(cost(1), known(6, 1));
         assert_eq!(cost(60), known(6, 1));
         assert_eq!(cost(61), known(6, 2));
+    }
+
+    fn run_of(jobs: &[Job], visibility: Visibility) -> Option<RunCost> {
+        run_cost(jobs, visibility, None, at(13, 0, 0))
+    }
+
+    #[test]
+    fn a_run_costs_the_sum_of_its_known_jobs() {
+        let jobs = [
+            sample_job(),
+            job(&["windows-latest"], RunState::Passed, Some(120)),
+        ];
+        let cost = run_of(&jobs, Visibility::Private).unwrap();
+        assert_eq!(
+            cost,
+            RunCost {
+                amount: Usd::from_mills(162) + Usd::from_mills(20),
+                partial: false,
+            }
+        );
+    }
+
+    #[test]
+    fn a_run_with_an_unknown_job_is_a_lower_bound() {
+        let jobs = [
+            sample_job(),
+            job(&["ubuntu-latest-8-cores"], RunState::Passed, Some(600)),
+        ];
+        let cost = run_of(&jobs, Visibility::Private).unwrap();
+        assert_eq!(
+            cost,
+            RunCost {
+                amount: Usd::from_mills(162),
+                partial: true,
+            }
+        );
+    }
+
+    #[test]
+    fn a_run_with_no_jobs_has_no_cost() {
+        assert_eq!(run_of(&[], Visibility::Private), None);
+    }
+
+    #[test]
+    fn a_run_of_only_unknown_jobs_is_a_zero_lower_bound() {
+        let jobs = [job(&["linux-arm64-gpu"], RunState::Passed, Some(60))];
+        let cost = run_of(&jobs, Visibility::Private).unwrap();
+        assert_eq!(
+            cost,
+            RunCost {
+                amount: Usd::ZERO,
+                partial: true,
+            }
+        );
+    }
+
+    #[test]
+    fn a_run_uses_the_billing_prices_and_the_visibility() {
+        let mut prices = Prices::default();
+        prices.set(Sku::Linux, Usd::from_mills(8));
+        let jobs = [sample_job()];
+        let billed = run_cost(&jobs, Visibility::Private, Some(&prices), at(13, 0, 0));
+        assert_eq!(billed.unwrap().amount, Usd::from_mills(8) * 27);
+        let free = run_cost(&jobs, Visibility::Public, Some(&prices), at(13, 0, 0));
+        assert_eq!(free.unwrap().amount, Usd::ZERO);
     }
 }
