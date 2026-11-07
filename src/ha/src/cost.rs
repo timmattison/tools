@@ -8,9 +8,15 @@
 //! The estimate is not the bill. The free minutes that an account includes can
 //! make the bill $0.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
+
+use crate::job::Job;
 use crate::money::Usd;
+use crate::run::Visibility;
+use crate::target::OwnerName;
 
 /// The SKU of a runner that `ha` can price.
 ///
@@ -193,6 +199,92 @@ pub fn billed_minutes(time: Duration) -> u64 {
     time.as_secs().div_ceil(SECONDS_PER_MINUTE)
 }
 
+/// The label of a runner that the user hosts.
+const SELF_HOSTED_LABEL: &str = "self-hosted";
+
+/// The `pricePerUnit` of each SKU that the billing data of one account names.
+///
+/// A price here wins over the list price of the table.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Prices(BTreeMap<Sku, Usd>);
+
+impl Prices {
+    /// Sets the price of one minute on a SKU. A new price replaces an older
+    /// price of the same SKU.
+    pub fn set(&mut self, sku: Sku, price: Usd) {
+        let _ = (sku, price);
+    }
+
+    /// The price of one minute on a SKU, or `None` when the billing data does
+    /// not name the SKU.
+    #[must_use]
+    pub fn get(&self, sku: Sku) -> Option<Usd> {
+        let _ = sku;
+        None
+    }
+}
+
+/// The billing prices of each account that `ha` could read.
+///
+/// An account that is not in the book uses the price table.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PriceBook(BTreeMap<OwnerName, Prices>);
+
+impl PriceBook {
+    /// Stores the prices of one account. New prices replace older prices of
+    /// the same account.
+    pub fn insert(&mut self, owner: OwnerName, prices: Prices) {
+        let _ = (owner, prices);
+    }
+
+    /// The prices of one account, or `None` when the book does not hold them.
+    /// The match ignores the case of the name.
+    #[must_use]
+    pub fn of(&self, owner: &OwnerName) -> Option<&Prices> {
+        let _ = owner;
+        None
+    }
+}
+
+/// The estimated cost of one job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobCost {
+    /// The cost is known. It can be zero.
+    Known(Usd),
+    /// The job ran on a runner that `ha` cannot price.
+    Unknown,
+}
+
+/// The list-price cost of one job.
+///
+/// The rules apply in this order:
+///
+/// 1. A `self-hosted` label gives zero. GitHub announced a fee of $0.002 per
+///    minute for self-hosted runners on 2025-12-16 and then postponed it. The
+///    pricing page gives no rate.
+/// 2. A job with no runner gives zero.
+/// 3. A job with no runner time gives zero. A skipped job and a waiting job
+///    are examples.
+/// 4. The SKU is the first label that `Sku::of_label` knows. A job with no
+///    such label gives `Unknown`. The runner can be a larger runner, or its
+///    label can be newer than the table. `ha` never guesses a price.
+/// 5. A standard runner on a public repository gives zero.
+/// 6. Else the cost is the price of one minute times the billed minutes. The
+///    price comes from `prices` when it names the SKU, else from the table.
+///
+/// A job that runs uses the time until `now`. Its cost thus grows at the
+/// start of each minute.
+#[must_use]
+pub fn job_cost(
+    job: &Job,
+    visibility: Visibility,
+    prices: Option<&Prices>,
+    now: DateTime<Utc>,
+) -> JobCost {
+    let _ = (job, visibility, prices, now);
+    JobCost::Unknown
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,5 +428,190 @@ mod tests {
         for sku in Sku::ALL {
             assert_eq!(Sku::of_billing_name(sku.table_name()), Some(sku));
         }
+    }
+
+    use chrono::TimeZone;
+
+    use crate::job::{JobId, RunnerName};
+    use crate::run::RunState;
+
+    fn at(hour: u32, minute: u32, second: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 11, 5, hour, minute, second)
+            .unwrap()
+    }
+
+    fn job(labels: &[&str], state: RunState, seconds: Option<i64>) -> Job {
+        let start = at(12, 30, 14);
+        Job {
+            id: JobId(1),
+            name: "build".to_owned(),
+            state,
+            runner: RunnerName::new("GitHub Actions 1000001133".to_owned()),
+            labels: labels.iter().map(|l| (*l).to_owned()).collect(),
+            created_at: Some(start),
+            started_at: seconds.map(|_| start),
+            completed_at: seconds.map(|s| start + chrono::Duration::seconds(s)),
+            url: String::new(),
+        }
+    }
+
+    /// The sample job of issue 639: 26 minutes 17 seconds, 27 billed minutes.
+    fn sample_job() -> Job {
+        let mut sample = job(&["ubuntu-latest"], RunState::Passed, None);
+        sample.started_at = Some(Utc.with_ymd_and_hms(2026, 11, 5, 12, 30, 14).unwrap());
+        sample.completed_at = Some(Utc.with_ymd_and_hms(2026, 11, 5, 12, 56, 31).unwrap());
+        sample
+    }
+
+    fn owner(name: &str) -> OwnerName {
+        OwnerName::parse(name).unwrap()
+    }
+
+    fn known(mills: u32, minutes: u64) -> JobCost {
+        JobCost::Known(Usd::from_mills(mills) * minutes)
+    }
+
+    #[test]
+    fn prices_hold_one_price_per_sku_and_the_newest_wins() {
+        let mut prices = Prices::default();
+        assert_eq!(prices.get(Sku::Linux), None);
+        prices.set(Sku::Linux, Usd::from_mills(8));
+        assert_eq!(prices.get(Sku::Linux), Some(Usd::from_mills(8)));
+        prices.set(Sku::Linux, Usd::from_mills(9));
+        assert_eq!(prices.get(Sku::Linux), Some(Usd::from_mills(9)));
+        assert_eq!(prices.get(Sku::Windows), None);
+    }
+
+    #[test]
+    fn a_price_book_finds_an_account_without_regard_to_case() {
+        let mut prices = Prices::default();
+        prices.set(Sku::Linux, Usd::from_mills(8));
+        let mut book = PriceBook::default();
+        assert_eq!(book.of(&owner("Octo")), None);
+        book.insert(owner("Octo"), prices.clone());
+        assert_eq!(book.of(&owner("octo")), Some(&prices));
+        assert_eq!(book.of(&owner("other")), None);
+    }
+
+    #[test]
+    fn the_sample_job_costs_27_minutes_at_the_linux_price() {
+        let cost = job_cost(&sample_job(), Visibility::Private, None, at(13, 0, 0));
+        assert_eq!(cost, known(6, 27));
+        assert_eq!(cost, JobCost::Known(Usd::from_mills(162)));
+    }
+
+    #[test]
+    fn a_self_hosted_job_is_free() {
+        let hosted = job(&["self-hosted", "linux"], RunState::Passed, Some(600));
+        let cost = job_cost(&hosted, Visibility::Private, None, at(13, 0, 0));
+        assert_eq!(cost, JobCost::Known(Usd::ZERO));
+        let shouting = job(&["Self-Hosted"], RunState::Passed, Some(600));
+        let cost = job_cost(&shouting, Visibility::Private, None, at(13, 0, 0));
+        assert_eq!(cost, JobCost::Known(Usd::ZERO));
+    }
+
+    #[test]
+    fn a_job_with_no_runner_is_free() {
+        let mut unassigned = job(&["ubuntu-latest"], RunState::Passed, Some(600));
+        unassigned.runner = None;
+        let cost = job_cost(&unassigned, Visibility::Private, None, at(13, 0, 0));
+        assert_eq!(cost, JobCost::Known(Usd::ZERO));
+    }
+
+    #[test]
+    fn a_job_with_no_runner_time_is_free() {
+        let skipped = job(&["ubuntu-latest"], RunState::Skipped, None);
+        let cost = job_cost(&skipped, Visibility::Private, None, at(13, 0, 0));
+        assert_eq!(cost, JobCost::Known(Usd::ZERO));
+        let waiting = job(&["ubuntu-latest"], RunState::Queued, Some(0));
+        let cost = job_cost(&waiting, Visibility::Private, None, at(13, 0, 0));
+        assert_eq!(cost, JobCost::Known(Usd::ZERO));
+    }
+
+    #[test]
+    fn an_unknown_label_on_a_private_repository_is_unknown() {
+        let big = job(&["ubuntu-latest-8-cores"], RunState::Passed, Some(600));
+        let cost = job_cost(&big, Visibility::Private, None, at(13, 0, 0));
+        assert_eq!(cost, JobCost::Unknown);
+        let none = job(&[], RunState::Passed, Some(600));
+        assert_eq!(
+            job_cost(&none, Visibility::Private, None, at(13, 0, 0)),
+            JobCost::Unknown
+        );
+    }
+
+    #[test]
+    fn the_first_known_label_decides_the_sku() {
+        let mixed = job(
+            &["custom", "windows-latest", "ubuntu-latest"],
+            RunState::Passed,
+            Some(60),
+        );
+        let cost = job_cost(&mixed, Visibility::Private, None, at(13, 0, 0));
+        assert_eq!(cost, known(10, 1));
+    }
+
+    #[test]
+    fn a_standard_runner_on_a_public_repository_is_free() {
+        let standard = job(&["ubuntu-latest"], RunState::Passed, Some(600));
+        let cost = job_cost(&standard, Visibility::Public, None, at(13, 0, 0));
+        assert_eq!(cost, JobCost::Known(Usd::ZERO));
+    }
+
+    #[test]
+    fn a_larger_runner_on_a_public_repository_is_billed() {
+        let large = job(&["macos-latest-xlarge"], RunState::Passed, Some(600));
+        let cost = job_cost(&large, Visibility::Public, None, at(13, 0, 0));
+        assert_eq!(cost, known(102, 10));
+    }
+
+    #[test]
+    fn an_unknown_label_on_a_public_repository_is_unknown() {
+        let big = job(&["linux-arm64-gpu"], RunState::Passed, Some(600));
+        let cost = job_cost(&big, Visibility::Public, None, at(13, 0, 0));
+        assert_eq!(cost, JobCost::Unknown);
+    }
+
+    #[test]
+    fn a_billing_price_wins_over_the_table() {
+        let mut prices = Prices::default();
+        prices.set(Sku::Linux, Usd::from_mills(8));
+        let cost = job_cost(
+            &sample_job(),
+            Visibility::Private,
+            Some(&prices),
+            at(13, 0, 0),
+        );
+        assert_eq!(cost, known(8, 27));
+    }
+
+    #[test]
+    fn the_table_prices_a_sku_that_the_billing_data_does_not_name() {
+        let mut prices = Prices::default();
+        prices.set(Sku::Windows, Usd::from_mills(20));
+        let cost = job_cost(
+            &sample_job(),
+            Visibility::Private,
+            Some(&prices),
+            at(13, 0, 0),
+        );
+        assert_eq!(cost, known(6, 27));
+        let cost = job_cost(&sample_job(), Visibility::Private, None, at(13, 0, 0));
+        assert_eq!(cost, known(6, 27));
+    }
+
+    #[test]
+    fn a_running_job_costs_one_more_minute_after_each_minute() {
+        let running = job(&["ubuntu-latest"], RunState::Running, None);
+        let mut running = running;
+        running.started_at = Some(at(12, 30, 14));
+        let cost = |seconds: i64| {
+            let now = at(12, 30, 14) + chrono::Duration::seconds(seconds);
+            job_cost(&running, Visibility::Private, None, now)
+        };
+        assert_eq!(cost(0), known(6, 0));
+        assert_eq!(cost(1), known(6, 1));
+        assert_eq!(cost(60), known(6, 1));
+        assert_eq!(cost(61), known(6, 2));
     }
 }
