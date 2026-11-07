@@ -485,3 +485,76 @@ fn without_hook_an_unlinked_sidecar_gives_exit_1() {
     assert_eq!(run.code, 1, "{run:?}");
     assert!(!fixture.main_clone(NAME).exists());
 }
+
+/// The process number of a process that has ended.
+fn dead_pid() -> u32 {
+    let mut child = std::process::Command::new("true")
+        .spawn()
+        .expect("start `true`");
+    let pid = child.id();
+    child.wait().expect("wait for `true`");
+    pid
+}
+
+/// Makes a scratch directory named `name` next to the main clone, with one file inside.
+fn make_scratch(fixture: &Fixture, name: &str) -> std::path::PathBuf {
+    let clone = fixture.main_clone(NAME);
+    let scratch = clone
+        .parent()
+        .expect("the main clone has a parent")
+        .join(format!(
+            ".{}.sidecar-clone-{name}",
+            clone.file_name().unwrap().to_string_lossy()
+        ));
+    fs::create_dir_all(scratch.join("objects/pack")).unwrap();
+    fs::write(scratch.join("objects/pack/partial.pack"), "partial").unwrap();
+    scratch
+}
+
+#[test]
+fn setup_removes_a_scratch_clone_whose_process_is_gone() {
+    let fixture = Fixture::new(&[NAME]);
+    let host = fixture.main_checkout();
+    let scratch = make_scratch(&fixture, &format!("{}-1", dead_pid()));
+
+    let run = fixture.run(&host, &["setup"]);
+
+    assert_eq!(run.code, 0, "{run:?}");
+    assert!(!scratch.exists(), "the scratch clone must be gone: {run:?}");
+    assert!(fixture.main_clone(NAME).join("data.txt").is_file());
+    assert!(
+        run.stdout.contains(&scratch.display().to_string()),
+        "{run:?}"
+    );
+}
+
+#[test]
+fn setup_keeps_a_scratch_clone_of_a_live_process() {
+    let fixture = Fixture::new(&[NAME]);
+    let host = fixture.main_checkout();
+    let scratch = make_scratch(&fixture, &format!("{}-1", std::process::id()));
+
+    let run = fixture.run(&host, &["setup"]);
+
+    assert_eq!(run.code, 0, "{run:?}");
+    assert!(scratch.join("objects/pack/partial.pack").is_file());
+}
+
+#[test]
+fn setup_keeps_a_directory_that_only_looks_like_a_scratch_clone() {
+    let fixture = Fixture::new(&[NAME]);
+    let host = fixture.main_checkout();
+    let dead = dead_pid();
+    let kept = [
+        make_scratch(&fixture, "abc-1"),
+        make_scratch(&fixture, &dead.to_string()),
+        make_scratch(&fixture, &format!("1.sidecar-clone-{dead}-1")),
+    ];
+
+    let run = fixture.run(&host, &["setup"]);
+
+    assert_eq!(run.code, 0, "{run:?}");
+    for scratch in kept {
+        assert!(scratch.exists(), "{} must stay: {run:?}", scratch.display());
+    }
+}
