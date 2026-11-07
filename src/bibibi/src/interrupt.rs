@@ -17,11 +17,11 @@
 //! is the pattern of `swt` in `teardown.rs`. The difference: the cleanup here
 //! runs by `Drop` on the main thread, not on the signal thread.
 //!
-//! # Why the children have their own process group
+//! # Why the children have their own session
 //!
-//! [`crate::child`] starts each child with `process_group(0)`. A Ctrl-C from
-//! the terminal goes to the foreground process group, and the child is not in
-//! it. So the child never dies before the flag is set, and the main thread
+//! [`crate::child`] starts each child with `setsid`. The child leads a new
+//! session and a new process group. A Ctrl-C from the terminal goes to the
+//! foreground process group, and the child is in another session. So the child never dies before the flag is set, and the main thread
 //! always sees the flag before it reads the status of the child. A Ctrl-C
 //! therefore never counts as a verdict (a test that a signal stops is `bad`).
 //! The signal thread stops the child on purpose, group and all, so no

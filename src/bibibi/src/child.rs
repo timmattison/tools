@@ -79,8 +79,12 @@ pub fn run_build(build: &str, dir: &Path) -> Result<Ended> {
 }
 
 /// Give `command` its directory, no input, and the standard error of
-/// `bibibi` as its output. The child leads a new process group, and the
-/// signal thread knows that group while the child runs. Then run it and wait.
+/// `bibibi` as its output. The child starts a session of its own, thus it has
+/// no controlling terminal. A child that opens `/dev/tty` gets an error at
+/// once, and a change of the terminal settings raises no SIGTTOU or SIGTTIN.
+/// So the child never stops on the terminal, and the wait always returns. A
+/// session leader leads its own process group, and the signal thread knows
+/// that group while the child runs. Then run it and wait.
 ///
 /// The child does not inherit the git environment. A `GIT_DIR` that a hook
 /// exported must not aim the test at another repository. The six names of
@@ -92,13 +96,27 @@ fn run_command(mut command: Command, dir: &Path) -> Result<Ended> {
         .as_fd()
         .try_clone_to_owned()
         .context("could not duplicate the standard error")?;
-    let mut child = command
+    command
         .current_dir(dir)
         .stdin(Stdio::null())
-        .stdout(Stdio::from(stdout))
-        .process_group(0)
-        .spawn()?;
-    // The group id of a child that leads its group is the pid of the child.
+        .stdout(Stdio::from(stdout));
+    // SAFETY: the closure runs in the child between the fork and the exec, and
+    // it calls one function. `setsid` is async-signal-safe and touches no
+    // memory of this process. The child is never a process group leader in
+    // that window, because the fork gave it a new process id and its process
+    // group is still the one of the parent, so the one documented failure of
+    // `setsid` (EPERM) cannot happen.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn()?;
+    // A session leader leads its own process group, thus the group id of the
+    // child is the pid of the child.
     interrupt::register_child(i32::try_from(child.id()).context("the pid is too large")?);
     let waited = child.wait();
     interrupt::clear_child();
