@@ -70,7 +70,7 @@ impl Holder {
 
 impl Drop for Holder {
     fn drop(&mut self) {
-        // The holder may be dead already. Both calls can fail without harm.
+        // The holder can be dead already. Both calls can fail without harm.
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
