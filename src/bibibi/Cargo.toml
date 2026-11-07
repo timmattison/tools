@@ -13,6 +13,7 @@ tempfile.workspace = true
 
 [dev-dependencies]
 gitscratch = { workspace = true, features = ["testing"] }
+libc.workspace = true
 
 [lints]
 workspace = true

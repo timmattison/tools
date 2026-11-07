@@ -934,6 +934,7 @@ dependencies = [
  "buildinfo",
  "clap",
  "gitscratch",
+ "libc",
  "tempfile",
 ]
 
