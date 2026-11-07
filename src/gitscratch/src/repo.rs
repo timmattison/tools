@@ -209,8 +209,18 @@ impl Repo {
     /// Returns an error if git could not be spawned, or if `commit` does not
     /// name a commit.
     pub fn parents(&self, commit: &str) -> Result<Vec<String>> {
-        let _ = commit;
-        Ok(vec!["not implemented".to_string()])
+        let line = self
+            .git()
+            .run(
+                "rev-list",
+                &["--parents", "-n", "1", "--end-of-options", commit],
+            )
+            .with_context(|| format!("could not read the parents of '{commit}'"))?;
+        Ok(line
+            .split_whitespace()
+            .skip(1)
+            .map(str::to_string)
+            .collect())
     }
 
     /// Whether `ancestor` is reachable from `descendant`.
@@ -223,8 +233,15 @@ impl Repo {
     /// Returns an error if git could not be spawned, or if either revision
     /// does not name a commit.
     pub fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool> {
-        let _ = (ancestor, descendant);
-        Ok(false)
+        let unreachable = format!("^{descendant}");
+        let output = self
+            .git()
+            .run(
+                "rev-list",
+                &["-n", "1", "--end-of-options", ancestor, &unreachable],
+            )
+            .with_context(|| format!("could not compare '{ancestor}' with '{descendant}'"))?;
+        Ok(output.trim().is_empty())
     }
 
     /// Resolve a revision to a full commit id, without creating a scratch
