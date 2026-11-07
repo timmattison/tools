@@ -460,6 +460,13 @@ fn a_signal_with_nothing_at_risk_kills_swt_the_way_the_default_disposition_would
     signal_with_nothing_at_risk_kills_swt(libc::SIGINT);
 }
 
+// The arming is scoped: with nothing at risk, a hangup keeps its default
+// action. This test keeps that property true for SIGHUP.
+#[test]
+fn a_hangup_with_nothing_at_risk_kills_swt_the_way_the_default_disposition_would() {
+    signal_with_nothing_at_risk_kills_swt(libc::SIGHUP);
+}
+
 // The other thing a signal orphans, and the more expensive one: a merge lock
 // left behind blocks every later merge in that repository until the staleness
 // reap an hour later. The post-rebase re-verification is the one long-running
