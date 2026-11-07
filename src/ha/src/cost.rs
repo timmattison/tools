@@ -9,6 +9,7 @@
 //! make the bill $0.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -341,6 +342,55 @@ pub fn run_cost(
         }
     }
     Some(total)
+}
+
+/// The cell text of a cost that `ha` cannot price.
+const UNKNOWN_TEXT: &str = "?";
+/// The cell text of an exact cost of zero.
+const ZERO_TEXT: &str = "$0";
+/// The cell text of an exact cost above zero and below one cent.
+const BELOW_CENT_TEXT: &str = "<$0.01";
+/// The prefix of a lower bound: the true cost is this amount or more.
+const LOWER_BOUND_PREFIX: &str = "≥";
+
+/// Writes an exact amount: `$0`, `<$0.01`, or the amount to the nearest cent.
+fn write_exact(f: &mut fmt::Formatter<'_>, amount: Usd) -> fmt::Result {
+    if amount.is_zero() {
+        f.write_str(ZERO_TEXT)
+    } else if amount < Usd::CENT {
+        f.write_str(BELOW_CENT_TEXT)
+    } else {
+        write!(f, "{amount}")
+    }
+}
+
+/// Writes a lower bound. The amount rounds down, thus the claim stays true.
+fn write_lower_bound(f: &mut fmt::Formatter<'_>, amount: Usd) -> fmt::Result {
+    let floor = amount.floor_to_cents();
+    f.write_str(LOWER_BOUND_PREFIX)?;
+    if floor.is_zero() {
+        f.write_str(ZERO_TEXT)
+    } else {
+        write!(f, "{floor}")
+    }
+}
+
+impl fmt::Display for JobCost {
+    /// Writes the cell text: `?` for an unknown cost, else the exact amount.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            JobCost::Known(_) | JobCost::Unknown => Ok(()),
+        }
+    }
+}
+
+impl fmt::Display for RunCost {
+    /// Writes the cell text. An exact cost shows as an amount. A lower bound
+    /// starts with `≥` and rounds down to cents.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let _ = f;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -736,5 +786,50 @@ mod tests {
         assert_eq!(billed.unwrap().amount, Usd::from_mills(8) * 27);
         let free = run_cost(&jobs, Visibility::Public, Some(&prices), at(13, 0, 0));
         assert_eq!(free.unwrap().amount, Usd::ZERO);
+    }
+
+    fn run_shown(mills: u32, partial: bool) -> String {
+        RunCost {
+            amount: Usd::from_mills(mills),
+            partial,
+        }
+        .to_string()
+    }
+
+    #[test]
+    fn a_known_job_cost_shows_cents_zero_or_below_a_cent() {
+        let shown = |cost: JobCost| cost.to_string();
+        assert_eq!(shown(known(6, 27)), "$0.16");
+        assert_eq!(shown(known(6, 1)), "<$0.01");
+        assert_eq!(shown(JobCost::Known(Usd::ZERO)), "$0");
+        assert_eq!(shown(JobCost::Known(Usd::CENT)), "$0.01");
+        assert_eq!(shown(JobCost::Known(Usd::from_mills(9))), "<$0.01");
+    }
+
+    #[test]
+    fn an_unknown_job_cost_shows_a_question_mark() {
+        assert_eq!(JobCost::Unknown.to_string(), "?");
+    }
+
+    #[test]
+    fn an_exact_run_cost_shows_like_a_job_cost() {
+        assert_eq!(run_shown(162, false), "$0.16");
+        assert_eq!(run_shown(6, false), "<$0.01");
+        assert_eq!(run_shown(0, false), "$0");
+    }
+
+    #[test]
+    fn a_lower_bound_rounds_down_and_starts_with_a_sign() {
+        assert_eq!(run_shown(162, true), "≥$0.16");
+        assert_eq!(run_shown(16, true), "≥$0.01");
+        assert_eq!(run_shown(6, true), "≥$0");
+        assert_eq!(run_shown(0, true), "≥$0");
+    }
+
+    #[test]
+    fn a_run_of_only_unknown_jobs_shows_a_zero_lower_bound() {
+        let jobs = [job(&["linux-arm64-gpu"], RunState::Passed, Some(60))];
+        let cost = run_of(&jobs, Visibility::Private).unwrap();
+        assert_eq!(cost.to_string(), "≥$0");
     }
 }
