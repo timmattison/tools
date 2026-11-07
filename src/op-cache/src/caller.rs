@@ -6,12 +6,39 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
+/// When a process started, in whole seconds since the Unix epoch.
+///
+/// The type keeps seconds apart from the milliseconds that a session file
+/// holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProcessStart(u64);
+
+impl ProcessStart {
+    /// Wraps a start time in seconds. It gives `None` for 0, because sysinfo
+    /// gives 0 when it cannot read the start time.
+    pub(crate) fn from_epoch_seconds(seconds: u64) -> Option<Self> {
+        (seconds != 0).then_some(Self(seconds))
+    }
+
+    /// True when this process started later than `started_at_ms`, a time in
+    /// milliseconds since the Unix epoch. The process start is a whole second,
+    /// so a start in the same second is not later.
+    pub(crate) fn is_later_than_ms(self, started_at_ms: u64) -> bool {
+        self.0.saturating_mul(1000) > started_at_ms
+    }
+}
+
 /// One process in the chain above op-cache.
+///
+/// The `start` is never written to the audit record. It lets `claude_session`
+/// reject a session file that a dead process left behind.
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Ancestor {
     pub(crate) pid: u32,
     pub(crate) name: String,
     pub(crate) command: Option<String>,
+    #[serde(skip)]
+    pub(crate) start: Option<ProcessStart>,
 }
 
 /// The Claude Code session that started the chain.
@@ -49,6 +76,8 @@ pub(crate) struct ProcessFacts {
     pub(crate) parent: Option<u32>,
     pub(crate) name: String,
     pub(crate) command: Option<String>,
+    /// When the process started, or `None` when the system does not say.
+    pub(crate) start: Option<ProcessStart>,
 }
 
 /// The most ancestors one record names.
@@ -88,6 +117,7 @@ pub(crate) fn walk_ancestors(
             command: facts.command.map(|command| {
                 audit::truncate_at_char_boundary(&command, COMMAND_MAX_BYTES).to_owned()
             }),
+            start: facts.start,
         });
         match facts.parent {
             Some(next) if parent != 1 => parent = next,
@@ -120,6 +150,7 @@ pub(crate) fn ancestors_of_this_process() -> Vec<Ancestor> {
             parent: process.parent().map(Pid::as_u32),
             name: process.name().to_string_lossy().into_owned(),
             command: (!command.is_empty()).then_some(command),
+            start: ProcessStart::from_epoch_seconds(process.start_time()),
         })
     })
 }
@@ -186,6 +217,7 @@ mod tests {
             parent,
             name: name.to_owned(),
             command: command.map(str::to_owned),
+            start: None,
         }
     }
 
@@ -195,6 +227,7 @@ mod tests {
                 parent: f.parent,
                 name: f.name.clone(),
                 command: f.command.clone(),
+                start: f.start,
             })
         })
     }
@@ -218,17 +251,20 @@ mod tests {
                 Ancestor {
                     pid: 9,
                     name: "nine".into(),
-                    command: Some("nine --y".into())
+                    command: Some("nine --y".into()),
+                    start: None
                 },
                 Ancestor {
                     pid: 8,
                     name: "eight".into(),
-                    command: None
+                    command: None,
+                    start: None
                 },
                 Ancestor {
                     pid: 1,
                     name: "init".into(),
-                    command: Some("/sbin/init".into())
+                    command: Some("/sbin/init".into()),
+                    start: None
                 },
             ]
         );
@@ -305,6 +341,7 @@ mod tests {
         let parent = std::os::unix::process::parent_id();
         assert_eq!(chain.first().map(|a| a.pid), Some(parent));
         assert!(!chain[0].name.is_empty());
+        assert!(chain[0].start.is_some(), "no start time");
         assert!(chain.len() <= 32);
         let mut seen = chain.iter().map(|a| a.pid).collect::<Vec<_>>();
         seen.sort_unstable();
@@ -336,14 +373,111 @@ mod tests {
     }
 
     fn chain_100_200_300() -> Vec<Ancestor> {
+        chain_100_200_300_started(None)
+    }
+
+    /// The start of every ancestor of the reused-PID tests, in seconds.
+    const START: u64 = 1_794_091_714;
+
+    fn chain_100_200_300_started(start: Option<ProcessStart>) -> Vec<Ancestor> {
         [100, 200, 300]
             .into_iter()
             .map(|pid| Ancestor {
                 pid,
                 name: format!("p{pid}"),
                 command: None,
+                start,
             })
             .collect()
+    }
+
+    fn started_chain() -> Vec<Ancestor> {
+        chain_100_200_300_started(ProcessStart::from_epoch_seconds(START))
+    }
+
+    fn session_json(started_at_ms: u64, tag: &str) -> String {
+        format!(r#"{{"sessionId":"s{tag}","name":"n{tag}","startedAt":{started_at_ms}}}"#)
+    }
+
+    fn stale_ms() -> u64 {
+        (START - 10) * 1000
+    }
+
+    #[test]
+    fn process_start_is_none_for_zero_and_some_otherwise() {
+        assert_eq!(ProcessStart::from_epoch_seconds(0), None);
+        assert!(ProcessStart::from_epoch_seconds(START).is_some());
+    }
+
+    #[test]
+    fn walk_keeps_the_start_of_each_ancestor() {
+        let start = ProcessStart::from_epoch_seconds(START);
+        let mut table = HashMap::from([
+            (10, facts(Some(9), "ten", None)),
+            (9, facts(Some(8), "nine", None)),
+            (8, facts(None, "eight", None)),
+        ]);
+        table.get_mut(&9).expect("nine").start = start;
+        let chain = walk(10, &table);
+        assert_eq!(chain[0].start, start);
+        assert_eq!(chain[1].start, None);
+    }
+
+    #[test]
+    fn a_stale_file_at_the_nearest_ancestor_gives_way_to_the_next() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_session(dir.path(), 200, &session_json(stale_ms(), "200"));
+        write_session(dir.path(), 300, &session_json(START * 1000, "300"));
+        let found = claude_session(&started_chain(), dir.path());
+        assert_eq!(
+            found,
+            Some(ClaudeSession {
+                pid: 300,
+                session_id: Some("s300".into()),
+                name: Some("n300".into())
+            })
+        );
+    }
+
+    #[test]
+    fn a_stale_file_alone_gives_no_session() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_session(dir.path(), 200, &session_json(stale_ms(), "200"));
+        assert_eq!(claude_session(&started_chain(), dir.path()), None);
+    }
+
+    #[test]
+    fn a_file_started_in_the_same_second_or_later_is_accepted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for started_at in [START * 1000, START * 1000 + 999] {
+            write_session(dir.path(), 200, &session_json(started_at, "200"));
+            let found = claude_session(&started_chain(), dir.path());
+            assert_eq!(found.map(|s| s.pid), Some(200), "startedAt {started_at}");
+        }
+    }
+
+    #[test]
+    fn a_file_without_started_at_is_accepted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_session(dir.path(), 200, r#"{"sessionId":"s200"}"#);
+        let found = claude_session(&started_chain(), dir.path());
+        assert_eq!(found.map(|s| s.pid), Some(200));
+    }
+
+    #[test]
+    fn an_ancestor_without_a_start_accepts_an_old_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_session(dir.path(), 200, &session_json(1, "200"));
+        let found = claude_session(&chain_100_200_300(), dir.path());
+        assert_eq!(found.map(|s| s.pid), Some(200));
+    }
+
+    #[test]
+    fn a_started_at_that_is_not_a_number_is_accepted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_session(dir.path(), 200, r#"{"sessionId":"s200","startedAt":"1"}"#);
+        let found = claude_session(&started_chain(), dir.path());
+        assert_eq!(found.map(|s| s.pid), Some(200));
     }
 
     fn write_session(dir: &Path, pid: u32, text: &str) {

@@ -434,6 +434,7 @@ fn op_start_names_the_ancestors_the_claude_session_and_the_terminal() {
         "pid": test_pid,
         "sessionId": session_id,
         "name": SESSION_NAME,
+        "startedAt": now_ms(),
     });
     fs::write(
         sessions.join(format!("{test_pid}.json")),
@@ -476,6 +477,44 @@ fn op_start_names_the_ancestors_the_claude_session_and_the_terminal() {
     assert_eq!(start["zellij_session"], zellij_session.as_str());
     assert_eq!(start["zellij_pane"], "7");
     assert_eq!(start["term_program"], "WezTerm");
+}
+
+/// The current time in milliseconds since the Unix epoch.
+fn now_ms() -> u64 {
+    let elapsed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after the epoch");
+    u64::try_from(elapsed.as_millis()).expect("milliseconds fit in u64")
+}
+
+#[test]
+fn op_start_ignores_a_session_file_older_than_its_process() {
+    let fixture = Fixture::new();
+    fixture.install_fake_op("echo value");
+    let test_pid = std::process::id();
+    let sessions = fixture.path("claude").join("sessions");
+    fs::create_dir_all(&sessions).expect("create sessions dir");
+    let session = serde_json::json!({
+        "pid": test_pid,
+        "sessionId": "stale-session",
+        "name": SESSION_NAME,
+        "startedAt": 1000,
+    });
+    fs::write(
+        sessions.join(format!("{test_pid}.json")),
+        session.to_string(),
+    )
+    .expect("write session file");
+
+    let output = fixture.read(REFERENCE);
+
+    assert!(output.status.success());
+    let records = records(&audit_text(&fixture));
+    assert!(
+        records[0]["claude"].is_null(),
+        "claude: {}",
+        records[0]["claude"]
+    );
 }
 
 #[test]
