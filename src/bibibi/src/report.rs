@@ -17,6 +17,15 @@ pub fn progress_line(short: &str, verdict: Verdict, subject: &str, steps_left: u
     format!("bibibi: {short} {word} {subject}{reason} - about {steps_left} {unit} left")
 }
 
+/// The pre-flight line of one tested commit, without the line end.
+///
+/// The line is `bibibi: <short> <verdict> <subject> - pre-flight`. A skip adds
+/// its reason after the subject.
+pub fn preflight_line(short: &str, verdict: Verdict, subject: &str) -> String {
+    let _ = (short, verdict, subject);
+    String::new()
+}
+
 /// The result line: the full id and the subject of the first bad commit.
 pub fn result_line(id: &str, subject: &str) -> String {
     format!("{id} {subject}")
@@ -91,6 +100,34 @@ mod tests {
                 2
             ),
             "bibibi: abc1234 skip commit 4 - the build exited 1 - about 2 steps left"
+        );
+    }
+
+    #[test]
+    fn a_preflight_line_for_a_good_commit_ends_in_pre_flight() {
+        assert_eq!(
+            preflight_line("abc1234", Verdict::Good, "commit 1"),
+            "bibibi: abc1234 good commit 1 - pre-flight"
+        );
+    }
+
+    #[test]
+    fn a_preflight_line_for_a_bad_commit_pads_the_verdict() {
+        assert_eq!(
+            preflight_line("abc1234", Verdict::Bad, "commit 10"),
+            "bibibi: abc1234 bad  commit 10 - pre-flight"
+        );
+    }
+
+    #[test]
+    fn a_preflight_line_for_a_skip_names_the_reason() {
+        assert_eq!(
+            preflight_line(
+                "abc1234",
+                Verdict::Skip(SkipReason::PatchDoesNotApply),
+                "commit 4"
+            ),
+            "bibibi: abc1234 skip commit 4 - the patch does not apply - pre-flight"
         );
     }
 
