@@ -41,10 +41,6 @@ pub enum SkipReason {
     /// This signal stopped the build.
     BuildKilled(i32),
     /// The test exited with code 125.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the test exit code slice constructs it")
-    )]
     TestExited125,
 }
 
@@ -69,18 +65,22 @@ use gitscratch::Scratch;
 
 use crate::child;
 
+/// The exit code of the test that means skip, as `git bisect run` defines it.
+const TEST_SKIP_CODE: i32 = 125;
+
 /// Test one commit: check it out, apply the patch, run the build when there
 /// is one, run the test, and restore the scratch worktree. The restore
 /// happens on every path.
 ///
 /// A build that exits non-zero is a skip, and so is a build that a signal
-/// stops. The test does not run after a skip. For the test, exit code 0 is
-/// good and any other code is bad.
+/// stops. The test does not run after a skip. For the test, see
+/// [`test_verdict`]: exit code 0 is good, 125 is a skip, and any other code or
+/// a signal is bad.
 ///
 /// # Errors
 ///
 /// Returns an error if git fails, if the patch does not apply, if the build
-/// or the test cannot start, or if a signal ends the test.
+/// or the test cannot start, or if the verdict of the test cannot be made.
 pub fn step(
     scratch: &Scratch,
     patch: &Path,
@@ -122,17 +122,28 @@ fn test_at(
 
 /// Map the exit status of the test to a verdict.
 ///
+/// | Result of the test | Verdict |
+/// | --- | --- |
+/// | exit code 0 | good |
+/// | exit code 125 | skip ([`SkipReason::TestExited125`]) |
+/// | any other exit code (`timeout` gives 124) | bad |
+/// | a signal stops the test | bad |
+///
 /// # Errors
 ///
-/// Returns an error if a signal stopped the test.
+/// Never fails today. It returns a `Result` so that a later check can fail.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the callers and the issue state the verdict as fallible"
+)]
 fn test_verdict(status: ExitStatus) -> Result<Verdict> {
-    if let Some(signal) = status.signal() {
-        bail!("a signal ({signal}) stopped the test");
+    if status.signal().is_some() {
+        return Ok(Verdict::Bad);
     }
-    Ok(if status.success() {
-        Verdict::Good
-    } else {
-        Verdict::Bad
+    Ok(match status.code() {
+        Some(0) => Verdict::Good,
+        Some(TEST_SKIP_CODE) => Verdict::Skip(SkipReason::TestExited125),
+        _ => Verdict::Bad,
     })
 }
 
