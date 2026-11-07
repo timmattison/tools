@@ -1980,6 +1980,7 @@ mod tests {
     fn run(repo_text: &str, id: u64) -> Run {
         let at = Utc::now();
         Run {
+            visibility: crate::run::Visibility::Private,
             id: RunId(id),
             repo: repo(repo_text),
             workflow: "ci".to_owned(),
@@ -2875,6 +2876,7 @@ mod tests {
 
     fn job(id: u64) -> Job {
         Job {
+            labels: Vec::new(),
             id: crate::job::JobId(id),
             name: format!("job {id}"),
             state: RunState::Passed,
@@ -5051,6 +5053,8 @@ mod tests {
             gross: Usd::from_f64(net * 2.0).expect("an amount"),
             net: Usd::from_f64(net).expect("an amount"),
             organization: organization.map(str::to_owned),
+            sku: String::new(),
+            price_per_unit: None,
         }
     }
 

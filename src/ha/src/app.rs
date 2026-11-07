@@ -288,8 +288,9 @@ where
                     history.map_err(|error| error.to_string()),
                 ),
                 Update::Billing(results) => {
-                    if let Some(board) = self.billing.as_mut() {
-                        board.apply(results);
+                    if let Some(billing) = self.billing.as_mut() {
+                        billing.apply(results);
+                        self.board.set_prices(billing.prices());
                     }
                 }
                 Update::Repos {
@@ -665,6 +666,7 @@ mod tests {
     /// An active run that started `started` minutes before `now`.
     fn active_run(id: u64, started: i64) -> Run {
         Run {
+            visibility: crate::run::Visibility::Private,
             id: RunId(id),
             repo: repo(),
             workflow: "ci".to_owned(),
@@ -811,6 +813,77 @@ mod tests {
             view.accounts[0].cell,
             AccountCell::Ready { error: None, .. }
         ));
+    }
+
+    #[test]
+    fn a_billing_update_gives_its_prices_to_the_board() {
+        use crate::billing::{DailyUsage, UsageItem};
+        use crate::job::{Job, JobId, RunnerName};
+        use crate::money::Usd;
+        let channels = channels();
+        let opener = opener(false);
+        let canceller = canceller();
+        let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
+        let tz = FixedOffset::east_opt(0).unwrap();
+        let clock = now;
+        let acme = OwnerName::parse("acme").unwrap();
+        let mut app = App::new(
+            Board::new(Duration::from_hours(8)),
+            Status::default(),
+            &opener,
+            &canceller,
+            &channels.worker,
+            &clock,
+            &tz,
+            Some(BillingBoard::new(vec![acme.clone()])),
+        );
+        app.board.replace(repo(), vec![active_run(1, 10)], now());
+        app.board.set_jobs(
+            RunId(1),
+            vec![Job {
+                labels: vec!["ubuntu-latest".to_owned()],
+                id: JobId(11),
+                name: "build".to_owned(),
+                state: RunState::Passed,
+                runner: RunnerName::new("GitHub Actions 1".to_owned()),
+                created_at: None,
+                started_at: Some(now() - chrono::Duration::seconds(300)),
+                completed_at: Some(now() - chrono::Duration::seconds(89)),
+                url: String::new(),
+            }],
+        );
+        let cost_before = run_cost_amount(&mut app.board);
+        assert_eq!(cost_before, Some(Usd::from_mills(24)));
+        let item = UsageItem {
+            date: now(),
+            product: "actions".to_owned(),
+            gross: Usd::from_mills(8),
+            net: Usd::ZERO,
+            organization: None,
+            sku: "Actions Linux".to_owned(),
+            price_per_unit: Some(Usd::from_mills(8)),
+        };
+        channels
+            .updates
+            .send(Update::Billing(vec![(
+                acme,
+                Ok(DailyUsage::from_items(&[item])),
+            )]))
+            .unwrap();
+        let result = app.run(
+            &mut terminal,
+            &mut script(vec![Some(press(KeyCode::Char('q')))]),
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(run_cost_amount(&mut app.board), Some(Usd::from_mills(32)));
+    }
+
+    /// The amount of the cost on the row of run 1.
+    fn run_cost_amount(board: &mut Board) -> Option<crate::money::Usd> {
+        board.rows(now()).iter().find_map(|row| match row {
+            crate::board::Row::Run { cost, .. } => cost.map(|cost| cost.amount),
+            _ => None,
+        })
     }
 
     #[test]
@@ -1309,10 +1382,10 @@ mod tests {
         let channels = channels();
         let (result, before) = run_app(&opener(false), &channels, quit());
         assert!(result.is_ok(), "{result:?}");
-        // The started column starts at column 90 of 120, thus the text gets 89.
-        let recent_before = format!("{:<89} FINISHED", "Last 8h");
+        // The started column starts at column 81 of 120, thus the text gets 80.
+        let recent_before = format!("{:<80} FINISHED", "Last 8h");
         let recent_after = format!(
-            "{:<89} FINISHED",
+            "{:<80} FINISHED",
             "Last 8h · 0 passed · 0 failed · 0 cancelled"
         );
         assert_eq!(
@@ -2012,6 +2085,7 @@ mod tests {
 
     fn job(id: u64, name: &str) -> crate::job::Job {
         crate::job::Job {
+            labels: Vec::new(),
             id: crate::job::JobId(id),
             name: name.to_owned(),
             state: RunState::Running,

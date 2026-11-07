@@ -49,6 +49,10 @@ pub struct Job {
     /// not empty always shows, whatever the state of the job, because a name on
     /// a waiting job means that GitHub gave the job to that runner.
     pub runner: Option<RunnerName>,
+    /// The labels of the runner that the job asked for, in the order that
+    /// GitHub gives them. The list is empty when GitHub gives none. The case is
+    /// as GitHub gives it.
+    pub labels: Vec<String>,
     /// When GitHub created the job. A job that waits, waits from this time.
     /// The value is `None` when GitHub gives none.
     pub created_at: Option<DateTime<Utc>>,
@@ -112,6 +116,7 @@ mod tests {
         completed_at: Option<DateTime<Utc>>,
     ) -> Job {
         Job {
+            labels: Vec::new(),
             id: JobId(1),
             name: "build".to_owned(),
             state,

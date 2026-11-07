@@ -45,7 +45,7 @@ use crate::billing::{
 use crate::job::{Job, JobId, RunnerName};
 use crate::money::Usd;
 use crate::queue::{EntryState, EventKind, PullNumber, QueueEntry, QueueEvent, QUEUE_BOT};
-use crate::run::{keep_first_of_each_id, Run, RunId, RunState};
+use crate::run::{keep_first_of_each_id, Run, RunId, RunState, Visibility};
 use crate::status::RateLimit;
 use crate::target::{OwnerName, RepoName};
 
@@ -110,6 +110,13 @@ struct RunJson {
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     html_url: String,
+    repository: Option<RepositoryJson>,
+}
+
+/// The repository member of a run. Only the field that `ha` reads is here.
+#[derive(Deserialize)]
+struct RepositoryJson {
+    private: Option<bool>,
 }
 
 /// The JSON body of one account. Only the `type` is read.
@@ -132,7 +139,12 @@ struct RepoBody {
 fn run_of(json: RunJson, repo: &RepoName) -> Run {
     let workflow = json.name.unwrap_or_default();
     let status = json.status.unwrap_or_default();
+    let visibility = match json.repository.and_then(|repository| repository.private) {
+        Some(false) => Visibility::Public,
+        Some(true) | None => Visibility::Private,
+    };
     Run {
+        visibility,
         id: RunId(json.id),
         repo: repo.clone(),
         state: RunState::from_github(&status, json.conclusion.as_deref()),
@@ -191,6 +203,7 @@ struct JobJson {
     completed_at: Option<DateTime<Utc>>,
     html_url: Option<String>,
     runner_name: Option<String>,
+    labels: Option<Vec<String>>,
 }
 
 /// Maps the JSON body of one page of jobs to a [`JobsPage`].
@@ -210,6 +223,7 @@ fn parse_jobs(body: &str) -> Result<JobsPage, SourceError> {
                 json.started_at.or(json.created_at)
             };
             Job {
+                labels: json.labels.unwrap_or_default(),
                 id: JobId(json.id),
                 name: json.name.unwrap_or_default(),
                 state,
@@ -1580,6 +1594,8 @@ fn parse_usage(body: &str) -> Result<Vec<UsageItem>, SourceError> {
             gross: json.gross_amount,
             net: json.net_amount,
             organization: json.organization_name,
+            sku: json.sku.unwrap_or_default(),
+            price_per_unit: json.price_per_unit,
         })
         .collect())
 }
@@ -1602,6 +1618,9 @@ struct UsageJson {
     net_amount: Usd,
     #[serde(rename = "organizationName")]
     organization_name: Option<String>,
+    sku: Option<String>,
+    #[serde(rename = "pricePerUnit")]
+    price_per_unit: Option<Usd>,
 }
 
 /// Splits a scope header at the commas and trims each scope. Empty scopes
@@ -1843,6 +1862,36 @@ mod tests {
          "html_url":"https://github.com/timmattison/tools/actions/runs/7"}]}"#;
 
     #[test]
+    fn the_visibility_of_a_run_comes_from_repository_private() {
+        let body = r#"{"total_count":4,"workflow_runs":[
+            {"id":1,"name":"CI","created_at":"2026-09-25T01:02:03Z","updated_at":"2026-09-25T01:03:00Z",
+             "html_url":"u1","repository":{"full_name":"o/r","private":false}},
+            {"id":2,"name":"CI","created_at":"2026-09-25T01:02:03Z","updated_at":"2026-09-25T01:03:00Z",
+             "html_url":"u2","repository":{"full_name":"o/r","private":true}},
+            {"id":3,"name":"CI","created_at":"2026-09-25T01:02:03Z","updated_at":"2026-09-25T01:03:00Z",
+             "html_url":"u3"},
+            {"id":4,"name":"CI","created_at":"2026-09-25T01:02:03Z","updated_at":"2026-09-25T01:03:00Z",
+             "html_url":"u4","repository":{"full_name":"o/r","private":null}}]}"#;
+        let page = parse_runs(body, &repo("o/r")).expect("a page");
+        let visibilities: Vec<Visibility> = page.runs.iter().map(|run| run.visibility).collect();
+        assert_eq!(
+            visibilities,
+            [
+                Visibility::Public,
+                Visibility::Private,
+                Visibility::Private,
+                Visibility::Private
+            ]
+        );
+    }
+
+    #[test]
+    fn a_run_with_a_repository_that_has_no_private_value_counts_as_private() {
+        let page = parse_runs(RUNS_JSON, &repo("timmattison/tools")).expect("a page");
+        assert_eq!(page.runs[0].visibility, Visibility::Private);
+    }
+
+    #[test]
     fn the_runs_json_maps_to_runs() {
         let tools = repo("timmattison/tools");
         let page = parse_runs(RUNS_JSON, &tools).expect("a page");
@@ -1851,6 +1900,7 @@ mod tests {
             page.runs,
             [
                 Run {
+                    visibility: crate::run::Visibility::Private,
                     id: RunId(36_064_582_280),
                     repo: tools.clone(),
                     workflow: "CI".to_owned(),
@@ -1863,6 +1913,7 @@ mod tests {
                     url: "https://github.com/timmattison/tools/actions/runs/36064582280".to_owned(),
                 },
                 Run {
+                    visibility: crate::run::Visibility::Private,
                     id: RunId(7),
                     repo: tools,
                     workflow: "Release".to_owned(),
@@ -1946,11 +1997,11 @@ mod tests {
         {"id":399444496,"run_id":29679449,"name":"build (ubuntu)","status":"completed","conclusion":"failure",
          "started_at":"2026-09-24T21:56:49Z","created_at":"2026-09-24T21:55:00Z",
          "completed_at":"2026-09-24T21:57:56Z",
-         "runner_name":"GitHub Actions 1000001050",
+         "runner_name":"GitHub Actions 1000001050","labels":["ubuntu-latest"],
          "html_url":"https://github.com/o/r/actions/runs/29679449/job/399444496","steps":[]},
         {"id":2,"name":"test","status":"in_progress","conclusion":null,
          "started_at":null,"created_at":"2026-09-25T01:02:03Z","completed_at":null,
-         "runner_name":"",
+         "runner_name":"","labels":null,
          "html_url":"https://github.com/o/r/actions/runs/29679449/job/2"},
         {"id":3,"name":null,"status":"queued","conclusion":null,
          "started_at":null,"created_at":"2026-09-25T01:04:00Z","completed_at":null,"html_url":null,"runner_name":null}]}"#;
@@ -1963,6 +2014,7 @@ mod tests {
             page.jobs,
             [
                 Job {
+                    labels: vec!["ubuntu-latest".to_owned()],
                     id: JobId(399_444_496),
                     name: "build (ubuntu)".to_owned(),
                     state: RunState::Failed,
@@ -1973,6 +2025,7 @@ mod tests {
                     url: "https://github.com/o/r/actions/runs/29679449/job/399444496".to_owned(),
                 },
                 Job {
+                    labels: Vec::new(),
                     id: JobId(2),
                     name: "test".to_owned(),
                     state: RunState::Running,
@@ -1983,6 +2036,7 @@ mod tests {
                     url: "https://github.com/o/r/actions/runs/29679449/job/2".to_owned(),
                 },
                 Job {
+                    labels: Vec::new(),
                     id: JobId(3),
                     name: String::new(),
                     state: RunState::Queued,
@@ -2271,6 +2325,7 @@ mod tests {
         assert_eq!(
             run,
             Ok(Some(Run {
+                visibility: crate::run::Visibility::Private,
                 id: RunId(42),
                 repo: repo("o/r"),
                 workflow: "CI".to_owned(),
@@ -3402,8 +3457,19 @@ mod tests {
                 gross: Usd::from_f64(0.126).unwrap(),
                 net: Usd::from_f64(0.0).unwrap(),
                 organization: Some("Lock-Free-Labs".to_owned()),
+                sku: "Actions Linux".to_owned(),
+                price_per_unit: Some(Usd::from_f64(0.006).unwrap()),
             }]
         );
+    }
+
+    #[test]
+    fn an_item_with_no_sku_and_no_price_maps_to_empty_text_and_none() {
+        let body = r#"{"usageItems":[{"date":"2026-11-01T18:01:16Z","grossAmount":1,"netAmount":1,"product":"actions","sku":null}]}"#;
+        let items = parse_usage(body).expect("a report");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].sku, "");
+        assert_eq!(items[0].price_per_unit, None);
     }
 
     #[test]
