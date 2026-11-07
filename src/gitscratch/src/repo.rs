@@ -138,14 +138,39 @@ impl Repo {
 
     /// The change that `commit` made, as a patch that `git apply` accepts.
     ///
-    /// Not yet implemented.
+    /// The bytes are binary safe (`--binary`) and name each object by its full
+    /// id (`--full-index`). They are not text, so the caller writes them to a
+    /// file and does not decode them.
+    ///
+    /// This is `git diff-tree` and not `git diff`. `git diff` obeys user
+    /// configuration that breaks `git apply`. `color.ui=always` writes color
+    /// codes into a pipe, and `diff.noprefix=true` removes the `a/` and `b/`
+    /// prefixes. `diff-tree` ignores both settings. The test
+    /// `patch_of_ignores_color_and_prefix_configuration` pins this.
+    ///
+    /// The patch is the change from the first parent. A root commit has no
+    /// parent, so it gives an error.
     ///
     /// # Errors
     ///
-    /// Returns an error if git fails.
+    /// Returns an error if git could not be spawned, or if git refused the
+    /// call. The usual causes are a `commit` that does not name a commit and a
+    /// root commit.
     pub fn patch_of(&self, commit: &str) -> Result<Vec<u8>> {
-        let _ = commit;
-        Ok(Vec::new())
+        let parent = format!("{commit}^");
+        self.git()
+            .verbatim(
+                "diff-tree",
+                &[
+                    "-p",
+                    "--binary",
+                    "--full-index",
+                    "--end-of-options",
+                    &parent,
+                    commit,
+                ],
+            )
+            .with_context(|| format!("could not make the patch of '{commit}'"))
     }
 
     /// Resolve a revision to a full commit id, without creating a scratch

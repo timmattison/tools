@@ -318,9 +318,14 @@ use gitscratch::Repo;
 let repo = Repo::open(cwd)?;           // any directory *inside* one; errors if there is none
 let onto = repo.resolve("main")?;      // errors naming the revision that did not resolve
 let dirty = repo.uncommitted_files()?; // an `Uncommitted`: staged + unstaged + untracked, per file
+let patch = repo.patch_of(&onto)?;     // the change of one commit, as bytes for `git apply`
 
 let scratch = repo.scratch(&onto)?;    // the only way to a worktree
 ```
+
+`Repo::patch_of` reads the change of one commit as a patch that `git apply`
+accepts. It uses `git diff-tree`, not `git diff`, because `git diff` obeys
+`color.ui` and `diff.noprefix` and the patch then breaks.
 
 `Repo::resolve` puts the question to git in the one form git can refuse. A bare
 `git rev-parse <revision>` prints an argument it cannot place straight back and
