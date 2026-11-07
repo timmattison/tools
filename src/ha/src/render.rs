@@ -1349,6 +1349,95 @@ fn reverse_if(selected: bool, buffer: &mut Buffer, area: Rect, y: u16) {
     }
 }
 
+/// What [`draw_row`] needs to draw a row besides the row itself: the facts of
+/// the whole frame.
+struct RowContext<'a, Tz: TimeZone> {
+    /// The spans that the section headers and the empty lines name.
+    spans: Spans,
+    /// Whether the first refresh cycle ended.
+    loaded: bool,
+    /// The widths of the text columns.
+    widths: Widths,
+    /// Whether the merge history shows. It decides which header names `FINISHED`.
+    history_shows: bool,
+    /// The time of the frame.
+    now: DateTime<Utc>,
+    /// The time zone of the clock cells.
+    tz: &'a Tz,
+}
+
+/// Draws one board row at buffer row `y`. A selectable row is the run row, the
+/// job row, the queue row, and the departure row. Its text takes the fade of
+/// [`age_style`], and the highlight reverses it when `selected` is true (see
+/// [`reverse_if`]). The other rows have no fade and no highlight.
+fn draw_row<Tz: TimeZone>(
+    buffer: &mut Buffer,
+    area: Rect,
+    y: usize,
+    row: &Row<'_>,
+    context: &RowContext<'_, Tz>,
+) where
+    Tz::Offset: Display,
+{
+    let RowContext {
+        spans,
+        loaded,
+        widths,
+        history_shows,
+        now,
+        tz,
+    } = *context;
+    let mut put_selectable = |line: Line<'static>, selected: bool| {
+        let y = put_line(buffer, y, &line.style(age_style(row, now)));
+        reverse_if(selected, buffer, area, y);
+    };
+    match row {
+        Row::Header(header) => {
+            let line = header_line(header, spans, loaded, widths, history_shows);
+            put_line(buffer, y, &prefix_to_width(line, area.width));
+        }
+        Row::Empty(section) => {
+            let line = empty_line(*section, spans, loaded);
+            put(buffer, y, &line, Style::default());
+        }
+        Row::Run {
+            run,
+            state,
+            selected,
+            stale,
+            job_sum,
+            ended,
+            cost,
+            ..
+        } => put_selectable(
+            run_line(
+                run, *state, *ended, *stale, *job_sum, *cost, now, tz, widths,
+            ),
+            *selected,
+        ),
+        Row::Job {
+            job,
+            last,
+            selected,
+            run,
+            cost,
+            ..
+        } => put_selectable(job_line(job, run, *last, *cost, now, tz, widths), *selected),
+        Row::Entry { entry, selected } => {
+            put_selectable(entry_line(entry, now, tz, widths), *selected);
+        }
+        Row::Departure {
+            departure,
+            selected,
+        } => put_selectable(departure_line(departure, now, tz, widths), *selected),
+        Row::JobsLoading => put_status_row(buffer, y, JOBS_LOADING),
+        Row::NoJobs => put_status_row(buffer, y, NO_JOBS),
+        Row::JobsError(error) => {
+            put_status_row(buffer, y, &format!("{JOBS_ERROR_PREFIX}{error}"));
+        }
+    }
+}
+
 /// Draws one frame: the column header, the board rows, and the status line.
 ///
 /// The board rows come from [`Board::view`] with the frame height minus the
@@ -1366,10 +1455,6 @@ fn reverse_if(selected: bool, buffer: &mut Buffer, area: Rect, y: u16) {
 /// and a job row show their `cost` there (see [`run_line`] and [`job_line`]),
 /// and the other rows leave it blank.
 /// This function never panics, whatever the size of the frame.
-#[expect(
-    clippy::too_many_lines,
-    reason = "one match arm draws each kind of row, and the next arm of a row is one more line"
-)]
 pub fn draw<Tz: TimeZone>(
     frame: &mut Frame,
     board: &mut Board,
@@ -1403,63 +1488,16 @@ pub fn draw<Tz: TimeZone>(
     let buffer = frame.buffer_mut();
     put(buffer, 0, &header_cells(widths), bold);
     let view = board.view(now, height);
+    let context = RowContext {
+        spans,
+        loaded,
+        widths,
+        history_shows,
+        now,
+        tz,
+    };
     for (index, row) in view.rows.iter().enumerate() {
-        match row {
-            Row::Header(header) => {
-                let line = header_line(header, spans, loaded, widths, history_shows);
-                put_line(buffer, index + 1, &prefix_to_width(line, area.width));
-            }
-            Row::Empty(section) => {
-                let line = empty_line(*section, spans, loaded);
-                put(buffer, index + 1, &line, Style::default());
-            }
-            Row::Run {
-                run,
-                state,
-                selected,
-                stale,
-                job_sum,
-                ended,
-                cost,
-                ..
-            } => {
-                let line = run_line(
-                    run, *state, *ended, *stale, *job_sum, *cost, now, tz, widths,
-                );
-                let y = put_line(buffer, index + 1, &line.style(age_style(row, now)));
-                reverse_if(*selected, buffer, area, y);
-            }
-            Row::Job {
-                job,
-                last,
-                selected,
-                run,
-                cost,
-                ..
-            } => {
-                let line = job_line(job, run, *last, *cost, now, tz, widths);
-                let y = put_line(buffer, index + 1, &line.style(age_style(row, now)));
-                reverse_if(*selected, buffer, area, y);
-            }
-            Row::Entry { entry, selected } => {
-                let line = entry_line(entry, now, tz, widths);
-                let y = put_line(buffer, index + 1, &line.style(age_style(row, now)));
-                reverse_if(*selected, buffer, area, y);
-            }
-            Row::Departure {
-                departure,
-                selected,
-            } => {
-                let line = departure_line(departure, now, tz, widths);
-                let y = put_line(buffer, index + 1, &line.style(age_style(row, now)));
-                reverse_if(*selected, buffer, area, y);
-            }
-            Row::JobsLoading => put_status_row(buffer, index + 1, JOBS_LOADING),
-            Row::NoJobs => put_status_row(buffer, index + 1, NO_JOBS),
-            Row::JobsError(error) => {
-                put_status_row(buffer, index + 1, &format!("{JOBS_ERROR_PREFIX}{error}"));
-            }
-        }
+        draw_row(buffer, area, index + 1, row, &context);
     }
     draw_status_line(buffer, area, board, status, now, tz, prompt.is_none());
     if let Some(shown) = &billing_box {
