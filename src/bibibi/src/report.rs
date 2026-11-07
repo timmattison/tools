@@ -7,7 +7,13 @@ use crate::step::{SkipReason, Verdict};
 /// The line is `bibibi: <short> <verdict> <subject> - about <n> step(s) left`.
 /// The verdict is padded to four columns. A skip adds its reason after the
 /// subject: `bibibi: <short> skip <subject> - <reason> - about <n> steps left`.
-pub fn progress_line(short: &str, verdict: Verdict, subject: &str, steps_left: u32) -> String {
+pub fn progress_line(
+    width: usize,
+    short: &str,
+    verdict: Verdict,
+    subject: &str,
+    steps_left: u32,
+) -> String {
     let (word, reason) = verdict_parts(verdict);
     let unit = if steps_left == 1 { "step" } else { "steps" };
     format!("bibibi: {short} {word} {subject}{reason} - about {steps_left} {unit} left")
@@ -27,9 +33,19 @@ fn verdict_parts(verdict: Verdict) -> (&'static str, String) {
 ///
 /// The line is `bibibi: <short> <verdict> <subject> - pre-flight`. A skip adds
 /// its reason after the subject.
-pub fn preflight_line(short: &str, verdict: Verdict, subject: &str) -> String {
+pub fn preflight_line(width: usize, short: &str, verdict: Verdict, subject: &str) -> String {
     let (word, reason) = verdict_parts(verdict);
     format!("bibibi: {short} {word} {subject}{reason} - pre-flight")
+}
+
+/// Shorten `subject` so that its display width is at most `budget` columns.
+///
+/// A subject that fits stays as it is. A longer subject loses characters from
+/// its end, and the last column holds `…` (one column wide). A character that
+/// does not fit completely is dropped, so a two-column character never gets
+/// cut in half. A budget of 0 gives an empty string.
+pub fn truncate_to_width(subject: &str, _budget: usize) -> String {
+    subject.to_string()
 }
 
 /// The result line: the full id and the subject of the first bad commit.
@@ -56,11 +72,15 @@ pub fn skips_leave_line(candidates: usize) -> String {
 mod tests {
     use super::*;
     use crate::step::TestFailure;
+    use unicode_width::UnicodeWidthStr;
+
+    /// A width at which no line needs a cut.
+    const WIDE: usize = usize::MAX;
 
     #[test]
     fn a_good_line_names_the_commit_the_verdict_and_the_steps() {
         assert_eq!(
-            progress_line("abc1234", Verdict::Good, "commit 3", 4),
+            progress_line(WIDE, "abc1234", Verdict::Good, "commit 3", 4),
             "bibibi: abc1234 good commit 3 - about 4 steps left"
         );
     }
@@ -69,6 +89,7 @@ mod tests {
     fn a_bad_line_pads_the_verdict_to_four_columns() {
         assert_eq!(
             progress_line(
+                WIDE,
                 "abc1234",
                 Verdict::Bad(TestFailure::Exited(1)),
                 "commit 8",
@@ -81,7 +102,7 @@ mod tests {
     #[test]
     fn one_step_left_is_singular() {
         assert_eq!(
-            progress_line("abc1234", Verdict::Good, "commit 5", 1),
+            progress_line(WIDE, "abc1234", Verdict::Good, "commit 5", 1),
             "bibibi: abc1234 good commit 5 - about 1 step left"
         );
     }
@@ -90,6 +111,7 @@ mod tests {
     fn two_steps_left_is_plural() {
         assert_eq!(
             progress_line(
+                WIDE,
                 "abc1234",
                 Verdict::Bad(TestFailure::Exited(1)),
                 "commit 6",
@@ -103,6 +125,7 @@ mod tests {
     fn zero_steps_left_is_plural() {
         assert_eq!(
             progress_line(
+                WIDE,
                 "abc1234",
                 Verdict::Bad(TestFailure::Exited(1)),
                 "commit 6",
@@ -116,6 +139,7 @@ mod tests {
     fn a_skip_line_names_the_reason() {
         assert_eq!(
             progress_line(
+                WIDE,
                 "abc1234",
                 Verdict::Skip(SkipReason::BuildExited(1)),
                 "commit 4",
@@ -128,7 +152,7 @@ mod tests {
     #[test]
     fn a_preflight_line_for_a_good_commit_ends_in_pre_flight() {
         assert_eq!(
-            preflight_line("abc1234", Verdict::Good, "commit 1"),
+            preflight_line(WIDE, "abc1234", Verdict::Good, "commit 1"),
             "bibibi: abc1234 good commit 1 - pre-flight"
         );
     }
@@ -136,7 +160,12 @@ mod tests {
     #[test]
     fn a_preflight_line_for_a_bad_commit_pads_the_verdict() {
         assert_eq!(
-            preflight_line("abc1234", Verdict::Bad(TestFailure::Exited(1)), "commit 10"),
+            preflight_line(
+                WIDE,
+                "abc1234",
+                Verdict::Bad(TestFailure::Exited(1)),
+                "commit 10"
+            ),
             "bibibi: abc1234 bad  commit 10 - pre-flight"
         );
     }
@@ -145,6 +174,7 @@ mod tests {
     fn a_preflight_line_for_a_skip_names_the_reason() {
         assert_eq!(
             preflight_line(
+                WIDE,
                 "abc1234",
                 Verdict::Skip(SkipReason::PatchDoesNotApply),
                 "commit 4"
@@ -189,5 +219,70 @@ mod tests {
             skips_leave_line(3),
             "bibibi: skips leave 3 candidates for the first bad commit"
         );
+    }
+
+    #[test]
+    fn a_subject_that_fits_stays_the_same() {
+        assert_eq!(truncate_to_width("commit 3", 8), "commit 3");
+        assert_eq!(truncate_to_width("commit 3", 20), "commit 3");
+        assert_eq!(truncate_to_width("日本語", 6), "日本語");
+    }
+
+    #[test]
+    fn japanese_characters_count_two_columns_each() {
+        assert_eq!(truncate_to_width("日本語テスト", 5), "日本…");
+    }
+
+    #[test]
+    fn a_wide_character_that_does_not_fit_is_dropped() {
+        assert_eq!(truncate_to_width("日本語", 4), "日…");
+    }
+
+    #[test]
+    fn an_emoji_counts_two_columns() {
+        assert_eq!(truncate_to_width("🎉🎊🎁", 4), "🎉…");
+    }
+
+    #[test]
+    fn accented_text_cuts_between_characters() {
+        assert_eq!(truncate_to_width("café au lait", 6), "café …");
+    }
+
+    #[test]
+    fn a_budget_of_zero_gives_an_empty_subject() {
+        assert_eq!(truncate_to_width("commit 3", 0), "");
+    }
+
+    #[test]
+    fn a_budget_of_one_gives_only_the_ellipsis() {
+        assert_eq!(truncate_to_width("commit 3", 1), "…");
+        assert_eq!(truncate_to_width("日本語", 1), "…");
+    }
+
+    #[test]
+    fn a_progress_line_fits_the_width() {
+        let line = progress_line(
+            60,
+            "abc1234",
+            Verdict::Good,
+            "commit 3 日本語のテストの長い件名 🎉🎊🎁",
+            2,
+        );
+        assert!(line.width() <= 60, "{line} is {} columns", line.width());
+        assert!(line.contains('…'), "{line}");
+        assert!(line.ends_with(" - about 2 steps left"), "{line}");
+    }
+
+    #[test]
+    fn a_preflight_line_fits_the_width() {
+        let line = preflight_line(
+            40,
+            "abc1234",
+            Verdict::Good,
+            "commit 3 日本語のテストの長い件名 🎉🎊🎁",
+        );
+        assert!(line.width() <= 40, "{line} is {} columns", line.width());
+        assert!(line.contains('…'), "{line}");
+        assert!(line.ends_with(" - pre-flight"), "{line}");
     }
 }

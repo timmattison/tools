@@ -10,6 +10,7 @@ buildinfo.workspace = true
 clap.workspace = true
 gitscratch.workspace = true
 tempfile.workspace = true
+unicode-width.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
@@ -18,6 +19,7 @@ signal-hook.workspace = true
 [dev-dependencies]
 gitscratch = { workspace = true, features = ["testing"] }
 libc.workspace = true
+unicode-width.workspace = true
 
 [lints]
 workspace = true

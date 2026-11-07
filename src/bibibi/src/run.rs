@@ -126,7 +126,7 @@ fn preflight_step(
     let subject = repo.subject(&commit.0)?;
     eprintln!(
         "{}",
-        report::preflight_line(&commit.short(), verdict, &subject)
+        report::preflight_line(usize::MAX, &commit.short(), verdict, &subject)
     );
     Ok(verdict)
 }
@@ -229,7 +229,7 @@ fn search(cli: &Cli) -> Result<Outcome> {
         let subject = repo.subject(&next.0)?;
         eprintln!(
             "{}",
-            report::progress_line(&next.short(), verdict, &subject, steps_left)
+            report::progress_line(usize::MAX, &next.short(), verdict, &subject, steps_left)
         );
     };
 
