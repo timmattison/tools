@@ -327,6 +327,9 @@ let scratch = repo.scratch(&onto)?;    // the only way to a worktree
 accepts. It uses `git diff-tree`, not `git diff`, because `git diff` obeys
 `color.ui` and `diff.noprefix` and the patch then breaks.
 
+`Repo::subject` reads the subject line of one commit, so a progress line can
+name the commit it is about.
+
 `Repo::resolve` puts the question to git in the one form git can refuse. A bare
 `git rev-parse <revision>` prints an argument it cannot place straight back and
 exits **0**, so a name that names no commit passed the very check that exists to

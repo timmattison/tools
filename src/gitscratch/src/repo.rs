@@ -173,16 +173,31 @@ impl Repo {
             .with_context(|| format!("could not make the patch of '{commit}'"))
     }
 
-    /// The subject line of `commit`.
+    /// The subject line of `commit`, without the line break.
     ///
-    /// Not yet implemented.
+    /// `rev-list` with `--no-commit-header` and `--format=%s` prints the
+    /// subject alone, so no `commit <id>` line has to be cut off. The runner
+    /// decodes the bytes as UTF-8 with replacement, so a multi-byte subject
+    /// stays whole.
     ///
     /// # Errors
     ///
-    /// Returns an error if git fails.
+    /// Returns an error if git could not be spawned, or if `commit` does not
+    /// name a commit. The message names `commit`.
     pub fn subject(&self, commit: &str) -> Result<String> {
-        let _ = commit;
-        Ok(String::new())
+        self.git()
+            .run(
+                "rev-list",
+                &[
+                    "--no-commit-header",
+                    "--format=%s",
+                    "-n",
+                    "1",
+                    "--end-of-options",
+                    commit,
+                ],
+            )
+            .with_context(|| format!("could not read the subject of '{commit}'"))
     }
 
     /// Resolve a revision to a full commit id, without creating a scratch
