@@ -606,7 +606,13 @@ impl BillingBoard {
     /// is loading, or that has no access, has no entry.
     #[must_use]
     pub fn prices(&self) -> PriceBook {
-        PriceBook::default()
+        let mut book = PriceBook::default();
+        for (name, state) in &self.accounts {
+            if let AccountState::Ready { usage, .. } = state {
+                book.insert(name.clone(), usage.prices().clone());
+            }
+        }
+        book
     }
 
     /// The rows and the totals for the UTC day `today`.
