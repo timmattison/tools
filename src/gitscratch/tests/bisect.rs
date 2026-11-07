@@ -157,3 +157,42 @@ fn apply_patch_ignores_a_whitespace_policy_of_the_user() {
 
     assert!(applied, "apply.whitespace=error must not refuse the patch");
 }
+
+#[test]
+fn restore_removes_untracked_files_and_directories() {
+    let fixture = TestRepo::init();
+    fixture.commit_file("a.txt", "one\n", "first");
+    let scratch = fixture.scratch("HEAD");
+    std::fs::write(scratch.path().join("stray.txt"), "x\n").expect("write a file");
+    std::fs::create_dir_all(scratch.path().join("stray-dir/inner")).expect("make directories");
+    std::fs::write(scratch.path().join("stray-dir/inner/f.txt"), "y\n").expect("write a file");
+
+    scratch.restore().expect("restore");
+
+    assert!(!scratch.path().join("stray.txt").exists());
+    assert!(!scratch.path().join("stray-dir").exists());
+    assert!(
+        scratch.path().join("a.txt").exists(),
+        "a tracked file stays"
+    );
+}
+
+#[test]
+fn restore_keeps_ignored_files() {
+    let fixture = TestRepo::init();
+    fixture.commit_files(
+        &[(".gitignore", "target/\n*.o\n"), ("a.txt", "one\n")],
+        "first",
+    );
+    let scratch = fixture.scratch("HEAD");
+    std::fs::create_dir_all(scratch.path().join("target")).expect("make a directory");
+    std::fs::write(scratch.path().join("target/out.bin"), "built\n").expect("write a file");
+    std::fs::write(scratch.path().join("main.o"), "object\n").expect("write a file");
+    std::fs::write(scratch.path().join("stray.txt"), "x\n").expect("write a file");
+
+    scratch.restore().expect("restore");
+
+    assert!(scratch.path().join("target/out.bin").exists());
+    assert!(scratch.path().join("main.o").exists());
+    assert!(!scratch.path().join("stray.txt").exists());
+}

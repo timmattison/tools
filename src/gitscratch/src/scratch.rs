@@ -326,6 +326,17 @@ impl Scratch {
         Ok(output.success)
     }
 
+    /// Remove the untracked files of the scratch worktree.
+    ///
+    /// Not yet implemented.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git fails.
+    pub fn restore(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// The id of the tree the scratch worktree's HEAD points at.
     ///
     /// The content of a commit without its ancestry, which is what a caller
