@@ -212,15 +212,14 @@ impl Prices {
     /// Sets the price of one minute on a SKU. A new price replaces an older
     /// price of the same SKU.
     pub fn set(&mut self, sku: Sku, price: Usd) {
-        let _ = (sku, price);
+        self.0.insert(sku, price);
     }
 
     /// The price of one minute on a SKU, or `None` when the billing data does
     /// not name the SKU.
     #[must_use]
     pub fn get(&self, sku: Sku) -> Option<Usd> {
-        let _ = sku;
-        None
+        self.0.get(&sku).copied()
     }
 }
 
@@ -234,15 +233,14 @@ impl PriceBook {
     /// Stores the prices of one account. New prices replace older prices of
     /// the same account.
     pub fn insert(&mut self, owner: OwnerName, prices: Prices) {
-        let _ = (owner, prices);
+        self.0.insert(owner, prices);
     }
 
     /// The prices of one account, or `None` when the book does not hold them.
     /// The match ignores the case of the name.
     #[must_use]
     pub fn of(&self, owner: &OwnerName) -> Option<&Prices> {
-        let _ = owner;
-        None
+        self.0.get(owner)
     }
 }
 
@@ -281,8 +279,30 @@ pub fn job_cost(
     prices: Option<&Prices>,
     now: DateTime<Utc>,
 ) -> JobCost {
-    let _ = (job, visibility, prices, now);
-    JobCost::Unknown
+    let zero = JobCost::Known(Usd::ZERO);
+    if job
+        .labels
+        .iter()
+        .any(|label| label.eq_ignore_ascii_case(SELF_HOSTED_LABEL))
+    {
+        return zero;
+    }
+    if job.runner.is_none() {
+        return zero;
+    }
+    let Some(time) = job.runner_time(now) else {
+        return zero;
+    };
+    let Some(sku) = job.labels.iter().find_map(|label| Sku::of_label(label)) else {
+        return JobCost::Unknown;
+    };
+    if visibility == Visibility::Public && sku.is_standard() {
+        return zero;
+    }
+    let price = prices
+        .and_then(|known| known.get(sku))
+        .unwrap_or_else(|| sku.list_price());
+    JobCost::Known(price * billed_minutes(time))
 }
 
 #[cfg(test)]
