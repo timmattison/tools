@@ -19,6 +19,7 @@ mod run;
 mod step;
 
 use std::ffi::OsString;
+use std::io::Write;
 use std::process::ExitCode;
 
 use buildinfo::version_string;
@@ -61,7 +62,12 @@ fn main() -> ExitCode {
         Ok(run::Outcome::Found) => ExitCode::SUCCESS,
         Ok(run::Outcome::Ambiguous) => ExitCode::from(EXIT_AMBIGUOUS),
         Ok(run::Outcome::Interrupted(signal)) => {
-            eprintln!("bibibi: a signal ({signal}) stopped the run");
+            // After a hangup the terminal is gone, and a panic on this write
+            // would turn the exit status into 101.
+            drop(writeln!(
+                std::io::stderr(),
+                "bibibi: a signal ({signal}) stopped the run"
+            ));
             // `run` returned, so the patch file and the scratch worktree are gone.
             std::process::exit(interrupt::exit_status(signal));
         }

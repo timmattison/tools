@@ -151,7 +151,7 @@ fn preflight_step(
 /// a good commit equal to the bad commit, or a good commit that is not an
 /// ancestor of the bad commit.
 ///
-/// A SIGINT or SIGTERM ends the run with [`Outcome::Interrupted`]. The running
+/// A SIGINT, SIGTERM, or SIGHUP ends the run with [`Outcome::Interrupted`]. The running
 /// child stops, and nothing else prints.
 pub fn run(cli: &Cli) -> Result<Outcome> {
     interrupt::arm();

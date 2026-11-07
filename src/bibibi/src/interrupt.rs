@@ -1,6 +1,6 @@
-//! Signals: what `bibibi` does when SIGINT or SIGTERM arrives.
+//! Signals: what `bibibi` does when SIGINT, SIGTERM, or SIGHUP arrives.
 //!
-//! [`arm`] starts one thread that reads SIGINT and SIGTERM. On a signal, the
+//! [`arm`] starts one thread that reads SIGINT, SIGTERM, and SIGHUP. On a signal, the
 //! thread stores the signal number (only the first signal counts), then stops
 //! the child that runs now: SIGTERM to its process group, and SIGKILL to the
 //! same group after [`GRACE`] if the same child still runs. The main thread
@@ -29,10 +29,10 @@
 //!
 //! # Known limits
 //!
-//! - A Ctrl-C from the terminal also reaches a git child of `gitscratch`,
-//!   because that child is in the process group of `bibibi`. If that git child
-//!   fails before the signal thread sets the flag, the error looks like a git
-//!   error and the run exits 2 in place of 130. The cleanup still happens.
+//! - A Ctrl-C or a hangup of the terminal also reaches a git child of
+//!   `gitscratch`, because that child is in the process group of `bibibi`. If
+//!   that git child fails before the signal thread sets the flag, the error
+//!   looks like a git error and the run exits 2 in place of 130 or 129. The cleanup still happens.
 //! - A second Ctrl-C during the cleanup reaches the `git worktree remove` of the
 //!   scratch drop for the same reason. It can stop that command and leave the
 //!   scratch worktree behind.
@@ -44,7 +44,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread;
 use std::time::Duration;
 
-use signal_hook::consts::{SIGINT, SIGTERM};
+use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
 
 /// The time between SIGTERM and SIGKILL for the group of a child.
@@ -108,7 +108,7 @@ pub fn check() -> Result<(), Interrupted> {
 pub fn arm() {
     static ARMED: OnceLock<()> = OnceLock::new();
     ARMED.get_or_init(|| {
-        let Ok(mut signals) = Signals::new([SIGINT, SIGTERM]) else {
+        let Ok(mut signals) = Signals::new([SIGHUP, SIGINT, SIGTERM]) else {
             return;
         };
         // If the spawn fails, the closure drops and the registration ends with
@@ -187,6 +187,7 @@ mod tests {
 
     #[test]
     fn a_signal_number_maps_to_128_plus_the_number() {
+        assert_eq!(exit_status(libc::SIGHUP), 129);
         assert_eq!(exit_status(libc::SIGINT), 130);
         assert_eq!(exit_status(libc::SIGTERM), 143);
     }

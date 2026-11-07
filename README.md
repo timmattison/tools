@@ -5271,12 +5271,12 @@ bibibi: skips leave 3 candidates for the first bad commit
 | 0 | The search found one first bad commit. |
 | 1 | Skips leave more than one candidate. |
 | 2 | Usage error, refusal, or git error. |
-| 128 + signal | A signal ended the run: 130 for SIGINT (Ctrl-C), 143 for SIGTERM. |
+| 128 + signal | A signal ended the run: 129 for SIGHUP (the terminal closed), 130 for SIGINT (Ctrl-C), 143 for SIGTERM. |
 
 ### Notes
 
-- **Your checkout does not change.** HEAD, the index, your uncommitted files, and the `refs/bisect/*` of a `git bisect` that you have in progress stay as they are. The scratch worktree and the patch file go away after each end of the run: a result, a refusal, an error, a panic, SIGINT, or SIGTERM.
-- **A Ctrl-C never counts as a verdict.** The build and the test run in a process group of their own. On SIGINT or SIGTERM, `bibibi` stops that group (SIGTERM, then SIGKILL after 2 seconds), removes the scratch worktree, and exits 128 + signal. A Ctrl-C from the terminal also reaches a git command of `bibibi`. If that git command fails first, the run can exit 2 in place of 130, and the cleanup still occurs.
+- **Your checkout does not change.** HEAD, the index, your uncommitted files, and the `refs/bisect/*` of a `git bisect` that you have in progress stay as they are. The scratch worktree and the patch file go away after each end of the run: a result, a refusal, an error, a panic, SIGHUP, SIGINT, or SIGTERM.
+- **A Ctrl-C never counts as a verdict.** The build and the test run in a process group of their own. On SIGHUP, SIGINT, or SIGTERM, `bibibi` stops that group (SIGTERM, then SIGKILL after 2 seconds), removes the scratch worktree, and exits 128 + signal. A Ctrl-C or a hangup of the terminal also reaches a git command of `bibibi`. If that git command fails first, the run can exit 2 in place of 130 or 129, and the cleanup still occurs.
 - **The first build is cold.** Each worktree has its own `./target`, so the first build in the scratch worktree compiles everything. The restore never runs `git clean -x`, so ignored build output stays, and each build after the first is incremental. To share a build cache with your checkout, set `CARGO_TARGET_DIR`.
 - **There is no `--timeout` flag.** If a test can hang, wrap it: `-- timeout 60 cargo test ...`. `timeout` exits 124, which counts as bad.
 - **Limits.** `bibibi` does not support a test that is in more than one commit (squash it first), repositories with submodules, or Windows (`--build` runs through `sh -c`).
