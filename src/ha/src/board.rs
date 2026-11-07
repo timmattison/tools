@@ -21,7 +21,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use unicode_width::UnicodeWidthStr;
 
-use crate::cost::{JobCost, PriceBook, RunCost};
+use crate::cost::{job_cost, run_cost, JobCost, PriceBook, RunCost};
 use crate::job::{Job, JobId, RunnerName};
 use crate::queue::{Departure, History, Outcome, PullNumber, QueueEntry};
 use crate::run::{keep_first_of_each_id, Run, RunId, RunState};
@@ -446,7 +446,7 @@ impl Board {
     /// prices of each account that `ha` could read. A run of an account that
     /// is not in the book takes the prices of the table in `cost.rs`.
     pub fn set_prices(&mut self, prices: PriceBook) {
-        let _ = prices;
+        drop(prices);
     }
 
     /// The time window of the finished runs and of the merge history.
@@ -1353,7 +1353,12 @@ fn push_runs<'a>(
             stale: view.errors.contains_key(&run.repo),
             job_sum: job_sum(jobs, view.now),
             ended,
-            cost: None,
+            cost: run_cost(
+                jobs,
+                run.visibility,
+                view.prices.of(run.repo.owner()),
+                view.now,
+            ),
         });
         if view.expanded.contains(&run.id) {
             push_jobs(
@@ -1383,8 +1388,10 @@ fn push_jobs<'a>(
     run_ended: Option<DateTime<Utc>>,
     answer: Option<&'a Jobs>,
     selected: Option<(JobId, usize)>,
-    _view: JobView<'a>,
+    view: JobView<'a>,
 ) {
+    let prices = view.prices.of(run.repo.owner());
+    let cost_of = |job: &Job| job_cost(job, run.visibility, prices, view.now);
     let marked = |index: usize| selected.is_some_and(|(_, position)| position == index);
     match answer {
         None => rows.push(Row::JobsLoading),
@@ -1396,7 +1403,7 @@ fn push_jobs<'a>(
                 selected: marked(index),
                 run,
                 run_ended,
-                cost: JobCost::Unknown,
+                cost: cost_of(job),
             }));
         }
         Some(Jobs::Failed { jobs, error }) => {
@@ -1406,7 +1413,7 @@ fn push_jobs<'a>(
                 selected: marked(index),
                 run,
                 run_ended,
-                cost: JobCost::Unknown,
+                cost: cost_of(job),
             }));
             rows.push(Row::JobsError(error));
         }

@@ -1316,6 +1316,10 @@ fn reverse_if(selected: bool, buffer: &mut Buffer, area: Rect, y: u16) {
 /// The job-sum column stands after the right marker cell. A run row shows its
 /// `job_sum` there (see [`run_line`]), and the other rows leave it blank.
 /// This function never panics, whatever the size of the frame.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one match arm draws each kind of row, and the next arm of a row is one more line"
+)]
 pub fn draw<Tz: TimeZone>(
     frame: &mut Frame,
     board: &mut Board,
