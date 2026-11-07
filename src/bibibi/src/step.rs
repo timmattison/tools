@@ -24,10 +24,28 @@ impl fmt::Display for Commit {
 pub enum Verdict {
     /// The test passed.
     Good,
-    /// The test failed.
-    Bad,
+    /// The test failed, in the stated way.
+    Bad(TestFailure),
     /// The commit cannot be judged, for the stated reason.
     Skip(SkipReason),
+}
+
+/// How a test failed. The pre-flight names it in its refusal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TestFailure {
+    /// The test exited with this code, which is neither 0 nor 125.
+    Exited(i32),
+    /// This signal stopped the test.
+    Killed(i32),
+}
+
+impl fmt::Display for TestFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Exited(code) => write!(f, "the test exited {code}"),
+            Self::Killed(signal) => write!(f, "a signal ({signal}) stopped the test"),
+        }
+    }
 }
 
 /// Why a step skipped a commit.
@@ -127,16 +145,18 @@ fn test_at(
 /// | --- | --- |
 /// | exit code 0 | good |
 /// | exit code 125 | skip ([`SkipReason::TestExited125`]) |
-/// | any other exit code (`timeout` gives 124) | bad |
-/// | a signal stops the test | bad |
+/// | any other exit code (`timeout` gives 124) | bad ([`TestFailure::Exited`]) |
+/// | a signal stops the test | bad ([`TestFailure::Killed`]) |
 fn test_verdict(status: ExitStatus) -> Verdict {
-    if status.signal().is_some() {
-        return Verdict::Bad;
+    if let Some(signal) = status.signal() {
+        return Verdict::Bad(TestFailure::Killed(signal));
     }
     match status.code() {
         Some(0) => Verdict::Good,
         Some(TEST_SKIP_CODE) => Verdict::Skip(SkipReason::TestExited125),
-        _ => Verdict::Bad,
+        Some(code) => Verdict::Bad(TestFailure::Exited(code)),
+        // A child that ended has a code or a signal, so this arm does not run.
+        None => Verdict::Bad(TestFailure::Killed(0)),
     }
 }
 
@@ -145,7 +165,7 @@ mod tests {
     use std::os::unix::process::ExitStatusExt;
     use std::process::ExitStatus;
 
-    use super::{test_verdict, SkipReason, Verdict};
+    use super::{test_verdict, SkipReason, TestFailure, Verdict};
 
     /// The status of a process that exited with `code`.
     fn exited(code: i32) -> ExitStatus {
@@ -159,7 +179,10 @@ mod tests {
 
     #[test]
     fn exit_1_is_bad() {
-        assert_eq!(test_verdict(exited(1)), Verdict::Bad);
+        assert_eq!(
+            test_verdict(exited(1)),
+            Verdict::Bad(TestFailure::Exited(1))
+        );
     }
 
     #[test]
@@ -172,11 +195,17 @@ mod tests {
 
     #[test]
     fn exit_124_from_timeout_is_bad() {
-        assert_eq!(test_verdict(exited(124)), Verdict::Bad);
+        assert_eq!(
+            test_verdict(exited(124)),
+            Verdict::Bad(TestFailure::Exited(124))
+        );
     }
 
     #[test]
     fn a_death_by_signal_9_is_bad() {
-        assert_eq!(test_verdict(ExitStatus::from_raw(9)), Verdict::Bad);
+        assert_eq!(
+            test_verdict(ExitStatus::from_raw(9)),
+            Verdict::Bad(TestFailure::Killed(9))
+        );
     }
 }

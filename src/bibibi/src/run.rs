@@ -2,7 +2,9 @@
 //! and print the result.
 
 use anyhow::{bail, Context, Result};
-use gitscratch::Repo;
+use std::path::Path;
+
+use gitscratch::{Repo, Scratch};
 use tempfile::NamedTempFile;
 
 use crate::report;
@@ -58,6 +60,69 @@ fn refuse_unusable_goods(repo: &Repo, goods: &[Commit], bad: &Commit) -> Result<
     Ok(())
 }
 
+/// Test each good commit in the order given, then the bad commit, and refuse
+/// the run if the ends do not behave. A progress line on standard error
+/// names each commit that was tested.
+///
+/// # Errors
+///
+/// Returns the refusal if a good commit does not pass or the bad commit does
+/// not fail. Returns an error if git fails or a step fails.
+fn preflight(
+    repo: &Repo,
+    scratch: &Scratch,
+    patch: &Path,
+    cli: &Cli,
+    goods: &[Commit],
+    bad: &Commit,
+) -> Result<()> {
+    for good in goods {
+        let verdict = preflight_step(repo, scratch, patch, cli, good)?;
+        let why = match verdict {
+            Verdict::Good => continue,
+            Verdict::Bad(failure) => failure.to_string(),
+            Verdict::Skip(reason) => reason.to_string(),
+        };
+        bail!(
+            "the test does not pass at the good commit {}: {why}.",
+            good.short()
+        );
+    }
+    let verdict = preflight_step(repo, scratch, patch, cli, bad)?;
+    let why = match verdict {
+        Verdict::Bad(_) => return Ok(()),
+        Verdict::Good => "the test exited 0".to_string(),
+        Verdict::Skip(reason) => reason.to_string(),
+    };
+    bail!(
+        "the test does not fail at the bad commit {}: {why}.",
+        bad.short()
+    )
+}
+
+/// Run one step for the pre-flight and print its line.
+fn preflight_step(
+    repo: &Repo,
+    scratch: &Scratch,
+    patch: &Path,
+    cli: &Cli,
+    commit: &Commit,
+) -> Result<Verdict> {
+    let verdict = step(
+        scratch,
+        patch,
+        cli.build.as_deref(),
+        &cli.test_command,
+        commit,
+    )?;
+    let subject = repo.subject(&commit.0)?;
+    eprintln!(
+        "{}",
+        report::preflight_line(&commit.short(), verdict, &subject)
+    );
+    Ok(verdict)
+}
+
 /// Search for the first bad commit and print the result on standard output.
 ///
 /// The test commit is the positional argument, or `HEAD` when it is absent.
@@ -101,6 +166,8 @@ pub fn run(cli: &Cli) -> Result<Outcome> {
 
     let scratch = repo.scratch(&bad.0)?;
 
+    preflight(&repo, &scratch, patch_file.path(), cli, &goods, &bad)?;
+
     let candidates = loop {
         let good_ids: Vec<&str> = goods.iter().map(|good| good.0.as_str()).collect();
         let listed: Vec<Commit> = scratch
@@ -127,7 +194,7 @@ pub fn run(cli: &Cli) -> Result<Outcome> {
         )?;
         match verdict {
             Verdict::Good => goods.push(next.clone()),
-            Verdict::Bad => bad = next.clone(),
+            Verdict::Bad(_) => bad = next.clone(),
             Verdict::Skip(reason) => skipped.push((next.clone(), reason)),
         }
 

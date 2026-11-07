@@ -8,13 +8,19 @@ use crate::step::{SkipReason, Verdict};
 /// The verdict is padded to four columns. A skip adds its reason after the
 /// subject: `bibibi: <short> skip <subject> - <reason> - about <n> steps left`.
 pub fn progress_line(short: &str, verdict: Verdict, subject: &str, steps_left: u32) -> String {
-    let (word, reason) = match verdict {
-        Verdict::Good => ("good", String::new()),
-        Verdict::Bad => ("bad ", String::new()),
-        Verdict::Skip(reason) => ("skip", format!(" - {reason}")),
-    };
+    let (word, reason) = verdict_parts(verdict);
     let unit = if steps_left == 1 { "step" } else { "steps" };
     format!("bibibi: {short} {word} {subject}{reason} - about {steps_left} {unit} left")
+}
+
+/// The verdict word, padded to four columns, and the skip reason with its
+/// leading separator (empty when the commit is not a skip).
+fn verdict_parts(verdict: Verdict) -> (&'static str, String) {
+    match verdict {
+        Verdict::Good => ("good", String::new()),
+        Verdict::Bad(_) => ("bad ", String::new()),
+        Verdict::Skip(reason) => ("skip", format!(" - {reason}")),
+    }
 }
 
 /// The pre-flight line of one tested commit, without the line end.
@@ -22,8 +28,8 @@ pub fn progress_line(short: &str, verdict: Verdict, subject: &str, steps_left: u
 /// The line is `bibibi: <short> <verdict> <subject> - pre-flight`. A skip adds
 /// its reason after the subject.
 pub fn preflight_line(short: &str, verdict: Verdict, subject: &str) -> String {
-    let _ = (short, verdict, subject);
-    String::new()
+    let (word, reason) = verdict_parts(verdict);
+    format!("bibibi: {short} {word} {subject}{reason} - pre-flight")
 }
 
 /// The result line: the full id and the subject of the first bad commit.
@@ -49,6 +55,7 @@ pub fn skips_leave_line(candidates: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::step::TestFailure;
 
     #[test]
     fn a_good_line_names_the_commit_the_verdict_and_the_steps() {
@@ -61,7 +68,12 @@ mod tests {
     #[test]
     fn a_bad_line_pads_the_verdict_to_four_columns() {
         assert_eq!(
-            progress_line("abc1234", Verdict::Bad, "commit 8", 3),
+            progress_line(
+                "abc1234",
+                Verdict::Bad(TestFailure::Exited(1)),
+                "commit 8",
+                3
+            ),
             "bibibi: abc1234 bad  commit 8 - about 3 steps left"
         );
     }
@@ -77,7 +89,12 @@ mod tests {
     #[test]
     fn two_steps_left_is_plural() {
         assert_eq!(
-            progress_line("abc1234", Verdict::Bad, "commit 6", 2),
+            progress_line(
+                "abc1234",
+                Verdict::Bad(TestFailure::Exited(1)),
+                "commit 6",
+                2
+            ),
             "bibibi: abc1234 bad  commit 6 - about 2 steps left"
         );
     }
@@ -85,7 +102,12 @@ mod tests {
     #[test]
     fn zero_steps_left_is_plural() {
         assert_eq!(
-            progress_line("abc1234", Verdict::Bad, "commit 6", 0),
+            progress_line(
+                "abc1234",
+                Verdict::Bad(TestFailure::Exited(1)),
+                "commit 6",
+                0
+            ),
             "bibibi: abc1234 bad  commit 6 - about 0 steps left"
         );
     }
@@ -114,7 +136,7 @@ mod tests {
     #[test]
     fn a_preflight_line_for_a_bad_commit_pads_the_verdict() {
         assert_eq!(
-            preflight_line("abc1234", Verdict::Bad, "commit 10"),
+            preflight_line("abc1234", Verdict::Bad(TestFailure::Exited(1)), "commit 10"),
             "bibibi: abc1234 bad  commit 10 - pre-flight"
         );
     }
