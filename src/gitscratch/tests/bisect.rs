@@ -196,3 +196,69 @@ fn restore_keeps_ignored_files() {
     assert!(scratch.path().join("main.o").exists());
     assert!(!scratch.path().join("stray.txt").exists());
 }
+
+/// Make a commit that is not the first and give back its id.
+fn commit_numbered(fixture: &TestRepo, number: usize) -> String {
+    fixture.commit_file(
+        &format!("f{number}.txt"),
+        &format!("{number}\n"),
+        &format!("commit {number}"),
+    );
+    fixture.rev_parse("HEAD")
+}
+
+/// Check that `item` is a full object id: 40 hexadecimal digits and nothing else.
+fn assert_full_id(item: &str) {
+    assert_eq!(item.len(), 40, "not a full id: {item:?}");
+    assert!(
+        item.chars().all(|c| c.is_ascii_hexdigit()),
+        "not a hexadecimal id: {item:?}"
+    );
+}
+
+#[test]
+fn bisect_all_lists_the_commits_after_the_good_one_up_to_the_bad_one() {
+    let fixture = TestRepo::init();
+    let ids: Vec<String> = (1..=5).map(|n| commit_numbered(&fixture, n)).collect();
+    let scratch = fixture.scratch(&ids[4]);
+
+    let listed = scratch
+        .bisect_all(&ids[4], &[ids[0].as_str()])
+        .expect("a list");
+
+    // The decoration of the line, for example "(HEAD -> main, dist=0)", is gone.
+    for item in &listed {
+        assert_full_id(item);
+    }
+    let found: std::collections::HashSet<&str> = listed.iter().map(String::as_str).collect();
+    let expected: std::collections::HashSet<&str> = ids[1..].iter().map(String::as_str).collect();
+    assert_eq!(found, expected);
+    assert_eq!(listed.len(), 4, "no commit is listed twice");
+}
+
+#[test]
+fn bisect_all_excludes_the_commits_of_every_good_branch() {
+    let fixture = TestRepo::init();
+    let base = commit_numbered(&fixture, 1);
+    fixture.git(&["checkout", "-q", "-b", "left"]);
+    let left = commit_numbered(&fixture, 2);
+    fixture.git(&["checkout", "-q", "main"]);
+    fixture.git(&["checkout", "-q", "-b", "right"]);
+    let right = commit_numbered(&fixture, 3);
+    fixture.git(&["merge", "-q", "--no-ff", "-m", "merge", "left"]);
+    let merge = fixture.rev_parse("HEAD");
+    let after_one = commit_numbered(&fixture, 4);
+    let after_two = commit_numbered(&fixture, 5);
+    let scratch = fixture.scratch(&after_two);
+
+    let listed = scratch
+        .bisect_all(&after_two, &[left.as_str(), right.as_str()])
+        .expect("a list");
+
+    let found: std::collections::HashSet<&str> = listed.iter().map(String::as_str).collect();
+    let expected: std::collections::HashSet<&str> = [&merge, &after_one, &after_two]
+        .into_iter()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(found, expected, "the base ({base}) and both goods are out");
+}

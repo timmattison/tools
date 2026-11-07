@@ -345,6 +345,18 @@ impl Scratch {
         Ok(())
     }
 
+    /// List the commits that a bisection between `bad` and `goods` can test.
+    ///
+    /// Not yet implemented.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git fails.
+    pub fn bisect_all(&self, bad: &str, goods: &[&str]) -> Result<Vec<String>> {
+        let _ = (bad, goods);
+        Ok(Vec::new())
+    }
+
     /// The id of the tree the scratch worktree's HEAD points at.
     ///
     /// The content of a commit without its ancestry, which is what a caller
