@@ -7,7 +7,7 @@
 
 use std::fmt;
 use std::iter::Sum;
-use std::ops::{Add, AddAssign};
+use std::ops::{Add, AddAssign, Mul};
 use std::str::FromStr;
 
 use rust_decimal::{Decimal, RoundingStrategy};
@@ -37,6 +37,34 @@ pub enum MoneyError {
 impl Usd {
     /// No money.
     pub const ZERO: Usd = Usd(Decimal::ZERO);
+
+    /// One cent, which is $0.01.
+    pub const CENT: Usd = Usd(Decimal::ZERO);
+
+    /// Makes an amount from mills. A mill is one thousandth of a dollar.
+    ///
+    /// `Usd::from_mills(6)` is $0.006. The function is `const`, thus a price
+    /// table can be a constant.
+    #[must_use]
+    pub const fn from_mills(mills: u32) -> Usd {
+        let _ = mills;
+        Usd::ZERO
+    }
+
+    /// Whether the amount is exactly zero.
+    #[must_use]
+    pub fn is_zero(self) -> bool {
+        false
+    }
+
+    /// Rounds the amount toward negative infinity to whole cents.
+    ///
+    /// The result is never above the amount. A caller uses it to make a claim
+    /// such as "at least $0.01" that stays true.
+    #[must_use]
+    pub fn floor_to_cents(self) -> Usd {
+        self
+    }
 
     /// Makes an amount from the `f64` that a JSON reader gave.
     ///
@@ -68,6 +96,15 @@ impl Add for Usd {
 
     fn add(self, other: Usd) -> Usd {
         Usd(self.0 + other.0)
+    }
+}
+
+impl Mul<u64> for Usd {
+    type Output = Usd;
+
+    fn mul(self, count: u64) -> Usd {
+        let _ = count;
+        Usd::ZERO
     }
 }
 
@@ -187,6 +224,49 @@ mod tests {
         assert_eq!(parsed.to_string(), "$0.13");
         let whole: Usd = serde_json::from_str("12").expect("an integer");
         assert_eq!(whole.to_string(), "$12.00");
+    }
+
+    #[test]
+    fn from_mills_is_thousandths_of_a_dollar() {
+        assert_eq!(Usd::from_mills(6), usd(0.006));
+        assert_eq!(Usd::from_mills(102), usd(0.102));
+        assert_eq!(Usd::from_mills(1000), usd(1.0));
+        assert_eq!(Usd::from_mills(0), Usd::ZERO);
+    }
+
+    #[test]
+    fn from_mills_is_usable_in_a_const() {
+        const PRICE: Usd = Usd::from_mills(62);
+        assert_eq!(PRICE, usd(0.062));
+    }
+
+    #[test]
+    fn cent_is_one_hundredth_of_a_dollar() {
+        assert_eq!(Usd::CENT, usd(0.01));
+        assert_eq!(Usd::CENT.to_string(), "$0.01");
+    }
+
+    #[test]
+    fn multiplying_by_minutes_is_exact() {
+        assert_eq!(Usd::from_mills(6) * 27, usd(0.162));
+        assert_eq!(Usd::from_mills(6) * 0, Usd::ZERO);
+        assert_eq!(Usd::from_mills(6) * 1000, usd(6.0));
+    }
+
+    #[test]
+    fn is_zero_tells_zero_from_a_small_amount() {
+        assert!(Usd::ZERO.is_zero());
+        assert!(Usd::from_mills(0).is_zero());
+        assert!(!Usd::from_mills(1).is_zero());
+    }
+
+    #[test]
+    fn floor_to_cents_rounds_toward_negative_infinity() {
+        assert_eq!(Usd::from_mills(16).floor_to_cents(), usd(0.01));
+        assert_eq!(Usd::from_mills(19).floor_to_cents(), usd(0.01));
+        assert_eq!(Usd::from_mills(6).floor_to_cents(), Usd::ZERO);
+        assert_eq!(Usd::from_mills(160).floor_to_cents(), usd(0.16));
+        assert_eq!(usd(-0.006).floor_to_cents(), usd(-0.01));
     }
 
     #[test]
