@@ -211,7 +211,7 @@ fn parse_jobs(body: &str) -> Result<JobsPage, SourceError> {
                 json.started_at.or(json.created_at)
             };
             Job {
-                labels: Vec::new(),
+                labels: json.labels.unwrap_or_default(),
                 id: JobId(json.id),
                 name: json.name.unwrap_or_default(),
                 state,
