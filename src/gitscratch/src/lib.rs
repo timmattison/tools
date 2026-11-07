@@ -31,8 +31,9 @@
 //! [`Scratch`] can only be built through [`Repo::scratch`], and a [`Scratch`]
 //! answers only the operations it names. There is no way to get a worktree from
 //! here without also getting the hardening, which is the point — the tools built
-//! on top (`grist`, and the `grime`/`grind` dry-run reporters) cannot drift
-//! apart on safety, because there is only one implementation of it.
+//! on top (`grist`, the `grime`/`grind` dry-run reporters, and the `bibibi`
+//! regression search) cannot drift apart on safety, because there is only one
+//! implementation of it.
 //!
 //! Two operations are replayed behind that door, and they answer the two
 //! questions a developer asks before doing the work. [`Scratch::replay_rebase`]

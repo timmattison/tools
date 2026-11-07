@@ -298,6 +298,158 @@ impl Scratch {
         Ok(())
     }
 
+    /// Apply the patch in the file `patch` to the scratch worktree.
+    ///
+    /// Gives `true` when the patch applies. Gives `false` when git refuses
+    /// it. Then git has changed nothing, because `git apply` is all or
+    /// nothing. A refused patch is an answer and not an error, because a
+    /// caller that searches over many commits expects some of them to refuse.
+    ///
+    /// `--whitespace=nowarn` stands in the call. Without it, a user setting
+    /// such as `apply.whitespace=error` refuses a patch that git committed
+    /// without complaint.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git cannot start, or if `patch` is not valid
+    /// UTF-8 and so cannot be given to git.
+    pub fn apply_patch(&self, patch: &Path) -> Result<bool> {
+        let patch = patch
+            .to_str()
+            .with_context(|| format!("the patch path {} is not UTF-8", patch.display()))?;
+
+        let output = self
+            .git()
+            .try_run("apply", &["--whitespace=nowarn", patch])
+            .context("could not start git apply")?;
+
+        Ok(output.success)
+    }
+
+    /// Apply `patch` with a three-way merge.
+    ///
+    /// This runs `git apply --3way --whitespace=nowarn`. It has the contract of
+    /// [`Scratch::apply_patch`]: `Ok(false)` when git refuses the patch, and an
+    /// error only when git cannot start or the path is not UTF-8.
+    ///
+    /// A three-way apply needs the blobs that the patch names on its `index`
+    /// lines. `Repo::patch_of` uses `--full-index`, so those ids are complete
+    /// and git finds the blobs in the object store.
+    ///
+    /// A conflict leaves conflict markers in the tree and unmerged entries in
+    /// the index. [`Scratch::restore`] removes both.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git cannot start, or if `patch` is not valid UTF-8
+    /// and so cannot be given to git.
+    pub fn apply_patch_three_way(&self, patch: &Path) -> Result<bool> {
+        let patch = patch
+            .to_str()
+            .with_context(|| format!("the patch path {} is not UTF-8", patch.display()))?;
+
+        let output = self
+            .git()
+            .try_run("apply", &["--3way", "--whitespace=nowarn", patch])
+            .context("could not start git apply --3way")?;
+
+        Ok(output.success)
+    }
+
+    /// Put the scratch worktree back to the state of its checked-out commit.
+    ///
+    /// This runs `git reset --hard -q`, then `git clean -f -d -q`. The reset
+    /// puts back each tracked file that a step changed and clears the index.
+    /// The clean removes the untracked files, for example a file that the
+    /// patch added.
+    ///
+    /// It is not `git apply -R`. A reverse apply fails when the build changed
+    /// a tracked file, and after a `--3way` apply that failed half way. The
+    /// reset and the clean work from the commit, so they need no knowledge of
+    /// what the step did.
+    ///
+    /// The clean never passes `-x`, so ignored files stay. Build output that a
+    /// `.gitignore` names thus survives between two steps of a search, and a
+    /// rebuild stays cheap.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git could not be spawned, or if git refused the
+    /// reset or the clean.
+    pub fn restore(&self) -> Result<()> {
+        self.git()
+            .run("reset", &["--hard", "-q"])
+            .context("could not reset the tracked files of the scratch worktree")?;
+        self.git()
+            .run("clean", &["-f", "-d", "-q"])
+            .context("could not remove the untracked files of the scratch worktree")?;
+
+        Ok(())
+    }
+
+    /// List the commits that a bisection between `bad` and `goods` can test.
+    ///
+    /// The list holds `bad` and each commit that is reachable from `bad` and
+    /// not from any of `goods`. Git sorts it by how well a commit halves the
+    /// range, best first. Each line of git's answer can carry a decoration,
+    /// for example `<id> (HEAD -> main, dist=0)`. This method keeps only the
+    /// first field, the full commit id.
+    ///
+    /// Each good is spelled `^<good>`, an exclusion, and all revisions stand
+    /// after `--end-of-options`. A plain `--not` would be read there as a
+    /// revision name.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git could not be spawned, or if git refused the
+    /// call. The usual cause is a revision that does not name a commit.
+    pub fn bisect_all(&self, bad: &str, goods: &[&str]) -> Result<Vec<String>> {
+        let output = self
+            .git()
+            .run(
+                "rev-list",
+                &as_str_slice(&bisect_arguments("--bisect-all", bad, goods)),
+            )
+            .with_context(|| format!("could not list the commits to test below '{bad}'"))?;
+
+        Ok(output
+            .lines()
+            .filter_map(|line| line.split_whitespace().next())
+            .map(str::to_string)
+            .collect())
+    }
+
+    /// Count the steps that a bisection between `bad` and `goods` still needs.
+    ///
+    /// This is the value of `bisect_steps=` in the answer of
+    /// `git rev-list --bisect-vars`, the number that `git bisect` prints as
+    /// "roughly N steps". A range with only `bad` in it gives 0. The revisions
+    /// are spelled as in [`Scratch::bisect_all`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git could not be spawned, if git refused the call,
+    /// or if the answer of git has no `bisect_steps=` line with a number.
+    pub fn bisect_steps(&self, bad: &str, goods: &[&str]) -> Result<u32> {
+        let output = self
+            .git()
+            .run(
+                "rev-list",
+                &as_str_slice(&bisect_arguments("--bisect-vars", bad, goods)),
+            )
+            .with_context(|| format!("could not count the steps to test below '{bad}'"))?;
+
+        let value = output
+            .lines()
+            .find_map(|line| line.strip_prefix("bisect_steps="))
+            .context("git gave no bisect_steps line")?;
+
+        value
+            .trim()
+            .parse()
+            .with_context(|| format!("git gave '{value}' as bisect_steps"))
+    }
+
     /// The id of the tree the scratch worktree's HEAD points at.
     ///
     /// The content of a commit without its ancestry, which is what a caller
@@ -685,6 +837,25 @@ impl Scratch {
     fn repo_git(&self) -> Git {
         Git::new(&self.repo, self.hooks.as_str())
     }
+}
+
+/// The arguments of a `git rev-list` bisection call over `bad` and `goods`.
+///
+/// `mode` is `--bisect-all` or `--bisect-vars`. Every revision stands after
+/// `--end-of-options`, and each good is an exclusion spelled `^<good>`.
+fn bisect_arguments(mode: &str, bad: &str, goods: &[&str]) -> Vec<String> {
+    let mut arguments = vec![
+        mode.to_string(),
+        "--end-of-options".to_string(),
+        bad.to_string(),
+    ];
+    arguments.extend(goods.iter().map(|good| format!("^{good}")));
+    arguments
+}
+
+/// Borrow each owned argument, in the shape that the git runner takes.
+fn as_str_slice(arguments: &[String]) -> Vec<&str> {
+    arguments.iter().map(String::as_str).collect()
 }
 
 impl Drop for Scratch {

@@ -927,6 +927,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "bibibi"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "buildinfo",
+ "clap",
+ "gitscratch",
+ "libc",
+ "signal-hook 0.3.18",
+ "tempfile",
+ "termbar",
+ "unicode-width",
+]
+
+[[package]]
 name = "bindgen"
 version = "0.72.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
