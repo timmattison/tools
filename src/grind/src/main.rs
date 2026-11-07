@@ -30,7 +30,7 @@ const TOOL: &str = "grind";
 #[derive(Parser, Debug)]
 #[clap(author, version = version_string!())]
 struct Args {
-    /// Branch to rebase HEAD onto [default: main, else master]
+    /// Branch to rebase HEAD onto, or the upstream with --onto [default: main, else master]
     ///
     // The default is stated in the doc comment above rather than through clap's
     // `default_value`, and the difference is the refusal. A `default_value` of
@@ -40,6 +40,15 @@ struct Args {
     // repository is open - and `None` is how it learns nobody named one.
     #[clap(value_name = "BRANCH")]
     branch: Option<String>,
+
+    /// Replay only BRANCH..HEAD, onto NEWBASE, as `git rebase --onto NEWBASE BRANCH` does
+    ///
+    // `requires`, because BRANCH is the upstream that bounds the replay. A
+    // default branch in its place replays `main..HEAD` onto `main`, which is a
+    // plain rebase under a verdict that names `--onto`. The parser refuses the
+    // command line instead, with its usage error and exit 2.
+    #[clap(long, value_name = "NEWBASE", requires = "branch")]
+    onto: Option<String>,
 
     /// Print nothing about the rebase - the exit code is the answer
     #[clap(short, long)]
@@ -117,7 +126,7 @@ fn run(args: &Args, console: &Console) -> Result<Conflicts> {
     let cwd = std::env::current_dir().context("could not determine the current directory")?;
     let repo = Repo::open(&cwd)?;
 
-    // Both revisions the run depends on, before any scratch worktree exists.
+    // Each revision the run depends on (HEAD, BRANCH, and NEWBASE when `--onto` names one), before any scratch worktree exists.
     // Creating one costs a temporary directory, a real `git worktree add`, and
     // administrative state in the developer's repository - all of it wasted if a
     // revision was never going to resolve, and worse, the failure would arrive
@@ -143,6 +152,13 @@ fn run(args: &Args, console: &Console) -> Result<Conflicts> {
     // developer typed the name or the default supplied it.
     let branch = repo.branch_or_default(args.branch.as_deref())?;
     repo.resolve(&branch)?;
+    // NEWBASE is the third revision of a run with `--onto`. It resolves beside
+    // HEAD and BRANCH for the same reason: a revision that cannot resolve must
+    // not cost a scratch worktree. `Repo::resolve` passes `--end-of-options`,
+    // so a name such as `--root` is refused as a revision.
+    if let Some(new_base) = args.onto.as_deref() {
+        repo.resolve(new_base)?;
+    }
 
     // The tool's name alone. The note below reads nothing else, and the verdict
     // adds the action on the next line. `UnwordedReport` is `Copy`, so one
@@ -150,7 +166,10 @@ fn run(args: &Args, console: &Console) -> Result<Conflicts> {
     let unworded = Report::for_tool(TOOL);
     // The chosen name, so this line tells the developer which branch got
     // measured on a run that named none.
-    let action = format!("replaying HEAD onto {branch}");
+    let action = match args.onto.as_deref() {
+        Some(new_base) => format!("replaying {branch}..HEAD onto {new_base}"),
+        None => format!("replaying HEAD onto {branch}"),
+    };
     let report = unworded.describing(&action);
 
     // Read here and printed later, which is two decisions rather than one.
@@ -185,12 +204,20 @@ fn run(args: &Args, console: &Console) -> Result<Conflicts> {
 
     let scratch = repo.scratch("HEAD")?;
     // `--diff` asks for the capture. Without it, the replay captures nothing
-    // and costs what it cost before the flag existed.
-    let (conflicts, diffs) = if args.diff {
-        let (conflicts, diffs) = scratch.replay_rebase_with_diffs(&branch)?;
-        (conflicts, Some(diffs))
-    } else {
-        (scratch.replay_rebase(&branch)?, None)
+    // and costs what it cost before the flag existed. `--onto` picks the
+    // two-revision form in both cases, so the diffs come from the replay that
+    // the verdict names.
+    let (conflicts, diffs) = match (args.onto.as_deref(), args.diff) {
+        (Some(new_base), true) => {
+            let (conflicts, diffs) = scratch.replay_rebase_onto_with_diffs(new_base, &branch)?;
+            (conflicts, Some(diffs))
+        }
+        (Some(new_base), false) => (scratch.replay_rebase_onto(new_base, &branch)?, None),
+        (None, true) => {
+            let (conflicts, diffs) = scratch.replay_rebase_with_diffs(&branch)?;
+            (conflicts, Some(diffs))
+        }
+        (None, false) => (scratch.replay_rebase(&branch)?, None),
     };
 
     // There is a verdict now, so the caveat has something to qualify.

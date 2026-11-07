@@ -13,7 +13,7 @@ use std::process::{Command, Output, Stdio};
 use gitscratch::testing::{
     contested_region_repo, default_branch_choice_repo, equal_hunks_unequal_stops_repo,
     independent_branches_repo, modify_delete_repo, multi_byte_names_repo, nested_conflict_repo,
-    not_a_repository, TestRepo, CHOICE_HEAD_BRANCH,
+    not_a_repository, squash_merged_parent_repo, TestRepo, CHOICE_HEAD_BRANCH,
 };
 use gitscratch::{NoInheritedGitEnvironment, DEFAULT_BRANCHES};
 use unicode_width::UnicodeWidthStr;
@@ -588,21 +588,22 @@ fn a_branch_that_rewrote_one_region_across_three_commits_stops_more_than_once() 
     );
 }
 
-/// Run `grind` with nowhere to put a temporary directory, so creating a scratch
-/// worktree is guaranteed to fail and everything before it is not.
+/// Run `grind` with the given arguments and nowhere to put a temporary
+/// directory, so creating a scratch worktree is guaranteed to fail and
+/// everything before it is not.
 ///
 /// `TMPDIR` is set on the child process only. `std::env::set_var` is
 /// process-global and Rust runs the tests in this binary as threads of one
 /// process, so poisoning it there would sabotage every other test in the file.
 fn grind_with_nowhere_to_put_a_scratch(
     repo: &TestRepo,
-    branch: &str,
+    args: &[&str],
 ) -> (Option<i32>, String, String) {
     // Under the fixture's own `TempDir`, so two concurrent copies of this test
     // cannot name the same path - and never created, so it stays missing.
     let missing = repo.path().join("tmpdir-that-does-not-exist");
 
-    let output = grind_command(repo.path(), &[branch])
+    let output = grind_command(repo.path(), args)
         .env("TMPDIR", missing)
         .output()
         .expect("failed to run grind");
@@ -641,7 +642,8 @@ fn a_branch_that_does_not_resolve_is_refused_before_any_scratch_worktree_exists(
     let repo = independent_branches_repo();
     repo.write_file("scratch-notes.txt", "untracked work in progress\n");
 
-    let (code, stdout, stderr) = grind_with_nowhere_to_put_a_scratch(&repo, "nonexistent-branch");
+    let (code, stdout, stderr) =
+        grind_with_nowhere_to_put_a_scratch(&repo, &["nonexistent-branch"]);
 
     assert_eq!(
         code,
@@ -670,7 +672,7 @@ fn a_branch_that_does_not_resolve_is_refused_before_any_scratch_worktree_exists(
     );
 
     let (control_code, control_stdout, control_stderr) =
-        grind_with_nowhere_to_put_a_scratch(&repo, "beta");
+        grind_with_nowhere_to_put_a_scratch(&repo, &["beta"]);
 
     assert_eq!(
         control_code,
@@ -956,6 +958,218 @@ fn quiet_prints_nothing_when_no_default_branch_resolves() {
         ERROR,
         "no default branch",
     );
+}
+
+/// The flag that replays only the commits above an upstream, onto a new base.
+const ONTO_FLAG: &str = "--onto";
+
+/// A stacked branch after a squash merge of its parent replays clean with
+/// `--onto`, although a plain run reports false conflicts.
+///
+/// The control run comes first. It proves the fixture holds the false conflicts
+/// of the commits of `parent`, so the clean verdict below is not vacuous. With
+/// `--onto main parent`, `grind` replays only `parent..HEAD`, which is the
+/// commits of `child` alone, and those commits hit no conflict.
+#[test]
+fn onto_replays_only_the_commits_above_the_upstream_and_reports_clean() {
+    let repo = squash_merged_parent_repo();
+
+    let control = run_raw(&repo, "child", &["main"]);
+    assert_eq!(
+        control.status.code(),
+        Some(CONFLICTS),
+        "a plain run has to report the false conflicts of the commits of parent:\n\
+         stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&control.stdout),
+        String::from_utf8_lossy(&control.stderr)
+    );
+
+    let output = run_raw(&repo, "child", &[ONTO_FLAG, "main", "parent"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(CLEAN),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        stdout, "grind: clean - replaying parent..HEAD onto main hit no conflicts\n",
+        "stderr:\n{stderr}"
+    );
+}
+
+/// `--onto` counts the hunks of the commits above the upstream and no others.
+///
+/// `contested-child` rewrites a line of `stacked.txt` that `main` also
+/// rewrote, so one stop is real. The commits of `parent` are already in `main`
+/// through the squash merge, so `shared.txt` must not appear in the breakdown.
+#[test]
+fn onto_counts_the_hunks_of_the_commits_above_the_upstream_and_no_others() {
+    let repo = squash_merged_parent_repo();
+
+    let output = run_raw(&repo, "contested-child", &[ONTO_FLAG, "main", "parent"]);
+    let (code, stdout, stderr) = streams(&output);
+
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        stdout,
+        r"grind: conflicts - replaying parent..HEAD onto main
+       1 hunk across 1 file, 1 stop
+
+  stacked.txt    1 hunk",
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("shared.txt"),
+        "the commits of parent are already in main and must cost nothing:\n{stdout}"
+    );
+}
+
+/// How many worktrees the repository lists, the main one included.
+///
+/// This is the literal check that the issue asks for. Alone it proves nothing,
+/// because a scratch removes itself on drop, so the count is 1 whether a scratch
+/// was built or not. The poisoned `TMPDIR` of
+/// `grind_with_nowhere_to_put_a_scratch` is the real discriminator.
+fn worktree_count(repo: &TestRepo) -> usize {
+    repo.git(&["worktree", "list", "--porcelain"])
+        .lines()
+        .filter(|line| line.starts_with("worktree "))
+        .count()
+}
+
+/// A NEWBASE that does not resolve is a bad argument, and answering it must not
+/// cost a scratch worktree.
+///
+/// The proof is the poisoned `TMPDIR` of `grind_with_nowhere_to_put_a_scratch`.
+/// If the message names the NEWBASE and not the scratch directory, resolution
+/// ran first. The control run uses a NEWBASE that resolves. It has to fail at
+/// the scratch, or the main assertions prove nothing.
+#[test]
+fn an_onto_that_does_not_resolve_is_refused_before_any_scratch_worktree_exists() {
+    let repo = squash_merged_parent_repo();
+    repo.checkout("child");
+
+    let (code, stdout, stderr) =
+        grind_with_nowhere_to_put_a_scratch(&repo, &[ONTO_FLAG, "nope", "parent"]);
+
+    assert_eq!(code, Some(ERROR), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        stderr.contains("could not resolve 'nope'"),
+        "the message must name the NEWBASE that did not resolve\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("scratch directory"),
+        "resolution must happen before a scratch worktree is built\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("clean") && !stderr.contains("clean"),
+        "a bad NEWBASE must not report clean\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("conflicts") && !stderr.contains("conflicts"),
+        "a bad NEWBASE must not report conflicts\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(worktree_count(&repo), 1, "no worktree may remain");
+
+    let (control_code, control_stdout, control_stderr) =
+        grind_with_nowhere_to_put_a_scratch(&repo, &[ONTO_FLAG, "main", "parent"]);
+
+    assert_eq!(
+        control_code,
+        Some(ERROR),
+        "stdout:\n{control_stdout}\nstderr:\n{control_stderr}"
+    );
+    assert!(
+        control_stderr.contains("could not create a scratch directory"),
+        "a NEWBASE that resolves must fail at the scratch under the same poisoned \
+         TMPDIR, or the assertions above prove nothing\nstdout:\n{control_stdout}\nstderr:\n{control_stderr}"
+    );
+}
+
+/// A NEWBASE that starts with a dash is refused, not replayed onto the root.
+///
+/// Git knows `--root` as an option of `rebase`. The one-revision form already
+/// had a defect where `--root` was reported clean, see
+/// `a_branch_name_that_starts_with_a_dash_is_refused_rather_than_reported_clean`.
+/// The joined `--onto=` spelling is how a user passes a dash-leading value to
+/// clap. The second run uses the real `TMPDIR` and pins that `grind` never
+/// replays onto the root and never reports clean.
+#[test]
+fn an_onto_that_starts_with_a_dash_is_refused_rather_than_replayed_onto_the_root() {
+    let repo = squash_merged_parent_repo();
+    repo.checkout("child");
+
+    let (code, stdout, stderr) =
+        grind_with_nowhere_to_put_a_scratch(&repo, &["--onto=--root", "parent"]);
+
+    assert_eq!(code, Some(ERROR), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        stderr.contains("could not resolve '--root'"),
+        "the message must name the NEWBASE that did not resolve\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("scratch directory"),
+        "resolution must happen before a scratch worktree is built\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("clean") && !stderr.contains("clean"),
+        "a dash-leading NEWBASE must not report clean\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    let output = run_raw(&repo, "child", &["--onto=--root", "parent"]);
+    let (real_code, real_stdout, real_stderr) = streams(&output);
+    assert_eq!(
+        real_code,
+        Some(ERROR),
+        "stdout:\n{real_stdout}\nstderr:\n{real_stderr}"
+    );
+    assert!(
+        !real_stdout.contains("clean") && !real_stderr.contains("clean"),
+        "a dash-leading NEWBASE must never report clean\nstdout:\n{real_stdout}\nstderr:\n{real_stderr}"
+    );
+    assert_eq!(worktree_count(&repo), 1, "no worktree may remain");
+}
+
+/// `--onto` without BRANCH is a usage error from the parser, also under `-q`.
+///
+/// Without this rule, BRANCH gets the default branch. From `child`, the run
+/// then replays `main..HEAD` onto `main`, which is a plain rebase onto `main`.
+/// That run reports the false conflicts of the commits of `parent` under a
+/// verdict that names `--onto`. So the parser refuses the command line before
+/// `grind` starts, and `-q` does not reach the refusal.
+///
+/// The refusal starts with `error:`, which is how clap opens its errors.
+/// `grind` opens its own errors with `grind: error:`, so this prefix shows
+/// that the parser answered.
+#[test]
+fn onto_without_an_upstream_is_a_usage_error_from_the_parser() {
+    let repo = squash_merged_parent_repo();
+
+    for args in [&[ONTO_FLAG, "main"][..], &["-q", ONTO_FLAG, "main"][..]] {
+        let output = run_raw(&repo, "child", args);
+        let (code, stdout, stderr) = streams(&output);
+
+        assert_eq!(
+            code,
+            Some(ERROR),
+            "{args:?} has no upstream to bound the replay, so it is a usage error\n\
+             stdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            stderr.starts_with("error:") && stderr.contains("BRANCH"),
+            "{args:?} must get the usage error of the parser, which names the \
+             missing BRANCH:\n{stderr}"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "{args:?} printed a verdict for a command line it cannot read:\n{stdout}"
+        );
+    }
 }
 
 /// One of the three build-state words `CLAUDE.md` allows after the hash.
@@ -1374,7 +1588,7 @@ fn the_long_spelling_of_quiet_answers_exactly_as_the_short_one_does() {
 /// there is no repository here to answer from.
 #[test]
 fn quiet_leaves_the_usage_error_to_the_parser_that_answers_before_grind_starts() {
-    const REFUSED_FLAG: &str = "--onto";
+    const REFUSED_FLAG: &str = "--no-such-flag";
     let elsewhere = not_a_repository();
 
     let (code, stdout, stderr) = streams(&grind(elsewhere.path(), &["-q", REFUSED_FLAG, "main"]));
@@ -1561,6 +1775,70 @@ index {y_ours},{y_theirs}..0000000
 ++=======
 + two-y
 ++>>>>>>> {y_commit} (two edits y)
+  line16
+  line17
+  line18
+"
+        ),
+        "stderr:\n{stderr}"
+    );
+}
+
+/// Stand on `contested-child` in [`squash_merged_parent_repo`] and replay
+/// `parent..HEAD` onto `main` with `--diff`.
+///
+/// `--diff` obeys `--onto`. The replay stops once, on the one commit of
+/// `contested-child`, so the run prints exactly one halt diff, and that diff
+/// is in `stacked.txt`. A run that captured its diffs from a plain rebase
+/// would give a halt diff in `shared.txt` for each commit of `parent`, or no
+/// halt diff at all.
+///
+/// The golden is the whole of stdout, byte for byte, with `NO_COLOR` set so
+/// the text is plain. Each id in it comes from the git of the fixture through
+/// [`short_id`].
+#[test]
+fn diff_with_onto_prints_one_halt_diff_for_the_commit_above_the_upstream() {
+    let repo = squash_merged_parent_repo();
+    repo.checkout("contested-child");
+
+    let stopped = short_id(&repo, "contested-child");
+    let ours = short_id(&repo, "main:stacked.txt");
+    let theirs = short_id(&repo, "contested-child:stacked.txt");
+
+    let output = grind_command(repo.path(), &[DIFF_FLAG, ONTO_FLAG, "main", "parent"])
+        .env(NO_COLOR, "1")
+        .output()
+        .expect("failed to run grind");
+    let (code, stdout, stderr) = streams(&output);
+
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "the commit of contested-child collides with main, with the diff as \
+         without it\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!(
+            "grind: conflicts - replaying parent..HEAD onto main
+       1 hunk across 1 file, 1 stop
+
+  stacked.txt    1 hunk
+
+stop 1 of 1 - {stopped} contested-child rewrites line 15 of stacked.txt
+diff --cc stacked.txt
+index {ours},{theirs}..0000000
+--- a/stacked.txt
++++ b/stacked.txt
+@@@ -12,7 -12,7 +12,11 @@@ line1
+  line12
+  line13
+  line14
+++<<<<<<< HEAD
+ +main-edit
+++=======
++ contested-child-edit
+++>>>>>>> {stopped} (contested-child rewrites line 15 of stacked.txt)
   line16
   line17
   line18

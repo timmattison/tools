@@ -37,6 +37,9 @@
 //! Two operations are replayed behind that door, and they answer the two
 //! questions a developer asks before doing the work. [`Scratch::replay_rebase`]
 //! walks a whole rebase, halt by halt, and folds a cost per stop.
+//! [`Scratch::replay_rebase_onto`] walks the same loop for
+//! `git rebase --onto <new_base> <upstream>`, where the commits to replay and
+//! the place they land come from two different revisions.
 //! [`Scratch::replay_merge`] makes one three-way merge and reads what git could
 //! not merge, so it counts one stop or none. Both answer with the same
 //! [`Conflicts`], and both refuse rather than answer when git would not perform
@@ -45,7 +48,8 @@
 //!
 //! Each operation also has an entrance that captures the halt diff of each
 //! halt: the text `git diff` shows there in a real rebase or merge.
-//! [`Scratch::replay_rebase_with_diffs`] and
+//! [`Scratch::replay_rebase_with_diffs`],
+//! [`Scratch::replay_rebase_onto_with_diffs`] and
 //! [`Scratch::replay_merge_with_diffs`] return the halt diffs in a
 //! [`HaltDiffs`] beside the [`Conflicts`], and the [`diffs`] module says why
 //! they stay out of that type.
