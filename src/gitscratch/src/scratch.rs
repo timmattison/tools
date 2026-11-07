@@ -377,6 +377,18 @@ impl Scratch {
             .collect())
     }
 
+    /// Count the steps that a bisection between `bad` and `goods` still needs.
+    ///
+    /// Not yet implemented.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git fails.
+    pub fn bisect_steps(&self, bad: &str, goods: &[&str]) -> Result<u32> {
+        let _ = (bad, goods);
+        Ok(0)
+    }
+
     /// The id of the tree the scratch worktree's HEAD points at.
     ///
     /// The content of a commit without its ancestry, which is what a caller

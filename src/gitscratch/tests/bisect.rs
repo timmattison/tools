@@ -262,3 +262,33 @@ fn bisect_all_excludes_the_commits_of_every_good_branch() {
         .collect();
     assert_eq!(found, expected, "the base ({base}) and both goods are out");
 }
+
+#[test]
+fn bisect_steps_is_zero_when_only_the_bad_commit_is_left() {
+    let fixture = TestRepo::init();
+    let ids: Vec<String> = (1..=2).map(|n| commit_numbered(&fixture, n)).collect();
+    let scratch = fixture.scratch(&ids[1]);
+
+    let steps = scratch
+        .bisect_steps(&ids[1], &[ids[0].as_str()])
+        .expect("a count");
+
+    assert_eq!(steps, 0);
+}
+
+#[test]
+fn bisect_steps_matches_the_count_that_git_gives_for_a_longer_range() {
+    let fixture = TestRepo::init();
+    let ids: Vec<String> = (1..=9).map(|n| commit_numbered(&fixture, n)).collect();
+    let scratch = fixture.scratch(&ids[8]);
+
+    let steps = scratch
+        .bisect_steps(&ids[8], &[ids[0].as_str()])
+        .expect("a count");
+
+    // The range holds commits 2 to 9, which is 8 commits. The literal comes
+    // from a shell run with git 2.56: `git rev-list --bisect-vars` over 8
+    // commits in a line prints `bisect_all=8` and `bisect_steps=2`. For
+    // comparison, 1 or 2 commits give 0, 3 to 7 give 1, and 12 give 3.
+    assert_eq!(steps, 2);
+}
