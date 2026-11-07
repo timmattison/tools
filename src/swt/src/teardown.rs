@@ -33,9 +33,9 @@
 //!
 //! - **It is scoped.** [`arm_signal_teardown`] is called only in the act of
 //!   taking a responsibility — never at startup, and never for its own sake — and
-//!   a signal arriving with nothing at risk is handed straight back to the
-//!   default handler, so `swt` never makes a signal mean something new in a
-//!   window where there is nothing to protect. Within that act the arming comes
+//!   a signal arriving with nothing at risk gets the default action once any
+//!   teardown in flight is done, so `swt` never makes a signal mean something
+//!   new in a window where there is nothing to protect. Within that act the arming comes
 //!   *first* and the state that records the responsibility second, so the two can
 //!   never disagree in the direction that matters.
 //! - **An inherited "ignore" stays.** A parent can start `swt` with a signal set
@@ -244,18 +244,24 @@ pub(crate) fn take_arming_witness() -> Option<bool> {
 /// exactly as it would have without `swt`, or it dies by `swt`'s hand after the
 /// teardown it owed. Nothing returns to read a second signal, which is what
 /// makes an impatient repeat harmless.
+///
+/// The teardown sequence is taken before the question of what is at risk. A
+/// signal that arrives during a teardown in flight thus waits for both git
+/// commands of that teardown, then takes its own ending.
 #[cfg(unix)]
 fn handle_signal(signal: c_int) {
+    // Taken before the question and held across both endings. A teardown in
+    // flight empties the registry before its git commands run, so without this
+    // guard a signal in that window finds nothing at risk and stops the process
+    // between the two commands. Any other party that reaches a teardown —
+    // `create` on a red check, a guard that unwinds — finishes it first.
+    let _sequence = teardown_sequence();
     match signal_disposition(signal, anything_at_risk()) {
         // Best effort: a signal the table does not recognize leaves the process
         // running, which is the same thing it would have done with a handler
         // that had nothing to do.
         Disposition::Default => drop(emulate_default_handler(signal)),
         Disposition::Terminate(status) => {
-            // Taken before the work and held across the exit: any other party
-            // reaching a teardown — `create` on a red check, a guard unwinding —
-            // waits here rather than racing this one out of the process.
-            let _sequence = teardown_sequence();
             drop(remove_held_worktree());
             release_all_held_locks();
             process::exit(status);
@@ -362,9 +368,9 @@ fn unverified_worktree() -> MutexGuard<'static, Option<UnverifiedWorktree>> {
 /// more importantly — so nobody can end the process in the middle of one.
 ///
 /// The latch below already keeps the *work* to a single run. This is the other
-/// half: the signal thread holds this across its `process::exit`, so a party
-/// that would otherwise have exited first waits here instead of cutting a
-/// teardown in flight in half. Deliberately not reentrant-safe — a std [`Mutex`]
+/// half: the signal thread holds this across both of its endings, the
+/// `process::exit` and the default action, so a party that would otherwise have
+/// exited first waits here instead of cutting a teardown in flight in half. Deliberately not reentrant-safe — a std [`Mutex`]
 /// is not — so nothing taken under it may take it again.
 static TEARDOWN_SEQUENCE: Mutex<()> = Mutex::new(());
 
