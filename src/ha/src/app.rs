@@ -288,8 +288,9 @@ where
                     history.map_err(|error| error.to_string()),
                 ),
                 Update::Billing(results) => {
-                    if let Some(board) = self.billing.as_mut() {
-                        board.apply(results);
+                    if let Some(billing) = self.billing.as_mut() {
+                        billing.apply(results);
+                        self.board.set_prices(billing.prices());
                     }
                 }
                 Update::Repos {
