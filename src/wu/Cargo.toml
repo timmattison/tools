@@ -19,6 +19,9 @@ sysinfo.workspace = true
 walkdir.workspace = true
 which.workspace = true
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [target.'cfg(target_os = "linux")'.dependencies]
 procfs.workspace = true
 
