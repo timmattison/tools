@@ -410,8 +410,7 @@ fn a_second_interrupt_cannot_truncate_the_teardown_the_first_asked_for() {
 // have. `swt merge` verifies the parent worktree before it creates or locks
 // anything, so that check is the one window where the answer is provably
 // nothing.
-#[test]
-fn a_signal_with_nothing_at_risk_kills_swt_the_way_the_default_disposition_would() {
+fn signal_with_nothing_at_risk_kills_swt(signal: c_int) {
     let repo = TestRepo::new();
     let subagent = repo.add_worktree("bystander");
     let scratch = scratch();
@@ -430,20 +429,25 @@ fn a_signal_with_nothing_at_risk_kills_swt_the_way_the_default_disposition_would
         "precondition: the parent check runs before anything is locked"
     );
 
-    run.signal(libc::SIGINT);
+    run.signal(signal);
     let status = run.wait();
     let stderr = run.stderr_text();
 
     assert_eq!(
         status.code(),
         None,
-        "swt turned a signal it owned nothing for into an ordinary exit: {status:?}\n{stderr}"
+        "swt turned signal {signal}, which it owned nothing for, into an ordinary exit: {status:?}\n{stderr}"
     );
     assert_eq!(
         status.signal(),
-        Some(libc::SIGINT),
-        "the run should have died by the signal, as it would have without swt: {status:?}\n{stderr}"
+        Some(signal),
+        "the run should have died by signal {signal}, as it would have without swt: {status:?}\n{stderr}"
     );
+}
+
+#[test]
+fn a_signal_with_nothing_at_risk_kills_swt_the_way_the_default_disposition_would() {
+    signal_with_nothing_at_risk_kills_swt(libc::SIGINT);
 }
 
 // The other thing a signal orphans, and the more expensive one: a merge lock
@@ -451,8 +455,7 @@ fn a_signal_with_nothing_at_risk_kills_swt_the_way_the_default_disposition_would
 // reap an hour later. The post-rebase re-verification is the one long-running
 // step that happens *inside* the locked region, so a check that stalls on
 // exactly that invocation puts the signal where it has to land.
-#[test]
-fn a_lock_held_when_the_signal_arrives_does_not_outlive_the_run() {
+fn interrupted_merge_releases_the_lock(signal: c_int, expected_status: i32) {
     let repo = TestRepo::new();
     let subagent = repo.add_worktree("locked");
     let scratch = scratch();
@@ -486,19 +489,24 @@ fn a_lock_held_when_the_signal_arrives_does_not_outlive_the_run() {
         lock.display()
     );
 
-    run.signal(libc::SIGINT);
+    run.signal(signal);
     let status = run.wait();
     let stderr = run.stderr_text();
 
     assert_eq!(
         status.code(),
-        Some(SIGINT_STATUS),
-        "an interrupted merge must exit 128 + signal: {status:?}\n{stderr}"
+        Some(expected_status),
+        "an interrupted merge must exit 128 + signal {signal}: {status:?}\n{stderr}"
     );
     assert!(
         !lock.exists(),
-        "the merge lock at {} outlived the run that held it, blocking every \
-         later merge until the staleness reap:\n{stderr}",
+        "signal {signal} left the merge lock at {} behind after the run that held it, \
+         blocking every later merge until the staleness reap:\n{stderr}",
         lock.display()
     );
+}
+
+#[test]
+fn a_lock_held_when_the_signal_arrives_does_not_outlive_the_run() {
+    interrupted_merge_releases_the_lock(libc::SIGINT, SIGINT_STATUS);
 }
