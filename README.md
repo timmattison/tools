@@ -1016,8 +1016,9 @@ cannot hang the caller. Used by `cwt` and `ha`.
 
     The subtitle is the Claude Code session and the zellij session. When both are absent, it is the
     name of the repo directory. A retry adds `(attempt 2 of 3)` to the title. Set
-    `OP_CACHE_NOTIFY=0` to turn the notification off. If no notification appears, find the entry
-    that controls `osascript` in System Settings → Notifications, and allow it.
+    `OP_CACHE_NOTIFY=0` to turn the notification off. macOS shows the notification under Script
+    Editor, because `osascript` posts it as `com.apple.ScriptEditor2`. If no notification appears,
+    allow notifications for Script Editor in System Settings → Notifications.
   - op-cache writes an audit trail to `$XDG_STATE_HOME/op-cache/audit.jsonl`. When
     `XDG_STATE_HOME` is unset, empty, or relative, the file is `~/.local/state/op-cache/audit.jsonl`.
     The audit trail has no switch. Each line is one JSON record, of one of two kinds:
