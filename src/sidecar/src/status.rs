@@ -8,6 +8,7 @@ use crate::host::{Host, WORKTREES_SUFFIX};
 use crate::link::{inspect_link, LinkState};
 use crate::name::SidecarName;
 use crate::remote::DATA_INFIX;
+use unicode_width::UnicodeWidthStr;
 
 /// The text of the two state columns of a row that the registry does not name.
 const NOT_REGISTERED: &str = "not registered";
@@ -159,6 +160,9 @@ fn link_text(state: &LinkState) -> String {
 }
 
 /// Renders the rows as a table. The text ends with a newline. No line ends in a space.
+///
+/// Each column pads to its widest cell. The width is the display width in terminal
+/// columns, not the count of characters, so a wide name keeps the columns in line.
 #[must_use]
 pub fn render(rows: &[Row]) -> String {
     let mut lines: Vec<[String; 3]> = vec![HEADER.map(str::to_string)];
@@ -167,7 +171,7 @@ pub fn render(rows: &[Row]) -> String {
         .map(|column| {
             lines
                 .iter()
-                .map(|line| line[column].chars().count())
+                .map(|line| line[column].width())
                 .max()
                 .unwrap_or(0)
         })
@@ -177,7 +181,9 @@ pub fn render(rows: &[Row]) -> String {
         let padded: Vec<String> = line
             .iter()
             .zip(&widths)
-            .map(|(cell, width)| format!("{cell:<width$}"))
+            .map(|(cell, width)| {
+                format!("{cell}{}", " ".repeat(width.saturating_sub(cell.width())))
+            })
             .collect();
         text.push_str(padded.join(GAP).trim_end());
         text.push('\n');
