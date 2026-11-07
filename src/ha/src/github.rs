@@ -1594,8 +1594,8 @@ fn parse_usage(body: &str) -> Result<Vec<UsageItem>, SourceError> {
             gross: json.gross_amount,
             net: json.net_amount,
             organization: json.organization_name,
-            sku: String::new(),
-            price_per_unit: None,
+            sku: json.sku.unwrap_or_default(),
+            price_per_unit: json.price_per_unit,
         })
         .collect())
 }
@@ -1618,6 +1618,9 @@ struct UsageJson {
     net_amount: Usd,
     #[serde(rename = "organizationName")]
     organization_name: Option<String>,
+    sku: Option<String>,
+    #[serde(rename = "pricePerUnit")]
+    price_per_unit: Option<Usd>,
 }
 
 /// Splits a scope header at the commas and trims each scope. Empty scopes
