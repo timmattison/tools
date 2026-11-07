@@ -34,7 +34,6 @@ pub enum Verdict {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SkipReason {
     /// The patch of the test commit does not apply.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the patch slice constructs it"))]
     PatchDoesNotApply,
     /// The build exited with this non-zero code.
     BuildExited(i32),
@@ -60,7 +59,7 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process::ExitStatus;
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use gitscratch::Scratch;
 
 use crate::child;
@@ -72,15 +71,17 @@ const TEST_SKIP_CODE: i32 = 125;
 /// is one, run the test, and restore the scratch worktree. The restore
 /// happens on every path.
 ///
-/// A build that exits non-zero is a skip, and so is a build that a signal
+/// The patch goes on with a plain apply first. When git refuses it, a
+/// three-way apply gets a second try. When that fails too, the commit is a
+/// skip ([`SkipReason::PatchDoesNotApply`]), and neither the build nor the
+/// test runs. A build that exits non-zero is a skip, and so is a build that a signal
 /// stops. The test does not run after a skip. For the test, see
 /// [`test_verdict`]: exit code 0 is good, 125 is a skip, and any other code or
 /// a signal is bad.
 ///
 /// # Errors
 ///
-/// Returns an error if git fails, if the patch does not apply, if the build
-/// or the test cannot start, or if the verdict of the test cannot be made.
+/// Returns an error if git fails, if the build or the test cannot start, or if the verdict of the test cannot be made.
 pub fn step(
     scratch: &Scratch,
     patch: &Path,
@@ -104,8 +105,8 @@ fn test_at(
     commit: &Commit,
 ) -> Result<Verdict> {
     scratch.check_out_detached(&commit.0)?;
-    if !scratch.apply_patch(patch)? {
-        bail!("the patch does not apply at {}", commit.short());
+    if !scratch.apply_patch(patch)? && !scratch.apply_patch_three_way(patch)? {
+        return Ok(Verdict::Skip(SkipReason::PatchDoesNotApply));
     }
     if let Some(build) = build {
         let status = child::run_build(build, scratch.path())?;
