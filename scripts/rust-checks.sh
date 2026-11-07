@@ -25,10 +25,16 @@
 #                           and benches/, where lints like
 #                           unseparated_literal_suffix would otherwise slip
 #                           through, and -D warnings turns every workspace lint
-#                           into a hard error.
+#                           into a hard error. --locked makes a Cargo.lock that
+#                           does not match the manifests fail the run, and
+#                           cargo does not rewrite it. Without --locked, CI
+#                           rewrites the lock file in its checkout and passes,
+#                           and then scripts/install-from-local.sh, which
+#                           installs with --locked, fails on main.
 #   4. cargo test         - the workspace test suite. Slowest, so it runs last;
 #                           clippy's --all-targets has already compiled the test
 #                           targets, so this pass is mostly incremental + run.
+#                           It also uses --locked, for the same reason.
 #
 # The script reads the working tree of the repository that holds it, whatever
 # the current directory of the caller is.
@@ -72,10 +78,10 @@ if ! command -v cargo-machete >/dev/null 2>&1; then
 fi
 cargo machete
 
-echo "$LOG_PREFIX running cargo clippy --all-targets --workspace -- -D warnings"
-cargo clippy --all-targets --workspace -- -D warnings
+echo "$LOG_PREFIX running cargo clippy --locked --all-targets --workspace -- -D warnings"
+cargo clippy --locked --all-targets --workspace -- -D warnings
 
-echo "$LOG_PREFIX running cargo test --workspace (CLICOLOR_FORCE=1)"
+echo "$LOG_PREFIX running cargo test --locked --workspace (CLICOLOR_FORCE=1)"
 # Git exports GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE/GIT_PREFIX into the hook's
 # environment, and `cargo test` inherits them. The suite spawns helpers that
 # run `git init`/`add`/`commit` inside throwaway temp repos; if those vars
@@ -126,4 +132,4 @@ echo "$LOG_PREFIX running cargo test --workspace (CLICOLOR_FORCE=1)"
 # in CI and in each terminal that does not set it. The first CI run found 8
 # such tests in `gsw`.
 env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_PREFIX \
-    CLICOLOR_FORCE=1 COLORTERM=truecolor cargo test --workspace
+    CLICOLOR_FORCE=1 COLORTERM=truecolor cargo test --locked --workspace
