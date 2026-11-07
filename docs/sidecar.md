@@ -6,7 +6,7 @@
 
 - **Host**: the repository that holds the code, for example `megarepo`.
 - **Sidecar**: the private repository `<host>-data-<name>` that holds the data of one name.
-- **Main clone**: the one clone of a sidecar. It is at `<parent of the main checkout>/<host>-data-<name>`, next to the main checkout of the host. All worktrees of the host share it.
+- **Main clone**: the one clone of a sidecar. It is at `<parent of the main checkout>/<host>-data-<name>`, next to the main checkout of the host. All worktrees of the host share it. `sidecar` never updates a main clone after the first clone. Only a person does, with `git -C <main clone> pull --ff-only`.
 - **Link**: `<link_dir>/<name>` in a worktree of the host. It is a symbolic link to the main clone, or to a sidecar worktree.
 - **Sidecar worktree**: a git worktree of the main clone. It is at `<parent of the main checkout>/<host>-data-<name>-worktrees/<branch>`.
 
@@ -137,7 +137,7 @@ The message of `sidecar path` is already on standard error, thus the program add
 
 - `sidecar worktree <name>` uses the current branch of the host. If the host has a detached `HEAD`, it refuses.
 - `sidecar worktree <name> <branch>` uses `<branch>`.
-- `sidecar worktree <name> main` points the link at the main clone again and makes no worktree.
+- `sidecar worktree <name> main` points the link at the main clone again and makes no worktree. It fetches `origin`.
 
 The rules:
 
@@ -145,6 +145,9 @@ The rules:
 - If the sidecar already has a worktree on `<branch>`, `sidecar` uses it. Two worktrees of the host that ask for the same branch thus share one sidecar worktree.
 - A new sidecar worktree takes its branch from the first of these sources: the local branch, then `origin/<branch>` after a fetch, then a new branch from `main`.
 - If the fetch fails, `sidecar` writes a warning and continues with the local branches.
+- A new branch from `main` starts at the local `main` of the main clone. If that `main` is behind `origin/main`, the command says so.
+- After the fetch, `sidecar worktree <name> main` compares the local `main` of the main clone with `origin/main`. If the local `main` is behind, the command writes a warning and prints `git -C <main clone> pull --ff-only`. It does not run that command.
+- If the local `main` has commits that `origin/main` does not have, and it is also behind, the warning says that a person must merge or rebase it by hand. A local `main` that is only ahead gets no warning.
 - The link changes atomically. `sidecar` makes a new link and renames it over the old link.
 - Only the link of `<name>` in the current worktree changes.
 
@@ -165,8 +168,9 @@ No command deletes a repository, a main clone, a sidecar worktree, a branch, or 
 2. Change the data, commit it in the sidecar worktree, and push the branch.
 3. Open a pull request in the sidecar.
 4. Name that pull request in the pull request of the host.
-5. Merge the sidecar pull request first. Thus `main` of the host never reads data that `main` of the sidecar does not have.
+5. Merge the sidecar pull request first. Thus `main` of the host never reads data that `main` of the sidecar does not have. The merge changes `origin/main` only. It does not change the local `main` of the main clone.
 6. Run `sidecar worktree <name> main`.
+7. If the command says that `main` is behind, run the command that it prints. For example: `git -C "$(sidecar path <name>)" pull --ff-only`. All worktrees of the host share the main clone, thus a person decides when its data changes.
 
 ## The setup of a host
 

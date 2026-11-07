@@ -52,6 +52,11 @@ pub fn point(host: &Host, raw_name: &str, branch: Option<&str>) -> anyhow::Resul
     require_replaceable_link(host, &name, &main_clone)?;
     let mut warnings = Vec::new();
     if branch == MAIN_BRANCH {
+        if fetch_origin(host, &main_clone, &mut warnings) {
+            if let Some(note) = main_note(host, &main_clone) {
+                warnings.push(note);
+            }
+        }
         point_link(&host.link(&name), &main_clone)
             .with_context(|| format!("cannot change {}", host.link_shown(&name)))?;
         return Ok(Pointed {
@@ -90,14 +95,7 @@ pub fn point(host: &Host, raw_name: &str, branch: Option<&str>) -> anyhow::Resul
     if ref_exists(host, &main_clone, &local_ref) {
         add_worktree(host, &main_clone, &[&path, &branch])?;
     } else {
-        let fetched = host.git().run(&main_clone, ["fetch", "--quiet", "origin"]);
-        if !fetched.ok {
-            warnings.push(format!(
-                "The fetch of origin in {} failed: {}. sidecar continues with the local branches.",
-                main_clone.display(),
-                fetched.stderr
-            ));
-        }
+        let fetched = fetch_origin(host, &main_clone, &mut warnings);
         let remote = format!("origin/{branch}");
         if ref_exists(host, &main_clone, &format!("refs/remotes/{remote}")) {
             add_worktree(
@@ -108,6 +106,14 @@ pub fn point(host: &Host, raw_name: &str, branch: Option<&str>) -> anyhow::Resul
         } else {
             let base = format!("refs/heads/{MAIN_BRANCH}");
             add_worktree(host, &main_clone, &["-b", &branch, &path, &base])?;
+            if fetched {
+                if let Some(note) = main_note(host, &main_clone) {
+                    warnings.push(format!(
+                        "The new branch {branch} starts at the local {MAIN_BRANCH} of {}. {note}",
+                        main_clone.display()
+                    ));
+                }
+            }
         }
     }
     point_link(&host.link(&name), &target)
@@ -119,6 +125,87 @@ pub fn point(host: &Host, raw_name: &str, branch: Option<&str>) -> anyhow::Resul
         made_worktree: true,
         warnings,
     })
+}
+
+/// Fetches `origin` into the main clone. Pushes a warning and returns false when the
+/// fetch fails.
+fn fetch_origin(host: &Host, main_clone: &Path, warnings: &mut Vec<String>) -> bool {
+    let fetched = host.git().run(main_clone, ["fetch", "--quiet", "origin"]);
+    if !fetched.ok {
+        warnings.push(format!(
+            "The fetch of origin in {} failed: {}. sidecar continues with the local branches.",
+            main_clone.display(),
+            fetched.stderr
+        ));
+    }
+    fetched.ok
+}
+
+/// How the local `main` of the main clone compares with `origin/main`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MainState {
+    /// Nothing to tell: no `origin/main`, the same commit, or only local commits.
+    Current,
+    /// `origin/main` has commits that the local `main` lacks.
+    Behind { behind: usize },
+    /// Both sides have commits that the other side lacks.
+    Diverged { ahead: usize, behind: usize },
+}
+
+/// Counts the commits in `range` (`A..B`) of the main clone.
+fn count_commits(host: &Host, main_clone: &Path, range: &str) -> Option<usize> {
+    let counted = host.git().run(main_clone, ["rev-list", "--count", range]);
+    if counted.ok {
+        counted.stdout.trim().parse().ok()
+    } else {
+        None
+    }
+}
+
+/// Compares the local `main` of the main clone with `origin/main`.
+fn main_state(host: &Host, main_clone: &Path) -> MainState {
+    let local = format!("refs/heads/{MAIN_BRANCH}");
+    let remote = format!("refs/remotes/origin/{MAIN_BRANCH}");
+    if !ref_exists(host, main_clone, &local) || !ref_exists(host, main_clone, &remote) {
+        return MainState::Current;
+    }
+    let behind = count_commits(host, main_clone, &format!("{local}..{remote}")).unwrap_or(0);
+    let ahead = count_commits(host, main_clone, &format!("{remote}..{local}")).unwrap_or(0);
+    match (ahead, behind) {
+        (_, 0) => MainState::Current,
+        (0, behind) => MainState::Behind { behind },
+        (ahead, behind) => MainState::Diverged { ahead, behind },
+    }
+}
+
+/// "1 commit" or "N commits".
+fn commits(count: usize) -> String {
+    if count == 1 {
+        "1 commit".to_string()
+    } else {
+        format!("{count} commits")
+    }
+}
+
+/// The note for a person when the local `main` is old, or `None` when it needs none.
+fn main_note(host: &Host, main_clone: &Path) -> Option<String> {
+    let clone = main_clone.display();
+    let reason =
+        "sidecar does not update a main clone, because all worktrees of the host share it.";
+    match main_state(host, main_clone) {
+        MainState::Current => None,
+        MainState::Behind { behind } => Some(format!(
+            "The local {MAIN_BRANCH} of {clone} is {} behind origin/{MAIN_BRANCH}. {reason} \
+             To read the newest data, run `git -C {clone} pull --ff-only`.",
+            commits(behind)
+        )),
+        MainState::Diverged { ahead, behind } => Some(format!(
+            "The local {MAIN_BRANCH} of {clone} has {} that origin/{MAIN_BRANCH} does not have, and it is {} behind it. {reason} \
+             `git pull --ff-only` cannot update it. A person must merge or rebase it by hand in {clone}.",
+            commits(ahead),
+            commits(behind)
+        )),
+    }
 }
 
 /// Parses `raw_name` and checks that the registry names it.
