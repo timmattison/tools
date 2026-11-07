@@ -36,7 +36,8 @@ pub enum Section {
     Active,
     /// Pull requests that left a merge queue inside the window.
     History,
-    /// Runs that finished inside the window.
+    /// Finished runs whose last update (`Run::updated_at`) is inside the
+    /// window.
     Recent,
 }
 
@@ -161,6 +162,9 @@ pub enum Row<'a> {
         /// holds no job. A failed fetch after a good one keeps the sum of
         /// the last good jobs.
         job_sum: Option<Duration>,
+        /// The end of a finished run (see `run_end`). `None` for an active
+        /// run.
+        ended: Option<DateTime<Utc>>,
     },
     /// One job of an expanded run.
     Job {
@@ -171,9 +175,12 @@ pub enum Row<'a> {
         last: bool,
         /// True for the one row that the selection marks.
         selected: bool,
-        /// The run that the job belongs to. The render reads its state and
-        /// end time to fade the job row with its run.
+        /// The run that the job belongs to. The render reads its state for
+        /// the started cell. The fade reads `run_ended`.
         run: &'a Run,
+        /// The end of its run (the `ended` of the run row). `None` for a job
+        /// of an active run.
+        run_ended: Option<DateTime<Utc>>,
     },
     /// The row of an expanded run before the first answer: "Loading jobs…".
     JobsLoading,
@@ -234,6 +241,37 @@ fn last_good_jobs(answer: Option<&Jobs>) -> &[Job] {
     match answer {
         Some(Jobs::Ready(jobs) | Jobs::Failed { jobs, .. }) => jobs,
         None => &[],
+    }
+}
+
+/// The end of the finished run `run`, from its job answer `answer`.
+///
+/// GitHub can change `Run::updated_at` long after the last job ended, thus the
+/// end of a finished run is the end of its last job when the jobs say it. The
+/// function applies five steps in this order:
+///
+/// 1. It takes the last good jobs. A failed fetch after a good fetch keeps
+///    the jobs of the good fetch.
+/// 2. If a held job is active (queued or running), it gives `run.updated_at`.
+///    A job answer from the time when the run was active can still hold a job
+///    that runs. A job in any other state counts as finished. A skipped job
+///    counts as finished, because GitHub gives it the status `completed`.
+/// 3. It takes the latest `completed_at` of the held jobs. If no job has a
+///    `completed_at`, it gives `run.updated_at`. This is also true when there
+///    is no job.
+/// 4. If that time is before `run.started_at`, it gives `run.updated_at`. After
+///    a re-run, the board can hold the jobs of the earlier attempt, and they
+///    ended before the new attempt started.
+/// 5. Else it gives the earlier one of that time and `run.updated_at`. The end
+///    is never later than the last update of the run.
+fn run_end(run: &Run, answer: Option<&Jobs>) -> DateTime<Utc> {
+    let jobs = last_good_jobs(answer);
+    if jobs.iter().any(|job| job.state.is_active()) {
+        return run.updated_at;
+    }
+    match jobs.iter().filter_map(|job| job.completed_at).max() {
+        Some(latest) if latest >= run.started_at => latest.min(run.updated_at),
+        _ => run.updated_at,
     }
 }
 
@@ -372,8 +410,9 @@ const QUEUE_ERROR_PREFIX: &str = "merge queue: ";
 const HISTORY_ERROR_PREFIX: &str = "merge history: ";
 
 impl Board {
-    /// Makes an empty board. A finished run shows while it ended inside
-    /// `window`, and so does a pull request that left a merge queue.
+    /// Makes an empty board. A finished run shows while its last update is
+    /// inside `window` (see `Board::sections`). A pull request that left a
+    /// merge queue shows while it left inside `window`.
     #[must_use]
     pub fn new(window: Duration) -> Board {
         Board {
@@ -555,7 +594,7 @@ impl Board {
         }
     }
 
-    /// The oldest finish time that the window holds at `now`.
+    /// The start of the window at `now`: the oldest time that the window holds.
     fn window_start(&self, now: DateTime<Utc>) -> DateTime<Utc> {
         chrono::Duration::from_std(self.window)
             .ok()
@@ -566,6 +605,17 @@ impl Board {
     /// Splits the shown runs into the active list and the recent list.
     ///
     /// Both lists are sorted. A run that is not shown at `now` is in neither.
+    /// The active list is in order of the start, oldest first. The recent
+    /// list is in order of the end of each run ([`run_end`]), newest first,
+    /// then by the run ID.
+    ///
+    /// The window does not use the end. A finished run is in the recent list
+    /// while its `updated_at` is inside the window. If the window used the
+    /// end, a run at the oldest edge of the window can leave the list when its
+    /// jobs arrive. [`Board::settle`] then drops the jobs of the run, the run
+    /// comes back with its update as the end, and the worker does not fetch
+    /// the jobs again. Thus such a run keeps its row, and its finish time can
+    /// be older than the start of the window.
     fn sections(&self, now: DateTime<Utc>) -> (Vec<&Run>, Vec<&Run>) {
         let mut active: Vec<&Run> = self
             .runs
@@ -581,7 +631,9 @@ impl Board {
             .flatten()
             .filter(|run| run.state.is_finished() && run.updated_at >= oldest)
             .collect();
-        recent.sort_by_key(|run| std::cmp::Reverse((run.updated_at, run.id)));
+        recent.sort_by_cached_key(|run| {
+            std::cmp::Reverse((run_end(run, self.jobs.get(&run.id)), run.id))
+        });
         (active, recent)
     }
 
@@ -1267,15 +1319,23 @@ fn push_runs<'a>(
         let here = selected.filter(|selection| selection.item.1 == first + offset);
         let answer = view.jobs.get(&run.id);
         let jobs = last_good_jobs(answer);
+        let ended = run.state.is_finished().then(|| run_end(run, answer));
         rows.push(Row::Run {
             run,
             state: run.state.shown_with_jobs(jobs.iter().map(|job| job.state)),
             selected: here.is_some_and(|selection| selection.job.is_none()),
             stale: view.errors.contains_key(&run.repo),
             job_sum: job_sum(jobs, view.now),
+            ended,
         });
         if view.expanded.contains(&run.id) {
-            push_jobs(rows, run, answer, here.and_then(|selection| selection.job));
+            push_jobs(
+                rows,
+                run,
+                ended,
+                answer,
+                here.and_then(|selection| selection.job),
+            );
         }
     }
 }
@@ -1283,11 +1343,14 @@ fn push_runs<'a>(
 /// Adds the block of rows of one expanded run to `rows`.
 ///
 /// `run` is the run that owns the block, and each job row carries it.
-/// `answer` is the job answer that the board holds for the run. `None` gives
-/// the loading row. The job row at the position of `selected` gets the mark.
+/// `run_ended` is the end of the run (`None` for an active run), and each job
+/// row carries it too. `answer` is the job answer that the board holds for the
+/// run. `None` gives the loading row. The job row at the position of
+/// `selected` gets the mark.
 fn push_jobs<'a>(
     rows: &mut Vec<Row<'a>>,
     run: &'a Run,
+    run_ended: Option<DateTime<Utc>>,
     answer: Option<&'a Jobs>,
     selected: Option<(JobId, usize)>,
 ) {
@@ -1301,6 +1364,7 @@ fn push_jobs<'a>(
                 last: index + 1 == list.len(),
                 selected: marked(index),
                 run,
+                run_ended,
             }));
         }
         Some(Jobs::Failed { jobs, error }) => {
@@ -1309,6 +1373,7 @@ fn push_jobs<'a>(
                 last: false,
                 selected: marked(index),
                 run,
+                run_ended,
             }));
             rows.push(Row::JobsError(error));
         }
@@ -4516,5 +4581,321 @@ mod tests {
         assert_eq!(selected_text(&mut board).as_deref(), Some("Run(3)*"));
         board.select_previous_page(now());
         assert_eq!(selected_text(&mut board).as_deref(), Some("Run(2)*"));
+    }
+
+    /// Parses the RFC 3339 time `text`.
+    fn at(text: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(text)
+            .expect("a valid time")
+            .with_timezone(&Utc)
+    }
+
+    /// The time now in the tests of the late run, 2026-11-04 at 18:00:00 UTC.
+    /// It is after the run ended.
+    fn late_now() -> DateTime<Utc> {
+        at("2026-11-04T18:00:00Z")
+    }
+
+    /// Run 41874496263 of `Lock-Free-Labs/nvr-tools`. It passed. GitHub
+    /// changed its `updated_at` 18 minutes after the last job ended.
+    fn late_run() -> Run {
+        Run {
+            id: RunId(41_874_496_263),
+            repo: repo("Lock-Free-Labs/nvr-tools"),
+            workflow: "ci".to_owned(),
+            branch: "main".to_owned(),
+            title: "late run".to_owned(),
+            state: RunState::Passed,
+            started_at: at("2026-11-04T17:07:48Z"),
+            created_at: at("2026-11-04T17:07:48Z"),
+            updated_at: at("2026-11-04T17:40:55Z"),
+            url: "https://example.test/Lock-Free-Labs/nvr-tools/runs/41874496263".to_owned(),
+        }
+    }
+
+    /// Builds a job with a name and optional start and finish times, as
+    /// RFC 3339 text.
+    fn timed_job(
+        id: u64,
+        name: &str,
+        state: RunState,
+        started: Option<&str>,
+        completed: Option<&str>,
+    ) -> Job {
+        Job {
+            name: name.to_owned(),
+            started_at: started.map(at),
+            completed_at: completed.map(at),
+            ..job(id, state)
+        }
+    }
+
+    /// The two jobs of `late_run`. The last one ends at 17:22:45.
+    fn late_jobs() -> Vec<Job> {
+        vec![
+            timed_job(
+                126_730_108_923,
+                "Full check list (Linux)",
+                RunState::Passed,
+                Some("2026-11-04T17:07:51Z"),
+                Some("2026-11-04T17:22:45Z"),
+            ),
+            timed_job(
+                126_730_109_123,
+                "Clippy (Windows)",
+                RunState::Passed,
+                Some("2026-11-04T17:07:53Z"),
+                Some("2026-11-04T17:12:05Z"),
+            ),
+        ]
+    }
+
+    /// The `ended` value of the row of run `id` at `now`. The function panics
+    /// when the board shows no row of that run.
+    fn ended(board: &mut Board, now: DateTime<Utc>, id: RunId) -> Option<DateTime<Utc>> {
+        board
+            .rows(now)
+            .into_iter()
+            .find_map(|row| match row {
+                Row::Run { run, ended, .. } if run.id == id => Some(ended),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the board shows no row of run {}", id.0))
+    }
+
+    /// A board that holds the run `run` and the jobs `jobs`, at the time
+    /// [`late_now`]. With no `jobs`, the board holds no jobs of the run.
+    fn late_board(run: Run, jobs: Option<Vec<Job>>) -> Board {
+        let mut board = board();
+        let id = run.id;
+        board.replace(repo("Lock-Free-Labs/nvr-tools"), vec![run], late_now());
+        if let Some(jobs) = jobs {
+            board.set_jobs(id, jobs);
+        }
+        board
+    }
+
+    #[test]
+    fn a_finished_run_ends_when_its_last_job_ends() {
+        let run = late_run();
+        let id = run.id;
+        let mut board = late_board(run, Some(late_jobs()));
+        assert_eq!(
+            ended(&mut board, late_now(), id),
+            Some(at("2026-11-04T17:22:45Z"))
+        );
+    }
+
+    #[test]
+    fn a_finished_run_with_no_jobs_ends_at_its_update() {
+        let run = late_run();
+        let id = run.id;
+        let mut board = late_board(run, None);
+        assert_eq!(
+            ended(&mut board, late_now(), id),
+            Some(at("2026-11-04T17:40:55Z"))
+        );
+    }
+
+    #[test]
+    fn a_failed_fetch_keeps_the_end_of_the_last_good_jobs() {
+        let run = late_run();
+        let id = run.id;
+        let mut board = late_board(run, Some(late_jobs()));
+        board.fail_jobs(id, "HTTP 502".to_owned());
+        assert_eq!(
+            ended(&mut board, late_now(), id),
+            Some(at("2026-11-04T17:22:45Z"))
+        );
+    }
+
+    #[test]
+    fn a_job_that_still_runs_gives_no_end() {
+        let run = late_run();
+        let id = run.id;
+        let mut jobs = late_jobs();
+        jobs.push(timed_job(
+            126_730_109_999,
+            "Deploy",
+            RunState::Running,
+            Some("2026-11-04T17:20:00Z"),
+            None,
+        ));
+        let mut board = late_board(run, Some(jobs));
+        assert_eq!(
+            ended(&mut board, late_now(), id),
+            Some(at("2026-11-04T17:40:55Z"))
+        );
+    }
+
+    #[test]
+    fn a_skipped_job_does_not_hold_back_the_end() {
+        let run = late_run();
+        let id = run.id;
+        let mut jobs = late_jobs();
+        // GitHub gives a skipped job the status `completed`, thus it is finished.
+        jobs.push(timed_job(
+            126_730_109_888,
+            "Release",
+            RunState::Skipped,
+            Some("2026-11-04T17:07:50Z"),
+            Some("2026-11-04T17:07:50Z"),
+        ));
+        let mut board = late_board(run, Some(jobs));
+        assert_eq!(
+            ended(&mut board, late_now(), id),
+            Some(at("2026-11-04T17:22:45Z"))
+        );
+    }
+
+    #[test]
+    fn jobs_with_no_finish_time_give_no_end() {
+        let run = late_run();
+        let id = run.id;
+        let jobs = vec![
+            timed_job(
+                126_730_108_923,
+                "Full check list (Linux)",
+                RunState::Passed,
+                Some("2026-11-04T17:07:51Z"),
+                None,
+            ),
+            timed_job(
+                126_730_109_123,
+                "Clippy (Windows)",
+                RunState::Passed,
+                Some("2026-11-04T17:07:53Z"),
+                None,
+            ),
+        ];
+        let mut board = late_board(run, Some(jobs));
+        assert_eq!(
+            ended(&mut board, late_now(), id),
+            Some(at("2026-11-04T17:40:55Z"))
+        );
+    }
+
+    #[test]
+    fn the_jobs_of_an_earlier_attempt_give_no_end() {
+        // A re-run starts at 17:30:00. The board still holds the jobs of the
+        // first attempt, and the last of them ended at 17:22:45.
+        let run = Run {
+            started_at: at("2026-11-04T17:30:00Z"),
+            ..late_run()
+        };
+        let id = run.id;
+        let mut board = late_board(run, Some(late_jobs()));
+        assert_eq!(
+            ended(&mut board, late_now(), id),
+            Some(at("2026-11-04T17:40:55Z"))
+        );
+    }
+
+    #[test]
+    fn the_end_is_never_later_than_the_update() {
+        let run = Run {
+            updated_at: at("2026-11-04T17:20:00Z"),
+            ..late_run()
+        };
+        let id = run.id;
+        let mut board = late_board(run, Some(late_jobs()));
+        assert_eq!(
+            ended(&mut board, late_now(), id),
+            Some(at("2026-11-04T17:20:00Z"))
+        );
+    }
+
+    /// Run 41874500000 of `Lock-Free-Labs/nvr-tools`. It passed, and its
+    /// `updated_at` is 17:30:00. It holds no jobs in the tests, thus it ends
+    /// at its update, after the end of `late_run` with `late_jobs`.
+    fn later_run() -> Run {
+        Run {
+            id: RunId(41_874_500_000),
+            started_at: at("2026-11-04T17:10:00Z"),
+            created_at: at("2026-11-04T17:10:00Z"),
+            updated_at: at("2026-11-04T17:30:00Z"),
+            ..late_run()
+        }
+    }
+
+    /// The IDs of the run rows of `rows`, as `shape` writes them.
+    fn run_rows(rows: Vec<String>) -> Vec<String> {
+        rows.into_iter()
+            .filter(|row| row.starts_with("Run("))
+            .collect()
+    }
+
+    #[test]
+    fn the_recent_runs_are_in_order_of_their_end() {
+        let mut board = late_board(late_run(), Some(late_jobs()));
+        board.replace(
+            repo("Lock-Free-Labs/nvr-tools"),
+            vec![late_run(), later_run()],
+            late_now(),
+        );
+        // By `updated_at` the first run is newer. By the end it is older.
+        assert_eq!(
+            run_rows(shape(&board.rows(late_now()))),
+            ["Run(41874500000)", "Run(41874496263)"]
+        );
+    }
+
+    #[test]
+    fn a_run_that_ended_before_the_window_stays_while_its_update_is_in_it() {
+        // The window is 8 hours, thus at `late_now` it starts at 10:00:00.
+        let run = Run {
+            id: RunId(41_874_600_000),
+            started_at: at("2026-11-04T09:40:00Z"),
+            created_at: at("2026-11-04T09:40:00Z"),
+            updated_at: at("2026-11-04T10:30:00Z"),
+            ..late_run()
+        };
+        let id = run.id;
+        let mut board = late_board(run, None);
+        assert_eq!(
+            ended(&mut board, late_now(), id),
+            Some(at("2026-11-04T10:30:00Z"))
+        );
+        board.set_jobs(
+            id,
+            vec![timed_job(
+                1,
+                "job",
+                RunState::Passed,
+                Some("2026-11-04T09:41:00Z"),
+                Some("2026-11-04T09:50:00Z"),
+            )],
+        );
+        // If the window used the end, the first call finds the run outside the
+        // window, and `Board::settle` drops its jobs. The same call then shows
+        // the run again, with its update as the end, and the worker does not
+        // fetch the jobs again. The second call makes sure that the jobs stay.
+        for _ in 0..2 {
+            assert_eq!(
+                ended(&mut board, late_now(), id),
+                Some(at("2026-11-04T09:50:00Z"))
+            );
+        }
+    }
+
+    #[test]
+    fn the_highlight_follows_its_run_when_its_jobs_move_its_row() {
+        let mut board = board();
+        board.replace(
+            repo("Lock-Free-Labs/nvr-tools"),
+            vec![late_run(), later_run()],
+            late_now(),
+        );
+        assert_eq!(
+            run_rows(marked(&board.rows(late_now()))),
+            ["Run(41874496263)*", "Run(41874500000)"]
+        );
+        // The end of the first run is now 17:22:45. Its row moves below the
+        // other row.
+        board.set_jobs(RunId(41_874_496_263), late_jobs());
+        assert_eq!(
+            run_rows(marked(&board.rows(late_now()))),
+            ["Run(41874500000)", "Run(41874496263)*"]
+        );
     }
 }

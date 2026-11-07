@@ -125,7 +125,12 @@ pub struct Run {
     pub started_at: DateTime<Utc>,
     /// When GitHub made the run. A re-run does not change it.
     pub created_at: DateTime<Utc>,
-    /// When the run last changed. For a finished run, this is the finish time.
+    /// When the run last changed at GitHub. This is not the end of a finished
+    /// run, because GitHub can change it after the last job of the run ended.
+    /// On 2026-11-06, 4 of 29 finished runs of one repository had an update
+    /// from 59 s to 18 minutes after their last job ended. The board gives the
+    /// end of a finished run from its jobs, and uses this time only when the
+    /// jobs do not give an end.
     pub updated_at: DateTime<Utc>,
     /// The address of the run page on GitHub.
     pub url: String,
