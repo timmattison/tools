@@ -127,7 +127,8 @@ fn run(args: &Args, console: &Console) -> Result<Conflicts> {
     let cwd = std::env::current_dir().context("could not determine the current directory")?;
     let repo = Repo::open(&cwd)?;
 
-    // Each revision the run depends on (HEAD, BRANCH, and NEWBASE when `--onto` names one), before any scratch worktree exists.
+    // Each revision the run depends on (HEAD, BRANCH, and NEWBASE when
+    // `--onto` names one), before any scratch worktree exists.
     // Creating one costs a temporary directory, a real `git worktree add`, and
     // administrative state in the developer's repository - all of it wasted if a
     // revision was never going to resolve, and worse, the failure would arrive
