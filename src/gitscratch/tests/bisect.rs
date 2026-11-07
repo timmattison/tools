@@ -289,6 +289,6 @@ fn bisect_steps_matches_the_count_that_git_gives_for_a_longer_range() {
     // The range holds commits 2 to 9, which is 8 commits. The literal comes
     // from a shell run with git 2.56: `git rev-list --bisect-vars` over 8
     // commits in a line prints `bisect_all=8` and `bisect_steps=2`. For
-    // comparison, 1 or 2 commits give 0, 3 to 7 give 1, and 12 give 3.
+    // comparison, 1 or 2 commits give 0, 3 to 5 give 1, and 12 give 3.
     assert_eq!(steps, 2);
 }

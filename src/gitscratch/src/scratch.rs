@@ -379,14 +379,33 @@ impl Scratch {
 
     /// Count the steps that a bisection between `bad` and `goods` still needs.
     ///
-    /// Not yet implemented.
+    /// This is the value of `bisect_steps=` in the answer of
+    /// `git rev-list --bisect-vars`, the number that `git bisect` prints as
+    /// "roughly N steps". A range with only `bad` in it gives 0. The revisions
+    /// are spelled as in [`Scratch::bisect_all`].
     ///
     /// # Errors
     ///
-    /// Returns an error if git fails.
+    /// Returns an error if git could not be spawned, if git refused the call,
+    /// or if the answer of git has no `bisect_steps=` line with a number.
     pub fn bisect_steps(&self, bad: &str, goods: &[&str]) -> Result<u32> {
-        let _ = (bad, goods);
-        Ok(0)
+        let output = self
+            .git()
+            .run(
+                "rev-list",
+                &as_str_slice(&bisect_arguments("--bisect-vars", bad, goods)),
+            )
+            .with_context(|| format!("could not count the steps to test below '{bad}'"))?;
+
+        let value = output
+            .lines()
+            .find_map(|line| line.strip_prefix("bisect_steps="))
+            .context("git gave no bisect_steps line")?;
+
+        value
+            .trim()
+            .parse()
+            .with_context(|| format!("git gave '{value}' as bisect_steps"))
     }
 
     /// The id of the tree the scratch worktree's HEAD points at.
