@@ -26,6 +26,29 @@ pub enum Verdict {
     Good,
     /// The test failed.
     Bad,
+    /// The commit cannot be judged, for the stated reason.
+    Skip(SkipReason),
+}
+
+/// Why a step skipped a commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SkipReason {
+    /// The patch of the test commit does not apply.
+    PatchDoesNotApply,
+    /// The build exited with this non-zero code.
+    BuildExited(i32),
+    /// This signal stopped the build.
+    BuildKilled(i32),
+    /// The test exited with code 125.
+    TestExited125,
+}
+
+impl fmt::Display for SkipReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Stub: the green commit writes the texts.
+        let _ = self;
+        f.write_str("")
+    }
 }
 
 use std::ffi::OsString;

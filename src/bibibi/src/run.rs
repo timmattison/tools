@@ -53,6 +53,7 @@ pub fn run(cli: &Cli) -> Result<()> {
         match verdict {
             Verdict::Good => goods.push(next.clone()),
             Verdict::Bad => bad = next.clone(),
+            Verdict::Skip(_) => {}
         }
 
         let good_ids: Vec<&str> = goods.iter().map(|good| good.0.as_str()).collect();
