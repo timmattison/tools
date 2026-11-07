@@ -39,7 +39,7 @@ impl Usd {
     pub const ZERO: Usd = Usd(Decimal::ZERO);
 
     /// One cent, which is $0.01.
-    pub const CENT: Usd = Usd(Decimal::ZERO);
+    pub const CENT: Usd = Usd::from_mills(10);
 
     /// Makes an amount from mills. A mill is one thousandth of a dollar.
     ///
@@ -47,14 +47,13 @@ impl Usd {
     /// table can be a constant.
     #[must_use]
     pub const fn from_mills(mills: u32) -> Usd {
-        let _ = mills;
-        Usd::ZERO
+        Usd(Decimal::from_parts(mills, 0, 0, false, 3))
     }
 
     /// Whether the amount is exactly zero.
     #[must_use]
     pub fn is_zero(self) -> bool {
-        false
+        self.0.is_zero()
     }
 
     /// Rounds the amount toward negative infinity to whole cents.
@@ -63,7 +62,9 @@ impl Usd {
     /// such as "at least $0.01" that stays true.
     #[must_use]
     pub fn floor_to_cents(self) -> Usd {
-        self
+        Usd(self
+            .0
+            .round_dp_with_strategy(2, RoundingStrategy::ToNegativeInfinity))
     }
 
     /// Makes an amount from the `f64` that a JSON reader gave.
@@ -103,8 +104,7 @@ impl Mul<u64> for Usd {
     type Output = Usd;
 
     fn mul(self, count: u64) -> Usd {
-        let _ = count;
-        Usd::ZERO
+        Usd(self.0 * Decimal::from(count))
     }
 }
 
