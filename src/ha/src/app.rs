@@ -815,6 +815,77 @@ mod tests {
     }
 
     #[test]
+    fn a_billing_update_gives_its_prices_to_the_board() {
+        use crate::billing::{DailyUsage, UsageItem};
+        use crate::job::{Job, JobId, RunnerName};
+        use crate::money::Usd;
+        let channels = channels();
+        let opener = opener(false);
+        let canceller = canceller();
+        let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
+        let tz = FixedOffset::east_opt(0).unwrap();
+        let clock = now;
+        let acme = OwnerName::parse("acme").unwrap();
+        let mut app = App::new(
+            Board::new(Duration::from_hours(8)),
+            Status::default(),
+            &opener,
+            &canceller,
+            &channels.worker,
+            &clock,
+            &tz,
+            Some(BillingBoard::new(vec![acme.clone()])),
+        );
+        app.board.replace(repo(), vec![active_run(1, 10)], now());
+        app.board.set_jobs(
+            RunId(1),
+            vec![Job {
+                labels: vec!["ubuntu-latest".to_owned()],
+                id: JobId(11),
+                name: "build".to_owned(),
+                state: RunState::Passed,
+                runner: RunnerName::new("GitHub Actions 1".to_owned()),
+                created_at: None,
+                started_at: Some(now() - chrono::Duration::seconds(300)),
+                completed_at: Some(now() - chrono::Duration::seconds(89)),
+                url: String::new(),
+            }],
+        );
+        let cost_before = run_cost_amount(&mut app.board);
+        assert_eq!(cost_before, Some(Usd::from_mills(24)));
+        let item = UsageItem {
+            date: now(),
+            product: "actions".to_owned(),
+            gross: Usd::from_mills(8),
+            net: Usd::ZERO,
+            organization: None,
+            sku: "Actions Linux".to_owned(),
+            price_per_unit: Some(Usd::from_mills(8)),
+        };
+        channels
+            .updates
+            .send(Update::Billing(vec![(
+                acme,
+                Ok(DailyUsage::from_items(&[item])),
+            )]))
+            .unwrap();
+        let result = app.run(
+            &mut terminal,
+            &mut script(vec![Some(press(KeyCode::Char('q')))]),
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(run_cost_amount(&mut app.board), Some(Usd::from_mills(32)));
+    }
+
+    /// The amount of the cost on the row of run 1.
+    fn run_cost_amount(board: &mut Board) -> Option<crate::money::Usd> {
+        board.rows(now()).iter().find_map(|row| match row {
+            crate::board::Row::Run { cost, .. } => cost.map(|cost| cost.amount),
+            _ => None,
+        })
+    }
+
+    #[test]
     fn q_stops_the_loop() {
         let (result, _) = run_app(&opener(false), &channels(), vec![press(KeyCode::Char('q'))]);
         assert!(result.is_ok(), "{result:?}");
