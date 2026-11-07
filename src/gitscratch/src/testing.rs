@@ -40,6 +40,26 @@ const FIXTURE_USER_NAME: &str = "gitscratch test";
 /// The email every fixture commit is authored and committed under.
 const FIXTURE_USER_EMAIL: &str = "gitscratch@example.com";
 
+/// The `git config` settings that every fixture repository gets, as
+/// `(key, value)` pairs. Both fixture inits apply this one list.
+///
+/// - `user.email` and `user.name` give each fixture commit an author.
+/// - `commit.gpgsign` is `false` because a commit-signing config in the
+///   developer's global gitconfig would otherwise make every fixture commit
+///   prompt or fail.
+/// - `maintenance.auto` is `false` because each `git commit` starts a detached
+///   `git maintenance run --auto`. That process holds
+///   `.git/objects/maintenance.lock` for some milliseconds after the commit
+///   returns, so a test that reads the `.git` directory before and after a run
+///   sees a file come and go. `src/kitchen-sync/tests/production-git-env-isolation.rs`
+///   and `src/nwt/tests/support/mod.rs` carry the same fix for the same race.
+const FIXTURE_CONFIG: [(&str, &str); 4] = [
+    ("user.email", FIXTURE_USER_EMAIL),
+    ("user.name", FIXTURE_USER_NAME),
+    ("commit.gpgsign", "false"),
+    ("maintenance.auto", "false"),
+];
+
 /// A throwaway repository that deletes itself when dropped.
 pub struct TestRepo {
     dir: TempDir,
@@ -57,11 +77,9 @@ impl TestRepo {
         let repo = Self { dir };
 
         repo.git(&["init", "-q", "-b", "main"]);
-        repo.git(&["config", "user.email", FIXTURE_USER_EMAIL]);
-        repo.git(&["config", "user.name", FIXTURE_USER_NAME]);
-        // A commit-signing config in the developer's global gitconfig would
-        // otherwise make every fixture commit prompt or fail.
-        repo.git(&["config", "commit.gpgsign", "false"]);
+        for (key, value) in FIXTURE_CONFIG {
+            repo.git(&["config", key, value]);
+        }
 
         repo
     }
@@ -1582,11 +1600,9 @@ impl DetachedGitDirRepo {
         // git directory is the only place that records which work tree it
         // belongs to.
         repo.git(&["config", "core.worktree", &work_tree_path]);
-        repo.git(&["config", "user.email", "gitscratch@example.com"]);
-        repo.git(&["config", "user.name", "gitscratch test"]);
-        // A commit-signing config in the developer's global gitconfig would
-        // otherwise make every fixture commit prompt or fail.
-        repo.git(&["config", "commit.gpgsign", "false"]);
+        for (key, value) in FIXTURE_CONFIG {
+            repo.git(&["config", key, value]);
+        }
 
         std::fs::write(
             repo.work_tree.join(DETACHED_TRACKED_FILE),

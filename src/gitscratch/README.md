@@ -192,7 +192,8 @@ A `compile_fail` doc-test holds the derive out — see **Testing** below.
 `Scratch` is the only way to get a worktree, and `Repo::scratch` is the only way
 to get a `Scratch`. A `Scratch` answers the operations it names —
 `check_out_detached`, `replay_rebase`, `replay_rebase_with_diffs`,
-`replay_merge`, `replay_merge_with_diffs`, `head_tree`, `commit_tree` — and
+`replay_merge`, `replay_merge_with_diffs`, `head_tree`, `commit_tree`,
+`apply_patch`, `apply_patch_three_way`, `restore`, `bisect_all`, `bisect_steps` — and
 each of them builds its own git call under the whole safety configuration. So there is no way to get a worktree from here without also
 getting the hardening — nor without first having established that the directory
 is a repository at all, which is the pre-flight's job below.
@@ -318,9 +319,24 @@ use gitscratch::Repo;
 let repo = Repo::open(cwd)?;           // any directory *inside* one; errors if there is none
 let onto = repo.resolve("main")?;      // errors naming the revision that did not resolve
 let dirty = repo.uncommitted_files()?; // an `Uncommitted`: staged + unstaged + untracked, per file
+let patch = repo.patch_of(&onto)?;     // the change of one commit, as bytes for `git apply`
 
 let scratch = repo.scratch(&onto)?;    // the only way to a worktree
 ```
+
+`Repo::patch_of` reads the change of one commit as a patch that `git apply`
+accepts. It uses `git diff-tree`, not `git diff`, because `git diff` obeys
+`color.ui` and `diff.noprefix` and the patch then breaks.
+
+`Repo::subject` reads the subject line of one commit, so a progress line can
+name the commit it is about.
+
+`Repo::parents` lists the parents of one commit, so a caller can tell a root
+commit (none) and a merge commit (two or more) from a plain one.
+
+`Repo::is_ancestor` tells whether one commit is reachable from another. It is
+also true for the same commit, so a caller that needs a strict ancestor checks
+the equality first.
 
 `Repo::resolve` puts the question to git in the one form git can refuse. A bare
 `git rev-parse <revision>` prints an argument it cannot place straight back and
@@ -1691,3 +1707,5 @@ gitscratch = { workspace = true, features = ["testing"] }
   and by how much?
 - [`grime`](../grime/README.md) — would merging this branch into HEAD conflict,
   and by how much?
+- [`bibibi`](../../README.md#bibibi-bye-bye-bye) — which commit caused this
+  regression, found with a test from a later commit?

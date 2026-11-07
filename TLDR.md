@@ -7,6 +7,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `aa` | Quickly prints your AWS caller identity as JSON, no pager. |
 | `aws2env` | Converts AWS credentials/config into env-var exports (use with `eval $(aws2env)`). |
 | `beta` | Records and replays terminal sessions; exports to HTML players or MP4/GIF. |
+| `bibibi` | Finds the commit that caused a regression, with a test from a later commit. |
 | `bm` | Bulk Move — recursively find and move files matching a pattern to a destination. |
 | `cdknuke` | Removes `cdk.out` directories from AWS CDK projects throughout a repo. |
 | `cdva` | Count da various attributes — counts the lines of a tree the way `cloc` does, and reports the test code apart from the production code, including the test code inside a production file. |

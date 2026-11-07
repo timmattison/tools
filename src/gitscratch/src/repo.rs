@@ -136,6 +136,114 @@ impl Repo {
         Scratch::create(&self.path, at)
     }
 
+    /// The change that `commit` made, as a patch that `git apply` accepts.
+    ///
+    /// The bytes are binary safe (`--binary`) and name each object by its full
+    /// id (`--full-index`). They are not text, so the caller writes them to a
+    /// file and does not decode them.
+    ///
+    /// This is `git diff-tree` and not `git diff`. `git diff` obeys user
+    /// configuration that breaks `git apply`. `color.ui=always` writes color
+    /// codes into a pipe, and `diff.noprefix=true` removes the `a/` and `b/`
+    /// prefixes. `diff-tree` ignores both settings. The test
+    /// `patch_of_ignores_color_and_prefix_configuration` pins this.
+    ///
+    /// The patch is the change from the first parent. A root commit has no
+    /// parent, so it gives an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git could not be spawned, or if git refused the
+    /// call. The usual causes are a `commit` that does not name a commit and a
+    /// root commit.
+    pub fn patch_of(&self, commit: &str) -> Result<Vec<u8>> {
+        let parent = format!("{commit}^");
+        self.git()
+            .verbatim(
+                "diff-tree",
+                &[
+                    "-p",
+                    "--binary",
+                    "--full-index",
+                    "--end-of-options",
+                    &parent,
+                    commit,
+                ],
+            )
+            .with_context(|| format!("could not make the patch of '{commit}'"))
+    }
+
+    /// The subject line of `commit`, without the line break.
+    ///
+    /// `rev-list` with `--no-commit-header` and `--format=%s` prints the
+    /// subject alone, so no `commit <id>` line has to be cut off. The runner
+    /// decodes the bytes as UTF-8 with replacement, so a multi-byte subject
+    /// stays whole.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git could not be spawned, or if `commit` does not
+    /// name a commit. The message names `commit`.
+    pub fn subject(&self, commit: &str) -> Result<String> {
+        self.git()
+            .run(
+                "rev-list",
+                &[
+                    "--no-commit-header",
+                    "--format=%s",
+                    "-n",
+                    "1",
+                    "--end-of-options",
+                    commit,
+                ],
+            )
+            .with_context(|| format!("could not read the subject of '{commit}'"))
+    }
+
+    /// The parents of `commit`, in the order git lists them.
+    ///
+    /// A root commit has none. A merge commit has two or more.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git could not be spawned, or if `commit` does not
+    /// name a commit.
+    pub fn parents(&self, commit: &str) -> Result<Vec<String>> {
+        let line = self
+            .git()
+            .run(
+                "rev-list",
+                &["--parents", "-n", "1", "--end-of-options", commit],
+            )
+            .with_context(|| format!("could not read the parents of '{commit}'"))?;
+        Ok(line
+            .split_whitespace()
+            .skip(1)
+            .map(str::to_string)
+            .collect())
+    }
+
+    /// Whether `ancestor` is reachable from `descendant`.
+    ///
+    /// The answer is also true when the two are the same commit. A caller that
+    /// needs a strict ancestor checks the equality first.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git could not be spawned, or if either revision
+    /// does not name a commit.
+    pub fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool> {
+        let unreachable = format!("^{descendant}");
+        let output = self
+            .git()
+            .run(
+                "rev-list",
+                &["-n", "1", "--end-of-options", ancestor, &unreachable],
+            )
+            .with_context(|| format!("could not compare '{ancestor}' with '{descendant}'"))?;
+        Ok(output.trim().is_empty())
+    }
+
     /// Resolve a revision to a full commit id, without creating a scratch
     /// worktree.
     ///
