@@ -1091,12 +1091,17 @@ cannot hang the caller. Used by `cwt` and `ha`.
     nothing to measure). A dirty tree isn't an error — it notes on stderr that uncommitted work isn't
     included and leaves the verdict alone. Nothing in your repo moves; the safety guarantees are the
     shared `gitscratch` harness's, not a second copy of them.
-  - Usage: `grind [-q | --diff] [BRANCH]`, `grind -q main && git rebase main`, `grind --diff main`.
+  - Usage: `grind [-q | --diff] [BRANCH]`, `grind -q main && git rebase main`, `grind --diff main`,
+    `grind --onto main parent`.
     `BRANCH` is optional: leave it out for `main`, or `master` in a repository with no `main`, and a
     repository holding neither name is refused with exit 2 rather than measured against HEAD.
+    `--onto NEWBASE BRANCH` measures `git rebase --onto NEWBASE BRANCH`: it replays only
+    `BRANCH..HEAD` onto NEWBASE, which is how a stacked branch moves after its parent got a squash
+    merge. A plain `grind main` there replays the commits of the parent too and reports false
+    conflicts. `--onto` needs BRANCH, and a NEWBASE that does not resolve is refused with exit 2.
     `--diff` prints the diff of each stop after the breakdown, in color on a terminal, and changes
     no exit code. `-q` silences everything grind says, on both streams, since the exit code is the
-    whole answer — but it stops at the argument parser, so `grind -q --onto main` and
+    whole answer — but it stops at the argument parser, so `grind -q --onto main` (no BRANCH) and
     `grind -q --diff` still print a usage error and `grind -q --version` still prints the version.
   - To install: `cargo install --git https://github.com/timmattison/tools grind`
 

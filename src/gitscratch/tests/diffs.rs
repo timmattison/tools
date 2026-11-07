@@ -17,7 +17,7 @@ use std::process::{Command, Output};
 
 use gitscratch::testing::{
     conflicting_repo, contested_region_repo, equal_hunks_unequal_stops_repo,
-    independent_branches_repo, modify_delete_repo, TestRepo,
+    independent_branches_repo, modify_delete_repo, squash_merged_parent_repo, TestRepo,
 };
 use gitscratch::{Conflicts, HaltDiff, HaltDiffs, Scratch, Stops};
 use tempfile::TempDir;
@@ -52,6 +52,17 @@ const THEIRS: &str = "right";
 /// The branch [`conflicting_repo`] leaves checked out in the fixture itself.
 const FIXTURE_BRANCH: &str = "main";
 
+/// The branch an `--onto` replay of [`squash_merged_parent_repo`] stands on.
+const STACKED_BRANCH: &str = "contested-child";
+
+/// The upstream of [`STACKED_BRANCH`] in [`squash_merged_parent_repo`]. It
+/// bounds the replay, so the commits of `parent` stay out of it.
+const STACKED_UPSTREAM: &str = "parent";
+
+/// The one file that [`STACKED_BRANCH`] conflicts in when it replays onto
+/// `main`.
+const STACKED_FILE: &str = "stacked.txt";
+
 /// The byte that starts each color code a terminal reads.
 const ESC: u8 = 0x1b;
 
@@ -80,6 +91,29 @@ fn replay_with_diffs(scratch: &Scratch, branch: &str, onto: &str) -> (Conflicts,
     scratch
         .replay_rebase_with_diffs(onto)
         .expect("replay the branch onto the simulated base and capture the halt diffs")
+}
+
+/// Replay `branch` onto `new_base` through the plain `--onto` entrance, which
+/// captures nothing.
+fn replay_onto(scratch: &Scratch, branch: &str, new_base: &str, upstream: &str) -> Conflicts {
+    check_out(scratch, branch);
+    scratch
+        .replay_rebase_onto(new_base, upstream)
+        .expect("replay the branch onto the new base")
+}
+
+/// Replay `branch` onto `new_base` through the `--onto` entrance that captures
+/// the halt diffs.
+fn replay_onto_with_diffs(
+    scratch: &Scratch,
+    branch: &str,
+    new_base: &str,
+    upstream: &str,
+) -> (Conflicts, HaltDiffs) {
+    check_out(scratch, branch);
+    scratch
+        .replay_rebase_onto_with_diffs(new_base, upstream)
+        .expect("replay the branch onto the new base and capture the halt diffs")
 }
 
 /// The lines of one halt diff, decoded for an assertion.
@@ -165,6 +199,73 @@ fn a_rebase_replay_captures_one_halt_diff_per_stop_each_naming_its_stopped_commi
         &contested_region_repo().scratch("main"),
         "iterated",
         "single",
+    );
+    assert_eq!(
+        conflicts, plain,
+        "the capture changed a count: the replay that captures and the plain replay have to \
+         measure one fixture the same way"
+    );
+}
+
+/// An `--onto` replay stops once where a plain rebase stops twice, captures
+/// one halt diff for that stop, and counts what the plain `--onto` entrance
+/// counts.
+///
+/// [`squash_merged_parent_repo`] gives `contested-child` a line of
+/// `stacked.txt` that `main` also rewrote. A plain rebase onto `main` would
+/// also stop in `shared.txt`. `--onto main parent` replays only the commits
+/// above `parent`, so the one stop is in `stacked.txt` and the halt diff names
+/// no other file.
+///
+/// The expected name comes from the runner of the same scratch worktree, read
+/// before the replay. The capture must change no count, thus the `Conflicts`
+/// of the capturing replay must equal the `Conflicts` that the plain entrance
+/// gives on a fresh copy of the fixture.
+#[test]
+fn a_rebase_onto_replay_captures_one_halt_diff_per_stop_and_counts_what_the_plain_entrance_counts()
+{
+    let repo = squash_merged_parent_repo();
+    let scratch = repo.scratch("main");
+    let expected = scratch
+        .testing_git()
+        .run("log", &["-1", "--format=%h %s", STACKED_BRANCH])
+        .expect("name the commit of the stacked branch");
+
+    let (conflicts, diffs) =
+        replay_onto_with_diffs(&scratch, STACKED_BRANCH, "main", STACKED_UPSTREAM);
+
+    assert_eq!(
+        conflicts.stops(),
+        Stops::new(1),
+        "the stacked branch stops once when it replays onto main"
+    );
+    let conflicted: BTreeSet<String> = conflicts
+        .file_hunks()
+        .map(|(path, _)| path.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        conflicted,
+        BTreeSet::from([STACKED_FILE.to_owned()]),
+        "the upstream has to bound the replay: a plain rebase would also stop in shared.txt"
+    );
+    assert_eq!(diffs.len(), 1, "the one stop has to give one halt diff");
+    let halt = diffs.iter().next().expect("the one halt diff");
+    assert_eq!(
+        halt.stopped(),
+        Some(expected.as_str()),
+        "the halt diff has to name the commit the rebase stopped on"
+    );
+    assert_eq!(
+        named_files(halt),
+        BTreeSet::from([STACKED_FILE.to_owned()]),
+        "the halt diff has to name the one file the breakdown counted"
+    );
+
+    let plain = replay_onto(
+        &squash_merged_parent_repo().scratch("main"),
+        STACKED_BRANCH,
+        "main",
+        STACKED_UPSTREAM,
     );
     assert_eq!(
         conflicts, plain,

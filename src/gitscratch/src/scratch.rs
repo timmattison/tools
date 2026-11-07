@@ -491,8 +491,14 @@ impl Scratch {
             .with_context(|| format!("could not write a commit holding the tree {tree}"))
     }
 
-    /// Rebase the checked-out HEAD onto `onto`, walking the whole rebase and
+    /// Rebase the checked-out HEAD onto `upstream`, walking the whole rebase and
     /// auto-resolving conflicts by staging markers verbatim.
+    ///
+    /// `upstream` is the name git gives the one revision of
+    /// `git rebase <upstream>`. It sets which commits git replays, which are
+    /// the commits of `upstream..HEAD`, and it is also the new base where they
+    /// land. [`Scratch::replay_rebase_onto`] gives the two roles to two
+    /// revisions.
     ///
     /// Every stop is measured before it is resolved, so the returned
     /// [`Conflicts`] describes what a human would have had to hand-merge to get
@@ -509,8 +515,8 @@ impl Scratch {
     /// which leaves the rebase unfinished however many times it is asked again,
     /// or if the rebase is still unfinished once `MAX_RESOLUTION_ROUNDS` rounds
     /// have been spent trying to advance it.
-    pub fn replay_rebase(&self, onto: &str) -> Result<Conflicts> {
-        self.replay_rebase_within(onto, MAX_RESOLUTION_ROUNDS, Capture::Nothing)
+    pub fn replay_rebase(&self, upstream: &str) -> Result<Conflicts> {
+        self.replay_rebase_within(None, upstream, MAX_RESOLUTION_ROUNDS, Capture::Nothing)
             .map(|(conflicts, _)| conflicts)
     }
 
@@ -547,8 +553,56 @@ impl Scratch {
     ///
     /// Returns an error in each case [`Scratch::replay_rebase`] does, and in no
     /// other.
-    pub fn replay_rebase_with_diffs(&self, onto: &str) -> Result<(Conflicts, HaltDiffs)> {
-        self.replay_rebase_within(onto, MAX_RESOLUTION_ROUNDS, Capture::Diffs)
+    pub fn replay_rebase_with_diffs(&self, upstream: &str) -> Result<(Conflicts, HaltDiffs)> {
+        self.replay_rebase_within(None, upstream, MAX_RESOLUTION_ROUNDS, Capture::Diffs)
+    }
+
+    /// Rebase the checked-out HEAD as `git rebase --onto new_base upstream`
+    /// does: replay the commits of `upstream..HEAD` and put them on `new_base`.
+    ///
+    /// The one-revision [`Scratch::replay_rebase`] uses its revision as both
+    /// values. The two-revision form matters for a stacked branch whose parent
+    /// got a squash merge. A plain rebase onto the target replays the commits
+    /// of the parent too, and reports false conflicts. With the parent as
+    /// `upstream`, the replay holds only the commits of the branch itself.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error in each case [`Scratch::replay_rebase`] does, and when
+    /// `new_base` does not name a commit.
+    pub fn replay_rebase_onto(&self, new_base: &str, upstream: &str) -> Result<Conflicts> {
+        self.replay_rebase_within(
+            Some(new_base),
+            upstream,
+            MAX_RESOLUTION_ROUNDS,
+            Capture::Nothing,
+        )
+        .map(|(conflicts, _)| conflicts)
+    }
+
+    /// [`Scratch::replay_rebase_onto`], and the halt diff of each stop beside
+    /// the counts.
+    ///
+    /// This entrance is to [`Scratch::replay_rebase_onto`] what
+    /// [`Scratch::replay_rebase_with_diffs`] is to [`Scratch::replay_rebase`].
+    /// It runs the same loop with the capture turned on, so the two entrances
+    /// count the same stops the same way.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error in each case [`Scratch::replay_rebase_onto`] does, and
+    /// in no other.
+    pub fn replay_rebase_onto_with_diffs(
+        &self,
+        new_base: &str,
+        upstream: &str,
+    ) -> Result<(Conflicts, HaltDiffs)> {
+        self.replay_rebase_within(
+            Some(new_base),
+            upstream,
+            MAX_RESOLUTION_ROUNDS,
+            Capture::Diffs,
+        )
     }
 
     /// [`Scratch::replay_rebase`] with the round budget named rather than baked
@@ -565,9 +619,14 @@ impl Scratch {
     /// plain entrance and the entrance that captures share this one loop, so
     /// they count the same stops the same way. The plain entrance gets back an
     /// empty [`HaltDiffs`] and drops it.
+    ///
+    /// `new_base` is the value of `--onto`. `None` gives the one-revision
+    /// rebase, where `upstream` is also the new base, and its argv is the argv
+    /// the replay had before the two-revision form existed.
     fn replay_rebase_within(
         &self,
-        onto: &str,
+        new_base: Option<&str>,
+        upstream: &str,
         max_rounds: usize,
         capture: Capture,
     ) -> Result<(Conflicts, HaltDiffs)> {
@@ -576,15 +635,22 @@ impl Scratch {
 
         let mut cost = Conflicts::nothing_replayed();
         let mut halt_diffs = HaltDiffs::nothing_captured();
-        // `--end-of-options` ahead of `onto`, because `onto` arrives from a
-        // caller and git knows `--root` as an option of `rebase`. Without it a
+        // `--end-of-options` ahead of `upstream`, because `upstream` arrives
+        // from a caller and git knows `--root` as an option of `rebase`. Without it a
         // replay onto `--root` rebases the whole history onto nothing, finishes
         // without a single conflict, and reports a cost of zero for a revision
         // that names no commit. Zero is what a genuinely free replay reports
         // too, so nothing downstream tells the two apart. With it git refuses
         // the upstream by name. Pinned by
         // `refuses_an_upstream_that_starts_with_a_dash_rather_than_replaying_onto_the_root`.
-        let mut outcome = git.try_run("rebase", &["--end-of-options", onto])?;
+        //
+        // `--onto=` is joined to its value, so the value binds to the option
+        // whatever its first character is. Pinned by
+        // `refuses_a_new_base_that_names_no_commit_rather_than_replaying_onto_it`.
+        let onto_option = new_base.map(|base| format!("--onto={base}"));
+        let mut rebase_args: Vec<&str> = onto_option.as_deref().into_iter().collect();
+        rebase_args.extend(["--end-of-options", upstream]);
+        let mut outcome = git.try_run("rebase", &rebase_args)?;
         let mut rounds = 0;
 
         loop {
@@ -1526,7 +1592,7 @@ mod tests {
     use crate::git::Git;
     use crate::metrics::{Hunks, Stops};
     use crate::repo::PREFLIGHT_HOOKS_PATH;
-    use crate::testing::{contested_region_repo, TestRepo};
+    use crate::testing::{contested_region_repo, squash_merged_parent_repo, TestRepo};
 
     /// How many rounds replaying `iterated` onto `single` spends.
     ///
@@ -1551,7 +1617,7 @@ mod tests {
             .run("checkout", &["-q", "--detach", "iterated"])
             .expect("check out the branch detached in the scratch worktree");
         scratch
-            .replay_rebase_within("single", max_rounds, Capture::Nothing)
+            .replay_rebase_within(None, "single", max_rounds, Capture::Nothing)
             .map(|(conflicts, _)| conflicts)
     }
 
@@ -1985,6 +2051,62 @@ mod tests {
             control.stops(),
             Stops::new(CONTESTED_ROUNDS),
             "the fixture has to cost something, or the refusal above proves only that this \
+             replay answers nothing at all"
+        );
+    }
+
+    /// A new base that names no commit stops the `--onto` replay, whatever its
+    /// first character is.
+    ///
+    /// Both entrances are public, so a caller can reach them without the
+    /// pre-flight `Repo::resolve` that `grind` runs. `--onto=` is joined to its
+    /// value, so `--root` arrives as a value and not as the `--root` option of
+    /// `git rebase`. Git refuses a value that names no commit, and the refusal
+    /// names that value.
+    ///
+    /// The control replays a revision that does name a commit, on the same
+    /// scratch worktree, because an entrance that refused every new base would
+    /// pass the assertions above it and answer nothing at all.
+    #[test]
+    fn refuses_a_new_base_that_names_no_commit_rather_than_replaying_onto_it() {
+        const BAD_NEW_BASES: [&str; 2] = ["--root", "nope"];
+        const STOPS_ONTO_MAIN: usize = 1;
+
+        let repo = squash_merged_parent_repo();
+        let scratch = repo.scratch("main");
+        scratch
+            .git()
+            .run("checkout", &["-q", "--detach", "contested-child"])
+            .expect("check out the branch detached in the scratch worktree");
+
+        for new_base in BAD_NEW_BASES {
+            let plain = scratch
+                .replay_rebase_onto(new_base, "parent")
+                .map(|conflicts| format!("{conflicts:?}"))
+                .expect_err("a new base that names no commit has to stop the plain replay");
+            assert!(
+                format!("{plain:#}").contains(new_base),
+                "the refusal of the plain entrance has to name `{new_base}`: {plain:#}"
+            );
+
+            let capturing = scratch
+                .replay_rebase_onto_with_diffs(new_base, "parent")
+                .map(|(conflicts, _)| format!("{conflicts:?}"))
+                .expect_err("a new base that names no commit has to stop the capturing replay");
+            assert!(
+                format!("{capturing:#}").contains(new_base),
+                "the refusal of the capturing entrance has to name `{new_base}`: {capturing:#}"
+            );
+        }
+
+        let control = scratch
+            .replay_rebase_onto("main", "parent")
+            .expect("replay onto a revision the fixture really has");
+
+        assert_eq!(
+            control.stops(),
+            Stops::new(STOPS_ONTO_MAIN),
+            "the fixture has to cost something, or the refusals above prove only that this \
              replay answers nothing at all"
         );
     }

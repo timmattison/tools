@@ -700,6 +700,62 @@ pub fn stacked_branches_repo() -> TestRepo {
     repo
 }
 
+/// A stacked branch whose parent landed in `main` as a squash merge.
+///
+/// `parent` rewrites one line of `shared.txt` in two commits. `main` holds
+/// them as one squash commit with a different patch. A plain rebase of either
+/// child onto `main` thus replays both commits of `parent` and stops on false
+/// conflicts in `shared.txt`.
+///
+/// `child` adds its own file, so `git rebase --onto main parent` from it is
+/// clean. `contested-child` rewrites the line of `stacked.txt` that `main` also
+/// rewrote, so `git rebase --onto main parent` from it stops once, in
+/// `stacked.txt` only.
+///
+/// # Panics
+///
+/// Panics if the repository cannot be built — git missing, or a command failing.
+pub fn squash_merged_parent_repo() -> TestRepo {
+    const CONTESTED_LINE: usize = 15;
+
+    let repo = TestRepo::init();
+    let base = numbered_lines(30);
+    repo.commit_files(&[("shared.txt", &base), ("stacked.txt", &base)], "base");
+
+    repo.branch("parent");
+    repo.commit_file(
+        "shared.txt",
+        &replace_line(&base, CONTESTED_LINE, "parent-v1"),
+        "parent rewrites line 15",
+    );
+    repo.commit_file(
+        "shared.txt",
+        &replace_line(&base, CONTESTED_LINE, "parent-v2"),
+        "parent rewrites line 15 again",
+    );
+
+    repo.branch("child");
+    repo.commit_file("child.txt", "child work\n", "child adds its own file");
+
+    repo.checkout("parent");
+    repo.branch("contested-child");
+    repo.commit_file(
+        "stacked.txt",
+        &replace_line(&base, CONTESTED_LINE, "contested-child-edit"),
+        "contested-child rewrites line 15 of stacked.txt",
+    );
+
+    repo.checkout("main");
+    repo.git(&["merge", "-q", "--squash", "parent"]);
+    repo.git(&["commit", "-q", "-m", "parent squashed"]);
+    repo.commit_file(
+        "stacked.txt",
+        &replace_line(&base, CONTESTED_LINE, "main-edit"),
+        "main rewrites line 15 of stacked.txt",
+    );
+    repo
+}
+
 /// Two branches that make the same two edits, packaged differently: `one` lands
 /// both in a single commit, `two` splits them across two commits. Every
 /// ordering hand-merges the same two hunks in the same two files, but replaying
