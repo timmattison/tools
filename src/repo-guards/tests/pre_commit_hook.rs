@@ -1,9 +1,10 @@
 //! Integration tests that run the repo's real `.husky/pre-commit` hook against
-//! throwaway fixtures and assert on its exit status.
+//! throwaway fixtures and assert on its exit status and its output.
 //!
 //! These cover *existing* correct behavior of the hook, so a TDD red phase is
 //! impossible — they pass immediately against the current hook. The mutation
-//! check that substitutes for red (neuter the hook, watch
+//! check that substitutes for red (remove the `cargo fmt` step from the copy of
+//! `scripts/rust-checks.sh` that each fixture runs, watch
 //! `staged_misformatted_rust_file_fails_the_gate` fail, restore, watch it pass)
 //! is documented in the commit body, not committed as code.
 //!
@@ -22,6 +23,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gitscratch::shed_inherited_git_environment;
+use gitscratch::testing::executable::write_executable;
 
 /// A deliberately misformatted Rust source file. `cargo fmt --check` rejects it
 /// because of the run-together braces, doubled spaces, and stray whitespace.
@@ -32,6 +34,18 @@ fn hook_path() -> PathBuf {
     let hook = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.husky/pre-commit");
     fs::canonicalize(&hook)
         .unwrap_or_else(|e| panic!("cannot canonicalize hook path {}: {e}", hook.display()))
+}
+
+/// Absolute, canonical path to the real check script. The hook starts it, and
+/// each fixture holds a copy of it.
+fn rust_checks_path() -> PathBuf {
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/rust-checks.sh");
+    fs::canonicalize(&script).unwrap_or_else(|e| {
+        panic!(
+            "cannot canonicalize rust-checks path {}: {e}",
+            script.display()
+        )
+    })
 }
 
 /// Path to the repo's pinned toolchain file, copied into each fixture so
@@ -67,6 +81,13 @@ fn unique_fixture_dir() -> PathBuf {
 /// Build a minimal cargo package inside `dir` whose `src/main.rs` is
 /// misformatted. The empty `[workspace]` table stops cargo from walking up into
 /// any parent manifest, and the copied `rust-toolchain.toml` pins rustfmt.
+///
+/// It also writes the real `scripts/rust-checks.sh` into `scripts/`. The hook
+/// starts `./scripts/rust-checks.sh` relative to its current directory, which
+/// is the fixture. Without the script, the hook stops with exit 127 before any
+/// check runs. The script is written with `write_executable` and not with
+/// `fs::copy`, because on Linux a file that this process held open for writing
+/// gives ETXTBSY when the hook runs it while another test thread forks.
 fn write_fixture_package(dir: &Path) {
     fs::write(
         dir.join("Cargo.toml"),
@@ -79,6 +100,11 @@ fn write_fixture_package(dir: &Path) {
 
     fs::copy(rust_toolchain_path(), dir.join("rust-toolchain.toml"))
         .expect("copy rust-toolchain.toml into fixture");
+
+    fs::create_dir_all(dir.join("scripts")).expect("create fixture scripts dir");
+    let script = fs::read(rust_checks_path()).expect("read scripts/rust-checks.sh");
+    write_executable(dir.join("scripts/rust-checks.sh"), script)
+        .expect("write rust-checks.sh into fixture");
 }
 
 /// `git init` the fixture and stage `paths`. No commit (hence no identity
@@ -155,6 +181,16 @@ fn run_hook(dir: &Path) -> HookRun {
 const INDEX_GUARD_ANNOUNCEMENT: &str =
     "pre-commit: running cargo test -p repo-guards --test tool_index_coverage";
 
+/// The line `scripts/rust-checks.sh` prints before it runs `cargo fmt`. Together
+/// with [`MACHETE_ANNOUNCEMENT`], it proves that the script started and stopped
+/// in the fmt step. An exit 127 from a missing script cannot print it.
+const FMT_ANNOUNCEMENT: &str = "rust-checks: running cargo fmt --all -- --check";
+
+/// The start of the line `scripts/rust-checks.sh` prints before it runs
+/// `cargo machete`, the step after `cargo fmt`. A failed fmt step stops the
+/// script before it prints this line.
+const MACHETE_ANNOUNCEMENT: &str = "rust-checks: running cargo machete";
+
 /// Best-effort cleanup; the per-process+nanos path is the real isolation, so a
 /// failed removal cannot collide with another run.
 fn cleanup(dir: &Path) {
@@ -162,20 +198,31 @@ fn cleanup(dir: &Path) {
 }
 
 /// Mutation test for the gate: a staged, misformatted `.rs` file must make the
-/// hook exit non-zero. If this ever passes with a broken hook, the guard is
-/// dead — that is exactly what we are protecting against.
+/// hook exit non-zero. The hook must fail in the fmt step of the check script:
+/// the output holds the fmt announcement and not the machete announcement. A
+/// status alone is not enough, because a missing script also fails the hook.
+/// If this ever passes with a broken hook, the guard is dead — that is exactly
+/// what we are protecting against.
 #[test]
 fn staged_misformatted_rust_file_fails_the_gate() {
     let dir = unique_fixture_dir();
     write_fixture_package(&dir);
     git_init_and_stage(&dir, &["src/main.rs", "Cargo.toml", "rust-toolchain.toml"]);
 
-    let HookRun { passed, .. } = run_hook(&dir);
+    let HookRun { passed, output } = run_hook(&dir);
     cleanup(&dir);
 
     assert!(
         !passed,
-        "hook should reject a staged misformatted .rs file, but it exited zero"
+        "hook should reject a staged misformatted .rs file, but it exited zero: {output}"
+    );
+    assert!(
+        output.contains(FMT_ANNOUNCEMENT),
+        "the check script must reach its cargo fmt step: {output}"
+    );
+    assert!(
+        !output.contains(MACHETE_ANNOUNCEMENT),
+        "the check script must stop in its cargo fmt step: {output}"
     );
 }
 
@@ -188,7 +235,9 @@ const RUSTFMT_TOML: &str = "style_edition = \"2021\"\n";
 /// introduce formatting/lint drift. We prove the gate fires by leaving a
 /// misformatted `src/main.rs` unstaged on disk: if the gate runs, `cargo fmt
 /// --check` sees the dirty tree and the hook exits non-zero; if the gate is
-/// skipped, the hook exits zero and this test fails.
+/// skipped, the hook exits zero and this test fails. The output must also show
+/// that the check script reached its fmt step and stopped there, so a missing
+/// script (exit 127) cannot satisfy the test.
 #[test]
 fn staged_toolchain_config_alone_triggers_the_gate() {
     // `rust-toolchain.toml` is already written by `write_fixture_package`, so it
@@ -202,12 +251,20 @@ fn staged_toolchain_config_alone_triggers_the_gate() {
         // so the gate must fire on the config file alone to catch it.
         git_init_and_stage(&dir, &[config_file]);
 
-        let HookRun { passed, .. } = run_hook(&dir);
+        let HookRun { passed, output } = run_hook(&dir);
         cleanup(&dir);
 
         assert!(
             !passed,
-            "hook should run the gate when {config_file} is staged, but it exited zero (gate skipped)"
+            "hook should run the gate when {config_file} is staged, but it exited zero (gate skipped): {output}"
+        );
+        assert!(
+            output.contains(FMT_ANNOUNCEMENT),
+            "the check script must reach its cargo fmt step when {config_file} is staged: {output}"
+        );
+        assert!(
+            !output.contains(MACHETE_ANNOUNCEMENT),
+            "the check script must stop in its cargo fmt step when {config_file} is staged: {output}"
         );
     }
 }
