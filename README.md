@@ -2591,7 +2591,7 @@ cannot hang the caller. Used by `cwt` and `ha`.
   - `sidecar status` shows the state of each clone and link, and the sidecars that `sidecar.toml` does not name.
   - `sidecar path <name>` prints the path of a link, or stops with a message that names the fix.
   - `sidecar worktree <name> [<branch>]` points a link at a worktree of the sidecar for a branch.
-  - `sidecar` never deletes a repository, a clone, a worktree, a branch, or a change.
+  - `sidecar` never deletes a repository, a main clone, a worktree, a branch, or a change. It removes only its own scratch clones.
   - See [docs/sidecar.md](./docs/sidecar.md) for the pattern, the rules, and the setup of a host.
   - To install: `cargo install --git https://github.com/timmattison/tools sidecar`
 

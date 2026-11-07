@@ -2,7 +2,9 @@
 //!
 //! A main clone is made in a scratch directory and moved into place with one rename.
 //! A main clone thus never appears half made, and the loser of two setups at the same
-//! time uses the clone of the winner.
+//! time uses the clone of the winner. A setup that stops during the clone, for example
+//! after a Ctrl-C, leaves its scratch directory. `remove_abandoned_scratch` removes each
+//! scratch directory whose process is gone.
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -164,6 +166,9 @@ fn settle_after_failure(git: &Git, url: &str, place: &Path, reason: String) -> C
     CloneOutcome::Failed { reason }
 }
 
+/// The text between the name of a main clone and the process number in a scratch name.
+const SCRATCH_MARKER: &str = ".sidecar-clone-";
+
 /// The scratch path of one clone: `<parent>/.<name>.sidecar-clone-<pid>-<nanos>`.
 fn scratch_path(place: &Path) -> PathBuf {
     let nanos = SystemTime::now()
@@ -174,9 +179,66 @@ fn scratch_path(place: &Path) -> PathBuf {
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
     place.with_file_name(format!(
-        ".{name}.sidecar-clone-{}-{nanos}",
+        ".{name}{SCRATCH_MARKER}{}-{nanos}",
         std::process::id()
     ))
+}
+
+/// Reads the process number from the end of a scratch name. `rest` is the text after
+/// `.<name>.sidecar-clone-`. It must be `<digits>-<digits>` and nothing else.
+fn scratch_pid(rest: &str) -> Option<u32> {
+    let (pid, nanos) = rest.split_once('-')?;
+    let digits = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
+    if digits(pid) && digits(nanos) {
+        pid.parse().ok()
+    } else {
+        None
+    }
+}
+
+/// Tells if the process `pid` is alive. When the answer is not certain, it says alive,
+/// because the safe direction is to keep a directory.
+fn process_is_alive(pid: u32) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
+        return true;
+    };
+    // SAFETY: `kill` with signal 0 sends no signal. It only checks that the process
+    // exists. It reads no memory of this program.
+    #[expect(unsafe_code, reason = "kill(pid, 0) has no safe wrapper in std")]
+    let result = unsafe { libc::kill(pid, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+/// Removes each scratch clone of `place` whose process is gone. A setup that stops
+/// during `git clone` leaves such a directory. A scratch clone of a live process stays,
+/// and so does each name that does not parse as `.<name>.sidecar-clone-<pid>-<nanos>`.
+/// Errors are ignored. Returns the paths that it removed.
+#[must_use]
+pub fn remove_abandoned_scratch(place: &Path) -> Vec<PathBuf> {
+    let (Some(parent), Some(name)) = (place.parent(), place.file_name()) else {
+        return Vec::new();
+    };
+    let prefix = format!(".{}{SCRATCH_MARKER}", name.to_string_lossy());
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return Vec::new();
+    };
+    let mut removed = Vec::new();
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(pid) = file_name
+            .to_string_lossy()
+            .strip_prefix(&prefix)
+            .and_then(scratch_pid)
+        else {
+            continue;
+        };
+        let path = entry.path();
+        let is_directory = std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_dir());
+        if is_directory && !process_is_alive(pid) && std::fs::remove_dir_all(&path).is_ok() {
+            removed.push(path);
+        }
+    }
+    removed
 }
 
 #[cfg(test)]
@@ -334,5 +396,69 @@ mod tests {
             CloneState::Ready
         );
         assert_eq!(scratch.scratch_names(), Vec::<String>::new());
+    }
+    #[test]
+    fn scratch_pid_accepts_only_digits_dash_digits() {
+        assert_eq!(scratch_pid("123-456"), Some(123));
+        assert_eq!(scratch_pid("abc-1"), None);
+        assert_eq!(scratch_pid("123"), None);
+        assert_eq!(scratch_pid("-1"), None);
+        assert_eq!(scratch_pid("1-"), None);
+        assert_eq!(scratch_pid("1.sidecar-clone-123-456"), None);
+        assert_eq!(scratch_pid("1-2-3"), None);
+        assert_eq!(scratch_pid(""), None);
+    }
+
+    #[test]
+    fn process_is_alive_tells_a_live_process_from_an_ended_one() {
+        assert!(process_is_alive(std::process::id()));
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("start `true`");
+        let pid = child.id();
+        child.wait().expect("wait for `true`");
+        assert!(!process_is_alive(pid));
+    }
+
+    #[test]
+    fn process_is_alive_keeps_a_pid_that_does_not_fit() {
+        assert!(process_is_alive(u32::MAX));
+    }
+
+    #[test]
+    fn remove_abandoned_scratch_removes_only_a_strict_match_of_a_dead_process() {
+        let scratch = Scratch::new();
+        let place = scratch.dir.join("megarepo-data-a");
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("start `true`");
+        let dead = child.id();
+        child.wait().expect("wait for `true`");
+        let make = |name: String| {
+            let path = scratch.dir.join(name);
+            std::fs::create_dir_all(path.join("objects")).expect("make the directory");
+            path
+        };
+        let gone = make(format!(".megarepo-data-a.sidecar-clone-{dead}-1"));
+        let live = make(format!(
+            ".megarepo-data-a.sidecar-clone-{}-1",
+            std::process::id()
+        ));
+        let other = make(format!(
+            ".megarepo-data-a.sidecar-clone-1.sidecar-clone-{dead}-1"
+        ));
+        let no_nanos = make(format!(".megarepo-data-a.sidecar-clone-{dead}"));
+        let file = scratch
+            .dir
+            .join(format!(".megarepo-data-a.sidecar-clone-{dead}-2"));
+        std::fs::write(&file, "x").expect("make the file");
+
+        let removed = remove_abandoned_scratch(&place);
+
+        assert_eq!(removed, vec![gone.clone()]);
+        assert!(!gone.exists());
+        for kept in [live, other, no_nanos, file] {
+            assert!(kept.exists(), "{} must stay", kept.display());
+        }
     }
 }

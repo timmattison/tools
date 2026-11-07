@@ -7828,6 +7828,7 @@ dependencies = [
  "buildinfo",
  "clap",
  "gitscratch",
+ "libc",
  "serde",
  "shellquote",
  "tempfile",

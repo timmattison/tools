@@ -54,7 +54,9 @@ sidecars = ["testdata", "remotesensing.fyi"]
 
 An empty sidecar has no `main` branch. The setup reports that case as a warning too.
 
-When each main clone and each link is correct, the setup makes no network call and writes nothing. The hook runs on each checkout, thus this case is fast.
+Before rule 1, the setup removes each scratch clone of the name. A scratch clone is a directory `.<host>-data-<name>.sidecar-clone-<pid>-<nanos>` next to the main clone. A clone that stops leaves it, for example after a Ctrl-C during the checkout. The setup removes it when the process `<pid>` is not alive. A scratch clone of a live process stays, because that setup is still at work. A name that does not match this form stays too.
+
+When each main clone and each link is correct, and no scratch clone is left, the setup makes no network call and writes nothing. The hook runs on each checkout, thus this case is fast.
 
 ### The ignore check
 
@@ -153,7 +155,7 @@ The rules:
 
 ## `sidecar` never deletes
 
-No command deletes a repository, a main clone, a sidecar worktree, a branch, or a change. When a link moves away from a sidecar worktree, that worktree and its changes stay.
+No command deletes a repository, a main clone, a sidecar worktree, a branch, or a change. The one exception is the scratch clone. It is the own work of `sidecar` and never a main clone. A setup removes it when its clone fails. The next setup removes one that a stopped setup left. When a link moves away from a sidecar worktree, that worktree and its changes stay.
 
 ## What goes in a sidecar
 

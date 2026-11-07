@@ -14,7 +14,7 @@
 
 use std::path::Path;
 
-use crate::clone::{ensure_clone, CloneOutcome};
+use crate::clone::{ensure_clone, remove_abandoned_scratch, CloneOutcome};
 use crate::host::Host;
 use crate::link::{inspect_link, point_link, ForeignLink, LinkState};
 use crate::name::SidecarName;
@@ -62,6 +62,12 @@ fn set_up_one(host: &Host, name: &SidecarName, report: &mut SetupReport) -> bool
         }
     };
     let shown = host.link_shown(name);
+    for path in remove_abandoned_scratch(&main_clone) {
+        report.actions.push(format!(
+            "Removed the scratch clone {} that an interrupted setup left.",
+            path.display()
+        ));
+    }
     match ensure_clone(host.git(), &url, &main_clone) {
         CloneOutcome::Made => report
             .actions
