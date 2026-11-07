@@ -1,6 +1,14 @@
-//! One step of the search: the types of a commit and of its verdict.
+//! One step of the search. [`step`] tests one commit. The module also holds the types of a commit and of its verdict.
 
+use std::ffi::OsString;
 use std::fmt;
+use std::path::Path;
+
+use anyhow::Result;
+use gitscratch::Scratch;
+
+use crate::child::{self, Ended};
+use crate::interrupt;
 
 /// A full object id that git resolved.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -71,15 +79,6 @@ impl fmt::Display for SkipReason {
         }
     }
 }
-
-use std::ffi::OsString;
-use std::path::Path;
-
-use anyhow::Result;
-use gitscratch::Scratch;
-
-use crate::child::{self, Ended};
-use crate::interrupt;
 
 /// The exit code of the test that means skip, as `git bisect run` defines it.
 const TEST_SKIP_CODE: i32 = 125;
