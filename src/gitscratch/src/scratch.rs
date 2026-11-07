@@ -298,6 +298,18 @@ impl Scratch {
         Ok(())
     }
 
+    /// Apply the patch in the file `patch` to the scratch worktree.
+    ///
+    /// Not yet implemented.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git cannot start.
+    pub fn apply_patch(&self, patch: &Path) -> Result<bool> {
+        let _ = patch;
+        Ok(false)
+    }
+
     /// The id of the tree the scratch worktree's HEAD points at.
     ///
     /// The content of a commit without its ancestry, which is what a caller

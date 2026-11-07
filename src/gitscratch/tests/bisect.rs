@@ -96,3 +96,64 @@ fn subject_keeps_multi_byte_characters() {
 
     assert_eq!(subject, "日本語 🎉 café");
 }
+
+/// Write `patch` to a file in a new temporary directory.
+///
+/// The directory comes back with the path, because its drop removes the file.
+fn patch_file(patch: &[u8]) -> (TempDir, std::path::PathBuf) {
+    let holder = TempDir::new().expect("create temp dir");
+    let path = holder.path().join("change.patch");
+    std::fs::write(&path, patch).expect("write the patch");
+    (holder, path)
+}
+
+#[test]
+fn apply_patch_applies_a_patch_that_fits() {
+    let fixture = TestRepo::init();
+    fixture.commit_file("a.txt", "one\n", "first");
+    fixture.commit_file("b.txt", "added by the patch\n", "second");
+    let patch = open(&fixture).patch_of("HEAD").expect("a patch");
+    let (_holder, path) = patch_file(&patch);
+    let scratch = fixture.scratch("HEAD~1");
+
+    let applied = scratch.apply_patch(&path).expect("git started");
+
+    assert!(applied, "the patch fits and has to apply");
+    let contents = std::fs::read_to_string(scratch.path().join("b.txt")).expect("b.txt exists");
+    assert_eq!(contents, "added by the patch\n");
+}
+
+#[test]
+fn apply_patch_gives_false_and_changes_nothing_when_the_patch_does_not_fit() {
+    let fixture = TestRepo::init();
+    fixture.commit_file("a.txt", "one\n", "first");
+    fixture.commit_file("a.txt", "two\n", "second");
+    let patch = open(&fixture).patch_of("HEAD").expect("a patch");
+    let (_holder, path) = patch_file(&patch);
+    fixture.commit_file("a.txt", "three\n", "third");
+    let scratch = fixture.scratch("HEAD");
+
+    let applied = scratch.apply_patch(&path).expect("git started");
+
+    assert!(!applied, "the patch expects 'one' and has to be refused");
+    let contents = std::fs::read_to_string(scratch.path().join("a.txt")).expect("a.txt exists");
+    assert_eq!(contents, "three\n");
+    let root = scratch.path().to_str().expect("UTF-8 path");
+    assert_eq!(fixture.git(&["-C", root, "status", "--porcelain"]), "");
+}
+
+#[test]
+fn apply_patch_ignores_a_whitespace_policy_of_the_user() {
+    let fixture = TestRepo::init();
+    fixture.commit_file("a.txt", "one\n", "first");
+    // The line ends in a space. Git commits it without complaint.
+    fixture.commit_file("a.txt", "one\ntrailing space \n", "second");
+    let patch = open(&fixture).patch_of("HEAD").expect("a patch");
+    let (_holder, path) = patch_file(&patch);
+    fixture.git(&["config", "apply.whitespace", "error"]);
+    let scratch = fixture.scratch("HEAD~1");
+
+    let applied = scratch.apply_patch(&path).expect("git started");
+
+    assert!(applied, "apply.whitespace=error must not refuse the patch");
+}
