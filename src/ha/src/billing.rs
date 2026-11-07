@@ -147,17 +147,28 @@ impl Sum for Windows {
 
 impl DailyUsage {
     /// Sums the billed items of an organization read or a user read by UTC
-    /// day. An item of another product is left out.
+    /// day. An item of another product is left out. The price of each runner
+    /// SKU comes from its newest billed item that has a price.
     #[must_use]
     pub fn from_items(items: &[UsageItem]) -> DailyUsage {
         let mut days: BTreeMap<NaiveDate, Amounts> = BTreeMap::new();
+        let mut newest: BTreeMap<Sku, (DateTime<Utc>, Usd)> = BTreeMap::new();
         for item in items.iter().filter(|item| is_billed(item)) {
             *days.entry(item.date.date_naive()).or_default() += item.amounts();
+            let (Some(sku), Some(price)) = (Sku::of_billing_name(&item.sku), item.price_per_unit)
+            else {
+                continue;
+            };
+            // On equal dates the later item wins, so only an older date loses.
+            if newest.get(&sku).is_none_or(|(date, _)| *date <= item.date) {
+                newest.insert(sku, (item.date, price));
+            }
         }
-        DailyUsage {
-            days,
-            prices: Prices::default(),
+        let mut prices = Prices::default();
+        for (sku, (_, price)) in newest {
+            prices.set(sku, price);
         }
+        DailyUsage { days, prices }
     }
 
     /// Sums the billed items of one organization from an enterprise report.
