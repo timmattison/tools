@@ -1423,8 +1423,10 @@ fn push_jobs<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cost::{Prices, Sku};
     use crate::money::Usd;
     use crate::queue::{EntryState, Outcome};
+    use crate::target::OwnerName;
     use chrono::{Duration as Span, TimeZone};
 
     const HOUR: u64 = 3600;
@@ -3243,6 +3245,67 @@ mod tests {
         };
         assert_eq!(amount_at(60), Some(mills(6)));
         assert_eq!(amount_at(61), Some(mills(12)));
+    }
+
+    /// Builds a book that gives `owner` the price `price` for the Linux SKU.
+    fn linux_book(owner: &str, price: Usd) -> PriceBook {
+        let mut prices = Prices::default();
+        prices.set(Sku::Linux, price);
+        let mut book = PriceBook::default();
+        book.insert(OwnerName::parse(owner).expect("a valid owner"), prices);
+        book
+    }
+
+    /// Builds a board with an expanded private run of `a/x` and one
+    /// `ubuntu-latest` job of 211 seconds (4 billed minutes).
+    fn linux_board() -> Board {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Passed, 60, 10)],
+            now(),
+        );
+        board.expand(now());
+        board.set_jobs(RunId(1), vec![labelled_job(1, "ubuntu-latest", 211)]);
+        board
+    }
+
+    #[test]
+    fn a_billing_price_of_the_owner_wins_over_the_table() {
+        let mut board = linux_board();
+        board.set_prices(linux_book("a", mills(8)));
+        let rows = board.rows(now());
+        assert_eq!(job_costs(&rows), [JobCost::Known(mills(32))]);
+        assert_eq!(
+            run_cost_of(&rows, 1),
+            Some(RunCost {
+                amount: mills(32),
+                partial: false
+            })
+        );
+    }
+
+    #[test]
+    fn a_book_for_another_owner_leaves_the_table_price() {
+        let mut board = linux_board();
+        board.set_prices(linux_book("b", mills(8)));
+        let rows = board.rows(now());
+        assert_eq!(job_costs(&rows), [JobCost::Known(mills(24))]);
+        assert_eq!(
+            run_cost_of(&rows, 1),
+            Some(RunCost {
+                amount: mills(24),
+                partial: false
+            })
+        );
+    }
+
+    #[test]
+    fn a_new_book_replaces_the_whole_old_book() {
+        let mut board = linux_board();
+        board.set_prices(linux_book("a", mills(8)));
+        board.set_prices(PriceBook::default());
+        assert_eq!(job_costs(&board.rows(now())), [JobCost::Known(mills(24))]);
     }
 
     #[test]
