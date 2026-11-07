@@ -300,14 +300,30 @@ impl Scratch {
 
     /// Apply the patch in the file `patch` to the scratch worktree.
     ///
-    /// Not yet implemented.
+    /// Gives `true` when the patch applies. Gives `false` when git refuses
+    /// it. Then git has changed nothing, because `git apply` is all or
+    /// nothing. A refused patch is an answer and not an error, because a
+    /// caller that searches over many commits expects some of them to refuse.
+    ///
+    /// `--whitespace=nowarn` stands in the call. Without it, a user setting
+    /// such as `apply.whitespace=error` refuses a patch that git committed
+    /// without complaint.
     ///
     /// # Errors
     ///
-    /// Returns an error if git cannot start.
+    /// Returns an error if git cannot start, or if `patch` is not valid
+    /// UTF-8 and so cannot be given to git.
     pub fn apply_patch(&self, patch: &Path) -> Result<bool> {
-        let _ = patch;
-        Ok(false)
+        let patch = patch
+            .to_str()
+            .with_context(|| format!("the patch path {} is not UTF-8", patch.display()))?;
+
+        let output = self
+            .git()
+            .try_run("apply", &["--whitespace=nowarn", patch])
+            .context("could not start git apply")?;
+
+        Ok(output.success)
     }
 
     /// The id of the tree the scratch worktree's HEAD points at.
