@@ -22,9 +22,10 @@ pub enum Outcome {
 }
 
 /// Refuse a test commit that has no single parent or changes no file.
+/// Return the patch of the test commit, which git made one time.
 ///
 /// This runs before the patch file and the scratch worktree exist.
-fn refuse_unusable_test_commit(repo: &Repo, test: &Commit) -> Result<()> {
+fn refuse_unusable_test_commit(repo: &Repo, test: &Commit) -> Result<Vec<u8>> {
     let short = test.short();
     match repo.parents(&test.0)?.len() {
         0 => bail!(
@@ -33,10 +34,11 @@ fn refuse_unusable_test_commit(repo: &Repo, test: &Commit) -> Result<()> {
         1 => {}
         _ => bail!("the test commit {short} is a merge commit. Give a commit that has one parent."),
     }
-    if repo.patch_of(&test.0)?.is_empty() {
+    let patch = repo.patch_of(&test.0)?;
+    if patch.is_empty() {
         bail!("the test commit {short} changes no file.");
     }
-    Ok(())
+    Ok(patch)
 }
 
 /// Refuse a good commit that is the bad commit, or that the bad commit does
@@ -145,7 +147,7 @@ pub fn run(cli: &Cli) -> Result<Outcome> {
 
     let repo = Repo::open(&std::env::current_dir().context("no current directory")?)?;
     let test = Commit(repo.resolve(cli.test_commit.as_deref().unwrap_or("HEAD"))?);
-    refuse_unusable_test_commit(&repo, &test)?;
+    let patch = refuse_unusable_test_commit(&repo, &test)?;
     let mut bad = Commit(match &cli.bad {
         Some(bad) => repo.resolve(bad)?,
         None => repo.resolve(&format!("{test}^"))?,
@@ -160,7 +162,7 @@ pub fn run(cli: &Cli) -> Result<Outcome> {
 
     let mut patch_file = NamedTempFile::new().context("could not make the patch file")?;
     patch_file
-        .write_all(&repo.patch_of(&test.0)?)
+        .write_all(&patch)
         .and_then(|()| patch_file.flush())
         .context("could not write the patch file")?;
 
