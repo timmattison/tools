@@ -500,3 +500,47 @@ fn checkout_and_switch_keep_the_link() {
         fs::canonicalize(fixture.worktrees_dir(NAME).join("feature")).unwrap()
     );
 }
+
+/// Makes the worktree of `feature`, optionally locks it, moves its directory away like a
+/// person does, and runs `sidecar worktree` again. Asserts the link did not change.
+fn rerun_after_removal_by_hand(lock: bool) -> support::Run {
+    let fixture = after_setup();
+    let host = fixture.main_checkout();
+    let first = fixture.run(&host, &["worktree", NAME, "feature"]);
+    assert_eq!(first.code, 0, "{first:?}");
+    let path = fixture.worktrees_dir(NAME).join("feature");
+    if lock {
+        fixture.git(
+            &fixture.main_clone(NAME),
+            &["worktree", "lock", &path.to_string_lossy()],
+        );
+    }
+    fs::rename(&path, fixture.root().join("moved-away")).unwrap();
+    let link = fixture.link(&host, NAME);
+    let before = fs::read_link(&link).unwrap();
+
+    let run = fixture.run(&host, &["worktree", NAME, "feature"]);
+
+    assert_eq!(fs::read_link(&link).unwrap(), before, "{run:?}");
+    let main_clone = fixture.main_clone(NAME);
+    assert_fails_naming(
+        &run,
+        &[
+            "worktree prune",
+            &main_clone.to_string_lossy(),
+            &path.to_string_lossy(),
+        ],
+    );
+    run
+}
+
+#[test]
+fn a_worktree_removed_by_hand_is_refused_and_the_link_stays() {
+    rerun_after_removal_by_hand(false);
+}
+
+#[test]
+fn a_locked_worktree_removed_by_hand_names_unlock() {
+    let run = rerun_after_removal_by_hand(true);
+    assert!(run.stderr.contains("worktree unlock"), "{run:?}");
+}
