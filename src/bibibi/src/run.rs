@@ -1,7 +1,7 @@
 //! The whole run: resolve, make the patch and the scratch worktree, search,
 //! and print the result.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use gitscratch::Repo;
 use tempfile::NamedTempFile;
 
@@ -19,6 +19,45 @@ pub enum Outcome {
     Ambiguous,
 }
 
+/// Refuse a test commit that has no single parent or changes no file.
+///
+/// This runs before the patch file and the scratch worktree exist.
+fn refuse_unusable_test_commit(repo: &Repo, test: &Commit) -> Result<()> {
+    let short = test.short();
+    match repo.parents(&test.0)?.len() {
+        0 => bail!(
+            "the test commit {short} is a root commit. It has no parent to take the change from."
+        ),
+        1 => {}
+        _ => bail!("the test commit {short} is a merge commit. Give a commit that has one parent."),
+    }
+    if repo.patch_of(&test.0)?.is_empty() {
+        bail!("the test commit {short} changes no file.");
+    }
+    Ok(())
+}
+
+/// Refuse a good commit that is the bad commit, or that the bad commit does
+/// not descend from. The goods are checked in the order given.
+fn refuse_unusable_goods(repo: &Repo, goods: &[Commit], bad: &Commit) -> Result<()> {
+    for good in goods {
+        if good == bad {
+            bail!(
+                "the good commit {} is the same commit as the bad commit.",
+                good.short()
+            );
+        }
+        if !repo.is_ancestor(&good.0, &bad.0)? {
+            bail!(
+                "the good commit {} is not an ancestor of the bad commit {}.",
+                good.short(),
+                bad.short()
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Search for the first bad commit and print the result on standard output.
 ///
 /// The test commit is the positional argument, or `HEAD` when it is absent.
@@ -32,12 +71,16 @@ pub enum Outcome {
 ///
 /// # Errors
 ///
-/// Returns an error if git fails or if a step fails.
+/// Returns an error if git fails, if a step fails, or if the commits are
+/// unusable: a root or merge test commit, a test commit that changes no file,
+/// a good commit equal to the bad commit, or a good commit that is not an
+/// ancestor of the bad commit.
 pub fn run(cli: &Cli) -> Result<Outcome> {
     use std::io::Write;
 
     let repo = Repo::open(&std::env::current_dir().context("no current directory")?)?;
     let test = Commit(repo.resolve(cli.test_commit.as_deref().unwrap_or("HEAD"))?);
+    refuse_unusable_test_commit(&repo, &test)?;
     let mut bad = Commit(match &cli.bad {
         Some(bad) => repo.resolve(bad)?,
         None => repo.resolve(&format!("{test}^"))?,
@@ -47,6 +90,7 @@ pub fn run(cli: &Cli) -> Result<Outcome> {
         .iter()
         .map(|good| repo.resolve(good).map(Commit))
         .collect::<Result<Vec<_>>>()?;
+    refuse_unusable_goods(&repo, &goods, &bad)?;
     let mut skipped: Vec<(Commit, SkipReason)> = Vec::new();
 
     let mut patch_file = NamedTempFile::new().context("could not make the patch file")?;
