@@ -45,7 +45,7 @@ use crate::billing::{
 use crate::job::{Job, JobId, RunnerName};
 use crate::money::Usd;
 use crate::queue::{EntryState, EventKind, PullNumber, QueueEntry, QueueEvent, QUEUE_BOT};
-use crate::run::{keep_first_of_each_id, Run, RunId, RunState};
+use crate::run::{keep_first_of_each_id, Run, RunId, RunState, Visibility};
 use crate::status::RateLimit;
 use crate::target::{OwnerName, RepoName};
 
@@ -110,6 +110,13 @@ struct RunJson {
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     html_url: String,
+    repository: Option<RepositoryJson>,
+}
+
+/// The repository member of a run. Only the field that `ha` reads is here.
+#[derive(Deserialize)]
+struct RepositoryJson {
+    private: Option<bool>,
 }
 
 /// The JSON body of one account. Only the `type` is read.
@@ -132,8 +139,12 @@ struct RepoBody {
 fn run_of(json: RunJson, repo: &RepoName) -> Run {
     let workflow = json.name.unwrap_or_default();
     let status = json.status.unwrap_or_default();
+    let visibility = match json.repository.and_then(|repository| repository.private) {
+        Some(false) => Visibility::Public,
+        Some(true) | None => Visibility::Private,
+    };
     Run {
-        visibility: crate::run::Visibility::Private,
+        visibility,
         id: RunId(json.id),
         repo: repo.clone(),
         state: RunState::from_github(&status, json.conclusion.as_deref()),
@@ -1761,7 +1772,6 @@ mod tests {
 
     use super::*;
     use crate::billing::EnterpriseSlug;
-    use crate::run::Visibility;
 
     /// A time limit that no stub that finishes comes near.
     const GENEROUS_LIMIT: Duration = Duration::from_secs(60);
