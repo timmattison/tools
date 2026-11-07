@@ -119,9 +119,10 @@ fn decide_color() {
 /// Returns an error if the current directory cannot be read, is not inside a
 /// git repository, has no commit at HEAD to replay, holds no branch the run
 /// could measure against - the one named, or a default when none was named -
-/// or if the replay itself failed without leaving a conflict to measure. Not for
-/// a working tree that cannot be inspected: that only costs the uncommitted-work
-/// note, which is a caveat rather than part of the answer.
+/// holds no commit for the NEWBASE that `--onto` names, or if the replay itself
+/// failed without leaving a conflict to measure. Not for a working tree that
+/// cannot be inspected: that only costs the uncommitted-work note, which is a
+/// caveat rather than part of the answer.
 fn run(args: &Args, console: &Console) -> Result<Conflicts> {
     let cwd = std::env::current_dir().context("could not determine the current directory")?;
     let repo = Repo::open(&cwd)?;
