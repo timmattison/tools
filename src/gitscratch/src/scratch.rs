@@ -329,13 +329,31 @@ impl Scratch {
     /// Apply `patch` with a three-way merge.
     ///
     /// This runs `git apply --3way --whitespace=nowarn`. It has the contract of
-    /// [`Scratch::apply_patch`].
+    /// [`Scratch::apply_patch`]: `Ok(false)` when git refuses the patch, and an
+    /// error only when git cannot start or the path is not UTF-8.
+    ///
+    /// A three-way apply needs the blobs that the patch names on its `index`
+    /// lines. `Repo::patch_of` uses `--full-index`, so those ids are complete
+    /// and git finds the blobs in the object store.
+    ///
+    /// A conflict leaves conflict markers in the tree and unmerged entries in
+    /// the index. [`Scratch::restore`] removes both.
     ///
     /// # Errors
     ///
-    /// Returns an error if git cannot start.
-    pub fn apply_patch_three_way(&self, _patch: &Path) -> Result<bool> {
-        Ok(false)
+    /// Returns an error if git cannot start, or if `patch` is not valid UTF-8
+    /// and so cannot be given to git.
+    pub fn apply_patch_three_way(&self, patch: &Path) -> Result<bool> {
+        let patch = patch
+            .to_str()
+            .with_context(|| format!("the patch path {} is not UTF-8", patch.display()))?;
+
+        let output = self
+            .git()
+            .try_run("apply", &["--3way", "--whitespace=nowarn", patch])
+            .context("could not start git apply --3way")?;
+
+        Ok(output.success)
     }
 
     /// Put the scratch worktree back to the state of its checked-out commit.
