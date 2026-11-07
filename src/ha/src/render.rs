@@ -16,6 +16,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::billing::{AccountCell, BillingView, Total};
 use crate::board::{Board, Header, JobCounts, Row, Section};
 use crate::cancel::Confirm;
+use crate::cost::{JobCost, RunCost};
 use crate::job::{Job, RunnerName};
 use crate::queue::{Departure, EntryState, Outcome, PullNumber, QueueEntry};
 use crate::run::{span, Run, RunState};
@@ -55,10 +56,16 @@ const COST_HEADER: &str = "COST";
 /// cost is right-aligned in the cell, thus money lines up on its cents.
 const COST_WIDTH: usize = 8;
 /// The columns that the text columns do not share: the two marker cells, the
-/// ID part, the started, time, and job-sum columns, and the nine spaces between
-/// the ten cells.
-const FIXED_COLUMNS: usize =
-    MARKER_WIDTH + ID_WIDTH + STARTED_WIDTH + TIME_WIDTH + MARKER_WIDTH + JOB_SUM_WIDTH + 9;
+/// ID part, the started, time, job-sum, and cost columns, and the ten spaces
+/// between the eleven cells.
+const FIXED_COLUMNS: usize = MARKER_WIDTH
+    + ID_WIDTH
+    + STARTED_WIDTH
+    + TIME_WIDTH
+    + MARKER_WIDTH
+    + JOB_SUM_WIDTH
+    + COST_WIDTH
+    + 10;
 /// The header word of the started column of the finished rows. A row of the
 /// recent section shows when its run or its job finished (see [`run_line`] and
 /// [`job_line`]). A row of the merge history shows when its pull request left
@@ -67,9 +74,10 @@ const FIXED_COLUMNS: usize =
 const FINISHED_HEADER: &str = "FINISHED";
 /// The columns from the start of the started cell to the end of a row: the
 /// started cell, one space, the time cell, one space, the right marker cell,
-/// one space, and the job-sum cell. [`header_cells`] ends the header line with
-/// the same cells.
-const STARTED_TO_END: usize = STARTED_WIDTH + 1 + TIME_WIDTH + 1 + MARKER_WIDTH + 1 + JOB_SUM_WIDTH;
+/// one space, the job-sum cell, one space, and the cost cell. [`header_cells`]
+/// ends the header line with the same cells.
+const STARTED_TO_END: usize =
+    STARTED_WIDTH + 1 + TIME_WIDTH + 1 + MARKER_WIDTH + 1 + JOB_SUM_WIDTH + 1 + COST_WIDTH;
 /// The header word of the workflow column.
 const WORKFLOW_HEADER: &str = "WORKFLOW";
 /// The most columns that the workflow name gets: the width of its header word.
@@ -215,7 +223,8 @@ fn fit_right(text: &str, width: usize) -> String {
 ///
 /// The ID part stands after the workflow cell, and `id` is right-aligned in it.
 /// The right marker cell stands after the time cell, and the job-sum cell
-/// stands after the right marker cell. The one `marker` argument fills it and
+/// stands after the right marker cell. The cost cell is the last cell, after
+/// the job-sum cell. The one `marker` argument fills it and
 /// the left marker cell, thus a row never shows two different markers. The
 /// header line does not come from this function. `header_cells` builds it.
 ///
@@ -231,6 +240,7 @@ fn fit_right(text: &str, width: usize) -> String {
 /// 3. The text cells, with one space between them, in the style of the line.
 /// 4. One space and the right marker cell, in [`MARK_STYLE`].
 /// 5. One space and the job-sum cell, in the style of the line.
+/// 6. One space and the cost cell, right-aligned, in the style of the line.
 ///
 /// The two marker cells and the sleeping mark keep `Color::Reset`, whatever
 /// color the line gets. The concatenated text of the spans is the whole row.
@@ -246,6 +256,7 @@ fn cells(
         started,
         time,
         job_sum,
+        cost,
     } = end;
     let [repo, workflow, branch, title] = texts;
     let repo = fit_repo(repo, is_stale, widths.repo);
@@ -272,7 +283,14 @@ fn cells(
         MARK_STYLE,
     ));
     spans.push(Span::raw(format!(" {}", pad_right(job_sum, JOB_SUM_WIDTH))));
+    spans.push(Span::raw(format!(" {}", cost_cell(cost))));
     Line::from(spans)
+}
+
+/// The cost cell: `text` cut to [`COST_WIDTH`] columns, then right-aligned in
+/// them. An empty text makes a blank cell.
+fn cost_cell(text: &str) -> String {
+    pad_left(&truncate_to_budget(text, COST_WIDTH), COST_WIDTH)
 }
 
 /// The cells at the right end of a row, before the right marker cell and after
@@ -285,6 +303,8 @@ struct EndCells<'a> {
     time: &'a str,
     /// The text of the job-sum cell. It stands after the right marker cell.
     job_sum: &'a str,
+    /// The text of the cost cell. It stands after the job-sum cell.
+    cost: &'a str,
 }
 
 /// The style of a marker cell. A terminal draws an emoji in its own colors,
@@ -298,7 +318,7 @@ const MARK_STYLE: Style = Style::new().fg(Color::Reset);
 /// Thus the whole word shows at every frame width, and it heads the workflow
 /// name and the ID. The other cells stand in the same columns as those of a run
 /// row. The cell of the right marker is blank. The word `JOB SUM` fills the
-/// last cell.
+/// job-sum cell, and the word `COST` stands at the right end of the last cell.
 fn header_cells(widths: Widths) -> String {
     [
         pad_right(" ", MARKER_WIDTH),
@@ -310,6 +330,7 @@ fn header_cells(widths: Widths) -> String {
         pad_right("TIME", TIME_WIDTH),
         pad_right(" ", MARKER_WIDTH),
         pad_right(JOB_SUM_HEADER, JOB_SUM_WIDTH),
+        pad_left(COST_HEADER, COST_WIDTH),
     ]
     .join(" ")
 }
@@ -353,8 +374,9 @@ fn fit_runner(name: &RunnerName, room: usize) -> Option<String> {
 /// part of a run row, right-aligned. The branch and title columns stay blank.
 /// Thus the ID, started, time, and right marker cells stand in the same columns
 /// as those of a run row, at every frame width. The right marker repeats the
-/// left marker. The job-sum cell is blank, because the time cell of a job row
-/// shows the time of the job.
+/// left marker. The cells at the right end come from `end`. A job row passes a
+/// blank job-sum cell, because the time cell of a job row shows the time of the
+/// job. Its cost cell shows the cost of the job.
 ///
 /// The line holds these spans, in this order:
 ///
@@ -365,7 +387,8 @@ fn fit_runner(name: &RunnerName, room: usize) -> Option<String> {
 /// 4. The padding of the text cell and the other cells, in the style of the
 ///    line.
 /// 5. One space and the right marker cell, in [`MARK_STYLE`].
-/// 6. One space and the blank job-sum cell, in the style of the line.
+/// 6. One space and the job-sum cell, in the style of the line.
+/// 7. One space and the cost cell, right-aligned, in the style of the line.
 ///
 /// The two marker cells keep `Color::Reset`, and the runner name keeps its
 /// cyan, whatever color the line gets.
@@ -375,9 +398,14 @@ fn job_cells(
     text: &str,
     runner: Option<&RunnerName>,
     id: &str,
-    started: &str,
-    time: &str,
+    end: EndCells<'_>,
 ) -> Line<'static> {
+    let EndCells {
+        started,
+        time,
+        job_sum,
+        cost,
+    } = end;
     let cell = widths.repo + 1 + widths.workflow;
     let text = truncate_to_budget(text, cell);
     let room = cell.saturating_sub(text_width(&text) + 1);
@@ -411,7 +439,8 @@ fn job_cells(
         format!(" {}", pad_right(marker, MARKER_WIDTH)),
         MARK_STYLE,
     ));
-    spans.push(Span::raw(format!(" {}", " ".repeat(JOB_SUM_WIDTH))));
+    spans.push(Span::raw(format!(" {}", pad_right(job_sum, JOB_SUM_WIDTH))));
+    spans.push(Span::raw(format!(" {}", cost_cell(cost))));
     Line::from(spans)
 }
 
@@ -505,7 +534,8 @@ where
 /// A stale run has the [`STALE_MARK`] before its repository name. `cells`
 /// puts the mark there and cuts the name at its start when the name does not
 /// fit. The job-sum cell shows `job_sum`, or it is blank when `job_sum` is
-/// `None`. The line holds the spans of `cells`: the two marker cells keep
+/// `None`. The cost cell shows `cost`, or it is blank when `cost` is `None`,
+/// which is the case until the jobs of the run load. The line holds the spans of `cells`: the two marker cells keep
 /// `Color::Reset`, and the text cells take the style that the caller gives
 /// the line.
 #[expect(
@@ -518,6 +548,7 @@ fn run_line<Tz: TimeZone>(
     ended: Option<DateTime<Utc>>,
     is_stale: bool,
     job_sum: Option<Duration>,
+    cost: Option<RunCost>,
     now: DateTime<Utc>,
     tz: &Tz,
     widths: Widths,
@@ -542,6 +573,7 @@ where
             started: &format_clock(clock_instant, now, tz),
             time: &time,
             job_sum: &job_sum.map(format_elapsed).unwrap_or_default(),
+            cost: &cost.map(|cost| cost.to_string()).unwrap_or_default(),
         },
     )
 }
@@ -552,7 +584,7 @@ where
 /// the state of the entry, and the ID part holds the number of the pull
 /// request. The started cell is the time that the pull request joined the
 /// queue, and the time cell is how long it has waited until `now`. The job-sum
-/// cell is blank. The line holds the spans of `cells`.
+/// cell and the cost cell are blank. The line holds the spans of `cells`.
 fn entry_line<Tz: TimeZone>(
     entry: &QueueEntry,
     now: DateTime<Utc>,
@@ -573,6 +605,7 @@ where
             started: &format_clock(entry.enqueued_at, now, tz),
             time: &format_elapsed(span(entry.enqueued_at, now)),
             job_sum: "",
+            cost: "",
         },
     )
 }
@@ -584,7 +617,7 @@ where
 /// started cell is the time that the pull request left the queue (see
 /// [`format_clock`]), and it is never empty. The time cell is how long it
 /// stayed in the queue. It is empty when the time that it joined is not
-/// known. The job-sum cell is blank. The line holds the spans of `cells`.
+/// known. The job-sum cell and the cost cell are blank. The line holds the spans of `cells`.
 fn departure_line<Tz: TimeZone>(
     departure: &Departure,
     now: DateTime<Utc>,
@@ -615,6 +648,7 @@ where
             started: &started,
             time: &time,
             job_sum: "",
+            cost: "",
         },
     )
 }
@@ -632,11 +666,13 @@ where
 /// that waits did not start, thus its started cell is empty. The time cell of
 /// a job that waits shows how long it waited, from its creation until `now`,
 /// and is empty when the job has no creation time. The time cell of each other
-/// job shows [`Job::runner_time`], and is empty when that time is `None`.
+/// job shows [`Job::runner_time`], and is empty when that time is `None`. The
+/// cost cell shows `cost`, the cost of the job.
 fn job_line<Tz: TimeZone>(
     job: &Job,
     run: &Run,
     last: bool,
+    cost: JobCost,
     now: DateTime<Utc>,
     tz: &Tz,
     widths: Widths,
@@ -672,8 +708,12 @@ where
         &format!("{glyph} {}", job.name),
         job.runner.as_ref(),
         &job.id.0.to_string(),
-        &started,
-        &time,
+        EndCells {
+            started: &started,
+            time: &time,
+            job_sum: "",
+            cost: &cost.to_string(),
+        },
     )
 }
 
@@ -688,10 +728,10 @@ const JOBS_ERROR_PREFIX: &str = "└ ⚠ ";
 ///
 /// The marker cells are empty, the left one and the right one. The text fills
 /// the line between them and ends in `…` when it is too wide. The space before
-/// the right marker cell stays blank too, and so does the job-sum cell with its
-/// space. A status row has no time cells.
+/// the right marker cell stays blank too, and so do the job-sum cell and the
+/// cost cell with their spaces. A status row has no time cells.
 fn status_row_line(text: &str, width: usize) -> String {
-    let room = width.saturating_sub(2 * (MARKER_WIDTH + 1) + 1 + JOB_SUM_WIDTH);
+    let room = width.saturating_sub(2 * (MARKER_WIDTH + 1) + 1 + JOB_SUM_WIDTH + 1 + COST_WIDTH);
     in_repo_column(&fit(text, room))
 }
 
@@ -1321,7 +1361,10 @@ fn reverse_if(selected: bool, buffer: &mut Buffer, area: Rect, y: u16) {
 /// rows show when each pull request left the queue. With no merge history, the
 /// recent header holds the word, because its rows show when each run finished.
 /// The job-sum column stands after the right marker cell. A run row shows its
-/// `job_sum` there (see [`run_line`]), and the other rows leave it blank.
+/// `job_sum` there (see [`run_line`]), and the other rows leave it blank. The
+/// cost column stands after the job-sum column, at the right edge. A run row
+/// and a job row show their `cost` there (see [`run_line`] and [`job_line`]),
+/// and the other rows leave it blank.
 /// This function never panics, whatever the size of the frame.
 #[expect(
     clippy::too_many_lines,
@@ -1377,9 +1420,12 @@ pub fn draw<Tz: TimeZone>(
                 stale,
                 job_sum,
                 ended,
+                cost,
                 ..
             } => {
-                let line = run_line(run, *state, *ended, *stale, *job_sum, now, tz, widths);
+                let line = run_line(
+                    run, *state, *ended, *stale, *job_sum, *cost, now, tz, widths,
+                );
                 let y = put_line(buffer, index + 1, &line.style(age_style(row, now)));
                 reverse_if(*selected, buffer, area, y);
             }
@@ -1388,9 +1434,10 @@ pub fn draw<Tz: TimeZone>(
                 last,
                 selected,
                 run,
+                cost,
                 ..
             } => {
-                let line = job_line(job, run, *last, now, tz, widths);
+                let line = job_line(job, run, *last, *cost, now, tz, widths);
                 let y = put_line(buffer, index + 1, &line.style(age_style(row, now)));
                 reverse_if(*selected, buffer, area, y);
             }
@@ -4393,6 +4440,7 @@ mod tests {
                     None,
                     is_stale,
                     None,
+                    None,
                     now(),
                     &utc(),
                     Widths::for_width(frame),
@@ -6246,8 +6294,8 @@ mod tests {
                     "2026-10-14T11:00:00Z",
                     "2026-10-14T11:30:00Z",
                 );
-                let line =
-                    run_line(&run, state, None, false, None, now(), &utc(), widths).to_string();
+                let line = run_line(&run, state, None, false, None, None, now(), &utc(), widths)
+                    .to_string();
                 assert_eq!(display_width(&line), usize::from(w), "{state:?}: {line:?}");
             }
             for (id, state) in MARKER_JOB_STATES {
@@ -6269,7 +6317,8 @@ mod tests {
                     "2026-10-14T11:30:00Z",
                 );
                 for last in [false, true] {
-                    let line = job_line(&job, &run, last, now(), &utc(), widths).to_string();
+                    let line = job_line(&job, &run, last, JobCost::Unknown, now(), &utc(), widths)
+                        .to_string();
                     assert_eq!(display_width(&line), usize::from(w), "{state:?}: {line:?}");
                 }
             }
@@ -6992,6 +7041,7 @@ mod tests {
             RunState::Running,
             None,
             false,
+            None,
             None,
             now(),
             &utc(),
