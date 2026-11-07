@@ -73,14 +73,12 @@ impl fmt::Display for SkipReason {
 }
 
 use std::ffi::OsString;
-use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
-use std::process::ExitStatus;
 
 use anyhow::Result;
 use gitscratch::Scratch;
 
-use crate::child;
+use crate::child::{self, Ended};
 
 /// The exit code of the test that means skip, as `git bisect run` defines it.
 const TEST_SKIP_CODE: i32 = 125;
@@ -127,19 +125,17 @@ fn test_at(
         return Ok(Verdict::Skip(SkipReason::PatchDoesNotApply));
     }
     if let Some(build) = build {
-        let status = child::run_build(build, scratch.path())?;
-        if let Some(signal) = status.signal() {
-            return Ok(Verdict::Skip(SkipReason::BuildKilled(signal)));
-        }
-        if let Some(code) = status.code().filter(|code| *code != 0) {
-            return Ok(Verdict::Skip(SkipReason::BuildExited(code)));
+        match child::run_build(build, scratch.path())? {
+            Ended::Killed(signal) => return Ok(Verdict::Skip(SkipReason::BuildKilled(signal))),
+            Ended::Exited(0) => {}
+            Ended::Exited(code) => return Ok(Verdict::Skip(SkipReason::BuildExited(code))),
         }
     }
-    let status = child::run(test_command, scratch.path())?;
-    Ok(test_verdict(status))
+    let ended = child::run(test_command, scratch.path())?;
+    Ok(test_verdict(ended))
 }
 
-/// Map the exit status of the test to a verdict.
+/// Map the end of the test to a verdict.
 ///
 /// | Result of the test | Verdict |
 /// | --- | --- |
@@ -147,29 +143,22 @@ fn test_at(
 /// | exit code 125 | skip ([`SkipReason::TestExited125`]) |
 /// | any other exit code (`timeout` gives 124) | bad ([`TestFailure::Exited`]) |
 /// | a signal stops the test | bad ([`TestFailure::Killed`]) |
-fn test_verdict(status: ExitStatus) -> Verdict {
-    if let Some(signal) = status.signal() {
-        return Verdict::Bad(TestFailure::Killed(signal));
-    }
-    match status.code() {
-        Some(0) => Verdict::Good,
-        Some(TEST_SKIP_CODE) => Verdict::Skip(SkipReason::TestExited125),
-        Some(code) => Verdict::Bad(TestFailure::Exited(code)),
-        // A child that ended has a code or a signal, so this arm does not run.
-        None => Verdict::Bad(TestFailure::Killed(0)),
+fn test_verdict(ended: Ended) -> Verdict {
+    match ended {
+        Ended::Killed(signal) => Verdict::Bad(TestFailure::Killed(signal)),
+        Ended::Exited(0) => Verdict::Good,
+        Ended::Exited(TEST_SKIP_CODE) => Verdict::Skip(SkipReason::TestExited125),
+        Ended::Exited(code) => Verdict::Bad(TestFailure::Exited(code)),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::process::ExitStatusExt;
-    use std::process::ExitStatus;
+    use super::{test_verdict, Ended, SkipReason, TestFailure, Verdict};
 
-    use super::{test_verdict, SkipReason, TestFailure, Verdict};
-
-    /// The status of a process that exited with `code`.
-    fn exited(code: i32) -> ExitStatus {
-        ExitStatus::from_raw(code << 8)
+    /// The end of a process that exited with `code`.
+    fn exited(code: i32) -> Ended {
+        Ended::Exited(code)
     }
 
     #[test]
@@ -204,7 +193,7 @@ mod tests {
     #[test]
     fn a_death_by_signal_9_is_bad() {
         assert_eq!(
-            test_verdict(ExitStatus::from_raw(9)),
+            test_verdict(Ended::Killed(9)),
             Verdict::Bad(TestFailure::Killed(9))
         );
     }
