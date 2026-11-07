@@ -23,9 +23,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  # A new push to a pull request stops the run of the old push. Each push to
-  # main keeps its full run.
+  # A new push to a pull request stops the run of the old push. Each other run
+  # (a push to main, a manual start) has a group of its own. GitHub keeps only
+  # one pending run in a group and cancels it when a newer run queues, also
+  # with cancel-in-progress false.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
