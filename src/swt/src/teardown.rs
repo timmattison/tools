@@ -68,7 +68,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 #[cfg(unix)]
 use {
     crate::lock::{holds_any_lock, release_all_held_locks},
-    signal_hook::consts::{SIGINT, SIGTERM},
+    signal_hook::consts::{SIGHUP, SIGINT, SIGTERM},
     signal_hook::iterator::Signals,
     signal_hook::low_level::emulate_default_handler,
     std::os::raw::c_int,
@@ -85,7 +85,7 @@ use crate::green_check::Outcome;
 /// SIGINT is the terminal's Ctrl-C and SIGTERM the polite kill. SIGKILL is the
 /// one no program is allowed to handle, and `swt` does not pretend otherwise.
 #[cfg(unix)]
-const TERMINATION_SIGNALS: [c_int; 2] = [SIGINT, SIGTERM];
+const TERMINATION_SIGNALS: [c_int; 3] = [SIGHUP, SIGINT, SIGTERM];
 
 /// The conventional shell status for a death by signal: 128 plus the signal
 /// number, so SIGINT is 130 and SIGTERM is 143.
