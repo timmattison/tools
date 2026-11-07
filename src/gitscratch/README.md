@@ -193,7 +193,7 @@ A `compile_fail` doc-test holds the derive out — see **Testing** below.
 to get a `Scratch`. A `Scratch` answers the operations it names —
 `check_out_detached`, `replay_rebase`, `replay_rebase_with_diffs`,
 `replay_merge`, `replay_merge_with_diffs`, `head_tree`, `commit_tree`,
-`apply_patch` — and
+`apply_patch`, `restore` — and
 each of them builds its own git call under the whole safety configuration. So there is no way to get a worktree from here without also
 getting the hardening — nor without first having established that the directory
 is a repository at all, which is the pre-flight's job below.

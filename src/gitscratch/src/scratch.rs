@@ -326,14 +326,22 @@ impl Scratch {
         Ok(output.success)
     }
 
-    /// Remove the untracked files of the scratch worktree.
+    /// Remove the untracked files and directories of the scratch worktree.
     ///
-    /// Not yet implemented.
+    /// This runs `git clean -f -d -q`. It never passes `-x`, so ignored files
+    /// stay. Build output that a `.gitignore` names thus survives between two
+    /// steps of a search, and a rebuild stays cheap. A tracked file that a
+    /// step changed is not restored here.
     ///
     /// # Errors
     ///
-    /// Returns an error if git fails.
+    /// Returns an error if git could not be spawned, or if git refused the
+    /// clean.
     pub fn restore(&self) -> Result<()> {
+        self.git()
+            .run("clean", &["-f", "-d", "-q"])
+            .context("could not remove the untracked files of the scratch worktree")?;
+
         Ok(())
     }
 
