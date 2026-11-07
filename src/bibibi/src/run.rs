@@ -81,10 +81,11 @@ fn preflight(
     cli: &Cli,
     goods: &[Commit],
     bad: &Commit,
+    width: usize,
 ) -> Result<()> {
     for good in goods {
         interrupt::check()?;
-        let verdict = preflight_step(repo, scratch, patch, cli, good)?;
+        let verdict = preflight_step(repo, scratch, patch, cli, good, width)?;
         let why = match verdict {
             Verdict::Good => continue,
             Verdict::Bad(failure) => failure.to_string(),
@@ -96,7 +97,7 @@ fn preflight(
         );
     }
     interrupt::check()?;
-    let verdict = preflight_step(repo, scratch, patch, cli, bad)?;
+    let verdict = preflight_step(repo, scratch, patch, cli, bad, width)?;
     let why = match verdict {
         Verdict::Bad(_) => return Ok(()),
         Verdict::Good => "the test exited 0".to_string(),
@@ -108,13 +109,14 @@ fn preflight(
     )
 }
 
-/// Run one step for the pre-flight and print its line.
+/// Run one step for the pre-flight and print its line, at most `width` columns wide.
 fn preflight_step(
     repo: &Repo,
     scratch: &Scratch,
     patch: &Path,
     cli: &Cli,
     commit: &Commit,
+    width: usize,
 ) -> Result<Verdict> {
     let verdict = step(
         scratch,
@@ -126,7 +128,7 @@ fn preflight_step(
     let subject = repo.subject(&commit.0)?;
     eprintln!(
         "{}",
-        report::preflight_line(usize::MAX, &commit.short(), verdict, &subject)
+        report::preflight_line(width, &commit.short(), verdict, &subject)
     );
     Ok(verdict)
 }
@@ -191,7 +193,9 @@ fn search(cli: &Cli) -> Result<Outcome> {
 
     let scratch = repo.scratch(&bad.0)?;
 
-    preflight(&repo, &scratch, patch_file.path(), cli, &goods, &bad)?;
+    // The width is read one time. A progress line fits it, see `report`.
+    let width = usize::from(termbar::TerminalWidth::get_or_default());
+    preflight(&repo, &scratch, patch_file.path(), cli, &goods, &bad, width)?;
 
     let candidates = loop {
         interrupt::check()?;
@@ -229,7 +233,7 @@ fn search(cli: &Cli) -> Result<Outcome> {
         let subject = repo.subject(&next.0)?;
         eprintln!(
             "{}",
-            report::progress_line(usize::MAX, &next.short(), verdict, &subject, steps_left)
+            report::progress_line(width, &next.short(), verdict, &subject, steps_left)
         );
     };
 
