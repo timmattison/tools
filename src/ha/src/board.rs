@@ -1401,6 +1401,7 @@ mod tests {
     /// Builds a run. The times are minutes before `now()`.
     fn run(id: u64, repo_text: &str, state: RunState, started: i64, updated: i64) -> Run {
         Run {
+            visibility: crate::run::Visibility::Private,
             id: RunId(id),
             repo: repo(repo_text),
             workflow: "ci".to_owned(),
@@ -4601,6 +4602,7 @@ mod tests {
     /// changed its `updated_at` 18 minutes after the last job ended.
     fn late_run() -> Run {
         Run {
+            visibility: crate::run::Visibility::Private,
             id: RunId(41_874_496_263),
             repo: repo("Lock-Free-Labs/nvr-tools"),
             workflow: "ci".to_owned(),

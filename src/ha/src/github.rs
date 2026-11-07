@@ -133,6 +133,7 @@ fn run_of(json: RunJson, repo: &RepoName) -> Run {
     let workflow = json.name.unwrap_or_default();
     let status = json.status.unwrap_or_default();
     Run {
+        visibility: crate::run::Visibility::Private,
         id: RunId(json.id),
         repo: repo.clone(),
         state: RunState::from_github(&status, json.conclusion.as_deref()),
@@ -1760,6 +1761,7 @@ mod tests {
 
     use super::*;
     use crate::billing::EnterpriseSlug;
+    use crate::run::Visibility;
 
     /// A time limit that no stub that finishes comes near.
     const GENEROUS_LIMIT: Duration = Duration::from_secs(60);
@@ -1845,6 +1847,36 @@ mod tests {
          "html_url":"https://github.com/timmattison/tools/actions/runs/7"}]}"#;
 
     #[test]
+    fn the_visibility_of_a_run_comes_from_repository_private() {
+        let body = r#"{"total_count":4,"workflow_runs":[
+            {"id":1,"name":"CI","created_at":"2026-09-25T01:02:03Z","updated_at":"2026-09-25T01:03:00Z",
+             "html_url":"u1","repository":{"full_name":"o/r","private":false}},
+            {"id":2,"name":"CI","created_at":"2026-09-25T01:02:03Z","updated_at":"2026-09-25T01:03:00Z",
+             "html_url":"u2","repository":{"full_name":"o/r","private":true}},
+            {"id":3,"name":"CI","created_at":"2026-09-25T01:02:03Z","updated_at":"2026-09-25T01:03:00Z",
+             "html_url":"u3"},
+            {"id":4,"name":"CI","created_at":"2026-09-25T01:02:03Z","updated_at":"2026-09-25T01:03:00Z",
+             "html_url":"u4","repository":{"full_name":"o/r","private":null}}]}"#;
+        let page = parse_runs(body, &repo("o/r")).expect("a page");
+        let visibilities: Vec<Visibility> = page.runs.iter().map(|run| run.visibility).collect();
+        assert_eq!(
+            visibilities,
+            [
+                Visibility::Public,
+                Visibility::Private,
+                Visibility::Private,
+                Visibility::Private
+            ]
+        );
+    }
+
+    #[test]
+    fn a_run_with_a_repository_that_has_no_private_value_counts_as_private() {
+        let page = parse_runs(RUNS_JSON, &repo("timmattison/tools")).expect("a page");
+        assert_eq!(page.runs[0].visibility, Visibility::Private);
+    }
+
+    #[test]
     fn the_runs_json_maps_to_runs() {
         let tools = repo("timmattison/tools");
         let page = parse_runs(RUNS_JSON, &tools).expect("a page");
@@ -1853,6 +1885,7 @@ mod tests {
             page.runs,
             [
                 Run {
+                    visibility: crate::run::Visibility::Private,
                     id: RunId(36_064_582_280),
                     repo: tools.clone(),
                     workflow: "CI".to_owned(),
@@ -1865,6 +1898,7 @@ mod tests {
                     url: "https://github.com/timmattison/tools/actions/runs/36064582280".to_owned(),
                 },
                 Run {
+                    visibility: crate::run::Visibility::Private,
                     id: RunId(7),
                     repo: tools,
                     workflow: "Release".to_owned(),
@@ -2276,6 +2310,7 @@ mod tests {
         assert_eq!(
             run,
             Ok(Some(Run {
+                visibility: crate::run::Visibility::Private,
                 id: RunId(42),
                 repo: repo("o/r"),
                 workflow: "CI".to_owned(),

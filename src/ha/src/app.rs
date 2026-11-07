@@ -665,6 +665,7 @@ mod tests {
     /// An active run that started `started` minutes before `now`.
     fn active_run(id: u64, started: i64) -> Run {
         Run {
+            visibility: crate::run::Visibility::Private,
             id: RunId(id),
             repo: repo(),
             workflow: "ci".to_owned(),

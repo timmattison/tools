@@ -1995,6 +1995,7 @@ mod tests {
         updated: &str,
     ) -> Run {
         Run {
+            visibility: crate::run::Visibility::Private,
             id: RunId(id),
             repo: repo(repo_text),
             workflow: workflow.to_owned(),

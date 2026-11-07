@@ -1980,6 +1980,7 @@ mod tests {
     fn run(repo_text: &str, id: u64) -> Run {
         let at = Utc::now();
         Run {
+            visibility: crate::run::Visibility::Private,
             id: RunId(id),
             repo: repo(repo_text),
             workflow: "ci".to_owned(),

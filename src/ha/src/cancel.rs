@@ -199,6 +199,7 @@ mod tests {
     fn a_confirm_copies_what_the_box_shows_from_the_run_and_the_job() {
         let time = chrono::DateTime::<chrono::Utc>::UNIX_EPOCH;
         let run = Run {
+            visibility: crate::run::Visibility::Private,
             id: RunId(39_149_840_084),
             repo: repo("timmattison/tools"),
             workflow: "CI".to_owned(),
