@@ -14,7 +14,10 @@ fn build_failing_at(broken: &[usize]) -> String {
     format!("echo building; {}", tests.join(" && "))
 }
 
-const BROKEN_AT: usize = 3;
+/// The commits whose build fails. The search tests commit 5 or commit 6 first
+/// (git breaks the tie with the ids), and then commit 3, 4, 7, or 8 (another
+/// tie). Thus every run skips at least one commit, and never commit 5 or 6.
+const BROKEN: [usize; 4] = [3, 4, 7, 8];
 
 const VALUES: [&str; 10] = [
     "good", "good", "good", "good", "good", "bad", "bad", "bad", "bad", "bad",
@@ -25,7 +28,7 @@ fn a_build_that_fails_away_from_the_culprit_does_not_change_the_result() {
     let repo = TestRepo::init();
     let ids = linear_history(&repo, &VALUES);
     add_test_commit(&repo);
-    let build = build_failing_at(&[BROKEN_AT]);
+    let build = build_failing_at(&BROKEN);
 
     let output = bibibi(
         repo.path(),

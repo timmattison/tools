@@ -12,6 +12,9 @@ use std::process::ExitCode;
 use buildinfo::version_string;
 use clap::Parser;
 
+/// Exit code when skips leave more than one candidate.
+const EXIT_AMBIGUOUS: u8 = 1;
+
 /// Exit code for a usage error, a refusal, or a git error.
 const EXIT_ERROR: u8 = 2;
 
@@ -43,7 +46,8 @@ struct Cli {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match run::run(&cli) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(run::Outcome::Found) => ExitCode::SUCCESS,
+        Ok(run::Outcome::Ambiguous) => ExitCode::from(EXIT_AMBIGUOUS),
         Err(error) => {
             eprintln!("bibibi: {error:#}");
             ExitCode::from(EXIT_ERROR)

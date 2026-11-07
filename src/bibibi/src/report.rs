@@ -5,15 +5,16 @@ use crate::step::{SkipReason, Verdict};
 /// The progress line of one tested commit, without the line end.
 ///
 /// The line is `bibibi: <short> <verdict> <subject> - about <n> step(s) left`.
-/// The verdict is padded to four columns.
+/// The verdict is padded to four columns. A skip adds its reason after the
+/// subject: `bibibi: <short> skip <subject> - <reason> - about <n> steps left`.
 pub fn progress_line(short: &str, verdict: Verdict, subject: &str, steps_left: u32) -> String {
-    let word = match verdict {
-        Verdict::Good => "good",
-        Verdict::Bad => "bad ",
-        Verdict::Skip(_) => return String::new(),
+    let (word, reason) = match verdict {
+        Verdict::Good => ("good", String::new()),
+        Verdict::Bad => ("bad ", String::new()),
+        Verdict::Skip(reason) => ("skip", format!(" - {reason}")),
     };
     let unit = if steps_left == 1 { "step" } else { "steps" };
-    format!("bibibi: {short} {word} {subject} - about {steps_left} {unit} left")
+    format!("bibibi: {short} {word} {subject}{reason} - about {steps_left} {unit} left")
 }
 
 /// The result line: the full id and the subject of the first bad commit.
@@ -24,13 +25,16 @@ pub fn result_line(id: &str, subject: &str) -> String {
 /// The result line of one candidate, when skips leave more than one.
 ///
 /// `skipped` is the reason for a skipped commit, or `None` for the bad commit.
-pub fn candidate_line(_id: &str, _subject: &str, _skipped: Option<SkipReason>) -> String {
-    String::new()
+pub fn candidate_line(id: &str, subject: &str, skipped: Option<SkipReason>) -> String {
+    match skipped {
+        Some(reason) => format!("{id} {subject} - skipped: {reason}"),
+        None => format!("{id} {subject} - bad"),
+    }
 }
 
 /// The line on standard error that says how many candidates the skips leave.
-pub fn skips_leave_line(_candidates: usize) -> String {
-    String::new()
+pub fn skips_leave_line(candidates: usize) -> String {
+    format!("bibibi: skips leave {candidates} candidates for the first bad commit")
 }
 
 #[cfg(test)]
