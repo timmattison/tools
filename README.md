@@ -2162,6 +2162,19 @@ cannot hang the caller. Used by `cwt` and `ha`.
       started. The rows are in order of finish time, thus the times in the column decrease from
       the top down. The time column still shows how long the run took, thus you can calculate
       when the run started.
+    - A run finishes when its last job finishes. GitHub can change the `updated_at` of a run
+      after that time. On 2026-11-06, 4 of the 29 finished runs of one repository since
+      2026-10-25 had an `updated_at` from 59 seconds to 18 minutes after their last job
+      finished. Thus `ha` reads the finish time of a run from its jobs. The started column, the
+      time column, the order of the rows, and the fade all use that time.
+    - `ha` uses `updated_at` until it holds the jobs of the run, and also while a job of the run
+      waits or runs in the jobs that it holds. Thus a row can move down when its jobs arrive. The
+      highlight stays on its run.
+    - The window still uses `updated_at`: a run shows while its `updated_at` is in the last 8
+      hours. If the window used the finish time from the jobs, a run at the oldest edge of the
+      window can leave the section when its jobs arrive. Then `ha` drops the jobs of the run, and
+      the run comes back with `updated_at` as its finish time. Thus a row at the bottom of the
+      section can show a finish time that is older than the window.
     - When no merge queue shows, the header of the section shows the word `FINISHED` in that
       column, below the `STARTED` of the column header. When the merge queue sections show, the
       word stands in the header of "Merge history" instead, because one word heads the two

@@ -490,18 +490,25 @@ where
 }
 
 /// The line of one run. `state` is the state that the row shows, not the state
-/// that GitHub reports. It sets the marker and the time cells. The started
-/// cell shows the start time of an active run. It shows the finish time
-/// (`Run::updated_at`) of a finished run, which stands in the recent section.
+/// that GitHub reports. It sets the marker. `ended` is the end of a finished
+/// run (`Row::Run::ended`), and `None` for an active run. The started cell
+/// shows the start time of an active run. It shows the end of a finished run,
+/// which stands in the recent section. The time cell runs from the start to
+/// the end, or to `now` for an active run.
 /// A stale run has the [`STALE_MARK`] before its repository name. `cells`
 /// puts the mark there and cuts the name at its start when the name does not
 /// fit. The job-sum cell shows `job_sum`, or it is blank when `job_sum` is
 /// `None`. The line holds the spans of `cells`: the two marker cells keep
 /// `Color::Reset`, and the text cells take the style that the caller gives
 /// the line.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is a distinct fact of the run row or of the view; a parameter struct would only rename them"
+)]
 fn run_line<Tz: TimeZone>(
     run: &Run,
     state: RunState,
+    ended: Option<DateTime<Utc>>,
     is_stale: bool,
     job_sum: Option<Duration>,
     now: DateTime<Utc>,
@@ -511,17 +518,8 @@ fn run_line<Tz: TimeZone>(
 where
     Tz::Offset: Display,
 {
-    let time = if state.is_active() {
-        format_elapsed(span(run.started_at, now))
-    } else {
-        format_elapsed(span(run.started_at, run.updated_at))
-    };
-    // `Board::sections` decides the section from `run.state`, thus the cell does too.
-    let clock_instant = if run.state.is_finished() {
-        run.updated_at
-    } else {
-        run.started_at
-    };
+    let time = format_elapsed(span(run.started_at, ended.unwrap_or(now)));
+    let clock_instant = ended.unwrap_or(run.started_at);
     cells(
         widths,
         marker(state),
@@ -1248,27 +1246,26 @@ fn layout_status(left: &str, mark: Option<&str>, width: usize) -> StatusLayout {
 /// [`ROW_RAMP`], from index 253 at age zero to index 238 at an age of
 /// [`ROW_FADE_END`] (2 hours). An older row keeps index 238. The window of
 /// the board does not change the fade. The age of a run row is the time since
-/// the run ended. The age of a departure row is the time since the pull
-/// request left the queue. Live work (an active run and a queue entry) and the
-/// highlighted row keep the default color, because a reversed dark gray gives
-/// a dark bar that is hard to see. A job row of a finished run fades with its
-/// run, by the time since the run ended. A job row of an active run keeps the
-/// default color. Every other row keeps the default color too.
+/// the end of the run (`Row::Run::ended`). The age of a departure row is the
+/// time since the pull request left the queue. Live work (an active run and a
+/// queue entry) and the highlighted row keep the default color, because a
+/// reversed dark gray gives a dark bar that is hard to see. A job row of a
+/// finished run fades with its run, by the same end. A job row of an active
+/// run keeps the default color. Every other row keeps the default color too.
 fn age_style(row: &Row<'_>, now: DateTime<Utc>) -> Style {
     let faded =
         |ended: DateTime<Utc>| Style::default().fg(ROW_RAMP.color(span(ended, now), ROW_FADE_END));
     match row {
         Row::Run {
-            run,
-            state,
+            ended: Some(end),
             selected: false,
             ..
-        } if state.is_finished() => faded(run.updated_at),
-        Row::Job {
-            run,
+        }
+        | Row::Job {
+            run_ended: Some(end),
             selected: false,
             ..
-        } if run.state.is_finished() => faded(run.updated_at),
+        } => faded(*end),
         Row::Departure {
             departure,
             selected: false,
@@ -1368,8 +1365,9 @@ pub fn draw<Tz: TimeZone>(
                 selected,
                 stale,
                 job_sum,
+                ended,
             } => {
-                let line = run_line(run, *state, *stale, *job_sum, now, tz, widths);
+                let line = run_line(run, *state, *ended, *stale, *job_sum, now, tz, widths);
                 let y = put_line(buffer, index + 1, &line.style(age_style(row, now)));
                 reverse_if(*selected, buffer, area, y);
             }
@@ -1378,6 +1376,7 @@ pub fn draw<Tz: TimeZone>(
                 last,
                 selected,
                 run,
+                ..
             } => {
                 let line = job_line(job, run, *last, now, tz, widths);
                 let y = put_line(buffer, index + 1, &line.style(age_style(row, now)));
@@ -1403,34 +1402,54 @@ pub fn draw<Tz: TimeZone>(
             }
         }
     }
-    if usize::from(area.height) >= FIXED_LINES {
-        let layout = layout_status(
-            &status_line(board, status, now, tz, prompt.is_none()),
-            status.refreshing.then_some(REFRESH_MARK),
-            usize::from(area.width),
-        );
-        let y = put(
-            buffer,
-            usize::from(area.height) - 1,
-            &layout.text,
-            Style::default(),
-        );
-        if let Some(message) = status.message_at(now) {
-            let width = Span::raw(message.text.as_str())
-                .width()
-                .min(layout.left_room);
-            let width = u16::try_from(width).unwrap_or(u16::MAX);
-            buffer.set_style(
-                Rect::new(area.x, y, width, 1),
-                Style::default().fg(message_color(span(message.posted_at, now))),
-            );
-        }
-    }
+    draw_status_line(buffer, area, board, status, now, tz, prompt.is_none());
     if let Some(shown) = &billing_box {
         draw_billing_box(buffer, area, shown);
     }
     if let Some(prompt) = prompt {
         draw_prompt(buffer, area, prompt);
+    }
+}
+
+/// Draws the status line on the last row of `area`.
+///
+/// With `hints`, the line shows the key hints. A message of `status` takes the
+/// color of its age. The function draws nothing when the frame is shorter than
+/// [`FIXED_LINES`].
+fn draw_status_line<Tz: TimeZone>(
+    buffer: &mut Buffer,
+    area: Rect,
+    board: &Board,
+    status: &Status,
+    now: DateTime<Utc>,
+    tz: &Tz,
+    hints: bool,
+) where
+    Tz::Offset: Display,
+{
+    if usize::from(area.height) < FIXED_LINES {
+        return;
+    }
+    let layout = layout_status(
+        &status_line(board, status, now, tz, hints),
+        status.refreshing.then_some(REFRESH_MARK),
+        usize::from(area.width),
+    );
+    let y = put(
+        buffer,
+        usize::from(area.height) - 1,
+        &layout.text,
+        Style::default(),
+    );
+    if let Some(message) = status.message_at(now) {
+        let width = Span::raw(message.text.as_str())
+            .width()
+            .min(layout.left_room);
+        let width = u16::try_from(width).unwrap_or(u16::MAX);
+        buffer.set_style(
+            Rect::new(area.x, y, width, 1),
+            Style::default().fg(message_color(span(message.posted_at, now))),
+        );
     }
 }
 
@@ -2047,6 +2066,26 @@ mod tests {
         board
     }
 
+    /// Draws one frame in the time zone `tz` at the time `now` and returns the buffer.
+    fn render_at_in<Tz: TimeZone>(
+        width: u16,
+        height: u16,
+        board: &mut Board,
+        status: &Status,
+        now: DateTime<Utc>,
+        tz: &Tz,
+    ) -> Buffer
+    where
+        Tz::Offset: Display,
+    {
+        let mut terminal =
+            Terminal::new(TestBackend::new(width, height)).expect("a test terminal opens");
+        terminal
+            .draw(|frame| draw(frame, board, status, now, tz, None, None))
+            .expect("a test frame draws");
+        terminal.backend().buffer().clone()
+    }
+
     /// Draws one frame in the time zone `tz` and returns the buffer.
     fn render_in<Tz: TimeZone>(
         width: u16,
@@ -2058,17 +2097,23 @@ mod tests {
     where
         Tz::Offset: Display,
     {
-        let mut terminal =
-            Terminal::new(TestBackend::new(width, height)).expect("a test terminal opens");
-        terminal
-            .draw(|frame| draw(frame, board, status, now(), tz, None, None))
-            .expect("a test frame draws");
-        terminal.backend().buffer().clone()
+        render_at_in(width, height, board, status, now(), tz)
     }
 
     /// Draws one frame in UTC and returns the buffer.
     fn render_with(width: u16, height: u16, board: &mut Board, status: &Status) -> Buffer {
         render_in(width, height, board, status, &utc())
+    }
+
+    /// Draws one frame in UTC at the time `now` and returns the buffer.
+    fn render_at(
+        width: u16,
+        height: u16,
+        board: &mut Board,
+        status: &Status,
+        now: DateTime<Utc>,
+    ) -> Buffer {
+        render_at_in(width, height, board, status, now, &utc())
     }
 
     /// Reads each line of a buffer as text. A wide glyph fills one cell and
@@ -2946,7 +2991,7 @@ mod tests {
                 "Bump deps",
                 RunState::Failed,
                 "2026-10-14T09:00:00Z",
-                "2026-10-14T09:10:05Z",
+                "2026-10-14T09:04:00Z",
             )],
             now(),
         );
@@ -2992,7 +3037,7 @@ mod tests {
         assert_eq!(time_cells(&text, lint_row), "45s");
         assert_eq!(time_cells(&text, test_row), "");
         // The job rows agree with their run.
-        assert_eq!(started_cells(&text, run_row), "09:10:05");
+        assert_eq!(started_cells(&text, run_row), "09:04:00");
     }
 
     #[test]
@@ -4038,6 +4083,7 @@ mod tests {
                 let line = run_line(
                     &long,
                     RunState::Running,
+                    None,
                     is_stale,
                     None,
                     now(),
@@ -5711,6 +5757,72 @@ mod tests {
             .unwrap_or_else(|| panic!("no row holds {needle:?}: {text:?}"))
     }
 
+    /// The time now in the tests of the late run, 2026-11-04 at 18:00:00 UTC.
+    /// It is after the run ended.
+    fn late_now() -> DateTime<Utc> {
+        at("2026-11-04T18:00:00Z")
+    }
+
+    /// Run 41874496263 of `Lock-Free-Labs/nvr-tools`. It passed. GitHub changed
+    /// its `updated_at` 18 minutes after its last job ended.
+    fn late_run() -> Run {
+        run(
+            41_874_496_263,
+            "Lock-Free-Labs/nvr-tools",
+            "CI",
+            "issue-325",
+            "Late update",
+            RunState::Passed,
+            "2026-11-04T17:07:48Z",
+            "2026-11-04T17:40:55Z",
+        )
+    }
+
+    /// The two jobs of [`late_run`]. The last one ends at 17:22:45.
+    fn late_jobs() -> Vec<Job> {
+        vec![
+            job(
+                126_730_108_923,
+                "Full check list (Linux)",
+                RunState::Passed,
+                Some("2026-11-04T17:07:51Z"),
+                Some("2026-11-04T17:22:45Z"),
+            ),
+            job(
+                126_730_109_123,
+                "Clippy (Windows)",
+                RunState::Passed,
+                Some("2026-11-04T17:07:53Z"),
+                Some("2026-11-04T17:12:05Z"),
+            ),
+        ]
+    }
+
+    // GitHub changed `updated_at` of this run 18 minutes after its last job
+    // ended. The row shows the end of the last job, not `updated_at`.
+    #[test]
+    fn a_finished_run_shows_the_end_of_its_last_job() {
+        let now = late_now();
+        let mut board = Board::new(Duration::from_hours(8));
+        board.replace(repo("Lock-Free-Labs/nvr-tools"), vec![late_run()], now);
+        board.set_jobs(late_run().id, late_jobs());
+        let buffer = render_at(120, 10, &mut board, &loaded(), now);
+        let text = lines(&buffer);
+        let y = row_holding(&text, "41874496263");
+        assert_eq!(
+            started_cells(&text, y),
+            "17:22:45",
+            "FINISHED is the end of the last job: {:?}",
+            text[y]
+        );
+        assert_eq!(
+            time_cells(&text, y),
+            "14m 57s",
+            "TIME runs to the end of the last job: {:?}",
+            text[y]
+        );
+    }
+
     #[test]
     fn no_marker_cell_has_a_foreground_color() {
         let mut board = marker_board();
@@ -5821,7 +5933,8 @@ mod tests {
                     "2026-10-14T11:00:00Z",
                     "2026-10-14T11:30:00Z",
                 );
-                let line = run_line(&run, state, false, None, now(), &utc(), widths).to_string();
+                let line =
+                    run_line(&run, state, None, false, None, now(), &utc(), widths).to_string();
                 assert_eq!(display_width(&line), usize::from(w), "{state:?}: {line:?}");
             }
             for (id, state) in MARKER_JOB_STATES {
@@ -6544,6 +6657,7 @@ mod tests {
         let reference = run_line(
             &fresh,
             RunState::Running,
+            None,
             false,
             None,
             now(),
@@ -7490,8 +7604,8 @@ mod tests {
                         9001 + index,
                         &format!("job-{index}"),
                         RunState::Passed,
-                        Some("2026-10-14T07:01:00Z"),
-                        Some("2026-10-14T07:05:00Z"),
+                        Some("2026-10-14T10:55:00Z"),
+                        Some("2026-10-14T11:00:00Z"),
                     );
                     if index == 0 {
                         on("mbp", built)
@@ -7503,6 +7617,41 @@ mod tests {
         );
         board.select_previous(now());
         board
+    }
+
+    // GitHub changed `updated_at` of this run 18 minutes after its last job
+    // ended. The run row and its job rows fade from the end of the last job,
+    // not from `updated_at`.
+    #[test]
+    fn a_finished_run_and_its_jobs_fade_from_the_end_of_its_last_job() {
+        let now = late_now();
+        let mut board = Board::new(Duration::from_hours(8));
+        board.replace(
+            repo("timmattison/tools"),
+            vec![run(
+                7001,
+                "timmattison/tools",
+                "CI",
+                "main",
+                "Live work",
+                RunState::Running,
+                "2026-11-04T17:45:30Z",
+                "2026-11-04T17:59:00Z",
+            )],
+            now,
+        );
+        board.replace(repo("Lock-Free-Labs/nvr-tools"), vec![late_run()], now);
+        board.select_next(now);
+        board.expand(now);
+        board.set_jobs(late_run().id, late_jobs());
+        board.select_previous(now);
+        let buffer = render_at(120, 12, &mut board, &loaded(), now);
+        let from_end = ROW_RAMP.color(Duration::from_secs(37 * 60 + 15), ROW_FADE_END);
+        let from_update = ROW_RAMP.color(Duration::from_secs(19 * 60 + 5), ROW_FADE_END);
+        assert_ne!(from_end, from_update, "the test must tell the two apart");
+        for id in ["41874496263", "126730108923", "126730109123"] {
+            assert_text_color(&buffer, row_of(&buffer, id), from_end);
+        }
     }
 
     #[test]
