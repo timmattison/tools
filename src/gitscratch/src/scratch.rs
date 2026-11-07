@@ -645,7 +645,8 @@ impl Scratch {
         // `refuses_an_upstream_that_starts_with_a_dash_rather_than_replaying_onto_the_root`.
         //
         // `--onto=` is joined to its value, so the value binds to the option
-        // whatever its first character is.
+        // whatever its first character is. Pinned by
+        // `refuses_a_new_base_that_names_no_commit_rather_than_replaying_onto_it`.
         let onto_option = new_base.map(|base| format!("--onto={base}"));
         let mut rebase_args: Vec<&str> = onto_option.as_deref().into_iter().collect();
         rebase_args.extend(["--end-of-options", upstream]);
@@ -1591,7 +1592,7 @@ mod tests {
     use crate::git::Git;
     use crate::metrics::{Hunks, Stops};
     use crate::repo::PREFLIGHT_HOOKS_PATH;
-    use crate::testing::{contested_region_repo, TestRepo};
+    use crate::testing::{contested_region_repo, squash_merged_parent_repo, TestRepo};
 
     /// How many rounds replaying `iterated` onto `single` spends.
     ///
@@ -2050,6 +2051,62 @@ mod tests {
             control.stops(),
             Stops::new(CONTESTED_ROUNDS),
             "the fixture has to cost something, or the refusal above proves only that this \
+             replay answers nothing at all"
+        );
+    }
+
+    /// A new base that names no commit stops the `--onto` replay, whatever its
+    /// first character is.
+    ///
+    /// Both entrances are public, so a caller can reach them without the
+    /// pre-flight `Repo::resolve` that `grind` runs. `--onto=` is joined to its
+    /// value, so `--root` arrives as a value and not as the `--root` option of
+    /// `git rebase`. Git refuses a value that names no commit, and the refusal
+    /// names that value.
+    ///
+    /// The control replays a revision that does name a commit, on the same
+    /// scratch worktree, because an entrance that refused every new base would
+    /// pass the assertions above it and answer nothing at all.
+    #[test]
+    fn refuses_a_new_base_that_names_no_commit_rather_than_replaying_onto_it() {
+        const BAD_NEW_BASES: [&str; 2] = ["--root", "nope"];
+        const STOPS_ONTO_MAIN: usize = 1;
+
+        let repo = squash_merged_parent_repo();
+        let scratch = repo.scratch("main");
+        scratch
+            .git()
+            .run("checkout", &["-q", "--detach", "contested-child"])
+            .expect("check out the branch detached in the scratch worktree");
+
+        for new_base in BAD_NEW_BASES {
+            let plain = scratch
+                .replay_rebase_onto(new_base, "parent")
+                .map(|conflicts| format!("{conflicts:?}"))
+                .expect_err("a new base that names no commit has to stop the plain replay");
+            assert!(
+                format!("{plain:#}").contains(new_base),
+                "the refusal of the plain entrance has to name `{new_base}`: {plain:#}"
+            );
+
+            let capturing = scratch
+                .replay_rebase_onto_with_diffs(new_base, "parent")
+                .map(|(conflicts, _)| format!("{conflicts:?}"))
+                .expect_err("a new base that names no commit has to stop the capturing replay");
+            assert!(
+                format!("{capturing:#}").contains(new_base),
+                "the refusal of the capturing entrance has to name `{new_base}`: {capturing:#}"
+            );
+        }
+
+        let control = scratch
+            .replay_rebase_onto("main", "parent")
+            .expect("replay onto a revision the fixture really has");
+
+        assert_eq!(
+            control.stops(),
+            Stops::new(STOPS_ONTO_MAIN),
+            "the fixture has to cost something, or the refusals above prove only that this \
              replay answers nothing at all"
         );
     }
