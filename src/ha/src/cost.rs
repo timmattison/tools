@@ -379,7 +379,8 @@ impl fmt::Display for JobCost {
     /// Writes the cell text: `?` for an unknown cost, else the exact amount.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            JobCost::Known(_) | JobCost::Unknown => Ok(()),
+            JobCost::Known(amount) => write_exact(f, *amount),
+            JobCost::Unknown => f.write_str(UNKNOWN_TEXT),
         }
     }
 }
@@ -388,8 +389,11 @@ impl fmt::Display for RunCost {
     /// Writes the cell text. An exact cost shows as an amount. A lower bound
     /// starts with `≥` and rounds down to cents.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let _ = f;
-        Ok(())
+        if self.partial {
+            write_lower_bound(f, self.amount)
+        } else {
+            write_exact(f, self.amount)
+        }
     }
 }
 

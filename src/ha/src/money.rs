@@ -249,7 +249,8 @@ mod tests {
     #[test]
     fn multiplying_by_minutes_is_exact() {
         assert_eq!(Usd::from_mills(6) * 27, usd(0.162));
-        assert_eq!(Usd::from_mills(6) * 0, Usd::ZERO);
+        let no_minutes: u64 = "0".parse().unwrap();
+        assert_eq!(Usd::from_mills(6) * no_minutes, Usd::ZERO);
         assert_eq!(Usd::from_mills(6) * 1000, usd(6.0));
     }
 
