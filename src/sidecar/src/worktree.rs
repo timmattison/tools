@@ -62,7 +62,9 @@ pub fn point(host: &Host, raw_name: &str, branch: Option<&str>) -> anyhow::Resul
             warnings,
         });
     }
-    if let Some(existing) = worktree_on_branch(host, &main_clone, &branch)? {
+    if let Some(record) = worktree_on_branch(host, &main_clone, &branch)? {
+        require_live_worktree(&record, &branch, &main_clone)?;
+        let existing = record.path;
         point_link(&host.link(&name), &existing)
             .with_context(|| format!("cannot change {}", host.link_shown(&name)))?;
         return Ok(Pointed {
@@ -216,14 +218,56 @@ fn add_worktree(host: &Host, main_clone: &Path, args: &[&str]) -> anyhow::Result
     }
 }
 
-/// Finds the worktree of the main clone that has `branch` checked out. The function
-/// reads `git worktree list --porcelain -z`: the fields end with a NUL, and an empty
-/// field ends a record.
+/// One record of `git worktree list --porcelain -z`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WorktreeRecord {
+    /// The path of the worktree.
+    path: PathBuf,
+    /// The branch that the worktree has checked out, if any.
+    branch: Option<String>,
+    /// True when the record has a `locked` field.
+    locked: bool,
+    /// True when the record has a `prunable` field.
+    prunable: bool,
+}
+
+/// Parses the output of `git worktree list --porcelain -z`: the fields end with a NUL,
+/// and an empty field ends a record. The `locked` and `prunable` fields come after the
+/// `branch` field, thus the function reads each whole record.
+fn parse_worktree_records(text: &str) -> Vec<WorktreeRecord> {
+    let mut records = Vec::new();
+    let mut current: Option<WorktreeRecord> = None;
+    for field in text.split('\0') {
+        if field.is_empty() {
+            records.extend(current.take());
+        } else if let Some(path) = field.strip_prefix("worktree ") {
+            records.extend(current.take());
+            current = Some(WorktreeRecord {
+                path: PathBuf::from(path),
+                branch: None,
+                locked: false,
+                prunable: false,
+            });
+        } else if let Some(record) = current.as_mut() {
+            if let Some(branch) = field.strip_prefix("branch refs/heads/") {
+                record.branch = Some(branch.to_string());
+            } else if field == "locked" || field.starts_with("locked ") {
+                record.locked = true;
+            } else if field == "prunable" || field.starts_with("prunable ") {
+                record.prunable = true;
+            }
+        }
+    }
+    records.extend(current);
+    records
+}
+
+/// Finds the record of the worktree of the main clone that has `branch` checked out.
 fn worktree_on_branch(
     host: &Host,
     main_clone: &Path,
     branch: &str,
-) -> anyhow::Result<Option<PathBuf>> {
+) -> anyhow::Result<Option<WorktreeRecord>> {
     let listed = host
         .git()
         .run(main_clone, ["worktree", "list", "--porcelain", "-z"]);
@@ -234,18 +278,34 @@ fn worktree_on_branch(
             listed.stderr
         );
     }
-    let wanted = format!("branch refs/heads/{branch}");
-    let mut path: Option<&str> = None;
-    for field in listed.stdout.split('\0') {
-        if field.is_empty() {
-            path = None;
-        } else if let Some(found) = field.strip_prefix("worktree ") {
-            path = Some(found);
-        } else if field == wanted {
-            return Ok(path.map(PathBuf::from));
-        }
+    Ok(parse_worktree_records(&listed.stdout)
+        .into_iter()
+        .find(|record| record.branch.as_deref() == Some(branch)))
+}
+
+/// Refuses a record whose directory a person removed by hand. sidecar never deletes
+/// and never prunes, thus the message names the commands for the person.
+fn require_live_worktree(
+    record: &WorktreeRecord,
+    branch: &str,
+    main_clone: &Path,
+) -> anyhow::Result<()> {
+    if !record.prunable && std::fs::symlink_metadata(&record.path).is_ok() {
+        return Ok(());
     }
-    Ok(None)
+    let path = record.path.display();
+    let clone = main_clone.display();
+    if record.locked {
+        bail!(
+            "git lists {path} as the worktree of the branch {branch}, but the directory is missing, and the worktree is locked. \
+             A prune does not remove a locked worktree. If the directory is on a disk that is not mounted, mount the disk, and the worktree comes back. \
+             Otherwise run `git -C {clone} worktree unlock {path}` and `git -C {clone} worktree prune`, and run the command again. sidecar does not delete or prune."
+        );
+    }
+    bail!(
+        "git lists {path} as the worktree of the branch {branch}, but the directory is missing. \
+         Run `git -C {clone} worktree prune`, and run the command again. sidecar does not delete or prune."
+    )
 }
 
 /// True when the reference `name` exists in the repository at `place`.
@@ -253,4 +313,75 @@ fn ref_exists(host: &Host, place: &Path, name: &str) -> bool {
     host.git()
         .run(place, ["rev-parse", "--verify", "--quiet", name])
         .ok
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(path: &str, branch: Option<&str>, locked: bool, prunable: bool) -> WorktreeRecord {
+        WorktreeRecord {
+            path: PathBuf::from(path),
+            branch: branch.map(str::to_string),
+            locked,
+            prunable,
+        }
+    }
+
+    #[test]
+    fn a_prunable_field_after_the_branch_is_read() {
+        let text = "worktree /w/a\0HEAD abc\0branch refs/heads/feature\0prunable gitdir file points to non-existent location\0\0";
+        assert_eq!(
+            parse_worktree_records(text),
+            vec![record("/w/a", Some("feature"), false, true)]
+        );
+    }
+
+    #[test]
+    fn a_locked_field_without_a_reason_is_read() {
+        let text = "worktree /w/a\0HEAD abc\0branch refs/heads/feature\0locked\0\0";
+        assert_eq!(
+            parse_worktree_records(text),
+            vec![record("/w/a", Some("feature"), true, false)]
+        );
+    }
+
+    #[test]
+    fn a_locked_field_with_a_reason_is_read() {
+        let text = "worktree /w/a\0HEAD abc\0branch refs/heads/feature\0locked on a usb disk\0prunable gone\0\0";
+        assert_eq!(
+            parse_worktree_records(text),
+            vec![record("/w/a", Some("feature"), true, true)]
+        );
+    }
+
+    #[test]
+    fn a_detached_record_has_no_branch() {
+        let text = "worktree /w/a\0HEAD abc\0detached\0\0";
+        assert_eq!(
+            parse_worktree_records(text),
+            vec![record("/w/a", None, false, false)]
+        );
+    }
+
+    #[test]
+    fn two_records_stay_apart() {
+        let text = "worktree /w/a\0HEAD abc\0branch refs/heads/main\0\0worktree /w/b\0HEAD def\0branch refs/heads/x\0prunable gone\0\0";
+        assert_eq!(
+            parse_worktree_records(text),
+            vec![
+                record("/w/a", Some("main"), false, false),
+                record("/w/b", Some("x"), false, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_record_without_a_final_empty_field_is_kept() {
+        let text = "worktree /w/a\0branch refs/heads/main\0";
+        assert_eq!(
+            parse_worktree_records(text),
+            vec![record("/w/a", Some("main"), false, false)]
+        );
+    }
 }
