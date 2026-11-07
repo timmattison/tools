@@ -5170,3 +5170,9 @@ The excerpt leaves out rows of the table and entries of the groups. `si` is a sh
 ```bash
 cargo install --git https://github.com/timmattison/tools wdid
 ```
+
+## bibibi
+
+Finds the commit that caused a regression, with a test from a later commit.
+
+To install: `cargo install --git https://github.com/timmattison/tools bibibi`

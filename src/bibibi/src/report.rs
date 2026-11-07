@@ -6,8 +6,18 @@ use crate::step::Verdict;
 ///
 /// The line is `bibibi: <short> <verdict> <subject> - about <n> step(s) left`.
 /// The verdict is padded to four columns.
-pub fn progress_line(_short: &str, _verdict: Verdict, _subject: &str, _steps_left: u32) -> String {
-    String::new()
+pub fn progress_line(short: &str, verdict: Verdict, subject: &str, steps_left: u32) -> String {
+    let word = match verdict {
+        Verdict::Good => "good",
+        Verdict::Bad => "bad ",
+    };
+    let unit = if steps_left == 1 { "step" } else { "steps" };
+    format!("bibibi: {short} {word} {subject} - about {steps_left} {unit} left")
+}
+
+/// The result line: the full id and the subject of the first bad commit.
+pub fn result_line(id: &str, subject: &str) -> String {
+    format!("{id} {subject}")
 }
 
 #[cfg(test)]

@@ -1,7 +1,9 @@
 //! `bibibi` finds the commit that caused a regression, with a test that a
 //! later commit added.
 
+mod child;
 mod report;
+mod run;
 mod step;
 
 use std::ffi::OsString;
@@ -16,10 +18,6 @@ const EXIT_ERROR: u8 = 2;
 /// Find the commit that caused a regression, with a test from a later commit
 #[derive(Parser, Debug)]
 #[clap(author, version = version_string!())]
-#[allow(
-    dead_code,
-    reason = "the fields are read by the search, which a later commit adds"
-)]
 struct Cli {
     /// The commit that adds the test [default: HEAD]
     #[clap(value_name = "TEST_COMMIT")]
@@ -43,6 +41,12 @@ struct Cli {
 }
 
 fn main() -> ExitCode {
-    let _cli = Cli::parse();
-    ExitCode::from(EXIT_ERROR)
+    let cli = Cli::parse();
+    match run::run(&cli) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("bibibi: {error:#}");
+            ExitCode::from(EXIT_ERROR)
+        }
+    }
 }
