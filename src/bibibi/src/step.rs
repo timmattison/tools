@@ -1,4 +1,5 @@
-//! One step of the search. [`step`] tests one commit. The module also holds the types of a commit and of its verdict.
+//! One step of the search. [`step`] tests one commit. The module also holds
+//! the types of a commit and of its verdict.
 
 use std::ffi::OsString;
 use std::fmt;
