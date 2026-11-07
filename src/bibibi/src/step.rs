@@ -60,7 +60,7 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process::ExitStatus;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use gitscratch::Scratch;
 
 use crate::child;
@@ -117,7 +117,7 @@ fn test_at(
         }
     }
     let status = child::run(test_command, scratch.path())?;
-    test_verdict(status).with_context(|| format!("at {}", commit.short()))
+    Ok(test_verdict(status))
 }
 
 /// Map the exit status of the test to a verdict.
@@ -128,23 +128,15 @@ fn test_at(
 /// | exit code 125 | skip ([`SkipReason::TestExited125`]) |
 /// | any other exit code (`timeout` gives 124) | bad |
 /// | a signal stops the test | bad |
-///
-/// # Errors
-///
-/// Never fails today. It returns a `Result` so that a later check can fail.
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "the callers and the issue state the verdict as fallible"
-)]
-fn test_verdict(status: ExitStatus) -> Result<Verdict> {
+fn test_verdict(status: ExitStatus) -> Verdict {
     if status.signal().is_some() {
-        return Ok(Verdict::Bad);
+        return Verdict::Bad;
     }
-    Ok(match status.code() {
+    match status.code() {
         Some(0) => Verdict::Good,
         Some(TEST_SKIP_CODE) => Verdict::Skip(SkipReason::TestExited125),
         _ => Verdict::Bad,
-    })
+    }
 }
 
 #[cfg(test)]
@@ -161,32 +153,29 @@ mod tests {
 
     #[test]
     fn exit_0_is_good() {
-        assert_eq!(test_verdict(exited(0)).expect("verdict"), Verdict::Good);
+        assert_eq!(test_verdict(exited(0)), Verdict::Good);
     }
 
     #[test]
     fn exit_1_is_bad() {
-        assert_eq!(test_verdict(exited(1)).expect("verdict"), Verdict::Bad);
+        assert_eq!(test_verdict(exited(1)), Verdict::Bad);
     }
 
     #[test]
     fn exit_125_is_a_skip() {
         assert_eq!(
-            test_verdict(exited(125)).expect("verdict"),
+            test_verdict(exited(125)),
             Verdict::Skip(SkipReason::TestExited125)
         );
     }
 
     #[test]
     fn exit_124_from_timeout_is_bad() {
-        assert_eq!(test_verdict(exited(124)).expect("verdict"), Verdict::Bad);
+        assert_eq!(test_verdict(exited(124)), Verdict::Bad);
     }
 
     #[test]
     fn a_death_by_signal_9_is_bad() {
-        assert_eq!(
-            test_verdict(ExitStatus::from_raw(9)).expect("verdict"),
-            Verdict::Bad
-        );
+        assert_eq!(test_verdict(ExitStatus::from_raw(9)), Verdict::Bad);
     }
 }
