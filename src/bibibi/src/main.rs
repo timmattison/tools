@@ -1,5 +1,16 @@
 //! `bibibi` finds the commit that caused a regression, with a test that a
 //! later commit added.
+//!
+//! The name is a reference to the NSYNC song "Bye Bye Bye": `bibibi` finds the
+//! bad commit, and then you can say goodbye to it.
+//!
+//! `git bisect` cannot use a red test, because each step puts the tree of an
+//! older commit in the working directory, and the test is part of a newer tree.
+//! `bibibi` takes the change of the test commit one time, as a patch, and
+//! applies it at each commit that it tests, in a scratch worktree from
+//! `gitscratch`. The checkout of the user does not change. The `README.md` at
+//! the root of the repository gives the interface, the verdicts, and the exit
+//! codes.
 
 mod child;
 mod interrupt;

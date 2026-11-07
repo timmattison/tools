@@ -1707,3 +1707,5 @@ gitscratch = { workspace = true, features = ["testing"] }
   and by how much?
 - [`grime`](../grime/README.md) — would merging this branch into HEAD conflict,
   and by how much?
+- [`bibibi`](../../README.md#bibibi-bye-bye-bye) — which commit caused this
+  regression, found with a test from a later commit?
