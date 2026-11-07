@@ -47,6 +47,13 @@ const JOB_SUM_HEADER: &str = "JOB SUM";
 /// because both cells hold a `format_elapsed` text, which is never wider than
 /// 7 columns. The header word fills the cell.
 const JOB_SUM_WIDTH: usize = TIME_WIDTH;
+/// The header word of the cost column.
+const COST_HEADER: &str = "COST";
+/// The width of the cost column. It fits the widest text that a real run
+/// gives, a lower bound such as `≥$552.96`: a matrix of 256 Linux jobs of 6
+/// hours costs $552.96. A wider text is cut to the width and ends in `…`. A
+/// cost is right-aligned in the cell, thus money lines up on its cents.
+const COST_WIDTH: usize = 8;
 /// The columns that the text columns do not share: the two marker cells, the
 /// ID part, the started, time, and job-sum columns, and the nine spaces between
 /// the ten cells.
@@ -2217,22 +2224,22 @@ mod tests {
             ],
         );
         let text = lines(&render_with(120, 10, &mut board, &loaded()));
-        // The started column starts at column 90 of 120, thus the text gets 89.
+        // The started column starts at column 81 of 120, thus the text gets 80.
         let recent = format!(
-            "{:<89} FINISHED",
+            "{:<80} FINISHED",
             "Last 8h · 1 passed · 0 failed · 0 cancelled"
         );
         assert_eq!(
             text[0..8],
             [
-                "   REPO                WORKFLOW              BRANCH       TITLE                           STARTED     TIME       JOB SUM",
+                "   REPO              WORKFLOW              BRANCH       TITLE                    STARTED     TIME       JOB SUM     COST",
                 "Running · 0 ⏳ · 1 🏃 · 1 ✅ · 1 ❌ · 0 💨 · 0 🪦",
-                "🏃 timmattison/tools   CI        39149840084 main         Fix the thing                   11:45:30    14m 30s 🏃 14m 55s",
-                "✅ ├ build                      107851237794                                              11:45:40    4m 20s  ✅",
-                "❌ ├ lint                       107851237795                                              11:46:00    45s     ❌",
-                "🏃 └ test                       107851237796                                              11:50:10    9m 50s  🏃",
+                "🏃 timmattison/tools CI        39149840084 main         Fix the thing            11:45:30    14m 30s 🏃 14m 55s       $0",
+                "✅ ├ build                    107851237794                                       11:45:40    4m 20s  ✅               $0",
+                "❌ ├ lint                     107851237795                                       11:46:00    45s     ❌               $0",
+                "🏃 └ test                     107851237796                                       11:50:10    9m 50s  🏃               $0",
                 recent.as_str(),
-                "✅ acme/widgets        Release   39149711502 issue-11     Bump deps                       09:10:05    10m 05s ✅",
+                "✅ acme/widgets      Release   39149711502 issue-11     Bump deps                09:10:05    10m 05s ✅",
             ]
         );
     }
@@ -2242,19 +2249,19 @@ mod tests {
         let mut board = four_run_board();
         let buffer = render_with(120, 10, &mut board, &loaded());
         let recent = format!(
-            "{:<89} FINISHED",
+            "{:<80} FINISHED",
             "Last 8h · 1 passed · 1 failed · 0 cancelled"
         );
         assert_eq!(
             lines(&buffer),
             [
-                "   REPO                WORKFLOW              BRANCH       TITLE                           STARTED     TIME       JOB SUM",
+                "   REPO              WORKFLOW              BRANCH       TITLE                    STARTED     TIME       JOB SUM     COST",
                 "Running · 0 ⏳ · 0 🏃 · 0 ✅ · 0 ❌ · 0 💨 · 0 🪦",
-                "🏃 timmattison/tools   CI                  1 main         Fix the thing                   11:45:30    14m 30s 🏃",
-                "⏳ acme/widgets        Release             2 issue-12     Add release job                 11:58:00    2m 00s  ⏳",
+                "🏃 timmattison/tools CI                  1 main         Fix the thing            11:45:30    14m 30s 🏃",
+                "⏳ acme/widgets      Release             2 issue-12     Add release job          11:58:00    2m 00s  ⏳",
                 recent.as_str(),
-                "✅ timmattison/tools   CI                  3 main         Bump deps                       09:10:05    10m 05s ✅",
-                "❌ acme/widgets        Release             4 issue-11     Broken build                    04:30:00    4h 40m  ❌",
+                "✅ timmattison/tools CI                  3 main         Bump deps                09:10:05    10m 05s ✅",
+                "❌ acme/widgets      Release             4 issue-11     Broken build             04:30:00    4h 40m  ❌",
                 "",
                 "",
                 "updated 30s ago      ·  ↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  r refresh  q quit",
@@ -2343,7 +2350,7 @@ mod tests {
     fn the_workflow_cell_ends_in_the_whole_run_id() {
         for (width, id) in [
             (120_u16, 39_149_840_084_u64),
-            (80, 391_498_400_841),
+            (89, 391_498_400_841),
             (200, 391_498_400_841),
         ] {
             let mut board = Board::new(Duration::from_hours(8));
@@ -2451,7 +2458,9 @@ mod tests {
     /// without the cap.
     #[test]
     fn a_workflow_name_wider_than_its_header_is_cut_and_the_branch_stays() {
-        for width in 80_u16..=200 {
+        // Since issue #639, a frame below 89 columns gives the workflow cell
+        // fewer than 5 columns, which cuts the name to `🎉…`.
+        for width in 89_u16..=200 {
             let mut board = Board::new(Duration::from_hours(8));
             board.replace(
                 repo("timmattison/tools"),
@@ -2591,8 +2600,8 @@ mod tests {
     fn each_empty_section_says_loading_before_the_first_refresh_ends() {
         let mut board = Board::new(Duration::from_hours(8));
         let text = lines(&render_with(60, 8, &mut board, &Status::default()));
-        // The started column starts at column 30 of 60, thus the text gets 29.
-        let recent = format!("{:<29} FINISHED", "Last 8h");
+        // The started column starts at column 21 of 60, thus the text gets 20.
+        let recent = format!("{:<20} FINISHED", "Last 8h");
         assert_eq!(
             text[1..5],
             ["Running", "   Loading…", recent.as_str(), "   Loading…"]
@@ -2605,7 +2614,7 @@ mod tests {
         let text = lines(&render_with(120, 10, &mut board, &Status::default()));
         assert_eq!(text[1], "Running");
         assert!(text[2].starts_with("🏃 timmattison/tools"), "{:?}", text[2]);
-        assert_eq!(text[4], format!("{:<89} FINISHED", "Last 8h"));
+        assert_eq!(text[4], format!("{:<80} FINISHED", "Last 8h"));
         assert!(text[5].starts_with("✅ timmattison/tools"), "{:?}", text[5]);
     }
 
@@ -2629,7 +2638,7 @@ mod tests {
         let text = lines(&render_with(120, 8, &mut board, &Status::default()));
         assert_eq!(text[1], "Running");
         assert!(text[2].starts_with("🏃 timmattison/tools"), "{:?}", text[2]);
-        let recent = format!("{:<89} FINISHED", "Last 8h");
+        let recent = format!("{:<80} FINISHED", "Last 8h");
         assert_eq!(text[3..5], [recent.as_str(), "   Loading…"]);
     }
 
@@ -2693,9 +2702,9 @@ mod tests {
         assert!(reversed(60, 2), "the middle of the selected row");
         // The test backend does not store the second cell of a wide glyph. The
         // marker cells are thus checked at their first cell.
-        assert!(reversed(109, 2), "the blank before the right marker");
+        assert!(reversed(100, 2), "the blank before the right marker");
         assert!(
-            reversed(110, 2),
+            reversed(101, 2),
             "the first cell of the right marker of the selected row"
         );
         for y in [0_u16, 1, 3, 4, 5, 6, 9] {
@@ -2707,7 +2716,7 @@ mod tests {
     #[test]
     fn an_empty_board_says_so_in_each_section() {
         let mut board = Board::new(Duration::from_hours(8));
-        let buffer = render_with(60, 8, &mut board, &loaded());
+        let buffer = render_with(69, 8, &mut board, &loaded());
         let text = lines(&buffer);
         assert_eq!(
             text[1..5],
@@ -2730,7 +2739,7 @@ mod tests {
         };
         let mut board = Board::new(Duration::from_hours(8));
         for status in [Status::default(), loaded()] {
-            let text = lines(&render_with(68, 8, &mut board, &status));
+            let text = lines(&render_with(77, 8, &mut board, &status));
             let repo_column = display_column(&text[0], "REPO");
             for row in [2_usize, 4] {
                 let line = &text[row];
@@ -2747,7 +2756,7 @@ mod tests {
     #[test]
     fn the_window_text_follows_the_setting() {
         let mut board = Board::new(Duration::from_mins(90));
-        let buffer = render_with(60, 8, &mut board, &loaded());
+        let buffer = render_with(69, 8, &mut board, &loaded());
         let text = lines(&buffer);
         assert_eq!(text[3], "Last 90m · 0 passed · 0 fail… FINISHED");
         assert_eq!(text[4], "   No runs finished in the last 90m.");
@@ -2782,7 +2791,7 @@ mod tests {
         assert_eq!(
             text[3],
             format!(
-                "{:<89} FINISHED",
+                "{:<80} FINISHED",
                 "Last 8h · 1 passed · 1 failed · 2 cancelled"
             )
         );
@@ -2795,7 +2804,7 @@ mod tests {
 
     #[test]
     fn the_recent_header_names_the_started_column_finished() {
-        for width in [80_u16, 120, 200] {
+        for width in [89_u16, 120, 200] {
             let mut board = four_run_board();
             let text = lines(&render_with(width, 10, &mut board, &loaded()));
             let y = recent_line(&text);
@@ -2848,7 +2857,7 @@ mod tests {
     #[test]
     fn a_narrow_recent_header_cuts_its_text_and_keeps_the_word_whole() {
         let mut board = four_run_board();
-        let text = lines(&render_with(60, 10, &mut board, &loaded()));
+        let text = lines(&render_with(69, 10, &mut board, &loaded()));
         assert_eq!(
             text[recent_line(&text)],
             "Last 8h · 1 passed · 1 faile… FINISHED"
@@ -3319,9 +3328,9 @@ mod tests {
             let width = u16::try_from(width).expect("the width fits in u16");
             let mut board = job_sum_board();
             let text = lines(&render_with(width, 8, &mut board, &loaded()));
-            assert!(text[0].ends_with("JOB SUM"), "width {width}: {:?}", text[0]);
+            assert!(text[0].contains("JOB SUM"), "width {width}: {:?}", text[0]);
             assert_eq!(job_sum_cells(&text, 4), "18m 28s", "width {width}");
-            assert!(text[4].ends_with("18m 28s"), "width {width}: {:?}", text[4]);
+            assert!(text[4].contains("18m 28s"), "width {width}: {:?}", text[4]);
             for line in &text {
                 assert!(
                     display_width(line) <= usize::from(width),
@@ -3338,10 +3347,298 @@ mod tests {
             let text = lines(&render_with(width, 8, &mut board, &loaded()));
             assert_eq!(
                 header_column(&text, "JOB SUM"),
-                usize::from(width) - JOB_SUM_WIDTH,
+                usize::from(width) - JOB_SUM_WIDTH - 1 - COST_WIDTH,
                 "width {width}"
             );
         }
+    }
+
+    /// The text of the cost column of line `y` in a frame whose header ends in
+    /// `COST`. The column is the last [`COST_WIDTH`] columns of the frame.
+    fn cost_cells(text: &[String], y: usize) -> String {
+        columns(&text[y], display_width(&text[0]) - COST_WIDTH, COST_WIDTH)
+    }
+
+    /// The board of [`job_sum_board`] with a label and a runner on each job, so
+    /// that each job has a list-price cost. The `build` job ran 211 s on
+    /// `ubuntu-latest` and costs $0.024, shown as `$0.02`. The `test` job ran
+    /// 897 s on `windows-latest` and costs $0.150. The run costs $0.174, shown
+    /// as `$0.17`. The label of the second job is `second_label`.
+    fn cost_board(second_label: &str) -> Board {
+        let mut board = job_sum_board();
+        let labelled = |built: Job, label: &str| Job {
+            labels: vec![label.to_owned()],
+            ..on("GitHub Actions 1", built)
+        };
+        board.set_jobs(
+            RunId(41_966_278_012),
+            vec![
+                labelled(
+                    job(
+                        1,
+                        "build",
+                        RunState::Passed,
+                        Some("2026-10-14T10:00:00Z"),
+                        Some("2026-10-14T10:03:31Z"),
+                    ),
+                    "ubuntu-latest",
+                ),
+                labelled(
+                    job(
+                        2,
+                        "test",
+                        RunState::Passed,
+                        Some("2026-10-14T10:03:31Z"),
+                        Some("2026-10-14T10:18:28Z"),
+                    ),
+                    second_label,
+                ),
+            ],
+        );
+        board
+    }
+
+    #[test]
+    fn the_cost_header_ends_at_the_right_edge_at_every_width() {
+        for width in u16::try_from(FIXED_COLUMNS).expect("fits")..=200 {
+            let mut board = cost_board("windows-latest");
+            let text = lines(&render_with(width, 8, &mut board, &loaded()));
+            assert!(text[0].ends_with("COST"), "width {width}: {:?}", text[0]);
+            assert_eq!(
+                header_column(&text, "COST"),
+                usize::from(width) - COST_HEADER.len(),
+                "width {width}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_run_row_shows_its_cost_right_aligned_in_the_last_column() {
+        for width in [80_u16, 120, 200] {
+            let mut board = cost_board("windows-latest");
+            let text = lines(&render_with(width, 8, &mut board, &loaded()));
+            assert!(text[4].ends_with("$0.17"), "width {width}: {:?}", text[4]);
+            assert_eq!(cost_cells(&text, 4), "   $0.17", "width {width}");
+            assert_eq!(job_sum_cells(&text, 4), "18m 28s", "width {width}");
+        }
+    }
+
+    #[test]
+    fn a_job_row_shows_its_cost_and_leaves_the_job_sum_blank() {
+        let mut board = cost_board("windows-latest");
+        board.expand(now());
+        let text = lines(&render_with(120, 10, &mut board, &loaded()));
+        for (y, cost) in [(5, "$0.02"), (6, "$0.15")] {
+            assert!(
+                text[y].contains('├') || text[y].contains('└'),
+                "line {y} is not a job row: {:?}",
+                text[y]
+            );
+            assert!(text[y].ends_with(cost), "line {y}: {:?}", text[y]);
+            assert_eq!(cost_cells(&text, y), format!("{cost:>COST_WIDTH$}"));
+            assert_eq!(job_sum_cells(&text, y), "", "job row at line {y}");
+        }
+        assert_eq!(cost_cells(&text, 4), "   $0.17");
+    }
+
+    #[test]
+    fn a_job_of_an_unknown_label_shows_a_question_mark_and_its_run_a_lower_bound() {
+        let mut board = cost_board("mystery-runner");
+        board.expand(now());
+        let text = lines(&render_with(120, 10, &mut board, &loaded()));
+        assert_eq!(cost_cells(&text, 4).trim_start(), "≥$0.02");
+        assert!(text[4].ends_with("≥$0.02"), "{:?}", text[4]);
+        assert_eq!(cost_cells(&text, 5).trim_start(), "$0.02");
+        assert_eq!(cost_cells(&text, 6).trim_start(), "?");
+        assert!(text[6].ends_with('?'), "{:?}", text[6]);
+        for line in &text {
+            assert!(display_width(line) <= 120, "{line:?} is too wide");
+        }
+    }
+
+    #[test]
+    fn a_run_whose_jobs_did_not_load_shows_an_empty_cost_cell() {
+        let mut board = Board::new(Duration::from_hours(8));
+        board.replace(
+            repo("a/x"),
+            vec![run(
+                41_966_278_012,
+                "a/x",
+                "CI",
+                "main",
+                "t",
+                RunState::Passed,
+                "2026-10-14T10:00:00Z",
+                "2026-10-14T10:20:00Z",
+            )],
+            now(),
+        );
+        let text = lines(&render_with(120, 8, &mut board, &loaded()));
+        assert!(text[0].ends_with("COST"), "{:?}", text[0]);
+        assert!(text[4].contains("41966278012"), "{:?}", text[4]);
+        assert_eq!(cost_cells(&text, 4).trim(), "");
+        assert!(!text[4].contains('$'), "{:?}", text[4]);
+    }
+
+    #[test]
+    fn a_queue_row_and_a_history_row_leave_the_cost_blank() {
+        let mut board = queue_frame_board();
+        let text = lines(&render_with(120, 20, &mut board, &loaded()));
+        for pull in ["16012", "16020", "16001", "15998", "15990"] {
+            let y = row_holding(&text, pull);
+            assert!(text[y].contains("rust-lang/cargo"), "{:?}", text[y]);
+            assert_eq!(cost_cells(&text, y).trim(), "", "the row of {pull}");
+            assert!(!text[y].contains('$'), "the row of {pull}: {:?}", text[y]);
+        }
+    }
+
+    #[test]
+    fn the_status_rows_of_an_expanded_run_leave_the_cost_blank() {
+        let mut loading = four_run_board();
+        loading.expand(now());
+        let mut failed = four_run_board();
+        failed.expand(now());
+        failed.fail_jobs(RunId(1), "x".repeat(400));
+        for (case, mut board) in [("loading", loading), ("error", failed)] {
+            let text = lines(&render_with(120, 14, &mut board, &loaded()));
+            assert!(text[3].starts_with("   └ "), "{case}: {:?}", text[3]);
+            assert_eq!(cost_cells(&text, 3).trim(), "", "{case}: {:?}", text[3]);
+            assert!(!text[3].contains('$'), "{case}: {:?}", text[3]);
+        }
+    }
+
+    #[test]
+    fn the_cost_of_a_finished_row_fades_as_its_time_cell_does() {
+        let mut board = cost_board("windows-latest");
+        // A running run stands first and takes the highlight. A highlighted
+        // row has no fade, thus the highlight moves back to the running run
+        // after the passed run expands.
+        board.replace(
+            repo("b/y"),
+            vec![run(
+                2,
+                "b/y",
+                "CI",
+                "main",
+                "t",
+                RunState::Running,
+                "2026-10-14T11:50:00Z",
+                "2026-10-14T11:59:00Z",
+            )],
+            now(),
+        );
+        board.select_next(now());
+        board.expand(now());
+        board.select_previous(now());
+        let buffer = render_with(120, 12, &mut board, &loaded());
+        let text = lines(&buffer);
+        let time_x = u16::try_from(header_column(&text, "TIME")).expect("a column fits in u16");
+        let cost_x =
+            u16::try_from(display_width(&text[0]) - COST_WIDTH).expect("a column fits in u16");
+        for (id, cost) in [
+            ("41966278012", "$0.17"),
+            ("├ build", "$0.02"),
+            ("└ test", "$0.15"),
+        ] {
+            let y = row_holding(&text, id);
+            let row = u16::try_from(y).expect("a row index fits in u16");
+            assert_eq!(cost_cells(&text, y).trim_start(), cost, "{id}");
+            let fade = buffer[(time_x, row)].fg;
+            assert!(matches!(fade, Color::Indexed(_)), "{id}: {fade:?}");
+            for x in cost_x..cost_x + u16::try_from(COST_WIDTH).expect("fits") {
+                assert_eq!(buffer[(x, row)].fg, fade, "cell {x} of {:?}", text[y]);
+            }
+        }
+    }
+
+    #[test]
+    fn the_cost_of_an_active_row_keeps_the_default_color() {
+        let mut board = Board::new(Duration::from_hours(8));
+        board.replace(
+            repo("a/x"),
+            vec![run(
+                1,
+                "a/x",
+                "CI",
+                "main",
+                "t",
+                RunState::Running,
+                "2026-10-14T11:50:00Z",
+                "2026-10-14T11:59:00Z",
+            )],
+            now(),
+        );
+        board.set_jobs(
+            RunId(1),
+            vec![Job {
+                labels: vec!["ubuntu-latest".to_owned()],
+                ..on(
+                    "GitHub Actions 1",
+                    job(
+                        1,
+                        "test",
+                        RunState::Running,
+                        Some("2026-10-14T11:50:10Z"),
+                        None,
+                    ),
+                )
+            }],
+        );
+        let buffer = render_with(120, 8, &mut board, &loaded());
+        let text = lines(&buffer);
+        assert_eq!(cost_cells(&text, 2).trim_start(), "$0.06");
+        for x in 112_u16..120 {
+            assert_eq!(buffer[(x, 2)].fg, Color::Reset, "cell {x} of {:?}", text[2]);
+        }
+    }
+
+    #[test]
+    fn a_narrow_frame_keeps_the_whole_cost_column() {
+        for width in [FIXED_COLUMNS, 60] {
+            let width = u16::try_from(width).expect("the width fits in u16");
+            let mut board = cost_board("windows-latest");
+            let text = lines(&render_with(width, 8, &mut board, &loaded()));
+            assert!(text[0].ends_with("COST"), "width {width}: {:?}", text[0]);
+            assert!(text[4].ends_with("$0.17"), "width {width}: {:?}", text[4]);
+            assert_eq!(cost_cells(&text, 4), "   $0.17", "width {width}");
+            assert!(text[0].contains("JOB SUM"), "width {width}: {:?}", text[0]);
+            for line in &text {
+                assert!(
+                    display_width(line) <= usize::from(width),
+                    "width {width}: the line is too wide: {line:?}"
+                );
+            }
+        }
+        // The title gives up its columns before the cost column does.
+        assert_eq!(Widths::for_width(FIXED_COLUMNS).title, 0);
+    }
+
+    #[test]
+    fn a_cost_wider_than_the_cell_is_cut_and_ends_in_an_ellipsis() {
+        // 1000 Linux jobs of 6 hours cost $2160.00, and one job of an unknown
+        // label makes the cost a lower bound, `≥$2160.00`, which is 9 columns.
+        let mut board = cost_board("windows-latest");
+        let labelled = |id: u64, label: &str| Job {
+            labels: vec![label.to_owned()],
+            ..on(
+                "GitHub Actions 1",
+                job(
+                    id,
+                    "j",
+                    RunState::Passed,
+                    Some("2026-10-14T04:00:00Z"),
+                    Some("2026-10-14T10:00:00Z"),
+                ),
+            )
+        };
+        let mut jobs: Vec<Job> = (1..=1000).map(|id| labelled(id, "ubuntu-latest")).collect();
+        jobs.push(labelled(1001, "mystery-runner"));
+        board.set_jobs(RunId(41_966_278_012), jobs);
+        let text = lines(&render_with(120, 8, &mut board, &loaded()));
+        assert!(text[0].ends_with("COST"), "{:?}", text[0]);
+        assert!(text[4].ends_with("≥$2160.…"), "{:?}", text[4]);
+        assert_eq!(cost_cells(&text, 4), "≥$2160.…");
+        assert!(display_width(&text[4]) <= 120, "{:?}", text[4]);
     }
 
     /// A job with the state `state`. `None` times stand for a job that GitHub
@@ -3401,21 +3698,22 @@ mod tests {
         ]
     }
 
-    /// The expected line of a job row at 120 columns. The widths follow the
+    /// The expected line of a job row at 129 columns. The widths follow the
     /// shares of the 70 columns of room: 19 repository, 8 workflow name, 12
     /// branch, and 31 title. The text fills 28 columns, the job ID fills 12,
     /// and the branch and title columns are 44 blank columns. The started and
     /// time cells fill 19 columns, and the right marker follows them after one
-    /// space. The job-sum cell after the marker is blank, thus the trim removes
-    /// it.
+    /// space. The job-sum cell after the marker is blank. The cost cell follows
+    /// it after one space, right-aligned in [`COST_WIDTH`] columns.
     ///
     /// The marker is an emoji of 2 columns. `format!` pads by characters, thus
     /// the caller never pads the marker with a format width. A blank marker is
     /// 2 spaces.
-    fn job_golden(marker: &str, text: &str, id: u64, times: &str) -> String {
+    fn job_golden(marker: &str, text: &str, id: u64, times: &str, cost: &str) -> String {
         format!(
-            "{marker} {text:<28} {id:>ID_WIDTH$} {blank:<44} {times:<19} {marker}",
-            blank = ""
+            "{marker} {text:<28} {id:>ID_WIDTH$} {blank:<44} {times:<19} {marker} {sum:<JOB_SUM_WIDTH$} {cost:>COST_WIDTH$}",
+            blank = "",
+            sum = ""
         )
         .trim_end()
         .to_owned()
@@ -3424,14 +3722,14 @@ mod tests {
     #[test]
     fn the_jobs_of_an_expanded_run_stand_below_it_in_the_run_columns() {
         let mut board = board_with_jobs(three_jobs());
-        let text = lines(&render_with(120, 14, &mut board, &loaded()));
+        let text = lines(&render_with(129, 14, &mut board, &loaded()));
         assert_eq!(
             text[2..6],
             [
-                "🏃 timmattison/tools   CI                  1 main         Fix the thing                   11:45:30    14m 30s 🏃 14m 55s".to_owned(),
-                job_golden("✅", "├ build", 12, "11:45:40    4m 20s"),
-                job_golden("❌", "├ lint", 13, "11:46:00    45s"),
-                job_golden("🏃", "└ test", 11, "11:50:10    9m 50s"),
+                "🏃 timmattison/tools   CI                  1 main         Fix the thing                   11:45:30    14m 30s 🏃 14m 55s       $0".to_owned(),
+                job_golden("✅", "├ build", 12, "11:45:40    4m 20s", "$0"),
+                job_golden("❌", "├ lint", 13, "11:46:00    45s", "$0"),
+                job_golden("🏃", "└ test", 11, "11:50:10    9m 50s", "$0"),
             ]
             .map(|line| line.trim_end().to_owned())
         );
@@ -3663,10 +3961,11 @@ mod tests {
                 ("🏃", Color::Reset),
                 "{name}"
             );
-            // The right marker cell stands before one space and the job-sum cell.
+            // The right marker cell stands before one space, the job-sum cell,
+            // one space, and the cost cell.
             let right = 120
-                - u16::try_from(MARKER_WIDTH + 1 + JOB_SUM_WIDTH)
-                    .expect("the marker and job-sum widths fit in u16");
+                - u16::try_from(MARKER_WIDTH + 1 + JOB_SUM_WIDTH + 1 + COST_WIDTH)
+                    .expect("the marker, job-sum, and cost widths fit in u16");
             assert_eq!(
                 (buffer[(right, y)].symbol(), buffer[(right, y)].fg),
                 ("🏃", Color::Reset),
@@ -3696,7 +3995,7 @@ mod tests {
         let reversed = |x: u16, y: u16| buffer[(x, y)].modifier.contains(Modifier::REVERSED);
         // The test backend does not store the second cell of a wide glyph. The
         // marker cells are thus checked at their first cell.
-        for x in [0_u16, 110] {
+        for x in [0_u16, 101] {
             assert!(reversed(x, 3), "the selected job row, marker cell {x}");
         }
         for x in [0_u16, 5, 60, 95, 117] {
@@ -3831,17 +4130,18 @@ mod tests {
         let mut board = four_run_board();
         board.expand(now());
         board.fail_jobs(RunId(1), "日本語のエラー".repeat(30));
-        let buffer = render_with(40, 14, &mut board, &loaded());
+        let buffer = render_with(49, 14, &mut board, &loaded());
         let text = lines(&buffer);
         assert!(text[3].starts_with("   └ ⚠ 日本語"), "{:?}", text[3]);
         assert!(text[3].ends_with('…'), "{:?}", text[3]);
-        // The text gets 40 - 6 - 8 = 26 columns, and the line ends in the space
-        // and the blank right marker cell, and the space and the blank job-sum
-        // cell. The trim takes all of them. A wide glyph that does not fit
+        // The text gets 49 - 6 - 8 - 9 = 26 columns, and the line ends in the
+        // space and the blank right marker cell, the space and the blank job-sum
+        // cell, and the space and the blank cost cell. The trim takes all of
+        // them. A wide glyph that does not fit
         // leaves 1 column free.
         assert!(display_width(&text[3]) <= 29, "{:?}", text[3]);
         assert!(display_width(&text[3]) >= 28, "{:?}", text[3]);
-        for x in 40 - (MARKER_WIDTH + 1 + JOB_SUM_WIDTH + 1)..40 {
+        for x in 49 - (MARKER_WIDTH + 1 + JOB_SUM_WIDTH + 1 + COST_WIDTH + 1)..49 {
             assert_eq!(
                 buffer[(u16::try_from(x).expect("a column fits in u16"), 3)].symbol(),
                 " ",
@@ -3877,9 +4177,9 @@ mod tests {
             let buffer = render_with(120, 14, &mut board, &loaded());
             let text = lines(&buffer);
             assert!(text[3].starts_with("   └ "), "{case}: {:?}", text[3]);
-            // The header shows `JOB SUM` after the right marker cell. The status
-            // row leaves the job-sum cell blank too.
-            let marker_end = 120 - (JOB_SUM_WIDTH + 1);
+            // The header shows `JOB SUM` and `COST` after the right marker cell.
+            // The status row leaves the job-sum cell and the cost cell blank too.
+            let marker_end = 120 - (JOB_SUM_WIDTH + 1 + COST_WIDTH + 1);
             for (y, end) in [(0_u16, marker_end), (3, 120)] {
                 for x in marker_end - MARKER_WIDTH - 1..end {
                     assert_eq!(
@@ -4012,9 +4312,9 @@ mod tests {
     #[test]
     fn a_long_repository_name_keeps_its_end_and_starts_with_an_ellipsis() {
         let mut board = board_of_repos(&["timmattison/keyboards", "Lock-Free-Labs/expert-witness"]);
-        // The repository cell is 21 columns wide at 128 columns, thus the first
+        // The repository cell is 21 columns wide at 137 columns, thus the first
         // name fits whole and the second name does not.
-        let text = lines(&render_with(128, 8, &mut board, &loaded()));
+        let text = lines(&render_with(137, 8, &mut board, &loaded()));
         let whole = line_of_run(&text, 7_001);
         let cut = line_of_run(&text, 7_002);
 
@@ -4037,9 +4337,9 @@ mod tests {
     }
 
     #[test]
-    fn at_100_columns_a_long_repository_name_keeps_its_end() {
+    fn at_109_columns_a_long_repository_name_keeps_its_end() {
         let mut board = board_of_repos(&["timmattison/megarepo", "timmattison/keyboards"]);
-        let text = lines(&render_with(100, 8, &mut board, &loaded()));
+        let text = lines(&render_with(109, 8, &mut board, &loaded()));
         assert!(
             line_of_run(&text, 7_001).contains(" …ison/megarepo "),
             "{text:?}"
@@ -4054,11 +4354,11 @@ mod tests {
     fn a_stale_long_repository_name_keeps_the_mark_and_its_end() {
         let name = "Lock-Free-Labs/expert-witness";
         let mut fresh_board = board_of_repos(&[name]);
-        let fresh_text = lines(&render_with(120, 8, &mut fresh_board, &loaded()));
+        let fresh_text = lines(&render_with(129, 8, &mut fresh_board, &loaded()));
         let fresh = line_of_run(&fresh_text, 7_001);
         let mut stale_board = board_of_repos(&[name]);
         stale_board.fail(repo(name), "HTTP 500".to_owned());
-        let stale_text = lines(&render_with(120, 8, &mut stale_board, &loaded()));
+        let stale_text = lines(&render_with(129, 8, &mut stale_board, &loaded()));
         let stale = line_of_run(&stale_text, 7_001);
 
         assert!(stale.contains("\u{1F4A4} …/expert-witness "), "{stale}");
@@ -4290,10 +4590,11 @@ mod tests {
                 branch <= 12,
                 "width {w}: the branch is {branch} wide, more than 12 columns"
             );
-            // The right marker cell takes `MARKER_WIDTH + 1` columns, and the
-            // job-sum cell takes `JOB_SUM_WIDTH + 1` columns, thus the floor is
-            // the one of the frame that many columns narrower.
-            let narrower = MARKER_WIDTH + 1 + JOB_SUM_WIDTH + 1;
+            // The right marker cell takes `MARKER_WIDTH + 1` columns, the
+            // job-sum cell takes `JOB_SUM_WIDTH + 1` columns, and the cost cell
+            // takes `COST_WIDTH + 1` columns, thus the floor is the one of the
+            // frame that many columns narrower.
+            let narrower = MARKER_WIDTH + 1 + JOB_SUM_WIDTH + 1 + COST_WIDTH + 1;
             if let Some(index) = usize::from(w).checked_sub(80 + narrower) {
                 let (old_branch, old_title) = TODAY_BRANCH_AND_TITLE[index];
                 assert!(
@@ -4326,8 +4627,19 @@ mod tests {
     /// entry that the frame three columns narrower had before. Since issue #587
     /// the repository gets 28 percent. Since issue #642 the job-sum cell and
     /// its space take 8 columns, thus each width has the entry that the frame
-    /// eight columns narrower had before.
+    /// eight columns narrower had before. Since issue #639 the cost cell and its
+    /// space take 9 columns, thus each width has the entry that the frame nine
+    /// columns narrower had before.
     const TEXT_WIDTHS: [(usize, usize, usize, usize); 121] = [
+        (5, 3, 4, 9),
+        (6, 4, 4, 8),
+        (6, 4, 4, 9),
+        (6, 4, 5, 9),
+        (7, 4, 5, 9),
+        (7, 4, 5, 10),
+        (7, 5, 5, 10),
+        (7, 5, 5, 11),
+        (8, 5, 6, 10),
         (8, 5, 6, 11),
         (8, 5, 6, 12),
         (8, 6, 6, 12),
@@ -4440,15 +4752,6 @@ mod tests {
         (38, 8, 12, 81),
         (39, 8, 12, 81),
         (39, 8, 12, 82),
-        (39, 8, 12, 83),
-        (40, 8, 12, 83),
-        (40, 8, 12, 84),
-        (40, 8, 12, 85),
-        (40, 8, 12, 86),
-        (41, 8, 12, 86),
-        (41, 8, 12, 87),
-        (41, 8, 12, 88),
-        (42, 8, 12, 88),
     ];
 
     #[test]
@@ -4507,8 +4810,8 @@ mod tests {
             )],
             now(),
         );
-        let text = lines(&render_with(76, 6, &mut board, &Status::default()));
-        // 76 - 50 = 26 columns for the text: 7, 4, 5, and 10.
+        let text = lines(&render_with(85, 6, &mut board, &Status::default()));
+        // 85 - 59 = 26 columns for the text: 7, 4, 5, and 10.
         assert_eq!(
             text[2],
             "🏃 …/tools Con…            1 feat… A very lo… 11:55:00    5m 00s  🏃"
@@ -4554,7 +4857,7 @@ mod tests {
             ],
             now(),
         );
-        let text = lines(&render_with(76, 7, &mut board, &Status::default()));
+        let text = lines(&render_with(85, 7, &mut board, &Status::default()));
         assert_eq!(
             text[2],
             "🏃 a/x     CI              1 日本… t          11:51:00    9m 00s  🏃"
@@ -4568,7 +4871,7 @@ mod tests {
             "🏃 a/x     CI              3 🎉🎉… t          11:53:00    7m 00s  🏃"
         );
         for line in &text {
-            assert!(display_width(line) <= 76, "{line:?} is too wide");
+            assert!(display_width(line) <= 85, "{line:?} is too wide");
         }
     }
 
@@ -5750,9 +6053,12 @@ mod tests {
         assert!(skipped.starts_with("💨 └ g-skipped"), "{skipped:?}");
         let other = &text[row_holding(&text, "f-other")];
         assert!(other.starts_with("   ├ f-other"), "{other:?}");
-        assert!(skipped.ends_with(" 💨"), "{skipped:?}");
+        // The cost cell stands after the right marker cell.
+        assert!(skipped.contains(" 💨 "), "{skipped:?}");
         assert!(
-            other.ends_with("20s"),
+            other
+                .strip_suffix("$0")
+                .is_some_and(|rest| rest.trim_end().ends_with("20s")),
             "the right marker of Other is blank: {other:?}"
         );
     }
@@ -5838,7 +6144,7 @@ mod tests {
         for (id, _) in MARKER_ROWS {
             let y = u16::try_from(row_holding(&text, &id.to_string()))
                 .expect("a row index fits in u16");
-            for x in [0_u16, 1, 110, 111] {
+            for x in [0_u16, 1, 101, 102] {
                 assert_eq!(
                     buffer[(x, y)].fg,
                     Color::Reset,
@@ -5850,11 +6156,12 @@ mod tests {
     }
 
     /// The first column of the right marker cell in a frame of `width` columns.
-    /// The cell stands before one space and the job-sum cell.
+    /// The cell stands before one space, the job-sum cell, one space, and the
+    /// cost cell.
     fn right_marker_column(width: u16) -> u16 {
         width
-            - u16::try_from(MARKER_WIDTH + 1 + JOB_SUM_WIDTH)
-                .expect("the marker and job-sum widths fit in u16")
+            - u16::try_from(MARKER_WIDTH + 1 + JOB_SUM_WIDTH + 1 + COST_WIDTH)
+                .expect("the marker, job-sum, and cost widths fit in u16")
     }
 
     /// The checks of the ID, STARTED, and TIME columns pass before issue #581
@@ -5874,6 +6181,7 @@ mod tests {
             let started_column = header_column(&text, "STARTED");
             let time_column = header_column(&text, "TIME");
             let mut id_column = None;
+            let right = right_marker_column(w);
             for (id, cells) in MARKER_ROWS {
                 let id = id.to_string();
                 let line = &text[row_holding(&text, &id)];
@@ -5884,7 +6192,6 @@ mod tests {
                     "width {w}: the ID {id} moved: {line:?}"
                 );
                 let y = u16::try_from(row_holding(&text, &id)).expect("a row index fits in u16");
-                let right = right_marker_column(w);
                 assert_eq!(
                     buffer[(right, y)].symbol(),
                     buffer[(0, y)].symbol(),
@@ -5921,7 +6228,6 @@ mod tests {
             // The buffer clips a line that is too wide, thus the lines of the
             // rows must fill the width exactly.
             let widths = Widths::for_width(usize::from(w));
-            let right = right_marker_column(w);
             for x in right..right + u16::try_from(MARKER_WIDTH).expect("the marker width fits") {
                 assert_eq!(
                     buffer[(x, 0)].symbol(),
@@ -6260,9 +6566,9 @@ mod tests {
     }
 
     #[test]
-    fn the_runner_of_each_job_stands_after_its_name_at_160_columns() {
+    fn the_runner_of_each_job_stands_after_its_name_at_169_columns() {
         let mut board = megarepo_board();
-        let text = lines(&render_with(160, 16, &mut board, &loaded()));
+        let text = lines(&render_with(169, 16, &mut board, &loaded()));
         let block: Vec<String> = (2..=8)
             .map(|y| columns(&text[y], 0, 59).trim_end().to_owned())
             .collect();
@@ -6333,7 +6639,7 @@ mod tests {
     #[test]
     fn a_long_runner_name_is_cut_to_the_room_that_the_job_text_leaves() {
         let mut board = megarepo_board();
-        let text = lines(&render_with(120, 16, &mut board, &loaded()));
+        let text = lines(&render_with(129, 16, &mut board, &loaded()));
         let block: Vec<String> = (3..=8)
             .map(|y| columns(&text[y], 0, 47).trim_end().to_owned())
             .collect();
@@ -6396,19 +6702,31 @@ mod tests {
                 "GitHub Actions 1000001050",
                 passed_job("Full check list (Mac 22)"),
             ),
-            120,
+            129,
         );
         assert_eq!(
             row,
-            job_golden("✅", "└ Full check list (Mac 22)", LONE_JOB, PASSED_TIMES)
+            job_golden(
+                "✅",
+                "└ Full check list (Mac 22)",
+                LONE_JOB,
+                PASSED_TIMES,
+                "?"
+            )
         );
         assert_eq!(cyan_columns(&buffer, y), Vec::<u16>::new());
         // A name of 22 columns makes a text of 24 columns, thus the room is 3.
         assert_eq!(display_width(ROOM_OF_3_NAME), 22);
-        let (buffer, row, y) = lone_job_row(on("m1-ts", passed_job(ROOM_OF_3_NAME)), 120);
+        let (buffer, row, y) = lone_job_row(on("m1-ts", passed_job(ROOM_OF_3_NAME)), 129);
         assert_eq!(
             row,
-            job_golden("✅", &format!("└ {ROOM_OF_3_NAME}"), LONE_JOB, PASSED_TIMES)
+            job_golden(
+                "✅",
+                &format!("└ {ROOM_OF_3_NAME}"),
+                LONE_JOB,
+                PASSED_TIMES,
+                "?"
+            )
         );
         assert_eq!(cyan_columns(&buffer, y), Vec::<u16>::new());
     }
@@ -6416,14 +6734,15 @@ mod tests {
     #[test]
     fn a_short_runner_name_that_fits_shows_in_fewer_than_4_columns() {
         // A name that fits whole shows in a room of 3.
-        let (buffer, row, y) = lone_job_row(on("mbp", passed_job(ROOM_OF_3_NAME)), 120);
+        let (buffer, row, y) = lone_job_row(on("mbp", passed_job(ROOM_OF_3_NAME)), 129);
         assert_eq!(
             row,
             job_golden(
                 "✅",
                 &format!("└ {ROOM_OF_3_NAME} mbp"),
                 LONE_JOB,
-                PASSED_TIMES
+                PASSED_TIMES,
+                "?"
             )
         );
         assert_eq!(cyan_columns(&buffer, y).len(), 3);
@@ -6444,6 +6763,7 @@ mod tests {
                 RunState::Queued,
                 (None, None),
                 "",
+                "$0",
             ),
             (
                 "failed",
@@ -6453,6 +6773,7 @@ mod tests {
                 RunState::Failed,
                 finished,
                 PASSED_TIMES,
+                "?",
             ),
             (
                 "cancelled",
@@ -6462,16 +6783,17 @@ mod tests {
                 RunState::Cancelled,
                 finished,
                 PASSED_TIMES,
+                "?",
             ),
         ];
-        for (case, marker, runner, name, state, (started, completed), times) in cases {
+        for (case, marker, runner, name, state, (started, completed), times, cost) in cases {
             let (buffer, row, y) = lone_job_row(
                 on(runner, job(LONE_JOB, name, state, started, completed)),
-                120,
+                129,
             );
             assert_eq!(
                 row,
-                job_golden(marker, &format!("└ {name} {runner}"), LONE_JOB, times),
+                job_golden(marker, &format!("└ {name} {runner}"), LONE_JOB, times, cost),
                 "the row of a {case} job"
             );
             // The runner name starts after the marker, a space, the text, and a space.
@@ -6494,19 +6816,20 @@ mod tests {
             let widths = Widths::for_width(w);
             (widths.repo, widths.title)
         };
-        assert_eq!(widths(100), (14, 18), "width 100");
-        assert_eq!(widths(120), (19, 31), "width 120");
-        assert_eq!(widths(140), (25, 45), "width 140");
-        assert_eq!(widths(160), (30, 60), "width 160");
+        assert_eq!(widths(109), (14, 18), "width 109");
+        assert_eq!(widths(129), (19, 31), "width 129");
+        assert_eq!(widths(149), (25, 45), "width 149");
+        assert_eq!(widths(169), (30, 60), "width 169");
     }
 
-    /// At 128 columns the text cell of a job row is 30 columns. Since issue
-    /// #642 the cell has 30 columns at 128 columns, not at 120 columns. The
-    /// runner `m1-ts` of the job `e2e-remotesensing (2)` fits whole.
+    /// At 137 columns the text cell of a job row is 30 columns. Since issue
+    /// #642 the cell has 30 columns at 128 columns, not at 120 columns, and since
+    /// issue #639 it has them at 137 columns. The runner `m1-ts` of the job
+    /// `e2e-remotesensing (2)` fits whole.
     #[test]
-    fn a_runner_name_shows_whole_in_the_wider_text_cell_of_128_columns() {
+    fn a_runner_name_shows_whole_in_the_wider_text_cell_of_137_columns() {
         let name = "e2e-remotesensing (2)";
-        let (buffer, row, y) = lone_job_row(on("m1-ts", passed_job(name)), 128);
+        let (buffer, row, y) = lone_job_row(on("m1-ts", passed_job(name)), 137);
         assert!(
             row.contains(&format!("{name} m1-ts")),
             "the row does not show the runner: {row:?}"
@@ -6529,29 +6852,32 @@ mod tests {
     #[test]
     fn a_job_name_that_fills_the_cell_shows_no_runner_name() {
         let name = "n".repeat(40);
-        let (buffer, row, y) = lone_job_row(on("mbp", passed_job(&name)), 120);
+        let (buffer, row, y) = lone_job_row(on("mbp", passed_job(&name)), 129);
         // The text is cut to the 28 columns of the cell and ends in `…`.
         let cut = format!("└ {}…", "n".repeat(25));
         assert_eq!(display_width(&cut), 28);
-        assert_eq!(row, job_golden("✅", &cut, LONE_JOB, PASSED_TIMES));
+        assert_eq!(row, job_golden("✅", &cut, LONE_JOB, PASSED_TIMES, "?"));
         assert_eq!(cyan_columns(&buffer, y), Vec::<u16>::new());
         assert_eq!(
             last_digit_column(&row, &LONE_JOB.to_string()),
-            Some(run_id_column(120))
+            Some(run_id_column(129))
         );
     }
 
     #[test]
     fn a_job_with_no_runner_gives_the_same_row_as_before() {
-        let (buffer, row, y) = lone_job_row(passed_job("build"), 120);
-        assert_eq!(row, job_golden("✅", "└ build", LONE_JOB, PASSED_TIMES));
+        let (buffer, row, y) = lone_job_row(passed_job("build"), 129);
+        assert_eq!(
+            row,
+            job_golden("✅", "└ build", LONE_JOB, PASSED_TIMES, "$0")
+        );
         assert_eq!(cyan_columns(&buffer, y), Vec::<u16>::new());
     }
 
     #[test]
     fn wide_glyphs_do_not_move_the_runner_color_or_the_job_id() {
         let runner = "🎉mac🎉";
-        let (buffer, row, y) = lone_job_row(on(runner, passed_job("日本語")), 120);
+        let (buffer, row, y) = lone_job_row(on(runner, passed_job("日本語")), 129);
         // Marker 2, space 1, `└ 日本語` 8, space 1: the runner starts in column 12.
         let from = 12_usize;
         let (before, _) = row.split_once(runner).expect("the runner shows");
@@ -6563,13 +6889,13 @@ mod tests {
             column += unicode_width::UnicodeWidthChar::width(glyph).unwrap_or(0);
         }
         assert_eq!(column, from + display_width(runner));
-        for x in column..120 {
+        for x in column..129 {
             let x = u16::try_from(x).expect("a small column");
             assert_ne!(buffer[(x, y)].fg, Color::Cyan, "column {x}");
         }
         assert_eq!(
             last_digit_column(&row, &LONE_JOB.to_string()),
-            Some(run_id_column(120))
+            Some(run_id_column(129))
         );
     }
 
@@ -6646,7 +6972,7 @@ mod tests {
                 "2026-10-14T11:58:00Z",
             )
         };
-        let widths = Widths::for_width(90);
+        let widths = Widths::for_width(99);
         let lines = [
             entry_line(&entry, now(), &utc(), widths).to_string(),
             departure_line(&departure, now(), &utc(), widths).to_string(),
@@ -6823,7 +7149,7 @@ mod tests {
                 "Running · 0 ⏳ · 0 🏃 · 0 ✅ · 0 ❌ · 0 💨 · 0 🪦".to_owned(),
                 text[5].clone(),
                 format!(
-                    "{:<89} FINISHED",
+                    "{:<80} FINISHED",
                     "Merge history · Last 8h · 1 merged · 1 failed · 1 removed"
                 ),
                 queue_golden(
@@ -6866,7 +7192,7 @@ mod tests {
         let history = line_starting_with(&text, "Merge history");
         assert_eq!(
             text[history],
-            format!("{:<89} FINISHED", "Merge history · Last 8h")
+            format!("{:<80} FINISHED", "Merge history · Last 8h")
         );
     }
 
@@ -6874,13 +7200,13 @@ mod tests {
     fn empty_merge_sections_say_so_and_say_loading_before_the_first_refresh_ends() {
         let mut board = Board::new(Duration::from_hours(8));
         board.set_queues(&BTreeSet::from([repo("rust-lang/cargo")]));
-        let text = lines(&render_with(80, 12, &mut board, &loaded()));
+        let text = lines(&render_with(89, 12, &mut board, &loaded()));
         assert_eq!(
             text[1..3],
             ["Merge queue · 0", "   No pull requests in the merge queue."]
         );
         let history = line_starting_with(&text, "Merge history");
-        // The started column starts at column 50 of 80, thus the text gets 49.
+        // The started column starts at column 50 of 89, thus the text gets 49.
         let header = "Merge history · Last 8h · 0 merged · 0 failed · … FINISHED";
         assert_eq!(
             text[history..history + 2],
@@ -6889,7 +7215,7 @@ mod tests {
                 "   No pull request left the merge queue in the last 8h.",
             ]
         );
-        let text = lines(&render_with(80, 12, &mut board, &Status::default()));
+        let text = lines(&render_with(89, 12, &mut board, &Status::default()));
         assert_eq!(text[2], "   Loading…");
         let history = line_starting_with(&text, "Merge history");
         assert_eq!(text[history + 1], "   Loading…");
@@ -6934,7 +7260,7 @@ mod tests {
         assert_eq!(
             text[history],
             format!(
-                "{:<89} FINISHED",
+                "{:<80} FINISHED",
                 "Merge history · Last 2h 00m of 8h · 1 merged · 0 failed · 0 removed"
             )
         );
@@ -6942,7 +7268,7 @@ mod tests {
         let history = line_starting_with(&text, "Merge history");
         assert_eq!(
             text[history],
-            format!("{:<89} FINISHED", "Merge history · Last 2h 00m of 8h")
+            format!("{:<80} FINISHED", "Merge history · Last 2h 00m of 8h")
         );
     }
 
@@ -6966,14 +7292,14 @@ mod tests {
             let mut board = queue_frame_board();
             let text = lines(&render_with(120, 14, &mut board, &status));
             let y = line_starting_with(&text, "Merge history");
-            assert_eq!(text[y], format!("{text_of_header:<89} FINISHED"));
+            assert_eq!(text[y], format!("{text_of_header:<80} FINISHED"));
             assert_eq!(started_cells(&text, y), "FINISHED");
         }
     }
 
     #[test]
     fn a_narrow_merge_history_header_cuts_its_text_and_keeps_the_word_whole() {
-        // The started column starts at column 30 of 60, thus the text gets 29.
+        // The started column starts at column 30 of 69, thus the text gets 29.
         let cases = [
             (
                 loaded(),
@@ -6986,7 +7312,7 @@ mod tests {
         ];
         for (status, expected) in cases {
             let mut board = queue_frame_board();
-            let text = lines(&render_with(60, 14, &mut board, &status));
+            let text = lines(&render_with(69, 14, &mut board, &status));
             let y = line_starting_with(&text, "Merge history");
             assert_eq!(text[y], expected);
             assert_eq!(started_cells(&text, y), "FINISHED");
@@ -6999,12 +7325,12 @@ mod tests {
         let mut board = cut_history_board(vec![cut_departure()]);
         let text = lines(&render_with(120, 12, &mut board, &loaded()));
         let y = line_starting_with(&text, "Merge history");
-        assert_eq!(text[y], format!("{loaded_text:<89} FINISHED"));
-        // The text gets 29 columns at width 60 and 49 columns at width 80.
+        assert_eq!(text[y], format!("{loaded_text:<80} FINISHED"));
+        // The text gets 29 columns at width 69 and 49 columns at width 89.
         let cases = [
-            (60_u16, "Merge history · Last 2h 00m … FINISHED"),
+            (69_u16, "Merge history · Last 2h 00m … FINISHED"),
             (
-                80,
+                89,
                 "Merge history · Last 2h 00m of 8h · 1 merged · 0… FINISHED",
             ),
         ];
@@ -7270,7 +7596,7 @@ mod tests {
         let reversed = |x: u16, y: u16| buffer[(x, y)].modifier.contains(Modifier::REVERSED);
         assert!(reversed(0, 2), "the marker of the selected entry");
         assert!(reversed(60, 2), "the middle of the selected entry");
-        assert!(reversed(110, 2), "the right marker of the selected entry");
+        assert!(reversed(101, 2), "the right marker of the selected entry");
         for y in [1_u16, 3, 4, 5, 9] {
             assert!(!reversed(60, y), "line {y}");
         }
@@ -7404,10 +7730,11 @@ mod tests {
 
     /// The columns of a 120-column frame that hold text in the style of the
     /// row: the cells after the left marker cell up to the blank before the
-    /// right marker cell, and the blank and the job-sum cell after it. The
-    /// right marker cell takes `Color::Reset`, and so does the blank before it.
+    /// right marker cell, and the blank, the job-sum cell, the blank, and the
+    /// cost cell after it. The right marker cell takes `Color::Reset`, and so
+    /// does the blank before it.
     fn row_text_columns() -> impl Iterator<Item = u16> {
-        (3_u16..109).chain(112..120)
+        (3_u16..100).chain(103..120)
     }
 
     /// Asserts that the row `y` is not highlighted and that each text cell of
@@ -7500,7 +7827,7 @@ mod tests {
         for (needle, gray) in [("Bump deps", 238), ("Broken build", 238)] {
             let y = row_of(&buffer, needle);
             assert_text_color(&buffer, y, Color::Indexed(gray));
-            for x in [0_u16, 1, 110, 111] {
+            for x in [0_u16, 1, 101, 102] {
                 assert_eq!(buffer[(x, y)].fg, Color::Reset, "{needle}, cell {x}");
             }
         }
@@ -7526,7 +7853,7 @@ mod tests {
         for x in 3_u16..6 {
             assert_eq!(buffer[(x, y)].fg, Color::Reset, "cell {x}");
         }
-        for x in (6_u16..109).chain(112..120) {
+        for x in (6_u16..100).chain(103..120) {
             assert_eq!(buffer[(x, y)].fg, Color::Indexed(246), "cell {x}");
         }
     }
@@ -7687,7 +8014,7 @@ mod tests {
                     lines(&buffer)[usize::from(y)]
                 );
             }
-            for x in [0_u16, 1, 110, 111] {
+            for x in [0_u16, 1, 101, 102] {
                 assert_eq!(buffer[(x, y)].fg, Color::Reset, "marker cell {x}");
             }
         }
