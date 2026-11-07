@@ -2,6 +2,7 @@
 //! later commit added.
 
 mod child;
+mod interrupt;
 mod report;
 mod run;
 mod step;
@@ -48,6 +49,11 @@ fn main() -> ExitCode {
     match run::run(&cli) {
         Ok(run::Outcome::Found) => ExitCode::SUCCESS,
         Ok(run::Outcome::Ambiguous) => ExitCode::from(EXIT_AMBIGUOUS),
+        Ok(run::Outcome::Interrupted(signal)) => {
+            eprintln!("bibibi: a signal ({signal}) stopped the run");
+            // `run` returned, so the patch file and the scratch worktree are gone.
+            std::process::exit(interrupt::exit_status(signal));
+        }
         Err(error) => {
             eprintln!("bibibi: {error:#}");
             ExitCode::from(EXIT_ERROR)

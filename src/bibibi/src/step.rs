@@ -79,6 +79,7 @@ use anyhow::Result;
 use gitscratch::Scratch;
 
 use crate::child::{self, Ended};
+use crate::interrupt;
 
 /// The exit code of the test that means skip, as `git bisect run` defines it.
 const TEST_SKIP_CODE: i32 = 125;
@@ -98,6 +99,7 @@ const TEST_SKIP_CODE: i32 = 125;
 /// # Errors
 ///
 /// Returns an error if git fails, if the build or the test cannot start, or if the verdict of the test cannot be made.
+/// Returns [`interrupt::Interrupted`] if a signal arrived.
 pub fn step(
     scratch: &Scratch,
     patch: &Path,
@@ -105,7 +107,11 @@ pub fn step(
     test_command: &[OsString],
     commit: &Commit,
 ) -> Result<Verdict> {
+    interrupt::check()?;
     let verdict = test_at(scratch, patch, build, test_command, commit);
+    // After a signal the scratch drop cleans up, and a restore would only run
+    // git against a run that is over.
+    interrupt::check()?;
     let restored = scratch.restore();
     let verdict = verdict?;
     restored?;

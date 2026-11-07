@@ -7,6 +7,7 @@ use std::path::Path;
 use gitscratch::{Repo, Scratch};
 use tempfile::NamedTempFile;
 
+use crate::interrupt;
 use crate::report;
 use crate::step::{step, Commit, SkipReason, Verdict};
 use crate::Cli;
@@ -19,6 +20,9 @@ pub enum Outcome {
     /// Skips leave more than one candidate for the first bad commit. `run`
     /// printed each of them, in the order of `git rev-list --bisect-all`.
     Ambiguous,
+    /// This signal stopped the run. The patch file and the scratch worktree
+    /// are gone, and `run` printed no verdict.
+    Interrupted(i32),
 }
 
 /// Refuse a test commit that has no single parent or changes no file.
@@ -79,6 +83,7 @@ fn preflight(
     bad: &Commit,
 ) -> Result<()> {
     for good in goods {
+        interrupt::check()?;
         let verdict = preflight_step(repo, scratch, patch, cli, good)?;
         let why = match verdict {
             Verdict::Good => continue,
@@ -90,6 +95,7 @@ fn preflight(
             good.short()
         );
     }
+    interrupt::check()?;
     let verdict = preflight_step(repo, scratch, patch, cli, bad)?;
     let why = match verdict {
         Verdict::Bad(_) => return Ok(()),
@@ -142,7 +148,24 @@ fn preflight_step(
 /// unusable: a root or merge test commit, a test commit that changes no file,
 /// a good commit equal to the bad commit, or a good commit that is not an
 /// ancestor of the bad commit.
+///
+/// A SIGINT or SIGTERM ends the run with [`Outcome::Interrupted`]. The running
+/// child stops, and nothing else prints.
 pub fn run(cli: &Cli) -> Result<Outcome> {
+    interrupt::arm();
+    match search(cli) {
+        // A signal can break a git child or a step in many ways. Whatever the
+        // error is, the signal is the cause.
+        Err(_) if interrupt::received().is_some() => Ok(Outcome::Interrupted(
+            interrupt::received().unwrap_or_default(),
+        )),
+        other => other,
+    }
+}
+
+/// The body of [`run`]. The patch file and the scratch worktree drop when this
+/// function returns, also with an error.
+fn search(cli: &Cli) -> Result<Outcome> {
     use std::io::Write;
 
     let repo = Repo::open(&std::env::current_dir().context("no current directory")?)?;
@@ -171,6 +194,7 @@ pub fn run(cli: &Cli) -> Result<Outcome> {
     preflight(&repo, &scratch, patch_file.path(), cli, &goods, &bad)?;
 
     let candidates = loop {
+        interrupt::check()?;
         let good_ids: Vec<&str> = goods.iter().map(|good| good.0.as_str()).collect();
         let listed: Vec<Commit> = scratch
             .bisect_all(&bad.0, &good_ids)?

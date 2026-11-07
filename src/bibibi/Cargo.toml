@@ -11,6 +11,10 @@ clap.workspace = true
 gitscratch.workspace = true
 tempfile.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+signal-hook.workspace = true
+
 [dev-dependencies]
 gitscratch = { workspace = true, features = ["testing"] }
 libc.workspace = true

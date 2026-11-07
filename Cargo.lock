@@ -935,6 +935,7 @@ dependencies = [
  "clap",
  "gitscratch",
  "libc",
+ "signal-hook 0.3.18",
  "tempfile",
 ]
 

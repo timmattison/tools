@@ -2,11 +2,13 @@
 
 use std::ffi::OsString;
 use std::os::fd::AsFd;
-use std::os::unix::process::ExitStatusExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
 
 use anyhow::{bail, Context, Result};
+
+use crate::interrupt;
 
 /// How a child ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,6 +49,7 @@ impl Ended {
 /// # Errors
 ///
 /// Returns an error if `argv` is empty, or if the program cannot start.
+/// Returns [`interrupt::Interrupted`] if a signal stopped the run.
 pub fn run(argv: &[OsString], dir: &Path) -> Result<Ended> {
     let Some((program, arguments)) = argv.split_first() else {
         bail!("the test command is empty");
@@ -68,6 +71,7 @@ pub fn run(argv: &[OsString], dir: &Path) -> Result<Ended> {
 /// # Errors
 ///
 /// Returns an error if the shell cannot start.
+/// Returns [`interrupt::Interrupted`] if a signal stopped the run.
 pub fn run_build(build: &str, dir: &Path) -> Result<Ended> {
     let mut command = Command::new("sh");
     command.arg("-c").arg(build);
@@ -75,16 +79,24 @@ pub fn run_build(build: &str, dir: &Path) -> Result<Ended> {
 }
 
 /// Give `command` its directory, no input, and the standard error of
-/// `bibibi` as its output. Then run it and wait.
+/// `bibibi` as its output. The child leads a new process group, and the
+/// signal thread knows that group while the child runs. Then run it and wait.
 fn run_command(mut command: Command, dir: &Path) -> Result<Ended> {
     let stdout = std::io::stderr()
         .as_fd()
         .try_clone_to_owned()
         .context("could not duplicate the standard error")?;
-    let status = command
+    let mut child = command
         .current_dir(dir)
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
-        .status()?;
+        .process_group(0)
+        .spawn()?;
+    // The group id of a child that leads its group is the pid of the child.
+    interrupt::register_child(i32::try_from(child.id()).context("the pid is too large")?);
+    let waited = child.wait();
+    interrupt::clear_child();
+    let status = waited?;
+    interrupt::check()?;
     Ended::from_status(status)
 }
