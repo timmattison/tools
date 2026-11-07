@@ -62,8 +62,9 @@ impl fmt::Display for SkipReason {
 use std::ffi::OsString;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
+use std::process::ExitStatus;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use gitscratch::Scratch;
 
 use crate::child;
@@ -116,8 +117,17 @@ fn test_at(
         }
     }
     let status = child::run(test_command, scratch.path())?;
+    test_verdict(status).with_context(|| format!("at {}", commit.short()))
+}
+
+/// Map the exit status of the test to a verdict.
+///
+/// # Errors
+///
+/// Returns an error if a signal stopped the test.
+fn test_verdict(status: ExitStatus) -> Result<Verdict> {
     if let Some(signal) = status.signal() {
-        bail!("a signal ({signal}) stopped the test at {}", commit.short());
+        bail!("a signal ({signal}) stopped the test");
     }
     Ok(if status.success() {
         Verdict::Good
