@@ -41,12 +41,15 @@
 //!   sequence of `SIGTERM` and `SIGKILL`.
 //! - [`stream`] — the parser of an endless run of `top`. It turns bytes into
 //!   events, one finished sample at a time. It holds no clock and no process.
+//! - [`history`] — the compact history of the samples, with a fixed memory
+//!   budget, and the readings of it.
 //! - [`render`] — the text that a person reads. Nothing here prints.
 //! - [`machine`] — every fact of this Mac, behind one trait. The module
 //!   `machine::macos` is the one part of `faulte` that runs a command or calls
 //!   the kernel.
 
 pub mod duration;
+pub mod history;
 pub mod machine;
 pub mod pid;
 pub mod plan;
