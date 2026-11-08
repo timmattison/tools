@@ -94,8 +94,19 @@ impl<M: Machine> Run<M> {
     /// Runs the thread until the view drops the channel.
     fn start(self) {
         let mut ledger = Ledger::default();
-        while let Ok(stream) = self.machine.fault_stream(self.interval) {
-            match self.read(stream, &mut ledger) {
+        loop {
+            let flow = match self.machine.fault_stream(self.interval) {
+                Ok(stream) => self.read(stream, &mut ledger),
+                Err(error) => {
+                    let now = self.machine.now();
+                    if self.send_gap(&mut ledger, now, error.to_string()) {
+                        Flow::Restart
+                    } else {
+                        Flow::Stop
+                    }
+                }
+            };
+            match flow {
                 Flow::Restart => self.machine.sleep(Duration::from(self.interval)),
                 Flow::Stop => return,
             }
