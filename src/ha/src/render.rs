@@ -6979,6 +6979,90 @@ mod tests {
     }
 
     #[test]
+    fn the_floor_shows_in_the_narrowest_cell_that_can_hold_it() {
+        let width = FIXED_COLUMNS + 22;
+        let widths = Widths::for_width(width);
+        assert_eq!(widths.repo + 1 + widths.workflow, 11);
+        let width = u16::try_from(width).expect("a small width");
+        let (buffer, row, y) = lone_job_row(
+            on("GitHub Actions 1000001050", passed_job(&"n".repeat(40))),
+            width,
+        );
+        assert_eq!(columns(&row, 3, 11).trim_end(), "└ … GitHub…");
+        assert_eq!(cyan_columns(&buffer, y).len(), 7);
+    }
+
+    #[test]
+    fn the_runner_name_and_its_cut_mark_stay_cyan_on_a_highlighted_row() {
+        let mut board = board_with_jobs(vec![on(
+            "GitHub Actions 1000001050",
+            passed_job(&"n".repeat(40)),
+        )]);
+        board.select_next(now());
+        let buffer = render_with(129, 14, &mut board, &loaded());
+        let text = lines(&buffer);
+        let y = u16::try_from(
+            text.iter()
+                .position(|line| line.contains(&LONE_JOB.to_string()))
+                .expect("the job row shows its ID"),
+        )
+        .expect("a small row");
+        assert!(
+            buffer[(5, y)].modifier.contains(Modifier::REVERSED),
+            "the row is highlighted: {:?}",
+            text[usize::from(y)]
+        );
+        assert_eq!(buffer[(5, y)].symbol(), "…");
+        assert_ne!(buffer[(5, y)].fg, Color::Cyan);
+        let (before, _) = text[usize::from(y)]
+            .split_once("GitHub…")
+            .expect("the floor shows");
+        let from = u16::try_from(display_width(before)).expect("a small column");
+        assert_eq!(
+            cyan_columns(&buffer, y),
+            (from..from + 7).collect::<Vec<u16>>()
+        );
+    }
+
+    #[test]
+    fn the_cut_mark_of_the_job_name_has_the_style_of_the_line() {
+        let mut board = fade_board(
+            Duration::from_hours(8),
+            "acme/widgets",
+            "2026-10-14T11:00:00Z",
+        );
+        board.select_next(now());
+        board.expand(now());
+        board.set_jobs(
+            RunId(FADE_JOBS_RUN),
+            vec![on(
+                "GitHub Actions 1000001050",
+                job(
+                    9001,
+                    &"n".repeat(40),
+                    RunState::Passed,
+                    Some("2026-10-14T10:55:00Z"),
+                    Some("2026-10-14T11:00:00Z"),
+                ),
+            )],
+        );
+        board.select_previous(now());
+        let buffer = render_with(120, 14, &mut board, &loaded());
+        let y = row_of(&buffer, "9001");
+        assert_eq!(buffer[(5, y)].symbol(), "…");
+        assert_eq!(buffer[(5, y)].fg, Color::Indexed(246));
+        let text = lines(&buffer);
+        let (before, _) = text[usize::from(y)]
+            .split_once("GitHub…")
+            .expect("the floor shows");
+        let from = u16::try_from(display_width(before)).expect("a small column");
+        assert_eq!(
+            cyan_columns(&buffer, y),
+            (from..from + 7).collect::<Vec<u16>>()
+        );
+    }
+
+    #[test]
     fn a_job_with_no_runner_and_a_long_name_keeps_the_cut_at_the_end() {
         let (buffer, row, y) = lone_job_row(passed_job(&"n".repeat(40)), 129);
         assert_eq!(
