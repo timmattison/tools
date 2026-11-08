@@ -30,7 +30,6 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 use shellquote::shell_quote;
 
@@ -257,7 +256,7 @@ pub fn build_check_plan(target: &Path, config_root: Option<&Path>) -> Option<Vec
 /// counts as a failure, not as a reason to abandon the check.
 fn stream_check(cmd: &str, cwd: &Path) -> bool {
     eprint!("\n  $ {cmd}\n");
-    Command::new(SHELL)
+    childenv::command(SHELL)
         .arg(SHELL_COMMAND_FLAG)
         .arg(cmd)
         // Inherited stdio is the point: the check's own output is the progress

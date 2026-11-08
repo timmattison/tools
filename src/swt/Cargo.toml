@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 buildinfo.workspace = true
+childenv.workspace = true
 clap.workspace = true
 serde_json.workspace = true
 shellquote.workspace = true

@@ -22,7 +22,7 @@
 use std::ffi::OsStr;
 use std::fmt;
 use std::path::Path;
-use std::process::{self, Command};
+use std::process;
 
 use crate::green_check::Outcome;
 
@@ -108,7 +108,7 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let mut command = Command::new(GIT);
+    let mut command = childenv::command(GIT);
     command.args(args);
     if let Some(dir) = cwd {
         command.current_dir(dir);
