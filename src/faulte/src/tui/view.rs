@@ -12,7 +12,7 @@ use chrono::{DateTime, TimeZone, Utc};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::history::{Cell, Gap, History, Reading};
@@ -287,12 +287,92 @@ fn table_line<'a>(cells: impl IntoIterator<Item = &'a str>, widths: &[usize]) ->
         .join(COLUMN_GAP)
 }
 
+/// The line of the detail view for a process that left the history.
+const NO_SERIES: &str = "the history no longer holds this process";
+
+/// Gives the clock time of `at`, or [`render::ABSENT`] when the process made
+/// no fault in the history.
+fn optional_clock<Tz: TimeZone>(at: Option<SystemTime>, tz: &Tz) -> String
+where
+    Tz::Offset: Display,
+{
+    at.map_or_else(|| render::ABSENT.to_string(), |at| clock(at, tz))
+}
+
+/// Paints the detail view of the selected process in `area`: its facts, its
+/// own timeline, its session and directory, and then its whole command, which
+/// wraps and scrolls.
+fn paint_detail<Tz: TimeZone>(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    context: &ViewContext<'_, Tz>,
+) where
+    Tz::Offset: Display,
+{
+    let history = app.history();
+    let cells = usize::from(area.width).saturating_sub(LABEL_WIDTH);
+    let Some(series) = app
+        .row_key()
+        .and_then(|key| history.series(key, cells, app.selected_entry()))
+    else {
+        paint_line(frame, area, NO_SERIES);
+        return;
+    };
+    let mut lines = vec![
+        Line::raw(format!(
+            "PID {} · OWNER {} · FIRST {} · LAST {} · PEAK {}/s · {} frames with faults",
+            series.key.pid,
+            history.accounts().name_of(series.uid),
+            optional_clock(series.first_at, context.tz),
+            optional_clock(series.last_at, context.tz),
+            render::rate(series.peak_rate),
+            series.frames_with_faults,
+        )),
+        cell_line(FAULTS_LABEL, &series.cells),
+        marker_line(series.marker),
+    ];
+    if let Some(session) = &series.session {
+        lines.push(Line::raw(format!("{SESSION_LABEL} {session}")));
+    }
+    if let Some(directory) = &series.directory {
+        lines.push(Line::raw(format!("{DIRECTORY_LABEL} {directory}")));
+    }
+    let facts = u16::try_from(lines.len()).unwrap_or(u16::MAX);
+    let [facts_area, command_area] =
+        Layout::vertical([Constraint::Length(facts), Constraint::Min(0)]).areas(area);
+    frame.render_widget(Paragraph::new(lines), facts_area);
+    frame.render_widget(
+        Paragraph::new(series.command)
+            .wrap(Wrap { trim: false })
+            .scroll((app.detail_scroll(), 0)),
+        command_area,
+    );
+}
+
+/// The label of the session line of the detail view.
+const SESSION_LABEL: &str = "SESSION";
+
+/// The label of the directory line of the detail view.
+const DIRECTORY_LABEL: &str = "DIRECTORY";
+
 /// Paints the header of the table and the rows that fit in `area`.
-fn paint_table(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
+fn paint_table<Tz: TimeZone>(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &mut App,
+    context: &ViewContext<'_, Tz>,
+) where
+    Tz::Offset: Display,
+{
     let page = usize::from(area.height.saturating_sub(1));
     app.set_page_rows(page);
     if let Some(gap) = past_gap(app) {
         paint_line(frame, area, &gap.reason);
+        return;
+    }
+    if app.detail_open() {
+        paint_detail(frame, area, app, context);
         return;
     }
     let Some(reading) = app.reading() else {
@@ -447,7 +527,7 @@ where
     paint_line(frame, parts.banner, &banner(app, context));
     paint_lines(frame, parts.headers, &header_lines);
     paint_timeline(frame, parts.timeline, app);
-    paint_table(frame, parts.table, app);
+    paint_table(frame, parts.table, app, context);
 }
 
 #[cfg(test)]
