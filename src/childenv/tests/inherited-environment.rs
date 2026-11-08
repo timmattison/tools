@@ -29,7 +29,6 @@
 //! guarantee.
 
 use std::ffi::{OsStr, OsString};
-use std::process::Command;
 
 /// The value every probe is set to.
 ///
@@ -86,8 +85,7 @@ fn sheds_every_inherited_git_variable_and_nothing_else() {
         std::env::set_var(key, PROBE_VALUE);
     }
 
-    let mut command = Command::new("git");
-    childenv::shed_inherited_git_environment(&mut command);
+    let command = childenv::fixture_command("git");
 
     // `env_remove` records a removal as a `None` value against the key, so the
     // scheduled removals can be read back without spawning anything.

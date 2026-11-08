@@ -273,19 +273,27 @@ pub fn shed_git_environment_from<I, K>(
     K: AsRef<OsStr>,
 {
     for key in keys {
-        let name = key.as_ref().to_string_lossy();
-
-        if !name.starts_with(GIT_ENVIRONMENT_PREFIX) {
-            continue;
-        }
-
-        let kept = matches!(rule, InheritedGitEnvironment::KeepUserIntent)
-            && USER_INTENT_GIT_ENVIRONMENT.contains(&&*name);
-
-        if !kept {
+        if rule_sheds(key.as_ref(), rule) {
             command.env_remove(key.as_ref());
         }
     }
+}
+
+/// Decide whether `rule` sheds the variable `name`.
+///
+/// This is the one implementation of the rule. [`shed_git_environment_from`]
+/// and [`inherited_git_variables`] both call it.
+fn rule_sheds(name: &OsStr, rule: InheritedGitEnvironment) -> bool {
+    let name = name.to_string_lossy();
+
+    if !name.starts_with(GIT_ENVIRONMENT_PREFIX) {
+        return false;
+    }
+
+    let kept = matches!(rule, InheritedGitEnvironment::KeepUserIntent)
+        && USER_INTENT_GIT_ENVIRONMENT.contains(&&*name);
+
+    !kept
 }
 
 /// Detach `command` from the inherited git environment, and keep the six names
@@ -357,13 +365,16 @@ pub fn fixture_command<S: AsRef<OsStr>>(program: S) -> Command {
 /// }
 /// ```
 pub fn inherited_git_variables(rule: InheritedGitEnvironment) -> Vec<OsString> {
-    let _ = rule;
-    Vec::new()
+    std::env::vars_os()
+        .map(|(name, _)| name)
+        .filter(|name| rule_sheds(name, rule))
+        .collect()
 }
 
 /// Build a command and sweep it with `rule`. This is the only place in this
 /// crate that starts a command.
 fn swept<S: AsRef<OsStr>>(program: S, rule: InheritedGitEnvironment) -> Command {
-    let _ = rule;
-    Command::new(program)
+    let mut command = Command::new(program);
+    shed_git_environment_from(&mut command, std::env::vars_os().map(|(key, _)| key), rule);
+    command
 }
