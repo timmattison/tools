@@ -1087,10 +1087,58 @@ impl History {
         Some(((position + 1) * used).div_ceil(entries) - 1)
     }
 
-    /// Gives the reading of the one frame `id`.
+    /// Gives the reading of the one frame `id`, or `None` for a gap or an
+    /// unknown name.
+    ///
+    /// The rows are the rows with at least one fault, in the order of the
+    /// ranking. The count of the other processes stays in the reading, so the
+    /// header can state the full count.
     #[must_use]
-    pub fn frame(&self, _id: EntryId) -> Option<Reading> {
-        None
+    pub fn frame(&self, id: EntryId) -> Option<Reading> {
+        let Entry::Frame(frame) = &self.entries[self.position(id)?] else {
+            return None;
+        };
+        let (rows, extras): (Vec<RankedRow>, Vec<RowExtra>) = frame
+            .rows
+            .iter()
+            .map(|row| {
+                let ranked = self.decode(row.identity, row.faults, row.rss_kib, row.state);
+                let own = self.identities.slab[row.identity as usize]
+                    .as_ref()
+                    .is_some_and(|identity| identity.own);
+                (
+                    ranked,
+                    RowExtra {
+                        as_of: frame.at,
+                        own,
+                    },
+                )
+            })
+            .unzip();
+        let others = frame.others as usize;
+        let processes = rows.len() + others;
+        Some(Reading {
+            end: id,
+            at: frame.at,
+            ranking: Ranking {
+                rows,
+                window: frame.window,
+                total_faults: frame.total_faults,
+                claude: frame.claude,
+                skipped: frame.skipped,
+            },
+            extras,
+            others,
+            header: HeaderFacts {
+                processes,
+                swap: frame.swap,
+                usage: frame.usage,
+                compressor_bytes: frame.compressor_bytes,
+                swap_window: frame.swap_window,
+                interval: frame.interval,
+                span: None,
+            },
+        })
     }
 
     /// Gives the names of the accounts that the frames mentioned.
