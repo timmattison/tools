@@ -591,4 +591,27 @@ mod tests {
         assert_eq!(gap.lost, Duration::ZERO);
         assert_eq!(frame.at, at(14));
     }
+
+    /// Output that the parser refused is a gap. The gap ends when the output
+    /// arrived, and it begins where the last frame ended.
+    #[test]
+    fn refused_output_makes_a_gap() {
+        let rig = Rig::new().stream(vec![
+            header(10),
+            header(12),
+            finished(14, 12, 7_000),
+            StreamEvent::Refused {
+                at: at(20),
+                reason: "top printed rubbish".to_owned(),
+            },
+        ]);
+        let sampler = rig.start();
+
+        let _frame = next_frame(&sampler);
+        let gap = next_gap(&sampler);
+
+        assert_eq!(gap.reason, "top printed rubbish");
+        assert_eq!(gap.at, at(20));
+        assert_eq!(gap.lost, Duration::from_secs(8));
+    }
 }
