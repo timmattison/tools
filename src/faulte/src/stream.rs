@@ -36,6 +36,11 @@ pub enum ParsedEvent {
 /// The byte that ends a line.
 const NEWLINE: u8 = b'\n';
 
+/// The longest line that the parser holds, in bytes. A line of `top` is far
+/// shorter. A longer one is not the output of `top`, and a parser that holds it
+/// would let a broken pipe fill the memory.
+const LONGEST_LINE: usize = 64 * 1024;
+
 /// Where the parser is inside the sample that it reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Position {
@@ -487,6 +492,66 @@ mod tests {
                 header_only(),
                 header_only(),
                 header_after(vec![row(10, 3)], 3),
+            ]
+        );
+    }
+
+    /// A line longer than `LONGEST_LINE` gives one `Refused`, and the parser
+    /// drops its bytes up to the next newline. It does not hold them. The
+    /// events are the same when the line arrives in one read, and when it
+    /// arrives in many. The sample that the line belongs to is refused, so no
+    /// row is lost without a word.
+    #[test]
+    fn a_line_longer_than_the_limit_is_refused_and_dropped() {
+        let long = "x".repeat(LONGEST_LINE + 1);
+        let text = sample("12:00:00", "10     9000000   \n")
+            + &sample("12:00:03", &format!("10     3         \n{long}\n"))
+            + &sample("12:00:06", "10     5         \n")
+            + &sample("12:00:09", "10     7         \n");
+        let expected = [
+            header_only(),
+            header_only(),
+            ParsedEvent::Refused {
+                reason: "the output of /usr/bin/top is not a sample of faults: a line is longer \
+                         than 65536 bytes"
+                    .to_owned(),
+            },
+            header_only(),
+            header_after(vec![row(10, 5)], 3),
+        ];
+
+        assert_eq!(events_of(&text), expected, "all in one read");
+
+        let mut parser = StreamParser::new();
+        let mut events = Vec::new();
+        for chunk in text.as_bytes().chunks(1_000) {
+            events.extend(parser.feed(chunk));
+            assert!(
+                parser.pending.len() <= LONGEST_LINE,
+                "the parser holds at most one line, not the whole long line"
+            );
+        }
+        assert_eq!(events, expected, "in reads of 1,000 bytes");
+    }
+
+    /// An overlong line at the limit exactly is a line. One byte more is not.
+    #[test]
+    fn a_line_of_exactly_the_limit_is_still_a_line() {
+        let text = sample("12:00:00", "10     9000000   \n")
+            + &sample(
+                "12:00:03",
+                &format!("10     3{}\n", " ".repeat(LONGEST_LINE - 8)),
+            )
+            + &sample("12:00:06", "10     5         \n");
+
+        let events = events_of(&text);
+
+        assert_eq!(
+            events,
+            [
+                header_only(),
+                header_only(),
+                header_after(vec![row(10, 3)], 3)
             ]
         );
     }
