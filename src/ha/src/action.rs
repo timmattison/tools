@@ -216,6 +216,11 @@ impl Request {
                 run.id.0,
                 self.verb()
             )),
+            Request::Rerun if run.state.is_active() => Prompt::Refuse(format!(
+                "run {} is still active: there is nothing to {} yet",
+                run.id.0,
+                self.verb()
+            )),
             Request::Rerun => Prompt::Confirm(Confirm::new(
                 run,
                 job.map_or(Action::RerunWorkflow, |job| Action::RerunJob {
