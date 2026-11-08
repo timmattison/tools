@@ -1884,6 +1884,19 @@ mod tests {
         assert_eq!(timeline.marker, None);
     }
 
+    /// A terminal can be too narrow for one cell of the timeline. A timeline of
+    /// no cells then has no place for the marker.
+    #[test]
+    fn a_timeline_of_no_cells_has_no_marker() {
+        let mut history = History::new();
+        let id = history.add(frame(10, vec![row(1, 5)]));
+
+        let timeline = history.timeline(0, Some(id));
+
+        assert!(timeline.faults.is_empty() && timeline.swap.is_empty());
+        assert_eq!(timeline.marker, None);
+    }
+
     /// The series of one process: blank cells before it started, a level
     /// against its own peak, and the full command.
     #[test]
