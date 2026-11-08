@@ -141,7 +141,8 @@ impl App {
 
     /// Adds an update to the history.
     pub fn on_update(&mut self, update: Update) {
-        let _ = update;
+        self.history.add(update);
+        self.refresh();
     }
 
     /// Applies a key.
