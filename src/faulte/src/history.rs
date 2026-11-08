@@ -1281,7 +1281,7 @@ impl History {
         let position = self.position(selected?)?;
         let entries = self.entries.len();
         let used = cells.min(entries);
-        Some(((position + 1) * used).div_ceil(entries) - 1)
+        (used > 0).then(|| ((position + 1) * used).div_ceil(entries) - 1)
     }
 
     /// Gives the reading of the one frame `id`, or `None` for a gap or an
