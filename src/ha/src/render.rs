@@ -6967,12 +6967,12 @@ mod tests {
         assert_eq!(widths.repo + 1 + widths.workflow, 9);
         let width = u16::try_from(width).expect("a small width");
         let cases = [
-            ("a", "└ a".to_owned()),
-            (&"n".repeat(40)[..], format!("└ {}…", "n".repeat(6))),
+            ("a".to_owned(), "└ a".to_owned()),
+            ("n".repeat(40), format!("└ {}…", "n".repeat(6))),
         ];
         for (job, text) in cases {
             let (buffer, row, y) =
-                lone_job_row(on("GitHub Actions 1000001050", passed_job(job)), width);
+                lone_job_row(on("GitHub Actions 1000001050", passed_job(&job)), width);
             assert_eq!(columns(&row, 3, 9).trim_end(), text, "job {job}");
             assert_eq!(cyan_columns(&buffer, y).len(), 0, "job {job}");
         }
