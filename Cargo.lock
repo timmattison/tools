@@ -2542,6 +2542,7 @@ dependencies = [
  "libc",
  "occ",
  "ratatui",
+ "signal-hook 0.3.18",
  "termsize",
  "testcolor",
  "textfit",

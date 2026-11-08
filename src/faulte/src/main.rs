@@ -15,11 +15,19 @@ use faulte::plan::{self, Candidate, PlanInput, Rules};
 #[cfg(target_os = "macos")]
 use faulte::render;
 #[cfg(target_os = "macos")]
+use faulte::sampler::Sampler;
+#[cfg(target_os = "macos")]
 use faulte::stop::{self, Decision, Timing};
+#[cfg(target_os = "macos")]
+use faulte::tui::{self as view, TerminalEvents};
 #[cfg(target_os = "macos")]
 use std::io::{self, BufRead, IsTerminal, Write};
 #[cfg(target_os = "macos")]
-use std::time::Duration;
+use std::sync::atomic::AtomicBool;
+#[cfg(target_os = "macos")]
+use std::sync::Arc;
+#[cfg(target_os = "macos")]
+use std::time::{Duration, SystemTime};
 
 /// The one-line description that `--help` shows.
 const ABOUT: &str =
@@ -67,6 +75,19 @@ const EXIT_ERROR: u8 = 2;
 /// not do the work that the command line asked for, so it is not a success.
 #[cfg(target_os = "macos")]
 const EXIT_NOT_A_TERMINAL: u8 = 1;
+
+/// What `faulte tui` says when the input or the output is not a terminal.
+#[cfg(target_os = "macos")]
+const TUI_NEEDS_A_TERMINAL: &str = "faulte tui draws a full-screen view, so it needs a terminal on its input and on its output. faulte tui did not start.";
+
+/// The signals that make `faulte tui` leave the same way that `q` does.
+///
+/// The handler of each one only sets a flag. The loop reads the flag, and the
+/// guard of the terminal restores the screen on the way out. A handler that
+/// restored the screen itself would call functions that are not safe in a
+/// signal handler.
+#[cfg(target_os = "macos")]
+const LEAVING_SIGNALS: [libc::c_int; 3] = [libc::SIGTERM, libc::SIGHUP, libc::SIGINT];
 
 /// The name that each message on the error output starts with.
 #[cfg(target_os = "macos")]
@@ -169,6 +190,10 @@ enum Command {
         #[arg(long, value_name = COUNT_VALUE)]
         max: Option<usize>,
     },
+
+    /// Show a full-screen view of the page faults of this Mac, with the
+    /// history of the samples. Press q to leave.
+    Tui,
 }
 
 fn main() -> ExitCode {
@@ -185,6 +210,7 @@ fn run(cli: Cli) -> ExitCode {
     } = cli;
     match command {
         None => rank(interval, limit),
+        Some(Command::Tui) => tui(interval),
         Some(Command::Kill {
             older_than,
             idle_for,
@@ -197,6 +223,60 @@ fn run(cli: Cli) -> ExitCode {
                 max,
             },
         ),
+    }
+}
+
+/// Puts the terminal back in its normal state when it drops, also when the
+/// loop returns an error or panics.
+#[cfg(target_os = "macos")]
+struct TerminalGuard;
+
+#[cfg(target_os = "macos")]
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        ratatui::restore();
+    }
+}
+
+/// Shows the full-screen view until the person quits or a signal arrives.
+///
+/// The check for a terminal comes first, so a run with pipes starts no `top`.
+/// The locals drop in the reverse order of their making: the guard restores
+/// the terminal first, then the sampler stops `top`.
+#[cfg(target_os = "macos")]
+fn tui(interval: Span) -> ExitCode {
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        eprintln!("{TUI_NEEDS_A_TERMINAL}");
+        return ExitCode::from(EXIT_NOT_A_TERMINAL);
+    }
+    let signalled = Arc::new(AtomicBool::new(false));
+    for signal in LEAVING_SIGNALS {
+        if let Err(error) = signal_hook::flag::register(signal, Arc::clone(&signalled)) {
+            eprintln!("{TOOL}: {error}");
+            return ExitCode::from(EXIT_ERROR);
+        }
+    }
+    let sampler = Sampler::spawn(Mac::new(), interval, Pid::new(std::process::id()));
+    // `ratatui::init` also installs a panic hook that restores the terminal.
+    let mut terminal = ratatui::init();
+    let guard = TerminalGuard;
+    let result = view::run(
+        &mut terminal,
+        &mut TerminalEvents,
+        sampler.updates(),
+        &signalled,
+        &SystemTime::now,
+        &chrono::Local,
+    );
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            // The guard has not dropped yet, so the screen is still the
+            // alternate screen. Restore it before the message.
+            drop(guard);
+            eprintln!("{TOOL}: {error}");
+            ExitCode::from(EXIT_ERROR)
+        }
     }
 }
 
