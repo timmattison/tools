@@ -222,11 +222,11 @@ pub fn parse(output: &str) -> Result<TopSample, TopParseError> {
 }
 
 /// The first token of the first line of the header block of each sample.
-const PROCESSES: &str = "Processes:";
+pub(crate) const PROCESSES: &str = "Processes:";
 
 /// The format of the clock line under each `Processes:` line. It is local
 /// time, and it names no zone.
-const CLOCK_FORMAT: &str = "%Y/%m/%d %H:%M:%S";
+pub(crate) const CLOCK_FORMAT: &str = "%Y/%m/%d %H:%M:%S";
 
 /// Gives the time from the first clock line to the second one.
 ///
@@ -261,19 +261,19 @@ const FAULTS_HEADER: &str = "FAULTS";
 
 /// The header row that `top` prints for [`STATS`], as tokens. The parser
 /// compares tokens, so the column widths of `top` do not matter.
-const HEADER: [&str; 2] = [PID_HEADER, FAULTS_HEADER];
+pub(crate) const HEADER: [&str; 2] = [PID_HEADER, FAULTS_HEADER];
 
 /// Tells whether `line` is a header row: its first token is `PID`. No other
 /// line of the output starts with that token.
 ///
 /// The parser splits each line on ASCII white space only. `top` prints ASCII,
 /// so a line that another separator splits is not a line of `top`.
-fn is_header_row(line: &str) -> bool {
+pub(crate) fn is_header_row(line: &str) -> bool {
     line.split_ascii_whitespace().next() == Some(PID_HEADER)
 }
 
 /// Reads a row: a PID, then a fault count, and no other token.
-fn parse_row(line: &str) -> Option<FaultCount> {
+pub(crate) fn parse_row(line: &str) -> Option<FaultCount> {
     let mut tokens = line.split_ascii_whitespace();
     let (Some(pid), Some(faults), None) = (tokens.next(), tokens.next(), tokens.next()) else {
         return None;
