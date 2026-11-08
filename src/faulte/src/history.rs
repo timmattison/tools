@@ -1580,4 +1580,110 @@ mod tests {
         assert_eq!(minute.end(), gap_id);
         assert!(history.span(gap_id, SpanWidth::OneFrame).is_none());
     }
+
+    /// Builds a history of seven entries: five frames and two gaps. The swap
+    /// traffic is 10 pages in frame 0 and 80 pages in frame 3.
+    fn seven_entries() -> (History, Vec<EntryId>) {
+        let mut history = History::new();
+        let mut ids = Vec::new();
+        for (index, faults) in [
+            (0, Some(2)),
+            (1, Some(4)),
+            (2, None),
+            (3, Some(16)),
+            (4, None),
+            (5, None),
+            (6, Some(8)),
+        ] {
+            let secs = index * WINDOW_SECS;
+            let id = match faults {
+                None => history.add(gap(secs, WINDOW_SECS)),
+                Some(faults) => {
+                    let mut sampled = sample(secs, vec![row(1, faults)]);
+                    sampled.observed.swap = match index {
+                        0 => VmDelta {
+                            swapins: 10,
+                            swapouts: 0,
+                        },
+                        3 => VmDelta {
+                            swapins: 40,
+                            swapouts: 40,
+                        },
+                        _ => VmDelta::default(),
+                    };
+                    history.add(Update::Frame(Box::new(sampled)))
+                }
+            };
+            ids.push(id);
+        }
+        (history, ids)
+    }
+
+    /// Makes the cell of a bar.
+    fn bar(level: u8, holds_gap: bool) -> Cell {
+        Cell::Bar { level, holds_gap }
+    }
+
+    /// Seven entries squeezed into three cells: each cell shows the highest
+    /// rate of its slice, and the marker is the cell of the selected entry.
+    #[test]
+    fn the_timeline_maps_entries_to_cells_by_integer_slices() {
+        let (history, ids) = seven_entries();
+
+        let timeline = history.timeline(3, Some(ids[3]));
+
+        assert_eq!(
+            timeline.faults,
+            vec![bar(2, false), bar(7, true), bar(4, true)]
+        );
+        assert_eq!(timeline.marker, Some(1));
+        assert_eq!(history.timeline(3, Some(ids[6])).marker, Some(2));
+        assert_eq!(history.timeline(3, Some(ids[0])).marker, Some(0));
+        assert_eq!(history.timeline(3, None).marker, None);
+    }
+
+    /// With a cell for each entry, a gap is a gap cell, and the swap row
+    /// scales to its own peak.
+    #[test]
+    fn the_timeline_shows_gaps_and_the_swap_row() {
+        let (history, _) = seven_entries();
+
+        let timeline = history.timeline(50, None);
+
+        assert_eq!(
+            timeline.faults,
+            vec![
+                bar(1, false),
+                bar(2, false),
+                Cell::Gap,
+                bar(7, false),
+                Cell::Gap,
+                Cell::Gap,
+                bar(4, false)
+            ]
+        );
+        assert_eq!(
+            timeline.swap,
+            vec![
+                bar(1, false),
+                bar(0, false),
+                Cell::Gap,
+                bar(7, false),
+                Cell::Gap,
+                Cell::Gap,
+                bar(0, false)
+            ]
+        );
+    }
+
+    /// A history with no entry has no cell and no marker.
+    #[test]
+    fn an_empty_history_has_an_empty_timeline() {
+        let history = History::new();
+
+        let timeline = history.timeline(10, None);
+
+        assert!(timeline.faults.is_empty() && timeline.swap.is_empty());
+        assert_eq!(timeline.marker, None);
+    }
 }
