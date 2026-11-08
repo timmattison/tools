@@ -9,7 +9,7 @@ pub mod app;
 pub mod view;
 
 use std::io;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, SystemTime};
 
@@ -70,7 +70,7 @@ pub fn run<B, E, Tz>(
     terminal: &mut Terminal<B>,
     events: &mut E,
     updates: &Receiver<Update>,
-    _signalled: &AtomicBool,
+    signalled: &AtomicBool,
     now: &dyn Fn() -> SystemTime,
     tz: &Tz,
 ) -> Result<(), RunError>
@@ -82,7 +82,7 @@ where
     Tz::Offset: std::fmt::Display,
 {
     let mut app = App::new(History::new());
-    loop {
+    while !signalled.load(Ordering::SeqCst) {
         while let Ok(update) = updates.try_recv() {
             app.on_update(update);
         }
@@ -95,15 +95,15 @@ where
             Some(_) | None => {}
         }
         if app.should_quit() {
-            return Ok(());
+            break;
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeSet, VecDeque};
-    use std::sync::atomic::Ordering;
     use std::sync::mpsc::{channel, Sender};
     use std::sync::Arc;
 
