@@ -66,7 +66,7 @@ if git diff --cached --name-only --diff-filter=ACMR | grep -qE '\.rs$|(^|/)Cargo
     # `rebase --exec`, `swt`'s green check called from a hook - which is why
     # `gitscratch` sheds every `GIT_`-prefixed variable, and not a list of
     # names, at every git spawn of its own - the rule `NoInheritedGitEnvironment`
-    # applies, pinned by `src/gitscratch/tests/inherited-environment.rs`. That
+    # applies, pinned by `src/childenv/tests/inherited-environment.rs`. That
     # is the suite that pins the *prefix*: it probes GIT_CONFIG_PARAMETERS,
     # GIT_CONFIG_COUNT and a name git has never invented, and it keeps a list of
     # names that must survive, so the rule stays a prefix rather than a sweep of

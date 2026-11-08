@@ -203,9 +203,10 @@ mod tests {
     use std::process::Command;
 
     use super::{HaltDiff, HaltDiffs};
-    use crate::git::{Git, NoInheritedGitEnvironment};
+    use crate::git::Git;
     use crate::repo::PREFLIGHT_HOOKS_PATH;
     use crate::testing::not_a_repository;
+    use childenv::NoInheritedGitEnvironment;
 
     /// The name a test gives a halt diff, so that it can read the name back.
     const STOPPED: &str = "abc1234 a stopped commit";

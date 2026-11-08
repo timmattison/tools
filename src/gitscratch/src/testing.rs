@@ -23,9 +23,9 @@ use std::process::{Command, Output};
 
 use tempfile::TempDir;
 
-use crate::git::NoInheritedGitEnvironment;
 use crate::repo::Repo;
 use crate::scratch::Scratch;
+use childenv::NoInheritedGitEnvironment;
 
 /// A pseudo-terminal of a size that a test chose, for a test of a tool that
 /// measures its terminal or that decides color by it.

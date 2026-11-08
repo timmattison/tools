@@ -136,7 +136,7 @@ pub mod testing;
 /// names of [`USER_INTENT_GIT_ENVIRONMENT`], which a person states on purpose.
 /// [`shed_git_environment_from`] is the one implementation of both, with the
 /// key source as a parameter so a test never touches the process environment.
-pub use git::{
+pub use childenv::{
     shed_git_environment_from, shed_inherited_git_environment,
     shed_inherited_git_environment_keeping_user_intent, InheritedGitEnvironment,
     NoInheritedGitEnvironment, HOOK_EXPORTED_GIT_ENVIRONMENT, USER_INTENT_GIT_ENVIRONMENT,
