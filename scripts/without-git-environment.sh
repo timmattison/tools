@@ -1,4 +1,4 @@
-# shellcheck shell=bash
+# shellcheck shell=sh
 # Run a command with every GIT_ variable removed from its environment.
 #
 # Git exports GIT_DIR, GIT_INDEX_FILE and more into each hook, and every
