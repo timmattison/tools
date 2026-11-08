@@ -5,19 +5,38 @@
 //! the view tried to measure and did not. The module holds no terminal, no
 //! clock, and no process. A [`SystemTime`] arrives only as data.
 
-use std::collections::BTreeSet;
+use std::borrow::Cow;
+use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::mem::size_of;
 use std::time::{Duration, SystemTime};
 
+use occ::SessionId;
+
+use crate::duration::Span;
 use crate::machine::Observed;
 use crate::pid::{Pid, Uid};
-use crate::ranking::Ranking;
-use crate::render::Accounts;
+use crate::ranking::{ClaudeTotal, ClaudeView, RankedRow, Skipped};
+use crate::render::{self, Accounts};
+use crate::state::SessionState;
+use crate::vm::{SwapUsage, VmDelta};
 
 /// The memory that a history keeps, in bytes.
 pub const BUDGET_BYTES: usize = 64 * 1024 * 1024;
 
 /// The most text of one command that the history keeps.
 pub const STORED_COMMAND_BYTES: usize = 16 * 1024;
+
+/// The most text of one directory, status, or gap reason that the history
+/// keeps.
+const STORED_TEXT_BYTES: usize = 1024;
+
+/// The share of the budget that the text of one frame may use, as a divisor.
+/// A frame whose commands are all as long as the cut then holds at most half
+/// of the budget in text, and the rest of the frame fits beside it.
+const TEXT_SHARE_DIVISOR: usize = 2;
+
+/// The value of `rss_kib` of a compact row that means "no value".
+const NO_RSS: u32 = u32::MAX;
 
 /// The names of an entry of the history. A name never repeats, so a holder of
 /// a name can tell that its entry left.
@@ -64,10 +83,305 @@ pub enum Update {
     Gap(Gap),
 }
 
+/// What a compact row says about Claude Code.
+///
+/// The text and the session of a row live in its identity record, because
+/// many rows of one process share them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompactState {
+    /// The process is not a Claude Code session.
+    NotClaude,
+    /// A Claude Code session with no registry record.
+    NoRecord,
+    /// A Claude Code process of another account.
+    OtherAccount,
+    /// The session runs a turn.
+    Busy,
+    /// The session waits for an answer.
+    Waiting,
+    /// The session is idle for a whole number of seconds, when known.
+    Idle(Option<u32>),
+    /// A status that `occ` does not know. The text is in the identity.
+    Other,
+    /// The record gives no status.
+    Unknown,
+}
+
+/// One row of a frame, in 24 bytes.
+#[derive(Debug, Clone, Copy)]
+struct CompactRow {
+    /// The faults of the process over the window of the frame.
+    faults: u64,
+    /// The index of the identity record in the slab.
+    identity: u32,
+    /// The resident memory in KiB. [`NO_RSS`] means no value.
+    rss_kib: u32,
+    /// What the row says about Claude Code.
+    state: CompactState,
+}
+
+const _: () = assert!(size_of::<CompactRow>() == 24);
+
+/// What the identity of a Claude Code session remembers about its session.
+#[derive(Debug)]
+struct SessionDetail {
+    /// The session id.
+    id: SessionId,
+    /// The directory of the session.
+    directory: Option<String>,
+    /// The text of the last status that `occ` does not know.
+    other_status: Option<String>,
+}
+
+/// The facts of one process that do not change from frame to frame.
+#[derive(Debug)]
+struct Identity {
+    /// The PID.
+    pid: Pid,
+    /// The account.
+    uid: Uid,
+    /// The start time.
+    started: Option<u64>,
+    /// The newest command, cut.
+    command: String,
+    /// The session, when the process is a session.
+    session: Option<SessionDetail>,
+    /// Whether the process is `faulte` or its child.
+    own: bool,
+    /// The count of rows that point at this record.
+    rows: u32,
+}
+
+impl Identity {
+    /// Gives the name of the process.
+    fn key(&self) -> ProcessKey {
+        ProcessKey {
+            pid: self.pid,
+            started_at_epoch_secs: self.started,
+        }
+    }
+
+    /// Gives the bytes of text that this record owns.
+    fn text_bytes(&self) -> usize {
+        let session = self.session.as_ref().map_or(0, |detail| {
+            detail.id.as_str().len()
+                + detail.directory.as_ref().map_or(0, String::capacity)
+                + detail.other_status.as_ref().map_or(0, String::capacity)
+        });
+        self.command.capacity() + session
+    }
+}
+
+/// Cuts `text` to at most `limit` bytes at a character boundary, and ends a
+/// cut text with [`render::MORE`]. A text that fits stays as it is.
+fn cut_text(text: &str, limit: usize) -> Cow<'_, str> {
+    if text.len() <= limit {
+        return Cow::Borrowed(text);
+    }
+    let room = limit.saturating_sub(render::MORE.len_utf8());
+    let mut cut = String::with_capacity(room + render::MORE.len_utf8());
+    cut.extend(
+        text.char_indices()
+            .take_while(|(index, character)| index + character.len_utf8() <= room)
+            .map(|(_, character)| character),
+    );
+    cut.push(render::MORE);
+    cut.shrink_to_fit();
+    Cow::Owned(cut)
+}
+
+/// Gives an owned, exact-size copy of `text` cut at `limit`.
+fn stored_text(text: &str, limit: usize) -> String {
+    let mut stored = cut_text(text, limit).into_owned();
+    stored.shrink_to_fit();
+    stored
+}
+
+/// Sets `slot` to the cut of `text`, unless it holds that text already.
+fn set_text(slot: &mut String, text: &str, limit: usize) {
+    let cut = cut_text(text, limit);
+    if slot.as_str() != cut {
+        *slot = stored_text(text, limit);
+    }
+}
+
+/// The identity records, and the index that finds one by process.
+#[derive(Debug, Default)]
+struct Identities {
+    /// The records. A freed slot holds `None`.
+    slab: Vec<Option<Identity>>,
+    /// The freed slots.
+    free: Vec<u32>,
+    /// The slot of each process.
+    index: HashMap<ProcessKey, u32>,
+    /// The bytes of text that the live records own.
+    text_bytes: usize,
+}
+
+impl Identities {
+    /// Points one more row at the record of `row`, and makes the record when
+    /// it is new. The newest command wins, a session detail that is present
+    /// wins, and `own` can only turn on.
+    fn acquire(&mut self, row: &RankedRow, own: bool, command_limit: usize) -> u32 {
+        let key = ProcessKey {
+            pid: row.pid,
+            started_at_epoch_secs: row.started_at_epoch_secs,
+        };
+        let slot = match self.index.get(&key) {
+            Some(&slot) => slot,
+            None => {
+                let fresh = Identity {
+                    pid: row.pid,
+                    uid: row.uid,
+                    started: row.started_at_epoch_secs,
+                    command: String::new(),
+                    session: None,
+                    own: false,
+                    rows: 0,
+                };
+                let slot = if let Some(slot) = self.free.pop() {
+                    self.slab[slot as usize] = Some(fresh);
+                    slot
+                } else {
+                    self.slab.push(Some(fresh));
+                    u32::try_from(self.slab.len() - 1).expect("fewer than 2^32 identities")
+                };
+                self.index.insert(key, slot);
+                slot
+            }
+        };
+        let record = self.slab[slot as usize]
+            .as_mut()
+            .expect("an indexed slot is live");
+        let before = record.text_bytes();
+        record.rows += 1;
+        record.uid = row.uid;
+        record.own |= own;
+        set_text(&mut record.command, &row.command, command_limit);
+        if let ClaudeView::Session {
+            id,
+            state,
+            directory,
+            ..
+        } = &row.claude
+        {
+            let detail = record.session.get_or_insert_with(|| SessionDetail {
+                id: id.clone(),
+                directory: None,
+                other_status: None,
+            });
+            if detail.id != *id {
+                detail.id = id.clone();
+            }
+            if let Some(directory) = directory {
+                let text = directory.to_string_lossy();
+                if detail.directory.as_deref() != Some(&*cut_text(&text, STORED_TEXT_BYTES)) {
+                    detail.directory = Some(stored_text(&text, STORED_TEXT_BYTES));
+                }
+            }
+            if let SessionState::Other(text) = state {
+                if detail.other_status.as_deref() != Some(&*cut_text(text, STORED_TEXT_BYTES)) {
+                    detail.other_status = Some(stored_text(text, STORED_TEXT_BYTES));
+                }
+            }
+        }
+        self.text_bytes = self.text_bytes - before + record.text_bytes();
+        slot
+    }
+
+    /// Takes one row away from the record `slot`. A record with no row leaves.
+    fn release(&mut self, slot: u32) {
+        let Some(record) = self.slab[slot as usize].as_mut() else {
+            return;
+        };
+        record.rows -= 1;
+        if record.rows > 0 {
+            return;
+        }
+        self.text_bytes -= record.text_bytes();
+        let key = record.key();
+        self.index.remove(&key);
+        self.slab[slot as usize] = None;
+        self.free.push(slot);
+    }
+
+    /// Gives the bytes that the records and their index hold.
+    fn bytes(&self) -> usize {
+        /// The control bytes that a table of the index keeps for each bucket.
+        const CONTROL_BYTES: usize = 1;
+        /// The buckets of a table hold `7/8` of its capacity.
+        const LOAD_NUMERATOR: usize = 8;
+        /// See [`LOAD_NUMERATOR`].
+        const LOAD_DENOMINATOR: usize = 7;
+        let capacity = self.index.capacity();
+        let buckets = if capacity == 0 {
+            0
+        } else {
+            (capacity * LOAD_NUMERATOR / LOAD_DENOMINATOR).next_power_of_two()
+        };
+        let index = buckets * (size_of::<(ProcessKey, u32)>() + CONTROL_BYTES);
+        self.slab.capacity() * size_of::<Option<Identity>>()
+            + self.free.capacity() * size_of::<u32>()
+            + self.text_bytes
+            + index
+    }
+}
+
+/// One sample, kept in compact form.
+#[derive(Debug)]
+struct Frame {
+    /// The time of the sample.
+    at: SystemTime,
+    /// The time that the counts cover.
+    window: Duration,
+    /// The faults of every process of the sample.
+    total_faults: u64,
+    /// The total of the Claude Code rows.
+    claude: ClaudeTotal,
+    /// The processes with no row.
+    skipped: Skipped,
+    /// The swap traffic.
+    swap: VmDelta,
+    /// The swap file.
+    usage: SwapUsage,
+    /// The size of the compressor in bytes.
+    compressor_bytes: u64,
+    /// The time between the two reads of the counters.
+    swap_window: Duration,
+    /// The interval that the person asked for.
+    interval: Span,
+    /// The count of processes with no fault. They have no stored row.
+    others: u32,
+    /// The rows with a fault, in the order of the ranking.
+    rows: Box<[CompactRow]>,
+}
+
+/// One entry of the history.
+#[derive(Debug)]
+enum Entry {
+    /// A sample.
+    Frame(Frame),
+    /// A time with no sample.
+    Gap(Gap),
+}
+
 /// The compact history. See the module doc.
 pub struct History {
+    /// The most bytes that the history may hold.
     budget: usize,
+    /// The entries, oldest first.
+    entries: VecDeque<Entry>,
+    /// The name of the next entry. The oldest entry has the name
+    /// `next_id - entries.len()`.
+    next_id: u64,
+    /// The identity records.
+    identities: Identities,
+    /// The names of the accounts that the frames mentioned.
     accounts: Accounts,
+    /// The rows that the frames store.
+    stored_rows: usize,
+    /// The bytes of the reasons of the gaps.
+    gap_text_bytes: usize,
 }
 
 impl Default for History {
@@ -88,32 +402,136 @@ impl History {
     pub fn with_budget(bytes: usize) -> Self {
         Self {
             budget: bytes,
+            entries: VecDeque::new(),
+            next_id: 0,
+            identities: Identities::default(),
             accounts: Accounts::new(),
+            stored_rows: 0,
+            gap_text_bytes: 0,
         }
     }
 
     /// Adds an update, and gives its name.
+    ///
+    /// The oldest entries leave while the history holds more than its budget
+    /// and more than one entry. The entry that arrived always stays.
     pub fn add(&mut self, update: Update) -> EntryId {
-        let _ = (&update, self.budget);
-        EntryId(0)
+        let entry = match update {
+            Update::Frame(sampled) => Entry::Frame(self.compact(*sampled)),
+            Update::Gap(gap) => {
+                let reason = stored_text(&gap.reason, STORED_TEXT_BYTES);
+                self.gap_text_bytes += reason.capacity();
+                Entry::Gap(Gap { reason, ..gap })
+            }
+        };
+        let id = EntryId(self.next_id);
+        self.next_id += 1;
+        self.entries.push_back(entry);
+        while self.bytes_used() > self.budget && self.entries.len() > 1 {
+            self.evict_oldest();
+        }
+        id
+    }
+
+    /// Turns a sample into a compact frame.
+    ///
+    /// The cut of a command is `min(STORED_COMMAND_BYTES, budget / (2 * rows))`.
+    /// That bound holds the budget when one frame alone holds worst-case text.
+    /// The count `rows` is the count of stored rows.
+    fn compact(&mut self, sampled: SampledFrame) -> Frame {
+        let Observed {
+            ranking,
+            swap,
+            usage,
+            compressor_bytes,
+            swap_window,
+            accounts,
+            interval,
+            ..
+        } = sampled.observed;
+        self.accounts.merge(&accounts);
+        let total_rows = ranking.rows.len();
+        let stored = ranking.rows.iter().filter(|row| row.faults > 0).count();
+        let command_limit =
+            STORED_COMMAND_BYTES.min(self.budget / (TEXT_SHARE_DIVISOR * stored.max(1)));
+        let mut rows = Vec::with_capacity(stored);
+        for row in ranking.rows {
+            if row.faults == 0 {
+                continue;
+            }
+            let own = sampled.own.contains(&row.pid);
+            let identity = self.identities.acquire(&row, own, command_limit);
+            rows.push(CompactRow {
+                faults: row.faults,
+                identity,
+                rss_kib: row.rss_kib.map_or(NO_RSS, |kib| {
+                    u32::try_from(kib).map_or(NO_RSS - 1, |kib| kib.min(NO_RSS - 1))
+                }),
+                state: compact_state(&row.claude),
+            });
+        }
+        self.stored_rows += rows.len();
+        Frame {
+            at: sampled.at,
+            window: ranking.window,
+            total_faults: ranking.total_faults,
+            claude: ranking.claude,
+            skipped: ranking.skipped,
+            swap,
+            usage,
+            compressor_bytes,
+            swap_window,
+            interval,
+            others: u32::try_from(total_rows - rows.len()).unwrap_or(u32::MAX),
+            rows: rows.into_boxed_slice(),
+        }
+    }
+
+    /// Removes the oldest entry, and lets go of its identities.
+    fn evict_oldest(&mut self) {
+        match self.entries.pop_front() {
+            Some(Entry::Frame(frame)) => {
+                self.stored_rows -= frame.rows.len();
+                for row in frame.rows.iter() {
+                    self.identities.release(row.identity);
+                }
+            }
+            Some(Entry::Gap(gap)) => {
+                self.gap_text_bytes -= gap.reason.capacity();
+            }
+            None => {}
+        }
+    }
+
+    /// Gives the place of `id` in the entries.
+    fn position(&self, id: EntryId) -> Option<usize> {
+        let oldest = self.next_id - self.entries.len() as u64;
+        let offset = id.0.checked_sub(oldest)?;
+        let position = usize::try_from(offset).ok()?;
+        (position < self.entries.len()).then_some(position)
     }
 
     /// Tells whether the entry `id` is still in the history.
     #[must_use]
-    pub fn contains(&self, _id: EntryId) -> bool {
-        false
+    pub fn contains(&self, id: EntryId) -> bool {
+        self.position(id).is_some()
     }
 
     /// Gives the name of the oldest entry.
     #[must_use]
     pub fn oldest(&self) -> Option<EntryId> {
-        None
+        (!self.entries.is_empty()).then(|| EntryId(self.next_id - self.entries.len() as u64))
     }
 
-    /// Gives the bytes that the history holds.
+    /// Gives the bytes that the history holds. It counts the real sizes: the
+    /// entries and the rows, the text of the identities and of the gaps, and
+    /// each container by its capacity.
     #[must_use]
     pub fn bytes_used(&self) -> usize {
-        0
+        self.entries.capacity() * size_of::<Entry>()
+            + self.stored_rows * size_of::<CompactRow>()
+            + self.gap_text_bytes
+            + self.identities.bytes()
     }
 
     /// Gives the names of the accounts that the frames mentioned.
@@ -123,5 +541,20 @@ impl History {
     }
 }
 
-#[allow(dead_code, reason = "stub")]
-fn _unused(_: Uid, _: Ranking) {}
+/// Gives the compact state of a view.
+fn compact_state(view: &ClaudeView) -> CompactState {
+    match view {
+        ClaudeView::NotClaude => CompactState::NotClaude,
+        ClaudeView::NoRecord => CompactState::NoRecord,
+        ClaudeView::OtherAccount => CompactState::OtherAccount,
+        ClaudeView::Session { state, .. } => match state {
+            SessionState::Busy => CompactState::Busy,
+            SessionState::Waiting => CompactState::Waiting,
+            SessionState::Idle { for_ } => CompactState::Idle(
+                for_.map(|time| u32::try_from(time.as_secs()).unwrap_or(u32::MAX)),
+            ),
+            SessionState::Other(_) => CompactState::Other,
+            SessionState::Unknown => CompactState::Unknown,
+        },
+    }
+}
