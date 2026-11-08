@@ -155,6 +155,13 @@ impl App {
         self.history.gap(self.selected_entry()?)
     }
 
+    /// Gives the position of the selected row in the reading, or `None` when
+    /// no row is selected or the selected process has no row.
+    #[must_use]
+    pub fn selected_row(&self) -> Option<usize> {
+        None
+    }
+
     /// Gives the key of the selected row.
     #[must_use]
     pub fn row_key(&self) -> Option<ProcessKey> {
@@ -387,5 +394,52 @@ mod tests {
         app.on_key(press(KeyCode::Home));
         app.on_key(press(KeyCode::Esc));
         assert_eq!(app.selection(), Selection::Live);
+    }
+
+    /// Builds one live frame with three rows, from the most faults down.
+    fn three_rows() -> App {
+        app_with(vec![frame(0, vec![row(10, 9), row(20, 5), row(30, 1)])]).0
+    }
+
+    /// Gives the PID of the selected row.
+    fn selected_pid(app: &App) -> Option<u32> {
+        app.row_key().map(|key| key.pid.get())
+    }
+
+    /// The arrows and `j` and `k` move the selected row by one, and stop at
+    /// each end. No row is selected at the start, and either key then selects
+    /// the first row.
+    #[test]
+    fn up_and_down_move_the_selected_row() {
+        let mut app = three_rows();
+        assert_eq!(app.selected_row(), None);
+
+        app.on_key(press(KeyCode::Down));
+        assert_eq!(
+            (app.selected_row(), selected_pid(&app)),
+            (Some(0), Some(10))
+        );
+        app.on_key(press(KeyCode::Char('j')));
+        assert_eq!(
+            (app.selected_row(), selected_pid(&app)),
+            (Some(1), Some(20))
+        );
+        app.on_key(press(KeyCode::Down));
+        app.on_key(press(KeyCode::Down));
+        assert_eq!(
+            (app.selected_row(), selected_pid(&app)),
+            (Some(2), Some(30))
+        );
+        app.on_key(press(KeyCode::Up));
+        app.on_key(press(KeyCode::Char('k')));
+        app.on_key(press(KeyCode::Up));
+        assert_eq!(
+            (app.selected_row(), selected_pid(&app)),
+            (Some(0), Some(10))
+        );
+
+        let mut fresh = three_rows();
+        fresh.on_key(press(KeyCode::Up));
+        assert_eq!(fresh.selected_row(), Some(0));
     }
 }
