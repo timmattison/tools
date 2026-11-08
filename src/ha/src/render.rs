@@ -6857,6 +6857,24 @@ mod tests {
     }
 
     #[test]
+    fn a_runner_name_of_6_characters_or_fewer_shows_whole_when_the_job_name_gives_columns() {
+        let cases = [
+            ("m1-ts", "└ …e-remotesensing (2) m1-ts", 5),
+            ("m1-tsx", "└ …-remotesensing (2) m1-tsx", 6),
+        ];
+        for (runner, text, cyan) in cases {
+            let (buffer, row, y) =
+                lone_job_row(on(runner, passed_job("e2e-remotesensing (2)")), 129);
+            assert_eq!(
+                row,
+                job_golden("✅", text, LONE_JOB, PASSED_TIMES, "?"),
+                "runner {runner}"
+            );
+            assert_eq!(cyan_columns(&buffer, y).len(), cyan, "runner {runner}");
+        }
+    }
+
+    #[test]
     fn a_job_with_no_runner_and_a_long_name_keeps_the_cut_at_the_end() {
         let (buffer, row, y) = lone_job_row(passed_job(&"n".repeat(40)), 129);
         assert_eq!(
