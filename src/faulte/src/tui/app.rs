@@ -331,6 +331,12 @@ impl App {
         self.page_rows = rows.max(1);
     }
 
+    /// Gives the position of the first row that the table draws.
+    #[must_use]
+    pub fn top_row(&self) -> usize {
+        0
+    }
+
     /// Gives the key of the selected row.
     #[must_use]
     pub fn row_key(&self) -> Option<ProcessKey> {
@@ -761,5 +767,30 @@ mod tests {
 
         app.on_key(press(KeyCode::Char('w')));
         assert_eq!(app.notice(), None);
+    }
+
+    /// `top_row` keeps the selected row on the screen, and is 0 with no
+    /// selection. A new page size keeps the row on the screen too.
+    #[test]
+    fn the_top_row_keeps_the_selection_on_screen() {
+        let mut app = ten_rows();
+        app.set_page_rows(4);
+        assert_eq!(app.top_row(), 0);
+
+        app.on_key(press(KeyCode::Down));
+        assert_eq!(app.top_row(), 0);
+        app.on_key(press(KeyCode::PageDown));
+        assert_eq!((app.selected_row(), app.top_row()), (Some(4), 1));
+        app.on_key(press(KeyCode::PageDown));
+        app.on_key(press(KeyCode::PageDown));
+        assert_eq!((app.selected_row(), app.top_row()), (Some(9), 6));
+        app.on_key(press(KeyCode::Up));
+        app.on_key(press(KeyCode::Up));
+        app.on_key(press(KeyCode::Up));
+        app.on_key(press(KeyCode::Up));
+        assert_eq!((app.selected_row(), app.top_row()), (Some(5), 5));
+
+        app.set_page_rows(2);
+        assert_eq!(app.top_row(), 4);
     }
 }
