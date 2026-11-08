@@ -398,6 +398,10 @@ where
                 self.ask(Request::Cancel);
                 Flow::Continue
             }
+            KeyCode::Char('R') => {
+                self.ask(Request::Rerun);
+                Flow::Continue
+            }
             KeyCode::Up => {
                 self.board.select_previous((self.now)());
                 Flow::Continue

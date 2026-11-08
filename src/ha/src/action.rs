@@ -160,6 +160,8 @@ impl Action {
 pub enum Request {
     /// The key `c`: cancel the run of the highlighted row.
     Cancel,
+    /// The key `R`: re-run the highlighted run or job.
+    Rerun,
 }
 
 /// What a key press on the highlighted row gives: a question that holds the
@@ -177,6 +179,7 @@ impl Request {
     fn verb(self) -> &'static str {
         match self {
             Request::Cancel => "cancel",
+            Request::Rerun => "re-run",
         }
     }
 
@@ -213,6 +216,7 @@ impl Request {
                 run.id.0,
                 self.verb()
             )),
+            Request::Rerun => Prompt::Confirm(Confirm::new(run, Action::RerunWorkflow)),
         })
     }
 }
