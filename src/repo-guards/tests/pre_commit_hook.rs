@@ -18,6 +18,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -128,9 +129,11 @@ struct HookRun {
 
 /// Run the real hook once with `dir` as CWD, shedding the inherited `GIT_`
 /// family so the hook operates on the fixture repo rather than this test's
-/// repo. Gives back the exit status and the printed output of that one run.
-fn run_hook(dir: &Path) -> HookRun {
+/// repo. `configure` changes the command before it starts. Gives back the exit
+/// status and the printed output of that one run.
+fn run_hook_configured(dir: &Path, configure: impl FnOnce(&mut Command)) -> HookRun {
     let mut command = childenv::fixture_command("bash");
+    configure(&mut command);
 
     let completed = command
         .arg(hook_path())
@@ -145,6 +148,11 @@ fn run_hook(dir: &Path) -> HookRun {
             String::from_utf8_lossy(&completed.stderr)
         ),
     }
+}
+
+/// Run the real hook once with `dir` as CWD and no change to its command.
+fn run_hook(dir: &Path) -> HookRun {
+    run_hook_configured(dir, |_| {})
 }
 
 /// The line the hook prints before it runs the tool-index guard.
@@ -351,21 +359,9 @@ fn read_recording(cargo: &CargoRecording) -> RecordedCalls {
 
 /// Run the real hook in `dir` with the fake `cargo` and the planted variables.
 fn run_hook_with_planted_git_variables(dir: &Path, cargo: &CargoRecording) -> HookRun {
-    let mut command = childenv::fixture_command("bash");
-    plant_fake_cargo_and_git_variables(&mut command, cargo);
-    let completed = command
-        .arg(hook_path())
-        .current_dir(dir)
-        .output()
-        .expect("failed to spawn pre-commit hook");
-    HookRun {
-        passed: completed.status.success(),
-        output: format!(
-            "{}{}",
-            String::from_utf8_lossy(&completed.stdout),
-            String::from_utf8_lossy(&completed.stderr)
-        ),
-    }
+    run_hook_configured(dir, |command| {
+        plant_fake_cargo_and_git_variables(command, cargo);
+    })
 }
 
 /// Assert that the fake ran for each word in `expected` and saw no `GIT_` line.
