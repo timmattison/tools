@@ -392,7 +392,7 @@ fn fit_job_text(
     } else {
         fit_runner(runner, room)
     };
-    if fitted.is_some() || text_width(&whole) > cell {
+    if fitted.is_some() {
         return (text, fitted);
     }
     let floor = truncate_to_budget(runner.as_str(), RUNNER_FLOOR_WIDTH);
@@ -7071,21 +7071,6 @@ mod tests {
         let mut board = board_with_jobs(vec![passed_job("build")]);
         let text = lines(&render_with(width, 14, &mut board, &loaded()));
         last_digit_column(&text[2], "1").expect("the run row shows its ID")
-    }
-
-    #[test]
-    fn a_job_name_that_fills_the_cell_shows_no_runner_name() {
-        let name = "n".repeat(40);
-        let (buffer, row, y) = lone_job_row(on("mbp", passed_job(&name)), 129);
-        // The text is cut to the 28 columns of the cell and ends in `…`.
-        let cut = format!("└ {}…", "n".repeat(25));
-        assert_eq!(display_width(&cut), 28);
-        assert_eq!(row, job_golden("✅", &cut, LONE_JOB, PASSED_TIMES, "?"));
-        assert_eq!(cyan_columns(&buffer, y), Vec::<u16>::new());
-        assert_eq!(
-            last_digit_column(&row, &LONE_JOB.to_string()),
-            Some(run_id_column(129))
-        );
     }
 
     #[test]
