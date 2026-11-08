@@ -150,7 +150,7 @@ mod tests {
     use crate::stream::{FaultStream, Stopper, StreamEvent, TimedSample};
     use crate::table::ProcessRow;
     use crate::top::{FaultCount, TopSample};
-    use crate::vm::{SwapUsage, VmCounters};
+    use crate::vm::{SwapUsage, VmCounters, VmDelta};
 
     /// The longest wait of any test. The machine of the tests can be under a
     /// heavy load, and a wait ends early when its condition holds.
@@ -484,5 +484,47 @@ mod tests {
             .find(|row| row.pid == Pid::new(200))
             .expect("the process 200 has a row");
         assert_eq!(row.faults, 7_000);
+    }
+
+    /// The swap traffic of a frame is the change of the counters over the
+    /// window of the sample itself: from the read at the header that began
+    /// the window to the read at the header that ended it. The read at the
+    /// header that finished the sample belongs to the next window. The first
+    /// frame follows the same rule.
+    #[test]
+    fn the_swap_traffic_is_the_change_over_the_window_of_the_sample() {
+        let rig = Rig::new()
+            .counters(vec![
+                Ok(counters(100, 200)),
+                Ok(counters(110, 230)),
+                Ok(counters(999, 999)),
+                Ok(counters(999, 999)),
+            ])
+            .stream(vec![
+                header(10),
+                header(12),
+                finished(14, 12, 7_000),
+                finished(16, 14, 8_000),
+            ]);
+        let sampler = rig.start();
+
+        let first = next_frame(&sampler);
+        let second = next_frame(&sampler);
+
+        assert_eq!(
+            first.observed.swap,
+            VmDelta {
+                swapins: 10,
+                swapouts: 30
+            }
+        );
+        assert_eq!(
+            second.observed.swap,
+            VmDelta {
+                swapins: 889,
+                swapouts: 769
+            }
+        );
+        assert_eq!(first.observed.swap_window, Duration::from_secs(4));
     }
 }
