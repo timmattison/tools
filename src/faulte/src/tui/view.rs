@@ -897,4 +897,30 @@ mod tests {
         );
         assert!(!lines[header + 2].contains("[faulte]"), "{lines:#?}");
     }
+
+    /// The age and the state of a row in the past are the age and the state
+    /// of that frame, and not of now.
+    #[test]
+    fn a_past_row_states_what_was_true_in_its_frame() {
+        let idle = RankedRow {
+            claude: ClaudeView::Session {
+                id: occ::SessionId::parse(SESSION_ID).expect("the test ID is a UUID"),
+                state: SessionState::Idle {
+                    for_: Some(Duration::from_secs(300)),
+                },
+                directory: Some("/work/project".into()),
+                status_changed_at: None,
+            },
+            ..row(10, 50)
+        };
+        let (mut app, _) = app_with(vec![frame(0, vec![idle]), frame(100, vec![row(10, 50)])]);
+        app.on_key(press(KeyCode::Left));
+
+        let lines = screen(&paint(&mut app, 160, 24, 10_000));
+
+        let header = line_starting(&lines, "PID");
+        assert!(lines[header + 1].contains(" 1h 0m "), "{lines:#?}");
+        assert!(lines[header + 1].contains("idle 5m 0s"), "{lines:#?}");
+        assert!(!lines[header + 1].contains("2h 46m"), "{lines:#?}");
+    }
 }
