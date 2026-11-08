@@ -9,9 +9,22 @@ use std::fmt::Display;
 use std::time::SystemTime;
 
 use chrono::TimeZone;
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::text::Line;
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::tui::app::App;
+
+/// What holds the parts of the banner apart.
+const SEPARATOR: &str = " · ";
+
+/// The banner while the history holds no frame.
+const WAITING_BANNER: &str =
+    "WAITING · faulte waits for the first frame. top can take 30 s on a loaded Mac.";
+
+/// The lines of the timeline: the faults, the swap, and the marker.
+const TIMELINE_HEIGHT: u16 = 3;
 
 /// What the view needs besides the state: the time now and the time zone.
 pub struct ViewContext<'a, Tz: TimeZone> {
@@ -22,12 +35,80 @@ pub struct ViewContext<'a, Tz: TimeZone> {
     pub tz: &'a Tz,
 }
 
+/// The parts of the screen, from the top down.
+struct Areas {
+    /// The banner.
+    banner: Rect,
+    /// The header lines.
+    headers: Rect,
+    /// The two rows of the timeline and the marker.
+    timeline: Rect,
+    /// The table, or the detail view.
+    table: Rect,
+    /// The line of the rows that the table hides.
+    more: Rect,
+    /// The line of keys.
+    keys: Rect,
+}
+
+/// Cuts `area` into the parts of the screen. A part that does not fit gets
+/// no lines, and a part never reaches outside `area`.
+fn areas(area: Rect, header_lines: usize) -> Areas {
+    let headers = u16::try_from(header_lines).unwrap_or(u16::MAX);
+    let [banner, headers, timeline, table, more, keys] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(headers),
+        Constraint::Length(TIMELINE_HEIGHT),
+        Constraint::Min(0),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(area);
+    Areas {
+        banner,
+        headers,
+        timeline,
+        table,
+        more,
+        keys,
+    }
+}
+
+/// Paints `text` on the first line of `area`, cut to the width of `area`.
+fn paint_line(frame: &mut Frame<'_>, area: Rect, text: &str) {
+    let fitted = textfit::truncate_to_budget(text, usize::from(area.width));
+    frame.render_widget(Paragraph::new(Line::raw(fitted)), area);
+}
+
+/// Gives the text of the banner.
+fn banner(app: &App) -> String {
+    let mut text = WAITING_BANNER.to_string();
+    if let Some(gap) = app
+        .history()
+        .newest()
+        .and_then(|newest| app.history().gap(newest))
+    {
+        text.push_str(SEPARATOR);
+        text.push_str(&gap.reason);
+    }
+    text
+}
+
 /// Paints one screen.
+///
+/// The function sets the page size of `app` from the size of the table, and
+/// changes nothing else. A screen of any size is valid: a part with no room
+/// draws nothing.
 pub fn draw<Tz: TimeZone>(frame: &mut Frame<'_>, app: &mut App, context: &ViewContext<'_, Tz>)
 where
     Tz::Offset: Display,
 {
-    let _ = (frame, app, context);
+    let _ = context;
+    let header_lines = app
+        .reading()
+        .map_or(0, |reading| reading.header_lines().len());
+    let parts = areas(frame.area(), header_lines);
+    paint_line(frame, parts.banner, &banner(app));
 }
 
 #[cfg(test)]
