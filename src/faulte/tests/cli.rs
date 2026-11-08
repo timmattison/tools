@@ -644,3 +644,88 @@ fn check_with_no_reader_keeps_the_exit_code_of_its_verdict() {
     );
     assert!(!stderr.contains("panicked"), "no panic: {stderr}");
 }
+
+/// The longest time that a run with no room for its output may take.
+///
+/// A `--watch` run whose write does not fail never ends, thus the helper stops
+/// it at this bound.
+#[cfg(target_os = "macos")]
+const NO_ROOM_BOUND: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Runs `faulte` with `args` and a file size limit of 0 on its output file.
+///
+/// The first write to the file fails with `EFBIG`. The shell ignores
+/// `SIGXFSZ`, thus the write gives an error and the signal does not stop the
+/// run. `exec` makes the child process the `faulte` binary itself. `name`
+/// keeps two parallel tests apart. Gives the exit code and the glyphs of the
+/// error output.
+#[cfg(target_os = "macos")]
+fn run_with_no_room_for_output(name: &str, args: &[&str]) -> (Option<i32>, String) {
+    use std::process::Stdio;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("the clock is after the epoch")
+        .as_nanos();
+    let file = std::env::temp_dir().join(format!(
+        "faulte-no-room-{name}-{}-{nanos}.txt",
+        std::process::id()
+    ));
+    let mut child = Command::new("/bin/sh")
+        .args([
+            "-c",
+            r#"trap "" XFSZ; ulimit -f 0; output=$1; shift; exec "$@" > "$output""#,
+            "sh",
+        ])
+        .arg(&file)
+        .arg(BIN)
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the shell starts");
+    let start = Instant::now();
+    loop {
+        if child.try_wait().expect("the child can be polled").is_some() {
+            break;
+        }
+        if start.elapsed() >= NO_ROOM_BOUND {
+            child.kill().expect("the child can be killed");
+            child.wait().expect("the child ends after the kill");
+            let _ = std::fs::remove_file(&file);
+            panic!("the run did not end within {NO_ROOM_BOUND:?}");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let output = child.wait_with_output().expect("the output is read");
+    std::fs::remove_file(&file).expect("the shell made the file");
+    (output.status.code(), glyphs(&output.stderr))
+}
+
+/// A report that cannot be written gives the exit code 2 and a message.
+#[cfg(target_os = "macos")]
+#[test]
+fn check_with_no_room_for_its_report_is_an_error() {
+    let (code, stderr) = run_with_no_room_for_output("report", &["check", "--interval", "1s"]);
+
+    assert_eq!(code, Some(2), "stderr: {stderr}");
+    assert!(
+        stderr.contains("the check did not write its output"),
+        "the message: {stderr}"
+    );
+}
+
+/// A watch line that cannot be written gives the exit code 2 and a message.
+#[cfg(target_os = "macos")]
+#[test]
+fn check_watch_with_no_room_for_its_line_is_an_error() {
+    let (code, stderr) =
+        run_with_no_room_for_output("watch", &["check", "--watch", "--interval", "1s"]);
+
+    assert_eq!(code, Some(2), "stderr: {stderr}");
+    assert!(
+        stderr.contains("the check did not write its output"),
+        "the message: {stderr}"
+    );
+}
