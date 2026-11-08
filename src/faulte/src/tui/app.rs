@@ -784,13 +784,13 @@ mod tests {
         app.on_key(press(KeyCode::PageDown));
         app.on_key(press(KeyCode::PageDown));
         assert_eq!((app.selected_row(), app.top_row()), (Some(9), 6));
-        app.on_key(press(KeyCode::Up));
-        app.on_key(press(KeyCode::Up));
-        app.on_key(press(KeyCode::Up));
-        app.on_key(press(KeyCode::Up));
-        assert_eq!((app.selected_row(), app.top_row()), (Some(5), 5));
 
         app.set_page_rows(2);
-        assert_eq!(app.top_row(), 4);
+        assert_eq!(app.top_row(), 8);
+
+        for _ in 0..4 {
+            app.on_key(press(KeyCode::Up));
+        }
+        assert_eq!((app.selected_row(), app.top_row()), (Some(5), 5));
     }
 }
