@@ -538,6 +538,10 @@ where
     paint_lines(frame, parts.headers, &header_lines);
     paint_timeline(frame, parts.timeline, app);
     paint_table(frame, parts.table, app, context);
+    if let Some(reading) = app.reading() {
+        let hidden = render::more_line(reading.ranking(), reading.other_rows(), 0);
+        paint_line(frame, parts.more, hidden.as_deref().unwrap_or_default());
+    }
 }
 
 #[cfg(test)]
@@ -1168,5 +1172,18 @@ mod tests {
         let lines = screen(&paint(&mut app, 120, 24, 3));
 
         assert_eq!(lines[22], "… 2 more processes made 0% of all faults");
+    }
+
+    /// The last line lists the keys.
+    #[test]
+    fn the_last_line_lists_the_keys() {
+        let (mut app, _) = app_with(vec![frame(0, vec![row(1, 50)])]);
+
+        let lines = screen(&paint(&mut app, 120, 24, 3));
+
+        assert_eq!(
+            lines[23],
+            "←/→ frame  [ ] minute  Home oldest  End live  w span  ↑/↓ row  Enter detail  q quit"
+        );
     }
 }
