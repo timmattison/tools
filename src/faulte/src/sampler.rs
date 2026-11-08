@@ -213,7 +213,7 @@ impl<M: Machine> Run<M> {
 mod tests {
     use super::*;
 
-    use std::collections::{HashMap, VecDeque};
+    use std::collections::{BTreeSet, HashMap, VecDeque};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc::RecvTimeoutError;
     use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -731,5 +731,17 @@ mod tests {
             vec![Duration::from(interval())]
         );
         assert_eq!(rig.shared.starts.load(Ordering::SeqCst), 2);
+    }
+
+    /// The own set of a frame holds `faulte` and each child process of it. A
+    /// grandchild and a process of another parent are not in it.
+    #[test]
+    fn the_own_set_holds_faulte_and_its_children() {
+        let rig = Rig::new().stream(vec![header(10), header(12), finished(14, 12, 7_000)]);
+        let sampler = rig.start();
+
+        let frame = next_frame(&sampler);
+
+        assert_eq!(frame.own, BTreeSet::from([Pid::new(OWN), Pid::new(101)]));
     }
 }
