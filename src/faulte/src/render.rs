@@ -249,7 +249,8 @@ impl Accounts {
     /// name of the same account in this map, because `other` is the newer
     /// read.
     pub fn merge(&mut self, other: &Accounts) {
-        let _ = other;
+        self.names
+            .extend(other.names.iter().map(|(uid, name)| (*uid, name.clone())));
     }
 }
 
