@@ -558,4 +558,16 @@ mod tests {
             "api -i -X POST repos/o/r/actions/jobs/11/rerun\n"
         );
     }
+
+    #[test]
+    fn the_words_of_a_rerun_workflow_name_the_run() {
+        let action = Action::RerunWorkflow;
+        let error = SourceError::Failed("boom".to_owned());
+        assert_eq!(action.started_text(RunId(7)), "re-running run 7…");
+        assert_eq!(action.accepted_text(RunId(7)), "GitHub is re-running run 7");
+        assert_eq!(
+            action.refused_text(RunId(7), &error),
+            format!("could not re-run run 7: {error}")
+        );
+    }
 }

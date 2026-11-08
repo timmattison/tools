@@ -5153,15 +5153,23 @@ mod tests {
 
     /// A cancel that waits, as `c` makes it over the run `run_id`.
     fn confirm(title: &str, job: Option<&str>) -> Confirm {
+        confirm_with(
+            title,
+            Action::Cancel {
+                job: job.map(str::to_owned),
+            },
+        )
+    }
+
+    /// A box that waits for `action`, over the run of the mocks.
+    fn confirm_with(title: &str, action: Action) -> Confirm {
         Confirm {
             repo: repo("timmattison/tools"),
             run: RunId(39_149_840_084),
             workflow: "CI".to_owned(),
             branch: "main".to_owned(),
             title: title.to_owned(),
-            action: Action::Cancel {
-                job: job.map(str::to_owned),
-            },
+            action,
         }
     }
 
@@ -5225,6 +5233,24 @@ mod tests {
         let all = lines(&buffer);
         assert!(!all[2].contains('┌'), "{:?}", all[2]);
         assert!(!all[13].contains('└'), "{:?}", all[13]);
+    }
+
+    #[test]
+    fn the_rerun_workflow_box_matches_the_mock_of_issue_668() {
+        let prompt = confirm_with("fix(ha): show the run ID", Action::RerunWorkflow);
+        let buffer = render_prompt(80, 16, &prompt);
+        assert_eq!(
+            box_rows(&buffer, 18, 44, 4, 7),
+            vec![
+                "┌ Re-run workflow? ────────────────────────┐",
+                "│ timmattison/tools                        │",
+                "│ CI 39149840084 on main                   │",
+                "│ fix(ha): show the run ID                 │",
+                "│                                          │",
+                "│ y re-run all jobs   any other key: keep  │",
+                "└──────────────────────────────────────────┘",
+            ]
+        );
     }
 
     #[test]
