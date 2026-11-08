@@ -1173,6 +1173,9 @@ mod tests {
     /// The window of a test frame, in seconds.
     const WINDOW_SECS: u64 = 2;
 
+    /// The id of the session of the test rows.
+    const SESSION: &str = "d3b0d921-f0a1-41fc-b309-c11aa30c1173";
+
     /// The account of every test row.
     const ACCOUNT: Uid = Uid::new(501);
 
@@ -1390,5 +1393,97 @@ mod tests {
         assert!(reading.header_lines()[0].starts_with("10 processes over"));
         assert!(history.frame(gap_id).is_none());
         assert!(history.span(gap_id, SpanWidth::OneFrame).is_none());
+    }
+
+    /// Makes the view of a session in `state`, with an optional directory.
+    fn session(state: SessionState, directory: Option<&str>) -> ClaudeView {
+        ClaudeView::Session {
+            id: SessionId::parse(SESSION).expect("a valid id"),
+            state,
+            directory: directory.map(PathBuf::from),
+            status_changed_at: None,
+        }
+    }
+
+    /// Makes a row with the view `claude`.
+    fn claude_row(pid: u32, faults: u64, claude: ClaudeView) -> RankedRow {
+        RankedRow {
+            claude,
+            ..row(pid, faults)
+        }
+    }
+
+    /// Every state comes back as the frame saw it: the seconds of an idle
+    /// session, and the text of a status that `occ` does not know.
+    #[test]
+    fn the_state_of_a_session_comes_back_as_of_the_frame() {
+        let views = vec![
+            ClaudeView::NotClaude,
+            ClaudeView::NoRecord,
+            ClaudeView::OtherAccount,
+            session(SessionState::Busy, Some("/work/a")),
+            session(SessionState::Waiting, Some("/work/a")),
+            session(
+                SessionState::Idle {
+                    for_: Some(Duration::from_secs(90)),
+                },
+                Some("/work/a"),
+            ),
+            session(SessionState::Idle { for_: None }, Some("/work/a")),
+            session(SessionState::Other("shell".to_string()), Some("/work/a")),
+            session(SessionState::Unknown, None),
+        ];
+        let rows: Vec<RankedRow> = views
+            .iter()
+            .enumerate()
+            .map(|(index, view)| {
+                claude_row(
+                    u32::try_from(index).unwrap() + 1,
+                    100 - index as u64,
+                    view.clone(),
+                )
+            })
+            .collect();
+        let mut history = History::new();
+        let id = history.add(frame(10, rows));
+
+        let reading = history.frame(id).expect("the frame is there");
+        let back: Vec<ClaudeView> = reading.rows().map(|view| view.row.claude.clone()).collect();
+
+        assert_eq!(back, views);
+    }
+
+    /// A later frame gives the newest directory to the process. A frame with
+    /// no directory does not erase the one that is known.
+    #[test]
+    fn an_absent_detail_never_erases_a_known_one() {
+        let mut history = History::new();
+        let first = history.add(frame(
+            10,
+            vec![claude_row(
+                1,
+                5,
+                session(SessionState::Busy, Some("/work/a")),
+            )],
+        ));
+        history.add(frame(
+            12,
+            vec![claude_row(1, 5, session(SessionState::Busy, None))],
+        ));
+        history.add(frame(
+            14,
+            vec![claude_row(
+                1,
+                5,
+                session(SessionState::Busy, Some("/work/b")),
+            )],
+        ));
+
+        let reading = history.frame(first).expect("the frame is there");
+
+        assert_eq!(
+            reading.row(0).unwrap().row.claude,
+            session(SessionState::Busy, Some("/work/b"))
+        );
     }
 }
