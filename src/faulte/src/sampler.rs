@@ -24,6 +24,9 @@ pub const UPDATE_BACKLOG: usize = 64;
 /// How long the sampler waits for an event before it looks at the stop flag.
 const POLL: Duration = Duration::from_millis(200);
 
+/// Why the gap before the first sample of a new `top` happened.
+pub const RESTART_REASON: &str = "faulte waited for a new top to start";
+
 /// The thread that samples this Mac, and the channel of its updates.
 pub struct Sampler {
     /// The updates of the sampler thread.
@@ -621,5 +624,44 @@ mod tests {
         assert_eq!(gap.reason, "top printed rubbish");
         assert_eq!(gap.at, at(20));
         assert_eq!(gap.lost, Duration::from_secs(8));
+    }
+
+    /// A `top` that ended is a gap with the reason of its end. The sampler
+    /// waits for one interval and starts a new `top`. The first header of the
+    /// new `top` is a second gap, with the reason of the wait, and the lost
+    /// times of the two gaps add up to the time between the last frame and
+    /// that header.
+    #[test]
+    fn an_ended_top_makes_a_gap_and_a_new_top_starts() {
+        let rig = Rig::new()
+            .stream(vec![
+                header(10),
+                header(12),
+                finished(14, 12, 7_000),
+                StreamEvent::Ended {
+                    at: at(20),
+                    reason: "top ended with exit status: 1".to_owned(),
+                },
+            ])
+            .stream(vec![header(30), header(32), finished(34, 32, 8_000)]);
+        let sampler = rig.start();
+
+        let _first = next_frame(&sampler);
+        let ended = next_gap(&sampler);
+        let restart = next_gap(&sampler);
+        let second = next_frame(&sampler);
+
+        assert_eq!(ended.reason, "top ended with exit status: 1");
+        assert_eq!(ended.at, at(20));
+        assert_eq!(ended.lost, Duration::from_secs(8));
+        assert_eq!(restart.reason, RESTART_REASON);
+        assert_eq!(restart.at, at(30));
+        assert_eq!(restart.lost, Duration::from_secs(10));
+        assert_eq!(second.at, at(32));
+        assert_eq!(
+            *locked(&rig.shared.sleeps),
+            vec![Duration::from(interval())]
+        );
+        assert_eq!(rig.shared.starts.load(Ordering::SeqCst), 2);
     }
 }
