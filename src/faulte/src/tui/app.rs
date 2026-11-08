@@ -314,4 +314,30 @@ mod tests {
         app.on_key(press(KeyCode::Char('[')));
         assert_eq!(app.selection(), Selection::Past(ids[1]));
     }
+
+    /// `]` selects the oldest entry at least 60 s newer than the selected one,
+    /// or the newest entry when none is far enough. In the live view it does
+    /// nothing, and it never returns to the live view.
+    #[test]
+    fn the_right_bracket_goes_forward_sixty_seconds() {
+        let (mut app, ids) = forty_apart();
+
+        app.on_key(press(KeyCode::Char(']')));
+        assert_eq!(app.selection(), Selection::Live);
+
+        app.on_key(press(KeyCode::Char('[')));
+        app.on_key(press(KeyCode::Char('[')));
+        assert_eq!(app.selection(), Selection::Past(ids[1]));
+        app.on_key(press(KeyCode::Char(']')));
+        assert_eq!(app.selection(), Selection::Past(ids[3]));
+        app.on_key(press(KeyCode::Char(']')));
+        assert_eq!(app.selection(), Selection::Past(ids[5]));
+        app.on_key(press(KeyCode::Char(']')));
+        assert_eq!(app.selection(), Selection::Past(ids[5]));
+
+        app.on_key(press(KeyCode::Left));
+        assert_eq!(app.selection(), Selection::Past(ids[4]));
+        app.on_key(press(KeyCode::Char(']')));
+        assert_eq!(app.selection(), Selection::Past(ids[5]));
+    }
 }
