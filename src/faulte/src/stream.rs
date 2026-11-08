@@ -426,9 +426,10 @@ impl TopStream {
         });
         let (sender, events) = mpsc::channel();
         let reader_child = Arc::clone(&child);
+        let reader_program = program.to_owned();
         let spawned = thread::Builder::new()
             .name("faulte-top-reader".to_owned())
-            .spawn(move || read_stream(stdout, stderr, &reader_child, &sender));
+            .spawn(move || read_stream(stdout, stderr, &reader_child, &reader_program, &sender));
         match spawned {
             Ok(reader) => Ok(Self {
                 events,
@@ -512,14 +513,30 @@ impl HeaderStamps {
     }
 }
 
+/// The status that an end states when the owner stopped the child, so nobody
+/// read the status of the process.
+const STOPPED_STATUS: &str = "stopped by faulte";
+
+/// How many times the reader asks for the status of a child that closed its
+/// output, before it stops the child.
+const STATUS_TRIES: u32 = 10;
+
+/// The pause between two of those questions.
+const STATUS_PAUSE: Duration = Duration::from_millis(50);
+
+/// The status that an end states when the operating system gives none.
+const UNKNOWN_STATUS: &str = "an unknown status";
+
 /// Reads the output of the child until it ends, and sends the events.
 ///
 /// This is the body of the reader thread. It stops early when the owner of
-/// the stream dropped the receiver.
+/// the stream dropped the receiver. At the end it sends one
+/// [`StreamEvent::Ended`].
 fn read_stream(
     mut stdout: ChildStdout,
-    _stderr: ChildStderr,
-    _child: &TopChild,
+    stderr: ChildStderr,
+    child: &TopChild,
+    program: &str,
     sender: &Sender<StreamEvent>,
 ) {
     let mut parser = StreamParser::new();
@@ -547,6 +564,64 @@ fn read_stream(
             }
         }
     }
+    let status = match child.take() {
+        Some(mut owned) => status_of(&mut owned),
+        None => STOPPED_STATUS.to_owned(),
+    };
+    let reason = MachineError::CommandFailed {
+        program: program.to_owned(),
+        status,
+        message: first_line(&read_limited(stderr)),
+    }
+    .to_string();
+    // The owner may have dropped the receiver already, and then nobody reads
+    // the end.
+    let _ = sender.send(StreamEvent::Ended {
+        at: SystemTime::now(),
+        reason,
+    });
+}
+
+/// Reads up to [`STDERR_LIMIT`] bytes of `source`.
+fn read_limited(source: impl Read) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    // A failed read leaves the bytes that arrived, and those are the message.
+    let _ = source.take(STDERR_LIMIT).read_to_end(&mut bytes);
+    bytes
+}
+
+/// Gives the status of a child whose output closed.
+///
+/// A child that closed its output is about to exit, so this asks a few times.
+/// A child that is still alive after that is stopped, because a sampler that
+/// holds no output has nothing more to give.
+fn status_of(child: &mut Child) -> String {
+    for _ in 0..STATUS_TRIES {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.to_string(),
+            Ok(None) => thread::sleep(STATUS_PAUSE),
+            Err(_) => return UNKNOWN_STATUS.to_owned(),
+        }
+    }
+    let _ = child.kill();
+    child
+        .wait()
+        .map_or_else(|_| UNKNOWN_STATUS.to_owned(), |status| status.to_string())
+}
+
+/// The text that an error states when a command wrote nothing to explain
+/// itself.
+const NO_MESSAGE: &str = "the command wrote no message";
+
+/// Gives the first line that a command wrote, for an error message.
+///
+/// One line is enough to name the fault, and a command that failed can write
+/// many lines. The bytes are read without a check of UTF-8, because a message
+/// that `faulte` cannot read is still a message that a person can.
+pub(crate) fn first_line(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let line = text.lines().map(str::trim).find(|line| !line.is_empty());
+    line.unwrap_or(NO_MESSAGE).to_owned()
 }
 
 #[cfg(test)]
