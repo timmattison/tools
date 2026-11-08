@@ -687,4 +687,38 @@ mod tests {
         );
         assert_eq!(rig.shared.starts.load(Ordering::SeqCst), 2);
     }
+
+    /// A `top` that does not start is a gap with the reason. The sampler
+    /// waits for one interval and tries again. The wait that the first
+    /// header of the next `top` ends is the second gap.
+    #[test]
+    fn a_failed_start_makes_a_gap_and_the_sampler_tries_again() {
+        let rig = Rig::new()
+            .failing_start(MachineError::CommandDidNotStart {
+                program: "/usr/bin/top".to_owned(),
+                reason: "no such file".to_owned(),
+            })
+            .stream(vec![
+                header(NOW + 10),
+                header(NOW + 12),
+                finished(NOW + 14, NOW + 12, 7_000),
+            ]);
+        let sampler = rig.start();
+
+        let failed = next_gap(&sampler);
+        let restart = next_gap(&sampler);
+        let frame = next_frame(&sampler);
+
+        assert_eq!(failed.reason, "/usr/bin/top did not start: no such file");
+        assert_eq!(failed.at, at(NOW));
+        assert_eq!(failed.lost, Duration::ZERO);
+        assert_eq!(restart.reason, RESTART_REASON);
+        assert_eq!(restart.lost, Duration::from_secs(10));
+        assert_eq!(frame.at, at(NOW + 12));
+        assert_eq!(
+            *locked(&rig.shared.sleeps),
+            vec![Duration::from(interval())]
+        );
+        assert_eq!(rig.shared.starts.load(Ordering::SeqCst), 2);
+    }
 }
