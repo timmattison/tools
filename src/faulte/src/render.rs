@@ -296,6 +296,11 @@ fn seconds(span: Duration) -> String {
 pub struct Measurement<'a> {
     /// The ranking of the same sample.
     pub ranking: &'a Ranking,
+    /// The count of processes that the first header line states. It is a
+    /// field and not the length of the rows, because a compact history keeps
+    /// only the rows that made faults, and the header must state the count of
+    /// the whole sample.
+    pub processes: usize,
     /// The swap traffic over [`Measurement::swap_window`].
     pub swap: VmDelta,
     /// The swap file of this Mac, from `vm.swapusage`.
@@ -1079,6 +1084,7 @@ mod tests {
     fn measurement(ranking: &Ranking) -> Measurement<'_> {
         Measurement {
             ranking,
+            processes: ranking.rows.len(),
             swap: VmDelta {
                 swapins: 46_564,
                 swapouts: 40_156,
@@ -1111,6 +1117,31 @@ mod tests {
         assert_eq!(
             header(&measurement(&one)).first().map(String::as_str),
             Some("1 process over a 4.0 s window (interval 5s) — 3 faults, 0.8/s")
+        );
+    }
+
+    /// The first line states the count in `Measurement::processes`, and not
+    /// the length of the rows. A compact history keeps only the rows with
+    /// faults, and the count of the whole sample must stay.
+    #[test]
+    fn the_first_line_states_the_processes_field_and_not_the_rows() {
+        let ranking = ranking(vec![row(10, 3), row(20, 2)], 5);
+        let stated = Measurement {
+            processes: 812,
+            ..measurement(&ranking)
+        };
+        let one = Measurement {
+            processes: 1,
+            ..measurement(&ranking)
+        };
+
+        assert_eq!(
+            header(&stated).first().map(String::as_str),
+            Some("812 processes over a 4.0 s window (interval 5s) — 5 faults, 1.3/s")
+        );
+        assert_eq!(
+            header(&one).first().map(String::as_str),
+            Some("1 process over a 4.0 s window (interval 5s) — 5 faults, 1.3/s")
         );
     }
 

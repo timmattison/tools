@@ -247,6 +247,7 @@ impl Observed {
     pub fn measurement(&self) -> Measurement<'_> {
         Measurement {
             ranking: &self.ranking,
+            processes: self.ranking.rows.len(),
             swap: self.swap,
             usage: self.usage,
             compressor_bytes: self.compressor_bytes,
