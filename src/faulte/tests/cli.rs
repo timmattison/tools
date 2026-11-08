@@ -556,3 +556,58 @@ mod signals {
         );
     }
 }
+
+/// `faulte check` reads this Mac, states one verdict on its first line, and
+/// gives the exit code of that verdict.
+///
+/// The verdict depends on the Mac at the time of the test, thus the test holds
+/// the rule that links the text to the exit code, and not one verdict.
+#[cfg(target_os = "macos")]
+#[test]
+fn check_states_a_verdict_and_the_exit_code_of_that_verdict() {
+    let output = run(&["check", "--interval", "1s"]);
+    let text = glyphs(&output.stdout);
+    let first = text.lines().next().unwrap_or_default();
+
+    assert!(first.starts_with("faulte check: "), "the verdict: {text}");
+    let expected = i32::from(first != "faulte check: OK");
+    assert_eq!(
+        output.status.code(),
+        Some(expected),
+        "the exit code: {text}"
+    );
+    assert!(text.contains("compressions/s"), "the rates: {text}");
+    assert!(text.contains("% system"), "the CPU split: {text}");
+}
+
+/// One line of a watch reaches a reader that stops after that line, and the
+/// run then ends with no panic.
+#[cfg(target_os = "macos")]
+#[test]
+fn check_watch_prints_lines_and_ends_when_the_reader_goes_away() {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+
+    let mut child = Command::new(BIN)
+        .args(["check", "--watch", "--interval", "1s"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the faulte binary starts");
+    let stdout = child.stdout.take().expect("the pipe of the output");
+    let mut first = String::new();
+    BufReader::new(stdout)
+        .read_line(&mut first)
+        .expect("one line of the watch");
+    // The read end of the pipe closes at the end of the statement above. The
+    // next line of the watch then finds no reader.
+    let status = child.wait().expect("the watch ends");
+
+    assert!(first.contains("% "), "a line of the watch: {first:?}");
+    assert!(first.contains("/s"), "the rates of the watch: {first:?}");
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "a watch with no reader ends cleanly"
+    );
+}
