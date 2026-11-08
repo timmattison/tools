@@ -10,11 +10,12 @@ use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, TimeZone, Utc};
 use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use crate::history::{History, Reading};
+use crate::history::{Cell, Gap, History, Reading};
 use crate::render::{self, Accounts};
 use crate::tui::app::{App, Selection};
 
@@ -33,6 +34,12 @@ const PAST: &str = "PAST";
 
 /// The words that say that the view does not follow the newest frame.
 const NOT_LIVE: &str = "NOT LIVE";
+
+/// The word that marks a selected gap in the banner.
+const GAP: &str = "GAP";
+
+/// What the banner of a selected gap says before the length of the gap.
+const MEASURED_NOTHING: &str = "faulte measured nothing for ";
 
 /// What the banner of a past view says about the way back.
 const END_RETURNS: &str = "End returns to the live view";
@@ -238,6 +245,10 @@ fn table_line<'a>(cells: impl IntoIterator<Item = &'a str>, widths: &[usize]) ->
 fn paint_table(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     let page = usize::from(area.height.saturating_sub(1));
     app.set_page_rows(page);
+    if let Some(gap) = past_gap(app) {
+        paint_line(frame, area, &gap.reason);
+        return;
+    }
     let Some(reading) = app.reading() else {
         return;
     };
@@ -254,12 +265,85 @@ fn paint_table(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     frame.render_widget(Paragraph::new(lines), area);
 }
 
+/// The label of the row of the fault rates in the timeline. It is as wide as
+/// [`SWAP_LABEL`].
+const FAULTS_LABEL: &str = "FAULTS ";
+
+/// The label of the row of the swap rates in the timeline.
+const SWAP_LABEL: &str = "SWAP   ";
+
+/// The width of the labels of the timeline, in columns.
+const LABEL_WIDTH: usize = 7;
+
+/// The bars of the timeline, from the lowest to the highest.
+const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+/// The glyph of a cell that holds gaps only.
+const GAP_GLYPH: char = '╳';
+
+/// The glyph of a cell with nothing to show.
+const BLANK_GLYPH: char = ' ';
+
+/// Gives the glyph and the style of `cell`. A bar that holds a gap is yellow,
+/// so a reader sees that the slice is not whole.
+fn cell_span(cell: Cell) -> Span<'static> {
+    match cell {
+        Cell::Blank => Span::raw(BLANK_GLYPH.to_string()),
+        Cell::Gap => Span::raw(GAP_GLYPH.to_string()),
+        Cell::Bar { level, holds_gap } => {
+            let top = BARS.len() - 1;
+            let glyph = BARS[usize::from(level).min(top)].to_string();
+            if holds_gap {
+                Span::styled(glyph, Style::new().yellow())
+            } else {
+                Span::raw(glyph)
+            }
+        }
+    }
+}
+
+/// Gives a line of the timeline: `label` and then one glyph for each cell.
+fn cell_line(label: &'static str, cells: &[Cell]) -> Line<'static> {
+    let mut spans = vec![Span::raw(label)];
+    spans.extend(cells.iter().copied().map(cell_span));
+    Line::from(spans)
+}
+
+/// Paints the timeline of the history in `area`.
+fn paint_timeline(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let cells = usize::from(area.width).saturating_sub(LABEL_WIDTH);
+    let timeline = app.history().timeline(cells, app.selected_entry());
+    let lines = vec![
+        cell_line(FAULTS_LABEL, &timeline.faults),
+        cell_line(SWAP_LABEL, &timeline.swap),
+    ];
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// Gives the gap that the person selected in the past. The live view never
+/// selects a gap: it shows the newest frame, even when a gap came after it.
+fn past_gap(app: &App) -> Option<&Gap> {
+    match app.selection() {
+        Selection::Past(_) => app.selected_gap(),
+        Selection::Live => None,
+    }
+}
+
 /// Gives the text of the banner.
 fn banner<Tz: TimeZone>(app: &App, context: &ViewContext<'_, Tz>) -> String
 where
     Tz::Offset: Display,
 {
     let history = app.history();
+    if let Some(gap) = past_gap(app) {
+        return format!(
+            "{PAST}{SEPARATOR}{GAP}{SEPARATOR}{} ({} ago){SEPARATOR}{MEASURED_NOTHING}{}: {}",
+            clock(gap.at, context.tz),
+            age(gap.at, context.now),
+            render::seconds(gap.lost),
+            gap.reason,
+        );
+    }
     let Some(reading) = app.reading() else {
         let mut text = WAITING_BANNER.to_string();
         if let Some(gap) = history.newest().and_then(|newest| history.gap(newest)) {
@@ -300,6 +384,7 @@ where
     let parts = areas(frame.area(), header_lines.len());
     paint_line(frame, parts.banner, &banner(app, context));
     paint_lines(frame, parts.headers, &header_lines);
+    paint_timeline(frame, parts.timeline, app);
     paint_table(frame, parts.table, app);
 }
 
