@@ -33,12 +33,24 @@ impl App {
     /// Makes the state over `history`, in the live view.
     #[must_use]
     pub fn new(history: History) -> Self {
-        Self {
+        let mut app = Self {
             history,
             selection: Selection::Live,
             span: SpanWidth::OneFrame,
             reading: None,
-        }
+        };
+        app.refresh();
+        app
+    }
+
+    /// Computes the reading again. Each change of the selection, the span, or
+    /// the history calls it, so `reading` never goes stale.
+    fn refresh(&mut self) {
+        let end = match self.selection {
+            Selection::Live => self.history.newest_frame(),
+            Selection::Past(id) => Some(id),
+        };
+        self.reading = end.and_then(|end| self.history.span(end, self.span));
     }
 
     /// Adds an update to the history.
@@ -78,7 +90,10 @@ impl App {
     /// Gives the entry that the marker of the timeline shows.
     #[must_use]
     pub fn selected_entry(&self) -> Option<EntryId> {
-        None
+        match self.selection {
+            Selection::Live => self.history.newest(),
+            Selection::Past(id) => Some(id),
+        }
     }
 
     /// Gives the gap at the selected entry.
