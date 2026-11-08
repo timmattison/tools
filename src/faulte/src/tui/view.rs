@@ -788,4 +788,46 @@ mod tests {
         assert_eq!(faults.len(), 5, "{faults:?}");
         assert!(faults.contains(&'█'), "{faults:?}");
     }
+
+    /// Gives the screen column where `needle` starts in `line`.
+    fn screen_column(line: &str, needle: &str) -> Option<usize> {
+        let (before, _) = line.split_once(needle)?;
+        Some(Span::raw(before).width())
+    }
+
+    /// The state column starts at one screen column for commands of any
+    /// glyph width, also when the commands do not fit.
+    #[test]
+    fn commands_of_any_glyph_width_keep_the_next_column_in_place() {
+        let long = "x".repeat(60);
+        let commands = [
+            format!("claude 日本語 {long}"),
+            format!("claude 🎉🎉🎉 {long}"),
+            format!("claude café {long}"),
+            format!("claude plain {long}"),
+        ];
+        let rows = commands
+            .iter()
+            .zip(10..)
+            .map(|(command, pid)| claude_row(pid, 50, command))
+            .collect();
+        let (mut app, _) = app_with(vec![frame(0, rows)]);
+
+        let lines = screen(&paint(&mut app, 100, 24, 3));
+
+        let header = line_starting(&lines, "PID");
+        let columns: Vec<Option<usize>> = lines[header + 1..header + 5]
+            .iter()
+            .map(|line| screen_column(line, "busy"))
+            .collect();
+        assert!(columns[0].is_some(), "{lines:#?}");
+        assert!(
+            columns.iter().all(|column| *column == columns[0]),
+            "{columns:?}"
+        );
+        assert_eq!(columns[0], screen_column(&lines[header], "STATE"));
+        assert!(lines[header + 1..header + 5]
+            .iter()
+            .all(|line| line.contains('…')));
+    }
 }
