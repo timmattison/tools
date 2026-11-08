@@ -6883,6 +6883,27 @@ mod tests {
     }
 
     #[test]
+    fn a_job_name_wider_than_the_cell_keeps_its_end_and_shows_the_runner() {
+        let job = format!("{} (Mac 22)", "n".repeat(40));
+        let (buffer, row, y) = lone_job_row(on("mbp", passed_job(&job)), 129);
+        assert_eq!(
+            row,
+            job_golden(
+                "✅",
+                &format!("└ …{} (Mac 22) mbp", "n".repeat(12)),
+                LONE_JOB,
+                PASSED_TIMES,
+                "?"
+            )
+        );
+        assert_eq!(cyan_columns(&buffer, y), (28..31).collect::<Vec<u16>>());
+        assert_eq!(
+            last_digit_column(&row, &LONE_JOB.to_string()),
+            Some(run_id_column(129))
+        );
+    }
+
+    #[test]
     fn a_job_with_no_runner_and_a_long_name_keeps_the_cut_at_the_end() {
         let (buffer, row, y) = lone_job_row(passed_job(&"n".repeat(40)), 129);
         assert_eq!(
