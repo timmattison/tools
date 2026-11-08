@@ -551,6 +551,21 @@ pub fn rows(
     }
 }
 
+/// Gives the ten cells of `row`, in the order of [`COLUMNS`].
+///
+/// The table of `rows` and a full-screen view both call this function, so no
+/// caller formats a cell twice.
+#[must_use]
+pub fn row_cells(
+    ranking: &Ranking,
+    row: &RankedRow,
+    accounts: &Accounts,
+    now: SystemTime,
+) -> [String; 10] {
+    let _ = (ranking, row, accounts, now);
+    Default::default()
+}
+
 /// The mark of a text that gives a part of something, and not the whole of it.
 ///
 /// [`command`] puts it at the end of a command that the cut made shorter, and
@@ -1163,6 +1178,40 @@ mod tests {
             more_line(&ranking, 2, 40).as_deref(),
             Some("… 2 more processes made 40.0% of all faults")
         );
+    }
+
+    /// `row_cells` gives the ten cells of a row in the order of `COLUMNS`.
+    #[test]
+    fn row_cells_gives_the_ten_cells_in_the_order_of_the_columns() {
+        let ranking = ranking(vec![row(10, 400), row(20, 600)], 1_000);
+        let accounts = Accounts::new().with(Uid::new(VIEWER_UID), "tim");
+        let plain = row(10, 400);
+        let other = RankedRow {
+            claude: ClaudeView::OtherAccount,
+            rss_kib: None,
+            ..row(20, 600)
+        };
+
+        assert_eq!(
+            row_cells(&ranking, &plain, &accounts, now()),
+            [
+                "10".to_owned(),
+                "tim".to_owned(),
+                rate(ranking.faults_per_second(400)),
+                share(ranking.share(400)),
+                kibibytes(831_488),
+                age(Some(STARTED), now()),
+                command("/usr/bin/process-10 --flag"),
+                String::new(),
+                String::new(),
+                String::new(),
+            ]
+        );
+        let cells = row_cells(&ranking, &other, &accounts, now());
+        assert_eq!(cells[0], "20");
+        assert_eq!(cells[4], ABSENT);
+        assert_eq!(cells[7], OTHER_ACCOUNT);
+        assert_eq!(cells[8], "");
     }
 
     /// The second line gives the swap traffic over the time that the tool
