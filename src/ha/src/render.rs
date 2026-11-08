@@ -92,7 +92,7 @@ const FIXED_LINES: usize = 2;
 /// The text that stands between two parts of the status line.
 const STATUS_SEPARATOR: &str = "  ·  ";
 /// The key hints at the end of the left part of the status line. The status line
-/// shows them only while no cancel box shows.
+/// shows them only while no box shows.
 const KEY_HINTS: &str =
     "↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  R re-run  r refresh  q quit";
 /// The widest outer width of the box of the prompt.

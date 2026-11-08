@@ -94,8 +94,8 @@ pub struct App<'a, O: Opener, A: ActionSender, Tz: TimeZone> {
     /// The list of the last `Command::RecentRuns` that the app sent. It is
     /// empty at the start.
     recent: Vec<(RepoName, RunId)>,
-    /// The box that asks the user to cancel a run. It is `None` when no box
-    /// shows.
+    /// The box that asks the user to confirm an action. It is `None` when no
+    /// box shows.
     confirm: Option<Confirm>,
     /// The tally of the first refresh cycle. It is `None` after the first
     /// cycle that gives a verdict. A cycle that ends with a spent API budget
@@ -234,7 +234,7 @@ where
         }
     }
 
-    /// Posts each open that failed late and the result of each cancel, and
+    /// Posts each open that failed late and the result of each action, and
     /// applies each update that the worker has sent. A worker that has ended
     /// sends nothing more, and that is not an error.
     ///
@@ -374,7 +374,7 @@ where
     /// `R` opens a box that asks to re-run the highlighted run. On a job row,
     /// it asks to re-run that job. On a run or job that is still active, and
     /// on a pull request row, it posts why there is nothing to re-run instead.
-    /// While the box shows, it takes every key. `y` cancels the run that the
+    /// While the box shows, it takes every key. `y` sends the action that the
     /// box names, Ctrl-C quits, and every other key closes the box and does
     /// nothing more. Thus `q`, `Esc`, and `Enter` do not quit, open, or move
     /// anything while the box shows.
@@ -3724,6 +3724,54 @@ mod tests {
                     name: "build".to_owned()
                 }
             )]
+        );
+    }
+
+    /// A re-run keeps the run ID and `created_at`, and `run_started_at` moves.
+    /// Thus the next refresh gives the same run as an active run.
+    #[test]
+    fn an_accepted_rerun_moves_the_run_to_the_top_section_and_keeps_the_highlight() {
+        let channels = channels();
+        send_runs(
+            &channels,
+            vec![finished_run(1, 40, 30), finished_run(2, 60, 50)],
+        );
+        let opener = opener(false);
+        let canceller = canceller();
+        let rerun = Run {
+            state: RunState::Queued,
+            started_at: now() - chrono::Duration::minutes(1),
+            updated_at: now(),
+            ..finished_run(2, 60, 50)
+        };
+        let (frame, _) = run_steps_all(
+            &channels,
+            &opener,
+            &canceller,
+            vec![
+                Step::Idle,
+                key(KeyCode::Down),
+                key(KeyCode::Char('R')),
+                key(KeyCode::Char('y')),
+                Step::Send(Update::Runs {
+                    repo: repo(),
+                    runs: vec![rerun, finished_run(1, 40, 30)],
+                }),
+                Step::Idle,
+                key(KeyCode::Enter),
+                key(KeyCode::Char('q')),
+            ],
+        );
+        assert_eq!(
+            *canceller.reruns.borrow(),
+            vec![(repo(), RunId(2), Action::RerunWorkflow)]
+        );
+        let last_section = row_of(&frame, "Last 8h");
+        assert!(row_of(&frame, "run 2") < last_section, "{frame:?}");
+        assert!(last_section < row_of(&frame, "run 1"), "{frame:?}");
+        assert_eq!(
+            *opener.urls.borrow(),
+            vec!["https://example.test/runs/2".to_owned()]
         );
     }
 

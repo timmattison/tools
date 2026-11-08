@@ -2437,6 +2437,22 @@ cannot hang the caller. Used by `cwt` and `ha`.
     - On a finished run, `c` shows no box. The status line says that there is nothing to cancel.
       On a pull request row, `c` also shows no box, and the status line says that a pull request
       is not a run.
+    - `R` (Shift-R) asks to re-run the highlighted row, and the row picks the scope. On a run
+      row, `R` asks to re-run all jobs of the workflow. On a job row, `R` asks to re-run only that
+      job, and the box says that GitHub also re-runs each job that needs this job. To re-run the
+      whole workflow from a job row, move the highlight to the run row. The box names the
+      repository, the workflow, the run ID, the branch, and the title. The box of a job row also
+      names the job.
+    - `y` or `Y` sends the re-run. Every other key closes the box and sends nothing, also Enter,
+      `q`, Esc, and `R`. Ctrl-C still quits. `r` continues to refresh. With Caps Lock on, `r` gives
+      `R`, and the box stops that press.
+    - The status line shows `re-running …`, and then that GitHub accepted the re-run or the reason
+      that GitHub refused it. After GitHub accepts, `ha` refreshes at once, the run moves to the
+      top section, and the highlight stays on it. GitHub permits a re-run up to 30 days after the
+      first run, and at most 50 times. `ha` does not do a check of these limits.
+    - On an active run, and on a job row where the run or the job is active, `R` shows no box. The
+      status line says that there is nothing to re-run yet. On a pull request row, `R` also shows
+      no box, and the status line says that a pull request is not a run.
     - When no box shows, `q`, Esc, or Ctrl-C quits and gives back the terminal.
   - Enter runs the command that `BROWSER` names when that variable is set and not empty. Thus a
     forwarder that sets `BROWSER`, for example the opener of mosh-rs, opens the page on your local
@@ -2535,10 +2551,11 @@ cannot hang the caller. Used by `cwt` and `ha`.
     - The enterprise endpoint gives only the usage that has no cost center. An enterprise that
       uses cost centers thus shows less than its bill.
   - `ha` uses the GitHub CLI, `gh`, and its login and host. It does not keep a second token. When
-    `gh` is missing or not logged in, `ha` stops with a message before it draws. The cancel of a
-    run is the only request of `ha` that changes something on GitHub. It needs the `repo` scope on
-    an OAuth token or a classic token. The default login of `gh auth login` has it. A login
-    without write access to the repository gets `403`, and the status line shows it.
+    `gh` is missing or not logged in, `ha` stops with a message before it draws. Only the cancel
+    of a run, the re-run of a run, and the re-run of a job change something on GitHub. These
+    requests need the `repo` scope on an OAuth token or a classic token. The default login of
+    `gh auth login` has it. A login without write access to the repository gets `403`, and the
+    status line shows it.
   - API budget: GitHub gives 5,000 requests each hour. An organization of 200 repositories at a
     60 s interval asks for 12,000 requests each hour. Thus `ha` sends the `ETag` of each answer
     back in `If-None-Match`, and GitHub does not count a `304 Not Modified` answer. The lookback
