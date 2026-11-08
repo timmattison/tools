@@ -6970,6 +6970,24 @@ mod tests {
     }
 
     #[test]
+    fn a_text_cell_too_narrow_for_the_floor_shows_no_runner_name() {
+        let width = FIXED_COLUMNS + 20;
+        let widths = Widths::for_width(width);
+        assert_eq!(widths.repo + 1 + widths.workflow, 9);
+        let width = u16::try_from(width).expect("a small width");
+        let cases = [
+            ("a", "└ a".to_owned()),
+            (&"n".repeat(40)[..], format!("└ {}…", "n".repeat(6))),
+        ];
+        for (job, text) in cases {
+            let (buffer, row, y) =
+                lone_job_row(on("GitHub Actions 1000001050", passed_job(job)), width);
+            assert_eq!(columns(&row, 3, 9).trim_end(), text, "job {job}");
+            assert_eq!(cyan_columns(&buffer, y).len(), 0, "job {job}");
+        }
+    }
+
+    #[test]
     fn a_job_with_no_runner_and_a_long_name_keeps_the_cut_at_the_end() {
         let (buffer, row, y) = lone_job_row(passed_job(&"n".repeat(40)), 129);
         assert_eq!(
