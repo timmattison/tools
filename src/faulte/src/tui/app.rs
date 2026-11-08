@@ -16,6 +16,10 @@ const JUMP: Duration = Duration::from_secs(60);
 /// The rows of one screen before the view states its size.
 const DEFAULT_PAGE_ROWS: usize = 20;
 
+/// The notice that tells the person that the selected frame left the history.
+const LEFT_NOTICE: &str =
+    "the selected frame left the history, so the view moved to the oldest frame";
+
 /// Which time the view shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Selection {
@@ -64,6 +68,8 @@ pub struct App {
     page_rows: usize,
     /// Whether the person asked to leave.
     quit: bool,
+    /// A note for the person. The next key clears it.
+    notice: Option<String>,
     /// The reading that the table shows.
     reading: Option<Reading>,
 }
@@ -81,6 +87,7 @@ impl App {
             detail_scroll: 0,
             page_rows: DEFAULT_PAGE_ROWS,
             quit: false,
+            notice: None,
             reading: None,
         };
         app.refresh();
@@ -142,6 +149,13 @@ impl App {
     /// Adds an update to the history.
     pub fn on_update(&mut self, update: Update) {
         self.history.add(update);
+        let left = matches!(self.selection, Selection::Past(id) if !self.history.contains(id));
+        if left {
+            if let Some(oldest) = self.history.oldest() {
+                self.selection = Selection::Past(oldest);
+            }
+            self.notice = Some(LEFT_NOTICE.to_string());
+        }
         self.refresh();
     }
 
@@ -150,6 +164,7 @@ impl App {
         if key.kind != KeyEventKind::Press {
             return;
         }
+        self.notice = None;
         match key.code {
             KeyCode::Left | KeyCode::Char('h') => {
                 let target = self
@@ -249,7 +264,7 @@ impl App {
     /// Gives the notice that the view shows until the next key, if any.
     #[must_use]
     pub fn notice(&self) -> Option<&str> {
-        None
+        self.notice.as_deref()
     }
 
     /// Gives the reading that the table shows.
