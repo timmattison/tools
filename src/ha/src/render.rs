@@ -363,6 +363,10 @@ fn fit_runner(name: &RunnerName, room: usize) -> Option<String> {
     }
 }
 
+/// The number of characters of a runner name that a job row always shows. A
+/// name of this many characters or fewer is its own floor.
+const RUNNER_FLOOR_CHARS: usize = 6;
+
 /// The columns of the runner floor of a long name: 6 characters and `…`.
 const RUNNER_FLOOR_WIDTH: usize = 7;
 
@@ -383,7 +387,11 @@ fn fit_job_text(
         return (text, None);
     };
     let room = cell.saturating_sub(text_width(&text) + 1);
-    let fitted = fit_runner(runner, room);
+    let fitted = if runner.as_str().chars().count() <= RUNNER_FLOOR_CHARS {
+        (text_width(runner.as_str()) <= room).then(|| runner.as_str().to_owned())
+    } else {
+        fit_runner(runner, room)
+    };
     if fitted.is_some() || text_width(&whole) > cell {
         return (text, fitted);
     }
@@ -6768,7 +6776,7 @@ mod tests {
             [
                 "✅ ├ e2e-plan grwetky1t8721h17… 107851237701",
                 "⏳ ├ e2e-remotesensing (1)      107851237705",
-                "🏃 ├ e2e-remotesensing (2) m1-… 107851237702",
+                "🏃 ├ …e-remotesensing (2) m1-ts 107851237702",
                 "🏃 ├ e2e-remotesensing (3) mbp  107851237703",
                 "⏳ ├ e2e-remotesensing (4)      107851237704",
                 "🏃 └ sites gr96283qcxw61jpesqn… 107851237706",
