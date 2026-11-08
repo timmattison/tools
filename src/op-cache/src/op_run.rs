@@ -7,7 +7,7 @@ use crate::notify;
 use crate::OpPath;
 use std::ffi::OsString;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// The most bytes of `op` standard error that one `op_end` record keeps.
@@ -168,7 +168,7 @@ impl<'a> OpRun<'a> {
         let notification = self.start_notification(attempt);
 
         let started = Instant::now();
-        let result = Command::new("op")
+        let result = childenv::command("op")
             .args(self.operation.args(self.op_path.as_ref()))
             .output();
         // Read the clock before the reap, so that `duration_ms` measures `op`
