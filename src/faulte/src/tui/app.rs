@@ -208,4 +208,30 @@ mod tests {
         assert_eq!(app.reading().map(Reading::end), Some(ids[1]));
         assert_eq!(app.selected_entry(), Some(ids[1]));
     }
+
+    /// Builds five entries, two seconds apart, with a gap at the third.
+    fn five() -> (App, Vec<EntryId>) {
+        app_with(vec![
+            frame(0, vec![row(1, 1)]),
+            frame(2, vec![row(1, 1)]),
+            gap(4, 2),
+            frame(6, vec![row(1, 1)]),
+            frame(8, vec![row(1, 1)]),
+        ])
+    }
+
+    /// `Left` and `h` select the entry before the selected one, a gap
+    /// included. The live view counts from the newest entry.
+    #[test]
+    fn left_and_h_select_the_previous_entry() {
+        let (mut app, ids) = five();
+
+        app.on_key(press(KeyCode::Left));
+        assert_eq!(app.selection(), Selection::Past(ids[3]));
+        app.on_key(press(KeyCode::Char('h')));
+        assert_eq!(app.selection(), Selection::Past(ids[2]));
+        assert_eq!(app.selected_entry(), Some(ids[2]));
+        assert_eq!(app.selected_gap().map(|gap| gap.lost.as_secs()), Some(2));
+        assert_eq!(app.reading().map(Reading::end), None);
+    }
 }
