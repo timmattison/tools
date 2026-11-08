@@ -1486,4 +1486,98 @@ mod tests {
             session(SessionState::Busy, Some("/work/b"))
         );
     }
+
+    /// A span sums the faults and the windows, counts each Claude Code process
+    /// once, orders by faults and then by PID, and takes the state and the
+    /// resident memory from the newest frame of each process.
+    #[test]
+    fn a_span_sums_orders_and_takes_the_newest_state() {
+        let busy = session(SessionState::Busy, Some("/work/a"));
+        let idle = session(
+            SessionState::Idle {
+                for_: Some(Duration::from_secs(30)),
+            },
+            None,
+        );
+        let mut newest_row = claude_row(1, 4, idle.clone());
+        newest_row.rss_kib = Some(7_000);
+        let mut updates = Vec::new();
+        for (secs, rows) in [
+            (10, vec![claude_row(1, 4, busy.clone()), row(3, 6)]),
+            (12, vec![row(2, 10), claude_row(1, 4, busy)]),
+            (14, vec![newest_row, row(3, 1)]),
+        ] {
+            let mut sampled = sample(secs, rows);
+            sampled.observed.ranking.skipped.exited = 1;
+            sampled.observed.ranking.skipped.exited_faults = 5;
+            updates.push(Update::Frame(Box::new(sampled)));
+        }
+        let mut history = History::new();
+        let ids: Vec<EntryId> = updates
+            .into_iter()
+            .map(|update| history.add(update))
+            .collect();
+
+        let reading = history
+            .span(ids[2], SpanWidth::Whole)
+            .expect("the span has frames");
+        let rows: Vec<(u32, u64)> = reading
+            .rows()
+            .map(|view| (view.row.pid.get(), view.row.faults))
+            .collect();
+        let ranking = reading.ranking();
+        let first = reading
+            .row(
+                reading
+                    .position_of(ProcessKey {
+                        pid: Pid::new(1),
+                        started_at_epoch_secs: Some(1_700_000_000),
+                    })
+                    .unwrap(),
+            )
+            .unwrap();
+
+        assert_eq!(rows, vec![(1, 12), (2, 10), (3, 7)]);
+        assert_eq!(ranking.window, Duration::from_secs(3 * WINDOW_SECS));
+        assert_eq!(ranking.total_faults, 29);
+        assert_eq!(ranking.claude.processes, 1);
+        assert_eq!(ranking.claude.faults, 12);
+        assert_eq!(ranking.skipped.exited, 3);
+        assert_eq!(ranking.skipped.exited_faults, 15);
+        assert_eq!(
+            first.row.claude,
+            session(
+                SessionState::Idle {
+                    for_: Some(Duration::from_secs(30))
+                },
+                Some("/work/a")
+            )
+        );
+        assert_eq!(first.row.rss_kib, Some(7_000));
+        assert_eq!(first.as_of, time(14));
+        assert!(reading.header_lines()[0].contains("of the last whole history (3 frames, 0 gaps)"));
+    }
+
+    /// A narrow span walks back only over the entries that are young enough,
+    /// and a span can end at a gap.
+    #[test]
+    fn a_narrow_span_leaves_out_old_entries() {
+        let mut history = History::new();
+        history.add(frame(0, vec![row(1, 100)]));
+        history.add(frame(100, vec![row(1, 3)]));
+        history.add(frame(130, vec![row(1, 4)]));
+        let gap_id = history.add(gap(150, 2));
+
+        let minute = history
+            .span(gap_id, SpanWidth::OneMinute)
+            .expect("frames in range");
+        let all = history
+            .span(gap_id, SpanWidth::FifteenMinutes)
+            .expect("frames in range");
+
+        assert_eq!(minute.ranking().rows[0].faults, 7);
+        assert_eq!(all.ranking().rows[0].faults, 107);
+        assert_eq!(minute.end(), gap_id);
+        assert!(history.span(gap_id, SpanWidth::OneFrame).is_none());
+    }
 }
