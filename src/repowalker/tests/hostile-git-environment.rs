@@ -12,7 +12,7 @@
 
 use std::path::PathBuf;
 
-use gitscratch::testing::{DecoyRepository, TestRepo};
+use gitscratch::testing::{child_ran, run_child_half, DecoyRepository, TestRepo};
 
 /// The variable that tells the test it runs as the child.
 const MARKER: &str = "REPOWALKER_HOSTILE_CHILD";
@@ -35,6 +35,9 @@ fn find_main_repo_answers_with_the_repository_it_stands_in() {
                 .canonicalize()
                 .expect("canonicalize the expected path"),
         );
+        // The child reaches this line only when the assertion above holds. The
+        // parent reads it as the proof that this branch ran.
+        child_ran();
         return;
     }
 
@@ -49,20 +52,16 @@ fn find_main_repo_answers_with_the_repository_it_stands_in() {
     decoy_repo.commit_file("decoy.txt", "decoy\n", "decoy");
     let decoy = DecoyRepository::of(decoy_repo);
 
-    let mut command = childenv::fixture_command(std::env::current_exe().expect("test binary"));
-    command
-        .args(["--exact", TEST_NAME, "--nocapture"])
-        .current_dir(&linked)
-        .env(MARKER, "1")
-        .env(EXPECTED, fixture.path());
-    decoy.aim(&mut command);
-    let output = command.output().expect("start the test binary again");
+    let outcome = run_child_half(TEST_NAME, |child| {
+        child
+            .current_dir(&linked)
+            .env(MARKER, "1")
+            .env(EXPECTED, fixture.path());
+        decoy.aim(child);
+    });
 
-    assert!(
-        output.status.success(),
-        "the child test failed:\n{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-    );
+    if let Err(report) = outcome {
+        panic!("find_main_repo followed an inherited git variable:\n{report}");
+    }
     decoy.assert_untouched("repowalker");
 }
