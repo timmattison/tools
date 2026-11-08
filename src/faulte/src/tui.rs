@@ -335,4 +335,34 @@ mod tests {
         assert!(result.is_ok(), "{result:?}");
         assert_eq!(events.calls, 0, "the loop reads nothing");
     }
+
+    /// Gives a clock that reads `millis` in turn, and its last value after
+    /// that.
+    fn clock_of(millis: &[u64]) -> impl Fn() -> SystemTime + '_ {
+        let next = std::cell::Cell::new(0_usize);
+        move || {
+            let at = next.get();
+            next.set(at + 1);
+            time(millis[at.min(millis.len() - 1)])
+        }
+    }
+
+    #[test]
+    fn a_quiet_pass_under_one_second_does_not_draw_again() {
+        let mut harness = Harness::new();
+        harness
+            .sender
+            .send(frame(COMMAND))
+            .expect("the channel is open");
+        let mut events = ScriptedEvents::new(vec![None, Some(key(KeyCode::Char('q')))]);
+
+        let result = harness.run(&mut events, &clock_of(&[1_900, 2_100]));
+
+        assert!(result.is_ok(), "{result:?}");
+        let screen = harness.screen();
+        assert!(
+            screen.contains("(1s ago)"),
+            "the age stays at the first draw:\n{screen}"
+        );
+    }
 }
