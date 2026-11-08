@@ -176,9 +176,13 @@ fn collect_files_recursively(path: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+/// The directory where Linux shows one entry for each process.
+#[cfg(target_os = "linux")]
+const PROC_ROOT: &str = "/proc";
+
 #[cfg(target_os = "linux")]
 fn who_is_using(path: &Path) -> Result<Vec<ProcessInfo>> {
-    get_file_users_linux(path)
+    get_file_users_linux(path, Path::new(PROC_ROOT))
 }
 
 #[cfg(target_os = "macos")]
@@ -196,11 +200,16 @@ fn who_is_using(_path: &Path) -> Result<Vec<ProcessInfo>> {
     anyhow::bail!("Unsupported platform");
 }
 
+/// Finds each process that holds `target_path`, or a file under it, open.
+///
+/// `target_path` is a file or a directory. `proc_root` is the directory that
+/// holds one entry for each process. It is `/proc` in production and a fake
+/// directory in a test. The function returns an error when it cannot read
+/// `proc_root` itself or cannot walk `target_path`.
 #[cfg(target_os = "linux")]
-fn get_file_users_linux(target_path: &Path) -> Result<Vec<ProcessInfo>> {
-    use procfs::process::all_processes;
+fn get_file_users_linux(target_path: &Path, proc_root: &Path) -> Result<Vec<ProcessInfo>> {
+    use procfs::process::{all_processes_with_root, FDTarget, MMapPath};
     use std::collections::HashSet;
-    use std::fs;
 
     let files = collect_files_recursively(target_path)?;
     let mut canonical_files = HashSet::new();
@@ -215,9 +224,17 @@ fn get_file_users_linux(target_path: &Path) -> Result<Vec<ProcessInfo>> {
 
     let mut processes = Vec::new();
 
-    for process in all_processes()? {
-        let process = process?;
-        let pid = process.pid;
+    for process in all_processes_with_root(proc_root)? {
+        // procfs cannot open an entry when its process stopped after the
+        // listing, or when the entry is not a process directory. Skip such an
+        // entry and go on.
+        let Ok(process) = process else {
+            continue;
+        };
+        // The kernel gives each process a positive id.
+        let Ok(pid) = u32::try_from(process.pid) else {
+            continue;
+        };
 
         // Get process info
         let stat = match process.stat() {
@@ -230,62 +247,58 @@ fn get_file_users_linux(target_path: &Path) -> Result<Vec<ProcessInfo>> {
             Err(_) => continue,
         };
 
-        // Check file descriptors
+        // Check file descriptors. procfs reads the target of each descriptor
+        // link. A socket, a pipe, or an anonymous inode has no path to match.
         if let Ok(fds) = process.fd() {
-            for fd_entry in fds {
-                if let Ok(fd_info) = fd_entry {
-                    if let Ok(fd_path) = fs::read_link(&fd_info.path()) {
-                        let fd_canonical = fd_path.canonicalize().unwrap_or(fd_path.clone());
+            for fd_info in fds.flatten() {
+                let FDTarget::Path(fd_path) = fd_info.target else {
+                    continue;
+                };
+                let fd_canonical = fd_path.canonicalize().unwrap_or_else(|_| fd_path.clone());
 
-                        // Check if this fd matches any of our target files
-                        for target_file in &canonical_files {
-                            if fd_canonical == *target_file
-                                || target_file.starts_with(&fd_canonical)
-                                || fd_canonical.starts_with(target_file)
-                            {
-                                processes.push(ProcessInfo {
-                                    pid: pid as u32,
-                                    name: stat.comm.clone(),
-                                    user: status.real_uid.map(|uid| format!("{}", uid)),
-                                    access_mode: Some(format!("fd:{}", fd_info.fd)),
-                                    file_descriptor: Some(format!("{}", fd_info.fd)),
-                                    file_path: Some(fd_path.clone()),
-                                });
-                                break;
-                            }
-                        }
+                // Check if this fd matches any of our target files
+                for target_file in &canonical_files {
+                    if fd_canonical == *target_file
+                        || target_file.starts_with(&fd_canonical)
+                        || fd_canonical.starts_with(target_file)
+                    {
+                        processes.push(ProcessInfo {
+                            pid,
+                            name: stat.comm.clone(),
+                            user: Some(status.ruid.to_string()),
+                            access_mode: Some(format!("fd:{}", fd_info.fd)),
+                            file_descriptor: Some(fd_info.fd.to_string()),
+                            file_path: Some(fd_path.clone()),
+                        });
+                        break;
                     }
                 }
             }
         }
 
-        // Check memory maps
+        // Check memory maps. Only a map of a file has a path to match.
         if let Ok(maps) = process.maps() {
             for map in maps {
-                if let Some(pathname) = map.pathname {
-                    match pathname {
-                        procfs::process::MMapPath::Path(map_path) => {
-                            let map_canonical = map_path.canonicalize().unwrap_or(map_path.clone());
+                let MMapPath::Path(map_path) = map.pathname else {
+                    continue;
+                };
+                let map_canonical = map_path.canonicalize().unwrap_or_else(|_| map_path.clone());
 
-                            // Check if this mmap matches any of our target files
-                            for target_file in &canonical_files {
-                                if map_canonical == *target_file
-                                    || target_file.starts_with(&map_canonical)
-                                    || map_canonical.starts_with(target_file)
-                                {
-                                    processes.push(ProcessInfo {
-                                        pid: pid as u32,
-                                        name: stat.comm.clone(),
-                                        user: status.real_uid.map(|uid| format!("{}", uid)),
-                                        access_mode: Some("mmap".to_string()),
-                                        file_descriptor: None,
-                                        file_path: Some(map_path.clone()),
-                                    });
-                                    break;
-                                }
-                            }
-                        }
-                        _ => {} // Skip other pathname types
+                // Check if this mmap matches any of our target files
+                for target_file in &canonical_files {
+                    if map_canonical == *target_file
+                        || target_file.starts_with(&map_canonical)
+                        || map_canonical.starts_with(target_file)
+                    {
+                        processes.push(ProcessInfo {
+                            pid,
+                            name: stat.comm.clone(),
+                            user: Some(status.ruid.to_string()),
+                            access_mode: Some("mmap".to_string()),
+                            file_descriptor: None,
+                            file_path: Some(map_path.clone()),
+                        });
+                        break;
                     }
                 }
             }
@@ -434,4 +447,58 @@ fn get_file_users_windows(target_path: &Path) -> Result<Vec<ProcessInfo>> {
     // A future enhancement could use the Windows API directly.
 
     Ok(processes)
+}
+
+/// Tests of the Linux scan. They use a fake proc root, thus they compile and
+/// run on Linux only. The ubuntu-latest CI job runs them.
+#[cfg(all(test, target_os = "linux"))]
+mod linux_scan_tests {
+    use super::*;
+
+    /// A numeric name, thus the procfs iterator treats the entry as a process.
+    /// The entry is a regular file. procfs opens each process entry with
+    /// `O_DIRECTORY`, thus the open fails.
+    const UNOPENABLE_ENTRY_NAME: &str = "4242";
+
+    /// The scan must skip an entry that procfs cannot open and go on.
+    ///
+    /// The fake proc root holds two entries. One is a regular file named
+    /// `4242`, which procfs cannot open. The other is a symlink named for this
+    /// test process. It points to the real entry of this process in `/proc`.
+    /// This process holds `held.txt` open, thus the scan must find it past the
+    /// bad entry.
+    ///
+    /// The order of directory entries is not fixed. That is fine. If the scan
+    /// stops at the bad entry, it returns `Err` in both orders. If the scan
+    /// skips the bad entry, it returns `Ok` with the holder in both orders.
+    #[test]
+    fn scan_skips_an_entry_it_cannot_open_and_finds_the_holder() {
+        let dir = tempfile::tempdir().expect("create a temporary directory");
+
+        let held_path = dir.path().join("held.txt");
+        std::fs::write(&held_path, b"held").expect("write the held file");
+        let _held = std::fs::File::open(&held_path).expect("open the held file");
+
+        let fake_root = dir.path().join("proc");
+        std::fs::create_dir(&fake_root).expect("create the fake proc root");
+        std::fs::write(fake_root.join(UNOPENABLE_ENTRY_NAME), b"")
+            .expect("write the unopenable entry");
+
+        let pid = std::process::id().to_string();
+        std::os::unix::fs::symlink(Path::new(PROC_ROOT).join(&pid), fake_root.join(&pid))
+            .expect("link the entry of this process");
+
+        let found = get_file_users_linux(&held_path, &fake_root).unwrap_or_else(|e| {
+            panic!("the scan must skip an entry that procfs cannot open, but it failed with {e:#}")
+        });
+
+        let expected_path = held_path
+            .canonicalize()
+            .expect("canonicalize the held file");
+        assert!(
+            found.iter().any(|info| info.pid == std::process::id()
+                && info.file_path.as_deref() == Some(expected_path.as_path())),
+            "the scan must find this process as the holder of the file, but it found {found:?}"
+        );
+    }
 }

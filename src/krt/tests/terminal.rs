@@ -533,6 +533,13 @@ struct Terminal {
     /// The hold on the terminal. The drop of it closes the terminal.
     _master: Box<dyn MasterPty + Send>,
     /// Where a key of the test goes.
+    ///
+    /// Only the macOS tests press a key, but each run holds the writer for its
+    /// whole life, thus the field stays on every platform.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(dead_code, reason = "only the macOS tests press a key")
+    )]
     keys: Box<dyn Write + Send>,
     /// Every byte that the terminal showed.
     shown: Arc<Mutex<Vec<u8>>>,
@@ -654,6 +661,7 @@ impl Terminal {
     ///
     /// Panics when [`PATIENCE`] runs out, and names the text that the terminal
     /// showed. A wait of no deadline holds every commit of the repository.
+    #[cfg(target_os = "macos")]
     fn wait_for(&self, text: &str) {
         let deadline = Instant::now() + PATIENCE;
         while !self.shown().contains(text) {

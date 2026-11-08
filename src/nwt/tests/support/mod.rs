@@ -503,12 +503,9 @@ pub fn clone_of(source: &Path) -> (TempDir, PathBuf) {
 /// `git config` fails.
 #[cfg(unix)]
 pub fn install_post_checkout_hook(repo: &Path, hooks_dir: &Path, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
-
     let hook = hooks_dir.join("post-checkout");
-    std::fs::write(&hook, format!("#!/bin/sh\n{body}")).expect("write the post-checkout hook");
-    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
-        .expect("make the post-checkout hook executable");
+    gitscratch::testing::executable::write_executable(&hook, format!("#!/bin/sh\n{body}"))
+        .expect("write the post-checkout hook");
 
     let hooks_dir = std::fs::canonicalize(hooks_dir).expect("resolve the hooks directory");
     let hooks_dir = hooks_dir.to_str().expect("utf-8 hooks directory");
@@ -634,8 +631,6 @@ impl FakeMultiplexer {
     /// Creates the temp dir, writes an executable fake `zellij` script into it,
     /// and points the script at a recorder file.
     pub fn new() -> Self {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = TempDir::new().expect("Failed to create fake-multiplexer temp dir");
         let bin_dir = dir.path().to_path_buf();
         let recorder = bin_dir.join("invocations.log");
@@ -650,13 +645,8 @@ impl FakeMultiplexer {
             "#!/bin/sh\nprintf '%s %s\\n' '{tool}' \"$*\" >> '{recorder}'\nexit 0\n",
             recorder = recorder.display()
         );
-        std::fs::write(&script_path, script).expect("Failed to write fake multiplexer script");
-        let mut perms = std::fs::metadata(&script_path)
-            .expect("Failed to stat fake multiplexer script")
-            .permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&script_path, perms)
-            .expect("Failed to mark fake multiplexer script executable");
+        gitscratch::testing::executable::write_executable(&script_path, script)
+            .expect("Failed to write fake multiplexer script");
 
         Self {
             _dir: dir,

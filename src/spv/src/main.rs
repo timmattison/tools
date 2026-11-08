@@ -3,6 +3,7 @@
 //! A CLI tool that provides enhanced process listing with flexible filtering
 //! and display options.
 
+#[cfg(target_os = "macos")]
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::process::Command;
@@ -655,38 +656,31 @@ fn collect_processes(
         };
 
         if matches {
-            let user = process
-                .user_id()
-                .map(|uid| {
-                    // Platform-specific handling is inline because sysinfo's Uid type
-                    // differs across platforms. On Unix, Uid implements Deref<Target = uid_t>,
-                    // allowing us to call get_username(**uid). On non-Unix platforms,
-                    // we fall back to displaying the UID directly via sysinfo's Display impl.
-                    //
-                    // NOTE: The non-Unix path relies on sysinfo::Uid implementing Display,
-                    // which it does per the sysinfo API. This has not been tested on Windows
-                    // but should work correctly.
-                    #[cfg(unix)]
-                    {
-                        get_username(**uid)
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        uid.to_string()
-                    }
-                })
-                .or_else(|| {
-                    // Fallback to sysctl data on macOS when sysinfo returns None
-                    #[cfg(target_os = "macos")]
-                    {
-                        sysctl_info.get(&pid_u32).map(|info| get_username(info.uid))
-                    }
-                    #[cfg(not(target_os = "macos"))]
-                    {
-                        None
-                    }
-                })
-                .unwrap_or_else(|| "unknown".to_string());
+            let user = process.user_id().map(|uid| {
+                // Platform-specific handling is inline because sysinfo's Uid type
+                // differs across platforms. On Unix, Uid implements Deref<Target = uid_t>,
+                // allowing us to call get_username(**uid). On non-Unix platforms,
+                // we fall back to displaying the UID directly via sysinfo's Display impl.
+                //
+                // NOTE: The non-Unix path relies on sysinfo::Uid implementing Display,
+                // which it does per the sysinfo API. This has not been tested on Windows
+                // but should work correctly.
+                #[cfg(unix)]
+                {
+                    get_username(**uid)
+                }
+                #[cfg(not(unix))]
+                {
+                    uid.to_string()
+                }
+            });
+            // Fallback to sysctl data on macOS when sysinfo returns None. The
+            // fallback is a statement of its own, so other platforms compile
+            // no empty fallback.
+            #[cfg(target_os = "macos")]
+            let user =
+                user.or_else(|| sysctl_info.get(&pid_u32).map(|info| get_username(info.uid)));
+            let user = user.unwrap_or_else(|| "unknown".to_string());
 
             let status = {
                 let sysinfo_status = format!("{:?}", process.status());
@@ -708,19 +702,12 @@ fn collect_processes(
                 }
             };
 
-            let start_time = match process.start_time() {
-                // sysinfo gives 0 for the process of another user on macOS.
-                // The kernel gives the start time to every user through sysctl.
-                0 => {
-                    #[cfg(target_os = "macos")]
-                    {
-                        sysctl_info.get(&pid_u32).map_or(0, |info| info.start_time)
-                    }
-                    #[cfg(not(target_os = "macos"))]
-                    {
-                        0
-                    }
-                }
+            let start_time = process.start_time();
+            // sysinfo gives 0 for the process of another user on macOS.
+            // The kernel gives the start time to every user through sysctl.
+            #[cfg(target_os = "macos")]
+            let start_time = match start_time {
+                0 => sysctl_info.get(&pid_u32).map_or(0, |info| info.start_time),
                 seconds => seconds,
             };
 
@@ -841,12 +828,49 @@ const LSOF_MIN_FIELDS: usize = 9;
 /// the reader that the process holds no files, which is worse than an error.
 fn get_open_files(pid: u32) -> Result<Vec<OpenFile>, String> {
     let stdout = run_lsof(&["-p", &pid.to_string()])?;
+    parse_open_files(pid, &stdout)
+}
+
+/// Parses the output of `lsof -p <pid>` into the open files of the process.
+///
+/// # Arguments
+///
+/// * `pid` - The process ID that lsof read
+/// * `stdout` - The standard output of lsof, with its header line
+///
+/// # Returns
+///
+/// The open files, or a sentence that says why there are none.
+///
+/// # Refused descriptors
+///
+/// lsof on Linux writes a row for each descriptor that the kernel refuses to
+/// show it. The row leaves the middle columns empty and puts the reason where
+/// the name goes, as in `/proc/1/cwd (readlink: Permission denied)`. Thus its
+/// name is not at the usual field, and only its FD column is where the header
+/// says. Each such row becomes a row that says the kernel refused it. When the
+/// kernel refused every descriptor, the answer is one sentence that says so.
+/// lsof on macOS writes no row for a refused process, and the caller reports
+/// that case.
+fn parse_open_files(pid: u32, stdout: &str) -> Result<Vec<OpenFile>, String> {
     let mut files = Vec::new();
+    let mut readable = 0_usize;
 
     // Skip the header line and parse each subsequent line
     for line in stdout.lines().skip(1) {
         let fields: Vec<&str> = line.split_whitespace().collect();
+        if line.trim_end().ends_with(LSOF_REFUSED_NAME_SUFFIX) {
+            if let Some(fd) = fields.get(LSOF_FIELD_FD) {
+                files.push(OpenFile {
+                    fd: (*fd).to_string(),
+                    file_type: REFUSED_FILE_TYPE.to_string(),
+                    name: REFUSED_FILE_NAME.to_string(),
+                });
+            }
+            continue;
+        }
         if fields.len() >= LSOF_MIN_FIELDS {
+            readable += 1;
             files.push(OpenFile {
                 fd: fields[LSOF_FIELD_FD].to_string(),
                 file_type: fields[LSOF_FIELD_TYPE].to_string(),
@@ -856,8 +880,23 @@ fn get_open_files(pid: u32) -> Result<Vec<OpenFile>, String> {
         }
     }
 
+    if readable == 0 && !files.is_empty() {
+        return Err(format!(
+            "the kernel refused lsof each descriptor of process {pid}, so run spv with sudo"
+        ));
+    }
     Ok(files)
 }
+
+/// The end of the name that lsof on Linux writes for a descriptor that the
+/// kernel refused to show it, as in `/proc/1/cwd (readlink: Permission denied)`.
+const LSOF_REFUSED_NAME_SUFFIX: &str = ": Permission denied)";
+
+/// The type that spv shows for a descriptor that the kernel refused.
+const REFUSED_FILE_TYPE: &str = "refused";
+
+/// The name that spv shows for a descriptor that the kernel refused.
+const REFUSED_FILE_NAME: &str = "the kernel refused this descriptor; run spv with sudo";
 
 /// Substrings that mark a credential wherever they appear in an uppercased name.
 ///
@@ -2101,6 +2140,61 @@ mod tests {
         // Lines with fewer than LSOF_MIN_FIELDS should be skipped
         let line = "bash 1234 user cwd DIR";
         assert!(parse_lsof_line(line).is_none());
+    }
+
+    /// The output of `lsof -p 1` on Linux, for a user who is not root. The
+    /// kernel refuses each descriptor of PID 1. lsof on Linux writes a row for
+    /// each one, with empty columns and the reason where the name goes. lsof
+    /// on macOS writes no row at all for such a process.
+    const LSOF_LINUX_EVERY_DESCRIPTOR_REFUSED: &str = "\
+COMMAND PID USER   FD      TYPE DEVICE SIZE/OFF NODE NAME
+systemd   1 root  cwd   unknown                      /proc/1/cwd (readlink: Permission denied)
+systemd   1 root  rtd   unknown                      /proc/1/root (readlink: Permission denied)
+systemd   1 root  txt   unknown                      /proc/1/exe (readlink: Permission denied)
+systemd   1 root NOFD                                /proc/1/fd (opendir: Permission denied)
+";
+
+    /// The output of `lsof -p` on Linux when the kernel refuses one
+    /// descriptor and shows the other.
+    const LSOF_LINUX_ONE_DESCRIPTOR_REFUSED: &str = "\
+COMMAND  PID USER   FD      TYPE DEVICE SIZE/OFF NODE NAME
+bash    4242 me    cwd       DIR    8,1     4096    2 /home/me
+bash    4242 me    txt   unknown                      /proc/4242/exe (readlink: Permission denied)
+";
+
+    #[test]
+    fn a_refusal_of_every_descriptor_names_the_refusal_and_the_remedy() {
+        let Err(reason) = parse_open_files(1, LSOF_LINUX_EVERY_DESCRIPTOR_REFUSED) else {
+            panic!("the kernel refused each descriptor, so there is no open file to show");
+        };
+        assert!(
+            reason.contains("refused"),
+            "the reason says that the kernel refused lsof: {reason}"
+        );
+        assert!(
+            reason.contains("sudo"),
+            "the reason names the remedy: {reason}"
+        );
+    }
+
+    #[test]
+    fn a_refused_descriptor_beside_a_readable_one_is_marked_refused() {
+        let Ok(files) = parse_open_files(4242, LSOF_LINUX_ONE_DESCRIPTOR_REFUSED) else {
+            panic!("one descriptor is readable, so there is an open file to show");
+        };
+        assert_eq!(files.len(), 2, "each descriptor gets one row");
+        assert_eq!(files[0].fd, "cwd");
+        assert_eq!(files[0].name, "/home/me");
+        assert_eq!(files[1].fd, "txt", "the refused row keeps its descriptor");
+        assert_eq!(
+            files[1].file_type, "refused",
+            "the refused row says that the kernel refused it"
+        );
+        assert!(
+            files[1].name.contains("sudo"),
+            "the refused row names the remedy: {}",
+            files[1].name
+        );
     }
 
     #[test]

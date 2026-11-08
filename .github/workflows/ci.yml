@@ -1,0 +1,83 @@
+# Continuous integration for the Rust workspace.
+#
+# Each job runs scripts/rust-checks.sh. The pre-commit hook runs the same
+# script, thus CI and the hook run the same list of checks. Add a new check to
+# that script, not to this file.
+#
+# The jobs run on Linux and on macOS. Some crates hold code that compiles only
+# on macOS (`#[cfg(target_os = "macos")]`). A Linux job does not compile, lint,
+# or test that code. GitHub does not charge for standard runners in a public
+# repository.
+#
+# Each third-party action is pinned to a full commit SHA, with its release tag
+# in a comment. A tag can move, but a commit SHA cannot.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # A new push to a pull request stops the run of the old push. Each other run
+  # (a push to main, a manual start) has a group of its own. GitHub keeps only
+  # one pending run in a group and cancels it when a newer run queues, also
+  # with cancel-in-progress false.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Debug information is most of the size of the target directory, and the
+  # disk of a Linux runner is small. CI reads no debug symbols.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+
+jobs:
+  rust-checks:
+    name: Rust checks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      # A failure on one platform must not hide the result of the other.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the system packages (Linux)
+        if: runner.os == 'Linux'
+        # alsa-sys (audio) and openssl-sys link against these libraries. The
+        # tests of crap run its shell function in zsh.
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends libasound2-dev libssl-dev pkg-config zsh
+
+      - name: Install the pinned Rust toolchain
+        # With no argument, rustup installs the toolchain and the components
+        # that rust-toolchain.toml names.
+        run: |
+          rustup --version
+          rustup toolchain install
+          rustc --version
+
+      - name: Install cargo-machete
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: cargo-machete@0.9.2
+
+      - name: Restore the Cargo cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          # Only main saves a cache. A pull request reads the cache of main,
+          # thus the caches of pull requests do not fill the 10 GB limit.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Run the Rust checks
+        run: ./scripts/rust-checks.sh

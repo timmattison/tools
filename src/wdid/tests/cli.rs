@@ -62,8 +62,7 @@ const fn row(days_ago: i64, command: &'static str) -> Row {
 /// Writes an executable script into `dir`.
 fn write_script(dir: &Path, name: &str, body: &str) {
     let path = dir.join(name);
-    std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    gitscratch::testing::executable::write_executable(&path, format!("#!/bin/sh\n{body}")).unwrap();
 }
 
 /// The body of a stub `atuin` that prints `rows` as NUL-separated records.

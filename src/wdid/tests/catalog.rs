@@ -577,8 +577,7 @@ impl StubCargo {
             env!("CARGO")
         );
         let path = dir.path().join("cargo");
-        std::fs::write(&path, script).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        gitscratch::testing::executable::write_executable(&path, script).unwrap();
         Self { dir }
     }
 

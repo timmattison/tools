@@ -14,11 +14,17 @@
 //! registry node hold" — names a structure, not a piece of text, so this module
 //! asks the IO Registry itself through IOKit. Nothing is text-matched.
 
+#[cfg(target_os = "macos")]
 use core_foundation::base::{CFType, TCFType};
+#[cfg(target_os = "macos")]
 use core_foundation::data::CFData;
+#[cfg(target_os = "macos")]
 use core_foundation::string::CFString;
+#[cfg(target_os = "macos")]
 use core_foundation_sys::base::kCFAllocatorDefault;
+#[cfg(target_os = "macos")]
 use io_kit_sys::keys::kIOServicePlane;
+#[cfg(target_os = "macos")]
 use io_kit_sys::{
     kIOMasterPortDefault, kIORegistryIterateRecursively, IOObjectRelease,
     IORegistryEntrySearchCFProperty, IORegistryGetRootEntry,
@@ -65,6 +71,12 @@ pub enum DvfsError {
         /// The property whose table could not be decoded.
         key: &'static str,
     },
+
+    /// The platform has no IO Registry, thus it has no DVFS table.
+    ///
+    /// Only macOS has an IO Registry. Linux and the other platforms reach this.
+    #[error("this platform has no IO Registry; this tool needs an Apple Silicon Mac")]
+    NoIoRegistry,
 }
 
 /// The frequency steps of the two CPU clusters of an Apple Silicon SoC.
@@ -148,6 +160,7 @@ pub fn decode_voltage_states(raw: &[u8]) -> Vec<Mhz> {
 
 /// Read one IO Registry property as raw bytes, searching the whole service
 /// plane from the root.
+#[cfg(target_os = "macos")]
 fn read_property(key: &'static str) -> Result<Vec<u8>, DvfsError> {
     let name = CFString::new(key);
 
@@ -187,4 +200,14 @@ fn read_property(key: &'static str) -> Result<Vec<u8>, DvfsError> {
         .downcast::<CFData>()
         .ok_or(DvfsError::PropertyNotData { key })?;
     Ok(data.bytes().to_vec())
+}
+
+/// Report that this platform has no IO Registry to read a property from.
+///
+/// The IO Registry and the IOKit crates exist only on macOS. This function
+/// lets [`DvfsTable::read`] compile on each platform and give an error that
+/// names the cause.
+#[cfg(not(target_os = "macos"))]
+fn read_property(_key: &'static str) -> Result<Vec<u8>, DvfsError> {
+    Err(DvfsError::NoIoRegistry)
 }

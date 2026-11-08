@@ -478,11 +478,8 @@ impl Default for TestRepo {
 /// Returns the path written.
 #[cfg(unix)]
 pub fn write_swt_check(root: &Path, body: &str) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-
     let path = root.join(SWT_CHECK);
-    fs::write(&path, body).expect("write .swt-check");
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod .swt-check");
+    gitscratch::testing::executable::write_executable(&path, body).expect("write .swt-check");
     path
 }
 

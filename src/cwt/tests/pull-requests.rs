@@ -9,7 +9,6 @@
 mod support;
 
 use std::ffi::{OsStr, OsString};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -130,9 +129,8 @@ impl GhStub {
         assert!(!text.contains('\''), "the stub path must not hold a quote");
         let script = STUB_SCRIPT.replace("@DIR@", &text);
         let file = path.join("gh");
-        std::fs::write(&file, script).expect("failed to write the stub");
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755))
-            .expect("failed to make the stub executable");
+        gitscratch::testing::executable::write_executable(&file, script)
+            .expect("failed to write the stub");
         Self { dir }
     }
 

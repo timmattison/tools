@@ -10,8 +10,6 @@
 //! of the person who started it, and it reaches no network.
 #![cfg(unix)]
 
-use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Output};
 
 /// A response that holds two resources gr8 can read and one that it cannot.
@@ -91,10 +89,11 @@ fn run_gr8_against(response: &str) -> Output {
     // The stub uses `printf`, which every POSIX shell holds as a builtin. The
     // run gets the directory of the stub as its whole `PATH`, so a stub that
     // calls an external program finds nothing to call.
-    fs::write(&stub, format!("#!/bin/sh\nprintf '%s\\n' '{response}'\n"))
-        .expect("the test must be able to write the stub gh");
-    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755))
-        .expect("the stub gh must be executable");
+    gitscratch::testing::executable::write_executable(
+        &stub,
+        format!("#!/bin/sh\nprintf '%s\\n' '{response}'\n"),
+    )
+    .expect("the test must be able to write the stub gh");
 
     Command::new(env!("CARGO_BIN_EXE_gr8"))
         .env_clear()

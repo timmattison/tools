@@ -1771,7 +1771,6 @@ fn parse_response(text: &str) -> Option<Response> {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
 
     use tempfile::TempDir;
 
@@ -1784,8 +1783,8 @@ mod tests {
     /// Writes an executable `#!/bin/sh` script into `dir` and returns its path.
     fn write_stub(dir: &TempDir, name: &str, body: &str) -> std::path::PathBuf {
         let path = dir.path().join(name);
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        gitscratch::testing::executable::write_executable(&path, format!("#!/bin/sh\n{body}\n"))
+            .unwrap();
         path
     }
 

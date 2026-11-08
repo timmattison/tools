@@ -1,7 +1,6 @@
 //! Tests of the shell definitions: the kind of the shell, the marker, the
 //! script, the parse of the output, the read of a real shell, and the resolver.
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -348,8 +347,8 @@ fn functions_after_the_end_marker_are_ignored() {
 fn stub(body: &str) -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("stub-shell");
-    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    gitscratch::testing::executable::write_executable(&path, format!("#!/bin/sh\n{body}\n"))
+        .unwrap();
     (dir, path)
 }
 

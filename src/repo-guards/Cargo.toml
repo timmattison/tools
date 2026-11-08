@@ -22,7 +22,9 @@ walkdir.workspace = true
 # pre-commit hook, and a run from inside a git hook inherits an environment
 # aimed at the repository being committed to. Which variables those are is
 # knowledge that lives in gitscratch rather than being copied here to drift.
-gitscratch.workspace = true
+# The hook tests also write the check script into each fixture with
+# `gitscratch::testing::executable::write_executable`.
+gitscratch = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 
 [lints]
