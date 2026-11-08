@@ -52,13 +52,23 @@ const SHED_BY_COMMAND: &[&str] = &[
     "GIT_SOMETHING_GIT_INVENTS_LATER",
 ];
 
-/// Returns `true` when this process is the child and the test body must run.
+/// Printed by a child that ran its body to the end, and required by the parent.
 ///
-/// In the parent, this function starts the test binary again with the hostile
-/// variables, asserts that the child passed, and returns `false`.
-fn in_hostile_child(test_name: &str) -> bool {
+/// libtest exits zero when `--exact` matches no test. Each test types its own
+/// name as a string, and nothing ties that string to the function. Only a child
+/// that reached the end of its body prints this line.
+const BODY_RAN: &str = "CHILDENV_CONSTRUCTORS_BODY_RAN";
+
+/// Run `body` in a child process that holds the hostile variables.
+///
+/// In the child, this function runs `body` and prints [`BODY_RAN`]. In the
+/// parent, it starts the test binary again with the hostile variables and
+/// asserts that the child passed and printed that line.
+fn in_hostile_child(test_name: &str, body: impl FnOnce()) {
     if std::env::var_os(MARKER).is_some() {
-        return true;
+        body();
+        println!("{BODY_RAN}");
+        return;
     }
 
     let exe = std::env::current_exe().expect("the path of the test binary");
@@ -70,14 +80,17 @@ fn in_hostile_child(test_name: &str) -> bool {
         child.env(name, value);
     }
     let output = child.output().expect("start the test binary again");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert!(
         output.status.success(),
-        "the child test {test_name} failed:\n{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
+        "the child test {test_name} failed:\n{stdout}\n{stderr}",
     );
-    false
+    assert!(
+        stdout.contains(BODY_RAN),
+        "the child test {test_name} ran no body, because `--exact` matched no test:\n{stdout}\n{stderr}",
+    );
 }
 
 /// Run `command` and read the `NAME=value` lines that it printed.
@@ -93,87 +106,82 @@ fn printed_environment(mut command: Command) -> BTreeMap<String, String> {
 
 #[test]
 fn command_sheds_hook_names_and_keeps_user_intent() {
-    if !in_hostile_child("command_sheds_hook_names_and_keeps_user_intent") {
-        return;
-    }
+    in_hostile_child("command_sheds_hook_names_and_keeps_user_intent", || {
+        let seen = printed_environment(command(ENV_PROGRAM));
 
-    let seen = printed_environment(command(ENV_PROGRAM));
-
-    for name in SHED_BY_COMMAND {
-        assert!(!seen.contains_key(*name), "{name} reached the grandchild");
-    }
-    for name in seen.keys().filter(|name| name.starts_with("GIT_")) {
-        assert!(
-            USER_INTENT_GIT_ENVIRONMENT.contains(&name.as_str()),
-            "{name} is not a user intent name and reached the grandchild"
+        for name in SHED_BY_COMMAND {
+            assert!(!seen.contains_key(*name), "{name} reached the grandchild");
+        }
+        for name in seen.keys().filter(|name| name.starts_with("GIT_")) {
+            assert!(
+                USER_INTENT_GIT_ENVIRONMENT.contains(&name.as_str()),
+                "{name} is not a user intent name and reached the grandchild"
+            );
+        }
+        assert_eq!(
+            seen.get("GIT_SSH_COMMAND").map(String::as_str),
+            Some("ssh -i /nonexistent/key")
         );
-    }
-    assert_eq!(
-        seen.get("GIT_SSH_COMMAND").map(String::as_str),
-        Some("ssh -i /nonexistent/key")
-    );
-    assert_eq!(
-        seen.get("GIT_TERMINAL_PROMPT").map(String::as_str),
-        Some("0")
-    );
-    assert_eq!(
-        seen.get("GITHUB_TOKEN").map(String::as_str),
-        Some("token-value")
-    );
+        assert_eq!(
+            seen.get("GIT_TERMINAL_PROMPT").map(String::as_str),
+            Some("0")
+        );
+        assert_eq!(
+            seen.get("GITHUB_TOKEN").map(String::as_str),
+            Some("token-value")
+        );
+    });
 }
 
 #[test]
 fn fixture_command_sheds_every_git_name_and_keeps_the_rest() {
-    if !in_hostile_child("fixture_command_sheds_every_git_name_and_keeps_the_rest") {
-        return;
-    }
+    in_hostile_child(
+        "fixture_command_sheds_every_git_name_and_keeps_the_rest",
+        || {
+            let seen = printed_environment(fixture_command(ENV_PROGRAM));
 
-    let seen = printed_environment(fixture_command(ENV_PROGRAM));
-
-    let leaked: Vec<&String> = seen
-        .keys()
-        .filter(|name| name.starts_with("GIT_"))
-        .collect();
-    assert!(
-        leaked.is_empty(),
-        "GIT_ names reached the grandchild: {leaked:?}"
-    );
-    assert_eq!(
-        seen.get("GITHUB_TOKEN").map(String::as_str),
-        Some("token-value")
+            let leaked: Vec<&String> = seen
+                .keys()
+                .filter(|name| name.starts_with("GIT_"))
+                .collect();
+            assert!(
+                leaked.is_empty(),
+                "GIT_ names reached the grandchild: {leaked:?}"
+            );
+            assert_eq!(
+                seen.get("GITHUB_TOKEN").map(String::as_str),
+                Some("token-value")
+            );
+        },
     );
 }
 
 #[test]
 fn inherited_git_variables_lists_what_each_rule_sheds() {
-    if !in_hostile_child("inherited_git_variables_lists_what_each_rule_sheds") {
-        return;
-    }
+    in_hostile_child("inherited_git_variables_lists_what_each_rule_sheds", || {
+        let keep = inherited_git_variables(InheritedGitEnvironment::KeepUserIntent);
+        let everything = inherited_git_variables(InheritedGitEnvironment::ShedEverything);
+        let has = |list: &[OsString], name: &str| list.iter().any(|item| item == name);
 
-    let keep = inherited_git_variables(InheritedGitEnvironment::KeepUserIntent);
-    let everything = inherited_git_variables(InheritedGitEnvironment::ShedEverything);
-    let has = |list: &[OsString], name: &str| list.iter().any(|item| item == name);
-
-    assert!(has(&keep, "GIT_DIR"));
-    assert!(has(&keep, "GIT_SOMETHING_GIT_INVENTS_LATER"));
-    assert!(!has(&keep, "GIT_SSH_COMMAND"));
-    assert!(!has(&keep, "GIT_TERMINAL_PROMPT"));
-    assert!(has(&everything, "GIT_DIR"));
-    assert!(has(&everything, "GIT_SSH_COMMAND"));
-    assert!(has(&everything, "GIT_TERMINAL_PROMPT"));
-    assert!(!has(&keep, "GITHUB_TOKEN"));
-    assert!(!has(&everything, "GITHUB_TOKEN"));
+        assert!(has(&keep, "GIT_DIR"));
+        assert!(has(&keep, "GIT_SOMETHING_GIT_INVENTS_LATER"));
+        assert!(!has(&keep, "GIT_SSH_COMMAND"));
+        assert!(!has(&keep, "GIT_TERMINAL_PROMPT"));
+        assert!(has(&everything, "GIT_DIR"));
+        assert!(has(&everything, "GIT_SSH_COMMAND"));
+        assert!(has(&everything, "GIT_TERMINAL_PROMPT"));
+        assert!(!has(&keep, "GITHUB_TOKEN"));
+        assert!(!has(&everything, "GITHUB_TOKEN"));
+    });
 }
 
 #[test]
 fn a_value_pinned_after_the_constructor_wins() {
-    if !in_hostile_child("a_value_pinned_after_the_constructor_wins") {
-        return;
-    }
+    in_hostile_child("a_value_pinned_after_the_constructor_wins", || {
+        let mut pinned = fixture_command(ENV_PROGRAM);
+        pinned.env("GIT_DIR", "pinned");
+        let seen = printed_environment(pinned);
 
-    let mut pinned = fixture_command(ENV_PROGRAM);
-    pinned.env("GIT_DIR", "pinned");
-    let seen = printed_environment(pinned);
-
-    assert_eq!(seen.get("GIT_DIR").map(String::as_str), Some("pinned"));
+        assert_eq!(seen.get("GIT_DIR").map(String::as_str), Some("pinned"));
+    });
 }
