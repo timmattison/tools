@@ -15,7 +15,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::history::History;
-use crate::tui::app::App;
+use crate::tui::app::{App, Selection};
 
 /// What holds the parts of the banner apart.
 const SEPARATOR: &str = " · ";
@@ -25,7 +25,16 @@ const WAITING_BANNER: &str =
     "WAITING · faulte waits for the first frame. top can take 30 s on a loaded Mac.";
 
 /// The first word of the banner of the live view.
-const LIVE: &str = "LIVE ·";
+const LIVE: &str = "LIVE";
+
+/// The first word of the banner of a past view.
+const PAST: &str = "PAST";
+
+/// The words that say that the view does not follow the newest frame.
+const NOT_LIVE: &str = "NOT LIVE";
+
+/// What the banner of a past view says about the way back.
+const END_RETURNS: &str = "End returns to the live view";
 
 /// What the banner of the live view says before the reason of a failed read.
 const LAST_READ_FAILED: &str = " · the last read failed: ";
@@ -138,12 +147,18 @@ where
         }
         return text;
     };
-    let mut text = format!(
-        "{LIVE} frame of {} ({} ago){SEPARATOR}{}",
+    let frame_text = format!(
+        "frame of {} ({} ago){SEPARATOR}{}",
         clock(reading.at(), context.tz),
         age(reading.at(), context.now),
         history_text(history),
     );
+    if let Selection::Past(_) = app.selection() {
+        return format!(
+            "{PAST}{SEPARATOR}{NOT_LIVE}{SEPARATOR}{frame_text}{SEPARATOR}{END_RETURNS}"
+        );
+    }
+    let mut text = format!("{LIVE}{SEPARATOR}{frame_text}");
     if let Some(gap) = history.newest().and_then(|newest| history.gap(newest)) {
         text.push_str(LAST_READ_FAILED);
         text.push_str(&gap.reason);
