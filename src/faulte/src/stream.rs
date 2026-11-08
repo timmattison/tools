@@ -171,8 +171,9 @@ fn elapsed_between(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::machine::MachineError;
     use crate::pid::Pid;
-    use crate::top::FaultCount;
+    use crate::top::{FaultCount, TopParseError};
     use std::time::Duration;
 
     /// The header row that `top` prints for `-stats pid,faults`.
@@ -285,5 +286,139 @@ mod tests {
         let header = ParsedEvent::Header { finished: None };
         assert_eq!(first, [header.clone(), header]);
         assert_eq!(second, []);
+    }
+
+    /// Gives one sample with the header row `header`.
+    fn sample_with_header(time: &str, header: &str, rows: &str) -> String {
+        sample(time, rows).replace(HEADER_ROW, header)
+    }
+
+    /// Gives the reason of a `Refused` event for `error`: the text of a
+    /// `MachineError::TopOutput`.
+    fn refused(error: TopParseError) -> ParsedEvent {
+        ParsedEvent::Refused {
+            reason: MachineError::from(error).to_string(),
+        }
+    }
+
+    /// The event for the header of a sample that ended with no usable sample.
+    fn header_only() -> ParsedEvent {
+        ParsedEvent::Header { finished: None }
+    }
+
+    /// The event for the header that ends the sample `rows`, with `elapsed`
+    /// seconds from the clock line before it.
+    fn header_after(rows: Vec<FaultCount>, elapsed: u64) -> ParsedEvent {
+        ParsedEvent::Header {
+            finished: Some(TopSample {
+                rows,
+                elapsed: Some(Duration::from_secs(elapsed)),
+            }),
+        }
+    }
+
+    /// A row that is not a PID and a count gives one `Refused` with its line
+    /// number, and the next good sample still comes out. A second bad row in the
+    /// same sample gives no second `Refused`. The sample before the bad one has
+    /// 6 lines, so the bad sample starts at line 7, its first row is line 12, and the bad row
+    /// is line 13.
+    #[test]
+    fn a_bad_row_refuses_its_sample_once_and_the_next_sample_comes_out() {
+        let text = sample("12:00:00", "10     9000000   \n")
+            + &sample("12:00:03", "10     3         \nnot a row\nalso not\n")
+            + &sample("12:00:06", "10     5         \n")
+            + &sample("12:00:09", "10     7         \n");
+
+        let events = events_of(&text);
+
+        assert_eq!(
+            events,
+            [
+                header_only(),
+                header_only(),
+                refused(TopParseError::MalformedRow {
+                    number: 13,
+                    line: "not a row".to_owned()
+                }),
+                header_only(),
+                header_after(vec![row(10, 5)], 3),
+            ]
+        );
+    }
+
+    /// A `PID` line of other columns gives one `Refused` with its line number.
+    /// The rows under it are not read, and the next good sample comes out.
+    #[test]
+    fn a_bad_header_row_refuses_its_sample_and_the_next_sample_comes_out() {
+        let command = "PID    COMMAND   ";
+        let text = sample("12:00:00", "10     9000000   \n")
+            + &sample_with_header("12:00:03", command, "10     launchd   \n")
+            + &sample("12:00:06", "10     5         \n")
+            + &sample("12:00:09", "10     7         \n");
+
+        let events = events_of(&text);
+
+        assert_eq!(
+            events,
+            [
+                header_only(),
+                header_only(),
+                refused(TopParseError::UnexpectedHeader {
+                    number: 11,
+                    line: command.to_owned()
+                }),
+                header_only(),
+                header_after(vec![row(10, 5)], 3),
+            ]
+        );
+    }
+
+    /// A sample with no rows gives a `Refused` when the next header ends it,
+    /// then the `Header` event of that next sample.
+    #[test]
+    fn a_sample_with_no_rows_is_refused_when_the_next_header_ends_it() {
+        let text = sample("12:00:00", "10     9000000   \n")
+            + &sample("12:00:03", "\n  \n")
+            + &sample("12:00:06", "10     5         \n")
+            + &sample("12:00:09", "10     7         \n");
+
+        let events = events_of(&text);
+
+        assert_eq!(
+            events,
+            [
+                header_only(),
+                header_only(),
+                refused(TopParseError::NoRows),
+                header_only(),
+                header_after(vec![row(10, 5)], 3),
+            ]
+        );
+    }
+
+    /// Text before the first `Processes:` line gives one `Refused` with the
+    /// first such line, however many lines follow. Blank lines are not text.
+    /// The first sample after the text still starts the stream.
+    #[test]
+    fn text_before_the_first_sample_is_refused_once() {
+        let text = String::from("\n日本語 not top\nsecond line\n   \n")
+            + &sample("12:00:00", "10     9000000   \n")
+            + &sample("12:00:03", "10     3         \n")
+            + &sample("12:00:06", "10     5         \n");
+
+        let events = events_of(&text);
+
+        assert_eq!(
+            events,
+            [
+                ParsedEvent::Refused {
+                    reason: "the output of /usr/bin/top is not a sample of faults: 日本語 not top"
+                        .to_owned()
+                },
+                header_only(),
+                header_only(),
+                header_after(vec![row(10, 3)], 3),
+            ]
+        );
     }
 }
