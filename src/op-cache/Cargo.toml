@@ -23,5 +23,9 @@ chrono.workspace = true
 which.workspace = true
 tempfile = "3"
 
+[dev-dependencies]
+childenv.workspace = true
+gitscratch = { workspace = true, features = ["testing"] }
+
 [lints]
 workspace = true

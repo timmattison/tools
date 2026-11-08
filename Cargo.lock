@@ -5993,8 +5993,10 @@ name = "op-cache"
 version = "0.1.0"
 dependencies = [
  "buildinfo",
+ "childenv",
  "chrono",
  "clap",
+ "gitscratch",
  "serde",
  "serde_json",
  "tempfile",
