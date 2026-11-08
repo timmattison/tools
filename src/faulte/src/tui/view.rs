@@ -218,6 +218,39 @@ fn column_widths(cells: &[Cells]) -> [usize; COLUMN_COUNT] {
     widths
 }
 
+/// The place of the command column in [`render::COLUMNS`].
+const COMMAND_COLUMN: usize = 6;
+
+/// The columns whose width never shrinks: the numbers and the state.
+const FIXED_COLUMNS: [usize; 7] = [0, 1, 2, 3, 4, 5, STATE_COLUMN];
+
+/// The part of the free width that the session column can take, as a divisor.
+const SESSION_SHARE: usize = 5;
+
+/// The part of the free width that the directory column can take, as a
+/// divisor.
+const DIRECTORY_SHARE: usize = 4;
+
+/// Gives the widths that fit in `total` columns, from the widths that the
+/// content wants.
+///
+/// The fixed columns keep their width. Let `free` be what remains when the
+/// fixed columns and the gaps between the columns are taken away. The session
+/// takes at most a fifth of it, the directory at most a quarter, and the
+/// command takes what is left, so the command is the column that gives way.
+fn fit_widths(wanted: [usize; COLUMN_COUNT], total: usize) -> [usize; COLUMN_COUNT] {
+    let visible = wanted.iter().filter(|width| **width > 0).count();
+    let gaps = visible.saturating_sub(1) * display_width(COLUMN_GAP);
+    let fixed: usize = FIXED_COLUMNS.iter().map(|place| wanted[*place]).sum();
+    let free = total.saturating_sub(fixed + gaps);
+    let mut widths = wanted;
+    widths[SESSION_COLUMN] = wanted[SESSION_COLUMN].min(free / SESSION_SHARE);
+    widths[DIRECTORY_COLUMN] = wanted[DIRECTORY_COLUMN].min(free / DIRECTORY_SHARE);
+    let left = free - widths[SESSION_COLUMN] - widths[DIRECTORY_COLUMN];
+    widths[COMMAND_COLUMN] = wanted[COMMAND_COLUMN].min(left);
+    widths
+}
+
 /// Pads `text` with spaces to `width` columns of the screen, on the left when
 /// `right` is true and on the right when it is false.
 fn pad(text: &str, width: usize, right: bool) -> String {
@@ -236,7 +269,9 @@ fn table_line<'a>(cells: impl IntoIterator<Item = &'a str>, widths: &[usize]) ->
         .zip(widths)
         .zip(RIGHT_ALIGNED)
         .filter(|((_, width), _)| **width > 0)
-        .map(|((cell, width), right)| pad(cell, *width, right))
+        .map(|((cell, width), right)| {
+            pad(&textfit::truncate_to_budget(cell, *width), *width, right)
+        })
         .collect::<Vec<_>>()
         .join(COLUMN_GAP)
 }
@@ -253,7 +288,7 @@ fn paint_table(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
         return;
     };
     let cells = table_cells(reading, app.history().accounts());
-    let widths = column_widths(&cells);
+    let widths = fit_widths(column_widths(&cells), usize::from(area.width));
     let mut lines = vec![Line::raw(table_line(render::COLUMNS, &widths))];
     lines.extend(
         cells
