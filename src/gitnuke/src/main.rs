@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::process::{exit, Command};
+use std::process::exit;
 
 use buildinfo::version_string;
 use clap::Parser;
@@ -381,7 +381,7 @@ fn unquote_c_style(value: &str) -> Option<String> {
 
 /// Lists the worktrees of the repository containing `repo_root`.
 fn get_worktrees(repo_root: &Path) -> Result<Vec<Worktree>, String> {
-    let output = Command::new("git")
+    let output = childenv::command("git")
         .args(["worktree", "list", "--porcelain"])
         .current_dir(repo_root)
         .output()
@@ -539,7 +539,7 @@ fn parse_gitlink_paths(stdout: &str) -> Vec<String> {
 /// give the authoritative answer either way.
 fn find_submodules(worktree: &WorktreePath) -> SubmoduleReport {
     let mut paths = Vec::new();
-    if let Ok(output) = Command::new("git")
+    if let Ok(output) = childenv::command("git")
         .args(["ls-files", "--stage", "-z"])
         .current_dir(worktree.as_path())
         .output()
@@ -570,7 +570,7 @@ fn find_submodules(worktree: &WorktreePath) -> SubmoduleReport {
 /// same way [`find_submodules`] reports nothing — the real removal is the
 /// authority, and it will say so in its own words.
 fn has_uncommitted_changes(worktree: &WorktreePath) -> bool {
-    Command::new("git")
+    childenv::command("git")
         .args(["status", "--porcelain", "--ignore-submodules=none"])
         .current_dir(worktree.as_path())
         .output()
@@ -585,7 +585,7 @@ fn has_uncommitted_changes(worktree: &WorktreePath) -> bool {
 /// are already safe on its remote but not yet back on the local mainline.
 fn branch_is_merged(repo_root: &Path, branch: &BranchName) -> bool {
     let upstream = format!("{branch}@{{upstream}}");
-    let has_upstream = Command::new("git")
+    let has_upstream = childenv::command("git")
         .args(["rev-parse", "--verify", "--quiet", &upstream])
         .current_dir(repo_root)
         .output()
@@ -596,7 +596,7 @@ fn branch_is_merged(repo_root: &Path, branch: &BranchName) -> bool {
     } else {
         "HEAD"
     };
-    Command::new("git")
+    childenv::command("git")
         .args(["merge-base", "--is-ancestor", branch.as_str(), reference])
         .current_dir(repo_root)
         .output()
@@ -605,7 +605,7 @@ fn branch_is_merged(repo_root: &Path, branch: &BranchName) -> bool {
 
 /// The worktree's private git dir (`.../.git/worktrees/<name>` for a linked one).
 fn worktree_git_dir(worktree: &WorktreePath) -> Option<PathBuf> {
-    let output = Command::new("git")
+    let output = childenv::command("git")
         .args(["rev-parse", "--absolute-git-dir"])
         .current_dir(worktree.as_path())
         .output()
@@ -722,7 +722,7 @@ fn nuke(repo_root: &Path, worktree: &Worktree, options: NukeOptions) -> Result<(
         args.push("--force");
     }
 
-    let output = Command::new("git")
+    let output = childenv::command("git")
         .args(args)
         .arg(worktree.path.as_path())
         .current_dir(repo_root)
@@ -835,7 +835,7 @@ fn report_plan(worktree: &Worktree, submodules: &SubmoduleReport, options: NukeO
 /// `safe` picks `git branch -d` (refuses an unmerged branch) over `-D`.
 fn delete_branch(repo_root: &Path, branch: &BranchName, safe: bool) -> Result<(), NukeError> {
     let delete_flag = if safe { "-d" } else { "-D" };
-    let output = Command::new("git")
+    let output = childenv::command("git")
         .args(["branch", delete_flag, branch.as_str()])
         .current_dir(repo_root)
         .output()
