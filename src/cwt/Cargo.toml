@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 buildinfo.workspace = true
+childenv.workspace = true
 clap.workspace = true
 colored.workspace = true
 # For `shed_inherited_git_environment_keeping_user_intent`: cwt asks git for the

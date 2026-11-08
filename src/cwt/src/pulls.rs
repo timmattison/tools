@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fmt;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 use runlimit::{run_with_limit, RunFailure};
@@ -319,8 +319,7 @@ fn lookup_with(gh: &OsStr, repo_dir: &Path, limit: Duration, extra_host: Option<
         return Lookup::default();
     };
 
-    let mut command = Command::new(gh);
-    gitscratch::shed_inherited_git_environment_keeping_user_intent(&mut command);
+    let mut command = childenv::command(gh);
     // `gh` paints its JSON with escape codes when `CLICOLOR_FORCE` or
     // `GH_FORCE_TTY` is set (seen on gh 2.102.0), and then the parse fails.
     // `NO_COLOR=1` gives plain JSON in every combination tested. All `GH_*`
@@ -418,8 +417,7 @@ fn one_line(text: &str) -> String {
 /// `remote.origin.url`, because `get-url` applies the `url.<base>.insteadOf`
 /// rewrites and so gives the URL that git really uses.
 fn origin_url(repo_dir: &Path) -> Option<String> {
-    let mut command = Command::new("git");
-    gitscratch::shed_inherited_git_environment_keeping_user_intent(&mut command);
+    let mut command = childenv::command("git");
     let output = command
         .args(["remote", "get-url", "origin"])
         .current_dir(repo_dir)
@@ -436,6 +434,7 @@ fn origin_url(repo_dir: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
     use std::time::Instant;
 
     use tempfile::TempDir;

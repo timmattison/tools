@@ -2,7 +2,6 @@
 //! and nothing about how `cwt` presents or selects one.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// Number of characters of a commit hash to show (git uses 7 by default).
 const SHORT_COMMIT_HASH_LENGTH: usize = 7;
@@ -121,7 +120,7 @@ pub struct RepoWorktrees {
 
 /// Gets all worktrees for the repository at the given root.
 pub fn list_worktrees(repo_root: &Path) -> Result<RepoWorktrees, String> {
-    let output = Command::new("git")
+    let output = childenv::command("git")
         .args(["worktree", "list", "--porcelain"])
         .current_dir(repo_root)
         .output()
