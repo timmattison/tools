@@ -207,27 +207,37 @@ struct HookRun {
     output: String,
 }
 
-/// The prefix of the variables that `cargo test` gives the test process about
-/// the package under test. `cargo machete` reads `CARGO_PKG_NAME`. When it is
-/// set, machete does not see that cargo started it, takes the word `machete` as
-/// a path, and fails with "No such file or directory". Git never gives a hook
-/// these variables, so the test removes them.
-const CARGO_PACKAGE_ENV_PREFIX: &str = "CARGO_PKG_";
+/// The directory, inside the fixture, that holds the stub `cargo-machete`.
+const MACHETE_STUB_DIR: &str = "stub-bin";
+
+/// The file name that cargo looks for when it runs `cargo machete`.
+const MACHETE_BINARY_NAME: &str = "cargo-machete";
+
+/// The text of the stub `cargo-machete`. It does nothing and exits zero.
+const MACHETE_STUB_SCRIPT: &str = "#!/bin/sh\nexit 0\n";
 
 /// Run the real hook once with `dir` as CWD, shedding the inherited `GIT_`
 /// family so the hook operates on the fixture repo rather than this test's
-/// repo. It also removes each inherited `CARGO_PKG_` variable, and it sets
-/// `CARGO_TARGET_DIR` to `dir/target`, so the cargo in the fixture never waits
-/// for the build-directory lock of the outer `cargo test` run. Gives back the
-/// exit status and the printed output of that one run.
+/// repo. It sets `CARGO_TARGET_DIR` to `dir/target`, so the cargo in the fixture
+/// never waits for the build-directory lock of the outer `cargo test` run.
+///
+/// It puts a stub `cargo-machete` that exits 0 first on PATH. The check script
+/// installs the real tool into the real `~/.cargo/bin` when the tool is not on
+/// PATH. A test must not write global state or need the network. The stub is
+/// the only `cargo-machete` that a hook run starts. Gives back the exit status
+/// and the printed output of that one run.
 fn run_hook(dir: &Path) -> HookRun {
     let mut command = Command::new("bash");
     shed_inherited_git_environment(&mut command);
-    for (name, _) in std::env::vars_os() {
-        if name.to_string_lossy().starts_with(CARGO_PACKAGE_ENV_PREFIX) {
-            command.env_remove(name);
-        }
-    }
+    let stub_dir = dir.join(MACHETE_STUB_DIR);
+    fs::create_dir_all(&stub_dir).expect("failed to create the stub directory");
+    write_executable(stub_dir.join(MACHETE_BINARY_NAME), MACHETE_STUB_SCRIPT)
+        .expect("failed to write the stub cargo-machete");
+    let path = std::env::join_paths(std::iter::once(stub_dir).chain(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    )))
+    .expect("failed to join the stub directory onto PATH");
+    command.env("PATH", path);
     command.env("CARGO_TARGET_DIR", dir.join("target"));
 
     let completed = command
