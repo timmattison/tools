@@ -180,9 +180,9 @@ enum Command {
         max: Option<usize>,
     },
 
-    /// Say if memory churn slows this Mac now. The exit code is 0 for no
-    /// problem and 1 for a problem. It reads kernel counters and runs no
-    /// command.
+    /// Say why the system time of this Mac is high now. The exit code is 0
+    /// for no problem and 1 for a problem. It runs no `top` and no `ps`, thus
+    /// it works on a Mac that is too busy for them.
     Check {
         /// Print one line for each interval, until you stop the run.
         #[arg(long)]

@@ -1,18 +1,27 @@
-//! `faulte check`: one fast answer to the question "does memory churn slow
-//! this Mac now?"
+//! `faulte check`: one fast answer to the question "why is the system time of
+//! this Mac high now?"
 //!
 //! The ranking of `faulte` runs `top` and `ps`, and one `ps` took up to 13
-//! seconds on this Mac at its slowest. The check runs no command. It reads the
-//! CPU counters and the compressor counters of the kernel, thus it answers
-//! when the Mac is at its slowest.
+//! seconds on this Mac at its slowest. The check starts no `top` and no `ps`.
+//! It reads the CPU counters and the compressor counters of the kernel, and it
+//! starts one short process to learn the newest process number. Thus it
+//! answers when the Mac is at its slowest.
 //!
-//! The metric is the rate of compressions and decompressions. On 2026-11-08,
-//! this Mac gave 12 samples of 5 seconds each. System time followed the rate of
-//! compressions (correlation 0.88) and of decompressions (0.73). It did not
-//! follow the load average (0.32), and it moved opposite to the rate of new
-//! processes (-0.80). The two compressor rates were almost equal, thus the same
-//! pages left memory and came back. Both rates must be high, because one rate
-//! alone is a one-time movement of pages and not churn.
+//! This Mac showed two states on 2026-11-08, both at 0% idle:
+//!
+//! - With 32 GB in the compressor, system time was 52% to 66% over 12 samples
+//!   of 5 seconds. It followed the rate of compressions (correlation 0.88) and
+//!   of decompressions (0.73), and it did not follow the load average (0.32).
+//!   The two compressor rates were almost equal, thus the same pages left
+//!   memory and came back. Both rates must be high, because one rate alone is
+//!   a one-time movement of pages and not churn.
+//! - With 16 GB in the compressor and 14,009 to 51,323 compressions each
+//!   second, system time was still 42% to 56%, with 257 to 490 new processes
+//!   each second and 7 test runs.
+//!
+//! The compressor thus explains only part of the system time. The check
+//! reports both rates. No measurement proves that new processes cause the
+//! rest, because that needs a kernel profile, and a profile needs root.
 //!
 //! The rules are pure functions over plain values. [`CheckSource`] is the one
 //! boundary to the kernel, thus a test gives each counter as a plain value.
@@ -48,6 +57,9 @@ pub const CHURN_LIMIT_PER_SECOND: f64 = 50_000.0;
 /// measurement can change it.
 pub const PROCESS_LIMIT_PER_SECOND: f64 = 150.0;
 
+/// The largest process number of a Mac.
+pub const PID_SPACE: u64 = 99_999;
+
 /// The name of [`Verdict::ProcessChurn`].
 const PROCESS_NAME: &str = "PROCESS CHURN";
 
@@ -70,14 +82,14 @@ const REPORT_PREFIX: &str = "faulte check: ";
 const NAME_WIDTH: usize = OTHER_NAME.len();
 
 /// What a person reads after [`Verdict::Healthy`].
-const HEALTHY_ADVICE: &str = "The system time and the compressor are below their limits.";
+const HEALTHY_ADVICE: &str = "The system time is below its limit.";
 
 /// What a person reads after [`Verdict::MemoryChurn`].
 const CHURN_ADVICE: &str = "The kernel moves pages in and out of compressed memory. Run `faulte` to rank the processes by page faults, and `faulte kill` to stop the old idle Claude Code sessions.";
 
 /// What a person reads after [`Verdict::OtherSystemTime`].
 const OTHER_ADVICE: &str =
-    "The compressor is not the cause of this system time. `faulte check` does not measure the other causes.";
+    "The compressor and new processes are below their limits. `faulte check` does not measure the other causes of system time.";
 
 /// The counters that one read of the kernel gives.
 ///
@@ -125,6 +137,8 @@ impl Reading {
     /// The kernel counts ticks in 32 bits, thus a tick counter can wrap, and
     /// the difference wraps with it. A compressor counter has 64 bits, thus a
     /// lower value means that the Mac started again, and it gives no rate.
+    /// Process numbers start again after [`PID_SPACE`]. An interval long
+    /// enough for two such starts counts too few processes.
     /// An interval of no time gives zeros, not a division by zero.
     #[must_use]
     pub fn between(before: CheckCounters, after: CheckCounters, elapsed: Duration) -> Self {
@@ -140,6 +154,11 @@ impl Reading {
                 0.0
             }
         };
+        let started_again = if after.newest_pid < before.newest_pid {
+            PID_SPACE
+        } else {
+            0
+        };
         let seconds = elapsed.as_secs_f64();
         let rate = |first: u64, last: u64| {
             if seconds > 0.0 {
@@ -154,7 +173,10 @@ impl Reading {
             idle_percent: percent(idle),
             compressions_per_second: rate(before.compressions, after.compressions),
             decompressions_per_second: rate(before.decompressions, after.decompressions),
-            new_processes_per_second: 0.0,
+            new_processes_per_second: rate(
+                u64::from(before.newest_pid),
+                u64::from(after.newest_pid) + started_again,
+            ),
         }
     }
 }
@@ -216,6 +238,8 @@ pub fn judge(reading: &Reading) -> Verdict {
         && reading.decompressions_per_second >= CHURN_LIMIT_PER_SECOND
     {
         Verdict::MemoryChurn
+    } else if reading.new_processes_per_second >= PROCESS_LIMIT_PER_SECOND {
+        Verdict::ProcessChurn
     } else {
         Verdict::OtherSystemTime
     }
@@ -315,6 +339,11 @@ pub fn report(check: &Check) -> Vec<String> {
             render::rate(reading.decompressions_per_second),
             render::rate(CHURN_LIMIT_PER_SECOND),
         ),
+        format!(
+            "processes: {} new processes/s (limit {}/s)",
+            render::rate(reading.new_processes_per_second),
+            render::rate(PROCESS_LIMIT_PER_SECOND),
+        ),
         check.verdict.advice().to_owned(),
     ]
 }
@@ -324,13 +353,14 @@ pub fn report(check: &Check) -> Vec<String> {
 pub fn watch_line(check: &Check, clock: &str) -> String {
     let reading = &check.reading;
     format!(
-        "{clock}  {:<NAME_WIDTH$}  system {:>3.0}%  user {:>3.0}%  idle {:>3.0}%  compress {}/s  decompress {}/s",
+        "{clock}  {:<NAME_WIDTH$}  system {:>3.0}%  user {:>3.0}%  idle {:>3.0}%  compress {}/s  decompress {}/s  new {}/s",
         check.verdict.name(),
         reading.system_percent,
         reading.user_percent,
         reading.idle_percent,
         render::rate(reading.compressions_per_second),
         render::rate(reading.decompressions_per_second),
+        render::rate(reading.new_processes_per_second),
     )
 }
 

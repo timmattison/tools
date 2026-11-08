@@ -4989,17 +4989,18 @@ On 2026-09-17 and 2026-09-18, this Mac spent 78% of its time in the kernel. 34 M
 
 ### Is this the problem now?
 
-`faulte check` gives one verdict in 5 seconds. It reads the CPU counters and the compressor counters of the kernel and runs no command, thus it works when one `ps` takes 13 seconds.
+`faulte check` gives one verdict in 5 seconds. It reads the CPU counters and the compressor counters of the kernel, and it starts one short process to learn the newest process number. It runs no `top` and no `ps`, thus it works when one `ps` takes 13 seconds.
 
 | Verdict | Meaning | Exit code |
 | --- | --- | --- |
 | `OK` | System time is below 30% of all CPU time. | 0 |
 | `MEMORY CHURN` | System time is at least 30%, and the compressor compresses and decompresses at least 50,000 pages each second. | 1 |
-| `OTHER SYSTEM TIME` | System time is at least 30%, and the compressor is not the cause. | 1 |
+| `PROCESS CHURN` | System time is at least 30%, the compressor is below its limit, and at least 150 processes start each second. | 1 |
+| `OTHER SYSTEM TIME` | System time is at least 30%, and both other rates are below their limits. | 1 |
 
 An error gives the exit code 2. `faulte check --watch` prints one line for each interval until you stop it.
 
-On 2026-11-08, over 12 samples of 5 seconds, system time followed the rate of compressions (correlation 0.88). It did not follow the load average (0.32), and it moved opposite to the rate of new processes (-0.80). The limits come from the bad samples of that day and the mean over 10.9 days. No sample of a quiet period set them.
+On 2026-11-08, at 0% idle, this Mac showed two states. With 32 GB in the compressor, system time was 52% to 66%, and it followed the rate of compressions (correlation 0.88, over 12 samples of 5 seconds). It did not follow the load average (0.32). With 16 GB in the compressor and at most 51,323 compressions each second, system time was still 42% to 56%, with 257 to 490 new processes each second. The limits come from the bad samples of that day. No sample of a quiet period set them.
 
 ### Basic Usage
 

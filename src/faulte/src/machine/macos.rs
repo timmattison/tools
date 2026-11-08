@@ -61,6 +61,9 @@ const VM_STATISTICS: &str = "host_statistics64(HOST_VM_INFO64)";
 /// The call that gives the CPU ticks of all cores.
 const CPU_STATISTICS: &str = "host_statistics(HOST_CPU_LOAD_INFO)";
 
+/// The command that `faulte check` starts to learn the newest process number.
+const NEWEST_PID_PROGRAM: &str = "/usr/bin/true";
+
 /// The size of a page of memory that `faulte` takes when `sysconf` gives none.
 ///
 /// It is the smallest page that any Mac uses. A Mac of Apple Silicon uses four
@@ -382,6 +385,28 @@ fn read_cpu_load() -> Result<libc::host_cpu_load_info, MachineError> {
     Ok(unsafe { load.assume_init() })
 }
 
+/// Starts one process that does nothing, and gives its number.
+///
+/// macOS gives each new process the next number, and it has no call that gives
+/// the newest number. One short process in each sample costs nothing beside
+/// the hundreds of processes that this rate measures.
+fn newest_pid() -> Result<u32, MachineError> {
+    let mut child = Command::new(NEWEST_PID_PROGRAM).spawn().map_err(|error| {
+        MachineError::CommandDidNotStart {
+            program: NEWEST_PID_PROGRAM.to_owned(),
+            reason: error.to_string(),
+        }
+    })?;
+    let pid = child.id();
+    child
+        .wait()
+        .map_err(|error| MachineError::CommandDidNotStart {
+            program: NEWEST_PID_PROGRAM.to_owned(),
+            reason: error.to_string(),
+        })?;
+    Ok(pid)
+}
+
 impl CheckSource for Mac {
     fn counters(&self) -> Result<CheckCounters, MachineError> {
         let statistics = read_vm_statistics()?;
@@ -395,7 +420,7 @@ impl CheckSource for Mac {
             idle_ticks,
             compressions: statistics.compressions,
             decompressions: statistics.decompressions,
-            newest_pid: 0,
+            newest_pid: newest_pid()?,
         })
     }
 
