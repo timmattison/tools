@@ -225,7 +225,12 @@ fn get_file_users_linux(target_path: &Path, proc_root: &Path) -> Result<Vec<Proc
     let mut processes = Vec::new();
 
     for process in all_processes_with_root(proc_root)? {
-        let process = process?;
+        // procfs cannot open an entry when its process stopped after the
+        // listing, or when the entry is not a process directory. Skip such an
+        // entry and go on.
+        let Ok(process) = process else {
+            continue;
+        };
         // The kernel gives each process a positive id.
         let Ok(pid) = u32::try_from(process.pid) else {
             continue;
