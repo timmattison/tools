@@ -256,6 +256,17 @@ impl App {
         self.detail_open
     }
 
+    /// Gives how many lines the detail text is scrolled.
+    #[must_use]
+    pub fn detail_scroll(&self) -> u16 {
+        0
+    }
+
+    /// Sets how many table rows fit on one screen.
+    pub fn set_page_rows(&mut self, rows: usize) {
+        let _ = rows;
+    }
+
     /// Gives the key of the selected row.
     #[must_use]
     pub fn row_key(&self) -> Option<ProcessKey> {
@@ -562,5 +573,40 @@ mod tests {
         assert_eq!(app.selection(), Selection::Past(ids[3]));
         app.on_key(press(KeyCode::Esc));
         assert_eq!(app.selection(), Selection::Live);
+    }
+
+    /// Builds one live frame with ten rows, from the most faults down.
+    fn ten_rows() -> App {
+        let rows = (0..10)
+            .map(|step| row(100 + step, 50 - u64::from(step)))
+            .collect();
+        app_with(vec![frame(0, rows)]).0
+    }
+
+    /// `PageUp` and `PageDown` move the selected row by one screen. With the
+    /// detail view open they scroll its text by one screen instead.
+    #[test]
+    fn page_keys_move_a_screen_or_scroll_the_detail() {
+        let mut app = ten_rows();
+        app.set_page_rows(4);
+
+        app.on_key(press(KeyCode::Down));
+        app.on_key(press(KeyCode::PageDown));
+        assert_eq!(app.selected_row(), Some(4));
+        app.on_key(press(KeyCode::PageDown));
+        app.on_key(press(KeyCode::PageDown));
+        assert_eq!(app.selected_row(), Some(9));
+        app.on_key(press(KeyCode::PageUp));
+        assert_eq!(app.selected_row(), Some(5));
+
+        app.on_key(press(KeyCode::Enter));
+        app.on_key(press(KeyCode::PageDown));
+        app.on_key(press(KeyCode::PageDown));
+        assert_eq!((app.detail_scroll(), app.selected_row()), (8, Some(5)));
+        app.on_key(press(KeyCode::PageUp));
+        assert_eq!(app.detail_scroll(), 4);
+        app.on_key(press(KeyCode::PageUp));
+        app.on_key(press(KeyCode::PageUp));
+        assert_eq!(app.detail_scroll(), 0);
     }
 }
