@@ -4,9 +4,14 @@
 //! does. It holds no terminal and no clock, so a test drives it with plain
 //! data and reads the result.
 
+use std::time::Duration;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
 use crate::history::{EntryId, Gap, History, ProcessKey, Reading, SpanWidth, Update};
+
+/// How far `[` and `]` jump.
+const JUMP: Duration = Duration::from_secs(60);
 
 /// Which time the view shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +79,12 @@ impl App {
                 if let Selection::Past(id) = self.selection {
                     self.go_past(self.history.next(id));
                 }
+            }
+            KeyCode::Char('[') => {
+                let target = self
+                    .selected_entry()
+                    .and_then(|base| self.history.back_by(base, JUMP));
+                self.go_past(target);
             }
             _ => {}
         }
