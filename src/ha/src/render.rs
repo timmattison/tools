@@ -6942,6 +6942,36 @@ mod tests {
     }
 
     #[test]
+    fn wide_glyphs_count_as_one_character_of_the_floor_and_two_columns_of_the_layout() {
+        let runner_text = "日本語テスト…";
+        let (buffer, row, y) = lone_job_row(
+            on("日本語テスト株式", passed_job("日本語のジョブ🎉🎊 (2)")),
+            129,
+        );
+        assert!(
+            row.starts_with("✅ └ …ブ🎉🎊 (2) 日本語テスト… "),
+            "row {row:?}"
+        );
+        assert_eq!(
+            last_digit_column(&row, &LONE_JOB.to_string()),
+            Some(run_id_column(129))
+        );
+        let (before, _) = row.split_once(runner_text).expect("the floor shows");
+        let from = display_width(before);
+        let mut column = from;
+        for glyph in runner_text.chars() {
+            let x = u16::try_from(column).expect("a small column");
+            assert_eq!(buffer[(x, y)].fg, Color::Cyan, "glyph {glyph:?}");
+            column += unicode_width::UnicodeWidthChar::width(glyph).unwrap_or(0);
+        }
+        assert_eq!(column, from + display_width(runner_text));
+        for x in column..129 {
+            let x = u16::try_from(x).expect("a small column");
+            assert_ne!(buffer[(x, y)].fg, Color::Cyan, "column {x}");
+        }
+    }
+
+    #[test]
     fn a_job_with_no_runner_and_a_long_name_keeps_the_cut_at_the_end() {
         let (buffer, row, y) = lone_job_row(passed_job(&"n".repeat(40)), 129);
         assert_eq!(
