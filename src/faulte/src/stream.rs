@@ -221,4 +221,38 @@ mod tests {
             ]
         );
     }
+
+    /// Gives the three samples of the tests above.
+    fn three_samples() -> String {
+        sample("12:00:00", "10     9000000   \n")
+            + &sample("12:00:03", "10     3         \n20     4000      \n")
+            + &sample("12:00:06", "10     5         \n")
+    }
+
+    /// A `Processes:` line that arrives in two reads is one line, and so is the
+    /// row after it. The same input split at each position gives the same
+    /// events as the input in one read, and so does one byte for each read.
+    #[test]
+    fn a_line_in_two_reads_is_one_line() {
+        let text = three_samples();
+        let bytes = text.as_bytes();
+        let whole = events_of(&text);
+        assert_eq!(whole.len(), 3, "the reference run holds three headers");
+
+        for split in 0..=bytes.len() {
+            let (head, tail) = bytes.split_at(split);
+            let mut parser = StreamParser::new();
+            let mut events = parser.feed(head);
+            events.extend(parser.feed(tail));
+
+            assert_eq!(events, whole, "the input split at byte {split}");
+        }
+
+        let mut parser = StreamParser::new();
+        let one_by_one: Vec<ParsedEvent> = bytes
+            .chunks(1)
+            .flat_map(|chunk| parser.feed(chunk))
+            .collect();
+        assert_eq!(one_by_one, whole, "one byte in each read");
+    }
 }
