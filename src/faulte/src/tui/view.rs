@@ -233,7 +233,7 @@ fn column_widths(cells: &[Cells]) -> [usize; COLUMN_COUNT] {
 const COMMAND_COLUMN: usize = 6;
 
 /// What stands before the command of `faulte` and of its children, so that a
-/// reader does not take the reader of the faults for the cause of them.
+/// reader sees that the tool itself made those faults.
 const OWN_PREFIX: &str = "[faulte] ";
 
 /// The columns whose width never shrinks: the numbers and the state.
