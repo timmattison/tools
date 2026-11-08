@@ -274,6 +274,20 @@ fn help_gives_each_flag_and_its_default() {
     }
 }
 
+/// `--interval` is one global flag, thus its help is true for each command.
+/// The check samples no page faults, and its help says what the check does.
+#[test]
+fn check_help_says_what_the_interval_does_for_the_check() {
+    let help = run(&["check", "--help"]);
+    assert!(help.status.success(), "faulte check --help exits 0");
+
+    let help = one_line(&help.stdout);
+    assert!(
+        help.contains("reads the kernel counters"),
+        "faulte check --help: {help}"
+    );
+}
+
 /// The tests of the real signals of this Mac.
 ///
 /// These are the one place where `faulte` signals a process for real, and each
