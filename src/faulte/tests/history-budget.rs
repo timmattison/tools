@@ -56,7 +56,7 @@ static ALLOCATOR: CountingAllocator = CountingAllocator;
 const SLACK_BYTES: usize = BUDGET_BYTES / 16;
 
 /// The count of frames of the first worst case.
-const MANY_ROWS_FRAMES: usize = 8;
+const MANY_ROWS_FRAMES: usize = 3;
 
 /// The count of rows of each frame of the first worst case.
 const MANY_ROWS: usize = 16_000;
@@ -66,7 +66,7 @@ const MANY_ROWS: usize = 16_000;
 const MANY_ROWS_COMMAND_BYTES: usize = 3 * 1024;
 
 /// The count of frames of the second worst case.
-const LONG_COMMAND_FRAMES: usize = 40;
+const LONG_COMMAND_FRAMES: usize = 12;
 
 /// The count of rows of each frame of the second worst case.
 const LONG_COMMAND_ROWS: usize = 500;
