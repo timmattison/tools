@@ -201,6 +201,22 @@ pub struct Timeline {
     pub marker: Option<usize>,
 }
 
+/// What the history holds, in counts and times.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Extent {
+    /// The count of frames.
+    pub frames: usize,
+    /// The count of gaps.
+    pub gaps: usize,
+    /// The time of the oldest entry.
+    pub oldest_at: Option<SystemTime>,
+    /// The time of the newest entry.
+    pub newest_at: Option<SystemTime>,
+    /// The sum of the windows of the frames: the time that the history
+    /// measured.
+    pub measured: Duration,
+}
+
 /// The history of one process, as a row of cells.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Series {
@@ -903,6 +919,30 @@ impl History {
             .len()
             .checked_sub(1)
             .map(|last| self.id_at(last))
+    }
+
+    /// Gives the name of the newest frame.
+    #[must_use]
+    pub fn newest_frame(&self) -> Option<EntryId> {
+        None
+    }
+
+    /// Gives the gap `id`, or `None` for a frame or an unknown name.
+    #[must_use]
+    pub fn gap(&self, _id: EntryId) -> Option<&Gap> {
+        None
+    }
+
+    /// Gives the time of the entry `id`.
+    #[must_use]
+    pub fn at(&self, _id: EntryId) -> Option<SystemTime> {
+        None
+    }
+
+    /// Gives the counts and the times of the whole history.
+    #[must_use]
+    pub fn extent(&self) -> Extent {
+        Extent::default()
     }
 
     /// Gives the name of the entry at `position`.
@@ -2028,5 +2068,52 @@ mod tests {
             ]
         );
         assert_eq!(width, SpanWidth::OneFrame);
+    }
+
+    /// The facts of the history: the newest frame, the gap of a name, the time
+    /// of an entry, and the counts.
+    #[test]
+    fn the_history_states_its_facts() {
+        let (mut history, ids) = five_entries();
+        let trailing = history.add(gap(10, 2));
+
+        assert_eq!(history.newest_frame(), Some(ids[4]));
+        assert_eq!(history.newest(), Some(trailing));
+        assert_eq!(
+            history.gap(ids[2]).map(|gap| gap.reason.as_str()),
+            Some("top stopped")
+        );
+        assert!(history.gap(ids[0]).is_none());
+        assert_eq!(history.at(ids[3]), Some(time(6)));
+        assert_eq!(history.at(EntryId(99)), None);
+        assert_eq!(
+            history.extent(),
+            Extent {
+                frames: 4,
+                gaps: 2,
+                oldest_at: Some(time(0)),
+                newest_at: Some(time(10)),
+                measured: Duration::from_secs(4 * WINDOW_SECS),
+            }
+        );
+        assert_eq!(History::new().newest_frame(), None);
+        assert_eq!(History::new().extent(), Extent::default());
+    }
+
+    /// The reason of a gap is cut at the stored size, on a character boundary.
+    #[test]
+    fn the_reason_of_a_gap_is_cut_on_a_boundary() {
+        let mut history = History::new();
+        let id = history.add(Update::Gap(Gap {
+            at: time(0),
+            lost: Duration::from_secs(2),
+            reason: "é".repeat(STORED_TEXT_BYTES),
+        }));
+
+        let reason = &history.gap(id).expect("a gap").reason;
+
+        assert!(reason.len() <= STORED_TEXT_BYTES);
+        assert!(reason.ends_with(render::MORE));
+        assert!(reason.starts_with('é'));
     }
 }
