@@ -137,6 +137,31 @@ fn tui_with_no_terminal_exits_one_and_starts_no_top() {
     );
 }
 
+/// `--limit` belongs to the ranking, and `faulte tui` refuses it in both
+/// spellings. A view that took the flag and ignored it would mislead the
+/// person who wrote it.
+#[test]
+fn tui_refuses_the_limit_of_the_ranking_in_both_spellings() {
+    for args in [["tui", "--limit", "3"], ["--limit", "3", "tui"]] {
+        let output = run(&args);
+        let stderr = one_line(&output.stderr);
+
+        assert_eq!(
+            output.status.code(),
+            Some(USAGE_ERROR),
+            "faulte {args:?} is a usage error, it wrote {stderr:?}"
+        );
+        assert!(
+            stderr.contains("--limit"),
+            "the message names the flag that faulte tui does not take, for {args:?}: {stderr:?}"
+        );
+        assert!(
+            !stderr.contains("unrecognized subcommand"),
+            "the message is about the flag and not about the command, for {args:?}: {stderr:?}"
+        );
+    }
+}
+
 /// `--help` lists the `tui` command.
 #[test]
 fn help_lists_the_tui_command() {
