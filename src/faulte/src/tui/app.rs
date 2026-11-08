@@ -360,4 +360,15 @@ mod tests {
         assert_eq!(app.selection(), Selection::Past(ids[0]));
         assert_eq!(app.reading().map(Reading::end), Some(ids[0]));
     }
+
+    /// `End` returns to the live view from any past entry.
+    #[test]
+    fn end_returns_to_the_live_view() {
+        let (mut app, ids) = five();
+
+        app.on_key(press(KeyCode::Home));
+        app.on_key(press(KeyCode::End));
+        assert_eq!(app.selection(), Selection::Live);
+        assert_eq!(app.reading().map(Reading::end), Some(ids[4]));
+    }
 }
