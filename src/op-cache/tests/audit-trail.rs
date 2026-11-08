@@ -52,6 +52,19 @@ impl Fixture {
         self.path("state").join("op-cache").join("audit.jsonl")
     }
 
+    /// Writes `session` as the Claude session file of the test process:
+    /// `<fixture>/claude/sessions/<pid>.json`. The test process starts
+    /// `op-cache`, so it is an ancestor that a session file can name.
+    fn write_session_file(&self, session: &serde_json::Value) {
+        let sessions = self.path("claude").join("sessions");
+        fs::create_dir_all(&sessions).expect("create sessions dir");
+        fs::write(
+            sessions.join(format!("{}.json", std::process::id())),
+            session.to_string(),
+        )
+        .expect("write session file");
+    }
+
     /// A command for the real binary with a hermetic environment.
     fn command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_op-cache"));
@@ -428,19 +441,12 @@ fn op_start_names_the_ancestors_the_claude_session_and_the_terminal() {
     let session_id = unique_token("session").replace("SENTINEL", "sess");
     let zellij_session = unique_token("zellij").replace("SENTINEL", "zs");
     let test_pid = std::process::id();
-    let sessions = fixture.path("claude").join("sessions");
-    fs::create_dir_all(&sessions).expect("create sessions dir");
-    let session = serde_json::json!({
+    fixture.write_session_file(&serde_json::json!({
         "pid": test_pid,
         "sessionId": session_id,
         "name": SESSION_NAME,
         "startedAt": now_ms(),
-    });
-    fs::write(
-        sessions.join(format!("{test_pid}.json")),
-        session.to_string(),
-    )
-    .expect("write session file");
+    }));
 
     let output = fixture
         .command()
@@ -491,20 +497,12 @@ fn now_ms() -> u64 {
 fn op_start_ignores_a_session_file_older_than_its_process() {
     let fixture = Fixture::new();
     fixture.install_fake_op("echo value");
-    let test_pid = std::process::id();
-    let sessions = fixture.path("claude").join("sessions");
-    fs::create_dir_all(&sessions).expect("create sessions dir");
-    let session = serde_json::json!({
-        "pid": test_pid,
+    fixture.write_session_file(&serde_json::json!({
+        "pid": std::process::id(),
         "sessionId": "stale-session",
         "name": SESSION_NAME,
         "startedAt": 1000,
-    });
-    fs::write(
-        sessions.join(format!("{test_pid}.json")),
-        session.to_string(),
-    )
-    .expect("write session file");
+    }));
 
     let output = fixture.read(REFERENCE);
 
@@ -631,15 +629,11 @@ mod notification {
             wait_for_records(&fixture, "1")
         ));
         let zellij_session = unique_token("zellij").replace("SENTINEL", "zs");
-        let test_pid = std::process::id();
-        let sessions = fixture.path("claude").join("sessions");
-        fs::create_dir_all(&sessions).expect("create sessions dir");
-        fs::write(
-            sessions.join(format!("{test_pid}.json")),
-            serde_json::json!({ "pid": test_pid, "sessionId": "s", "name": SESSION_NAME })
-                .to_string(),
-        )
-        .expect("write session file");
+        fixture.write_session_file(&serde_json::json!({
+            "pid": std::process::id(),
+            "sessionId": "s",
+            "name": SESSION_NAME,
+        }));
 
         let output = notifying_command(&fixture)
             .args(["read", REFERENCE])
