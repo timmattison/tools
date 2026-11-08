@@ -41,6 +41,12 @@ const STATS: &str = "pid,faults";
 /// drops no process.
 #[must_use]
 pub fn arguments(interval: Span, max_processes: u32) -> Vec<String> {
+    stream_arguments(interval, max_processes)
+}
+
+/// Gives the arguments of [`PROGRAM`] for a run that never ends.
+#[must_use]
+pub fn stream_arguments(interval: Span, max_processes: u32) -> Vec<String> {
     let seconds = Duration::from(interval).as_secs();
     vec![
         // Logging mode: print this count of samples, then stop.
@@ -716,6 +722,25 @@ mod tests {
 
     /// `top` reads the delay as a number of seconds. The text of a [`Span`]
     /// carries a unit, so the arguments give the seconds, not that text.
+    #[test]
+    fn the_stream_arguments_ask_for_endless_samples() {
+        assert_eq!(
+            stream_arguments(span("5s"), 16_000),
+            [
+                "-l",
+                "0",
+                "-s",
+                "5",
+                "-c",
+                "d",
+                "-n",
+                "16000",
+                "-stats",
+                "pid,faults"
+            ]
+        );
+    }
+
     #[test]
     fn the_delay_is_a_bare_number_of_seconds() {
         let arguments = arguments(span("10m"), 4_000);
