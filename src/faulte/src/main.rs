@@ -147,8 +147,10 @@ const POLL: Duration = Duration::from_secs(1);
 #[derive(Parser)]
 #[command(name = "faulte", version = version_string!(), about = ABOUT)]
 struct Cli {
-    /// The time to sample the page faults of each process, for example 5s, 10m,
-    /// or 2h. A bare number is a number of seconds.
+    /// The length of the sample, for example 5s, 10m, or 2h. A bare number is a
+    /// number of seconds. The ranking and `faulte kill` count the page faults
+    /// of each process over this time. `faulte check` reads the kernel counters
+    /// at the start and at the end of this time.
     #[arg(long, global = true, value_name = DURATION_VALUE, default_value = DEFAULT_INTERVAL)]
     interval: Span,
 
