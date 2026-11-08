@@ -379,6 +379,21 @@ const GAP: &str = "gap";
 /// The plural of the word for one gap of a span.
 const GAPS: &str = "gaps";
 
+/// Gives a count of frames and a count of gaps, for example `58 frames, 1 gap`.
+///
+/// The header of a span and the banner of the view both state these counts,
+/// so one function holds the singular and the plural.
+#[must_use]
+pub fn frames_and_gaps(frames: usize, gaps: usize) -> String {
+    format!(
+        "{} {}, {} {}",
+        count_of(frames),
+        plural(frames, FRAME, FRAMES),
+        count_of(gaps),
+        plural(gaps, GAP, GAPS),
+    )
+}
+
 /// What a view states about the span of history that it shows.
 #[derive(Debug, Clone, Copy)]
 pub struct SpanTotals<'a> {
@@ -401,15 +416,12 @@ pub fn span_header(measurement: &Measurement<'_>, span: &SpanTotals<'_>) -> Vec<
     let processes = measurement.processes;
     let mut lines = vec![
         format!(
-            "{} {} with faults over {} measured of {} ({} {}, {} {}) {DASH} {} faults, {}/s",
+            "{} {} with faults over {} measured of {} ({}) {DASH} {} faults, {}/s",
             count_of(processes),
             plural(processes, PROCESS, PROCESSES),
             seconds(ranking.window),
             span.label,
-            count_of(span.frames),
-            plural(span.frames, FRAME, FRAMES),
-            count_of(span.gaps),
-            plural(span.gaps, GAP, GAPS),
+            frames_and_gaps(span.frames, span.gaps),
             count(ranking.total_faults),
             rate(ranking.faults_per_second(ranking.total_faults)),
         ),

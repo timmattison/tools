@@ -138,10 +138,9 @@ fn history_text(history: &History) -> String {
         _ => Duration::ZERO,
     };
     format!(
-        "history holds {} ({} frames, {} gaps)",
+        "history holds {} ({})",
         occ::format_uptime(span.as_secs()),
-        extent.frames,
-        extent.gaps,
+        render::frames_and_gaps(extent.frames, extent.gaps),
     )
 }
 
@@ -195,6 +194,26 @@ fn display_width(text: &str) -> usize {
     Span::raw(text).width()
 }
 
+/// The character that takes the place of a control character in a cell.
+const CONTROL_REPLACEMENT: char = ' ';
+
+/// Gives `cell` with each control character replaced.
+///
+/// A process states its own arguments, so a command line can hold a tab or an
+/// escape. The screen draws no such character, and the width of a column
+/// counts it. A cell that kept one would thus move every column after it.
+fn printable(cell: &str) -> String {
+    cell.chars()
+        .map(|character| {
+            if character.is_control() {
+                CONTROL_REPLACEMENT
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
 /// Gives the cells of each row of `reading`. The command of an own row starts
 /// with [`OWN_PREFIX`]. The age of a row is the time
 /// from its start to the frame that the row comes from.
@@ -202,7 +221,8 @@ fn table_cells(reading: &Reading, accounts: &Accounts) -> Vec<Cells> {
     reading
         .rows()
         .map(|view| {
-            let mut cells = render::row_cells(reading.ranking(), view.row, accounts, view.as_of);
+            let mut cells = render::row_cells(reading.ranking(), view.row, accounts, view.as_of)
+                .map(|cell| printable(&cell));
             if view.own {
                 cells[COMMAND_COLUMN].insert_str(0, OWN_PREFIX);
             }
@@ -529,6 +549,35 @@ where
 
 /// Paints one screen.
 ///
+/// Gives the style of the banner.
+///
+/// A past frame has a background that a live frame does not have, because a
+/// person must never read an old table as live. The text of the banner says
+/// the same thing, so the color is never the only sign.
+fn banner_style(app: &App) -> Style {
+    match app.selection() {
+        Selection::Live => Style::new(),
+        Selection::Past(_) if past_gap(app).is_some() => Style::new().black().on_red(),
+        Selection::Past(_) => Style::new().black().on_yellow(),
+    }
+}
+
+/// Paints the banner across the whole width of `area`.
+fn paint_banner<Tz: TimeZone>(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    context: &ViewContext<'_, Tz>,
+) where
+    Tz::Offset: Display,
+{
+    let fitted = textfit::truncate_to_budget(&banner(app, context), usize::from(area.width));
+    frame.render_widget(
+        Paragraph::new(Line::raw(fitted)).style(banner_style(app)),
+        area,
+    );
+}
+
 /// The function sets the page size of `app` from the size of the table, and
 /// changes nothing else. A screen of any size is valid: a part with no room
 /// draws nothing.
@@ -538,7 +587,7 @@ where
 {
     let header_lines = app.reading().map_or_else(Vec::new, Reading::header_lines);
     let parts = areas(frame.area(), header_lines.len());
-    paint_line(frame, parts.banner, &banner(app, context));
+    paint_banner(frame, parts.banner, app, context);
     paint_lines(frame, parts.headers, &header_lines);
     paint_timeline(frame, parts.timeline, app);
     paint_table(frame, parts.table, app, context);
@@ -1134,7 +1183,7 @@ mod tests {
             vec![
                 row(10, 50),
                 RankedRow {
-                    command: command.clone(),
+                    command,
                     ..row(11, 40)
                 },
             ],
