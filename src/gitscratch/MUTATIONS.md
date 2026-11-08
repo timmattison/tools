@@ -63,13 +63,13 @@ not have to re-derive which guard belongs to which test.
 | `uncommitted_files_counts_a_working_tree_rename_and_copy_as_the_files_they_are` (`tests/repo.rs`) | The second status byte, the working-tree column, which carries the letter as readily as the index one | `src/repo.rs`, `moved_from_elsewhere` — reduce `[record.first(), record.get(1)]` to `[record.first()]` | narrow |
 | The ` ```compile_fail ` doc-test on `Scratch` (`src/scratch.rs`) | The runner staying inside the crate — a consumer is never *handed* one, which is the half `Git::new` being crate-private does not cover | `src/scratch.rs`, `Scratch::git` — put the `pub` back | remove |
 | The ` ```compile_fail ` doc-test on `Conflicts` (`src/scratch.rs`) | A cost being measured rather than stated — a released binary has no ungated route to a `Conflicts` that claims one, `Conflicts::nothing_replayed` being a seed for a fold and clean because nothing has run yet | `src/scratch.rs`, the `Conflicts` derive — put `Default` back | **add** |
-| `fixtures_and_replays_stay_inside_their_own_temporary_directories` (`tests/isolation.rs`) | The environment sweep at `TestRepo::git_with_stdin`, the spawn that pipes a record in on stdin | `src/testing.rs`, `TestRepo::git_with_stdin` — drop the `.without_inherited_git_environment()` call | remove |
-| `fixtures_and_replays_stay_inside_their_own_temporary_directories` (`tests/isolation.rs`) | The environment sweep at `DetachedGitDirRepo::run`, which the `--git-dir` and `--work-tree` arguments on that command line do not stand in for | `src/testing.rs`, `DetachedGitDirRepo::run` — drop the `.without_inherited_git_environment()` call | remove |
+| `fixtures_and_replays_stay_inside_their_own_temporary_directories` (`tests/isolation.rs`) | The environment sweep at `TestRepo::git_with_stdin`, the spawn that pipes a record in on stdin | `src/testing.rs`, `TestRepo::git_with_stdin` — replace `childenv::fixture_command("git")` with a raw `std::process::Command::new("git")` | remove |
+| `fixtures_and_replays_stay_inside_their_own_temporary_directories` (`tests/isolation.rs`) | The environment sweep at `DetachedGitDirRepo::run`, which the `--git-dir` and `--work-tree` arguments on that command line do not stand in for | `src/testing.rs`, `DetachedGitDirRepo::run` — replace `childenv::fixture_command("git")` with a raw `std::process::Command::new("git")` | remove |
 | `a_child_half_that_ran_another_test_is_not_taken_for_the_one_that_was_named` (`src/testing.rs`) | The `CHILD_RAN` sentinel, which is a child half's proof that its own body ran | `src/testing.rs`, `run_child_half` — accept a child whose stdout holds `1 passed` instead of requiring the sentinel | narrow |
 | `uncommitted_files_refuses_a_repository_with_no_working_tree` (`tests/repo.rs`) | The failure `Repo::uncommitted_files` answers with where git has no working tree to read | `src/repo.rs`, `Repo::uncommitted_files` — take the status with `unwrap_or_default()` in place of `?` | narrow |
 | `every_identity_variable_is_settled_on_the_command_the_runner_builds` | The two `env_remove` calls that take `GIT_AUTHOR_DATE` and `GIT_COMMITTER_DATE` off every command, which is the half of the restated identity a commit cannot show | `src/git.rs`, `Git::command` — drop both calls | remove |
 | `refuses_an_empty_hooks_path_rather_than_resolving_a_hook_outside_the_repository` | The refusal of an empty `hooks_path`, which git resolves at the root of the file system rather than at nothing | `src/git.rs`, `Git::new` — drop the `assert!` | remove |
-| `sheds_every_inherited_git_variable_and_nothing_else` (`src/childenv/tests/inherited-environment.rs`) | The `GIT_` prefix, which is the whole of what the scrub covers beyond a list of names | `src/childenv/src/lib.rs`, `NoInheritedGitEnvironment for Command` — narrow the prefix test over `std::env::vars_os` back to a fifteen-name list | narrow |
+| `sheds_every_inherited_git_variable_and_nothing_else` (`src/childenv/tests/inherited-environment.rs`) | The `GIT_` prefix, which is the whole of what the scrub covers beyond a list of names | `src/childenv/src/lib.rs`, `rule_sheds` — narrow the prefix test back to a fifteen-name list | narrow |
 | `each_halt_diff_holds_the_markers_of_its_own_region` (`tests/diffs.rs`) | The capture above `git add -A` in the rebase loop, which reads a stop before the replay stages its markers | `src/scratch.rs`, `Scratch::replay_rebase_within` — move the capture block below `git.run("add", &["-A"])` | move |
 | Nothing — see the record below | `--diff-filter=U` in `DIFF_AT_HALT`, which keeps a halt diff to the files the counter reads | `src/diffs.rs`, `DIFF_AT_HALT` — drop the entry | remove |
 | `a_replay_that_does_not_halt_captures_no_halt_diff` (`tests/diffs.rs`) | The merge capture below the early return for a merge git completed, which keeps a clean merge free of halt diffs | `src/scratch.rs`, `Scratch::replay_merge_capturing` — move the capture block above `if outcome.success` | move |
@@ -1912,7 +1912,7 @@ and the six identity names. Run as above.
 
 ```text
 thread 'sheds_every_inherited_git_variable_and_nothing_else'
-panicked at src/childenv/tests/inherited-environment.rs:
+panicked at src/gitscratch/tests/inherited-environment.rs:
 `GIT_CONFIG_PARAMETERS` survived the scrub: every git this crate spawns would
 run under configuration the launching shell injected, `user.email`, `core.bare`
 and `core.hooksPath` among it
@@ -1921,7 +1921,7 @@ test result: FAILED. 0 passed; 1 failed
 ```
 
 Exactly one test in the three crates goes red, and it is in
-`src/childenv/tests/inherited-environment.rs`. Every test of `tests/isolation.rs` stays
+`tests/inherited-environment.rs`. Every test of `tests/isolation.rs` stays
 green:
 
 ```text
@@ -1938,7 +1938,7 @@ That answer is a fact about what each suite leaks rather than a surprise.
 `GIT_INDEX_FILE`, and a name list removes every one of them. The
 `GIT_AUTHOR_NAME` it also sets goes on the control command *after* the scrub, so
 no scrub of any width takes that one either. So the hook now cites
-`src/childenv/tests/inherited-environment.rs` for the prefix: that file probes
+`tests/inherited-environment.rs` for the prefix: that file probes
 `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT` and a name git has never invented,
 and it keeps a `MUST_SURVIVE` list so the rule stays a prefix rather than a
 sweep of everything. `tests/isolation.rs` keeps the separate claim it does pin —
@@ -2000,7 +2000,7 @@ tests/conflicts.rs              test result: ok. 7 passed; 0 failed
 tests/diffs.rs                  test result: ok. 6 passed; 0 failed
 tests/halts.rs                  test result: ok. 8 passed; 0 failed
 tests/hook_environment.rs       test result: ok. 1 passed; 0 failed
-src/childenv/tests/inherited-environment.rs  test result: ok. 1 passed; 0 failed
+tests/inherited-environment.rs  test result: ok. 1 passed; 0 failed
 tests/isolation.rs              test result: ok. 3 passed; 0 failed
 tests/merges.rs                 test result: ok. 7 passed; 0 failed
 tests/repo.rs                   test result: ok. 20 passed; 0 failed
@@ -2249,7 +2249,7 @@ tests/conflicts.rs              test result: ok. 7 passed; 0 failed
 tests/diffs.rs                  test result: ok. 12 passed; 0 failed
 tests/halts.rs                  test result: ok. 8 passed; 0 failed
 tests/hook_environment.rs       test result: ok. 1 passed; 0 failed
-src/childenv/tests/inherited-environment.rs  test result: ok. 1 passed; 0 failed
+tests/inherited-environment.rs  test result: ok. 1 passed; 0 failed
 tests/isolation.rs              test result: ok. 3 passed; 0 failed
 tests/merges.rs                 test result: ok. 7 passed; 0 failed
 tests/repo.rs                   test result: ok. 20 passed; 0 failed
@@ -2376,7 +2376,7 @@ code moves. Every place below is load-bearing for the whole table:
   the sweep alone, which is the one guard the restatement exists to survive.
   A date restated as a *pin* rather than a removal is the same row broken the
   other way.
-- **The `GIT_` prefix in `NoInheritedGitEnvironment`** — the rule the whole
+- **The `GIT_` prefix in `rule_sheds`** — the rule the whole
   scrub is, and the only part of it a list cannot imitate.
   `src/childenv/tests/inherited-environment.rs` is the suite that pins it, and its probes are
   a sample of the family rather than its definition; `tests/isolation.rs` leaks
