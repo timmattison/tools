@@ -4,8 +4,8 @@
 //! token of its own. This module starts `gh`, reads what it prints, and maps
 //! the answer to the types of the rest of the crate.
 //!
-//! The cancel of a run is the only request that changes something on GitHub.
-//! Every other request only reads.
+//! The cancel of a run, the re-run of a run, and the re-run of a job change
+//! something on GitHub. Every other request only reads.
 //!
 //! The requests about the merge queue use GraphQL where REST has no answer:
 //! which repositories have a queue, the entries of a queue, and the head
@@ -661,10 +661,10 @@ impl GhSource {
     /// Cancels `run` of `repo` on GitHub.
     ///
     /// The request is `POST /repos/{owner}/{repo}/actions/runs/{run_id}/cancel`.
-    /// It changes GitHub. Every other request of `ha` only reads. The request
-    /// needs the `repo` scope on an OAuth token or a classic token. A login
-    /// without write access gets `403`. GitHub answers `409` for a run that
-    /// finished.
+    /// It changes GitHub, as do the re-run of a run and the re-run of a job.
+    /// Every other request of `ha` only reads. The request needs the `repo`
+    /// scope on an OAuth token or a classic token. A login without write
+    /// access gets `403`. GitHub answers `409` for a run that finished.
     ///
     /// The request sends no `If-None-Match` header and does not touch the `ETag`
     /// cache.
@@ -4263,6 +4263,79 @@ mod tests {
                 "repos/o/r/actions/jobs/11/rerun"
             ]]
         );
+    }
+
+    /// Runs `rerun_run` and `rerun_job` against a stub that prints `answer` and
+    /// exits with `exit`. Gives the two results in that order.
+    fn rerun_with(answer: &str, exit: u8) -> (Result<(), SourceError>, Result<(), SourceError>) {
+        let stub = Stub::new(&format!("cat \"$dir/rerun.out\"; exit {exit}"));
+        stub.file("rerun.out", answer);
+        let source = stub.source();
+        (
+            source.rerun_run(&repo("o/r"), RunId(7)),
+            source.rerun_job(&repo("o/r"), JobId(11)),
+        )
+    }
+
+    #[test]
+    fn rerun_run_and_rerun_job_give_ok_for_201_created() {
+        assert_eq!(rerun_with(CREATED, 0), (Ok(()), Ok(())));
+        let empty = CREATED.strip_suffix("{}").unwrap();
+        assert_eq!(rerun_with(empty, 0), (Ok(()), Ok(())));
+    }
+
+    /// The body of GitHub for a re-run that a login without write access sent.
+    const RERUN_403_BODY: &str = r#"{"message":"Must have admin rights to Repository.","documentation_url":"https://docs.github.com/rest","status":"403"}"#;
+
+    /// The error that `RERUN_403_BODY` must give.
+    fn rerun_403_error() -> SourceError {
+        SourceError::Http {
+            status: 403,
+            message: "Must have admin rights to Repository.".to_owned(),
+        }
+    }
+
+    #[test]
+    fn rerun_run_gives_the_message_of_github_for_403() {
+        let (run, _) = rerun_with(&http_output("HTTP/2.0 403 Forbidden", RERUN_403_BODY), 1);
+        assert_eq!(run.unwrap_err(), rerun_403_error());
+    }
+
+    #[test]
+    fn rerun_job_gives_the_message_of_github_for_403() {
+        let (_, job) = rerun_with(&http_output("HTTP/2.0 403 Forbidden", RERUN_403_BODY), 1);
+        assert_eq!(job.unwrap_err(), rerun_403_error());
+    }
+
+    #[test]
+    fn rerun_run_and_rerun_job_do_not_change_the_etag_cache() {
+        let stub = Stub::new(
+            "case \"$*\" in
+  *rerun*) cat \"$dir/rerun.out\";;
+  *If-None-Match*) cat \"$dir/not-modified.out\"; echo 'gh: HTTP 304' >&2; exit 1;;
+  *) cat \"$dir/page1.out\";;
+ esac",
+        );
+        stub.file("page1.out", &ok_output(RUNS_JSON));
+        stub.file("not-modified.out", NOT_MODIFIED);
+        stub.file("rerun.out", CREATED);
+        let source = stub.source();
+        let tools = repo("timmattison/tools");
+        source.runs_of(&tools, since_query()).unwrap();
+        let keys = cache_keys(&source);
+        source.rerun_run(&tools, RunId(7)).unwrap();
+        source.rerun_job(&tools, JobId(11)).unwrap();
+        assert_eq!(cache_keys(&source), keys);
+        source.runs_of(&tools, since_query()).unwrap();
+        let requests = stub.requests();
+        assert_eq!(requests.len(), 4);
+        assert_eq!(requests[3][1], "-i");
+        assert!(requests[3]
+            .iter()
+            .any(|arg| arg.starts_with("If-None-Match: ")));
+        for rerun in &requests[1..3] {
+            assert!(!rerun.iter().any(|arg| arg.starts_with("If-None-Match: ")));
+        }
     }
 
     /// The output of `gh api -i graphql` for a `200`. The headers state the
