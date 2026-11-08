@@ -13,6 +13,10 @@
 //! prefix, so a variable git invents next year leaves without anyone editing a
 //! file.
 //!
+//! `clippy.toml` makes that entrance mandatory: it bans a raw `Command::new`, so
+//! a spawn that sheds nothing fails the build. This guard refuses the other
+//! shape that the ban does not see, a list of names written into `env_remove`.
+//!
 //! # The rule
 //!
 //! A call to `env_remove` whose argument holds a string literal starting with
@@ -91,8 +95,9 @@
 //!
 //! # Why a lint cannot say this
 //!
-//! `clippy.toml` supports `disallowed-methods`, which matches a method path and
-//! ignores its arguments. The predicate here is about the argument, so clippy
+//! The ban names a constructor, so clippy can state it. A list of names is
+//! different. `disallowed-methods` matches a method path and ignores its
+//! arguments. The predicate here is about the argument, so clippy
 //! can only ban `env_remove` outright, which fires on every legitimate removal
 //! of a variable that is not git's.
 //!

@@ -181,6 +181,10 @@ pub async fn record(
 
     let pair = pty_system.openpty(pty_size).context("Failed to open PTY")?;
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "portable-pty has no entrance in childenv, so the loop below applies its rule by name"
+    )]
     let mut cmd = CommandBuilder::new(&shell);
     for name in childenv::inherited_git_variables(childenv::InheritedGitEnvironment::KeepUserIntent)
     {

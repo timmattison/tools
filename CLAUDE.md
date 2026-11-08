@@ -285,24 +285,26 @@ full path, `shellquote::shell_quote(...)`, where the call site sits behind a
 
 ## Spawning Git
 
-Every command this workspace spawns that is git, or that runs git, **must**
-shed the inherited git environment through `gitscratch`. **Never write a list
-of variable names.**
+Every child process that this workspace starts **must** shed the inherited git
+environment through the crate `childenv`, whether or not the child is git.
+**Never write a list of variable names.** A raw `Command::new` fails the build.
 
-There are two entrances, and which one a spawn takes is decided by whether it
+`childenv` has two constructors, and a spawn takes the one that fits whether it
 has a user whose intent to honor:
 
-- **A test fixture** takes `gitscratch::shed_inherited_git_environment` (or the
-  `NoInheritedGitEnvironment` trait, for a builder chain). It sheds the whole
+- **Test code** takes `childenv::fixture_command(program)`. It sheds the whole
   `GIT_` prefix and keeps nothing. A fixture builds a throwaway repository, so
   there is no user setting for it to honor.
-- **A production spawn** takes
-  `gitscratch::shed_inherited_git_environment_keeping_user_intent`. It sheds
-  the same prefix and keeps the six names of
-  `gitscratch::USER_INTENT_GIT_ENVIRONMENT` — `GIT_CONFIG_GLOBAL`,
-  `GIT_CONFIG_SYSTEM`, `GIT_SSH`, `GIT_SSH_COMMAND`, `GIT_ASKPASS` and
-  `GIT_TERMINAL_PROMPT`. A person states each of those on purpose, and a tool
-  that runs for that person honors them.
+- **Production code** takes `childenv::command(program)`. It sheds the same
+  prefix and keeps the six names of `childenv::USER_INTENT_GIT_ENVIRONMENT` —
+  `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, `GIT_SSH`, `GIT_SSH_COMMAND`,
+  `GIT_ASKPASS` and `GIT_TERMINAL_PROMPT`. A person states each of those on
+  purpose, and a tool that runs for that person honors them.
+
+The rule covers every child for two reasons. A program that does not run git
+ignores `GIT_` variables, so the sweep costs nothing there. And `go`, `cargo`,
+`gh`, `claude`, a shell, and `tmux` all run git later, so a rule about the
+literal `"git"` does not see them.
 
 ### Why
 
@@ -336,7 +338,7 @@ families, which the prefix genuinely cannot tell apart. It is by whose intent a
 variable carries.** Git exports `GIT_DIR`, `GIT_INDEX_FILE` and
 `GIT_CONFIG_PARAMETERS` into every hook, so those carry the launching hook's
 intent and leave. A person exports `GIT_SSH_COMMAND` and `GIT_TERMINAL_PROMPT`,
-so those carry the user's intent and stay. `gitscratch` states the two sets as
+so those carry the user's intent and stay. `childenv` states the two sets as
 `USER_INTENT_GIT_ENVIRONMENT` and `HOOK_EXPORTED_GIT_ENVIRONMENT`, and a test
 holds them disjoint — `GIT_EDITOR` is out of the keep-list for exactly that
 reason, although a person does set it on purpose.
@@ -356,50 +358,75 @@ the user a stalled command instead.
 
 ### Usage
 
-Take the crate with `gitscratch.workspace = true` (a dev-dependency when only
-the tests spawn git), then sweep before the command is built. A production
-spawn:
+Take the crate with `childenv.workspace = true` (a dev-dependency when only the
+tests start a child process), then build the command from a constructor. A
+production spawn:
 
 ```rust
-use gitscratch::shed_inherited_git_environment_keeping_user_intent;
-
-let mut command = Command::new("git");
-shed_inherited_git_environment_keeping_user_intent(&mut command);
-
-let output = command.args(["ls-files"]).current_dir(repo_root).output();
+let output = childenv::command("git")
+    .args(["ls-files"])
+    .current_dir(repo_root)
+    .output();
 ```
 
 A test fixture, which keeps nothing:
 
 ```rust
-use gitscratch::shed_inherited_git_environment;
-
-let mut command = Command::new("git");
-shed_inherited_git_environment(&mut command);
+let mut command = childenv::fixture_command("git");
 ```
 
-A value the call site wants pinned is set **after** the sweep, and so wins.
-That is how `cwt` keeps its fixture identity and how several fixtures keep
+A value the call site wants pinned is set **after** the constructor, and so
+wins. That is how `cwt` keeps its fixture identity and how several fixtures keep
 `GIT_CONFIG_GLOBAL` pointed at `/dev/null`.
 
 Removing `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` costs a fixture nothing: a
 removal is not a redirect to `/dev/null`, so git falls back to the host's
 `~/.gitconfig` and `/etc/gitconfig` exactly as it does in a shell that holds
 nothing. What it costs is the answer for a user who exported one on purpose,
-which is why the production entrance keeps both — `nwt`'s `missing_hooks_path`
+which is why the production constructor keeps both — `nwt`'s `missing_hooks_path`
 reads the effective `core.hooksPath`, and the global and system steps of that
 precedence are two of the four steps it exists to predict.
 
-A third entrance, `gitscratch::shed_git_environment_from`, takes the key source
-and the rule as parameters. Tests use it, so no test has to set a real `GIT_*`
-variable: cargo runs the tests of one binary on parallel threads, and such a
-test would redirect the git children of every sibling thread.
+`childenv::shed_git_environment_from` takes the key source and the rule as
+parameters. Tests use it, so no test has to set a real `GIT_*` variable: cargo
+runs the tests of one binary on parallel threads, and such a test would redirect
+the git children of every sibling thread.
+
+Two builders are not a `std::process::Command`:
+
+- `tokio::process::Command` starts from the entrance:
+  `tokio::process::Command::from(childenv::command(program))`.
+- `portable_pty::CommandBuilder` cannot come from `childenv`, because the crate
+  depends only on `std`. Call `childenv::inherited_git_variables(rule)` and
+  apply each name with `env_remove`.
+
+### The Ban
+
+`clippy.toml` bans `std::process::Command::new`,
+`tokio::process::Command::new`, and `portable_pty::CommandBuilder::new`.
+`disallowed_methods` is `deny` in the workspace lint set, so a raw spawn fails
+the build. A hostile-environment test needs no exemption, because it sets its
+variables after the constructor.
+
+A raw spawn that is correct says so at its own site, with
+`#[expect(clippy::disallowed_methods, reason = "...")]`, so the exemption stays
+visible in the file it applies to.
+
+### The Runners
+
+The ban covers the Rust code of this workspace. It does not cover code that
+other crates own, for example the build script of a dependency. So
+`.husky/pre-commit` and `test.sh` start each cargo command through
+`without_git_environment` in `scripts/without-git-environment.sh`, which removes
+the whole prefix. The hook is started by `sh`, so that function does not use
+`compgen`, which a shell other than bash does not have.
 
 ### The Trap: A Lint Cannot Say This
 
-`clippy.toml` supports `disallowed-methods`, which matches a method path and
-ignores its arguments. The predicate here is entirely about the argument, so
-clippy can only ban `env_remove` outright, which fires on every legitimate
+The ban above names a constructor, so clippy can state it. A list of names is
+different. `disallowed-methods` matches a method path and ignores its arguments.
+The predicate here is entirely about the argument, so clippy can only ban
+`env_remove` outright, which fires on every legitimate
 removal of a variable that is not git's. The guard therefore reads the source.
 
 It reads **tokens** rather than the syntax tree, because `syn` leaves the body
@@ -425,19 +452,31 @@ exempt file is still a violation, and an entry that matches nothing is reported
 too — an allowlist nobody prunes is how a guard quietly stops covering what it
 was written for.
 
-### What the Guard Does Not Prove
+### What the Ban and the Guard Do Not Prove
 
-It proves no call site passes a `GIT_`-prefixed name to `env_remove` as a
+The guard proves no call site passes a `GIT_`-prefixed name to `env_remove` as a
 literal. A list of those names held in a constant and applied in a loop hands
 the call a binding, so the guard reports it clean — the module doc of
 `git_env_sweep` records why widening the matcher to see that shape was measured
-and refused. It does **not** prove a given spawn sheds anything at all either: a
-spawn that scrubs nothing is not written in a shape any rule can name. Proving
-either is a dataflow question, and this workspace does not have a dataflow
-engine.
+and refused.
+
+The ban proves that each spawn in the Rust code of this workspace takes a
+constructor or states an exemption at its site. It does not prove three things:
+
+- A dependency that starts a child process inside its own code is out of reach
+  of clippy. The sweep in the runners is the only layer there.
+- Clippy on macOS does not compile a `#[cfg(windows)]` site. Such a site takes
+  the entrance by hand.
+- A call site can put a `GIT_` variable back after the constructor. That is
+  correct when the site means it, and it is visible at the site.
 
 ### Guards Enforcing This
 
+- `clippy.toml` `disallowed-methods` — a raw `Command::new`,
+  `tokio::process::Command::new` or `CommandBuilder::new` fails the build
+- `src/repo-guards/tests/pre_commit_hook.rs` — no cargo command of the hook or
+  of `test.sh` sees a `GIT_` variable, under a fake `cargo` that writes its
+  environment to a file
 - `repo_guards::git_env_sweep` (`src/repo-guards/src/git_env_sweep.rs`) — no
   file cargo compiles removes a `GIT_`-prefixed variable by name. Its companion
   test asks `cargo metadata` whether the read set holds every target root cargo
