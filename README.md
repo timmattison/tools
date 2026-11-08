@@ -2373,12 +2373,23 @@ cannot hang the caller. Used by `cwt` and `ha`.
       job names the machine where it failed. A job that has no runner shows no runner name. This
       occurs while the job waits for a runner, and when the job ended before a runner took it, for
       example a skipped job.
-    - The job name has priority in its cell. The runner name gets only the columns that the job
-      name does not use. Thus the job ID and the time columns do not move when a runner takes a
-      job. A runner name that fits shows whole, also in fewer than 4 columns, for example `mbp` in
-      3 columns. A longer runner name keeps its start and ends in `…`, for example `m1-…`. This cut
-      needs 4 free columns, thus in fewer columns the longer name does not show. On a highlighted
-      job row, the runner name stays cyan.
+    - The job name and the runner name share one text cell. Thus the job ID and the time columns
+      do not move when a runner takes a job. The **runner floor** is the part of the runner name
+      that a job row must always show. A name of 6 characters or fewer is its own floor. A longer
+      name has a floor of its first 6 characters and `…`, for example `GitHub…`. The floor counts
+      characters, not columns. If the cut saves no column, for example in a name of 7 ASCII
+      characters, the whole name is the floor. The first rule that applies gives the row:
+      1. If the job name and the whole runner name fit, both show whole.
+      2. If the job name and the runner floor fit, the job name shows whole. The runner name keeps
+         its start and gets the columns that the job name leaves, and it ends in `…`.
+      3. If the cell can hold the tree glyph, one space, `…`, one space, and the runner floor, the
+         runner name shows as its floor. The job name gets the other columns. It keeps its end and
+         starts with `…`, for example `…e-remotesensing (2) m1-ts`. Thus the part that divides the
+         jobs of a matrix stays.
+      4. In a narrower cell, the text keeps its start and ends in `…`, and no runner name shows.
+
+      A job with no runner keeps the start of its text. On a highlighted job row, the runner name
+      stays cyan, also its `…`.
     - The jobs are sorted by name, with no difference between capital and small letters. Thus the
       order stays the same through each refresh and each re-run, and the jobs of one matrix stay
       together. GitHub gives the jobs in the order of their IDs, which has no meaning that you can
