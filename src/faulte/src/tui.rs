@@ -305,4 +305,34 @@ mod tests {
         );
         assert_eq!(events.calls, 2, "the loop reads no event after q");
     }
+
+    #[test]
+    fn the_loop_leaves_when_a_signal_set_the_flag() {
+        let mut harness = Harness::new();
+        let mut events = ScriptedEvents::new(vec![None, None, Some(key(KeyCode::Char('x')))]);
+        events.raise = Some((2, Arc::clone(&harness.signalled)));
+
+        let result = harness.run(&mut events, &|| time(1_000));
+
+        assert!(
+            result.is_ok(),
+            "a signal ends the run without an error: {result:?}"
+        );
+        assert_eq!(
+            events.calls, 2,
+            "the loop looks at the flag on the pass after the signal"
+        );
+    }
+
+    #[test]
+    fn a_flag_that_is_set_before_the_start_ends_the_run_at_once() {
+        let mut harness = Harness::new();
+        harness.signalled.store(true, Ordering::SeqCst);
+        let mut events = ScriptedEvents::new(vec![]);
+
+        let result = harness.run(&mut events, &|| time(0));
+
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(events.calls, 0, "the loop reads nothing");
+    }
 }
