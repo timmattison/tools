@@ -562,4 +562,59 @@ mod tests {
         assert_eq!(lines[header + 1].split_whitespace().next(), Some("10"));
         assert_eq!(lines[header + 2].split_whitespace().next(), Some("11"));
     }
+
+    /// Makes five entries, two seconds apart, with a gap at the third.
+    fn five_with_a_gap() -> crate::tui::app::App {
+        app_with(vec![
+            frame(0, vec![row(1, 5)]),
+            frame(2, vec![row(1, 5)]),
+            gap(4, 2, "top stopped"),
+            frame(6, vec![row(1, 5)]),
+            frame(8, vec![row(1, 5)]),
+        ])
+        .0
+    }
+
+    /// A gap shows as its glyph in the timeline.
+    #[test]
+    fn a_gap_shows_its_glyph_in_the_timeline() {
+        let mut app = five_with_a_gap();
+
+        let lines = screen(&paint(&mut app, 120, 24, 100));
+
+        let faults: Vec<char> = lines[line_starting(&lines, "FAULTS ")]
+            .chars()
+            .skip(7)
+            .collect();
+        assert_eq!(faults.len(), 5, "{faults:?}");
+        assert_eq!(faults[2], '╳');
+        assert!(faults.iter().filter(|glyph| **glyph == '╳').count() == 1);
+    }
+
+    /// A selected gap says how long nothing was measured and why, and the
+    /// table area gives the same reason and no rows.
+    #[test]
+    fn a_selected_gap_shows_its_reason() {
+        let mut app = five_with_a_gap();
+        app.on_key(press(KeyCode::Left));
+        app.on_key(press(KeyCode::Left));
+
+        let lines = screen(&paint(&mut app, 120, 24, 100));
+
+        assert_eq!(
+            lines[0],
+            "PAST · GAP · 22:13:24 (1m 36s ago) · faulte measured nothing for 2.0 s: top stopped"
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.contains("top stopped"))
+                .count(),
+            2
+        );
+        assert!(
+            lines.iter().all(|line| !line.starts_with("PID")),
+            "{lines:#?}"
+        );
+    }
 }
