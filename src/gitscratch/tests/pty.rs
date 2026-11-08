@@ -24,7 +24,7 @@ const COLUMNS: u16 = 97;
 
 /// A `sh -c` command that runs `script`.
 fn shell(script: &str) -> Command {
-    let mut command = Command::new("sh");
+    let mut command = childenv::fixture_command("sh");
     command.arg("-c").arg(script);
     command
 }

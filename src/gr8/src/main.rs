@@ -5,7 +5,6 @@ use comfy_table::{presets::UTF8_FULL, Cell, Color, ContentArrangement, Table};
 use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use std::fmt;
-use std::process::Command;
 
 /// The core rate limit resource name. Used in tests for consistency with other
 /// resource name constants.
@@ -144,7 +143,7 @@ struct RateLimitResponse {
 
 /// Executes the `gh api rate_limit` command and returns the JSON output
 fn fetch_rate_limit_data() -> Result<String> {
-    let output = Command::new("gh")
+    let output = childenv::command("gh")
         .args(["api", "rate_limit"])
         .output()
         .context("Failed to execute 'gh' command. Is GitHub CLI installed?")?;

@@ -796,7 +796,7 @@ fn run_with_stdin_and_start(
 /// rule.
 fn wn(gh: &FakeGh, args: &[&str], columns: &str, color: bool, start: Option<&str>) -> Command {
     let path = format!("{}:/usr/bin:/bin", gh.path().display());
-    let mut command = Command::new(env!("CARGO_BIN_EXE_wn"));
+    let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_wn"));
     command
         .env_clear()
         .env("PATH", path)
@@ -1049,7 +1049,7 @@ fn asks_about_the_whole_chain_in_one_query() {
 fn takes_the_chain_from_standard_input() {
     let gh = FakeGh::new(THREE_ISSUES);
     let path = format!("{}:/usr/bin:/bin", gh.path().display());
-    let output = Command::new("sh")
+    let output = childenv::fixture_command("sh")
         .env_clear()
         .env("PATH", path)
         .env("COLUMNS", "80")
@@ -1100,7 +1100,7 @@ fn an_empty_pipe_reaches_the_clipboard_step() {
     // standard input would report a chain error about empty text instead.
     let gh = FakeGh::new(THREE_ISSUES);
     let path = format!("{}:/usr/bin:/bin", gh.path().display());
-    let output = Command::new("sh")
+    let output = childenv::fixture_command("sh")
         .env_clear()
         .env("PATH", path)
         .env("COLUMNS", "80")
@@ -1148,7 +1148,7 @@ fn the_run_with_no_argument_reads_the_clipboard() {
     // the person at the keyboard copied.
     let gh = FakeGh::new(THREE_ISSUES);
     let path = format!("{}:/usr/bin:/bin", gh.path().display());
-    let output = Command::new(env!("CARGO_BIN_EXE_wn"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_wn"))
         .env_clear()
         .env("PATH", path)
         .env("COLUMNS", "80")
@@ -1277,7 +1277,7 @@ fn reports_a_number_github_would_not_answer_for() {
 #[test]
 fn says_so_when_the_github_cli_is_not_installed() {
     let dir = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_wn"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_wn"))
         .env_clear()
         .env("PATH", dir.path())
         .env("COLUMNS", "80")
@@ -1307,7 +1307,7 @@ fn a_machine_with_no_gh_is_not_told_to_name_a_repository() {
     // reason. Advice that leads the reader to a second failure is worse than
     // no advice.
     let dir = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_wn"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_wn"))
         .env_clear()
         .env("PATH", dir.path())
         .env("COLUMNS", "80")

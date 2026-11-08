@@ -25,7 +25,7 @@
 //!   `GIT_OBJECT_DIRECTORY` sends the objects of a fixture into another store,
 //!   and a leaked `GIT_CONFIG_PARAMETERS` injects configuration into the child.
 //!   So [`sandboxed`] sheds the whole `GIT_` prefix through
-//!   [`gitscratch::shed_inherited_git_environment`]. It holds no list of names,
+//!   [`childenv::fixture_command`]. It holds no list of names,
 //!   because a list misses every variable that git adds later. The host's
 //!   global and system gitconfig is a quieter version of the same problem: it
 //!   decides hooks paths, aliases and credential helpers for a suite that must
@@ -55,10 +55,6 @@ use std::process::{Command, Output, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tempfile::TempDir;
-
-/// The git location variables git exports into a hook's environment. A fixture
-/// that inherits any of them operates on the real repository instead of itself.
-const INHERITED_GIT_ENV: [&str; 4] = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_PREFIX"];
 
 /// Name of the repository directory inside each fixture's `TempDir`. The repo is
 /// a subdirectory so that a worktree created beside it stays inside the temp dir.
@@ -116,26 +112,6 @@ pub fn unique(label: &str) -> String {
     format!("{label}-{}-{}", std::process::id(), nanos())
 }
 
-/// Fails loudly when the ambient environment would send fixture git commands at
-/// the real repository.
-///
-/// The suite calls `swt`'s git functions in process, so those inherit this
-/// process's environment and cannot be sandboxed by the harness. The repo's
-/// pre-commit hook already scrubs these before `cargo test`; if that ever
-/// regresses, this turns "the fixtures quietly rewrote the real branch" into an
-/// immediate, self-explaining failure.
-pub fn assert_git_env_is_sandboxed() {
-    for var in INHERITED_GIT_ENV {
-        assert!(
-            std::env::var_os(var).is_none(),
-            "{var} is set, so fixture git commands would target the real repository \
-             instead of the temp one — run the suite with `env -u {}` (this is what \
-             the pre-commit hook does)",
-            INHERITED_GIT_ENV.join(" -u ")
-        );
-    }
-}
-
 /// Applies the isolation rules to a child the suite is about to spawn, whether
 /// that child is a fixture's git, the real `swt` binary, or a shell that runs
 /// git.
@@ -147,7 +123,7 @@ pub fn assert_git_env_is_sandboxed() {
 /// this order:
 ///
 /// - **Every inherited `GIT_` variable is removed**, through
-///   [`gitscratch::shed_inherited_git_environment`]. The rule is the prefix,
+///   [`childenv::fixture_command`]. The rule is the prefix,
 ///   not a list of names. Git obeys `GIT_OBJECT_DIRECTORY` and
 ///   `GIT_CONFIG_PARAMETERS` as it obeys `GIT_DIR`, and a list misses every
 ///   variable that git adds later. The child then acts on its working
@@ -160,7 +136,6 @@ pub fn assert_git_env_is_sandboxed() {
 ///   The sweep removes both names when this process holds them, and a value
 ///   set after the sweep wins.
 fn sandboxed(cmd: &mut Command) -> &mut Command {
-    gitscratch::shed_inherited_git_environment(cmd);
     cmd.stdin(Stdio::null())
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
@@ -169,7 +144,7 @@ fn sandboxed(cmd: &mut Command) -> &mut Command {
 /// A git invocation in `dir`, sandboxed from the host by [`sandboxed`] exactly
 /// as every spawn of the binary under test is.
 pub fn git_command(dir: &Path, args: &[&str]) -> Command {
-    let mut cmd = Command::new("git");
+    let mut cmd = childenv::fixture_command("git");
     sandboxed(&mut cmd).args(args).current_dir(dir);
     cmd
 }
@@ -186,7 +161,7 @@ const SHELL: &str = "/bin/sh";
 /// argument after `-c`. Every git that the script runs inherits the
 /// environment of the shell, so the one sweep covers each of them too.
 pub fn shell_command(dir: &Path, script: &str) -> Command {
-    let mut cmd = Command::new(SHELL);
+    let mut cmd = childenv::fixture_command(SHELL);
     sandboxed(&mut cmd).arg("-c").arg(script).current_dir(dir);
     cmd
 }
@@ -308,8 +283,6 @@ impl TestRepo {
     /// git and `swt` print is already resolved. Comparing those against an
     /// unresolved temp path would otherwise never match.
     pub fn new() -> Self {
-        assert_git_env_is_sandboxed();
-
         let temp = TempDir::new().expect("fixture temp dir");
         let siblings = fs::canonicalize(temp.path()).expect("canonical fixture temp dir");
         let root = siblings.join(REPO_DIR);
@@ -498,7 +471,7 @@ pub fn exiting_check(status: i32) -> String {
 /// own git gets: an empty global and system git config, no inherited `GIT_`
 /// variable, and a nulled stdin so an unexpected prompt cannot hang the suite.
 pub fn swt_command(cwd: &Path) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_swt"));
+    let mut cmd = childenv::fixture_command(env!("CARGO_BIN_EXE_swt"));
     sandboxed(&mut cmd).current_dir(cwd);
     cmd
 }

@@ -259,7 +259,7 @@ pub fn ps_arguments() -> Option<String> {
 ///
 /// The answer is `None` when the machine cannot run `ps` at all.
 fn run_ps(args: &[&str]) -> Option<String> {
-    std::process::Command::new("ps")
+    childenv::command("ps")
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

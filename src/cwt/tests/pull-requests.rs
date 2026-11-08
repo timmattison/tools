@@ -11,7 +11,7 @@ mod support;
 use std::ffi::{OsStr, OsString};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 use tempfile::TempDir;
 
@@ -211,7 +211,7 @@ fn prepend_to_path(first: &Path) -> OsString {
 /// The environment of the child is built here. The test process never calls
 /// `set_var`, because the tests of one binary run on many threads.
 fn run_cwt(dir: &Path, args: &[&str], env: &[(&str, &str)], path: &OsStr) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_cwt"));
+    let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_cwt"));
     command
         .args(args)
         .current_dir(dir)

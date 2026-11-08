@@ -10,6 +10,47 @@
 //! [`fixture_command`]. A value that a call site must pin goes on after the
 //! constructor, and so it wins.
 //!
+//! The sweep has no effect on a program that does not run git. Thus the rule
+//! needs no knowledge of what a program runs. `go`, `cargo`, `gh`, `claude`,
+//! a shell, and `tmux` all run git later, and a rule about the literal `"git"`
+//! does not see them.
+//!
+//! # The rule is the prefix
+//!
+//! The rule is the `GIT_` prefix, and never a list of names. A list removes
+//! nothing new on the day that git adds a variable, and it then gives the same
+//! clean answer as a list that works. This rule was a list of fifteen names
+//! once, and `GIT_CONFIG_PARAMETERS` went through it. Git exports that variable
+//! into each hook, and it sets any configuration key in the child. The sweep
+//! reads [`std::env::vars_os`], so it also removes the variables that git adds
+//! later. `tests/inherited-environment.rs` holds this rule.
+//!
+//! The prefix covers three families:
+//!
+//! - The location variables, for example `GIT_DIR` and `GIT_INDEX_FILE`, aim
+//!   git at another repository. Git often exports `GIT_INDEX_FILE` as a relative
+//!   path, so it silently changes with the directory of each command.
+//! - The attribution variables, for example `GIT_AUTHOR_NAME`, outrank `-c` and
+//!   `git config`. The two `DATE` variables give each commit of a run one
+//!   timestamp.
+//! - The configuration variables, for example `GIT_CONFIG_PARAMETERS` and
+//!   `GIT_CONFIG_COUNT`, set any key.
+//!
+//! # Two rules, and the split is by intent
+//!
+//! The prefix cannot tell the families of git apart, so a call site cannot ask
+//! for one family. The split that is safe is a split by whose intent a variable
+//! carries. A hook exports `GIT_DIR` and `GIT_CONFIG_PARAMETERS`, so those carry
+//! the intent of the hook, and they leave. A person exports `GIT_SSH_COMMAND`,
+//! so it carries the intent of the user, and [`command`] keeps it. A fixture has
+//! no user, so [`fixture_command`] keeps nothing.
+//!
+//! A keep-list is safe in a way that a strip-list is not. A variable that git
+//! adds next year leaves by default, and the cost is one setting that a user
+//! states again. `tests/user-intent-environment.rs` holds the two lists disjoint.
+//!
+//! # The dependencies
+//!
 //! This crate uses the standard library only. The build script of `buildinfo`
 //! takes it as a build-dependency, and every tool builds `buildinfo`, so a
 //! dependency here would reach every build in the workspace.
@@ -20,132 +61,6 @@ use std::process::Command;
 /// The prefix that makes a variable git's, and therefore one the sweep
 /// removes.
 pub const GIT_ENVIRONMENT_PREFIX: &str = "GIT_";
-
-/// Spawn a command that takes its repository, and its identity, from nothing it
-/// inherited.
-///
-/// **The rule is the `GIT_` prefix, and never a list of names.** A list strips
-/// nothing new the day git adds a variable, and from then on it returns the same
-/// clean-looking answer as a list that works. This scrub was a fifteen-name list
-/// once, and `GIT_CONFIG_PARAMETERS` walked straight through it — a variable git
-/// exports to every hook, which injects arbitrary configuration (`user.email`,
-/// `core.bare`, `core.hooksPath`) into every git this crate spawns. It is not a
-/// location variable, so no amount of adding location names would have caught
-/// it. Enumerating [`std::env::vars_os`] sweeps whatever git invents next
-/// without anyone editing this file. Pinned by `tests/inherited-environment.rs`.
-///
-/// Three families the old lists named are worth keeping in mind, because the
-/// prefix now covers all of them. The location variables — `GIT_DIR`,
-/// `GIT_WORK_TREE`, `GIT_INDEX_FILE` and their kin — aim git at a repository
-/// other than the one the runner is rooted in, and git hands several of them to
-/// its hooks, `GIT_INDEX_FILE` often *relative* so it silently re-anchors on
-/// whatever directory each command runs in. The attribution variables —
-/// `GIT_AUTHOR_NAME` and its five siblings — are read in preference to `-c`
-/// *and* to `git config`, so leaving them in place re-attributes anything this
-/// crate commits, and the two `DATE` variables are the quieter half: left in
-/// place, every commit a run makes carries one identical timestamp. The
-/// configuration variables — `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`,
-/// `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM` — hand the caller a way to set any
-/// key at all.
-///
-/// Removing `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` costs nothing here, because
-/// removing a variable is not the same as pinning it to `/dev/null`: with them
-/// gone git falls back to the host's `~/.gitconfig` and `/etc/gitconfig` exactly
-/// as it does in a normal shell. It costs a *production* tool the answer for a
-/// user who exported one on purpose, which is why production takes the other
-/// entrance - see below.
-///
-/// **One trait, and the one split beside it is not a split by family.** The
-/// prefix cannot tell git's families apart, so a call site that asked for the
-/// location half alone would be asking for the shape this crate stopped
-/// trusting. The split that is safe is a split by *whose intent* a variable
-/// carries. [`shed_inherited_git_environment_keeping_user_intent`] keeps the
-/// six names of [`USER_INTENT_GIT_ENVIRONMENT`], which a person states on
-/// purpose, and sheds the rest of the prefix. A keep-list is safe in the way a
-/// strip-list is not, because its staleness runs in the safe direction: a
-/// variable git invents next year is shed by default rather than inherited by
-/// default. This trait keeps the blanket rule, because a fixture has no user
-/// whose intent to honor.
-///
-/// Public, and an extension trait rather than a private helper, because the
-/// commands that need it are not all git: a consumer's test suite spawning its
-/// own binary inherits exactly the same environment, and a second copy of this
-/// rule living in a test file is the drift this exists to prevent.
-pub trait NoInheritedGitEnvironment {
-    /// Remove every `GIT_`-prefixed variable from the environment this command
-    /// will be spawned with.
-    ///
-    /// A no-op in normal use — nothing sets these outside a hook or a replay —
-    /// which is precisely why it has to be unconditional. The one run where it
-    /// matters is the one nobody is watching.
-    ///
-    /// A caller that wants one of these variables set — or wants it gone
-    /// whatever this process holds — does so *after* calling this, and wins.
-    /// That is how `Git::command` pins `GIT_EDITOR` and the four identity
-    /// names on top of a swept command, and takes the two identity dates off it
-    /// again: this sweep removes only what the process carries, so a restated
-    /// removal is what makes the second guard hold on its own.
-    ///
-    /// Keys are compared through [`std::ffi::OsStr::to_string_lossy`]: lossy
-    /// conversion replaces invalid bytes with U+FFFD, so it can never
-    /// manufacture a `GIT_` prefix out of bytes that did not spell one.
-    fn without_inherited_git_environment(&mut self) -> &mut Self;
-}
-
-impl NoInheritedGitEnvironment for Command {
-    fn without_inherited_git_environment(&mut self) -> &mut Self {
-        shed_git_environment_from(
-            self,
-            std::env::vars_os().map(|(key, _)| key),
-            InheritedGitEnvironment::ShedEverything,
-        );
-
-        self
-    }
-}
-
-/// Detach `command` from every part of the git environment this process
-/// inherited: the repository it names and the identity it carries, in one call.
-///
-/// The free-function spelling of [`NoInheritedGitEnvironment`], for a call site
-/// that holds a `&mut Command` rather than a builder chain.
-///
-/// Public because the danger is not this crate's alone. Anything in this
-/// repository that spawns git - a tool that adds a worktree, a test that builds
-/// a throwaway repository - is broken the same way by the same environment, and
-/// the rule for what to shed is worth keeping in one reusable place rather than
-/// copied into each of them to drift.
-///
-/// **The entrance a fixture takes.** It keeps nothing, because a fixture has no
-/// user whose intent to honor. A production spawn takes
-/// [`shed_inherited_git_environment_keeping_user_intent`] instead, which sheds
-/// the same prefix and keeps the six names of
-/// [`USER_INTENT_GIT_ENVIRONMENT`].
-///
-/// It was an offer rather than a guarantee for as long as nothing obliged a git
-/// spawn in this repository to call it. `repo_guards::git_env_sweep` now does
-/// the obliging from the other side: it reports every `env_remove` in the
-/// workspace whose argument names a `GIT_` variable, which is the shape a
-/// hand-written list arrives in. A clippy rule cannot say that, because
-/// `disallowed-methods` matches a method path and ignores its arguments.
-///
-/// What the guard proves is narrow, and worth stating. It proves no call site
-/// passes a `GIT_`-prefixed name to `env_remove` as a literal. A list of those
-/// names held in a constant and applied in a loop hands the call a binding, so
-/// the guard reports it clean; its module doc states why widening the matcher
-/// to see that shape was measured and refused. It does not prove a given spawn
-/// sheds anything at all either, because a spawn that scrubs nothing is not
-/// written in a shape any rule can name. So immunity still holds where this is
-/// called, and the guard stops the spelling it used to be quietly replaced
-/// with.
-///
-/// ```no_run
-/// let mut command = std::process::Command::new("git");
-/// childenv::shed_inherited_git_environment(&mut command);
-/// ```
-pub fn shed_inherited_git_environment(command: &mut Command) {
-    command.without_inherited_git_environment();
-}
 
 /// Which rule a sweep applies to a `GIT_`-prefixed variable it finds.
 ///
@@ -242,11 +157,9 @@ pub const HOOK_EXPORTED_GIT_ENVIRONMENT: &[&str] = &[
 /// is load-bearing.** Cargo runs the tests of one binary on parallel threads,
 /// so a test that set a real `GIT_*` variable to prove this rule would redirect
 /// the git children of every sibling thread while it did so. A synthetic key
-/// list keeps such a test parallel-safe. The two entrances that read the real
-/// environment, [`shed_inherited_git_environment`] and
-/// [`shed_inherited_git_environment_keeping_user_intent`], both delegate here,
-/// so the rule has one implementation and the test measures the one a spawn
-/// uses.
+/// list keeps such a test parallel-safe. The two constructors read the real
+/// environment and delegate here, so the rule has one implementation and the
+/// test measures the one that a spawn uses.
 ///
 /// Keys are compared through [`std::ffi::OsStr::to_string_lossy`]: lossy
 /// conversion replaces an invalid byte with U+FFFD, so it can never manufacture
@@ -296,40 +209,12 @@ fn rule_sheds(name: &OsStr, rule: InheritedGitEnvironment) -> bool {
     !kept
 }
 
-/// Detach `command` from the inherited git environment, and keep the six names
-/// the user stated on purpose.
-///
-/// **The entrance a production spawn takes.** It sheds the whole `GIT_` prefix,
-/// [`USER_INTENT_GIT_ENVIRONMENT`] excepted, so a tool still aims at the
-/// repository it was pointed at while it authenticates the way the user's own
-/// shell authenticates. [`shed_inherited_git_environment`] is the entrance a
-/// fixture takes, and it keeps nothing.
-///
-/// The split is not a split by git's families, which the prefix genuinely
-/// cannot tell apart. It is a split by whose intent a variable carries. A hook
-/// exports `GIT_DIR`, `GIT_INDEX_FILE` and `GIT_CONFIG_PARAMETERS`, so those
-/// carry the launching hook's intent and leave. A person exports
-/// `GIT_SSH_COMMAND` and `GIT_TERMINAL_PROMPT`, so those carry the user's
-/// intent and stay. `tests/user-intent-environment.rs` pins the two lists
-/// disjoint.
-///
-/// ```no_run
-/// let mut command = std::process::Command::new("git");
-/// childenv::shed_inherited_git_environment_keeping_user_intent(&mut command);
-/// ```
-pub fn shed_inherited_git_environment_keeping_user_intent(command: &mut Command) {
-    shed_git_environment_from(
-        command,
-        std::env::vars_os().map(|(key, _)| key),
-        InheritedGitEnvironment::KeepUserIntent,
-    );
-}
-
 /// Start a child process for production code.
 ///
 /// The child sheds every inherited `GIT_` variable except the names in
-/// [`USER_INTENT_GIT_ENVIRONMENT`]. A value that the call site must pin goes on
-/// after this call, and so it wins.
+/// [`USER_INTENT_GIT_ENVIRONMENT`], so a tool aims at the repository that it
+/// stands in and authenticates as the shell of the user does. A value that the
+/// call site must pin goes on after this call, and so it wins.
 ///
 /// ```no_run
 /// let mut command = childenv::command("git");
@@ -341,8 +226,13 @@ pub fn command<S: AsRef<OsStr>>(program: S) -> Command {
 
 /// Start a child process for test code.
 ///
-/// The child sheds every inherited `GIT_` variable and keeps none. A value that
-/// the call site must pin goes on after this call, and so it wins.
+/// The child sheds every inherited `GIT_` variable and keeps none, because a
+/// fixture builds a throwaway repository and has no user whose intent to honor.
+/// A value that the call site must pin goes on after this call, and so it wins.
+///
+/// The removal of `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` costs a fixture
+/// nothing. A removal is not a redirect to `/dev/null`, so git reads the
+/// `~/.gitconfig` and `/etc/gitconfig` of the host, as it does in a plain shell.
 ///
 /// ```no_run
 /// let mut command = childenv::fixture_command("git");

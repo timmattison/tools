@@ -12,8 +12,8 @@ use std::ffi::OsStr;
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 
+use childenv::InheritedGitEnvironment;
 use ghrest::{parse_response, EtagEntry, PullNumber, RateLimitWait, Response};
-use gitscratch::InheritedGitEnvironment;
 use runlimit::{run_with_limit, RunFailure};
 use serde::Deserialize;
 
@@ -116,7 +116,7 @@ where
     I: IntoIterator<Item = K>,
     K: AsRef<OsStr>,
 {
-    gitscratch::shed_git_environment_from(
+    childenv::shed_git_environment_from(
         command,
         inherited_keys,
         InheritedGitEnvironment::KeepUserIntent,
@@ -139,7 +139,7 @@ where
     I: IntoIterator<Item = K>,
     K: AsRef<OsStr>,
 {
-    let mut command = Command::new(program);
+    let mut command = childenv::command(program);
     command
         .args(["api", "-i", "--hostname"])
         .arg(target.repo().host());
@@ -844,7 +844,7 @@ mod tests {
             ("CLICOLOR_FORCE", "1"),
             ("GH_TOKEN", "token-value"),
         ];
-        let mut command = Command::new(&stub);
+        let mut command = childenv::fixture_command(&stub);
         for (name, value) in inherited {
             command.env(name, value);
         }

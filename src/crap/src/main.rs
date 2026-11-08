@@ -1485,7 +1485,7 @@ where
 /// exists, and requiring `claude` in the command line guards against a stale
 /// session file whose pid has since been reused by an unrelated process.
 fn pid_is_alive(pid: u32) -> bool {
-    let Ok(output) = std::process::Command::new("ps")
+    let Ok(output) = childenv::command("ps")
         .args(["-p", &pid.to_string(), "-o", "command="])
         .output()
     else {
@@ -5564,12 +5564,10 @@ mod tests {
     /// `crap_never_escalates_privilege_itself` sees both programs.
     #[cfg(unix)]
     fn shell_command(shell: TestShell, fake_dir: &Path, script: &str) -> std::process::Command {
-        use std::process::Command;
-
         let mut command = match shell {
-            TestShell::Bash => Command::new("bash"),
+            TestShell::Bash => childenv::fixture_command("bash"),
             TestShell::Zsh => {
-                let mut zsh = Command::new("zsh");
+                let mut zsh = childenv::fixture_command("zsh");
                 zsh.arg("-f");
                 zsh
             }
@@ -6908,10 +6906,12 @@ mod tests {
     }
 
     /// Extracts every program literal handed to a process spawn in `source` —
-    /// the string inside each `Command::new(…)` call, however the type is
-    /// qualified at the call site.
+    /// the string inside each call of a constructor of `childenv`, and inside
+    /// each raw `Command::new(…)` call, however the type is qualified at the
+    /// call site. The ban in `clippy.toml` sends each spawn through a
+    /// constructor, and it leaves the raw call to a site that says so.
     ///
-    /// The needle is assembled at runtime rather than written as one literal so
+    /// Each needle is assembled at runtime rather than written as one literal so
     /// that this function's own text cannot satisfy the scan. Spelled out, the
     /// guard would find itself in every file it reads, and a matcher that
     /// reports its own source is indistinguishable from one that reports
@@ -6923,13 +6923,22 @@ mod tests {
     /// multi-byte characters anywhere) is exactly the panic that lint exists to
     /// prevent.
     fn spawned_programs(source: &str) -> Vec<String> {
-        let needle = ["Command", "::new(\""].concat();
-        source
-            .split(&needle)
-            // The first chunk is whatever preceded the first spawn, so it never
-            // begins with a program name.
-            .skip(1)
-            .map(|rest| rest.chars().take_while(|c| *c != '"').collect())
+        let needles = [
+            ["childenv::", "command(\""].concat(),
+            ["childenv::", "fixture_command(\""].concat(),
+            ["Command", "::new(\""].concat(),
+        ];
+        needles
+            .iter()
+            .flat_map(|needle| {
+                source
+                    .split(needle.as_str())
+                    // The first chunk is whatever preceded the first spawn, so
+                    // it never begins with a program name.
+                    .skip(1)
+                    .map(|rest| rest.chars().take_while(|c| *c != '"').collect::<String>())
+                    .collect::<Vec<String>>()
+            })
             .collect()
     }
 
@@ -7007,6 +7016,18 @@ mod tests {
             escalators.contains(&caught[0]),
             "a known violation must classify as an escalation binary"
         );
+
+        // The same for each constructor of the entrance, which is the spelling
+        // that a real spawn takes.
+        for constructor in ["command", "fixture_command"] {
+            let spawn = ["childenv::", constructor, "(\""].concat();
+            let through_the_entrance = format!("let _ = {spawn}{escalator}\");");
+            assert_eq!(
+                spawned_programs(&through_the_entrance),
+                vec![escalator.clone()],
+                "the spawn matcher must see a spawn through `{constructor}`"
+            );
+        }
 
         // Mutation test 2: the same for shell text, which is scanned by words.
         let violating_shell = format!("function crap() {{ {escalator} -u someone claude; }}");

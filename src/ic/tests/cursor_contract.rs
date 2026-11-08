@@ -331,7 +331,7 @@ fn kitty_key_list(bytes: &[u8]) -> Vec<String> {
 /// A command with the environment, the pipes and the new session of the tests
 /// already set.
 fn ic_command(routine: Routine, args: &[&str]) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ic"));
+    let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_ic"));
     command
         .args(args)
         .env_clear()

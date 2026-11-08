@@ -31,7 +31,9 @@ fn find_main_repo_answers_with_the_repository_it_stands_in() {
 
         assert_eq!(
             answer.canonicalize().expect("canonicalize the answer"),
-            expected.canonicalize().expect("canonicalize the expected path"),
+            expected
+                .canonicalize()
+                .expect("canonicalize the expected path"),
         );
         return;
     }

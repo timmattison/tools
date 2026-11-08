@@ -74,7 +74,7 @@ pub(crate) const SCRIPT: [&str; 3] = [
     expect(dead_code, reason = "only the macOS `start` builds the command")
 )]
 pub(crate) fn notification_command(notification: &Notification) -> Command {
-    let mut command = Command::new("osascript");
+    let mut command = childenv::command("osascript");
     for line in SCRIPT {
         command.arg("-e").arg(line);
     }

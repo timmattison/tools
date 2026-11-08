@@ -13,7 +13,7 @@ mod support;
 use std::fs::{self, File};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -113,7 +113,7 @@ fn wait_for_exit(run: &mut Run) -> ExitStatus {
 
 /// Whether `pid` is a live process. A zombie is a process that died.
 fn is_alive(pid: i32) -> bool {
-    let output = Command::new("ps")
+    let output = childenv::fixture_command("ps")
         .args(["-o", "stat=", "-p", &pid.to_string()])
         .output()
         .expect("run ps");

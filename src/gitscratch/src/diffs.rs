@@ -200,13 +200,11 @@ impl HaltDiffs {
 
 #[cfg(test)]
 mod tests {
-    use std::process::Command;
 
     use super::{HaltDiff, HaltDiffs};
     use crate::git::Git;
     use crate::repo::PREFLIGHT_HOOKS_PATH;
     use crate::testing::not_a_repository;
-    use childenv::NoInheritedGitEnvironment;
 
     /// The name a test gives a halt diff, so that it can read the name back.
     const STOPPED: &str = "abc1234 a stopped commit";
@@ -267,10 +265,9 @@ mod tests {
     fn a_diff_call_that_fails_leaves_git_s_own_words_in_the_halt_diff() {
         let outside = not_a_repository();
 
-        let refused = Command::new("git")
+        let refused = childenv::fixture_command("git")
             .arg("diff")
             .current_dir(outside.path())
-            .without_inherited_git_environment()
             .output()
             .expect("spawn git diff outside a repository");
         assert!(

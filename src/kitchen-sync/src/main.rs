@@ -12,7 +12,6 @@ use std::process::{Command, ExitCode, Stdio};
 use anyhow::{bail, Context, Result};
 use buildinfo::version_string;
 use clap::Parser;
-use gitscratch::shed_inherited_git_environment_keeping_user_intent;
 use tempfile::TempDir;
 
 /// Install every Rust binary from a git repository
@@ -196,8 +195,7 @@ fn shallow_clone(repo_url: &str) -> Result<TempDir> {
     // missing credential fail at once with the reason on stderr, which this
     // function reports. Without it git prompts on `/dev/tty`, and the clone
     // stalls instead.
-    let mut command = Command::new("git");
-    shed_inherited_git_environment_keeping_user_intent(&mut command);
+    let mut command = childenv::command("git");
 
     let output = command
         .arg("clone")
@@ -452,7 +450,7 @@ fn run_streaming(cmd: &mut Command) -> std::io::Result<(std::process::ExitStatus
 /// caller can surface a useful diagnostic in the summary without the user
 /// having to scroll back.
 fn install_from_git(repo_url: &str, package: Option<&str>) -> Result<()> {
-    let mut cmd = Command::new("cargo");
+    let mut cmd = childenv::command("cargo");
     cmd.arg("install").arg("--git").arg(repo_url);
     // cargo install selects specific packages via a positional crate name, not --package.
     if let Some(pkg) = package {
@@ -497,7 +495,6 @@ mod tests {
     // production rule beside it, because a fixture has no user whose intent to
     // honor: it builds a throwaway repository, and a `GIT_SSH_COMMAND` it
     // inherited names a program the fixture has no reason to run.
-    use gitscratch::shed_inherited_git_environment;
 
     // ----- Phase 1 tests -----
 
@@ -735,7 +732,7 @@ mod tests {
         // back whatever the child wrote to stderr so the caller can include
         // it in a summary. We use `sh -c` so the test does not depend on any
         // specific real tool being installed.
-        let mut cmd = Command::new("sh");
+        let mut cmd = childenv::fixture_command("sh");
         cmd.arg("-c")
             .arg("printf 'oops line 1\\noops line 2\\n' 1>&2; exit 3");
         let (status, captured) = run_streaming(&mut cmd).unwrap();
@@ -958,8 +955,7 @@ mod tests {
             // Shed the whole inherited `GIT_` family so these fixture commits
             // target `repo` rather than the real repository, when this suite
             // runs from inside the pre-commit hook's own `cargo test`.
-            let mut command = Command::new("git");
-            shed_inherited_git_environment(&mut command);
+            let mut command = childenv::fixture_command("git");
 
             let out = command
                 .args(args)

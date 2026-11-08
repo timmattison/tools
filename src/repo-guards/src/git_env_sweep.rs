@@ -7,16 +7,11 @@
 //! arrived one call site at a time, and each arrival was repaired the same way:
 //! a short list of the names somebody had thought of.
 //!
-//! `gitscratch::shed_inherited_git_environment` holds the rule that replaces
-//! the list. It is named rather than linked because this crate takes gitscratch
-//! as a dev-dependency, so rustdoc cannot resolve the path from here. It
+//! The crate `childenv` holds the rule that replaces the list, in its two
+//! constructors `childenv::command` and `childenv::fixture_command`. It
 //! enumerates the process environment and removes every key with the `GIT_`
 //! prefix, so a variable git invents next year leaves without anyone editing a
-//! file. Its own documentation states the gap this module closes:
-//!
-//! > That is an offer, not a guarantee. Nothing - no lint, no type, no guard -
-//! > obliges a git spawn in this repository to call this, so immunity holds
-//! > where it is called and nowhere else.
+//! file.
 //!
 //! # The rule
 //!
@@ -52,7 +47,7 @@
 //! report an array that holds two or more `GIT_` literals. Measured against
 //! this workspace, the audit read 392 files; 25 of them hold two or more `GIT_`
 //! string literals, and 14 write those names into an array. All 14 are correct
-//! code: the keep-list `gitscratch::USER_INTENT_GIT_ENVIRONMENT`, the identity
+//! code: the keep-list `childenv::USER_INTENT_GIT_ENVIRONMENT`, the identity
 //! names a fixture pins on every command it builds, the probe lists that the
 //! hostile-environment tests aim at a decoy repository, the [`EXEMPTIONS`]
 //! table below, and the fixtures of this guard's own tests. So the widened rule
@@ -82,9 +77,8 @@
 //!
 //! # A keep-list is a different shape, and this guard does not report it
 //!
-//! `gitscratch::shed_inherited_git_environment_keeping_user_intent` sweeps the
-//! same prefix and keeps six names a person states on purpose, which
-//! `gitscratch::USER_INTENT_GIT_ENVIRONMENT` holds. That is not the shape
+//! `childenv::command` sweeps the same prefix and keeps six names a person
+//! states on purpose, which `childenv::USER_INTENT_GIT_ENVIRONMENT` holds. That is not the shape
 //! reported here: those names sit in a `const` array and never reach
 //! `env_remove`.
 //!
@@ -440,8 +434,8 @@ impl fmt::Display for Report {
         )?;
         writeln!(
             f,
-            "Call `gitscratch::shed_inherited_git_environment(&mut command)` instead, which \
-             removes every key carrying the {GIT_ENVIRONMENT_PREFIX} prefix."
+            "Build the command with `childenv::command` or `childenv::fixture_command` instead, \
+             which remove every key carrying the {GIT_ENVIRONMENT_PREFIX} prefix."
         )?;
 
         for offender in &self.offenders {

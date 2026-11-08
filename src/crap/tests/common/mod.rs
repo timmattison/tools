@@ -17,7 +17,7 @@ pub fn is_generated_fork_id(field: &str) -> bool {
 /// the log of a test into the real data directory. The function strips by
 /// prefix, so a variable that the XDG standard adds later is stripped too.
 pub fn crap_command(home: &std::path::Path) -> std::process::Command {
-    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_crap"));
+    let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_crap"));
     for (name, _) in std::env::vars_os() {
         if name.to_string_lossy().starts_with("XDG_") {
             command.env_remove(name);

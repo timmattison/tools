@@ -4,11 +4,9 @@
 #![deny(unsafe_code)]
 #![warn(clippy::pedantic)]
 
-use std::process::Command;
-
 #[test]
 fn version_prints_name_number_and_build() {
-    let output = Command::new(env!("CARGO_BIN_EXE_ha"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_ha"))
         .arg("--version")
         .output()
         .expect("ha starts");
@@ -31,7 +29,7 @@ struct Run {
 /// empty directory that belongs to the test, so the run never reads the real
 /// configuration of the user.
 fn run_ha(home: &tempfile::TempDir, args: &[&str]) -> Run {
-    let output = Command::new(env!("CARGO_BIN_EXE_ha"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_ha"))
         .args(args)
         .env("HOME", home.path())
         .env("XDG_CONFIG_HOME", home.path())
@@ -209,7 +207,7 @@ fn a_first_refresh_that_reads_no_target_exits_1_with_the_error_after_the_termina
     std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755))
         .expect("the gh stub is executable");
 
-    let mut command = Command::new("perl");
+    let mut command = childenv::fixture_command("perl");
     command
         .arg("-e")
         .arg(BOUND_ON_THE_TERMINAL)

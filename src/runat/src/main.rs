@@ -16,7 +16,7 @@ use ratatui::{
 use std::{
     error::Error,
     io,
-    process::{exit, Command},
+    process::exit,
     time::{Duration, Instant},
 };
 
@@ -105,7 +105,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Now execute the command if we have one
     if let Some(command) = command_to_run {
-        let mut cmd = Command::new(&command[0]);
+        let mut cmd = childenv::command(&command[0]);
         cmd.args(&command[1..]);
 
         match cmd.status() {

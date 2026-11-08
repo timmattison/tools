@@ -21,9 +21,7 @@ impl Fixture {
         for dir in ["bin", "home", "state", "claude", "repo"] {
             fs::create_dir_all(root.path().join(dir)).expect("create fixture subdir");
         }
-        let mut git = Command::new("git");
-        gitscratch::shed_inherited_git_environment(&mut git);
-        let status = git
+        let status = childenv::fixture_command("git")
             .args(["init", "-q"])
             .current_dir(root.path().join("repo"))
             .status()
@@ -67,8 +65,7 @@ impl Fixture {
 
     /// A command for the real binary with a hermetic environment.
     fn command(&self) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_op-cache"));
-        gitscratch::shed_inherited_git_environment(&mut command);
+        let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_op-cache"));
         // A failed execve of one PATH entry makes execvp go on to the next entry,
         // so a real `op` further along PATH would run. /usr/bin holds `git`;
         // neither it nor /bin holds an `op`. The PATH of the test process is
@@ -750,7 +747,7 @@ mod notification {
         let calls = osascript_calls(&fixture);
         let pid = calls.first().map(|(pid, _)| pid.clone());
         let alive = pid.as_deref().is_some_and(|pid| {
-            Command::new("ps")
+            childenv::fixture_command("ps")
                 .args(["-p", pid])
                 .output()
                 .expect("run ps")
@@ -760,7 +757,7 @@ mod notification {
         if alive {
             // Never leave a `sleep` behind, whatever the assertions say.
             if let Some(pid) = pid.as_deref() {
-                let _ = Command::new("kill").args(["-9", pid]).status();
+                let _ = childenv::fixture_command("kill").args(["-9", pid]).status();
             }
         }
         assert!(output.status.success());

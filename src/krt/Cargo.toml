@@ -26,6 +26,7 @@ trippy-privilege.workspace = true
 unicode-width.workspace = true
 
 [dev-dependencies]
+childenv.workspace = true
 mockito.workspace = true
 portable-pty.workspace = true
 

@@ -16,7 +16,7 @@
 
 use std::fs;
 use std::path::Path;
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 
 use tempfile::TempDir;
 
@@ -25,7 +25,7 @@ const COLUMNS: &str = "80";
 
 /// Run `prcp` with `args` in `dir`. Standard input is null.
 fn run_prcp(dir: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_prcp"))
+    childenv::fixture_command(env!("CARGO_BIN_EXE_prcp"))
         .args(args)
         .current_dir(dir)
         .env("COLUMNS", COLUMNS)

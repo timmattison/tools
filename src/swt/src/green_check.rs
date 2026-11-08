@@ -737,7 +737,6 @@ mod tests {
     #[test]
     fn a_config_root_with_a_space_and_a_quote_runs_under_sh_c() {
         use std::os::unix::fs::PermissionsExt;
-        use std::process::Command;
 
         let holder = fixture(&[]);
         let config_root = holder.path().join("wei'rd $config root");
@@ -751,7 +750,7 @@ mod tests {
             build_check_plan(target.path(), Some(&config_root)).expect("override yields a plan");
         assert_eq!(plan, vec![quoted(&script)]);
 
-        let status = Command::new("sh")
+        let status = childenv::fixture_command("sh")
             .arg("-c")
             .arg(&plan[0])
             .current_dir(target.path())
