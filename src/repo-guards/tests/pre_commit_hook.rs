@@ -1,11 +1,12 @@
 //! Integration tests that run the repo's real `.husky/pre-commit` hook against
 //! throwaway fixtures and assert on its exit status.
 //!
-//! These cover *existing* correct behavior of the hook, so a TDD red phase is
-//! impossible — they pass immediately against the current hook. The mutation
-//! check that substitutes for red (neuter the hook, watch
+//! Most of these tests cover *existing* correct behavior of the hook, so a TDD
+//! red phase is impossible for them — they pass immediately against the current
+//! hook. The mutation check that substitutes for red (neuter the hook, watch
 //! `staged_misformatted_rust_file_fails_the_gate` fail, restore, watch it pass)
-//! is documented in the commit body, not committed as code.
+//! is documented in the commit body, not committed as code. The tests of the
+//! `GIT_` variables are different: each one failed first, in a red commit.
 //!
 //! Parallel safety: a `bacon` loop runs `cargo test` concurrently with the
 //! pre-commit hook's own `cargo test`, so two copies of each test can execute
