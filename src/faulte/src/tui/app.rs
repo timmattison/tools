@@ -851,4 +851,17 @@ mod tests {
         app.on_key(press(KeyCode::Left));
         assert_eq!((selected_pid(&app), app.selected_row()), (Some(2), Some(0)));
     }
+
+    /// A span ends at the selected frame, in the past and in the live view.
+    #[test]
+    fn a_span_ends_at_the_selected_frame() {
+        let (mut app, ids) = forty_apart();
+
+        app.on_key(press(KeyCode::Char('w')));
+        assert_eq!(app.reading().map(Reading::end), Some(ids[5]));
+
+        app.on_key(press(KeyCode::Char('[')));
+        assert_eq!(app.selection(), Selection::Past(ids[3]));
+        assert_eq!(app.reading().map(Reading::end), Some(ids[3]));
+    }
 }
