@@ -680,17 +680,40 @@ impl GhSource {
             repo.name(),
             run.0
         );
-        self.send(&["api", "-i", "-X", "POST", &path])?;
+        self.post(&path)
+    }
+
+    /// Sends a `POST` with no body to `path` and drops the answer.
+    ///
+    /// The request sends no `If-None-Match` header and does not touch the `ETag`
+    /// cache. A status of 400 or more gives the error of [`http_error`].
+    fn post(&self, path: &str) -> Result<(), SourceError> {
+        self.send(&["api", "-i", "-X", "POST", path])?;
         Ok(())
     }
 
-    /// Re-runs `run` of `repo` on GitHub. (Compile-only stub.)
+    /// Re-runs `run` of `repo` on GitHub.
+    ///
+    /// The request is `POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun`.
+    /// It changes GitHub. The request needs the `repo` scope on an OAuth token
+    /// or a classic token. A login without write access gets `403`. GitHub
+    /// answers `201` when it accepts the re-run.
+    ///
+    /// The request sends no `If-None-Match` header and does not touch the `ETag`
+    /// cache.
     ///
     /// # Errors
     ///
-    /// Gives no error yet.
-    pub fn rerun_run(&self, _repo: &RepoName, _run: RunId) -> Result<(), SourceError> {
-        Ok(())
+    /// Gives the error of `gh` or the error of [`http_error`] for a status of
+    /// 400 or more.
+    pub fn rerun_run(&self, repo: &RepoName, run: RunId) -> Result<(), SourceError> {
+        let path = format!(
+            "repos/{}/{}/actions/runs/{}/rerun",
+            repo.owner(),
+            repo.name(),
+            run.0
+        );
+        self.post(&path)
     }
 
     /// Fetches the page `number` of the runs of `repo` for `filter`.
