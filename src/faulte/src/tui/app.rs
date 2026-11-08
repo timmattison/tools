@@ -831,4 +831,24 @@ mod tests {
         app.on_key(press(KeyCode::Char(']')));
         assert_eq!(app.selection(), Selection::Past(ids[4]));
     }
+
+    /// The row selection stays on one process while the rows reorder. A
+    /// process with no row stays selected, and its row comes back with the
+    /// frame that holds it.
+    #[test]
+    fn the_selection_stays_on_one_process() {
+        let (mut app, _) = app_with(vec![frame(0, vec![row(1, 9), row(2, 5)])]);
+        app.on_key(press(KeyCode::Down));
+        app.on_key(press(KeyCode::Down));
+        assert_eq!((selected_pid(&app), app.selected_row()), (Some(2), Some(1)));
+
+        app.on_update(frame(2, vec![row(2, 20), row(1, 9)]));
+        assert_eq!((selected_pid(&app), app.selected_row()), (Some(2), Some(0)));
+
+        app.on_update(frame(4, vec![row(1, 9)]));
+        assert_eq!((selected_pid(&app), app.selected_row()), (Some(2), None));
+
+        app.on_key(press(KeyCode::Left));
+        assert_eq!((selected_pid(&app), app.selected_row()), (Some(2), Some(0)));
+    }
 }
