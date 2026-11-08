@@ -256,4 +256,23 @@ mod tests {
         assert_eq!(app.selected_gap().map(|gap| gap.lost.as_secs()), Some(2));
         assert_eq!(app.reading().map(Reading::end), None);
     }
+
+    /// `Right` and `l` select the entry after the selected one. In the live
+    /// view they do nothing, and at the newest entry they stay in the past.
+    #[test]
+    fn right_and_l_select_the_next_entry() {
+        let (mut app, ids) = five();
+
+        app.on_key(press(KeyCode::Right));
+        assert_eq!(app.selection(), Selection::Live);
+
+        for _ in 0..4 {
+            app.on_key(press(KeyCode::Left));
+        }
+        assert_eq!(app.selection(), Selection::Past(ids[0]));
+        app.on_key(press(KeyCode::Right));
+        assert_eq!(app.selection(), Selection::Past(ids[1]));
+        app.on_key(press(KeyCode::Char('l')));
+        assert_eq!(app.selection(), Selection::Past(ids[2]));
+    }
 }
