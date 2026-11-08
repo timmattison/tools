@@ -8,6 +8,9 @@ set -e
 
 cd "$(dirname "$0")"
 
+# shellcheck source=scripts/without-git-environment.sh
+. scripts/without-git-environment.sh
+
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -32,7 +35,7 @@ echo "========================================="
 echo "Running Rust tests..."
 echo "========================================="
 
-if cargo test --workspace; then
+if without_git_environment cargo test --workspace; then
     echo ""
     echo "========================================="
     echo "All tests passed!"
