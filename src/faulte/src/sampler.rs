@@ -7,7 +7,9 @@
 //! at once.
 
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
@@ -15,7 +17,7 @@ use crate::duration::Span;
 use crate::history::{Gap, SampledFrame, Update};
 use crate::machine::{join_sources, sample_window, Machine, MachineError, SampleFacts};
 use crate::pid::Pid;
-use crate::stream::{FaultStream, StreamEvent, TimedSample};
+use crate::stream::{FaultStream, Stopper, StreamEvent, TimedSample};
 use crate::table::ProcessRow;
 use crate::vm::VmCounters;
 
@@ -32,6 +34,42 @@ pub const RESTART_REASON: &str = "faulte waited for a new top to start";
 pub struct Sampler {
     /// The updates of the sampler thread.
     updates: Receiver<Update>,
+    /// The stop state that the thread shares.
+    control: Arc<Control>,
+}
+
+/// The stop state that the owner and the thread share.
+#[derive(Default)]
+struct Control {
+    /// Tells whether the owner asked the thread to stop.
+    stopped: AtomicBool,
+    /// The stopper of the stream that runs now.
+    stopper: Mutex<Option<Stopper>>,
+}
+
+impl Control {
+    /// Asks the thread to stop, and stops the child of the current stream.
+    fn stop(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        let current = self
+            .stopper
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let Some(stopper) = current {
+            stopper.stop();
+        }
+    }
+
+    /// Tells whether the owner asked the thread to stop.
+    fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::SeqCst)
+    }
+
+    /// Makes `stopper` the stopper of the current stream, or clears it.
+    fn publish(&self, stopper: Option<Stopper>) {
+        *self.stopper.lock().unwrap_or_else(PoisonError::into_inner) = stopper;
+    }
 }
 
 impl Sampler {
@@ -42,21 +80,25 @@ impl Sampler {
     /// `faulte` and of its child processes.
     pub fn spawn<M: Machine + Send + 'static>(machine: M, interval: Span, own_pid: Pid) -> Self {
         let (sender, updates) = sync_channel(UPDATE_BACKLOG);
+        let control = Arc::new(Control::default());
         let run = Run {
             machine,
             interval,
             own_pid,
             sender,
+            control: Arc::clone(&control),
         };
         thread::spawn(move || run.start());
-        Self { updates }
+        Self { updates, control }
     }
 
     /// Stops the sampler and its child at once.
     ///
     /// This call does not join the thread, because a `ps` can run for
     /// seconds. The `Stopper` of the current stream stops `top` at once.
-    pub fn stop(&self) {}
+    pub fn stop(&self) {
+        self.control.stop();
+    }
 
     /// Gives the channel of the updates.
     #[must_use]
@@ -79,6 +121,8 @@ struct Run<M> {
     own_pid: Pid,
     /// The channel to the view.
     sender: SyncSender<Update>,
+    /// The stop state that the owner shares.
+    control: Arc<Control>,
 }
 
 /// What the thread does after it reads a stream.
@@ -101,9 +145,22 @@ impl<M: Machine> Run<M> {
     /// Runs the thread until the view drops the channel.
     fn start(self) {
         let mut ledger = Ledger::default();
-        loop {
+        while !self.control.is_stopped() {
             let flow = match self.machine.fault_stream(self.interval) {
-                Ok(stream) => self.read(stream, &mut ledger),
+                Ok(stream) => {
+                    // Publish the stopper first, and look at the flag after
+                    // it. A stop that came during the start sees either the
+                    // stopper or the flag, so the new child never runs on.
+                    self.control.publish(Some(stream.stopper()));
+                    let flow = if self.control.is_stopped() {
+                        stream.stopper().stop();
+                        Flow::Stop
+                    } else {
+                        self.read(stream, &mut ledger)
+                    };
+                    self.control.publish(None);
+                    flow
+                }
                 Err(error) => {
                     let now = self.machine.now();
                     if self.send_gap(&mut ledger, now, error.to_string()) {
@@ -114,8 +171,10 @@ impl<M: Machine> Run<M> {
                 }
             };
             match flow {
-                Flow::Restart => self.machine.sleep(Duration::from(self.interval)),
-                Flow::Stop => return,
+                Flow::Restart if !self.control.is_stopped() => {
+                    self.machine.sleep(Duration::from(self.interval));
+                }
+                Flow::Restart | Flow::Stop => return,
             }
         }
     }
@@ -126,6 +185,9 @@ impl<M: Machine> Run<M> {
         let mut first_header = true;
         loop {
             let Some(event) = stream.next_event(POLL) else {
+                if self.control.is_stopped() {
+                    return Flow::Stop;
+                }
                 continue;
             };
             let delivered = match event {
