@@ -12,7 +12,8 @@ use std::time::Duration;
 
 use chrono::NaiveDateTime;
 
-use crate::top::{self, FaultCount, TopSample};
+use crate::machine::MachineError;
+use crate::top::{self, FaultCount, TopParseError, TopSample};
 
 /// What the parser found in the bytes that it has read so far.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +57,9 @@ struct Current {
     clock: Option<NaiveDateTime>,
     /// The rows that arrived.
     rows: Vec<FaultCount>,
+    /// Tells whether the parser refused this sample. A refused sample gives one
+    /// `Refused` event and no sample, and the parser reads no more of it.
+    refused: bool,
 }
 
 impl Current {
@@ -65,6 +69,7 @@ impl Current {
             position: Position::ExpectClock,
             clock: None,
             rows: Vec::new(),
+            refused: false,
         }
     }
 }
@@ -84,6 +89,12 @@ pub struct StreamParser {
     /// The bytes of the line that has not ended yet. A read can end inside a
     /// line, so the parser keeps the start of the line until the rest arrives.
     pending: Vec<u8>,
+    /// The count of lines that ended, so an error names the line of the
+    /// stream. The first line is line 1.
+    lines: usize,
+    /// Tells whether the parser refused the text before the first sample. It
+    /// refuses that text once.
+    stray_refused: bool,
 }
 
 impl StreamParser {
@@ -111,47 +122,105 @@ impl StreamParser {
 
     /// Reads one whole line.
     fn line(&mut self, line: &str, events: &mut Vec<ParsedEvent>) {
+        self.lines += 1;
         if line.split_ascii_whitespace().next() == Some(top::PROCESSES) {
-            let finished = self.finish();
+            let finished = self.finish(events);
             events.push(ParsedEvent::Header { finished });
             self.current = Some(Current::new());
             return;
         }
+        let number = self.lines;
         let Some(current) = self.current.as_mut() else {
+            self.refuse_stray(line, events);
             return;
         };
-        match current.position {
+        if current.refused {
+            return;
+        }
+        let error = match current.position {
             Position::ExpectClock => {
                 current.clock =
                     NaiveDateTime::parse_from_str(line.trim_ascii(), top::CLOCK_FORMAT).ok();
                 current.position = Position::BeforeHeader;
+                None
             }
             Position::BeforeHeader => {
                 if top::is_header_row(line) {
                     current.position = Position::Rows;
+                    (!line.split_ascii_whitespace().eq(top::HEADER)).then(|| {
+                        TopParseError::UnexpectedHeader {
+                            number,
+                            line: line.to_owned(),
+                        }
+                    })
+                } else {
+                    None
                 }
             }
-            Position::Rows => {
-                if let Some(row) = top::parse_row(line) {
+            Position::Rows => match top::parse_row(line) {
+                Some(row) => {
                     current.rows.push(row);
+                    None
                 }
-            }
+                None if line.trim_ascii().is_empty() => None,
+                None => Some(TopParseError::MalformedRow {
+                    number,
+                    line: line.to_owned(),
+                }),
+            },
+        };
+        if let Some(error) = error {
+            current.refused = true;
+            events.push(refused(error));
         }
     }
 
+    /// Refuses a line that comes before the first `Processes:` line. A blank
+    /// line is not text. Only the first such line gives an event.
+    fn refuse_stray(&mut self, line: &str, events: &mut Vec<ParsedEvent>) {
+        if self.stray_refused || line.trim_ascii().is_empty() {
+            return;
+        }
+        self.stray_refused = true;
+        events.push(ParsedEvent::Refused {
+            reason: format!(
+                "the output of {} is not a sample of faults: {line}",
+                top::PROGRAM
+            ),
+        });
+    }
+
     /// Ends the sample that the parser reads. Gives the sample when it is
-    /// usable. The first sample of a child gives `None`.
-    fn finish(&mut self) -> Option<TopSample> {
+    /// usable. The first sample of a child, a refused sample, and a sample with
+    /// no rows give `None`. A sample with no rows also adds a `Refused` event.
+    fn finish(&mut self, events: &mut Vec<ParsedEvent>) -> Option<TopSample> {
         let current = self.current.take()?;
         let before = std::mem::replace(&mut self.previous_clock, current.clock);
         let elapsed = elapsed_between(before, current.clock);
-        if !std::mem::replace(&mut self.finished_one, true) {
+        let first = !std::mem::replace(&mut self.finished_one, true);
+        if current.refused {
+            return None;
+        }
+        if current.rows.is_empty() {
+            events.push(refused(TopParseError::NoRows));
+            return None;
+        }
+        if first {
             return None;
         }
         Some(TopSample {
             rows: current.rows,
             elapsed,
         })
+    }
+}
+
+/// Makes the `Refused` event for `error`. The reason is the text of a
+/// `MachineError::TopOutput`, so a person reads the same words as for a run
+/// of the single-sample sampler.
+fn refused(error: TopParseError) -> ParsedEvent {
+    ParsedEvent::Refused {
+        reason: MachineError::from(error).to_string(),
     }
 }
 
