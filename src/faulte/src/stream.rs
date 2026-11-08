@@ -1100,4 +1100,76 @@ mod tests {
             .expect("a finished sample");
         assert_eq!(second.sample.rows, vec![row(10, 3), row(20, 4000)]);
     }
+
+    /// Each event has the time that the reader thread read it, and the sample
+    /// that a header finishes states its window. The sample ended before the
+    /// header that finished it arrived. The test depends on the order of the
+    /// times and not on their size.
+    #[test]
+    fn a_finished_sample_states_its_window_and_the_time_that_it_ended() {
+        let started = SystemTime::now();
+        let mut stream = stub_printing("", &three_samples());
+
+        let events = events_until(&mut stream, headers_at_least(3));
+
+        let Some(StreamEvent::Header {
+            at,
+            finished: Some(timed),
+        }) = events.get(2)
+        else {
+            panic!("the third header finishes the second sample: {events:?}");
+        };
+        assert!(timed.ended_at <= *at, "the sample ended before its header");
+        assert!(
+            timed.ended_at >= started,
+            "the sample ended after the test began"
+        );
+        assert!(timed.wall < BOUND, "the window is a time of this run");
+    }
+
+    /// Gives a path in the temporary directory that no other run uses.
+    fn unique_path(name: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |since| since.as_nanos());
+        std::env::temp_dir().join(format!(
+            "faulte-stream-{name}-{}-{nanos}",
+            std::process::id()
+        ))
+    }
+
+    /// Tells whether the process `pid` exists, as `ps` sees it.
+    fn process_exists(pid: u32) -> bool {
+        std::process::Command::new("/bin/ps")
+            .args(["-p", &pid.to_string()])
+            .output()
+            .expect("ps runs")
+            .status
+            .success()
+    }
+
+    /// Starts a stub that writes its own PID to a file before it prints its
+    /// samples, waits for the first header, and gives the stream and the PID.
+    fn stub_with_pid() -> (TopStream, u32) {
+        let path = unique_path("pid");
+        let before = format!("echo $$ > '{}';", path.display());
+        let mut stream = stub_printing(&before, &three_samples());
+        events_until(&mut stream, headers_at_least(1));
+        let text = std::fs::read_to_string(&path).expect("the stub wrote its PID");
+        std::fs::remove_file(&path).expect("the file is there");
+        (stream, text.trim().parse().expect("the PID is a number"))
+    }
+
+    /// A program that does not exist is a command that did not start.
+    #[test]
+    fn a_program_that_does_not_exist_did_not_start() {
+        let missing = "/nonexistent/faulte-top";
+
+        let error = TopStream::spawn(missing, &[]).expect_err("the program is not there");
+
+        assert!(
+            matches!(&error, MachineError::CommandDidNotStart { program, .. } if program == missing),
+            "{error:?}"
+        );
+    }
 }
