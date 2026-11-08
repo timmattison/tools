@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::thread;
 
 use crate::github::{GhSource, SourceError};
-use crate::job::Job;
+use crate::job::{Job, JobId};
 use crate::queue::PullNumber;
 use crate::run::{Run, RunId};
 use crate::target::RepoName;
@@ -44,6 +44,15 @@ pub enum Action {
         /// The name of the highlighted job. `None` for a run row.
         job: Option<String>,
     },
+    /// Re-run every job of the run.
+    RerunWorkflow,
+    /// Re-run one job and the jobs that need it.
+    RerunJob {
+        /// The job to re-run, copied at the key press.
+        id: JobId,
+        /// The name of the job, for the box and the status line.
+        name: String,
+    },
 }
 
 impl Action {
@@ -51,7 +60,7 @@ impl Action {
     #[must_use]
     pub fn box_title(&self) -> &'static str {
         match self {
-            Action::Cancel { .. } => CANCEL_TITLE,
+            Action::Cancel { .. } | Action::RerunWorkflow | Action::RerunJob { .. } => CANCEL_TITLE,
         }
     }
 
@@ -60,6 +69,7 @@ impl Action {
     pub fn box_job(&self) -> Option<&str> {
         match self {
             Action::Cancel { job } => job.as_deref(),
+            Action::RerunWorkflow | Action::RerunJob { .. } => None,
         }
     }
 
@@ -69,6 +79,7 @@ impl Action {
     pub fn box_note(&self) -> Option<&'static str> {
         match self {
             Action::Cancel { job } => job.as_ref().map(|_| CANCEL_JOB_NOTE),
+            Action::RerunWorkflow | Action::RerunJob { .. } => None,
         }
     }
 
@@ -76,7 +87,7 @@ impl Action {
     #[must_use]
     pub fn box_key(&self) -> &'static str {
         match self {
-            Action::Cancel { .. } => CANCEL_KEY,
+            Action::Cancel { .. } | Action::RerunWorkflow | Action::RerunJob { .. } => CANCEL_KEY,
         }
     }
 
@@ -105,21 +116,23 @@ impl Action {
     /// The verb of the action in the form that ends in `-ing`.
     fn gerund(&self) -> &'static str {
         match self {
-            Action::Cancel { .. } => "cancelling",
+            Action::Cancel { .. } | Action::RerunWorkflow | Action::RerunJob { .. } => "cancelling",
         }
     }
 
     /// The verb of the action in the base form.
     fn verb(&self) -> &'static str {
         match self {
-            Action::Cancel { .. } => "cancel",
+            Action::Cancel { .. } | Action::RerunWorkflow | Action::RerunJob { .. } => "cancel",
         }
     }
 
     /// What the action works on, in words.
     fn object(&self, run: RunId) -> String {
         match self {
-            Action::Cancel { .. } => format!("run {}", run.0),
+            Action::Cancel { .. } | Action::RerunWorkflow | Action::RerunJob { .. } => {
+                format!("run {}", run.0)
+            }
         }
     }
 }
@@ -280,7 +293,9 @@ impl ActionSender for GhActionSender {
             .name(THREAD_NAME.to_owned())
             .spawn(move || {
                 let result = match &thread_action {
-                    Action::Cancel { .. } => source.cancel_run(&thread_repo, run),
+                    Action::Cancel { .. } | Action::RerunWorkflow | Action::RerunJob { .. } => {
+                        source.cancel_run(&thread_repo, run)
+                    }
                 };
                 // The receiver is gone when `ha` ends. Nobody reads the outcome then.
                 let _ = sender.send(ActionOutcome {
@@ -325,6 +340,9 @@ mod tests {
     /// The answer of GitHub for a cancel that it accepted.
     const ACCEPTED: &str = "HTTP/2.0 202 Accepted\nContent-Type: application/json; charset=utf-8\r\nX-Ratelimit-Limit: 5000\r\nX-Ratelimit-Remaining: 4999\r\nX-Ratelimit-Reset: 1791977652\r\n\r\n{}";
 
+    /// The answer of GitHub for a re-run that it created.
+    const CREATED: &str = "HTTP/2.0 201 Created\nContent-Type: application/json; charset=utf-8\r\nX-Ratelimit-Limit: 5000\r\nX-Ratelimit-Remaining: 4999\r\nX-Ratelimit-Reset: 1791977652\r\n\r\n{}";
+
     /// The answer of GitHub for a run that finished.
     const CONFLICT: &str = "HTTP/2.0 409 Conflict\nContent-Type: application/json\r\n\r\n{\"message\":\"Cannot cancel a workflow run that is completed.\"}";
 
@@ -357,6 +375,13 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         panic!("no outcome arrived");
+    }
+
+    /// A script body that appends its arguments to `args.log` beside the
+    /// script, and then prints the answer file.
+    fn logging_body(dir: &TempDir, answer: &str) -> String {
+        std::fs::write(dir.path().join("answer.out"), answer).unwrap();
+        "printf '%s\\n' \"$*\" >> \"$(dirname \"$0\")/args.log\"\ncat \"$(dirname \"$0\")/answer.out\"".to_owned()
     }
 
     /// A script body that waits for the file `release` next to the script, for
@@ -483,6 +508,28 @@ mod tests {
                 status: 409,
                 message: "Cannot cancel a workflow run that is completed.".to_owned()
             })
+        );
+    }
+
+    #[test]
+    fn rerun_workflow_sends_the_request_of_the_run() {
+        let dir = TempDir::new().unwrap();
+        let sender = canceller(&dir, &logging_body(&dir, CREATED));
+
+        sender.start(&repo("o/r"), RunId(7), &Action::RerunWorkflow);
+
+        assert_eq!(
+            wait_for_outcome(&sender),
+            ActionOutcome {
+                repo: repo("o/r"),
+                run: RunId(7),
+                action: Action::RerunWorkflow,
+                result: Ok(())
+            }
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("args.log")).unwrap(),
+            "api -i -X POST repos/o/r/actions/runs/7/rerun\n"
         );
     }
 }

@@ -582,6 +582,7 @@ mod tests {
         fn start(&self, repo: &RepoName, run: RunId, action: &Action) {
             match action {
                 Action::Cancel { .. } => self.cancels.borrow_mut().push((repo.clone(), run)),
+                Action::RerunWorkflow | Action::RerunJob { .. } => {}
             }
         }
 
