@@ -70,6 +70,11 @@ impl App {
                     .and_then(|base| self.history.previous(base));
                 self.go_past(target);
             }
+            KeyCode::Right | KeyCode::Char('l') => {
+                if let Selection::Past(id) = self.selection {
+                    self.go_past(self.history.next(id));
+                }
+            }
             _ => {}
         }
     }
