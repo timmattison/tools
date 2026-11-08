@@ -1,6 +1,6 @@
-//! What [`childenv::shed_inherited_git_environment_keeping_user_intent`]
-//! takes off a production command, what it deliberately leaves on, and what the
-//! fixture rule beside it takes off a command that keeps nothing.
+//! What [`childenv::command`] takes off a production command, what it
+//! deliberately leaves on, and what the fixture rule beside it takes off a
+//! command that keeps nothing.
 //!
 //! A fixture and a production tool differ in one way that decides the rule. A
 //! fixture builds a throwaway repository and has no user whose intent to honor,
