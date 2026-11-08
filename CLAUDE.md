@@ -301,6 +301,12 @@ has a user whose intent to honor:
   `GIT_ASKPASS` and `GIT_TERMINAL_PROMPT`. A person states each of those on
   purpose, and a tool that runs for that person honors them.
 
+One production site takes `fixture_command` on purpose:
+`gitscratch::Git::command`, which `grind` and `grime` run. A replay works on
+local objects and needs no credential, and a `GIT_CONFIG_GLOBAL` that one shell
+states must not change what the replay reports. Do not move that site to
+`childenv::command`.
+
 The rule covers every child for two reasons. A program that does not run git
 ignores `GIT_` variables, so the sweep costs nothing there. And `go`, `cargo`,
 `gh`, `claude`, a shell, and `tmux` all run git later, so a rule about the

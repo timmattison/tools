@@ -7,7 +7,8 @@
 //!
 //! Each child process sheds the inherited `GIT_` variables through this
 //! entrance. Production code takes [`command`]. Test code takes
-//! [`fixture_command`]. A value that a call site must pin goes on after the
+//! [`fixture_command`]. The doc of [`fixture_command`] names the one production
+//! site that takes it. A value that a call site must pin goes on after the
 //! constructor, and so it wins.
 //!
 //! The sweep has no effect on a program that does not run git. Thus the rule
@@ -241,6 +242,11 @@ pub fn command<S: AsRef<OsStr>>(program: S) -> Command {
 /// The child sheds every inherited `GIT_` variable and keeps none, because a
 /// fixture builds a throwaway repository and has no user whose intent to honor.
 /// A value that the call site must pin goes on after this call, and so it wins.
+///
+/// One production site takes this constructor on purpose:
+/// `gitscratch::Git::command`. A replay works on local objects and needs no
+/// credential, and a `GIT_CONFIG_GLOBAL` that one shell states must not change
+/// what the replay reports.
 ///
 /// The removal of `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` costs a fixture
 /// nothing. A removal is not a redirect to `/dev/null`, so git reads the
