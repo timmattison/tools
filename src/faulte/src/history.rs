@@ -1766,7 +1766,7 @@ mod tests {
         );
         assert_eq!(first.row.rss_kib, Some(7_000));
         assert_eq!(first.as_of, time(14));
-        assert!(reading.header_lines()[0].contains("of the last whole history (3 frames, 0 gaps)"));
+        assert!(reading.header_lines()[0].contains("of the whole history (3 frames, 0 gaps)"));
     }
 
     /// A narrow span walks back only over the entries that are young enough,

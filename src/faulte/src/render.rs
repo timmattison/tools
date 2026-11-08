@@ -1297,7 +1297,7 @@ mod tests {
             ..measurement(&long)
         };
         let span = SpanTotals {
-            label: "5 m",
+            label: "the last 5 m",
             frames: 58,
             gaps: 1,
         };
@@ -1318,7 +1318,7 @@ mod tests {
         assert_eq!(lines.len(), 3);
 
         let one = SpanTotals {
-            label: "1 m",
+            label: "the last 1 m",
             frames: 1,
             gaps: 0,
         };
