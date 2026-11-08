@@ -6922,6 +6922,24 @@ mod tests {
     }
 
     #[test]
+    fn a_job_name_that_leaves_the_columns_of_the_floor_shows_whole() {
+        let cases = [
+            ("abcdefghijklmnopqr", "└ abcdefghijklmnopqr GitHub…"),
+            ("abcdefghijklmnopqrs", "└ …cdefghijklmnopqrs GitHub…"),
+        ];
+        for (job, text) in cases {
+            let (buffer, row, y) =
+                lone_job_row(on("GitHub Actions 1000001050", passed_job(job)), 129);
+            assert_eq!(
+                row,
+                job_golden("✅", text, LONE_JOB, PASSED_TIMES, "?"),
+                "job {job}"
+            );
+            assert_eq!(cyan_columns(&buffer, y).len(), 7, "job {job}");
+        }
+    }
+
+    #[test]
     fn a_job_with_no_runner_and_a_long_name_keeps_the_cut_at_the_end() {
         let (buffer, row, y) = lone_job_row(passed_job(&"n".repeat(40)), 129);
         assert_eq!(
