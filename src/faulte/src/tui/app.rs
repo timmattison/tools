@@ -95,6 +95,7 @@ impl App {
                     self.go_past(target);
                 }
             }
+            KeyCode::Home => self.go_past(self.history.oldest()),
             _ => {}
         }
     }
