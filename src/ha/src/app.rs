@@ -3545,4 +3545,45 @@ mod tests {
         assert!(canceller.reruns.borrow().is_empty());
         assert!(canceller.cancels.borrow().is_empty());
     }
+
+    #[test]
+    fn capital_r_on_a_running_job_of_a_finished_run_says_it_is_still_active() {
+        let channels = channels();
+        send_runs(&channels, vec![finished_run(1, 100, 60)]);
+        let mut steps = steps_to_job_row(vec![job(10, "build")]);
+        steps.extend([key(KeyCode::Char('R')), Step::Idle]);
+        let canceller = canceller();
+        let (frame, _) = run_steps_cancelling_open(&channels, &canceller, steps);
+        assert!(!shows_title(&frame, RERUN_JOB_BOX_TITLE), "{frame:?}");
+        assert!(!shows_title(&frame, RERUN_WORKFLOW_BOX_TITLE), "{frame:?}");
+        assert!(frame[11].contains(STILL_ACTIVE), "{:?}", frame[11]);
+    }
+
+    #[test]
+    fn y_after_capital_r_on_a_running_job_re_runs_nothing() {
+        let channels = channels();
+        send_runs(&channels, vec![finished_run(1, 100, 60)]);
+        let mut steps = steps_to_job_row(vec![job(10, "build")]);
+        steps.extend([
+            key(KeyCode::Char('R')),
+            key(KeyCode::Char('y')),
+            Step::Idle,
+            key(KeyCode::Char('q')),
+        ]);
+        let canceller = canceller();
+        let _ = run_steps_cancelling(&channels, &canceller, steps);
+        assert!(canceller.reruns.borrow().is_empty());
+    }
+
+    #[test]
+    fn capital_r_on_a_finished_job_of_an_active_run_says_the_run_is_still_active() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        let mut steps = steps_to_job_row(vec![passed_job(10, "build")]);
+        steps.extend([key(KeyCode::Char('R')), Step::Idle]);
+        let canceller = canceller();
+        let (frame, _) = run_steps_cancelling_open(&channels, &canceller, steps);
+        assert!(!shows_title(&frame, RERUN_JOB_BOX_TITLE), "{frame:?}");
+        assert!(frame[11].contains(STILL_ACTIVE), "{:?}", frame[11]);
+    }
 }
