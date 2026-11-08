@@ -489,6 +489,12 @@ mod tests {
 
     /// Makes the update that holds one sample at `secs`.
     fn frame(secs: u64, rows: Vec<RankedRow>) -> Update {
+        frame_with_own(secs, rows, &[])
+    }
+
+    /// Makes the update that holds one sample at `secs`, in which the
+    /// processes `own` are `faulte` or its children.
+    fn frame_with_own(secs: u64, rows: Vec<RankedRow>, own: &[u32]) -> Update {
         let window = Duration::from_secs(WINDOW_SECS);
         let total_faults = rows.iter().map(|row| row.faults).sum();
         Update::Frame(Box::new(SampledFrame {
@@ -514,7 +520,7 @@ mod tests {
                 interval: "2s".parse().expect("2s is a span"),
             },
             at: time(secs),
-            own: BTreeSet::new(),
+            own: own.iter().copied().map(Pid::new).collect::<BTreeSet<_>>(),
         }))
     }
 
@@ -864,5 +870,20 @@ mod tests {
         assert!(lines[header + 1..header + 5]
             .iter()
             .all(|line| line.contains('…')));
+    }
+
+    /// A row of `faulte` or of its child carries a mark in its command.
+    #[test]
+    fn an_own_row_is_marked() {
+        let (mut app, _) = app_with(vec![frame_with_own(0, vec![row(7, 50), row(8, 30)], &[7])]);
+
+        let lines = screen(&paint(&mut app, 120, 24, 3));
+
+        let header = line_starting(&lines, "PID");
+        assert!(
+            lines[header + 1].contains("[faulte] /bin/command-7"),
+            "{lines:#?}"
+        );
+        assert!(!lines[header + 2].contains("[faulte]"), "{lines:#?}");
     }
 }
