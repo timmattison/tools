@@ -46,6 +46,8 @@
 //! - [`render`] — the text that a person reads. Nothing here prints.
 //! - [`sampler`] — the thread that reads a stream of samples, joins the other
 //!   sources to each sample, and sends the result over a channel.
+//! - [`tui`] — the full-screen view. Its state is one pure value that takes a
+//!   key or an update, with no terminal and no clock.
 //! - [`machine`] — every fact of this Mac, behind one trait. The module
 //!   `machine::macos` is the one part of `faulte` that runs a command or calls
 //!   the kernel.
@@ -63,4 +65,5 @@ pub mod stop;
 pub mod stream;
 pub mod table;
 pub mod top;
+pub mod tui;
 pub mod vm;

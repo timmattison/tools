@@ -20,6 +20,7 @@ childenv.workspace = true
 chrono.workspace = true
 clap.workspace = true
 comfy-table.workspace = true
+crossterm.workspace = true
 occ.workspace = true
 termsize.workspace = true
 thiserror.workspace = true

@@ -2538,6 +2538,7 @@ dependencies = [
  "chrono",
  "clap",
  "comfy-table",
+ "crossterm",
  "libc",
  "occ",
  "termsize",
