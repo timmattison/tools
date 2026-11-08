@@ -1023,10 +1023,12 @@ cannot hang the caller. Used by `cwt` and `ha`.
   - A SIGHUP, SIGINT, or SIGTERM removes what the run holds: the unverified worktree and its branch of
     `swt create`, or the merge lock of `swt merge`. The run then exits 128 + the signal (129, 130, or
     143). A closed terminal window, a dropped SSH session, or a killed tmux pane sends SIGHUP. A
-    signal that arrives while `swt` holds nothing keeps its default action. A signal that the parent
-    set to ignore stays ignored, so `nohup swt merge <path> &` survives a closed terminal. A signal
-    to the whole process group also stops the green check, and the run can then exit 1 in place of
-    128 + the signal. Nothing stays behind in that case either.
+    signal that arrives while `swt` holds nothing keeps its default action. If a signal arrives while
+    `swt` removes the worktree and the branch of a red check, `swt` finishes both removals first. The
+    run then exits 1 or ends by the signal. A signal that the parent set to ignore stays ignored, so
+    `nohup swt merge <path> &` survives a closed terminal. A signal to the whole process group also
+    stops the green check, and the run can then exit 1 in place of 128 + the signal. Nothing stays
+    behind in that case either.
   - In a parent worktree on the branch `<branch>`, `swt create <name>` makes the branch
     `swt/<branch>/<name>-<token>` and the directory `<parent-worktree-name>--<name>-<token>.swt`
     beside the parent. One token keys both names, and `ls` shows each child next to its parent.
