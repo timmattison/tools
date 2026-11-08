@@ -283,7 +283,7 @@ fn plural<'a>(count: usize, singular: &'a str, many: &'a str) -> &'a str {
 /// asked for. On a loaded Mac the two samples of `top` were 4 seconds apart
 /// when the interval was 2 seconds, so the decimal is the difference between a
 /// rate and a guess.
-fn seconds(span: Duration) -> String {
+pub fn seconds(span: Duration) -> String {
     format!("{:.1} s", span.as_secs_f64())
 }
 
@@ -337,20 +337,39 @@ pub fn header(measurement: &Measurement<'_>) -> Vec<String> {
             count(ranking.total_faults),
             rate(ranking.faults_per_second(ranking.total_faults)),
         ),
-        format!(
-            "swap: {} in, {} out in {}{DOT}compressor {}{DOT}swap in use {} of {}",
-            count(measurement.swap.swapins),
-            count(measurement.swap.swapouts),
-            seconds(measurement.swap_window),
-            bytes(measurement.compressor_bytes),
-            bytes(measurement.usage.used_bytes),
-            bytes(measurement.usage.total_bytes),
-        ),
+        swap_line(measurement),
         claude_line(ranking),
     ];
     lines.extend(skipped_line(ranking));
     lines
 }
+
+/// Gives the line of the swap traffic, the compressor, and the swap in use.
+///
+/// [`header`] and [`span_header`] both state it, so the two cannot disagree.
+fn swap_line(measurement: &Measurement<'_>) -> String {
+    format!(
+        "swap: {} in, {} out in {}{DOT}compressor {}{DOT}swap in use {} of {}",
+        count(measurement.swap.swapins),
+        count(measurement.swap.swapouts),
+        seconds(measurement.swap_window),
+        bytes(measurement.compressor_bytes),
+        bytes(measurement.usage.used_bytes),
+        bytes(measurement.usage.total_bytes),
+    )
+}
+
+/// The singular of the word for one frame of a span.
+const FRAME: &str = "frame";
+
+/// The plural of the word for one frame of a span.
+const FRAMES: &str = "frames";
+
+/// The singular of the word for one gap of a span.
+const GAP: &str = "gap";
+
+/// The plural of the word for one gap of a span.
+const GAPS: &str = "gaps";
 
 /// What a view states about the span of history that it shows.
 #[derive(Debug, Clone, Copy)]
@@ -370,8 +389,27 @@ pub struct SpanTotals<'a> {
 /// other lines are the lines of [`header`].
 #[must_use]
 pub fn span_header(measurement: &Measurement<'_>, span: &SpanTotals<'_>) -> Vec<String> {
-    let _ = (measurement, span);
-    Vec::new()
+    let ranking = measurement.ranking;
+    let processes = measurement.processes;
+    let mut lines = vec![
+        format!(
+            "{} {} with faults over {} measured of the last {} ({} {}, {} {}) {DASH} {} faults, {}/s",
+            count_of(processes),
+            plural(processes, PROCESS, PROCESSES),
+            seconds(ranking.window),
+            span.label,
+            count_of(span.frames),
+            plural(span.frames, FRAME, FRAMES),
+            count_of(span.gaps),
+            plural(span.gaps, GAP, GAPS),
+            count(ranking.total_faults),
+            rate(ranking.faults_per_second(ranking.total_faults)),
+        ),
+        swap_line(measurement),
+        claude_line(ranking),
+    ];
+    lines.extend(skipped_line(ranking));
+    lines
 }
 
 /// Gives the line of the processes that the ranking left out, or nothing when
