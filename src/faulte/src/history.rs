@@ -1923,4 +1923,73 @@ mod tests {
         assert_eq!(history.forward_by(ids[3], five), None);
         assert_eq!(history.forward_by(ids[0], Duration::ZERO), Some(ids[1]));
     }
+
+    /// Makes `count` rows with PIDs from `first`, each with a long command.
+    fn long_rows(first: u32, count: u32) -> Vec<RankedRow> {
+        (first..first + count)
+            .map(|pid| RankedRow {
+                command: format!("/bin/worker-{pid} {}", "x".repeat(400)),
+                ..row(pid, 3)
+            })
+            .collect()
+    }
+
+    /// An identity record leaves when the last frame that points at it
+    /// leaves, and its text leaves with it.
+    #[test]
+    fn an_identity_leaves_when_no_frame_points_at_it() {
+        let mut probe = History::new();
+        probe.add(frame(0, long_rows(1, 50)));
+        let one_frame = probe.bytes_used();
+        let mut history = History::with_budget(one_frame + one_frame / 2);
+        let first = history.add(frame(0, long_rows(1, 50)));
+        let second = history.add(frame(2, long_rows(100, 50)));
+
+        let mut reference = History::new();
+        reference.add(frame(2, long_rows(100, 50)));
+
+        assert!(!history.contains(first));
+        assert!(history.contains(second));
+        assert_eq!(history.identities.index.len(), 50);
+        assert_eq!(
+            history.identities.text_bytes,
+            reference.identities.text_bytes
+        );
+        assert!(history
+            .series(
+                ProcessKey {
+                    pid: Pid::new(1),
+                    started_at_epoch_secs: Some(1_700_000_000)
+                },
+                4,
+                None
+            )
+            .is_none());
+        assert!(history.bytes_used() < one_frame + one_frame / 2);
+    }
+
+    /// A process in two frames has one record, and the record counts both
+    /// rows. The record stays when the first frame leaves.
+    #[test]
+    fn a_shared_identity_stays_while_a_frame_points_at_it() {
+        let mut history = History::new();
+        history.add(frame(0, long_rows(1, 50)));
+        history.add(frame(2, long_rows(1, 50)));
+
+        assert_eq!(history.identities.index.len(), 50);
+        assert!(history.identities.index.values().all(|slot| {
+            history.identities.slab[*slot as usize]
+                .as_ref()
+                .is_some_and(|record| record.rows == 2)
+        }));
+
+        history.evict_oldest();
+
+        assert_eq!(history.identities.index.len(), 50);
+        assert!(history.identities.index.values().all(|slot| {
+            history.identities.slab[*slot as usize]
+                .as_ref()
+                .is_some_and(|record| record.rows == 1)
+        }));
+    }
 }
