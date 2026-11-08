@@ -1059,4 +1059,56 @@ mod tests {
             "{lines:#?}"
         );
     }
+
+    /// The sizes of the screens that the no-panic test draws on.
+    const SIZES: [(u16, u16); 8] = [
+        (1, 1),
+        (1, 40),
+        (200, 1),
+        (80, 24),
+        (7, 4),
+        (8, 5),
+        (30, 9),
+        (120, 3),
+    ];
+
+    /// Makes a state with frames, a gap, and Claude Code rows.
+    fn busy_app() -> crate::tui::app::App {
+        app_with(vec![
+            frame(0, vec![claude_row(10, 50, "claude 日本語"), row(11, 5)]),
+            gap(2, 2, "top stopped"),
+            frame_with_own(4, vec![claude_row(10, 70, "claude 🎉"), row(12, 9)], &[12]),
+        ])
+        .0
+    }
+
+    /// No size of screen makes the view panic, with data and with none, live
+    /// and in the past, on a gap, and in the detail view.
+    #[test]
+    fn no_size_of_screen_makes_the_view_panic() {
+        for (width, height) in SIZES {
+            let mut empty = app_with(Vec::new()).0;
+            paint(&mut empty, width, height, 10);
+
+            let mut live = busy_app();
+            paint(&mut live, width, height, 10);
+
+            live.on_key(press(KeyCode::Down));
+            live.on_key(press(KeyCode::Enter));
+            paint(&mut live, width, height, 10);
+            live.on_key(press(KeyCode::PageDown));
+            paint(&mut live, width, height, 10);
+            live.on_key(press(KeyCode::Esc));
+
+            live.on_key(press(KeyCode::Left));
+            paint(&mut live, width, height, 10);
+            live.on_key(press(KeyCode::Left));
+            paint(&mut live, width, height, 10);
+            live.on_key(press(KeyCode::Char('w')));
+            paint(&mut live, width, height, 10);
+
+            let mut gaps_only = app_with(vec![gap(0, 2, "top stopped")]).0;
+            paint(&mut gaps_only, width, height, 10);
+        }
+    }
 }
