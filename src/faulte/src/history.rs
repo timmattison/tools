@@ -15,7 +15,7 @@ use occ::SessionId;
 use crate::duration::Span;
 use crate::machine::Observed;
 use crate::pid::{Pid, Uid};
-use crate::ranking::{ClaudeTotal, ClaudeView, RankedRow, Skipped};
+use crate::ranking::{ClaudeTotal, ClaudeView, RankedRow, Ranking, Skipped};
 use crate::render::{self, Accounts};
 use crate::state::SessionState;
 use crate::vm::{SwapUsage, VmDelta};
@@ -81,6 +81,62 @@ pub enum Update {
     Frame(Box<SampledFrame>),
     /// A time with no sample.
     Gap(Gap),
+}
+
+/// How much of the history a reading covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpanWidth {
+    /// The one frame that the reading ends at.
+    OneFrame,
+    /// The last minute.
+    OneMinute,
+    /// The last five minutes.
+    FiveMinutes,
+    /// The last fifteen minutes.
+    FifteenMinutes,
+    /// Every entry up to the end.
+    Whole,
+}
+
+/// One row of a reading, with the facts that belong to it alone.
+#[derive(Debug, Clone, Copy)]
+pub struct RowView<'a> {
+    /// The row.
+    pub row: &'a RankedRow,
+    /// The name of the process.
+    pub key: ProcessKey,
+    /// The time of the frame that the facts of the row come from.
+    pub as_of: SystemTime,
+    /// Whether the process is `faulte` or its child.
+    pub own: bool,
+}
+
+/// What a reading knows of one row, beside the row itself.
+#[derive(Debug)]
+struct RowExtra {
+    /// The time of the frame that the facts of the row come from.
+    as_of: SystemTime,
+    /// Whether the process is `faulte` or its child.
+    own: bool,
+}
+
+/// A ranking that the history made from one frame or from a span of frames.
+///
+/// The extras of the rows are private and `rows` pairs each row with its own
+/// extras, so that no caller can pair a row with the wrong ones.
+#[derive(Debug)]
+pub struct Reading {
+    /// The ranking.
+    ranking: Ranking,
+    /// One extra for each row of the ranking.
+    extras: Vec<RowExtra>,
+}
+
+impl Reading {
+    /// Gives each row with its facts.
+    pub fn rows(&self) -> impl ExactSizeIterator<Item = RowView<'_>> {
+        std::iter::empty()
+    }
 }
 
 /// What a compact row says about Claude Code.
@@ -534,6 +590,12 @@ impl History {
             + self.identities.bytes()
     }
 
+    /// Gives the reading of the span of `width` that ends at `end`.
+    #[must_use]
+    pub fn span(&self, _end: EntryId, _width: SpanWidth) -> Option<Reading> {
+        None
+    }
+
     /// Gives the names of the accounts that the frames mentioned.
     #[must_use]
     pub fn accounts(&self) -> &Accounts {
@@ -667,5 +729,34 @@ mod tests {
         );
         assert!(history.contains(ids[99]));
         assert_eq!(history.oldest(), Some(ids[first_kept]));
+    }
+
+    /// A PID that returns with a new start time is a new process: the span
+    /// holds two rows and not one.
+    #[test]
+    fn a_reused_pid_is_two_processes() {
+        let mut first = row(7, 4);
+        first.started_at_epoch_secs = Some(100);
+        let mut second = row(7, 6);
+        second.started_at_epoch_secs = Some(200);
+        let mut history = History::new();
+        history.add(frame(10, vec![first]));
+        let end = history.add(frame(12, vec![second]));
+
+        let reading = history
+            .span(end, SpanWidth::Whole)
+            .expect("the span has frames");
+        let rows: Vec<(u32, Option<u64>, u64)> = reading
+            .rows()
+            .map(|view| {
+                (
+                    view.key.pid.get(),
+                    view.key.started_at_epoch_secs,
+                    view.row.faults,
+                )
+            })
+            .collect();
+
+        assert_eq!(rows, vec![(7, Some(200), 6), (7, Some(100), 4)]);
     }
 }
