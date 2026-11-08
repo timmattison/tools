@@ -13,9 +13,11 @@
 //! can spend seconds in another command, and a stamp that it made late would
 //! make a false window.
 
-use std::sync::mpsc::{self, Receiver};
-use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
+use std::io::{ErrorKind, Read};
+use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
 use chrono::NaiveDateTime;
@@ -357,11 +359,32 @@ impl Stopper {
 }
 
 /// The child process of a [`TopStream`].
+///
+/// The reader thread and the owner of the stream both reach the child, so the
+/// child lives in a shared cell. Whoever takes it out of the cell owns the
+/// stop and the status.
 #[derive(Debug)]
 struct TopChild {
     /// The child, until something takes it to stop it or to read its status.
-    child: Mutex<Option<std::process::Child>>,
+    child: Mutex<Option<Child>>,
 }
+
+impl TopChild {
+    /// Takes the child out of the cell. The lock is free again when this
+    /// returns, so a caller never holds it across a blocking wait.
+    fn take(&self) -> Option<Child> {
+        self.child
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+    }
+}
+
+/// How many bytes of the error output the reader keeps.
+const STDERR_LIMIT: u64 = 4_096;
+
+/// How many bytes the reader asks the pipe for in one read.
+const READ_CHUNK: usize = 8_192;
 
 /// An endless run of a sampler, as a stream of events.
 #[derive(Debug)]
@@ -382,15 +405,44 @@ impl TopStream {
     /// Gives `MachineError::CommandDidNotStart` when the program does not
     /// start.
     pub fn spawn(program: &str, arguments: &[String]) -> Result<Self, MachineError> {
-        let _ = (program, arguments);
-        let (_sender, events) = mpsc::channel();
-        Ok(Self {
-            events,
-            child: Arc::new(TopChild {
-                child: Mutex::new(None),
+        let did_not_start = |reason: String| MachineError::CommandDidNotStart {
+            program: program.to_owned(),
+            reason,
+        };
+        let mut child = Command::new(program)
+            .args(arguments)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| did_not_start(error.to_string()))?;
+        let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(did_not_start("the child has no pipe".to_owned()));
+        };
+        let child = Arc::new(TopChild {
+            child: Mutex::new(Some(child)),
+        });
+        let (sender, events) = mpsc::channel();
+        let reader_child = Arc::clone(&child);
+        let spawned = thread::Builder::new()
+            .name("faulte-top-reader".to_owned())
+            .spawn(move || read_stream(stdout, stderr, &reader_child, &sender));
+        match spawned {
+            Ok(reader) => Ok(Self {
+                events,
+                child,
+                reader: Some(reader),
             }),
-            reader: None,
-        })
+            Err(error) => {
+                if let Some(mut orphan) = child.take() {
+                    let _ = orphan.kill();
+                    let _ = orphan.wait();
+                }
+                Err(did_not_start(error.to_string()))
+            }
+        }
     }
 }
 
@@ -401,6 +453,99 @@ impl FaultStream for TopStream {
 
     fn stopper(&self) -> Stopper {
         Stopper::new(|| {})
+    }
+}
+
+/// When a chunk of output arrived, on both clocks.
+#[derive(Debug, Clone, Copy)]
+struct Stamp {
+    /// The monotonic clock. It measures a window, and it never moves back.
+    monotonic: Instant,
+    /// The wall clock. It names the moment for a person.
+    wall: SystemTime,
+}
+
+impl Stamp {
+    /// Reads both clocks now.
+    fn now() -> Self {
+        Self {
+            monotonic: Instant::now(),
+            wall: SystemTime::now(),
+        }
+    }
+}
+
+/// The stamps of the last two headers.
+///
+/// A sample ends at its own header and begins at the header before it, so the
+/// window of a sample needs both stamps.
+#[derive(Debug, Default)]
+struct HeaderStamps {
+    /// The header before the one that arrived last.
+    before_previous: Option<Stamp>,
+    /// The header that arrived last.
+    previous: Option<Stamp>,
+}
+
+impl HeaderStamps {
+    /// Turns a header that arrived at `at` into an event, and keeps its stamp.
+    ///
+    /// `finished` is the sample that this header ended. That sample began at
+    /// the header before `previous` and ended at `previous`.
+    fn header(&mut self, at: Stamp, finished: Option<TopSample>) -> StreamEvent {
+        let timed = finished.map(|sample| TimedSample {
+            sample,
+            wall: match (self.before_previous, self.previous) {
+                (Some(began), Some(ended)) => {
+                    ended.monotonic.saturating_duration_since(began.monotonic)
+                }
+                _ => Duration::ZERO,
+            },
+            ended_at: self.previous.map_or(at.wall, |ended| ended.wall),
+        });
+        self.before_previous = self.previous;
+        self.previous = Some(at);
+        StreamEvent::Header {
+            at: at.wall,
+            finished: timed,
+        }
+    }
+}
+
+/// Reads the output of the child until it ends, and sends the events.
+///
+/// This is the body of the reader thread. It stops early when the owner of
+/// the stream dropped the receiver.
+fn read_stream(
+    mut stdout: ChildStdout,
+    _stderr: ChildStderr,
+    _child: &TopChild,
+    sender: &Sender<StreamEvent>,
+) {
+    let mut parser = StreamParser::new();
+    let mut stamps = HeaderStamps::default();
+    let mut buffer = [0_u8; READ_CHUNK];
+    loop {
+        let count = match stdout.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => count,
+            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        };
+        let at = Stamp::now();
+        let chunk = buffer.get(..count).unwrap_or_default();
+        for event in parser.feed(chunk) {
+            let event = match event {
+                ParsedEvent::Header { finished } => stamps.header(at, finished),
+                ParsedEvent::Refused { reason } => StreamEvent::Refused {
+                    at: at.wall,
+                    reason,
+                },
+            };
+            if sender.send(event).is_err() {
+                return;
+            }
+        }
     }
 }
 
