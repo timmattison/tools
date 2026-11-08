@@ -128,7 +128,6 @@ mod tests {
     use crate::pid::{Pid, Uid};
     use crate::ranking::{ClaudeTotal, ClaudeView, RankedRow, Ranking, Skipped};
     use crate::render::Accounts;
-    use crate::state::SessionState;
     use crate::vm::{SwapUsage, VmDelta};
 
     /// The window of a test frame, in seconds.
@@ -253,6 +252,32 @@ mod tests {
             lines[0],
             "WAITING · faulte waits for the first frame. top can take 30 s on a loaded Mac. · top stopped"
         );
-        let _ = SessionState::Busy;
+    }
+
+    /// A live view states the clock and the age of the newest frame, and what
+    /// the history holds.
+    #[test]
+    fn the_live_banner_gives_the_clock_and_the_age() {
+        let (mut app, _) = app_with(vec![frame(0, vec![row(1, 5)]), frame(2, vec![row(1, 5)])]);
+
+        let lines = screen(&paint(&mut app, 120, 24, 11));
+
+        assert_eq!(
+            lines[0],
+            "LIVE · frame of 22:13:22 (9s ago) · history holds 2s (2 frames, 0 gaps)"
+        );
+    }
+
+    /// A live view with a gap at its end says why the last read failed.
+    #[test]
+    fn the_live_banner_gives_the_reason_of_a_gap_at_the_end() {
+        let (mut app, _) = app_with(vec![frame(0, vec![row(1, 5)]), gap(2, 2, "top stopped")]);
+
+        let lines = screen(&paint(&mut app, 120, 24, 11));
+
+        assert_eq!(
+            lines[0],
+            "LIVE · frame of 22:13:20 (11s ago) · history holds 2s (1 frames, 1 gaps) · the last read failed: top stopped"
+        );
     }
 }
