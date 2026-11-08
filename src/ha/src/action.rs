@@ -532,4 +532,30 @@ mod tests {
             "api -i -X POST repos/o/r/actions/runs/7/rerun\n"
         );
     }
+
+    #[test]
+    fn rerun_job_sends_the_request_of_the_job() {
+        let dir = TempDir::new().unwrap();
+        let sender = canceller(&dir, &logging_body(&dir, CREATED));
+        let action = Action::RerunJob {
+            id: JobId(11),
+            name: "build".to_owned(),
+        };
+
+        sender.start(&repo("o/r"), RunId(7), &action);
+
+        assert_eq!(
+            wait_for_outcome(&sender),
+            ActionOutcome {
+                repo: repo("o/r"),
+                run: RunId(7),
+                action,
+                result: Ok(())
+            }
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("args.log")).unwrap(),
+            "api -i -X POST repos/o/r/actions/jobs/11/rerun\n"
+        );
+    }
 }
