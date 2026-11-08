@@ -6836,6 +6836,31 @@ mod tests {
     }
 
     #[test]
+    fn a_long_job_name_gives_columns_to_the_floor_of_a_long_runner_name() {
+        let (_, row, _) = lone_job_row(
+            on(
+                "GitHub Actions 1000001050",
+                passed_job("Full check list (Mac 22)"),
+            ),
+            129,
+        );
+        assert_eq!(
+            row,
+            job_golden(
+                "✅",
+                "└ …eck list (Mac 22) GitHub…",
+                LONE_JOB,
+                PASSED_TIMES,
+                "?"
+            )
+        );
+        assert_eq!(
+            last_digit_column(&row, &LONE_JOB.to_string()),
+            Some(run_id_column(129))
+        );
+    }
+
+    #[test]
     fn a_job_with_no_runner_and_a_long_name_keeps_the_cut_at_the_end() {
         let (buffer, row, y) = lone_job_row(passed_job(&"n".repeat(40)), 129);
         assert_eq!(
