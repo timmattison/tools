@@ -900,4 +900,24 @@ mod tests {
         assert_eq!(rig.shared.stops.load(Ordering::SeqCst), 1);
         assert_eq!(rig.shared.starts.load(Ordering::SeqCst), 1);
     }
+
+    /// Dropping the sampler ends the thread. The thread owns the machine, so
+    /// the drop of the machine shows that the thread ended, and the stopper
+    /// of the stream ran.
+    #[test]
+    fn dropping_the_sampler_ends_the_thread() {
+        let rig = Rig::new().stream(vec![header(10)]);
+        let sampler = rig.start();
+        wait_until("the first child", || {
+            rig.shared.starts.load(Ordering::SeqCst) == 1
+        });
+
+        drop(sampler);
+
+        wait_until("the end of the thread", || {
+            rig.shared.dropped.load(Ordering::SeqCst)
+        });
+        assert!(rig.shared.stops.load(Ordering::SeqCst) >= 1);
+        assert_eq!(rig.shared.starts.load(Ordering::SeqCst), 1);
+    }
 }
