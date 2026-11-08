@@ -70,7 +70,7 @@ pub(crate) const SCRIPT: [&str; 3] = [
 /// the message as three separate arguments. All three standard streams are
 /// null. This function does not start the command.
 #[cfg_attr(
-    not(target_os = "macos"),
+    all(not(target_os = "macos"), not(test)),
     expect(dead_code, reason = "only the macOS `start` builds the command")
 )]
 pub(crate) fn notification_command(notification: &Notification) -> Command {
