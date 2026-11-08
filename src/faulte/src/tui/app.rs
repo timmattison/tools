@@ -64,6 +64,8 @@ pub struct App {
     detail_open: bool,
     /// How many lines the detail text is scrolled.
     detail_scroll: u16,
+    /// The position of the first row that the table draws.
+    top_row: usize,
     /// How many table rows fit on one screen. It is never 0.
     page_rows: usize,
     /// Whether the person asked to leave.
@@ -85,6 +87,7 @@ impl App {
             row: None,
             detail_open: false,
             detail_scroll: 0,
+            top_row: 0,
             page_rows: DEFAULT_PAGE_ROWS,
             quit: false,
             notice: None,
@@ -157,6 +160,7 @@ impl App {
             self.notice = Some(LEFT_NOTICE.to_string());
         }
         self.refresh();
+        self.keep_selection_on_screen();
     }
 
     /// Applies a key.
@@ -233,6 +237,20 @@ impl App {
             }
             _ => {}
         }
+        self.keep_selection_on_screen();
+    }
+
+    /// Moves `top_row` so that the selected row is on the screen. With no
+    /// selected row, `top_row` is 0.
+    fn keep_selection_on_screen(&mut self) {
+        self.top_row = match self.selected_row() {
+            None => 0,
+            Some(selected) if selected < self.top_row => selected,
+            Some(selected) if selected >= self.top_row + self.page_rows => {
+                selected + 1 - self.page_rows
+            }
+            Some(_) => self.top_row,
+        };
     }
 
     /// Gives the lines of one screen of the detail text.
@@ -329,12 +347,13 @@ impl App {
     /// Sets how many table rows fit on one screen.
     pub fn set_page_rows(&mut self, rows: usize) {
         self.page_rows = rows.max(1);
+        self.keep_selection_on_screen();
     }
 
     /// Gives the position of the first row that the table draws.
     #[must_use]
     pub fn top_row(&self) -> usize {
-        0
+        self.top_row
     }
 
     /// Gives the key of the selected row.
