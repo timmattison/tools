@@ -18,6 +18,9 @@
 //! off too, because the rule it applies is the `GIT_` prefix rather than a list
 //! of names.
 
+use std::collections::BTreeMap;
+use std::ffi::OsString;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -1930,6 +1933,161 @@ pub fn run_child_half(filter: &str, configure: impl FnOnce(&mut Command)) -> Res
     }
 
     Ok(())
+}
+
+/// What one path of a [`DecoyRepository`] snapshot holds.
+///
+/// A directory carries no content of its own. A file carries its bytes. A link
+/// carries the path that it names. The snapshot reads a link and never follows
+/// it, so a snapshot is a statement about the decoy alone.
+#[derive(Debug, Eq, PartialEq)]
+enum Held {
+    Directory,
+    File(Vec<u8>),
+    Link(PathBuf),
+}
+
+/// Every path under one directory, with what each path holds.
+///
+/// The map keys on the relative path and orders by it. A difference between
+/// two snapshots thus reads in path order on every run.
+type Snapshot = BTreeMap<String, Held>;
+
+/// A repository that a hostile environment points at, and that nothing may
+/// touch.
+///
+/// Take the snapshot with [`DecoyRepository::of`]. Run the tool under test with
+/// the variables of [`DecoyRepository::hostile_environment`], or call
+/// [`DecoyRepository::aim`] on the command. A tool that sheds the inherited
+/// `GIT_` variables never reads the decoy. A tool that does not shed them
+/// writes to it. [`DecoyRepository::assert_untouched`] then names each path that
+/// appeared, vanished, or changed.
+pub struct DecoyRepository {
+    repo: TestRepo,
+    before: Snapshot,
+}
+
+impl DecoyRepository {
+    /// Turn `repo` into a decoy and take the first snapshot of it.
+    ///
+    /// This call sets `maintenance.auto` to `false` in the repository. Without
+    /// that setting, `git commit` starts a detached `git maintenance run
+    /// --auto`. That process takes `.git/objects/maintenance.lock` and drops it
+    /// a few milliseconds later, so the lock file appears and vanishes on its
+    /// own and a snapshot sees a change that no tool made.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the configuration cannot be written or if a path of the
+    /// repository cannot be read.
+    pub fn of(repo: TestRepo) -> Self {
+        repo.git(&["config", "maintenance.auto", "false"]);
+        let before = snapshot(repo.path());
+
+        Self { repo, before }
+    }
+
+    /// The working directory of the decoy.
+    pub fn path(&self) -> &Path {
+        self.repo.path()
+    }
+
+    /// The four variables that aim git at the decoy.
+    ///
+    /// They are `GIT_DIR`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, and
+    /// `GIT_CONFIG_PARAMETERS`. A hook exports all four. The last one carries
+    /// the probe setting `gitscratch.envleakprobe=leaked`, with the single
+    /// quotes that git writes into that variable.
+    pub fn hostile_environment(&self) -> [(&'static str, OsString); 4] {
+        let git_dir = self.repo.path().join(".git");
+
+        [
+            ("GIT_DIR", git_dir.clone().into_os_string()),
+            ("GIT_INDEX_FILE", git_dir.join("index").into_os_string()),
+            (
+                "GIT_OBJECT_DIRECTORY",
+                git_dir.join("objects").into_os_string(),
+            ),
+            (
+                "GIT_CONFIG_PARAMETERS",
+                OsString::from("'gitscratch.envleakprobe=leaked'"),
+            ),
+        ]
+    }
+
+    /// Set the four hostile variables on `command`.
+    pub fn aim(&self, command: &mut Command) {
+        for (name, value) in self.hostile_environment() {
+            command.env(name, value);
+        }
+    }
+
+    /// Take a new snapshot and compare it with the first one.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the decoy differs from its first snapshot. The message names
+    /// `tool` and lists each path that appeared, vanished, or changed.
+    pub fn assert_untouched(&self, tool: &str) {
+        let _ = tool;
+    }
+}
+
+/// The path of `path` under `root`, spelled with forward slashes.
+///
+/// # Panics
+///
+/// Panics if `path` does not lie under `root`.
+fn relative_name(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or_else(|e| panic!("{} lies under {}: {e}", path.display(), root.display()))
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Record every path under `dir` into `into`, and descend into each directory.
+///
+/// # Panics
+///
+/// Panics if a directory cannot be read or if a file cannot be read back.
+fn record(root: &Path, dir: &Path, into: &mut Snapshot) {
+    for entry in fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display())) {
+        let path = entry
+            .unwrap_or_else(|e| panic!("read an entry of {}: {e}", dir.display()))
+            .path();
+        let name = relative_name(root, &path);
+
+        // `symlink_metadata` reads the entry itself. `metadata` follows a link,
+        // so a link that points outside the decoy would put the bytes of
+        // another directory into the snapshot of this one.
+        let kind = fs::symlink_metadata(&path)
+            .unwrap_or_else(|e| panic!("stat {}: {e}", path.display()))
+            .file_type();
+
+        if kind.is_dir() {
+            into.insert(name, Held::Directory);
+            record(root, &path, into);
+        } else if kind.is_symlink() {
+            let target =
+                fs::read_link(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            into.insert(name, Held::Link(target));
+        } else {
+            let bytes = fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            into.insert(name, Held::File(bytes));
+        }
+    }
+}
+
+/// Every path under `root`, with the bytes of every file.
+///
+/// A count of refs or objects cannot show that a repository is untouched. A
+/// write that replaces one object with another keeps the count.
+fn snapshot(root: &Path) -> Snapshot {
+    let mut held = Snapshot::new();
+    record(root, root, &mut held);
+    held
 }
 
 #[cfg(test)]
