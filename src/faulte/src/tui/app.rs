@@ -96,7 +96,7 @@ impl App {
                 }
             }
             KeyCode::Home => self.go_past(self.history.oldest()),
-            KeyCode::End => self.go_live(),
+            KeyCode::End | KeyCode::Esc => self.go_live(),
             _ => {}
         }
     }
