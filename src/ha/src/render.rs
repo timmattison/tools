@@ -388,17 +388,19 @@ fn fit_job_text(
     };
     let room = cell.saturating_sub(text_width(&text) + 1);
     let floor = truncate_to_budget(runner.as_str(), RUNNER_FLOOR_WIDTH);
+    let without_name = text_width(glyph) + 2 + text_width(&floor);
     let fitted = if runner.as_str().chars().count() <= RUNNER_FLOOR_CHARS
         || text_width(&floor) >= text_width(runner.as_str())
     {
         (text_width(runner.as_str()) <= room).then(|| runner.as_str().to_owned())
-    } else {
+    } else if room >= text_width(&floor) || without_name >= cell {
         fit_runner(runner, room)
+    } else {
+        None
     };
     if fitted.is_some() {
         return (text, fitted);
     }
-    let without_name = text_width(glyph) + 2 + text_width(&floor);
     if without_name >= cell {
         return (text, None);
     }
