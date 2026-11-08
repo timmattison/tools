@@ -8,6 +8,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::mem::size_of;
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use occ::SessionId;
@@ -98,6 +99,46 @@ pub enum SpanWidth {
     Whole,
 }
 
+impl SpanWidth {
+    /// Gives the label that the header of a span states.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::OneFrame => "this frame",
+            Self::OneMinute => "the last 1 m",
+            Self::FiveMinutes => "the last 5 m",
+            Self::FifteenMinutes => "the last 15 m",
+            Self::Whole => "the whole history",
+        }
+    }
+
+    /// Gives the words that follow "of the last" in the header of a span.
+    ///
+    /// [`SpanWidth::label`] starts with "the last", and the header already
+    /// writes those words, so the header takes this shorter text.
+    fn header_label(self) -> &'static str {
+        match self {
+            Self::OneFrame => "frame",
+            Self::OneMinute => "1 m",
+            Self::FiveMinutes => "5 m",
+            Self::FifteenMinutes => "15 m",
+            Self::Whole => "whole history",
+        }
+    }
+
+    /// Gives how far back from the end the span reaches. `None` means one
+    /// frame, or the whole history.
+    fn reach(self) -> Option<Duration> {
+        const MINUTE_SECS: u64 = 60;
+        match self {
+            Self::OneFrame | Self::Whole => None,
+            Self::OneMinute => Some(Duration::from_secs(MINUTE_SECS)),
+            Self::FiveMinutes => Some(Duration::from_secs(5 * MINUTE_SECS)),
+            Self::FifteenMinutes => Some(Duration::from_secs(15 * MINUTE_SECS)),
+        }
+    }
+}
+
 /// One row of a reading, with the facts that belong to it alone.
 #[derive(Debug, Clone, Copy)]
 pub struct RowView<'a> {
@@ -120,23 +161,147 @@ struct RowExtra {
     own: bool,
 }
 
+/// The numbers of the header that a reading states beside its ranking.
+#[derive(Debug)]
+struct HeaderFacts {
+    /// The count of processes that the first line states.
+    processes: usize,
+    /// The swap traffic.
+    swap: VmDelta,
+    /// The swap file.
+    usage: SwapUsage,
+    /// The size of the compressor in bytes.
+    compressor_bytes: u64,
+    /// The time between the two reads of the counters.
+    swap_window: Duration,
+    /// The interval that the person asked for.
+    interval: Span,
+    /// The span that the reading covers. `None` for one frame.
+    span: Option<SpanFacts>,
+}
+
+/// What the header says about the span of a reading.
+#[derive(Debug)]
+struct SpanFacts {
+    /// The label of the width of the span.
+    label: &'static str,
+    /// The count of frames in the span.
+    frames: usize,
+    /// The count of gaps in the span.
+    gaps: usize,
+}
+
 /// A ranking that the history made from one frame or from a span of frames.
 ///
 /// The extras of the rows are private and `rows` pairs each row with its own
 /// extras, so that no caller can pair a row with the wrong ones.
 #[derive(Debug)]
 pub struct Reading {
+    /// The name of the last entry of the reading.
+    end: EntryId,
+    /// The time of the last entry of the reading.
+    at: SystemTime,
     /// The ranking.
     ranking: Ranking,
     /// One extra for each row of the ranking.
     extras: Vec<RowExtra>,
+    /// The count of processes with no fault. A span gives 0.
+    others: usize,
+    /// The facts of the header.
+    header: HeaderFacts,
 }
 
 impl Reading {
+    /// Gives the name of the last entry of the reading.
+    #[must_use]
+    pub fn end(&self) -> EntryId {
+        self.end
+    }
+
+    /// Gives the time of the last entry of the reading.
+    #[must_use]
+    pub fn at(&self) -> SystemTime {
+        self.at
+    }
+
+    /// Gives the ranking. Its rows are the rows with at least one fault.
+    #[must_use]
+    pub fn ranking(&self) -> &Ranking {
+        &self.ranking
+    }
+
     /// Gives each row with its facts.
     pub fn rows(&self) -> impl ExactSizeIterator<Item = RowView<'_>> {
-        std::iter::empty()
+        self.ranking
+            .rows
+            .iter()
+            .zip(self.extras.iter())
+            .map(|(row, extra)| RowView {
+                row,
+                key: ProcessKey {
+                    pid: row.pid,
+                    started_at_epoch_secs: row.started_at_epoch_secs,
+                },
+                as_of: extra.as_of,
+                own: extra.own,
+            })
     }
+
+    /// Gives the row at `index`.
+    #[must_use]
+    pub fn row(&self, index: usize) -> Option<RowView<'_>> {
+        self.rows().nth(index)
+    }
+
+    /// Gives the index of the row of `key`.
+    #[must_use]
+    pub fn position_of(&self, key: ProcessKey) -> Option<usize> {
+        self.rows().position(|view| view.key == key)
+    }
+
+    /// Gives the count of processes with no faults. A span gives 0.
+    #[must_use]
+    pub fn other_rows(&self) -> usize {
+        self.others
+    }
+
+    /// Gives the lines above the table: [`render::header`] for one frame and
+    /// [`render::span_header`] for a span.
+    #[must_use]
+    pub fn header_lines(&self) -> Vec<String> {
+        let facts = &self.header;
+        let measurement = render::Measurement {
+            ranking: &self.ranking,
+            processes: facts.processes,
+            swap: facts.swap,
+            usage: facts.usage,
+            compressor_bytes: facts.compressor_bytes,
+            swap_window: facts.swap_window,
+            interval: facts.interval,
+        };
+        match &facts.span {
+            None => render::header(&measurement),
+            Some(span) => render::span_header(
+                &measurement,
+                &render::SpanTotals {
+                    label: span.label,
+                    frames: span.frames,
+                    gaps: span.gaps,
+                },
+            ),
+        }
+    }
+}
+
+/// The newest row of one identity in a span.
+#[derive(Debug, Clone, Copy)]
+struct Newest {
+    /// The place of the frame in the list of frames, newest first.
+    frame: usize,
+    /// The resident memory in KiB.
+    rss_kib: u32,
+    /// What the row said about Claude Code.
+    state: CompactState,
 }
 
 /// What a compact row says about Claude Code.
@@ -590,9 +755,187 @@ impl History {
             + self.identities.bytes()
     }
 
+    /// Gives the time of the entry at `position`.
+    fn entry_at(&self, position: usize) -> SystemTime {
+        match &self.entries[position] {
+            Entry::Frame(frame) => frame.at,
+            Entry::Gap(gap) => gap.at,
+        }
+    }
+
+    /// Makes the row of `slot` as the history stored it, with `faults`.
+    fn decode(&self, slot: u32, faults: u64, rss_kib: u32, state: CompactState) -> RankedRow {
+        let identity = self.identities.slab[slot as usize]
+            .as_ref()
+            .expect("a stored row points at a live identity");
+        let detail = identity.session.as_ref();
+        let session = |state: SessionState| match detail {
+            None => ClaudeView::NoRecord,
+            Some(detail) => ClaudeView::Session {
+                id: detail.id.clone(),
+                state,
+                directory: detail.directory.as_ref().map(PathBuf::from),
+                status_changed_at: None,
+            },
+        };
+        let claude = match state {
+            CompactState::NotClaude => ClaudeView::NotClaude,
+            CompactState::NoRecord => ClaudeView::NoRecord,
+            CompactState::OtherAccount => ClaudeView::OtherAccount,
+            CompactState::Busy => session(SessionState::Busy),
+            CompactState::Waiting => session(SessionState::Waiting),
+            CompactState::Idle(seconds) => session(SessionState::Idle {
+                for_: seconds.map(|seconds| Duration::from_secs(u64::from(seconds))),
+            }),
+            CompactState::Other => session(SessionState::Other(
+                detail
+                    .and_then(|detail| detail.other_status.clone())
+                    .unwrap_or_default(),
+            )),
+            CompactState::Unknown => session(SessionState::Unknown),
+        };
+        RankedRow {
+            pid: identity.pid,
+            uid: identity.uid,
+            faults,
+            rss_kib: (rss_kib != NO_RSS).then_some(u64::from(rss_kib)),
+            started_at_epoch_secs: identity.started,
+            command: identity.command.clone(),
+            claude,
+        }
+    }
+
     /// Gives the reading of the span of `width` that ends at `end`.
+    ///
+    /// The span holds the entries with `at + width > end.at`, and the whole
+    /// history up to `end` for [`SpanWidth::Whole`]. The faults of a process
+    /// are the sum over the frames, and the window is the sum of the windows.
+    /// A gap adds to neither sum. A span with no frame gives `None`.
     #[must_use]
-    pub fn span(&self, _end: EntryId, _width: SpanWidth) -> Option<Reading> {
+    pub fn span(&self, end: EntryId, width: SpanWidth) -> Option<Reading> {
+        if width == SpanWidth::OneFrame {
+            return self.frame(end);
+        }
+        let end_position = self.position(end)?;
+        let end_at = self.entry_at(end_position);
+        let mut start = end_position;
+        while start > 0 {
+            let earlier = start - 1;
+            if let Some(reach) = width.reach() {
+                if self.entry_at(earlier) + reach <= end_at {
+                    break;
+                }
+            }
+            start = earlier;
+        }
+        let mut frames: Vec<&Frame> = Vec::new();
+        let mut gaps = 0;
+        for entry in self.entries.range(start..=end_position).rev() {
+            match entry {
+                Entry::Frame(frame) => frames.push(frame),
+                Entry::Gap(_) => gaps += 1,
+            }
+        }
+        let newest = *frames.first()?;
+        // The sums use a vector indexed by the slab. A whole-history span
+        // visits about three million rows, and a hash map costs more there.
+        let mut faults = vec![0_u64; self.identities.slab.len()];
+        let mut latest: Vec<Option<Newest>> = vec![None; self.identities.slab.len()];
+        let mut touched: Vec<u32> = Vec::new();
+        for (place, frame) in frames.iter().enumerate() {
+            for row in frame.rows.iter() {
+                let slot = row.identity as usize;
+                faults[slot] = faults[slot].saturating_add(row.faults);
+                if latest[slot].is_none() {
+                    latest[slot] = Some(Newest {
+                        frame: place,
+                        rss_kib: row.rss_kib,
+                        state: row.state,
+                    });
+                    touched.push(row.identity);
+                }
+            }
+        }
+        let mut ranked: Vec<(RankedRow, RowExtra)> = touched
+            .iter()
+            .map(|&slot| {
+                let seen = latest[slot as usize].expect("a touched slot has a row");
+                let row = self.decode(slot, faults[slot as usize], seen.rss_kib, seen.state);
+                let own = self.identities.slab[slot as usize]
+                    .as_ref()
+                    .is_some_and(|identity| identity.own);
+                let extra = RowExtra {
+                    as_of: frames[seen.frame].at,
+                    own,
+                };
+                (row, extra)
+            })
+            .collect();
+        ranked.sort_by(|(left, _), (right, _)| {
+            right
+                .faults
+                .cmp(&left.faults)
+                .then(left.pid.cmp(&right.pid))
+                .then(left.started_at_epoch_secs.cmp(&right.started_at_epoch_secs))
+        });
+        let claude = ClaudeTotal {
+            processes: touched
+                .iter()
+                .filter(|&&slot| {
+                    latest[slot as usize].is_some_and(|seen| seen.state != CompactState::NotClaude)
+                })
+                .count(),
+            other_account: touched
+                .iter()
+                .filter(|&&slot| {
+                    latest[slot as usize]
+                        .is_some_and(|seen| seen.state == CompactState::OtherAccount)
+                })
+                .count(),
+            faults: frames.iter().map(|frame| frame.claude.faults).sum(),
+        };
+        let skipped = Skipped {
+            exited: frames.iter().map(|frame| frame.skipped.exited).sum(),
+            exited_faults: frames.iter().map(|frame| frame.skipped.exited_faults).sum(),
+            zombies: 0,
+            unsampled: 0,
+        };
+        let (rows, extras): (Vec<RankedRow>, Vec<RowExtra>) = ranked.into_iter().unzip();
+        let processes = rows.len();
+        Some(Reading {
+            end,
+            at: end_at,
+            ranking: Ranking {
+                rows,
+                window: frames.iter().map(|frame| frame.window).sum(),
+                total_faults: frames.iter().map(|frame| frame.total_faults).sum(),
+                claude,
+                skipped,
+            },
+            extras,
+            others: 0,
+            header: HeaderFacts {
+                processes,
+                swap: VmDelta {
+                    swapins: frames.iter().map(|frame| frame.swap.swapins).sum(),
+                    swapouts: frames.iter().map(|frame| frame.swap.swapouts).sum(),
+                },
+                usage: newest.usage,
+                compressor_bytes: newest.compressor_bytes,
+                swap_window: frames.iter().map(|frame| frame.swap_window).sum(),
+                interval: newest.interval,
+                span: Some(SpanFacts {
+                    label: width.header_label(),
+                    frames: frames.len(),
+                    gaps,
+                }),
+            },
+        })
+    }
+
+    /// Gives the reading of the one frame `id`.
+    #[must_use]
+    pub fn frame(&self, _id: EntryId) -> Option<Reading> {
         None
     }
 
