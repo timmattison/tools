@@ -1126,8 +1126,8 @@ impl History {
         }
         let mut ranked: Vec<(RankedRow, RowExtra)> = touched
             .iter()
-            .map(|&slot| {
-                let seen = latest[slot as usize].expect("a touched slot has a row");
+            .filter_map(|&slot| {
+                let seen = latest[slot as usize]?;
                 let row = self.decode(slot, faults[slot as usize], seen.rss_kib, seen.state);
                 let own = self.identities.slab[slot as usize]
                     .as_ref()
@@ -1136,7 +1136,7 @@ impl History {
                     as_of: frames[seen.frame].at,
                     own,
                 };
-                (row, extra)
+                Some((row, extra))
             })
             .collect();
         ranked.sort_by(|(left, _), (right, _)| {
@@ -1710,7 +1710,7 @@ mod tests {
             },
             None,
         );
-        let mut newest_row = claude_row(1, 4, idle.clone());
+        let mut newest_row = claude_row(1, 4, idle);
         newest_row.rss_kib = Some(7_000);
         let mut updates = Vec::new();
         for (secs, rows) in [
