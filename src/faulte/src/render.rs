@@ -326,7 +326,7 @@ pub struct Measurement<'a> {
 #[must_use]
 pub fn header(measurement: &Measurement<'_>) -> Vec<String> {
     let ranking = measurement.ranking;
-    let processes = ranking.rows.len();
+    let processes = measurement.processes;
     let mut lines = vec![
         format!(
             "{} {} over a {} window (interval {}) {DASH} {} faults, {}/s",
@@ -1137,11 +1137,11 @@ mod tests {
 
         assert_eq!(
             header(&stated).first().map(String::as_str),
-            Some("812 processes over a 4.0 s window (interval 5s) — 5 faults, 1.3/s")
+            Some("812 processes over a 4.0 s window (interval 5s) — 5 faults, 1.2/s")
         );
         assert_eq!(
             header(&one).first().map(String::as_str),
-            Some("1 process over a 4.0 s window (interval 5s) — 5 faults, 1.3/s")
+            Some("1 process over a 4.0 s window (interval 5s) — 5 faults, 1.2/s")
         );
     }
 
