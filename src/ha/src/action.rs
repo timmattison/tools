@@ -35,6 +35,17 @@ const CANCEL_JOB_NOTE: &str = "GitHub cannot cancel one job. y cancels every job
 /// The key that cancels the run.
 const CANCEL_KEY: &str = "y cancel the run";
 
+/// The title in the top border of the box of a workflow re-run.
+const RERUN_WORKFLOW_TITLE: &str = " Re-run workflow? ";
+/// The title in the top border of the box of a job re-run.
+const RERUN_JOB_TITLE: &str = " Re-run job? ";
+/// The note in the box of a job re-run: GitHub also re-runs the dependent jobs.
+const RERUN_JOB_NOTE: &str = "GitHub also re-runs each job that needs this job.";
+/// The key that re-runs every job of the run.
+const RERUN_WORKFLOW_KEY: &str = "y re-run all jobs";
+/// The key that re-runs one job.
+const RERUN_JOB_KEY: &str = "y re-run this job";
+
 /// What `y` asks GitHub to do. The box and the status line take their words
 /// from this value, thus the words and the request cannot disagree.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,7 +71,9 @@ impl Action {
     #[must_use]
     pub fn box_title(&self) -> &'static str {
         match self {
-            Action::Cancel { .. } | Action::RerunWorkflow | Action::RerunJob { .. } => CANCEL_TITLE,
+            Action::Cancel { .. } => CANCEL_TITLE,
+            Action::RerunWorkflow => RERUN_WORKFLOW_TITLE,
+            Action::RerunJob { .. } => RERUN_JOB_TITLE,
         }
     }
 
@@ -87,7 +100,9 @@ impl Action {
     #[must_use]
     pub fn box_key(&self) -> &'static str {
         match self {
-            Action::Cancel { .. } | Action::RerunWorkflow | Action::RerunJob { .. } => CANCEL_KEY,
+            Action::Cancel { .. } => CANCEL_KEY,
+            Action::RerunWorkflow => RERUN_WORKFLOW_KEY,
+            Action::RerunJob { .. } => RERUN_JOB_KEY,
         }
     }
 
@@ -116,23 +131,24 @@ impl Action {
     /// The verb of the action in the form that ends in `-ing`.
     fn gerund(&self) -> &'static str {
         match self {
-            Action::Cancel { .. } | Action::RerunWorkflow | Action::RerunJob { .. } => "cancelling",
+            Action::Cancel { .. } => "cancelling",
+            Action::RerunWorkflow | Action::RerunJob { .. } => "re-running",
         }
     }
 
     /// The verb of the action in the base form.
     fn verb(&self) -> &'static str {
         match self {
-            Action::Cancel { .. } | Action::RerunWorkflow | Action::RerunJob { .. } => "cancel",
+            Action::Cancel { .. } => "cancel",
+            Action::RerunWorkflow | Action::RerunJob { .. } => "re-run",
         }
     }
 
     /// What the action works on, in words.
     fn object(&self, run: RunId) -> String {
         match self {
-            Action::Cancel { .. } | Action::RerunWorkflow | Action::RerunJob { .. } => {
-                format!("run {}", run.0)
-            }
+            Action::Cancel { .. } | Action::RerunWorkflow => format!("run {}", run.0),
+            Action::RerunJob { .. } => format!("run {}", run.0),
         }
     }
 }
