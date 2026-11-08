@@ -82,7 +82,8 @@ impl Action {
     pub fn box_job(&self) -> Option<&str> {
         match self {
             Action::Cancel { job } => job.as_deref(),
-            Action::RerunWorkflow | Action::RerunJob { .. } => None,
+            Action::RerunJob { name, .. } => Some(name),
+            Action::RerunWorkflow => None,
         }
     }
 
@@ -92,7 +93,8 @@ impl Action {
     pub fn box_note(&self) -> Option<&'static str> {
         match self {
             Action::Cancel { job } => job.as_ref().map(|_| CANCEL_JOB_NOTE),
-            Action::RerunWorkflow | Action::RerunJob { .. } => None,
+            Action::RerunJob { .. } => Some(RERUN_JOB_NOTE),
+            Action::RerunWorkflow => None,
         }
     }
 
@@ -148,7 +150,7 @@ impl Action {
     fn object(&self, run: RunId) -> String {
         match self {
             Action::Cancel { .. } | Action::RerunWorkflow => format!("run {}", run.0),
-            Action::RerunJob { .. } => format!("run {}", run.0),
+            Action::RerunJob { name, .. } => format!("job {name} of run {}", run.0),
         }
     }
 }
