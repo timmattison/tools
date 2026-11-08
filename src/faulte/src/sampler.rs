@@ -74,6 +74,14 @@ struct Run<M> {
     sender: SyncSender<Update>,
 }
 
+/// What the thread does after it reads a stream.
+enum Flow {
+    /// The stream ended. Wait one interval, then start a new one.
+    Restart,
+    /// The view dropped the channel. End the thread.
+    Stop,
+}
+
 /// What the sampler knows about the time that it covered.
 #[derive(Debug, Default)]
 struct Ledger {
@@ -86,34 +94,49 @@ impl<M: Machine> Run<M> {
     /// Runs the thread until the view drops the channel.
     fn start(self) {
         let mut ledger = Ledger::default();
-        if let Ok(stream) = self.machine.fault_stream(self.interval) {
-            self.read(stream, &mut ledger);
+        while let Ok(stream) = self.machine.fault_stream(self.interval) {
+            match self.read(stream, &mut ledger) {
+                Flow::Restart => self.machine.sleep(Duration::from(self.interval)),
+                Flow::Stop => return,
+            }
         }
     }
 
-    /// Reads one stream until the channel closes.
-    fn read(&self, mut stream: Box<dyn FaultStream>, ledger: &mut Ledger) {
+    /// Reads one stream until it ends or the channel closes.
+    fn read(&self, mut stream: Box<dyn FaultStream>, ledger: &mut Ledger) -> Flow {
         let mut reads: [Option<CounterRead>; 2] = [None, None];
+        let mut first_header = true;
         loop {
             let Some(event) = stream.next_event(POLL) else {
                 continue;
             };
-            match event {
-                StreamEvent::Header { finished, .. } => {
+            let delivered = match event {
+                StreamEvent::Header { at, finished } => {
+                    let waited = std::mem::replace(&mut first_header, false)
+                        && ledger.covered_until.is_some();
+                    let restart_sent =
+                        !waited || self.send_gap(ledger, at, RESTART_REASON.to_owned());
                     let before = reads.clone();
                     reads = [reads[1].take(), Some(self.read_counters())];
-                    if let (Some(sample), [Some(older), Some(newer)]) = (finished, before) {
-                        if !self.send_sample(&sample, older, newer, ledger) {
-                            return;
+                    restart_sent
+                        && match (finished, before) {
+                            (Some(sample), [Some(older), Some(newer)]) => {
+                                self.send_sample(&sample, older, newer, ledger)
+                            }
+                            _ => true,
                         }
-                    }
                 }
-                StreamEvent::Refused { at, reason } => {
-                    if !self.send_gap(ledger, at, reason) {
-                        return;
-                    }
+                StreamEvent::Refused { at, reason } => self.send_gap(ledger, at, reason),
+                StreamEvent::Ended { at, reason } => {
+                    return if self.send_gap(ledger, at, reason) {
+                        Flow::Restart
+                    } else {
+                        Flow::Stop
+                    };
                 }
-                StreamEvent::Ended { .. } => return,
+            };
+            if !delivered {
+                return Flow::Stop;
             }
         }
     }
