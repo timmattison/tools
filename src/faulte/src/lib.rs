@@ -39,6 +39,8 @@
 //!   and the count of each session that the rules refused.
 //! - [`stop`] — the question, the check immediately before each signal, and the
 //!   sequence of `SIGTERM` and `SIGKILL`.
+//! - [`stream`] — the parser of an endless run of `top`. It turns bytes into
+//!   events, one finished sample at a time. It holds no clock and no process.
 //! - [`render`] — the text that a person reads. Nothing here prints.
 //! - [`machine`] — every fact of this Mac, behind one trait. The module
 //!   `machine::macos` is the one part of `faulte` that runs a command or calls
@@ -52,6 +54,7 @@ pub mod ranking;
 pub mod render;
 pub mod state;
 pub mod stop;
+pub mod stream;
 pub mod table;
 pub mod top;
 pub mod vm;
