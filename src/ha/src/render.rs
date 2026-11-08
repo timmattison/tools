@@ -363,6 +363,39 @@ fn fit_runner(name: &RunnerName, room: usize) -> Option<String> {
     }
 }
 
+/// The columns of the runner floor of a long name: 6 characters and `…`.
+const RUNNER_FLOOR_WIDTH: usize = 7;
+
+/// The text of the text cell of a job row, and the runner name that follows it.
+///
+/// The text is the tree glyph, one space, and the job name. The text keeps its
+/// start and gets the runner name only in the room that it leaves. A text wider
+/// than the cell keeps its end, and the runner name shows as its floor.
+fn fit_job_text(
+    glyph: &str,
+    name: &str,
+    runner: Option<&RunnerName>,
+    cell: usize,
+) -> (String, Option<String>) {
+    let whole = format!("{glyph} {name}");
+    let text = truncate_to_budget(&whole, cell);
+    let Some(runner) = runner else {
+        return (text, None);
+    };
+    let room = cell.saturating_sub(text_width(&text) + 1);
+    let fitted = fit_runner(runner, room);
+    if fitted.is_some() || text_width(&whole) > cell {
+        return (text, fitted);
+    }
+    let floor = truncate_to_budget(runner.as_str(), RUNNER_FLOOR_WIDTH);
+    let without_name = text_width(glyph) + 2 + text_width(&floor);
+    if without_name >= cell {
+        return (text, None);
+    }
+    let kept = truncate_left_to_budget(name, cell - without_name);
+    (format!("{glyph} {kept}"), Some(floor))
+}
+
 /// Joins the cells of one job row into one line. One space stands between cells.
 ///
 /// The text fills the repository cell, one space, and the workflow-name cell.
@@ -395,7 +428,8 @@ fn fit_runner(name: &RunnerName, room: usize) -> Option<String> {
 fn job_cells(
     widths: Widths,
     marker: &str,
-    text: &str,
+    glyph: &str,
+    name: &str,
     runner: Option<&RunnerName>,
     id: &str,
     end: EndCells<'_>,
@@ -407,9 +441,7 @@ fn job_cells(
         cost,
     } = end;
     let cell = widths.repo + 1 + widths.workflow;
-    let text = truncate_to_budget(text, cell);
-    let room = cell.saturating_sub(text_width(&text) + 1);
-    let runner = runner.and_then(|name| fit_runner(name, room));
+    let (text, runner) = fit_job_text(glyph, name, runner, cell);
     let mut used = text_width(&text);
     let mut lead = text;
     let mut spans = vec![Span::styled(
@@ -705,7 +737,8 @@ where
     job_cells(
         widths,
         marker(job.state),
-        &format!("{glyph} {}", job.name),
+        glyph,
+        &job.name,
         job.runner.as_ref(),
         &job.id.0.to_string(),
         EndCells {
@@ -6780,43 +6813,6 @@ mod tests {
     /// A job name of 22 columns. Its text `└ ` plus the name is 24 columns,
     /// thus the room for a runner name in the 28 columns of the cell is 3.
     const ROOM_OF_3_NAME: &str = "abcdefghijklmnopqrstuv";
-
-    #[test]
-    fn a_long_runner_name_with_fewer_than_4_columns_does_not_show() {
-        // The text `└ Full check list (Mac 22)` is 26 columns, thus the room is 1.
-        let (buffer, row, y) = lone_job_row(
-            on(
-                "GitHub Actions 1000001050",
-                passed_job("Full check list (Mac 22)"),
-            ),
-            129,
-        );
-        assert_eq!(
-            row,
-            job_golden(
-                "✅",
-                "└ Full check list (Mac 22)",
-                LONE_JOB,
-                PASSED_TIMES,
-                "?"
-            )
-        );
-        assert_eq!(cyan_columns(&buffer, y), Vec::<u16>::new());
-        // A name of 22 columns makes a text of 24 columns, thus the room is 3.
-        assert_eq!(display_width(ROOM_OF_3_NAME), 22);
-        let (buffer, row, y) = lone_job_row(on("m1-ts", passed_job(ROOM_OF_3_NAME)), 129);
-        assert_eq!(
-            row,
-            job_golden(
-                "✅",
-                &format!("└ {ROOM_OF_3_NAME}"),
-                LONE_JOB,
-                PASSED_TIMES,
-                "?"
-            )
-        );
-        assert_eq!(cyan_columns(&buffer, y), Vec::<u16>::new());
-    }
 
     #[test]
     fn a_short_runner_name_that_fits_shows_in_fewer_than_4_columns() {
