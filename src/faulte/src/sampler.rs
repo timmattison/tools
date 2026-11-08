@@ -107,6 +107,13 @@ impl Sampler {
     }
 }
 
+impl Drop for Sampler {
+    /// Stops the thread and its child, so no `top` outlives the view.
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 /// The result of a read of the counters: the counters, or the text of the
 /// error.
 type CounterRead = Result<VmCounters, String>;
