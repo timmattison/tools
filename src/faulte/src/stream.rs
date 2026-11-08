@@ -594,4 +594,99 @@ mod tests {
             ]
         );
     }
+
+    /// Gives the `elapsed` of the one sample that a stream of three clock lines
+    /// finishes. The sample is the second one, and its clock line is `second`.
+    fn elapsed_of(first: &str, second: &str, third: &str) -> Option<Duration> {
+        let text = sample_at(first, "10     9000000   \n")
+            + &sample_at(second, "10     3         \n")
+            + &sample_at(third, "10     5         \n");
+
+        match events_of(&text).pop() {
+            Some(ParsedEvent::Header {
+                finished: Some(sample),
+            }) => sample.elapsed,
+            other => panic!("the stream did not finish a sample: {other:?}"),
+        }
+    }
+
+    /// The elapsed time of a sample is its clock line minus the clock line of
+    /// the sample before it. It holds across midnight, and the spaces after a
+    /// clock line are not part of the time. This test passed when it was
+    /// written, because the first green commit of the parser stored the clock
+    /// lines already.
+    #[test]
+    fn the_elapsed_time_is_the_difference_of_two_clock_lines() {
+        let cases = [
+            ("2026/09/18 12:00:00", "2026/09/18 12:00:02", 2),
+            ("2026/09/18 23:59:59", "2026/09/19 00:00:03", 4),
+            ("2026/12/31 23:59:58  ", "2027/01/01 00:00:08 ", 10),
+        ];
+        for (before, after, seconds) in cases {
+            assert_eq!(
+                elapsed_of(before, after, "2030/01/01 00:00:00"),
+                Some(Duration::from_secs(seconds)),
+                "the clock lines {before:?} and {after:?}"
+            );
+        }
+    }
+
+    /// A clock line that is bad, or a difference of zero or less, gives no
+    /// elapsed time, and no error. The sample still comes out with its rows.
+    #[test]
+    fn a_bad_backward_or_equal_clock_gives_no_elapsed_time() {
+        let good = "2026/09/18 12:00:02";
+        let cases = [
+            ("2026/09/18 12:00:05", good),
+            (good, good),
+            ("not a time", good),
+            (good, "not a time"),
+            (good, ""),
+            ("2026/09/18 12:00", good),
+            ("2026/09/18 25:00:00", good),
+            ("２０２６/09/18 12:00:00", good),
+        ];
+        for (before, after) in cases {
+            assert_eq!(
+                elapsed_of(before, after, "2030/01/01 00:00:00"),
+                None,
+                "the clock lines {before:?} and {after:?}"
+            );
+        }
+    }
+
+    /// The clock line of the sample before is the one that counts, not the
+    /// clock line of the first sample. A bad clock line in one sample spoils
+    /// that sample and the next one only.
+    #[test]
+    fn the_elapsed_time_uses_the_sample_just_before() {
+        let text = sample_at("2026/09/18 12:00:00", "10     9000000   \n")
+            + &sample_at("2026/09/18 12:00:10", "10     3         \n")
+            + &sample_at("not a time", "10     5         \n")
+            + &sample_at("2026/09/18 12:00:20", "10     7         \n")
+            + &sample_at("2026/09/18 12:00:23", "10     9         \n");
+
+        let events = events_of(&text);
+
+        assert_eq!(
+            events,
+            [
+                header_only(),
+                header_only(),
+                header_after(vec![row(10, 3)], 10),
+                ParsedEvent::Header {
+                    finished: Some(TopSample {
+                        rows: vec![row(10, 5)],
+                        elapsed: None
+                    })
+                },
+                ParsedEvent::Header {
+                    finished: Some(TopSample {
+                        rows: vec![row(10, 7)],
+                        elapsed: None
+                    })
+                },
+            ]
+        );
+    }
 }
