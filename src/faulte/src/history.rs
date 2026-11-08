@@ -2141,4 +2141,41 @@ mod tests {
         assert!(reason.ends_with(render::MORE));
         assert!(reason.starts_with('é'));
     }
+
+    /// A command is cut at a character boundary, ends with the mark of a cut
+    /// text, and the cut shrinks when one frame holds many rows.
+    #[test]
+    fn a_command_is_cut_on_a_boundary_and_by_the_share_of_the_budget() {
+        let long = RankedRow {
+            command: "日本語".repeat(10_000),
+            ..row(1, 3)
+        };
+        let mut history = History::new();
+        let id = history.add(frame(0, vec![long.clone()]));
+        let reading = history.frame(id).expect("a frame");
+        let command = &reading.row(0).unwrap().row.command;
+
+        assert!(command.len() <= STORED_COMMAND_BYTES);
+        assert!(command.ends_with(render::MORE));
+        assert!(command.starts_with("日本語"));
+
+        let mut tight = History::with_budget(10_000);
+        let rows: Vec<RankedRow> = (1..=10)
+            .map(|pid| RankedRow {
+                pid: Pid::new(pid),
+                ..long.clone()
+            })
+            .collect();
+        let id = tight.add(frame(0, rows));
+        let reading = tight.frame(id).expect("a frame");
+
+        assert!(reading
+            .rows()
+            .all(|view| view.row.command.len() <= 10_000 / 20));
+        assert_eq!(cut_text("abc", 3), "abc");
+        assert_eq!(
+            cut_text("日本語", 3 + render::MORE.len_utf8()),
+            format!("日{}", render::MORE)
+        );
+    }
 }
