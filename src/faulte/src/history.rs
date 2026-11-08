@@ -558,3 +558,114 @@ fn compact_state(view: &ClaudeView) -> CompactState {
         },
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The window of a test frame, in seconds.
+    const WINDOW_SECS: u64 = 2;
+
+    /// The account of every test row.
+    const ACCOUNT: Uid = Uid::new(501);
+
+    /// Gives the time `secs` seconds after the Unix epoch.
+    fn time(secs: u64) -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
+    }
+
+    /// Makes a row of a process that is not a session.
+    fn row(pid: u32, faults: u64) -> RankedRow {
+        RankedRow {
+            pid: Pid::new(pid),
+            uid: ACCOUNT,
+            faults,
+            rss_kib: Some(1_000),
+            started_at_epoch_secs: Some(1_700_000_000),
+            command: format!("/bin/command-{pid}"),
+            claude: ClaudeView::NotClaude,
+        }
+    }
+
+    /// Makes the sample that holds `rows`, taken at `secs`.
+    fn sample(secs: u64, rows: Vec<RankedRow>) -> SampledFrame {
+        let window = Duration::from_secs(WINDOW_SECS);
+        let claude = ClaudeTotal {
+            processes: rows
+                .iter()
+                .filter(|row| row.claude != ClaudeView::NotClaude)
+                .count(),
+            other_account: rows
+                .iter()
+                .filter(|row| row.claude == ClaudeView::OtherAccount)
+                .count(),
+            faults: rows
+                .iter()
+                .filter(|row| row.claude != ClaudeView::NotClaude)
+                .map(|row| row.faults)
+                .sum(),
+        };
+        let total_faults = rows.iter().map(|row| row.faults).sum();
+        SampledFrame {
+            observed: Observed {
+                ranking: crate::ranking::Ranking {
+                    rows,
+                    window,
+                    total_faults,
+                    claude,
+                    skipped: Skipped::default(),
+                },
+                table: Vec::new(),
+                swap: VmDelta::default(),
+                usage: SwapUsage::default(),
+                compressor_bytes: 0,
+                swap_window: window,
+                accounts: Accounts::new(),
+                now: time(secs),
+                interval: "2s".parse().expect("2s is a span"),
+            },
+            at: time(secs),
+            own: BTreeSet::new(),
+        }
+    }
+
+    /// Makes the update that holds one sample.
+    fn frame(secs: u64, rows: Vec<RankedRow>) -> Update {
+        Update::Frame(Box::new(sample(secs, rows)))
+    }
+
+    /// Makes the update that holds one gap.
+    fn gap(secs: u64, lost_secs: u64) -> Update {
+        Update::Gap(Gap {
+            at: time(secs),
+            lost: Duration::from_secs(lost_secs),
+            reason: "top stopped".to_string(),
+        })
+    }
+
+    /// The oldest entry leaves first, and `contains` says which ones are left.
+    #[test]
+    fn the_oldest_entry_leaves_first() {
+        let mut history = History::with_budget(8_000);
+        let ids: Vec<EntryId> = (0..100)
+            .map(|index| history.add(frame(index * 2, vec![row(1, 5), row(2, 3)])))
+            .collect();
+
+        let kept: Vec<bool> = ids.iter().map(|id| history.contains(*id)).collect();
+        let first_kept = kept
+            .iter()
+            .position(|kept| *kept)
+            .expect("the newest stays");
+
+        assert!(
+            first_kept > 0,
+            "a budget of 8,000 bytes cannot hold 100 frames"
+        );
+        assert!(
+            kept[first_kept..].iter().all(|kept| *kept),
+            "the kept ids are a suffix"
+        );
+        assert!(history.contains(ids[99]));
+        assert_eq!(history.oldest(), Some(ids[first_kept]));
+    }
+}
