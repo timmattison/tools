@@ -176,9 +176,13 @@ fn collect_files_recursively(path: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+/// The directory where Linux shows one entry for each process.
+#[cfg(target_os = "linux")]
+const PROC_ROOT: &str = "/proc";
+
 #[cfg(target_os = "linux")]
 fn who_is_using(path: &Path) -> Result<Vec<ProcessInfo>> {
-    get_file_users_linux(path)
+    get_file_users_linux(path, Path::new(PROC_ROOT))
 }
 
 #[cfg(target_os = "macos")]
@@ -196,9 +200,15 @@ fn who_is_using(_path: &Path) -> Result<Vec<ProcessInfo>> {
     anyhow::bail!("Unsupported platform");
 }
 
+/// Finds each process that holds `target_path`, or a file under it, open.
+///
+/// `target_path` is a file or a directory. `proc_root` is the directory that
+/// holds one entry for each process. It is `/proc` in production and a fake
+/// directory in a test. The function returns an error when it cannot read
+/// `proc_root` itself or cannot walk `target_path`.
 #[cfg(target_os = "linux")]
-fn get_file_users_linux(target_path: &Path) -> Result<Vec<ProcessInfo>> {
-    use procfs::process::{all_processes, FDTarget, MMapPath};
+fn get_file_users_linux(target_path: &Path, proc_root: &Path) -> Result<Vec<ProcessInfo>> {
+    use procfs::process::{all_processes_with_root, FDTarget, MMapPath};
     use std::collections::HashSet;
 
     let files = collect_files_recursively(target_path)?;
@@ -214,11 +224,8 @@ fn get_file_users_linux(target_path: &Path) -> Result<Vec<ProcessInfo>> {
 
     let mut processes = Vec::new();
 
-    for process in all_processes()? {
-        // A process can stop after procfs lists it. Skip it and go on.
-        let Ok(process) = process else {
-            continue;
-        };
+    for process in all_processes_with_root(proc_root)? {
+        let process = process?;
         // The kernel gives each process a positive id.
         let Ok(pid) = u32::try_from(process.pid) else {
             continue;
@@ -435,4 +442,58 @@ fn get_file_users_windows(target_path: &Path) -> Result<Vec<ProcessInfo>> {
     // A future enhancement could use the Windows API directly.
 
     Ok(processes)
+}
+
+/// Tests of the Linux scan. They use a fake proc root, thus they compile and
+/// run on Linux only. The ubuntu-latest CI job runs them.
+#[cfg(all(test, target_os = "linux"))]
+mod linux_scan_tests {
+    use super::*;
+
+    /// A numeric name, thus the procfs iterator treats the entry as a process.
+    /// The entry is a regular file. procfs opens each process entry with
+    /// `O_DIRECTORY`, thus the open fails.
+    const UNOPENABLE_ENTRY_NAME: &str = "4242";
+
+    /// The scan must skip an entry that procfs cannot open and go on.
+    ///
+    /// The fake proc root holds two entries. One is a regular file named
+    /// `4242`, which procfs cannot open. The other is a symlink named for this
+    /// test process. It points to the real entry of this process in `/proc`.
+    /// This process holds `held.txt` open, thus the scan must find it past the
+    /// bad entry.
+    ///
+    /// The order of directory entries is not fixed. That is fine. If the scan
+    /// stops at the bad entry, it returns `Err` in both orders. If the scan
+    /// skips the bad entry, it returns `Ok` with the holder in both orders.
+    #[test]
+    fn scan_skips_an_entry_it_cannot_open_and_finds_the_holder() {
+        let dir = tempfile::tempdir().expect("create a temporary directory");
+
+        let held_path = dir.path().join("held.txt");
+        std::fs::write(&held_path, b"held").expect("write the held file");
+        let _held = std::fs::File::open(&held_path).expect("open the held file");
+
+        let fake_root = dir.path().join("proc");
+        std::fs::create_dir(&fake_root).expect("create the fake proc root");
+        std::fs::write(fake_root.join(UNOPENABLE_ENTRY_NAME), b"")
+            .expect("write the unopenable entry");
+
+        let pid = std::process::id().to_string();
+        std::os::unix::fs::symlink(Path::new(PROC_ROOT).join(&pid), fake_root.join(&pid))
+            .expect("link the entry of this process");
+
+        let found = get_file_users_linux(&held_path, &fake_root).unwrap_or_else(|e| {
+            panic!("the scan must skip an entry that procfs cannot open, but it failed with {e:#}")
+        });
+
+        let expected_path = held_path
+            .canonicalize()
+            .expect("canonicalize the held file");
+        assert!(
+            found.iter().any(|info| info.pid == std::process::id()
+                && info.file_path.as_deref() == Some(expected_path.as_path())),
+            "the scan must find this process as the holder of the file, but it found {found:?}"
+        );
+    }
 }
