@@ -57,6 +57,16 @@ pub enum RunError {
 /// The longest time that the loop waits for an event.
 const TICK: Duration = Duration::from_millis(100);
 
+/// The time after which the loop draws again with no change, because the ages
+/// on the screen move.
+const REDRAW_AFTER: Duration = Duration::from_secs(1);
+
+/// Tells whether the ages on the screen moved since the last draw. The first
+/// draw has no earlier one. A clock that moved back counts as no time.
+fn ages_moved(last_draw: Option<SystemTime>, now: SystemTime) -> bool {
+    last_draw.is_none_or(|last| now.duration_since(last).unwrap_or_default() >= REDRAW_AFTER)
+}
+
 /// Runs the view until the person quits or `signalled` is set.
 ///
 /// The loop never reads `top`. It takes each update that waits in `updates`
@@ -82,16 +92,28 @@ where
     Tz::Offset: std::fmt::Display,
 {
     let mut app = App::new(History::new());
+    let mut last_draw: Option<SystemTime> = None;
+    let mut changed = false;
     while !signalled.load(Ordering::SeqCst) {
         while let Ok(update) = updates.try_recv() {
             app.on_update(update);
+            changed = true;
         }
-        let context = ViewContext { now: now(), tz };
-        terminal
-            .draw(|frame| draw(frame, &mut app, &context))
-            .map_err(io::Error::other)?;
+        let clock = now();
+        if changed || ages_moved(last_draw, clock) {
+            let context = ViewContext { now: clock, tz };
+            terminal
+                .draw(|frame| draw(frame, &mut app, &context))
+                .map_err(io::Error::other)?;
+            last_draw = Some(clock);
+            changed = false;
+        }
         match events.next(TICK)? {
-            Some(Event::Key(key)) => app.on_key(key),
+            Some(Event::Key(key)) => {
+                app.on_key(key);
+                changed = true;
+            }
+            Some(Event::Resize(..)) => changed = true,
             Some(_) | None => {}
         }
         if app.should_quit() {
