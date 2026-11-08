@@ -100,6 +100,9 @@ pub struct StreamParser {
     /// Tells whether the parser refused the text before the first sample. It
     /// refuses that text once.
     stray_refused: bool,
+    /// Tells whether the parser drops the bytes of a line that was too long,
+    /// up to the next newline.
+    discarding: bool,
 }
 
 impl StreamParser {
@@ -116,13 +119,49 @@ impl StreamParser {
         while let Some(newline) = rest.iter().position(|byte| *byte == NEWLINE) {
             let (head, tail) = rest.split_at(newline);
             rest = tail.get(1..).unwrap_or_default();
-            self.pending.extend_from_slice(head);
-            let line = String::from_utf8_lossy(&self.pending).into_owned();
-            self.pending.clear();
-            self.line(line.strip_suffix('\r').unwrap_or(&line), &mut events);
+            if self.discarding {
+                // The overlong line ends here. Its refusal went out already.
+                self.discarding = false;
+                self.lines += 1;
+            } else if self.pending.len() + head.len() > LONGEST_LINE {
+                self.refuse_long_line(&mut events);
+                self.lines += 1;
+            } else {
+                self.pending.extend_from_slice(head);
+                let line = String::from_utf8_lossy(&self.pending).into_owned();
+                self.pending.clear();
+                self.line(line.strip_suffix('\r').unwrap_or(&line), &mut events);
+            }
         }
-        self.pending.extend_from_slice(rest);
+        if !self.discarding {
+            if self.pending.len() + rest.len() > LONGEST_LINE {
+                self.refuse_long_line(&mut events);
+                self.discarding = true;
+            } else {
+                self.pending.extend_from_slice(rest);
+            }
+        }
         events
+    }
+
+    /// Refuses a line that is longer than [`LONGEST_LINE`], and drops the bytes
+    /// that the parser holds for it. The sample that the line belongs to is
+    /// refused too, because the parser lost a row or a header of it.
+    fn refuse_long_line(&mut self, events: &mut Vec<ParsedEvent>) {
+        self.pending.clear();
+        let already_refused = match self.current.as_mut() {
+            Some(current) => std::mem::replace(&mut current.refused, true),
+            None => std::mem::replace(&mut self.stray_refused, true),
+        };
+        if !already_refused {
+            events.push(ParsedEvent::Refused {
+                reason: format!(
+                    "the output of {} is not a sample of faults: a line is longer than \
+                     {LONGEST_LINE} bytes",
+                    top::PROGRAM
+                ),
+            });
+        }
     }
 
     /// Reads one whole line.
