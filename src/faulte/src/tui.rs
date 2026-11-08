@@ -18,7 +18,9 @@ use crossterm::event::Event;
 use ratatui::backend::Backend;
 use ratatui::Terminal;
 
-use crate::history::Update;
+use crate::history::{History, Update};
+use crate::tui::app::App;
+use crate::tui::view::{draw, ViewContext};
 
 /// A source of terminal events.
 pub trait Events {
@@ -52,17 +54,25 @@ pub enum RunError {
     Terminal(#[from] io::Error),
 }
 
+/// The longest time that the loop waits for an event.
+const TICK: Duration = Duration::from_millis(100);
+
 /// Runs the view until the person quits or `signalled` is set.
+///
+/// The loop never reads `top`. It takes each update that waits in `updates`
+/// with `try_recv`, so a slow `top` cannot hold back a key. A closed channel
+/// does not end the view, because the history stays readable after the
+/// sampler stops.
 ///
 /// # Errors
 /// Returns [`RunError::Terminal`] when the terminal cannot draw or be read.
 pub fn run<B, E, Tz>(
-    _terminal: &mut Terminal<B>,
-    _events: &mut E,
-    _updates: &Receiver<Update>,
+    terminal: &mut Terminal<B>,
+    events: &mut E,
+    updates: &Receiver<Update>,
     _signalled: &AtomicBool,
-    _now: &dyn Fn() -> SystemTime,
-    _tz: &Tz,
+    now: &dyn Fn() -> SystemTime,
+    tz: &Tz,
 ) -> Result<(), RunError>
 where
     B: Backend,
@@ -71,7 +81,23 @@ where
     Tz: TimeZone,
     Tz::Offset: std::fmt::Display,
 {
-    Ok(())
+    let mut app = App::new(History::new());
+    loop {
+        while let Ok(update) = updates.try_recv() {
+            app.on_update(update);
+        }
+        let context = ViewContext { now: now(), tz };
+        terminal
+            .draw(|frame| draw(frame, &mut app, &context))
+            .map_err(io::Error::other)?;
+        match events.next(TICK)? {
+            Some(Event::Key(key)) => app.on_key(key),
+            Some(_) | None => {}
+        }
+        if app.should_quit() {
+            return Ok(());
+        }
+    }
 }
 
 #[cfg(test)]
