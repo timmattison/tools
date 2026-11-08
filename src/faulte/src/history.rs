@@ -130,7 +130,13 @@ impl SpanWidth {
     /// history, and then one frame again.
     #[must_use]
     pub fn next(self) -> Self {
-        self
+        match self {
+            Self::OneFrame => Self::OneMinute,
+            Self::OneMinute => Self::FiveMinutes,
+            Self::FiveMinutes => Self::FifteenMinutes,
+            Self::FifteenMinutes => Self::Whole,
+            Self::Whole => Self::OneFrame,
+        }
     }
 
     /// Gives how far back from the end the span reaches. `None` means one
