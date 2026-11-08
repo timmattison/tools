@@ -19,7 +19,7 @@ use faulte::render;
 #[cfg(target_os = "macos")]
 use faulte::stop::{self, Decision, Timing};
 #[cfg(target_os = "macos")]
-use std::io::{self, BufRead, IsTerminal, Write};
+use std::io::{self, BufRead, ErrorKind, IsTerminal, Write};
 #[cfg(target_os = "macos")]
 use std::time::Duration;
 
@@ -106,6 +106,10 @@ const STOPPED_NOTHING: &str = "faulte stopped nothing.";
 /// What `faulte kill` says when it cannot write the question out.
 #[cfg(target_os = "macos")]
 const NO_QUESTION: &str = "the question did not reach the output, so faulte stopped nothing.";
+
+/// What `faulte check` says when a write of its output fails.
+#[cfg(target_os = "macos")]
+const NO_OUTPUT: &str = "the check did not write its output";
 
 /// The time that `faulte kill` gives a session between `SIGTERM` and
 /// `SIGKILL`.
@@ -220,10 +224,43 @@ fn run(cli: Cli) -> ExitCode {
     }
 }
 
+/// What happened to the lines that a check wrote.
+#[cfg(target_os = "macos")]
+enum Delivery {
+    /// Each line reached the output.
+    Written,
+    /// The reader of the pipe left, which is a normal end of a run that a
+    /// person pipes into `head`.
+    ReaderLeft,
+    /// The write failed for a different reason, for example a full disk.
+    /// [`deliver`] printed the reason on the error output.
+    Failed,
+}
+
+/// Writes `lines` to `output`, one line each, and stops at the first error.
+///
+/// `println!` panics on a write error, thus each line of a check goes through
+/// this function. It tells a reader that left from a write that failed.
+#[cfg(target_os = "macos")]
+fn deliver(output: &mut impl Write, lines: &[String]) -> Delivery {
+    for line in lines {
+        match writeln!(output, "{line}") {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::BrokenPipe => return Delivery::ReaderLeft,
+            Err(error) => {
+                eprintln!("{TOOL}: {NO_OUTPUT}: {error}");
+                return Delivery::Failed;
+            }
+        }
+    }
+    Delivery::Written
+}
+
 /// Gives one verdict on this Mac, or one line for each interval with `watch`.
 ///
 /// The exit code is 0 for no problem, 1 for a problem, and 2 when the kernel
-/// refuses a read.
+/// refuses a read or when a write of the output fails. A reader that left does
+/// not change the exit code.
 #[cfg(target_os = "macos")]
 fn check_now(interval: Span, watch: bool) -> ExitCode {
     let interval = Duration::from(interval);
@@ -236,13 +273,12 @@ fn check_now(interval: Span, watch: bool) -> ExitCode {
     }
     match sampler.sample(interval) {
         Ok(result) => {
-            // A `println!` panics when the reader left, thus this function
-            // writes the lines itself. The verdict still decides the exit code.
             let mut output = io::stdout().lock();
-            for line in check::report(&result) {
-                if writeln!(output, "{line}").is_err() {
-                    break;
-                }
+            if matches!(
+                deliver(&mut output, &check::report(&result)),
+                Delivery::Failed
+            ) {
+                return ExitCode::from(EXIT_ERROR);
             }
             if result.verdict.is_problem() {
                 ExitCode::from(EXIT_PROBLEM)
@@ -256,9 +292,9 @@ fn check_now(interval: Span, watch: bool) -> ExitCode {
 
 /// Prints one line for each interval.
 ///
-/// The watch ends with the exit code 0 when nothing reads its output. A
-/// `println!` panics at that point, thus this function writes the lines
-/// itself.
+/// The watch ends with the exit code 0 when the reader of its output left, and
+/// with the exit code 2 when a read of the kernel or a write of the output
+/// fails.
 #[cfg(target_os = "macos")]
 fn check_watch(sampler: &mut Sampler<Mac>, interval: Duration) -> ExitCode {
     let mut output = io::stdout().lock();
@@ -268,8 +304,10 @@ fn check_watch(sampler: &mut Sampler<Mac>, interval: Duration) -> ExitCode {
             Err(error) => return failed(&error),
         };
         let clock = chrono::Local::now().format(CLOCK_FORMAT).to_string();
-        if writeln!(output, "{}", check::watch_line(&result, &clock)).is_err() {
-            return ExitCode::SUCCESS;
+        match deliver(&mut output, &[check::watch_line(&result, &clock)]) {
+            Delivery::Written => {}
+            Delivery::ReaderLeft => return ExitCode::SUCCESS,
+            Delivery::Failed => return ExitCode::from(EXIT_ERROR),
         }
     }
 }
