@@ -3388,11 +3388,7 @@ mod tests {
 
     /// The key `R` as a terminal delivers it: the capital letter, with Shift.
     fn shift_r() -> Event {
-        key_event(
-            KeyCode::Char('R'),
-            KeyModifiers::SHIFT,
-            KeyEventKind::Press,
-        )
+        key_event(KeyCode::Char('R'), KeyModifiers::SHIFT, KeyEventKind::Press)
     }
 
     fn shows_title(frame: &[String], title: &str) -> bool {
@@ -3436,10 +3432,7 @@ mod tests {
             &channels,
             vec![press(KeyCode::Char('R'))],
         );
-        assert!(
-            shows_title(&frame, RERUN_WORKFLOW_BOX_TITLE),
-            "{frame:?}"
-        );
+        assert!(shows_title(&frame, RERUN_WORKFLOW_BOX_TITLE), "{frame:?}");
     }
 
     /// The title that the box of a job re-run shows.
@@ -3585,5 +3578,23 @@ mod tests {
         let (frame, _) = run_steps_cancelling_open(&channels, &canceller, steps);
         assert!(!shows_title(&frame, RERUN_JOB_BOX_TITLE), "{frame:?}");
         assert!(frame[11].contains(STILL_ACTIVE), "{:?}", frame[11]);
+    }
+
+    #[test]
+    fn control_capital_r_does_nothing() {
+        let channels = channels();
+        send_runs(&channels, vec![finished_run(1, 100, 60)]);
+        let (_, frame) = run_app_with(
+            Status::default(),
+            &opener(false),
+            &canceller(),
+            &channels,
+            vec![key_event(
+                KeyCode::Char('R'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                KeyEventKind::Press,
+            )],
+        );
+        assert!(!shows_title(&frame, RERUN_WORKFLOW_BOX_TITLE), "{frame:?}");
     }
 }
