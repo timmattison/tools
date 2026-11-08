@@ -474,7 +474,8 @@ impl FaultStream for TopStream {
     }
 
     fn stopper(&self) -> Stopper {
-        Stopper::new(|| {})
+        let child = Arc::clone(&self.child);
+        Stopper::new(move || child.stop())
     }
 }
 
