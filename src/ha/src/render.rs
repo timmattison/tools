@@ -5676,6 +5676,16 @@ mod tests {
     const HINTS_TAIL: &str =
         "loading…  ·  ↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  r refresh  q quit";
 
+    #[test]
+    fn the_status_line_names_the_rerun_key_between_cancel_and_refresh() {
+        let mut board = Board::new(std::time::Duration::from_hours(8));
+        let line = status_line_of(&mut board, &Status::default());
+        assert!(
+            line.ends_with("c cancel  R re-run  r refresh  q quit"),
+            "{line:?}"
+        );
+    }
+
     /// The tail of a status line whose board has stale repositories that
     /// never had a good read: the stale part with `counts`, and the hints.
     fn stale_tail(counts: &str) -> String {
