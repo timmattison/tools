@@ -924,25 +924,50 @@ impl History {
     /// Gives the name of the newest frame.
     #[must_use]
     pub fn newest_frame(&self) -> Option<EntryId> {
-        None
+        let position = self
+            .entries
+            .iter()
+            .rposition(|entry| matches!(entry, Entry::Frame(_)))?;
+        Some(self.id_at(position))
     }
 
     /// Gives the gap `id`, or `None` for a frame or an unknown name.
     #[must_use]
-    pub fn gap(&self, _id: EntryId) -> Option<&Gap> {
-        None
+    pub fn gap(&self, id: EntryId) -> Option<&Gap> {
+        match &self.entries[self.position(id)?] {
+            Entry::Gap(gap) => Some(gap),
+            Entry::Frame(_) => None,
+        }
     }
 
     /// Gives the time of the entry `id`.
     #[must_use]
-    pub fn at(&self, _id: EntryId) -> Option<SystemTime> {
-        None
+    pub fn at(&self, id: EntryId) -> Option<SystemTime> {
+        Some(self.entry_at(self.position(id)?))
     }
 
     /// Gives the counts and the times of the whole history.
     #[must_use]
     pub fn extent(&self) -> Extent {
-        Extent::default()
+        let mut extent = Extent {
+            oldest_at: (!self.entries.is_empty()).then(|| self.entry_at(0)),
+            newest_at: self
+                .entries
+                .len()
+                .checked_sub(1)
+                .map(|last| self.entry_at(last)),
+            ..Extent::default()
+        };
+        for entry in &self.entries {
+            match entry {
+                Entry::Frame(frame) => {
+                    extent.frames += 1;
+                    extent.measured += frame.window;
+                }
+                Entry::Gap(_) => extent.gaps += 1,
+            }
+        }
+        extent
     }
 
     /// Gives the name of the entry at `position`.
