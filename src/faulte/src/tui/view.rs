@@ -6,14 +6,15 @@
 //! and the time zone in a [`ViewContext`].
 
 use std::fmt::Display;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
-use chrono::TimeZone;
+use chrono::{DateTime, TimeZone, Utc};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
+use crate::history::History;
 use crate::tui::app::App;
 
 /// What holds the parts of the banner apart.
@@ -22,6 +23,15 @@ const SEPARATOR: &str = " · ";
 /// The banner while the history holds no frame.
 const WAITING_BANNER: &str =
     "WAITING · faulte waits for the first frame. top can take 30 s on a loaded Mac.";
+
+/// The first word of the banner of the live view.
+const LIVE: &str = "LIVE ·";
+
+/// What the banner of the live view says before the reason of a failed read.
+const LAST_READ_FAILED: &str = " · the last read failed: ";
+
+/// The format of a clock time.
+const CLOCK_FORMAT: &str = "%H:%M:%S";
 
 /// The lines of the timeline: the faults, the swap, and the marker.
 const TIMELINE_HEIGHT: u16 = 3;
@@ -80,15 +90,62 @@ fn paint_line(frame: &mut Frame<'_>, area: Rect, text: &str) {
     frame.render_widget(Paragraph::new(Line::raw(fitted)), area);
 }
 
+/// Gives the clock time of `at` in the time zone `tz`, for example
+/// `14:23:05`.
+fn clock<Tz: TimeZone>(at: SystemTime, tz: &Tz) -> String
+where
+    Tz::Offset: Display,
+{
+    DateTime::<Utc>::from(at)
+        .with_timezone(tz)
+        .format(CLOCK_FORMAT)
+        .to_string()
+}
+
+/// Gives the time from `at` to `now`, for example `20m 0s`. A time after
+/// `now` gives `0s`, because the clock of this Mac can move back.
+fn age(at: SystemTime, now: SystemTime) -> String {
+    occ::format_uptime(now.duration_since(at).map_or(0, |passed| passed.as_secs()))
+}
+
+/// Gives what the history holds, for example `history holds 2m 0s (60 frames,
+/// 1 gaps)`.
+fn history_text(history: &History) -> String {
+    let extent = history.extent();
+    let span = match (extent.oldest_at, extent.newest_at) {
+        (Some(oldest), Some(newest)) => newest.duration_since(oldest).unwrap_or_default(),
+        _ => Duration::ZERO,
+    };
+    format!(
+        "history holds {} ({} frames, {} gaps)",
+        occ::format_uptime(span.as_secs()),
+        extent.frames,
+        extent.gaps,
+    )
+}
+
 /// Gives the text of the banner.
-fn banner(app: &App) -> String {
-    let mut text = WAITING_BANNER.to_string();
-    if let Some(gap) = app
-        .history()
-        .newest()
-        .and_then(|newest| app.history().gap(newest))
-    {
-        text.push_str(SEPARATOR);
+fn banner<Tz: TimeZone>(app: &App, context: &ViewContext<'_, Tz>) -> String
+where
+    Tz::Offset: Display,
+{
+    let history = app.history();
+    let Some(reading) = app.reading() else {
+        let mut text = WAITING_BANNER.to_string();
+        if let Some(gap) = history.newest().and_then(|newest| history.gap(newest)) {
+            text.push_str(SEPARATOR);
+            text.push_str(&gap.reason);
+        }
+        return text;
+    };
+    let mut text = format!(
+        "{LIVE} frame of {} ({} ago){SEPARATOR}{}",
+        clock(reading.at(), context.tz),
+        age(reading.at(), context.now),
+        history_text(history),
+    );
+    if let Some(gap) = history.newest().and_then(|newest| history.gap(newest)) {
+        text.push_str(LAST_READ_FAILED);
         text.push_str(&gap.reason);
     }
     text
@@ -103,12 +160,11 @@ pub fn draw<Tz: TimeZone>(frame: &mut Frame<'_>, app: &mut App, context: &ViewCo
 where
     Tz::Offset: Display,
 {
-    let _ = context;
     let header_lines = app
         .reading()
         .map_or(0, |reading| reading.header_lines().len());
     let parts = areas(frame.area(), header_lines);
-    paint_line(frame, parts.banner, &banner(app));
+    paint_line(frame, parts.banner, &banner(app, context));
 }
 
 #[cfg(test)]
