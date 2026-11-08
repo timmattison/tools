@@ -7207,6 +7207,7 @@ dependencies = [
 name = "repowalker"
 version = "0.1.0"
 dependencies = [
+ "childenv",
  "gitscratch",
  "ignore",
  "tempfile",

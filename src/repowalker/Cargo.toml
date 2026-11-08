@@ -13,6 +13,7 @@ ignore.workspace = true
 walkdir.workspace = true
 
 [dev-dependencies]
+childenv.workspace = true
 # The shared git fixtures, including the detached-git-directory layout that
 # `find_repo_context_at` exists to read.
 gitscratch = { workspace = true, features = ["testing"] }
