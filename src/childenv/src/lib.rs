@@ -49,6 +49,18 @@
 //! adds next year leaves by default, and the cost is one setting that a user
 //! states again. `tests/user-intent-environment.rs` holds the two lists disjoint.
 //!
+//! # What holds the entrance
+//!
+//! `clippy.toml` bans `std::process::Command::new`,
+//! `tokio::process::Command::new`, and `portable_pty::CommandBuilder::new`, so a
+//! raw spawn fails the build. A spawn that must stay raw says so at its site,
+//! with an `#[expect]` and a reason. `repo_guards::git_env_sweep` refuses the
+//! other shape, a list of names written into `env_remove`.
+//!
+//! The ban does not reach a dependency that starts a child process inside its
+//! own code. `.husky/pre-commit` and `test.sh` remove the whole prefix before
+//! each cargo command for that reason.
+//!
 //! # The dependencies
 //!
 //! This crate uses the standard library only. The build script of `buildinfo`
@@ -264,6 +276,10 @@ pub fn inherited_git_variables(rule: InheritedGitEnvironment) -> Vec<OsString> {
 /// Build a command and sweep it with `rule`. This is the only place in this
 /// crate that starts a command.
 fn swept<S: AsRef<OsStr>>(program: S, rule: InheritedGitEnvironment) -> Command {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "this function is the one entrance, so it holds the one raw spawn"
+    )]
     let mut command = Command::new(program);
     shed_git_environment_from(&mut command, std::env::vars_os().map(|(key, _)| key), rule);
     command

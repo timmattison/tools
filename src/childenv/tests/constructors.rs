@@ -62,7 +62,7 @@ fn in_hostile_child(test_name: &str) -> bool {
     }
 
     let exe = std::env::current_exe().expect("the path of the test binary");
-    let mut child = Command::new(exe);
+    let mut child = childenv::fixture_command(exe);
     child
         .args(["--exact", test_name, "--nocapture"])
         .env(MARKER, "1");

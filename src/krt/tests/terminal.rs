@@ -563,6 +563,10 @@ impl Terminal {
                 pixel_height,
             })
             .expect("the pseudo terminal must open");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "portable-pty has no entrance in childenv, so the loop below applies its rule by name"
+        )]
         let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_krt"));
         for name in
             childenv::inherited_git_variables(childenv::InheritedGitEnvironment::ShedEverything)
