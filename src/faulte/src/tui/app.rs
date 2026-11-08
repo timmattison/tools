@@ -349,4 +349,14 @@ mod tests {
         app.on_key(press(KeyCode::Char(']')));
         assert_eq!(app.selection(), Selection::Past(ids[5]));
     }
+
+    /// `Home` selects the oldest entry.
+    #[test]
+    fn home_selects_the_oldest_entry() {
+        let (mut app, ids) = five();
+
+        app.on_key(press(KeyCode::Home));
+        assert_eq!(app.selection(), Selection::Past(ids[0]));
+        assert_eq!(app.reading().map(Reading::end), Some(ids[0]));
+    }
 }
