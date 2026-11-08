@@ -559,15 +559,7 @@ mod tests {
         let header = line_starting(&lines, "PID");
         let names: Vec<&str> = lines[header].split_whitespace().collect();
         assert_eq!(names, crate::render::COLUMNS);
-        assert!(
-            lines[header + 1].starts_with("10 "),
-            "{:?}",
-            lines[header + 1]
-        );
-        assert!(
-            lines[header + 2].starts_with("11 "),
-            "{:?}",
-            lines[header + 2]
-        );
+        assert_eq!(lines[header + 1].split_whitespace().next(), Some("10"));
+        assert_eq!(lines[header + 2].split_whitespace().next(), Some("11"));
     }
 }
