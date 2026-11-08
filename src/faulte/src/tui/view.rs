@@ -10,11 +10,12 @@ use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, TimeZone, Utc};
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::history::{History, Reading};
+use crate::render::{self, Accounts};
 use crate::tui::app::{App, Selection};
 
 /// What holds the parts of the banner apart.
@@ -152,6 +153,107 @@ fn paint_lines(frame: &mut Frame<'_>, area: Rect, lines: &[String]) {
     }
 }
 
+/// The place of the session column in [`render::COLUMNS`].
+const SESSION_COLUMN: usize = 7;
+
+/// The place of the state column in [`render::COLUMNS`].
+const STATE_COLUMN: usize = 8;
+
+/// The place of the directory column in [`render::COLUMNS`].
+const DIRECTORY_COLUMN: usize = 9;
+
+/// The columns that the view leaves out when each of their cells is empty.
+const OPTIONAL_COLUMNS: [usize; 3] = [SESSION_COLUMN, STATE_COLUMN, DIRECTORY_COLUMN];
+
+/// What stands between two columns of the table.
+const COLUMN_GAP: &str = " ";
+
+/// Which columns are right-aligned: the columns of numbers.
+const RIGHT_ALIGNED: [bool; COLUMN_COUNT] = [
+    true, false, true, true, true, true, false, false, false, false,
+];
+
+/// The count of columns of the table.
+const COLUMN_COUNT: usize = render::COLUMNS.len();
+
+/// The ten cells of one row of the table.
+type Cells = [String; COLUMN_COUNT];
+
+/// Gives the width of `text` on the screen, in columns.
+fn display_width(text: &str) -> usize {
+    Span::raw(text).width()
+}
+
+/// Gives the cells of each row of `reading`. The age of a row is the time
+/// from its start to the frame that the row comes from.
+fn table_cells(reading: &Reading, accounts: &Accounts) -> Vec<Cells> {
+    reading
+        .rows()
+        .map(|view| render::row_cells(reading.ranking(), view.row, accounts, view.as_of))
+        .collect()
+}
+
+/// Gives the width of each column: the widest of its name and its cells. A
+/// column of the optional ones with no text in any cell has width 0, and the
+/// view leaves it out.
+fn column_widths(cells: &[Cells]) -> [usize; COLUMN_COUNT] {
+    let mut widths = render::COLUMNS.map(display_width);
+    for row in cells {
+        for (width, cell) in widths.iter_mut().zip(row) {
+            *width = (*width).max(display_width(cell));
+        }
+    }
+    for (place, width) in widths.iter_mut().enumerate() {
+        if OPTIONAL_COLUMNS.contains(&place) && cells.iter().all(|row| row[place].is_empty()) {
+            *width = 0;
+        }
+    }
+    widths
+}
+
+/// Pads `text` with spaces to `width` columns of the screen, on the left when
+/// `right` is true and on the right when it is false.
+fn pad(text: &str, width: usize, right: bool) -> String {
+    let fill = " ".repeat(width.saturating_sub(display_width(text)));
+    if right {
+        format!("{fill}{text}")
+    } else {
+        format!("{text}{fill}")
+    }
+}
+
+/// Joins the cells of one row into the text of one line.
+fn table_line<'a>(cells: impl IntoIterator<Item = &'a str>, widths: &[usize]) -> String {
+    cells
+        .into_iter()
+        .zip(widths)
+        .zip(RIGHT_ALIGNED)
+        .filter(|((_, width), _)| **width > 0)
+        .map(|((cell, width), right)| pad(cell, *width, right))
+        .collect::<Vec<_>>()
+        .join(COLUMN_GAP)
+}
+
+/// Paints the header of the table and the rows that fit in `area`.
+fn paint_table(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
+    let page = usize::from(area.height.saturating_sub(1));
+    app.set_page_rows(page);
+    let Some(reading) = app.reading() else {
+        return;
+    };
+    let cells = table_cells(reading, app.history().accounts());
+    let widths = column_widths(&cells);
+    let mut lines = vec![Line::raw(table_line(render::COLUMNS, &widths))];
+    lines.extend(
+        cells
+            .iter()
+            .skip(app.top_row())
+            .take(page)
+            .map(|row| Line::raw(table_line(row.iter().map(String::as_str), &widths))),
+    );
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
 /// Gives the text of the banner.
 fn banner<Tz: TimeZone>(app: &App, context: &ViewContext<'_, Tz>) -> String
 where
@@ -198,6 +300,7 @@ where
     let parts = areas(frame.area(), header_lines.len());
     paint_line(frame, parts.banner, &banner(app, context));
     paint_lines(frame, parts.headers, &header_lines);
+    paint_table(frame, parts.table, app);
 }
 
 #[cfg(test)]
