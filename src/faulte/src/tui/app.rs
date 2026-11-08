@@ -280,4 +280,27 @@ mod tests {
         app.on_key(press(KeyCode::Char('l')));
         assert_eq!(app.selection(), Selection::Past(ids[2]));
     }
+
+    /// Builds six frames, forty seconds apart.
+    fn forty_apart() -> (App, Vec<EntryId>) {
+        app_with(
+            (0..6)
+                .map(|step| frame(step * 40, vec![row(1, 1)]))
+                .collect(),
+        )
+    }
+
+    /// `[` selects the newest entry that is at least 60 s older than the
+    /// selected one, and stays when no entry is old enough.
+    #[test]
+    fn the_left_bracket_goes_back_sixty_seconds() {
+        let (mut app, ids) = forty_apart();
+
+        app.on_key(press(KeyCode::Char('[')));
+        assert_eq!(app.selection(), Selection::Past(ids[3]));
+        app.on_key(press(KeyCode::Char('[')));
+        assert_eq!(app.selection(), Selection::Past(ids[1]));
+        app.on_key(press(KeyCode::Char('[')));
+        assert_eq!(app.selection(), Selection::Past(ids[1]));
+    }
 }
