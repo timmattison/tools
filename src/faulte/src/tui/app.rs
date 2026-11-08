@@ -660,6 +660,24 @@ mod tests {
         assert_eq!(app.selection(), Selection::Live);
     }
 
+    /// A process that made no faults in the newest frame has no row there.
+    /// The person selected that process, so `Enter` still opens it. On a Mac
+    /// with short-lived processes, the frame changed before the key arrived,
+    /// and the key did nothing.
+    #[test]
+    fn enter_opens_a_selected_process_that_has_no_row_in_this_frame() {
+        let mut app = three_rows();
+        app.on_key(press(KeyCode::Down));
+        let selected = app.row_key();
+        app.on_update(frame(2, vec![row(99, 5)]));
+        assert_eq!(app.selected_row(), None);
+
+        app.on_key(press(KeyCode::Enter));
+
+        assert!(app.detail_open());
+        assert_eq!(app.row_key(), selected);
+    }
+
     /// Builds one live frame with ten rows, from the most faults down.
     fn ten_rows() -> App {
         let rows = (0..10)
