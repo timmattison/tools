@@ -125,8 +125,8 @@ impl Git {
     }
 }
 
-/// Builds the git command. The steps are in this order:
-/// `command` arrives with the sweep of the inherited git environment done.
+/// Builds the git command. `command` arrives with the sweep of the inherited
+/// git environment done. The steps are in this order:
 ///
 /// 1. The directory and a closed standard input.
 /// 2. The removal of the token variable.
