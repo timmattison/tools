@@ -12,6 +12,7 @@ path = "src/main.rs"
 anyhow.workspace = true
 arboard.workspace = true
 buildinfo.workspace = true
+childenv.workspace = true
 chrono.workspace = true
 clap.workspace = true
 colored.workspace = true
@@ -25,7 +26,6 @@ thiserror.workspace = true
 unicode-width.workspace = true
 
 [dev-dependencies]
-childenv.workspace = true
 gitscratch = { workspace = true, features = ["testing"] }
 # So a test of the line the tool paints while a run works can give that run a
 # terminal to paint on. indicatif draws nothing when standard error is not a

@@ -30,7 +30,7 @@
 //! because only a run that ended on its own has a use for it.
 
 use std::io::{Read, Write};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -456,7 +456,7 @@ pub fn candidate_paths(home: Option<&str>) -> Vec<String> {
 /// which is a test of the machine rather than of the code.
 #[must_use]
 pub fn answers_version(path: &str) -> bool {
-    std::process::Command::new(path)
+    childenv::command(path)
         .arg("--version")
         .output()
         .is_ok_and(|answer| answer.status.success())
@@ -652,7 +652,7 @@ fn ask(
     model: &ModelName,
     progress: &Progress,
 ) -> Result<Answer, BuildError> {
-    let mut child = Command::new(path)
+    let mut child = childenv::command(path)
         .args(arguments(effort, model))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
