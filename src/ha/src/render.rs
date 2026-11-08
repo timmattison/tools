@@ -6904,6 +6904,22 @@ mod tests {
     }
 
     #[test]
+    fn a_runner_name_of_7_ascii_characters_shows_whole_when_the_job_name_gives_columns() {
+        let (buffer, row, y) = lone_job_row(on("abcdefg", passed_job("abcdefghijklmnopqrs")), 129);
+        assert_eq!(
+            row,
+            job_golden(
+                "✅",
+                "└ …cdefghijklmnopqrs abcdefg",
+                LONE_JOB,
+                PASSED_TIMES,
+                "?"
+            )
+        );
+        assert_eq!(cyan_columns(&buffer, y).len(), 7);
+    }
+
+    #[test]
     fn a_job_with_no_runner_and_a_long_name_keeps_the_cut_at_the_end() {
         let (buffer, row, y) = lone_job_row(passed_job(&"n".repeat(40)), 129);
         assert_eq!(
