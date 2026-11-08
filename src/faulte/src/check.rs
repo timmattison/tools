@@ -627,6 +627,25 @@ mod tests {
         assert_eq!(judge(&one_way), Verdict::OtherSystemTime);
     }
 
+    /// One direction of the compressor can pass its limit on this verdict,
+    /// thus the advice states the rule and does not call the compressor quiet.
+    #[test]
+    fn the_advice_of_other_system_time_is_true_when_one_direction_is_busy() {
+        let one_way = Reading {
+            decompressions_per_second: 1_000.0,
+            ..reading(58.0, 212_384.0)
+        };
+
+        let verdict = judge(&one_way);
+
+        assert_eq!(verdict, Verdict::OtherSystemTime);
+        assert!(
+            verdict.advice().contains("in both directions"),
+            "the advice: {}",
+            verdict.advice()
+        );
+    }
+
     /// With system time below its limit, the CPU is not in the kernel, and a
     /// busy compressor does not slow this Mac.
     #[test]
