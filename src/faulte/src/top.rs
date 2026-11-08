@@ -30,6 +30,10 @@ pub const PROGRAM: &str = "/usr/bin/top";
 /// the window to get the rate that it ranks by.
 const SAMPLES: usize = 2;
 
+/// The value of `-l` for a run that never ends. `top` reads zero as "print
+/// samples until the process stops".
+const ENDLESS: &str = "0";
+
 /// The value of `-stats`: the columns that `faulte` asks `top` for. Both are
 /// numbers, so no command name with spaces can move a column.
 const STATS: &str = "pid,faults";
@@ -41,17 +45,28 @@ const STATS: &str = "pid,faults";
 /// drops no process.
 #[must_use]
 pub fn arguments(interval: Span, max_processes: u32) -> Vec<String> {
-    stream_arguments(interval, max_processes)
+    build_arguments(&SAMPLES.to_string(), interval, max_processes)
 }
 
 /// Gives the arguments of [`PROGRAM`] for a run that never ends.
+///
+/// The list is the one of [`arguments`] with `-l 0`. `top` prints one sample
+/// after the other until the caller stops it, so one run gives a stream of
+/// samples. The first sample holds the counter since each process started, and
+/// each later sample holds the change over the interval.
 #[must_use]
 pub fn stream_arguments(interval: Span, max_processes: u32) -> Vec<String> {
+    build_arguments(ENDLESS, interval, max_processes)
+}
+
+/// Builds the one list of arguments that [`arguments`] and
+/// [`stream_arguments`] share. `count` is the value of `-l`.
+fn build_arguments(count: &str, interval: Span, max_processes: u32) -> Vec<String> {
     let seconds = Duration::from(interval).as_secs();
     vec![
         // Logging mode: print this count of samples, then stop.
         "-l".to_owned(),
-        SAMPLES.to_string(),
+        count.to_owned(),
         // The delay between the samples, in whole seconds.
         "-s".to_owned(),
         seconds.to_string(),
