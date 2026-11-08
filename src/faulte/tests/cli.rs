@@ -615,3 +615,32 @@ fn check_watch_prints_lines_and_ends_when_the_reader_goes_away() {
         "a watch with no reader ends cleanly"
     );
 }
+
+/// A reader that leaves before the report starts does not change how the run
+/// ends. The run keeps the exit code of its verdict and does not panic.
+///
+/// The verdict depends on the Mac at the time of the test, thus the test holds
+/// the two exit codes that a verdict can give.
+#[cfg(target_os = "macos")]
+#[test]
+fn check_with_no_reader_keeps_the_exit_code_of_its_verdict() {
+    use std::process::Stdio;
+
+    let mut child = Command::new(BIN)
+        .args(["check", "--interval", "1s"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the faulte binary starts");
+    // The read end of the pipe closes here, one second before the report.
+    drop(child.stdout.take());
+    let output = child.wait_with_output().expect("the check ends");
+
+    let stderr = glyphs(&output.stderr);
+    assert!(
+        matches!(output.status.code(), Some(0 | 1)),
+        "the exit code of a verdict, not {:?}: {stderr}",
+        output.status.code(),
+    );
+    assert!(!stderr.contains("panicked"), "no panic: {stderr}");
+}
