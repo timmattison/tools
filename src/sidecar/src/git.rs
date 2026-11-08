@@ -172,7 +172,11 @@ mod tests {
     /// A command that has the sweep of a fixed list of keys, so that a test does
     /// not depend on the environment of this process.
     fn synthetic_sweep() -> Command {
-        let mut command = childenv::command(GIT);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "this helper measures a fixed list of keys, so the command must not hold the sweep of the real environment"
+        )]
+        let mut command = Command::new(GIT);
         childenv::shed_git_environment_from(
             &mut command,
             [
