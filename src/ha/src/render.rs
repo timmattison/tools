@@ -93,7 +93,8 @@ const FIXED_LINES: usize = 2;
 const STATUS_SEPARATOR: &str = "  ·  ";
 /// The key hints at the end of the left part of the status line. The status line
 /// shows them only while no cancel box shows.
-const KEY_HINTS: &str = "↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  r refresh  q quit";
+const KEY_HINTS: &str =
+    "↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  R re-run  r refresh  q quit";
 /// The widest outer width of the box of the prompt.
 const PROMPT_WIDTH: usize = 44;
 /// The columns of the box that hold no text: a border column and a space of
@@ -2347,7 +2348,7 @@ mod tests {
                 "❌ acme/widgets      Release             4 issue-11     Broken build             04:30:00    4h 40m  ❌",
                 "",
                 "",
-                "updated 30s ago      ·  ↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  r refresh  q quit",
+                "updated 30s ago      ·  ↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  R re-run  r refresh  q quit",
             ]
         );
     }
@@ -5051,7 +5052,7 @@ mod tests {
     fn the_status_line_says_loading_before_the_first_refresh() {
         assert_eq!(
             status_line(100, &Status::default()),
-            "loading…  ·  ↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  r refresh  q quit"
+            "loading…  ·  ↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  R re-run  r refresh  q quit"
         );
     }
 
@@ -5063,7 +5064,7 @@ mod tests {
         };
         assert_eq!(
             status_line(100, &status),
-            "updated 30s ago      ·  ↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  r refresh  q quit"
+            "updated 30s ago      ·  ↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  R re-run  r refresh  q quit"
         );
     }
 
@@ -5076,7 +5077,7 @@ mod tests {
         };
         assert_eq!(
             status_line(120, &status),
-            "updated 30s ago      ·  API 4821/5000  ·  ↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  r refresh  q quit"
+            "updated 30s ago      ·  API 4821/5000  ·  ↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  R re-run  r refresh  q quit"
         );
     }
 
@@ -5089,8 +5090,8 @@ mod tests {
             ..Status::default()
         };
         assert_eq!(
-            status_line(140, &status),
-            "updated 30s ago      ·  API low 412/5000, next refresh 12:34  ·  ↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  r refresh  q quit"
+            status_line(150, &status),
+            "updated 30s ago      ·  API low 412/5000, next refresh 12:34  ·  ↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  R re-run  r refresh  q quit"
         );
     }
 
@@ -5146,7 +5147,7 @@ mod tests {
     fn the_status_line_names_the_cancel_key_between_open_and_refresh() {
         let line = status_line(140, &Status::default());
         assert!(
-            line.ends_with("⏎ open  c cancel  r refresh  q quit"),
+            line.ends_with("⏎ open  c cancel  R re-run  r refresh  q quit"),
             "{line}"
         );
     }
@@ -5674,7 +5675,7 @@ mod tests {
     }
 
     const HINTS_TAIL: &str =
-        "loading…  ·  ↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  r refresh  q quit";
+        "loading…  ·  ↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  R re-run  r refresh  q quit";
 
     #[test]
     fn the_status_line_names_the_rerun_key_between_cancel_and_refresh() {
