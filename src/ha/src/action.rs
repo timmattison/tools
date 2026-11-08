@@ -609,4 +609,45 @@ mod tests {
             format!("could not re-run job build (ubuntu-latest) of run 7: {error}")
         );
     }
+
+    #[test]
+    fn a_refused_rerun_gives_the_error_in_its_outcome() {
+        let dir = TempDir::new().unwrap();
+        let forbidden = "HTTP/2.0 403 Forbidden\nContent-Type: application/json\r\n\r\n{\"message\":\"Must have admin rights to Repository.\"}";
+        let body = answer_body(&dir, forbidden, 1);
+        let sender = canceller(&dir, &body);
+
+        sender.start(&repo("o/r"), RunId(7), &Action::RerunWorkflow);
+
+        let outcome = wait_for_outcome(&sender);
+        assert_eq!(outcome.action, Action::RerunWorkflow);
+        assert_eq!(
+            outcome.result,
+            Err(SourceError::Http {
+                status: 403,
+                message: "Must have admin rights to Repository.".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn the_words_of_a_rerun_job_keep_a_multi_byte_name() {
+        let action = Action::RerunJob {
+            id: JobId(11),
+            name: "日本語 🎉 café".to_owned(),
+        };
+        let error = SourceError::Failed("boom".to_owned());
+        assert_eq!(
+            action.started_text(RunId(7)),
+            "re-running job 日本語 🎉 café of run 7…"
+        );
+        assert_eq!(
+            action.accepted_text(RunId(7)),
+            "GitHub is re-running job 日本語 🎉 café of run 7"
+        );
+        assert_eq!(
+            action.refused_text(RunId(7), &error),
+            format!("could not re-run job 日本語 🎉 café of run 7: {error}")
+        );
+    }
 }
