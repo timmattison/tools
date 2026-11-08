@@ -482,19 +482,19 @@ mod tests {
     #[test]
     fn a_closed_channel_does_not_end_the_view() {
         let mut harness = Harness::new();
-        harness
-            .sender
-            .send(frame(COMMAND))
-            .expect("the channel is open");
-        let (sender, updates) = channel();
+        let sender = std::mem::replace(&mut harness.sender, channel().0);
+        sender.send(frame(COMMAND)).expect("the channel is open");
         drop(sender);
-        harness.updates = updates;
-        harness.sender = channel().0;
         let mut events = ScriptedEvents::new(vec![None, None, Some(key(KeyCode::Char('q')))]);
 
         let result = harness.run(&mut events, &clock_of(&[1_000]));
 
         assert!(result.is_ok(), "{result:?}");
         assert_eq!(events.calls, 3, "the loop kept reading keys until q");
+        assert!(
+            harness.screen().contains(COMMAND),
+            "the history stays on the screen:\n{}",
+            harness.screen()
+        );
     }
 }
