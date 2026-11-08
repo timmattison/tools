@@ -19,7 +19,7 @@ use crate::pid::{Pid, Uid};
 use crate::ranking::{rank, ClaudeRole, Observation, Ranking, Viewer};
 use crate::render::{Accounts, Measurement};
 use crate::table::{ProcessRow, TableParseError};
-use crate::top::{TopParseError, TopSample};
+use crate::top::{FaultCount, TopParseError, TopSample};
 use crate::vm::{SwapUsage, VmCounters, VmDelta};
 
 #[cfg(target_os = "macos")]
@@ -278,6 +278,54 @@ pub fn observe(machine: &dyn Machine, interval: Span) -> Result<Observed, Machin
     let (sample, wall) = machine.sample_faults(interval)?;
     let after = machine.vm_counters()?;
     let swap_window = started.elapsed();
+    join_sources(
+        machine,
+        &SampleFacts {
+            interval,
+            window: sample_window(interval, sample.elapsed, wall),
+            faults: &sample.rows,
+            before,
+            after,
+            swap_window,
+        },
+    )
+}
+
+/// What one sample of faults and the two reads of the counters around it
+/// state. [`join_sources`] reads every other source and joins them to these.
+#[derive(Debug, Clone, Copy)]
+pub struct SampleFacts<'a> {
+    /// The interval that the person asked for.
+    pub interval: Span,
+    /// The time that the faults of the sample were made over.
+    pub window: Duration,
+    /// The faults of each process in the sample.
+    pub faults: &'a [FaultCount],
+    /// The counters of the virtual memory system before the sample.
+    pub before: VmCounters,
+    /// The counters of the virtual memory system after the sample.
+    pub after: VmCounters,
+    /// The time between the two reads of the counters.
+    pub swap_window: Duration,
+}
+
+/// Reads every source that is not a sample and joins it to `facts`.
+///
+/// This is the one join of the sources. [`observe`] calls it after its own
+/// sample, and a run that reads a stream of samples calls it for each sample,
+/// so the two never rank in different ways.
+///
+/// The order of the reads is the design. The swap file comes first, then the
+/// process table, because a process that the sampler saw is still in the table
+/// when it is alive.
+///
+/// # Errors
+///
+/// Gives the error of the first source that failed.
+pub fn join_sources(
+    machine: &dyn Machine,
+    facts: &SampleFacts<'_>,
+) -> Result<Observed, MachineError> {
     let usage = machine.swap_usage()?;
     let table = machine.process_table()?;
     let claude = machine.claude_roles();
@@ -285,8 +333,8 @@ pub fn observe(machine: &dyn Machine, interval: Span) -> Result<Observed, Machin
     let now = machine.now();
     let records = records_of(machine, &table, &claude, viewer);
     let ranking = rank(&Observation {
-        window: sample_window(interval, sample.elapsed, wall),
-        faults: &sample.rows,
+        window: facts.window,
+        faults: facts.faults,
         table: &table,
         claude: &claude,
         records: &records,
@@ -297,15 +345,15 @@ pub fn observe(machine: &dyn Machine, interval: Span) -> Result<Observed, Machin
     Ok(Observed {
         ranking,
         table,
-        swap: VmDelta::between(before, after),
+        swap: VmDelta::between(facts.before, facts.after),
         usage,
         // The compressor holds what it holds now, so the count after the
         // sample is the one that says what this Mac is doing.
-        compressor_bytes: after.compressor_bytes(machine.page_size()),
-        swap_window,
+        compressor_bytes: facts.after.compressor_bytes(machine.page_size()),
+        swap_window: facts.swap_window,
         accounts,
         now,
-        interval,
+        interval: facts.interval,
     })
 }
 
