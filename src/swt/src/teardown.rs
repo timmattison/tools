@@ -27,15 +27,23 @@
 //! outright, which is precisely how a worktree that never passed its check — or
 //! a merge lock — outlives its owner. So while `swt` owns something orphanable,
 //! [`TERMINATION_SIGNALS`] mean teardown first and then an exit with the
-//! conventional 128 + signal status. Three properties of that are load-bearing:
+//! conventional 128 + signal status. The signals are SIGHUP (129), SIGINT (130)
+//! and SIGTERM (143). A closed terminal window, a dropped SSH session and a
+//! killed tmux pane send SIGHUP. Four properties of that are load-bearing:
 //!
 //! - **It is scoped.** [`arm_signal_teardown`] is called only in the act of
 //!   taking a responsibility — never at startup, and never for its own sake — and
-//!   a signal arriving with nothing at risk is handed straight back to the
-//!   default handler, so `swt` never makes a signal mean something new in a
-//!   window where there is nothing to protect. Within that act the arming comes
-//!   *first* and the state that records the responsibility second, so the two can
-//!   never disagree in the direction that matters.
+//!   a signal arriving with nothing at risk gets the default action once any
+//!   teardown in flight is done, so `swt` never makes a signal mean something
+//!   new in a window where there is nothing to protect. Within that act the
+//!   arming comes *first* and the state that records the responsibility second,
+//!   so the two can never disagree in the direction that matters.
+//! - **An inherited "ignore" stays.** A parent can start `swt` with a signal set
+//!   to ignore, and `nohup` does this for SIGHUP. A registration replaces
+//!   SIG_IGN with a handler. A child that `exec` starts keeps SIG_IGN but loses a
+//!   handler. Thus the arming does not register a signal that the parent set to
+//!   ignore (see `signals_to_read`). That signal stays ignored for `swt` and
+//!   for the green check, as it was before `swt` armed.
 //! - **It runs on a thread, not in a handler.** Teardown takes mutexes and spawns
 //!   git, none of which is async-signal-safe. A dedicated thread reading the
 //!   signals turns them into ordinary code, which is what makes the work legal.
@@ -52,11 +60,12 @@
 //! # The one case the exit status is not `swt`'s to decide
 //!
 //! A terminal aims Ctrl-C at the whole foreground process group, which contains
-//! the green check `swt` is blocked on. That check dies, `swt`'s ordinary path
+//! the green check `swt` is blocked on. The hangup of a closed terminal goes to
+//! the same group. That check dies, `swt`'s ordinary path
 //! wakes up, reads the dead check as a red one, tears the worktree down itself
 //! and exits with *its* status. Nothing is orphaned — same teardown, latched so
-//! it happens once — but such a run may report 1 rather than 130, because the
-//! work the signal interrupted got to the exit first. A signal aimed at `swt`
+//! it happens once — but such a run can report 1 in place of 130 or 129, because
+//! the work the signal interrupted got to the exit first. A signal aimed at `swt`
 //! alone leaves the check running, and there this module is the only way the run
 //! can end.
 
@@ -68,7 +77,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 #[cfg(unix)]
 use {
     crate::lock::{holds_any_lock, release_all_held_locks},
-    signal_hook::consts::{SIGINT, SIGTERM},
+    signal_hook::consts::{SIGHUP, SIGINT, SIGTERM},
     signal_hook::iterator::Signals,
     signal_hook::low_level::emulate_default_handler,
     std::os::raw::c_int,
@@ -82,13 +91,46 @@ use crate::green_check::Outcome;
 
 /// The signals `swt` turns into a teardown followed by an ordinary exit.
 ///
-/// SIGINT is the terminal's Ctrl-C and SIGTERM the polite kill. SIGKILL is the
-/// one no program is allowed to handle, and `swt` does not pretend otherwise.
+/// SIGHUP comes from a closed terminal window, a dropped SSH session or a killed
+/// tmux pane. SIGINT is the terminal's Ctrl-C and SIGTERM the polite kill.
+/// SIGKILL is the one no program is allowed to handle, and `swt` does not
+/// pretend otherwise. The arming does not read a member that the parent set to
+/// ignore (see [`signals_to_read`]).
 #[cfg(unix)]
-const TERMINATION_SIGNALS: [c_int; 2] = [SIGINT, SIGTERM];
+const TERMINATION_SIGNALS: [c_int; 3] = [SIGHUP, SIGINT, SIGTERM];
+
+/// Tells whether the parent of this process set `signal` to SIG_IGN.
+///
+/// `signal_hook` replaces the current disposition when it registers a signal,
+/// also when that disposition is SIG_IGN. Nothing in `swt` changes a disposition
+/// before it arms, so the current disposition is the inherited one. The query
+/// only reads: it does not change the disposition. If the query fails, the
+/// answer is `false`, which is the behavior of a signal with no special state.
+#[cfg(unix)]
+fn inherited_as_ignored(signal: c_int) -> bool {
+    // SAFETY: an all-zero `sigaction` is a valid value for this plain C struct.
+    let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
+    // SAFETY: the new action is a null pointer, so the call only reads the
+    // current action. `current` is a valid, writable `sigaction` for the call.
+    let failed = unsafe { libc::sigaction(signal, std::ptr::null(), &raw mut current) } != 0;
+    !failed && current.sa_sigaction == libc::SIG_IGN
+}
+
+/// Lists the members of [`TERMINATION_SIGNALS`], in order, that `swt` reads.
+///
+/// A signal for which `is_ignored` is true stays out of the list. The parent
+/// set it to ignore, and `swt` keeps that choice. The function is pure, so a
+/// test can pin it without a real signal.
+#[cfg(unix)]
+fn signals_to_read(is_ignored: impl Fn(c_int) -> bool) -> Vec<c_int> {
+    TERMINATION_SIGNALS
+        .into_iter()
+        .filter(|&signal| !is_ignored(signal))
+        .collect()
+}
 
 /// The conventional shell status for a death by signal: 128 plus the signal
-/// number, so SIGINT is 130 and SIGTERM is 143.
+/// number, so SIGHUP is 129, SIGINT is 130 and SIGTERM is 143.
 #[cfg(unix)]
 const SIGNAL_EXIT_BASE: i32 = 128;
 
@@ -202,18 +244,24 @@ pub(crate) fn take_arming_witness() -> Option<bool> {
 /// exactly as it would have without `swt`, or it dies by `swt`'s hand after the
 /// teardown it owed. Nothing returns to read a second signal, which is what
 /// makes an impatient repeat harmless.
+///
+/// The teardown sequence is taken before the question of what is at risk. A
+/// signal that arrives during a teardown in flight thus waits for both git
+/// commands of that teardown, then takes its own ending.
 #[cfg(unix)]
 fn handle_signal(signal: c_int) {
+    // Taken before the question and held across both endings. A teardown in
+    // flight empties the registry before its git commands run, so without this
+    // guard a signal in that window finds nothing at risk and stops the process
+    // between the two commands. Any other party that reaches a teardown —
+    // `create` on a red check, a guard that unwinds — finishes it first.
+    let _sequence = teardown_sequence();
     match signal_disposition(signal, anything_at_risk()) {
         // Best effort: a signal the table does not recognize leaves the process
         // running, which is the same thing it would have done with a handler
         // that had nothing to do.
         Disposition::Default => drop(emulate_default_handler(signal)),
         Disposition::Terminate(status) => {
-            // Taken before the work and held across the exit: any other party
-            // reaching a teardown — `create` on a red check, a guard unwinding —
-            // waits here rather than racing this one out of the process.
-            let _sequence = teardown_sequence();
             drop(remove_held_worktree());
             release_all_held_locks();
             process::exit(status);
@@ -235,6 +283,11 @@ fn handle_signal(signal: c_int) {
 /// the gap that the other order would open, where the registries name something
 /// orphanable and no thread is reading the signals yet.
 ///
+/// A termination signal that the parent set to ignore is not registered, because
+/// a registration replaces SIG_IGN. `nohup` sets SIGHUP to ignore on purpose, and
+/// `swt` keeps that choice. If the parent set every termination signal to
+/// ignore, no thread starts.
+///
 /// Best effort by design. If the signals cannot be registered, or the thread
 /// that reads them cannot be spawned, the run continues under the default
 /// disposition — the state it was in a moment ago — rather than failing over a
@@ -251,7 +304,11 @@ pub fn arm_signal_teardown() {
     // process and be silent for every later responsibility.
     witness_arming();
     ARMED.get_or_init(|| {
-        let Ok(mut signals) = Signals::new(TERMINATION_SIGNALS) else {
+        let signals = signals_to_read(inherited_as_ignored);
+        if signals.is_empty() {
+            return;
+        }
+        let Ok(mut signals) = Signals::new(signals) else {
             return;
         };
         drop(
@@ -311,10 +368,11 @@ fn unverified_worktree() -> MutexGuard<'static, Option<UnverifiedWorktree>> {
 /// more importantly — so nobody can end the process in the middle of one.
 ///
 /// The latch below already keeps the *work* to a single run. This is the other
-/// half: the signal thread holds this across its `process::exit`, so a party
-/// that would otherwise have exited first waits here instead of cutting a
-/// teardown in flight in half. Deliberately not reentrant-safe — a std [`Mutex`]
-/// is not — so nothing taken under it may take it again.
+/// half: the signal thread holds this across both of its endings, the
+/// `process::exit` and the default action, so a party that would otherwise have
+/// exited first waits here instead of cutting a teardown in flight in half.
+/// Deliberately not reentrant-safe — a std [`Mutex`] is not — so nothing taken
+/// under it may take it again.
 static TEARDOWN_SEQUENCE: Mutex<()> = Mutex::new(());
 
 /// Claims the teardown sequence, ignoring poisoning.
@@ -456,7 +514,10 @@ mod tests {
         hold_unverified_worktree, remove_unverified_worktree, serialize_at_risk, UnverifiedWorktree,
     };
     #[cfg(unix)]
-    use super::{signal_disposition, take_arming_witness, Disposition, SIGINT, SIGTERM};
+    use super::{
+        signal_disposition, signals_to_read, take_arming_witness, Disposition, SIGHUP, SIGINT,
+        SIGTERM, TERMINATION_SIGNALS,
+    };
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -563,7 +624,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_signal_is_left_to_its_default_disposition_when_nothing_is_at_risk() {
-        for signal in [SIGINT, SIGTERM] {
+        for signal in TERMINATION_SIGNALS {
             assert_eq!(
                 signal_disposition(signal, false),
                 Disposition::Default,
@@ -579,6 +640,11 @@ mod tests {
     #[test]
     fn a_signal_with_something_at_risk_becomes_a_teardown_and_128_plus_the_signal() {
         assert_eq!(
+            signal_disposition(SIGHUP, true),
+            Disposition::Terminate(129),
+            "SIGHUP is 128 + 1"
+        );
+        assert_eq!(
             signal_disposition(SIGINT, true),
             Disposition::Terminate(130),
             "SIGINT is 128 + 2"
@@ -587,6 +653,27 @@ mod tests {
             signal_disposition(SIGTERM, true),
             Disposition::Terminate(143),
             "SIGTERM is 128 + 15"
+        );
+    }
+
+    // A parent that set a signal to ignore meant it. `swt` must not register that
+    // signal, because registering replaces SIG_IGN with a handler.
+    #[cfg(unix)]
+    #[test]
+    fn a_signal_ignored_on_entry_is_not_read() {
+        assert_eq!(
+            signals_to_read(|_| false),
+            TERMINATION_SIGNALS.to_vec(),
+            "with nothing ignored, every termination signal is read"
+        );
+        assert_eq!(
+            signals_to_read(|signal| signal == SIGHUP),
+            vec![SIGINT, SIGTERM],
+            "an ignored SIGHUP must leave the list and keep the order of the rest"
+        );
+        assert!(
+            signals_to_read(|_| true).is_empty(),
+            "with every signal ignored, nothing is read"
         );
     }
 }

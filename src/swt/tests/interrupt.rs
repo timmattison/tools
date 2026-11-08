@@ -31,7 +31,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use shellquote::shell_quote;
-use support::{git, swt_command, unique, write_swt_check, TestRepo};
+use support::{exiting_check, git, swt_command, unique, write_swt_check, TestRepo};
 use tempfile::TempDir;
 
 /// Ceiling on every wait for a child `swt`, so a wedged run fails the test
@@ -47,15 +47,14 @@ const POLL: Duration = Duration::from_millis(10);
 /// and the run ending, so the signal cannot land after the check is over.
 const CHECK_HOLD_SECONDS: u32 = 30;
 
-/// How long the shimmed teardown git stalls, holding the teardown open for the
-/// second interrupt to land inside it.
-const TEARDOWN_HOLD_SECONDS: u32 = 2;
-
 /// Basename of the lock file inside a repository's shared git directory.
 const LOCK_FILE: &str = "swt.lock";
 
 /// Status a run interrupted with SIGINT must report: 128 + 2.
 const SIGINT_STATUS: i32 = 130;
+
+/// Status a run that a hangup ended must report: 128 + 1.
+const SIGHUP_STATUS: i32 = 129;
 
 /// Status a run terminated with SIGTERM must report: 128 + 15.
 const SIGTERM_STATUS: i32 = 143;
@@ -67,6 +66,43 @@ fn stalling_check(marker: &Path) -> String {
     format!(
         "#!/bin/sh\n: > {}\nsleep {CHECK_HOLD_SECONDS}\n",
         shell_quote(&marker.to_string_lossy())
+    )
+}
+
+/// How long a fixture script sleeps between two looks for its release file.
+/// The hangup check and the teardown shim both use it.
+const RELEASE_POLL: Duration = Duration::from_millis(100);
+
+/// How many polls a fixture script makes before it stops waiting for its
+/// release file. It comes from [`DEADLINE`], so the script stops waiting when
+/// the test does.
+const RELEASE_POLLS: u128 = DEADLINE.as_millis() / RELEASE_POLL.as_millis();
+
+/// The shell lines of a bounded wait: they return when `release` exists, or
+/// when [`RELEASE_POLLS`] polls have passed.
+fn release_wait(release: &Path) -> String {
+    let release = shell_quote(&release.to_string_lossy());
+    let poll = RELEASE_POLL.as_secs_f64();
+    format!(
+        "i=0\n\
+         while [ ! -f {release} ] && [ \"$i\" -lt {RELEASE_POLLS} ]; do sleep {poll}; i=$((i + 1)); done\n"
+    )
+}
+
+/// The body of a `.swt-check` that announces itself by creating `started`,
+/// waits for `release`, sends itself SIGHUP and then exits 0.
+///
+/// The check survives its own hangup only when its parent left SIGHUP ignored,
+/// because `exec` keeps an ignored signal and resets a caught one.
+fn hangup_ignoring_check(started: &Path, release: &Path) -> String {
+    let started = shell_quote(&started.to_string_lossy());
+    let wait = release_wait(release);
+    format!(
+        "#!/bin/sh\n\
+         : > {started}\n\
+         {wait}\
+         kill -HUP $$\n\
+         exit 0\n"
     )
 }
 
@@ -104,19 +140,23 @@ fn scratch() -> TempDir {
 /// A PATH-shadowing `git` that announces `swt`'s teardown and then holds its
 /// first command open.
 ///
-/// The second interrupt under test has to land *inside* teardown, and teardown
-/// is two back-to-back git commands that together take tens of milliseconds — so
+/// The signals under test have to land *inside* teardown, and teardown is two
+/// back-to-back git commands that together take tens of milliseconds — so
 /// timing a signal into that window with a sleep is a coin flip, and a flaky
 /// test for a flaky bug proves nothing. Making the first teardown command its
 /// own synchronization point removes the guesswork: it touches a sentinel the
-/// test waits on, then stalls before handing over to the real git. Every other
-/// git invocation is passed straight through, so nothing else about the run
-/// changes.
+/// test waits on, then holds until the test releases it, and only then hands
+/// over to the real git. The test releases it after it sent its signals. Thus
+/// each signal lands inside the teardown, whatever the load on the machine.
+/// Every other git invocation is passed straight through, so nothing else
+/// about the run changes.
 struct TeardownShim {
     /// Directory to prepend to PATH.
     dir: PathBuf,
     /// File the shim creates the moment teardown's first command runs.
     sentinel: PathBuf,
+    /// File that lets the held command go on to the real git.
+    release: PathBuf,
 }
 
 impl TeardownShim {
@@ -136,6 +176,7 @@ impl TeardownShim {
         let dir = scratch.join(unique("git-shim"));
         fs::create_dir_all(&dir).expect("shim directory");
         let sentinel = dir.join("teardown-started");
+        let release = dir.join("teardown-release");
         let shim = dir.join("git");
         fs::write(
             &shim,
@@ -143,17 +184,40 @@ impl TeardownShim {
                 "#!/bin/sh\n\
                  if [ \"$1\" = \"worktree\" ] && [ \"$2\" = \"remove\" ]; then\n\
                  \x20 : > {sentinel}\n\
-                 \x20 sleep {TEARDOWN_HOLD_SECONDS}\n\
+                 {wait}\
                  fi\n\
                  exec {real_git} \"$@\"\n",
                 sentinel = shell_quote(&sentinel.to_string_lossy()),
+                wait = release_wait(&release),
                 real_git = shell_quote(&real_git),
             ),
         )
         .expect("shim script");
         fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).expect("chmod shim");
 
-        Self { dir, sentinel }
+        Self {
+            dir,
+            sentinel,
+            release,
+        }
+    }
+
+    /// Lets the held teardown command go on to the real git.
+    fn release(&self) {
+        fs::write(&self.release, "").expect("release file");
+    }
+}
+
+/// Releases the shim when the test ends, also when it panics.
+///
+/// `swt` runs its teardown git in a process group of its own (the `shielded`
+/// flag in `src/swt/src/git.rs`), so the group kill in `RunningSwt::drop` does
+/// not reach the shim. A test that panics before it releases the shim thus
+/// releases it here. The shim then does not wait until [`RELEASE_POLLS`] runs
+/// out.
+impl Drop for TeardownShim {
+    fn drop(&mut self) {
+        let _ = fs::write(&self.release, "");
     }
 }
 
@@ -176,6 +240,19 @@ struct RunningSwt {
 impl RunningSwt {
     /// Spawns `swt` in `cwd`, optionally with `shim` prepended to its PATH.
     fn spawn(cwd: &Path, args: &[&str], shim: Option<&Path>) -> Self {
+        Self::start(cwd, args, shim, &[])
+    }
+
+    /// Spawns `swt` in `cwd` with each signal in `ignored` set to SIG_IGN, as
+    /// `nohup` does for SIGHUP.
+    fn spawn_ignoring(cwd: &Path, args: &[&str], ignored: &[c_int]) -> Self {
+        Self::start(cwd, args, None, ignored)
+    }
+
+    /// The one constructor behind [`Self::spawn`] and [`Self::spawn_ignoring`].
+    fn start(cwd: &Path, args: &[&str], shim: Option<&Path>, ignored: &[c_int]) -> Self {
+        // Copied before the closure, so the closure does not allocate after `fork`.
+        let ignored: Vec<c_int> = ignored.to_vec();
         let logs = scratch();
         let log = logs.path().join("stderr");
         let stderr = File::create(&log).expect("stderr log");
@@ -195,18 +272,25 @@ impl RunningSwt {
 
         // SAFETY: the closure runs in the forked child between `fork` and
         // `exec`, where only async-signal-safe calls are legal. `signal(2)` is
-        // one, and it touches nothing else in the child.
+        // one, and it touches nothing else in the child. The closure only reads
+        // `ignored`, a `Vec` that was built before the fork.
         unsafe {
-            command.pre_exec(|| {
+            command.pre_exec(move || {
                 // Every assertion here is stated against the *default*
                 // disposition, so each run has to start from it. A shell sets
                 // SIGINT and SIGQUIT to ignore for a background job, and a
                 // disposition of "ignore" survives `exec` — so a suite run in
                 // the background would otherwise hand `swt` a SIGINT it can
                 // never feel, and the test would measure the harness instead of
-                // the tool.
-                for signal in [libc::SIGINT, libc::SIGTERM] {
+                // the tool. `nohup` and some job managers start a child with
+                // SIGHUP set to ignore. That disposition also survives `exec`.
+                for signal in [libc::SIGHUP, libc::SIGINT, libc::SIGTERM] {
                     if libc::signal(signal, libc::SIG_DFL) == libc::SIG_ERR {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                for &signal in &ignored {
+                    if libc::signal(signal, libc::SIG_IGN) == libc::SIG_ERR {
                         return Err(std::io::Error::last_os_error());
                     }
                 }
@@ -354,6 +438,53 @@ fn a_terminated_green_check_leaves_no_worktree_and_no_branch() {
     interrupted_create_leaves_nothing_behind(libc::SIGTERM, SIGTERM_STATUS);
 }
 
+// A closed terminal window or a dropped SSH session sends SIGHUP.
+#[test]
+fn a_hung_up_green_check_leaves_no_worktree_and_no_branch() {
+    interrupted_create_leaves_nothing_behind(libc::SIGHUP, SIGHUP_STATUS);
+}
+
+// `nohup` starts its child with SIGHUP set to ignore. The user asked for the
+// hangup to have no effect, so `swt` must keep it ignored. The `kill -HUP $$` in
+// the check is the deterministic witness. A child keeps an inherited "ignore"
+// across `exec` but loses a handler, so the check survives its own hangup only
+// when `swt` kept SIGHUP ignored. The signal to `swt` itself models the hangup
+// that a closed terminal sends to the whole job.
+#[test]
+fn a_hangup_that_nohup_ignores_leaves_the_run_alone() {
+    let repo = TestRepo::new();
+    let scratch = scratch();
+    let started = scratch.path().join("check-started");
+    let release = scratch.path().join("check-release");
+    write_swt_check(repo.path(), &hangup_ignoring_check(&started, &release));
+    let name = unique("nohup");
+
+    let mut run = RunningSwt::spawn_ignoring(repo.path(), &["create", &name], &[libc::SIGHUP]);
+    run.wait_for(&started, "the green check to start");
+    let worktree = repo.sole_created_worktree(&name);
+
+    run.signal(libc::SIGHUP);
+    fs::write(&release, "").expect("release marker");
+    let status = run.wait();
+    let stderr = run.stderr_text();
+
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "the hangup that nohup told the run to ignore changed how it ended: {status:?}\n{stderr}"
+    );
+    assert!(
+        worktree.is_dir(),
+        "the hangup that nohup told the run to ignore removed the worktree at {}:\n{stderr}",
+        worktree.display()
+    );
+    assert_eq!(
+        repo.created_branches(&name).len(),
+        1,
+        "the hangup that nohup told the run to ignore removed the branch:\n{stderr}"
+    );
+}
+
 // One interrupt asks `swt` to stop; a second, while it is still stopping, must
 // not undo the stopping. Teardown is two git commands, and cut between them it
 // leaves the worst possible state: a worktree that survived and a branch that
@@ -384,6 +515,7 @@ fn a_second_interrupt_cannot_truncate_the_teardown_the_first_asked_for() {
     for _ in 0..3 {
         run.signal(libc::SIGINT);
     }
+    shim.release();
 
     let status = run.wait();
     let stderr = run.stderr_text();
@@ -404,14 +536,73 @@ fn a_second_interrupt_cannot_truncate_the_teardown_the_first_asked_for() {
     );
 }
 
+/// Runs a `swt create` whose check is red, signals `swt` alone while the shim
+/// holds the `git worktree remove` of the teardown, releases the shim after the
+/// signal, and asserts that nothing survives.
+fn signal_during_a_red_teardown_leaves_nothing_behind(signal: c_int) {
+    let repo = TestRepo::new();
+    let scratch = scratch();
+    write_swt_check(repo.path(), &exiting_check(1));
+    let shim = TeardownShim::new(scratch.path());
+    let name = unique("red-teardown");
+
+    let mut run = RunningSwt::spawn(repo.path(), &["create", &name], Some(&shim.dir));
+    run.wait_for(&shim.sentinel, "the teardown of the red check to start");
+    // The shim holds the real removal until the release below, so the worktree
+    // is still there.
+    let worktree = repo.sole_created_worktree(&name);
+
+    run.signal(signal);
+    shim.release();
+    let status = run.wait();
+    let stderr = run.stderr_text();
+
+    // The branch first: `git branch -D` is the command that the cut teardown never starts.
+    assert!(
+        repo.created_branches(&name).is_empty(),
+        "signal {signal} during the teardown of a red check orphaned the branch:\n{stderr}"
+    );
+    assert!(
+        !worktree.exists(),
+        "signal {signal} during the teardown of a red check orphaned the worktree at {}:\n{stderr}",
+        worktree.display()
+    );
+    assert_eq!(
+        repo.entries_beside(),
+        vec!["repo".to_string()],
+        "signal {signal} during the teardown of a red check left something beside the repository:\n{stderr}"
+    );
+    // After the teardown, the main thread and the signal thread race to end the
+    // run. Either ending is honest: exit 1 for the red check, or death by the signal.
+    assert!(
+        status.code() == Some(1) || status.signal() == Some(signal),
+        "the run ended in neither of the two honest ways: {status:?}\n{stderr}"
+    );
+}
+
+// A red check starts a teardown, and the teardown takes the hold out of the
+// registry before git runs. A signal in that window finds nothing at risk. It
+// must still wait for both git commands, or it cuts the teardown between them
+// and the branch stays behind. A user who reads "HEAD not green" and closes the
+// window sends this SIGHUP.
+#[test]
+fn a_hangup_during_the_teardown_of_a_red_check_cannot_orphan_the_branch() {
+    signal_during_a_red_teardown_leaves_nothing_behind(libc::SIGHUP);
+}
+
+// The same window for the polite kill of a supervisor.
+#[test]
+fn a_termination_during_the_teardown_of_a_red_check_cannot_orphan_the_branch() {
+    signal_during_a_red_teardown_leaves_nothing_behind(libc::SIGTERM);
+}
+
 // The scope of the whole mechanism. `swt` only gets to alter what a signal means
 // while it actually owns something that would otherwise be orphaned; a signal
 // arriving before it owns anything must kill the process the way it always would
 // have. `swt merge` verifies the parent worktree before it creates or locks
 // anything, so that check is the one window where the answer is provably
 // nothing.
-#[test]
-fn a_signal_with_nothing_at_risk_kills_swt_the_way_the_default_disposition_would() {
+fn signal_with_nothing_at_risk_kills_swt(signal: c_int) {
     let repo = TestRepo::new();
     let subagent = repo.add_worktree("bystander");
     let scratch = scratch();
@@ -430,20 +621,32 @@ fn a_signal_with_nothing_at_risk_kills_swt_the_way_the_default_disposition_would
         "precondition: the parent check runs before anything is locked"
     );
 
-    run.signal(libc::SIGINT);
+    run.signal(signal);
     let status = run.wait();
     let stderr = run.stderr_text();
 
     assert_eq!(
         status.code(),
         None,
-        "swt turned a signal it owned nothing for into an ordinary exit: {status:?}\n{stderr}"
+        "swt turned signal {signal}, which it owned nothing for, into an ordinary exit: {status:?}\n{stderr}"
     );
     assert_eq!(
         status.signal(),
-        Some(libc::SIGINT),
-        "the run should have died by the signal, as it would have without swt: {status:?}\n{stderr}"
+        Some(signal),
+        "the run should have died by signal {signal}, as it would have without swt: {status:?}\n{stderr}"
     );
+}
+
+#[test]
+fn a_signal_with_nothing_at_risk_kills_swt_the_way_the_default_disposition_would() {
+    signal_with_nothing_at_risk_kills_swt(libc::SIGINT);
+}
+
+// The arming is scoped: with nothing at risk, a hangup keeps its default
+// action. This test keeps that property true for SIGHUP.
+#[test]
+fn a_hangup_with_nothing_at_risk_kills_swt_the_way_the_default_disposition_would() {
+    signal_with_nothing_at_risk_kills_swt(libc::SIGHUP);
 }
 
 // The other thing a signal orphans, and the more expensive one: a merge lock
@@ -451,8 +654,7 @@ fn a_signal_with_nothing_at_risk_kills_swt_the_way_the_default_disposition_would
 // reap an hour later. The post-rebase re-verification is the one long-running
 // step that happens *inside* the locked region, so a check that stalls on
 // exactly that invocation puts the signal where it has to land.
-#[test]
-fn a_lock_held_when_the_signal_arrives_does_not_outlive_the_run() {
+fn interrupted_merge_releases_the_lock(signal: c_int, expected_status: i32) {
     let repo = TestRepo::new();
     let subagent = repo.add_worktree("locked");
     let scratch = scratch();
@@ -486,19 +688,30 @@ fn a_lock_held_when_the_signal_arrives_does_not_outlive_the_run() {
         lock.display()
     );
 
-    run.signal(libc::SIGINT);
+    run.signal(signal);
     let status = run.wait();
     let stderr = run.stderr_text();
 
     assert_eq!(
         status.code(),
-        Some(SIGINT_STATUS),
-        "an interrupted merge must exit 128 + signal: {status:?}\n{stderr}"
+        Some(expected_status),
+        "an interrupted merge must exit 128 + signal {signal}: {status:?}\n{stderr}"
     );
     assert!(
         !lock.exists(),
-        "the merge lock at {} outlived the run that held it, blocking every \
-         later merge until the staleness reap:\n{stderr}",
+        "signal {signal} left the merge lock at {} behind after the run that held it, \
+         blocking every later merge until the staleness reap:\n{stderr}",
         lock.display()
     );
+}
+
+#[test]
+fn a_lock_held_when_the_signal_arrives_does_not_outlive_the_run() {
+    interrupted_merge_releases_the_lock(libc::SIGINT, SIGINT_STATUS);
+}
+
+// The same guarantee for a lock: a hangup must not leave the merge lock behind.
+#[test]
+fn a_lock_held_when_a_hangup_arrives_does_not_outlive_the_run() {
+    interrupted_merge_releases_the_lock(libc::SIGHUP, SIGHUP_STATUS);
 }
