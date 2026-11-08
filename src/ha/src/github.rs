@@ -683,13 +683,29 @@ impl GhSource {
         self.post(&path)
     }
 
-    /// Re-runs `job` of `repo` on GitHub. (Compile-only stub.)
+    /// Re-runs `job` of `repo` on GitHub.
+    ///
+    /// The request is `POST /repos/{owner}/{repo}/actions/jobs/{job_id}/rerun`.
+    /// It changes GitHub. GitHub re-runs the job and each job that needs it.
+    /// The request needs the `repo` scope on an OAuth token or a classic token.
+    /// A login without write access gets `403`. GitHub answers `201` when it
+    /// accepts the re-run.
+    ///
+    /// The request sends no `If-None-Match` header and does not touch the `ETag`
+    /// cache.
     ///
     /// # Errors
     ///
-    /// Gives no error yet.
-    pub fn rerun_job(&self, _repo: &RepoName, _job: JobId) -> Result<(), SourceError> {
-        Ok(())
+    /// Gives the error of `gh` or the error of [`http_error`] for a status of
+    /// 400 or more.
+    pub fn rerun_job(&self, repo: &RepoName, job: JobId) -> Result<(), SourceError> {
+        let path = format!(
+            "repos/{}/{}/actions/jobs/{}/rerun",
+            repo.owner(),
+            repo.name(),
+            job.0
+        );
+        self.post(&path)
     }
 
     /// Sends a `POST` with no body to `path` and drops the answer.
