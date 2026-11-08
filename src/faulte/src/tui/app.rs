@@ -229,11 +229,9 @@ impl App {
                     self.go_live();
                 }
             }
-            KeyCode::Enter => {
-                if self.selected_row().is_some() {
-                    self.detail_open = true;
-                    self.detail_scroll = 0;
-                }
+            KeyCode::Enter if self.selected_row().is_some() => {
+                self.detail_open = true;
+                self.detail_scroll = 0;
             }
             _ => {}
         }
