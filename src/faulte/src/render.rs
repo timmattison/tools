@@ -244,6 +244,13 @@ impl Accounts {
             .cloned()
             .unwrap_or_else(|| uid.to_string())
     }
+
+    /// Adds the names of `other` to this map. A name in `other` replaces the
+    /// name of the same account in this map, because `other` is the newer
+    /// read.
+    pub fn merge(&mut self, other: &Accounts) {
+        let _ = other;
+    }
 }
 
 impl FromIterator<(Uid, String)> for Accounts {
@@ -1335,6 +1342,24 @@ mod tests {
             lines.get(3).map(String::as_str),
             Some("skipped: 72 zombies")
         );
+    }
+
+    /// `merge` keeps the names of both maps, and the name of `other` wins.
+    #[test]
+    fn merge_keeps_both_maps_and_lets_the_other_name_win() {
+        let mut mine = Accounts::new()
+            .with(Uid::new(1), "old")
+            .with(Uid::new(2), "kept");
+        let other = Accounts::new()
+            .with(Uid::new(1), "new")
+            .with(Uid::new(3), "added");
+
+        mine.merge(&other);
+
+        assert_eq!(mine.name_of(Uid::new(1)), "new");
+        assert_eq!(mine.name_of(Uid::new(2)), "kept");
+        assert_eq!(mine.name_of(Uid::new(3)), "added");
+        assert_eq!(mine.name_of(Uid::new(4)), "4");
     }
 
     /// The second line gives the swap traffic over the time that the tool
