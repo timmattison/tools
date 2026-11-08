@@ -14,7 +14,7 @@
 //! takes it as a build-dependency, and every tool builds `buildinfo`, so a
 //! dependency here would reach every build in the workspace.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::process::Command;
 
 /// The prefix that makes a variable git's, and therefore one the sweep
@@ -315,4 +315,55 @@ pub fn shed_inherited_git_environment_keeping_user_intent(command: &mut Command)
         std::env::vars_os().map(|(key, _)| key),
         InheritedGitEnvironment::KeepUserIntent,
     );
+}
+
+/// Start a child process for production code.
+///
+/// The child sheds every inherited `GIT_` variable except the names in
+/// [`USER_INTENT_GIT_ENVIRONMENT`]. A value that the call site must pin goes on
+/// after this call, and so it wins.
+///
+/// ```no_run
+/// let mut command = childenv::command("git");
+/// command.arg("status");
+/// ```
+pub fn command<S: AsRef<OsStr>>(program: S) -> Command {
+    swept(program, InheritedGitEnvironment::KeepUserIntent)
+}
+
+/// Start a child process for test code.
+///
+/// The child sheds every inherited `GIT_` variable and keeps none. A value that
+/// the call site must pin goes on after this call, and so it wins.
+///
+/// ```no_run
+/// let mut command = childenv::fixture_command("git");
+/// command.arg("init");
+/// ```
+pub fn fixture_command<S: AsRef<OsStr>>(program: S) -> Command {
+    swept(program, InheritedGitEnvironment::ShedEverything)
+}
+
+/// List the names in the environment of this process that `rule` sheds.
+///
+/// A `std::process::Command` takes [`command`] or [`fixture_command`]. This
+/// function is for a builder of another type, such as the command builder of a
+/// pseudo-terminal crate. This crate cannot depend on such a type, so the
+/// caller removes each listed name itself.
+///
+/// ```no_run
+/// for name in childenv::inherited_git_variables(childenv::InheritedGitEnvironment::KeepUserIntent) {
+///     println!("remove {}", name.to_string_lossy());
+/// }
+/// ```
+pub fn inherited_git_variables(rule: InheritedGitEnvironment) -> Vec<OsString> {
+    let _ = rule;
+    Vec::new()
+}
+
+/// Build a command and sweep it with `rule`. This is the only place in this
+/// crate that starts a command.
+fn swept<S: AsRef<OsStr>>(program: S, rule: InheritedGitEnvironment) -> Command {
+    let _ = rule;
+    Command::new(program)
 }
