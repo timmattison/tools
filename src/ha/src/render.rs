@@ -5254,6 +5254,33 @@ mod tests {
     }
 
     #[test]
+    fn the_rerun_job_box_matches_the_mock_of_issue_668() {
+        let prompt = confirm_with(
+            "fix(ha): show the run ID",
+            Action::RerunJob {
+                id: JobId(11),
+                name: "build (ubuntu-latest)".to_owned(),
+            },
+        );
+        let buffer = render_prompt(80, 16, &prompt);
+        assert_eq!(
+            box_rows(&buffer, 18, 44, 3, 10),
+            vec![
+                "┌ Re-run job? ─────────────────────────────┐",
+                "│ timmattison/tools                        │",
+                "│ CI 39149840084 on main                   │",
+                "│ fix(ha): show the run ID                 │",
+                "│ job: build (ubuntu-latest)               │",
+                "│ GitHub also re-runs each job that needs  │",
+                "│ this job.                                │",
+                "│                                          │",
+                "│ y re-run this job   any other key: keep  │",
+                "└──────────────────────────────────────────┘",
+            ]
+        );
+    }
+
+    #[test]
     fn the_box_over_a_run_row_has_no_job_line_and_no_note() {
         let buffer = render_prompt(80, 16, &confirm("fix(ha): show the run ID", None));
         // 7 rows, centered in the rows 1 to 14: the top row is row 4.

@@ -586,4 +586,25 @@ mod tests {
             format!("could not re-run run 7: {error}")
         );
     }
+
+    #[test]
+    fn the_words_of_a_rerun_job_name_the_job_and_the_run() {
+        let action = Action::RerunJob {
+            id: JobId(11),
+            name: "build (ubuntu-latest)".to_owned(),
+        };
+        let error = SourceError::Failed("boom".to_owned());
+        assert_eq!(
+            action.started_text(RunId(7)),
+            "re-running job build (ubuntu-latest) of run 7…"
+        );
+        assert_eq!(
+            action.accepted_text(RunId(7)),
+            "GitHub is re-running job build (ubuntu-latest) of run 7"
+        );
+        assert_eq!(
+            action.refused_text(RunId(7), &error),
+            format!("could not re-run job build (ubuntu-latest) of run 7: {error}")
+        );
+    }
 }
