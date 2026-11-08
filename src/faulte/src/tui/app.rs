@@ -4,7 +4,7 @@
 //! does. It holds no terminal and no clock, so a test drives it with plain
 //! data and reads the result.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
 use crate::history::{EntryId, Gap, History, ProcessKey, Reading, SpanWidth, Update};
 
@@ -60,7 +60,27 @@ impl App {
 
     /// Applies a key.
     pub fn on_key(&mut self, key: KeyEvent) {
-        let _ = (key, KeyCode::Esc, KeyEventKind::Press, KeyModifiers::NONE);
+        if key.kind != KeyEventKind::Press {
+            return;
+        }
+        match key.code {
+            KeyCode::Left | KeyCode::Char('h') => {
+                let target = self
+                    .selected_entry()
+                    .and_then(|base| self.history.previous(base));
+                self.go_past(target);
+            }
+            _ => {}
+        }
+    }
+
+    /// Selects the past entry `target`. `None` means that the move found no
+    /// entry, and the selection stays.
+    fn go_past(&mut self, target: Option<EntryId>) {
+        if let Some(id) = target {
+            self.selection = Selection::Past(id);
+            self.refresh();
+        }
     }
 
     /// Gives the reading that the table shows.
@@ -99,7 +119,7 @@ impl App {
     /// Gives the gap at the selected entry.
     #[must_use]
     pub fn selected_gap(&self) -> Option<&Gap> {
-        None
+        self.history.gap(self.selected_entry()?)
     }
 
     /// Gives the key of the selected row.
@@ -113,6 +133,8 @@ impl App {
 mod tests {
     use std::collections::BTreeSet;
     use std::time::{Duration, SystemTime};
+
+    use crossterm::event::KeyModifiers;
 
     use super::*;
     use crate::history::SampledFrame;
