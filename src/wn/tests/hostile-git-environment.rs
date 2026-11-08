@@ -35,14 +35,6 @@ const ONE_ISSUE: &str = r#"{"data":{"repository":{
 "i277":{"__typename":"Issue","number":277,"title":"First thing","state":"OPEN","stateReason":null}
 }}}"#;
 
-/// The variables that git exports into a hook and that a child must not see.
-const HOOK_VARIABLES: [&str; 4] = [
-    "GIT_DIR",
-    "GIT_INDEX_FILE",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_CONFIG_PARAMETERS",
-];
-
 #[test]
 fn wn_starts_gh_without_the_git_variables_of_a_hook() {
     let decoy_repo = TestRepo::init();
@@ -106,7 +98,7 @@ WN_FAKE_GH_BODY
     assert!(first_argument("api"), "wn never ran `gh api graphql`");
 
     for call in &calls {
-        for variable in HOOK_VARIABLES {
+        for (variable, _) in decoy.hostile_environment() {
             let prefix = format!("{variable}=");
             assert!(
                 !call.lines().any(|line| line.starts_with(&prefix)),

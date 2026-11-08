@@ -18,15 +18,6 @@ use std::fs;
 use gitscratch::testing::{DecoyRepository, TestRepo as DecoyFixture};
 use support::{swt_command, unique, write_swt_check, TestRepo};
 
-/// Names that aim git at the decoy. No line of the recorded environment of the
-/// check starts with one of them.
-const AIMING_PREFIXES: [&str; 4] = [
-    "GIT_DIR=",
-    "GIT_INDEX_FILE=",
-    "GIT_OBJECT_DIRECTORY=",
-    "GIT_CONFIG_PARAMETERS=",
-];
-
 #[test]
 fn create_acts_on_its_own_repository_and_the_check_sees_no_aiming_variable() {
     let repo = TestRepo::new();
@@ -70,8 +61,9 @@ fn create_acts_on_its_own_repository_and_the_check_sees_no_aiming_variable() {
 
     let environment = fs::read_to_string(&recorded).expect("the check records its environment");
     for line in environment.lines() {
-        for prefix in AIMING_PREFIXES {
-            assert!(!line.starts_with(prefix), "the check inherited {line:?}");
+        for (name, _) in decoy.hostile_environment() {
+            let prefix = format!("{name}=");
+            assert!(!line.starts_with(&prefix), "the check inherited {line:?}");
         }
     }
 }
