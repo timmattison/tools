@@ -367,9 +367,6 @@ fn fit_runner(name: &RunnerName, room: usize) -> Option<String> {
 /// name of this many characters or fewer is its own floor.
 const RUNNER_FLOOR_CHARS: usize = 6;
 
-/// The columns of the runner floor of a long name: 6 characters and `…`.
-const RUNNER_FLOOR_WIDTH: usize = 7;
-
 /// The text of the text cell of a job row, and the runner name that follows it.
 ///
 /// The text is the tree glyph, one space, and the job name. The text keeps its
@@ -387,7 +384,8 @@ fn fit_job_text(
         return (text, None);
     };
     let room = cell.saturating_sub(text_width(&text) + 1);
-    let floor = truncate_to_budget(runner.as_str(), RUNNER_FLOOR_WIDTH);
+    let start: String = runner.as_str().chars().take(RUNNER_FLOOR_CHARS).collect();
+    let floor = truncate_to_budget(runner.as_str(), text_width(&start) + 1);
     let without_name = text_width(glyph) + 2 + text_width(&floor);
     let fitted = if runner.as_str().chars().count() <= RUNNER_FLOOR_CHARS
         || text_width(&floor) >= text_width(runner.as_str())
