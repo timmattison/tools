@@ -683,6 +683,15 @@ impl GhSource {
         self.post(&path)
     }
 
+    /// Re-runs `job` of `repo` on GitHub. (Compile-only stub.)
+    ///
+    /// # Errors
+    ///
+    /// Gives no error yet.
+    pub fn rerun_job(&self, _repo: &RepoName, _job: JobId) -> Result<(), SourceError> {
+        Ok(())
+    }
+
     /// Sends a `POST` with no body to `path` and drops the answer.
     ///
     /// The request sends no `If-None-Match` header and does not touch the `ETag`
@@ -4219,6 +4228,23 @@ mod tests {
                 "-X",
                 "POST",
                 "repos/o/r/actions/runs/7/rerun"
+            ]]
+        );
+    }
+
+    #[test]
+    fn rerun_job_posts_to_the_rerun_path_of_the_job() {
+        let stub = Stub::new("cat \"$dir/rerun.out\"");
+        stub.file("rerun.out", CREATED);
+        stub.source().rerun_job(&repo("o/r"), JobId(11)).unwrap();
+        assert_eq!(
+            stub.requests(),
+            vec![vec![
+                "api",
+                "-i",
+                "-X",
+                "POST",
+                "repos/o/r/actions/jobs/11/rerun"
             ]]
         );
     }
