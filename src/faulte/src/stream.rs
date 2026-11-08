@@ -1172,4 +1172,26 @@ mod tests {
             "{error:?}"
         );
     }
+
+    /// A child that exits with a status that is not success, and wrote a line
+    /// on its error output, gives one end event. The event names the status
+    /// and the line, and no event follows it.
+    #[test]
+    fn a_child_that_fails_gives_an_end_with_its_status_and_its_message() {
+        let script = "echo 'boom: bad flag' >&2; echo second line >&2; exit 3";
+        let mut stream = TopStream::spawn("/bin/sh", &shell(script)).expect("the shell starts");
+
+        let events = events_until(&mut stream, |events| {
+            matches!(events.last(), Some(StreamEvent::Ended { .. }))
+        });
+
+        let [StreamEvent::Ended { reason, .. }] = events.as_slice() else {
+            panic!("one end event and nothing else: {events:?}");
+        };
+        assert!(reason.contains("exit status: 3"), "{reason}");
+        assert!(reason.contains("boom: bad flag"), "{reason}");
+        assert!(!reason.contains("second line"), "{reason}");
+        assert!(reason.contains("/bin/sh"), "{reason}");
+        assert_eq!(stream.next_event(POLL), None, "nothing follows the end");
+    }
 }
