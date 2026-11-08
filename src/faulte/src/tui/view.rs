@@ -14,7 +14,7 @@ use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use crate::history::History;
+use crate::history::{History, Reading};
 use crate::tui::app::{App, Selection};
 
 /// What holds the parts of the banner apart.
@@ -133,6 +133,25 @@ fn history_text(history: &History) -> String {
     )
 }
 
+/// Paints `lines` from the top of `area`, one for each line of `area`. Each
+/// line is cut to the width of `area`.
+fn paint_lines(frame: &mut Frame<'_>, area: Rect, lines: &[String]) {
+    for (offset, text) in lines.iter().enumerate().take(usize::from(area.height)) {
+        let Ok(offset) = u16::try_from(offset) else {
+            return;
+        };
+        paint_line(
+            frame,
+            Rect {
+                y: area.y.saturating_add(offset),
+                height: 1,
+                ..area
+            },
+            text,
+        );
+    }
+}
+
 /// Gives the text of the banner.
 fn banner<Tz: TimeZone>(app: &App, context: &ViewContext<'_, Tz>) -> String
 where
@@ -175,11 +194,10 @@ pub fn draw<Tz: TimeZone>(frame: &mut Frame<'_>, app: &mut App, context: &ViewCo
 where
     Tz::Offset: Display,
 {
-    let header_lines = app
-        .reading()
-        .map_or(0, |reading| reading.header_lines().len());
-    let parts = areas(frame.area(), header_lines);
+    let header_lines = app.reading().map_or_else(Vec::new, Reading::header_lines);
+    let parts = areas(frame.area(), header_lines.len());
     paint_line(frame, parts.banner, &banner(app, context));
+    paint_lines(frame, parts.headers, &header_lines);
 }
 
 #[cfg(test)]
