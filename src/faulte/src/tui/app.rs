@@ -232,6 +232,12 @@ impl App {
         }
     }
 
+    /// Tells whether the person asked to leave.
+    #[must_use]
+    pub fn should_quit(&self) -> bool {
+        false
+    }
+
     /// Gives the reading that the table shows.
     #[must_use]
     pub fn reading(&self) -> Option<&Reading> {
@@ -659,5 +665,20 @@ mod tests {
                 SpanWidth::OneFrame,
             ]
         );
+    }
+
+    /// `q` and `Ctrl-C` ask to quit. A plain `c` does not.
+    #[test]
+    fn q_and_control_c_quit() {
+        let (mut app, _) = five();
+        app.on_key(press(KeyCode::Char('c')));
+        assert!(!app.should_quit());
+
+        app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.should_quit());
+
+        let (mut app, _) = five();
+        app.on_key(press(KeyCode::Char('q')));
+        assert!(app.should_quit());
     }
 }
