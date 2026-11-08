@@ -42,7 +42,7 @@ use crate::duration::Span;
 use crate::machine::{Machine, MachineError, Signal};
 use crate::pid::{Pid, Uid};
 use crate::ranking::{ClaudeRole, Viewer};
-use crate::stream::first_line;
+use crate::stream::{first_line, FaultStream, TopStream};
 use crate::table::{self, ProcessRow};
 use crate::top::{self, TopSample};
 use crate::vm::{SwapUsage, VmCounters};
@@ -166,6 +166,11 @@ impl Machine for Mac {
         let output = run(top::PROGRAM, &arguments, &[])?;
         let wall = started.elapsed();
         Ok((top::parse(&output)?, wall))
+    }
+
+    fn fault_stream(&self, interval: Span) -> Result<Box<dyn FaultStream>, MachineError> {
+        let arguments = top::stream_arguments(interval, self.max_processes()?);
+        Ok(Box::new(TopStream::spawn(top::PROGRAM, &arguments)?))
     }
 
     fn process_table(&self) -> Result<Vec<ProcessRow>, MachineError> {

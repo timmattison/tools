@@ -18,6 +18,7 @@ use crate::duration::Span;
 use crate::pid::{Pid, Uid};
 use crate::ranking::{rank, ClaudeRole, Observation, Ranking, Viewer};
 use crate::render::{Accounts, Measurement};
+use crate::stream::FaultStream;
 use crate::table::{ProcessRow, TableParseError};
 use crate::top::{FaultCount, TopParseError, TopSample};
 use crate::vm::{SwapUsage, VmCounters, VmDelta};
@@ -127,6 +128,16 @@ pub trait Machine {
     /// Gives an error when the sampler does not start, ends with a status that
     /// is not success, or writes output that the parser refuses.
     fn sample_faults(&self, interval: Span) -> Result<(TopSample, Duration), MachineError>;
+
+    /// Starts an endless run of the sampler, one sample every `interval`.
+    ///
+    /// The stream gives the samples one at a time as the sampler prints them.
+    /// Dropping the stream stops the sampler.
+    ///
+    /// # Errors
+    ///
+    /// Gives an error when the sampler does not start.
+    fn fault_stream(&self, interval: Span) -> Result<Box<dyn FaultStream>, MachineError>;
 
     /// Reads one row for each process of every account.
     ///

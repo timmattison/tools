@@ -15,6 +15,7 @@ use faulte::machine::{join_sources, observe, Machine, MachineError, SampleFacts,
 use faulte::pid::{Pid, Uid};
 use faulte::ranking::{ClaudeRole, ClaudeView, Viewer};
 use faulte::state::SessionState;
+use faulte::stream::FaultStream;
 use faulte::table::ProcessRow;
 use faulte::top::{self, TopSample};
 use faulte::vm::{SwapUsage, VmCounters};
@@ -179,6 +180,10 @@ impl FakeMachine {
 impl Machine for FakeMachine {
     fn sample_faults(&self, _interval: Span) -> Result<(TopSample, Duration), MachineError> {
         self.sample.clone()
+    }
+
+    fn fault_stream(&self, _interval: Span) -> Result<Box<dyn FaultStream>, MachineError> {
+        unreachable!("a read of the machine started a stream of faults");
     }
 
     fn process_table(&self) -> Result<Vec<ProcessRow>, MachineError> {
