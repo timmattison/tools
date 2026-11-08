@@ -13,6 +13,9 @@ use crate::history::{EntryId, Gap, History, ProcessKey, Reading, SpanWidth, Upda
 /// How far `[` and `]` jump.
 const JUMP: Duration = Duration::from_secs(60);
 
+/// The rows of one screen before the view states its size.
+const DEFAULT_PAGE_ROWS: usize = 20;
+
 /// Which time the view shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Selection {
@@ -57,6 +60,8 @@ pub struct App {
     detail_open: bool,
     /// How many lines the detail text is scrolled.
     detail_scroll: u16,
+    /// How many table rows fit on one screen. It is never 0.
+    page_rows: usize,
     /// The reading that the table shows.
     reading: Option<Reading>,
 }
@@ -72,6 +77,7 @@ impl App {
             row: None,
             detail_open: false,
             detail_scroll: 0,
+            page_rows: DEFAULT_PAGE_ROWS,
             reading: None,
         };
         app.refresh();
@@ -169,6 +175,20 @@ impl App {
             }
             KeyCode::Up | KeyCode::Char('k') => self.move_row(Way::Back, 1),
             KeyCode::Down | KeyCode::Char('j') => self.move_row(Way::Forward, 1),
+            KeyCode::PageUp => {
+                if self.detail_open {
+                    self.detail_scroll = self.detail_scroll.saturating_sub(self.page_lines());
+                } else {
+                    self.move_row(Way::Back, self.page_rows);
+                }
+            }
+            KeyCode::PageDown => {
+                if self.detail_open {
+                    self.detail_scroll = self.detail_scroll.saturating_add(self.page_lines());
+                } else {
+                    self.move_row(Way::Forward, self.page_rows);
+                }
+            }
             KeyCode::Home => self.go_past(self.history.oldest()),
             KeyCode::End => self.go_live(),
             KeyCode::Esc => {
@@ -186,6 +206,11 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Gives the lines of one screen of the detail text.
+    fn page_lines(&self) -> u16 {
+        u16::try_from(self.page_rows).unwrap_or(u16::MAX)
     }
 
     /// Selects the live view.
@@ -259,12 +284,12 @@ impl App {
     /// Gives how many lines the detail text is scrolled.
     #[must_use]
     pub fn detail_scroll(&self) -> u16 {
-        0
+        self.detail_scroll
     }
 
     /// Sets how many table rows fit on one screen.
     pub fn set_page_rows(&mut self, rows: usize) {
-        let _ = rows;
+        self.page_rows = rows.max(1);
     }
 
     /// Gives the key of the selected row.
