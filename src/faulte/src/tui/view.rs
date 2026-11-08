@@ -107,6 +107,10 @@ fn paint_line(frame: &mut Frame<'_>, area: Rect, text: &str) {
     frame.render_widget(Paragraph::new(Line::raw(fitted)), area);
 }
 
+/// The line of keys at the bottom of the screen.
+const KEYS_LINE: &str =
+    "←/→ frame  [ ] minute  Home oldest  End live  w span  ↑/↓ row  Enter detail  q quit";
+
 /// Gives the clock time of `at` in the time zone `tz`, for example
 /// `14:23:05`.
 fn clock<Tz: TimeZone>(at: SystemTime, tz: &Tz) -> String
@@ -542,6 +546,7 @@ where
         let hidden = render::more_line(reading.ranking(), reading.other_rows(), 0);
         paint_line(frame, parts.more, hidden.as_deref().unwrap_or_default());
     }
+    paint_line(frame, parts.keys, KEYS_LINE);
 }
 
 #[cfg(test)]
