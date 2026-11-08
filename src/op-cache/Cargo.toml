@@ -25,7 +25,8 @@ sysinfo.workspace = true
 tempfile = "3"
 
 [dev-dependencies]
-gitscratch.workspace = true
+childenv.workspace = true
+gitscratch = { workspace = true, features = ["testing"] }
 
 [lints]
 workspace = true
