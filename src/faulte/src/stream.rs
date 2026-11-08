@@ -1305,4 +1305,33 @@ mod tests {
             "the child {pid} is gone after the drop"
         );
     }
+
+    /// The handle stops the child from another thread, and the stream then
+    /// gives its end. A second stop does nothing. The handle outlives the
+    /// stream, and a stop through it after the drop does nothing too.
+    #[test]
+    fn the_stopper_stops_the_child_from_another_thread() {
+        let (mut stream, pid) = stub_with_pid();
+        let stopper = stream.stopper();
+        let remote = stopper.clone();
+
+        std::thread::spawn(move || {
+            remote.stop();
+            remote.stop();
+        })
+        .join()
+        .expect("the stop does not panic");
+
+        let events = events_until(&mut stream, |events| {
+            matches!(events.last(), Some(StreamEvent::Ended { .. }))
+        });
+        assert!(matches!(events.last(), Some(StreamEvent::Ended { .. })));
+        assert!(
+            !process_exists(pid),
+            "the child {pid} is gone after the stop"
+        );
+        stopper.stop();
+        drop(stream);
+        stopper.stop();
+    }
 }
