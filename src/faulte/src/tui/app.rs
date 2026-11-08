@@ -22,6 +22,27 @@ pub enum Selection {
     Past(EntryId),
 }
 
+/// The row that the person selected. It names a process, so that the
+/// selection stays on that process while the rows reorder.
+#[derive(Debug, Clone, Copy)]
+struct RowSelection {
+    /// The process of the row.
+    key: ProcessKey,
+    /// The last known position of the row. When the process has no row in the
+    /// reading, this is a position inside the rows, so that a move starts
+    /// near the place where the row was.
+    index: usize,
+}
+
+/// The way that a move of the row selection goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Way {
+    /// Toward the first row.
+    Back,
+    /// Toward the last row.
+    Forward,
+}
+
 /// The state of the view.
 pub struct App {
     /// Every entry that the sampler gave.
@@ -30,6 +51,8 @@ pub struct App {
     selection: Selection,
     /// How much history the table sums.
     span: SpanWidth,
+    /// The selected row, if any.
+    row: Option<RowSelection>,
     /// The reading that the table shows.
     reading: Option<Reading>,
 }
@@ -42,6 +65,7 @@ impl App {
             history,
             selection: Selection::Live,
             span: SpanWidth::OneFrame,
+            row: None,
             reading: None,
         };
         app.refresh();
@@ -56,6 +80,48 @@ impl App {
             Selection::Past(id) => Some(id),
         };
         self.reading = end.and_then(|end| self.history.span(end, self.span));
+        self.follow_row();
+    }
+
+    /// Keeps the row selection on its process. When the process has a row,
+    /// the index is that position. When it has none, the key stays and the
+    /// index moves into the rows, so that the row comes back when the person
+    /// moves to a frame that holds it.
+    fn follow_row(&mut self) {
+        let Some(selection) = &mut self.row else {
+            return;
+        };
+        let rows = self
+            .reading
+            .as_ref()
+            .map_or(0, |reading| reading.rows().len());
+        selection.index = self
+            .reading
+            .as_ref()
+            .and_then(|reading| reading.position_of(selection.key))
+            .unwrap_or_else(|| selection.index.min(rows.saturating_sub(1)));
+    }
+
+    /// Moves the row selection by `by` rows. The first move selects the first
+    /// row. A move stops at each end.
+    fn move_row(&mut self, way: Way, by: usize) {
+        let Some(reading) = &self.reading else {
+            return;
+        };
+        let rows = reading.rows().len();
+        let target = match (&self.row, way) {
+            (None, _) => 0,
+            (Some(selection), Way::Back) => selection.index.saturating_sub(by),
+            (Some(selection), Way::Forward) => {
+                (selection.index.saturating_add(by)).min(rows.saturating_sub(1))
+            }
+        };
+        if let Some(view) = reading.row(target) {
+            self.row = Some(RowSelection {
+                key: view.key,
+                index: target,
+            });
+        }
     }
 
     /// Adds an update to the history.
@@ -95,6 +161,8 @@ impl App {
                     self.go_past(target);
                 }
             }
+            KeyCode::Up | KeyCode::Char('k') => self.move_row(Way::Back, 1),
+            KeyCode::Down | KeyCode::Char('j') => self.move_row(Way::Forward, 1),
             KeyCode::Home => self.go_past(self.history.oldest()),
             KeyCode::End | KeyCode::Esc => self.go_live(),
             _ => {}
@@ -159,13 +227,14 @@ impl App {
     /// no row is selected or the selected process has no row.
     #[must_use]
     pub fn selected_row(&self) -> Option<usize> {
-        None
+        let selection = self.row?;
+        self.reading.as_ref()?.position_of(selection.key)
     }
 
     /// Gives the key of the selected row.
     #[must_use]
     pub fn row_key(&self) -> Option<ProcessKey> {
-        None
+        self.row.map(|selection| selection.key)
     }
 }
 
