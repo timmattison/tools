@@ -684,6 +684,15 @@ impl GhSource {
         Ok(())
     }
 
+    /// Re-runs `run` of `repo` on GitHub. (Compile-only stub.)
+    ///
+    /// # Errors
+    ///
+    /// Gives no error yet.
+    pub fn rerun_run(&self, _repo: &RepoName, _run: RunId) -> Result<(), SourceError> {
+        Ok(())
+    }
+
     /// Fetches the page `number` of the runs of `repo` for `filter`.
     ///
     /// `family` names the kind of filter without its value, for the cache key
@@ -4169,6 +4178,26 @@ mod tests {
         assert!(requests[2]
             .iter()
             .any(|arg| arg.starts_with("If-None-Match: ")));
+    }
+
+    /// The answer of GitHub for a re-run that it created.
+    const CREATED: &str = "HTTP/2.0 201 Created\nContent-Type: application/json; charset=utf-8\r\nX-Ratelimit-Limit: 5000\r\nX-Ratelimit-Remaining: 4999\r\nX-Ratelimit-Reset: 1791977652\r\n\r\n{}";
+
+    #[test]
+    fn rerun_run_posts_to_the_rerun_path_of_the_run() {
+        let stub = Stub::new("cat \"$dir/rerun.out\"");
+        stub.file("rerun.out", CREATED);
+        stub.source().rerun_run(&repo("o/r"), RunId(7)).unwrap();
+        assert_eq!(
+            stub.requests(),
+            vec![vec![
+                "api",
+                "-i",
+                "-X",
+                "POST",
+                "repos/o/r/actions/runs/7/rerun"
+            ]]
+        );
     }
 
     /// The output of `gh api -i graphql` for a `200`. The headers state the
