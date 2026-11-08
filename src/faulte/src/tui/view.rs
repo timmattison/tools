@@ -702,4 +702,31 @@ mod tests {
             "{lines:#?}"
         );
     }
+
+    /// Gives the index of the cell of the timeline that holds the marker, or
+    /// `None` when the line under the swap row holds no marker.
+    fn marker_cell(lines: &[String]) -> Option<usize> {
+        let swap = line_starting(lines, "SWAP ");
+        lines[swap + 1]
+            .chars()
+            .position(|glyph| glyph == '▲')
+            .map(|column| column - 7)
+    }
+
+    /// The marker stands under the cell of the selected entry.
+    #[test]
+    fn the_marker_stands_under_the_selected_cell() {
+        let mut app = five_with_a_gap();
+
+        assert_eq!(
+            marker_cell(&screen(&paint(&mut app, 120, 24, 100))),
+            Some(4)
+        );
+
+        app.on_key(press(KeyCode::Left));
+        assert_eq!(
+            marker_cell(&screen(&paint(&mut app, 120, 24, 100))),
+            Some(3)
+        );
+    }
 }
