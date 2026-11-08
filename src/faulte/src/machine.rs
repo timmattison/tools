@@ -1,7 +1,8 @@
 //! The machine that `faulte` reads, behind one trait.
 //!
 //! Every fact of this Mac reaches `faulte` through this module: the sample of
-//! `top`, the process table of `ps`, the Claude Code role of each process, the
+//! `top`, the endless stream of samples from one `top` child (for `faulte tui`),
+//! the process table of `ps`, the Claude Code role of each process, the
 //! registry record of each session, the counters of the virtual memory system,
 //! the account names, and the clock. One trait holds all of them, so a test
 //! gives each fact as a plain value and no test reads the real machine.
