@@ -333,7 +333,7 @@ const NO_RUN: &str = "the file holds no run";
 
 /// Invoke the freshly built `krt` binary.
 fn krt() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_krt"))
+    childenv::fixture_command(env!("CARGO_BIN_EXE_krt"))
 }
 
 /// What one run of the binary wrote, and how it exited.

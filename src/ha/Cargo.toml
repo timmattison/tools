@@ -6,11 +6,11 @@ description = "Hot actions: a self-refreshing terminal view of GitHub Actions ru
 
 [dependencies]
 buildinfo.workspace = true
+childenv.workspace = true
 chrono.workspace = true
 clap.workspace = true
 crossterm.workspace = true
 dirs.workspace = true
-gitscratch.workspace = true
 open.workspace = true
 ratatui.workspace = true
 rust_decimal.workspace = true

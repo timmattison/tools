@@ -318,13 +318,13 @@ pub(crate) fn user_shell() -> OsString {
 /// finds a repository at all, and `GIT_CONFIG_PARAMETERS` sets any key it
 /// likes. A list that named all of those today would still be a list, and it
 /// strips nothing new the day git adds a variable. So this calls
-/// [`gitscratch::shed_inherited_git_environment_keeping_user_intent`], which
+/// [`childenv::command`], which
 /// enumerates [`std::env::vars_os`] and removes every name that starts with
 /// `GIT_`, except six. That rule is written once, in the crate that states it,
 /// and it is tested there.
 ///
 /// **The sweep keeps the six names of
-/// [`gitscratch::USER_INTENT_GIT_ENVIRONMENT`], because this child acts for the
+/// [`childenv::USER_INTENT_GIT_ENVIRONMENT`], because this child acts for the
 /// user.** A `gsw` started from inside a pre-commit hook holds `GIT_DIR`,
 /// `GIT_INDEX_FILE`, `GIT_PREFIX` and `GIT_CONFIG_PARAMETERS`, and the user
 /// asked for none of them. But a user also exports `GIT_SSH_COMMAND` or
@@ -333,9 +333,8 @@ pub(crate) fn user_shell() -> OsString {
 /// and `M` pushes, so a child without them fails to authenticate, or rebases
 /// under the wrong identity.
 pub(crate) fn shell_child(shell: &OsStr, script: String) -> Command {
-    let mut command = Command::new(shell);
+    let mut command = childenv::command(shell);
     command.arg("-ic").arg(script);
-    gitscratch::shed_inherited_git_environment_keeping_user_intent(&mut command);
     detach_from_terminal(&mut command);
     command
 }
@@ -1149,7 +1148,7 @@ mod run_tests {
                  assertion below is measured against nothing",
             );
         }
-        for name in gitscratch::USER_INTENT_GIT_ENVIRONMENT {
+        for name in childenv::USER_INTENT_GIT_ENVIRONMENT {
             assert_eq!(
                 std::env::var(name).ok(),
                 Some(user_intent_value(name)),
@@ -1184,7 +1183,7 @@ mod run_tests {
             );
         }
         let run_environment = run_stub.environment();
-        for name in gitscratch::USER_INTENT_GIT_ENVIRONMENT {
+        for name in childenv::USER_INTENT_GIT_ENVIRONMENT {
             let kept = format!("{name}={}", user_intent_value(name));
             let held = run_environment.lines().filter(|line| *line == kept).count();
             assert_eq!(
@@ -1405,7 +1404,7 @@ pub(crate) mod stub_shell {
         /// Start the script once, so the test that follows does not pay for
         /// the first start of it.
         pub(crate) fn warm(&self) {
-            let status = Command::new(&self.path)
+            let status = childenv::fixture_command(&self.path)
                 .env(WARMUP_VAR, "1")
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
@@ -1883,7 +1882,7 @@ pub(crate) mod stub_shell {
     /// `GIT_CONFIG_PARAMETERS` sets any key at all.
     ///
     /// The child also holds each name of
-    /// [`gitscratch::USER_INTENT_GIT_ENVIRONMENT`], with the value
+    /// [`childenv::USER_INTENT_GIT_ENVIRONMENT`], with the value
     /// [`user_intent_value`] gives it. Those names come from the constant and
     /// not from this table, so a name gitscratch adds is tested here too.
     pub(crate) const HOSTILE_GIT_ENVIRONMENT: [(&str, &str); 7] = [
@@ -1900,7 +1899,7 @@ pub(crate) mod stub_shell {
     ];
 
     /// The value the hostile environment gives `name`, a name of
-    /// [`gitscratch::USER_INTENT_GIT_ENVIRONMENT`].
+    /// [`childenv::USER_INTENT_GIT_ENVIRONMENT`].
     ///
     /// Each value holds its own name, so a child that kept the name with
     /// another value fails as surely as a child that lost it. The value is not
@@ -1916,7 +1915,7 @@ pub(crate) mod stub_shell {
     /// user states on purpose.
     ///
     /// The rule is the [`GIT_PREFIX`] with the names of
-    /// [`gitscratch::USER_INTENT_GIT_ENVIRONMENT`] taken out, which is the rule
+    /// [`childenv::USER_INTENT_GIT_ENVIRONMENT`] taken out, which is the rule
     /// the children hold.
     pub(crate) fn shed_git_lines(environment: &str) -> Vec<&str> {
         environment
@@ -1924,17 +1923,17 @@ pub(crate) mod stub_shell {
             .filter(|line| {
                 line.split_once('=').is_some_and(|(key, _)| {
                     key.starts_with(GIT_PREFIX)
-                        && !gitscratch::USER_INTENT_GIT_ENVIRONMENT.contains(&key)
+                        && !childenv::USER_INTENT_GIT_ENVIRONMENT.contains(&key)
                 })
             })
             .collect()
     }
 
-    /// The names of [`gitscratch::USER_INTENT_GIT_ENVIRONMENT`] that
+    /// The names of [`childenv::USER_INTENT_GIT_ENVIRONMENT`] that
     /// `environment` does not hold with the value [`user_intent_value`] gives
     /// them, `except` left out.
     pub(crate) fn user_intent_lost(environment: &str, except: Option<&str>) -> Vec<&'static str> {
-        gitscratch::USER_INTENT_GIT_ENVIRONMENT
+        childenv::USER_INTENT_GIT_ENVIRONMENT
             .iter()
             .copied()
             .filter(|name| Some(*name) != except)
@@ -1991,7 +1990,8 @@ pub(crate) mod stub_shell {
         let workdir = tempfile::tempdir().expect("tempdir");
         let stdout = NamedTempFile::new().expect("a file for what the child says");
         let stderr = NamedTempFile::new().expect("a file for why the child stopped");
-        let mut command = Command::new(std::env::current_exe().expect("the path of this binary"));
+        let mut command =
+            childenv::fixture_command(std::env::current_exe().expect("the path of this binary"));
         command
             .args(["--exact", "--nocapture", test])
             .current_dir(workdir.path())
@@ -2006,7 +2006,7 @@ pub(crate) mod stub_shell {
         for (name, value) in HOSTILE_GIT_ENVIRONMENT {
             command.env(name, value);
         }
-        for name in gitscratch::USER_INTENT_GIT_ENVIRONMENT {
+        for name in childenv::USER_INTENT_GIT_ENVIRONMENT {
             command.env(name, user_intent_value(name));
         }
         for (name, value) in extra {

@@ -434,7 +434,7 @@ fn origin_url(repo_dir: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
-    use std::process::Command;
+
     use std::time::Instant;
 
     use tempfile::TempDir;
@@ -697,8 +697,7 @@ mod tests {
     /// Runs a git command in `dir` with a hermetic environment and checks that
     /// it worked.
     fn git(dir: &Path, args: &[&str]) {
-        let mut command = Command::new("git");
-        gitscratch::shed_inherited_git_environment(&mut command);
+        let mut command = childenv::fixture_command("git");
         let output = command
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null")

@@ -116,7 +116,7 @@ const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/two-runs.js
 
 /// Invoke the freshly built `krt` binary.
 fn krt() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_krt"))
+    childenv::fixture_command(env!("CARGO_BIN_EXE_krt"))
 }
 
 /// Assert that `flag` makes `krt` print one build string and exit with success.

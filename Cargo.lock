@@ -909,6 +909,7 @@ dependencies = [
  "ab_glyph",
  "anyhow",
  "base64 0.22.1",
+ "childenv",
  "chrono",
  "clap",
  "crossterm",
@@ -932,6 +933,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "buildinfo",
+ "childenv",
  "clap",
  "gitscratch",
  "libc",
@@ -1051,6 +1053,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "buildinfo",
+ "childenv",
  "clap",
  "filewalker",
  "indicatif",
@@ -1140,6 +1143,7 @@ dependencies = [
 name = "buildinfo"
 version = "0.1.0"
 dependencies = [
+ "childenv",
  "const_format",
 ]
 
@@ -1300,6 +1304,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "buildinfo",
+ "childenv",
  "clap",
  "csv",
  "globset",
@@ -1748,6 +1753,7 @@ version = "0.1.0"
 dependencies = [
  "aho-corasick",
  "buildinfo",
+ "childenv",
  "chrono",
  "clap",
  "colored",
@@ -2195,6 +2201,7 @@ version = "0.1.0"
 dependencies = [
  "arboard",
  "buildinfo",
+ "childenv",
  "clap",
  "tempfile",
  "thiserror 2.0.21",
@@ -2206,6 +2213,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "buildinfo",
+ "childenv",
  "clap",
  "ignore",
  "rayon",
@@ -2240,6 +2248,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "buildinfo",
+ "childenv",
  "clap",
  "crossterm",
  "human_bytes",
@@ -2514,6 +2523,7 @@ name = "faulte"
 version = "0.1.0"
 dependencies = [
  "buildinfo",
+ "childenv",
  "chrono",
  "clap",
  "comfy-table",
@@ -3902,6 +3912,7 @@ name = "goup"
 version = "0.1.0"
 dependencies = [
  "buildinfo",
+ "childenv",
  "clap",
  "repowalker",
 ]
@@ -3912,6 +3923,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "buildinfo",
+ "childenv",
  "chrono",
  "comfy-table",
  "serde",
@@ -3925,6 +3937,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "buildinfo",
+ "childenv",
  "clap",
  "colored",
  "gitscratch",
@@ -3940,6 +3953,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "buildinfo",
+ "childenv",
  "clap",
  "colored",
  "gitscratch",
@@ -3955,6 +3969,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "buildinfo",
+ "childenv",
  "clap",
  "comfy-table",
  "gitscratch",
@@ -3977,6 +3992,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "buildinfo",
+ "childenv",
  "clap",
  "colored",
  "crossterm",
@@ -4019,6 +4035,7 @@ name = "ha"
 version = "0.1.0"
 dependencies = [
  "buildinfo",
+ "childenv",
  "chrono",
  "clap",
  "crossterm",
@@ -4376,6 +4393,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "buildinfo",
+ "childenv",
  "clap",
  "image",
  "libc",
@@ -4654,6 +4672,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "buildinfo",
+ "childenv",
  "clap",
  "git2",
  "indicatif",
@@ -4693,6 +4712,7 @@ name = "install-bin"
 version = "0.1.0"
 dependencies = [
  "buildinfo",
+ "childenv",
  "clap",
  "dirs",
  "tempfile",
@@ -4955,8 +4975,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "buildinfo",
+ "childenv",
  "clap",
- "gitscratch",
  "glob",
  "tempfile",
  "toml",
@@ -5002,6 +5022,7 @@ name = "krt"
 version = "0.1.0"
 dependencies = [
  "buildinfo",
+ "childenv",
  "chrono",
  "clap",
  "crossterm",
@@ -5172,6 +5193,7 @@ name = "localnext"
 version = "0.1.0"
 dependencies = [
  "buildinfo",
+ "childenv",
  "clap",
  "httpfile",
  "percent-encoding",
@@ -5515,6 +5537,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "buildinfo",
+ "childenv",
  "clap",
  "colored",
  "notify",
@@ -5573,6 +5596,7 @@ name = "nodenuke"
 version = "0.1.0"
 dependencies = [
  "buildinfo",
+ "childenv",
  "clap",
  "gitscratch",
  "repowalker",
@@ -5583,6 +5607,7 @@ name = "nodeup"
 version = "0.1.0"
 dependencies = [
  "buildinfo",
+ "childenv",
  "clap",
  "repowalker",
 ]
@@ -5798,6 +5823,7 @@ name = "nwt"
 version = "0.1.0"
 dependencies = [
  "buildinfo",
+ "childenv",
  "clap",
  "dirs",
  "gitscratch",
@@ -6347,6 +6373,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "buildinfo",
+ "childenv",
  "clap",
  "colored",
  "libc",
@@ -6388,6 +6415,7 @@ name = "polish"
 version = "0.1.0"
 dependencies = [
  "buildinfo",
+ "childenv",
  "clap",
  "repowalker",
 ]
@@ -6397,6 +6425,7 @@ name = "popstop"
 version = "0.1.0"
 dependencies = [
  "buildinfo",
+ "childenv",
  "chrono",
  "clap",
  "dirs",
@@ -6454,6 +6483,7 @@ name = "portplz"
 version = "0.1.0"
 dependencies = [
  "buildinfo",
+ "childenv",
  "clap",
  "portplz-core",
 ]
@@ -6462,7 +6492,7 @@ dependencies = [
 name = "portplz-core"
 version = "0.1.0"
 dependencies = [
- "gitscratch",
+ "childenv",
  "gix",
  "libc",
  "sha2 0.10.9",
@@ -6501,6 +6531,7 @@ dependencies = [
  "anyhow",
  "blake3",
  "buildinfo",
+ "childenv",
  "clap",
  "colored",
  "crossterm",
@@ -6530,6 +6561,7 @@ name = "prgz"
 version = "0.1.0"
 dependencies = [
  "buildinfo",
+ "childenv",
  "clap",
  "colored",
  "flate2",
@@ -6633,6 +6665,9 @@ dependencies = [
 [[package]]
 name = "proctree"
 version = "0.1.0"
+dependencies = [
+ "childenv",
+]
 
 [[package]]
 name = "prodash"
@@ -7086,6 +7121,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "buildinfo",
+ "childenv",
  "clap",
  "toml",
  "which",
@@ -7175,7 +7211,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 name = "repo-guards"
 version = "0.1.0"
 dependencies = [
- "gitscratch",
+ "childenv",
  "glob",
  "proc-macro2",
  "pulldown-cmark",
@@ -7201,6 +7237,7 @@ name = "repotidy"
 version = "0.1.0"
 dependencies = [
  "buildinfo",
+ "childenv",
  "gitscratch",
  "repowalker",
 ]
@@ -7311,6 +7348,7 @@ name = "rr"
 version = "0.1.0"
 dependencies = [
  "buildinfo",
+ "childenv",
  "clap",
  "repowalker",
  "walkdir",
@@ -7345,6 +7383,7 @@ name = "runat"
 version = "0.1.0"
 dependencies = [
  "buildinfo",
+ "childenv",
  "chrono",
  "clap",
  "crossterm",
@@ -7355,6 +7394,7 @@ dependencies = [
 name = "runlimit"
 version = "0.1.0"
 dependencies = [
+ "childenv",
  "tempfile",
  "wait-timeout",
 ]
@@ -7607,6 +7647,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "buildinfo",
+ "childenv",
  "chrono",
  "clap",
  "colored",
@@ -7807,6 +7848,9 @@ checksum = "dc6fe69c597f9c37bfeeeeeb33da3530379845f10be461a66d16d03eca2ded77"
 [[package]]
 name = "shellquote"
 version = "0.1.0"
+dependencies = [
+ "childenv",
+]
 
 [[package]]
 name = "shellsetup"
@@ -7836,8 +7880,8 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "buildinfo",
+ "childenv",
  "clap",
- "gitscratch",
  "libc",
  "serde",
  "shellquote",
@@ -7951,6 +7995,7 @@ name = "sirn"
 version = "0.1.0"
 dependencies = [
  "buildinfo",
+ "childenv",
  "clap",
  "httpfile",
  "percent-encoding",
@@ -8023,6 +8068,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "buildinfo",
+ "childenv",
  "chrono",
  "clap",
  "comfy-table",
@@ -8104,6 +8150,7 @@ dependencies = [
  "aws-sigv4",
  "buildinfo",
  "bytes",
+ "childenv",
  "chrono",
  "clap",
  "futures",
@@ -8147,6 +8194,7 @@ name = "symfix"
 version = "0.1.0"
 dependencies = [
  "buildinfo",
+ "childenv",
  "clap",
  "tempfile",
  "walkdir",
@@ -8422,6 +8470,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "buildinfo",
+ "childenv",
  "clap",
  "colored",
  "core-foundation 0.10.1",
@@ -9080,6 +9129,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "buildinfo",
+ "childenv",
  "clap",
  "comfy-table",
  "futures",
@@ -9301,6 +9351,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "buildinfo",
+ "childenv",
  "clap",
  "colored",
  "op-cache",
@@ -9450,10 +9501,10 @@ version = "0.1.0"
 dependencies = [
  "brush-parser",
  "buildinfo",
+ "childenv",
  "chrono",
  "clap",
  "comfy-table",
- "gitscratch",
  "num-format",
  "serde",
  "serde_json",
@@ -10250,6 +10301,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "buildinfo",
+ "childenv",
  "clap",
  "procfs",
  "serde",
@@ -10418,6 +10470,7 @@ name = "zth"
 version = "0.1.0"
 dependencies = [
  "buildinfo",
+ "childenv",
  "clap",
  "crossbeam",
  "indicatif",

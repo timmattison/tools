@@ -41,7 +41,7 @@ const TERMINALS_ABOVE_THE_STANDARD_STREAMS: &str = r#"printf 'terminals above 2:
 
 /// A `sh -c` command that runs [`TERMINALS_ABOVE_THE_STANDARD_STREAMS`].
 fn listing() -> Command {
-    let mut command = Command::new("sh");
+    let mut command = childenv::fixture_command("sh");
     command.arg("-c").arg(TERMINALS_ABOVE_THE_STANDARD_STREAMS);
     command
 }

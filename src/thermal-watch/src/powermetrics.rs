@@ -307,7 +307,7 @@ impl SampleStream {
     /// Returns the error of the spawn when `powermetrics` cannot be started,
     /// which is what a caller without root sees.
     pub fn spawn(interval: Duration, count: u32) -> std::io::Result<Self> {
-        let mut command = Command::new("powermetrics");
+        let mut command = childenv::command("powermetrics");
         command
             .arg("--samplers")
             .arg(SAMPLERS)

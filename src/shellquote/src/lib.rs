@@ -139,7 +139,7 @@ mod tests {
     /// A shell that runs `script` and gives back what it printed.
     #[cfg(unix)]
     fn sh_output(script: String) -> String {
-        let out = std::process::Command::new("/bin/sh")
+        let out = childenv::fixture_command("/bin/sh")
             .arg("-c")
             .arg(&script)
             .output()

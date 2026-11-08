@@ -35,7 +35,7 @@
 //! suite.
 
 use std::io::{Cursor, Write};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 mod common;
 
@@ -198,7 +198,7 @@ fn run_ic(table: &MoshProcessTable, budgets: Option<&str>) -> Vec<u8> {
     let columns = PICTURE_COLUMNS.to_string();
     let rows = PICTURE_ROWS.to_string();
 
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ic"));
+    let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_ic"));
     command
         .args(["--stdin", "--width", &columns, "--height", &rows])
         .env_clear()

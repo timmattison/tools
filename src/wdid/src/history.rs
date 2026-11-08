@@ -9,7 +9,7 @@
 
 use std::ffi::OsStr;
 use std::io::ErrorKind;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// The program that holds the history.
 pub const ATUIN: &str = "atuin";
@@ -187,7 +187,7 @@ fn parse_record(record: &[u8], number: usize) -> Result<HistoryEntry, HistoryErr
 /// [`parse`].
 pub fn read(program: &OsStr) -> Result<Vec<HistoryEntry>, HistoryError> {
     let program_text = program.to_string_lossy().into_owned();
-    let output = Command::new(program)
+    let output = childenv::command(program)
         .args(SEARCH_ARGUMENTS)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

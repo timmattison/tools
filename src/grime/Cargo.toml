@@ -33,6 +33,7 @@ termbar.workspace = true
 termwindow.workspace = true
 
 [dev-dependencies]
+childenv.workspace = true
 gitscratch = { workspace = true, features = ["testing"] }
 # Takes the color codes back out of a painted run, so a test compares the
 # glyphs of the diff with the text of the same run with `NO_COLOR`. One

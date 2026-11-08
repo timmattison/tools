@@ -17,7 +17,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::Path;
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 
 use tempfile::TempDir;
 
@@ -30,7 +30,7 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    Command::new(env!("CARGO_BIN_EXE_prcp"))
+    childenv::fixture_command(env!("CARGO_BIN_EXE_prcp"))
         .env("COLUMNS", TEST_COLUMNS)
         .stdin(Stdio::null())
         .args(args)
@@ -449,7 +449,10 @@ fn recursive_copy_skips_a_fifo_and_warns() {
     write_file(&src.join("a.txt"), "a");
     write_file(&src.join("b.txt"), "b");
     let fifo = src.join("pipe");
-    let status = Command::new("mkfifo").arg(&fifo).status().unwrap();
+    let status = childenv::fixture_command("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap();
     assert!(status.success(), "mkfifo must work");
 
     let output = run_prcp([
@@ -668,7 +671,10 @@ fn move_of_a_tree_with_a_fifo_keeps_every_original_and_fails() {
     let dest = temp.path().join("dest");
     make_sample_tree(&src);
     let fifo = src.join("pipe");
-    let status = Command::new("mkfifo").arg(&fifo).status().unwrap();
+    let status = childenv::fixture_command("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap();
     assert!(status.success(), "mkfifo must work");
 
     let output = run_prcp([

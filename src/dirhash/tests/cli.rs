@@ -9,7 +9,6 @@
 //! `git init`, so no test can reach a real repository.
 
 use std::path::PathBuf;
-use std::process::Command;
 
 /// A temporary tree to hash, plus an empty `HOME` for the child process.
 struct Fixture {
@@ -57,12 +56,7 @@ impl Fixture {
     /// walker sees, and a test that reads the machine it runs on is a test that
     /// passes for a reason nobody wrote down.
     fn run_from(&self, working_dir: PathBuf, directory: PathBuf, args: &[&str]) -> Run {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_dirhash"));
-        for (key, _) in std::env::vars_os() {
-            if key.to_string_lossy().starts_with("GIT_") {
-                command.env_remove(&key);
-            }
-        }
+        let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_dirhash"));
         command
             .env("HOME", self.home())
             .env("XDG_CONFIG_HOME", self.home())

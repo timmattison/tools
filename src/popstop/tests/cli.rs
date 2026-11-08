@@ -151,7 +151,7 @@ impl Drop for Copy<'_> {
     /// stop gets `SIGKILL` after it, because a test must leave no copy that
     /// plays.
     fn drop(&mut self) {
-        let _ = Command::new(env!("CARGO_BIN_EXE_popstop"))
+        let _ = childenv::fixture_command(env!("CARGO_BIN_EXE_popstop"))
             .arg("--stop")
             .arg("--state-dir")
             .arg(&self.dir)
@@ -168,7 +168,7 @@ impl<'turn> Copy<'turn> {
     /// Starts a copy of popstop with the state directory `dir`, and with the
     /// arguments `arguments` after it, in the turn `turn`.
     fn start(turn: &'turn DeviceTurn, dir: &Path, arguments: &[&str]) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_popstop"))
+        let mut child = childenv::fixture_command(env!("CARGO_BIN_EXE_popstop"))
             .arg("--state-dir")
             .arg(dir)
             .args(arguments)
@@ -311,7 +311,7 @@ struct BackgroundStart<'turn> {
 
 impl Drop for BackgroundStart<'_> {
     fn drop(&mut self) {
-        let _ = Command::new(env!("CARGO_BIN_EXE_popstop"))
+        let _ = childenv::fixture_command(env!("CARGO_BIN_EXE_popstop"))
             .arg("--stop")
             .arg("--state-dir")
             .arg(&self.dir)
@@ -347,7 +347,7 @@ impl<'turn> BackgroundStart<'turn> {
     /// The command runs in `working_dir` when it is given, and in the working
     /// directory of this test when it is not.
     fn make_from(turn: &'turn DeviceTurn, working_dir: Option<&Path>, state_dir: &Path) -> Self {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_popstop"));
+        let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_popstop"));
         if let Some(working_dir) = working_dir {
             command.current_dir(working_dir);
         }
@@ -375,7 +375,11 @@ impl<'turn> BackgroundStart<'turn> {
         late: &mut LateCopy,
         handshake_bound: Option<Duration>,
     ) -> Self {
-        let start = Self::spawn(&mut Command::new(&late.program), &late.dir, handshake_bound);
+        let start = Self::spawn(
+            &mut childenv::fixture_command(&late.program),
+            &late.dir,
+            handshake_bound,
+        );
         late.make_the_copy_late();
         Self::finish(turn, start, late.dir.clone())
     }
@@ -470,7 +474,7 @@ impl LateCopy {
         let dir = root.join("state");
         fs::create_dir(&dir).expect("make the state directory");
         let log = StateDir::new(dir.clone()).log_path();
-        let made = Command::new("mkfifo")
+        let made = childenv::fixture_command("mkfifo")
             .arg(&log)
             .status()
             .expect("start mkfifo");
@@ -574,7 +578,7 @@ struct Facts {
 /// field takes an `-o` of its own: one `-o` with commas makes the text after
 /// the first `=` the heading of one column.
 fn facts_of(pid: u32) -> Option<Facts> {
-    let output = Command::new("ps")
+    let output = childenv::fixture_command("ps")
         .args(["-o", "ppid=", "-o", "pgid=", "-o", "tty=", "-p"])
         .arg(pid.to_string())
         .stdin(Stdio::null())
@@ -655,7 +659,7 @@ fn wait_until(mut ready: impl FnMut() -> bool) -> bool {
 /// The arguments of these runs end before popstop takes a lock or opens a
 /// device, thus the run needs no state directory.
 fn ask(arguments: &[&str]) -> (ExitStatus, String) {
-    let output = Command::new(env!("CARGO_BIN_EXE_popstop"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_popstop"))
         .args(arguments)
         .stdin(Stdio::null())
         .output()
@@ -679,7 +683,7 @@ fn ask_in(
     dir: &Path,
     arguments: &[impl AsRef<OsStr>],
 ) -> (ExitStatus, String, String) {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_popstop"));
+    let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_popstop"));
     command.arg("--state-dir").arg(dir).args(arguments);
     outcome_of(&mut command)
 }
@@ -696,7 +700,7 @@ fn ask_from(
     working_dir: &Path,
     arguments: &[impl AsRef<OsStr>],
 ) -> (ExitStatus, String, String) {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_popstop"));
+    let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_popstop"));
     command.current_dir(working_dir).args(arguments);
     outcome_of(&mut command)
 }
@@ -738,7 +742,7 @@ impl Bystander {
     /// [`EXIT_AFTER_SECONDS`] at most.
     fn start() -> Self {
         Self(
-            Command::new("sleep")
+            childenv::fixture_command("sleep")
                 .arg(EXIT_AFTER_SECONDS)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
@@ -1214,7 +1218,7 @@ fn a_relative_state_directory_in_a_working_directory_that_is_gone_is_an_error() 
     // popstop. The working directory of popstop then has no path, thus a
     // relative state directory names no directory. A status opens no device
     // and takes no lock, thus it needs no time limit.
-    let mut command = Command::new("/bin/sh");
+    let mut command = childenv::fixture_command("/bin/sh");
     command
         .arg("-c")
         .arg(r#"cd -- "$1" && rmdir -- "$1" && exec "$2" --state-dir state --status"#)

@@ -562,7 +562,7 @@ const RETRY_ADVICE: &str = "press p again";
 /// git obeys the environment before it obeys the directory it was pointed at:
 ///
 /// - **The git environment gsw inherited is shed**
-///   ([`gitscratch::shed_inherited_git_environment_keeping_user_intent`]). A
+///   ([`childenv::command`]). A
 ///   `gsw` started from inside a pre-commit hook holds `GIT_DIR`,
 ///   `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY` and `GIT_CONFIG_PARAMETERS`, and
 ///   the user asked for none of them. A child that carried one would send a
@@ -571,7 +571,7 @@ const RETRY_ADVICE: &str = "press p again";
 ///   guard that reads the same wrong place as the thing it guards is worse
 ///   than no guard, because it reports success. The rule is the `GIT_` prefix
 ///   and never a list of names. The six names of
-///   [`gitscratch::USER_INTENT_GIT_ENVIRONMENT`] stay, because this child acts
+///   [`childenv::USER_INTENT_GIT_ENVIRONMENT`] stay, because this child acts
 ///   for the user and nothing states them again. gsw spawns git itself, so no
 ///   rc file runs between the sweep and the push, and a user who holds a
 ///   non-default key cannot authenticate without `GIT_SSH_COMMAND`.
@@ -620,8 +620,7 @@ fn run_push(
         }
     }
 
-    let mut child = Command::new("git");
-    gitscratch::shed_inherited_git_environment_keeping_user_intent(&mut child);
+    let mut child = childenv::command("git");
     child
         .args(command.args())
         .current_dir(workdir)
@@ -862,11 +861,10 @@ fn drain(stream: Option<impl std::io::Read>, report: &(dyn Fn(String) + Sync)) {
 /// repository being committed to. That answer is some other branch, or no
 /// branch at all, and every confirmation would then be refused as a checkout
 /// that never happened. The rule is the `GIT_` prefix and never a list of
-/// names, and the six names of [`gitscratch::USER_INTENT_GIT_ENVIRONMENT`] stay
+/// names, and the six names of [`childenv::USER_INTENT_GIT_ENVIRONMENT`] stay
 /// because a person sets each of those on purpose — this runs for that person.
 pub(crate) fn current_branch(workdir: &Path) -> Option<String> {
-    let mut command = Command::new("git");
-    gitscratch::shed_inherited_git_environment_keeping_user_intent(&mut command);
+    let mut command = childenv::command("git");
     let output = command
         .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
         .current_dir(workdir)
@@ -6011,7 +6009,7 @@ mod run_tests {
         let marker = dir.path().join("it's-here");
         let body = failing_marker_hook_body(&marker);
 
-        let status = std::process::Command::new("/bin/sh")
+        let status = childenv::fixture_command("/bin/sh")
             .arg("-c")
             .arg(&body)
             .current_dir(dir.path())
@@ -6724,7 +6722,7 @@ exit 1"#,
         /// itself and refuses nothing.
         ///
         /// **The sweep keeps the six names of
-        /// [`gitscratch::USER_INTENT_GIT_ENVIRONMENT`], because this child acts
+        /// [`childenv::USER_INTENT_GIT_ENVIRONMENT`], because this child acts
         /// for the user.** A push is where that matters most. A user who holds
         /// a non-default key cannot authenticate without `GIT_SSH_COMMAND`, and
         /// nothing states it again: `gsw` spawns git itself, so no rc file runs
@@ -6763,7 +6761,7 @@ exit 1"#,
                      the assertion below is measured against nothing",
                 );
             }
-            for name in gitscratch::USER_INTENT_GIT_ENVIRONMENT {
+            for name in childenv::USER_INTENT_GIT_ENVIRONMENT {
                 assert_eq!(
                     std::env::var(name).ok(),
                     Some(user_intent_value(name)),
@@ -6845,7 +6843,7 @@ exit 1"#,
         /// The helpers want the blanket sweep rather than the allowlist the
         /// push child takes. A fixture builds a throwaway repository, so there
         /// is no user whose intent to honor — see
-        /// [`gitscratch::shed_inherited_git_environment`].
+        /// [`childenv::fixture_command`].
         ///
         /// **This is measurable, and it was measured.** Five of the push tests
         /// failed with one hostile variable set and nothing else,
@@ -6924,7 +6922,7 @@ exit 1"#,
             let record = dir.path().join("it's-here");
             let body = recording_hook_body(&record);
 
-            let status = std::process::Command::new("/bin/sh")
+            let status = childenv::fixture_command("/bin/sh")
                 .arg("-c")
                 .arg(&body)
                 .current_dir(dir.path())

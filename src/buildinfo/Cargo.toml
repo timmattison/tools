@@ -8,5 +8,8 @@ license.workspace = true
 [dependencies]
 const_format = "0.2"
 
+[build-dependencies]
+childenv.workspace = true
+
 [lints]
 workspace = true

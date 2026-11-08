@@ -9,7 +9,7 @@
 //! pre-commit hook's and yours) never share a path. A private path is only half
 //! of it, though: a `cargo test` run *from* the pre-commit hook inherits the
 //! hook's git environment, which names the developer's real repository, so every
-//! spawn here goes through [`NoInheritedGitEnvironment`] as well.
+//! spawn here goes through [`childenv::fixture_command`] as well.
 //!
 //! The same hook exports who is committing, and an identity variable outranks
 //! the `user.name` [`TestRepo::init`] configures — so a fixture built under a
@@ -28,7 +28,6 @@ use tempfile::TempDir;
 
 use crate::repo::Repo;
 use crate::scratch::Scratch;
-use childenv::NoInheritedGitEnvironment;
 
 /// A pseudo-terminal of a size that a test chose, for a test of a tool that
 /// measures its terminal or that decides color by it.
@@ -103,7 +102,7 @@ impl TestRepo {
     }
 
     fn git_in(&self, cwd: &Path, args: &[&str]) -> String {
-        let mut command = Command::new("git");
+        let mut command = childenv::fixture_command("git");
         let output = command
             .args(args)
             .current_dir(cwd)
@@ -114,7 +113,6 @@ impl TestRepo {
             // linked worktree's `.git` is a file, so a fixture that keeps it
             // cannot add one at all - it fails before the code under test is
             // ever reached.
-            .without_inherited_git_environment()
             .output()
             .unwrap_or_else(|e| panic!("failed to spawn git {args:?}: {e}"));
 
@@ -159,11 +157,8 @@ impl TestRepo {
     /// Panics if `git` cannot be spawned at all — most likely because it is not
     /// installed. A non-zero exit is not a panic; it is the answer.
     pub fn try_git(&self, args: &[&str], env: &[(&str, &str)]) -> Output {
-        let mut command = Command::new("git");
-        command
-            .args(args)
-            .current_dir(self.dir.path())
-            .without_inherited_git_environment();
+        let mut command = childenv::fixture_command("git");
+        command.args(args).current_dir(self.dir.path());
 
         // After the sweep, never before it - see the note above on why the
         // order decides whether a caller's `GIT_`-prefixed variable survives.
@@ -261,7 +256,7 @@ impl TestRepo {
     fn git_with_stdin(&self, args: &[&str], stdin: &[u8]) -> String {
         use std::io::Write as _;
 
-        let mut command = Command::new("git");
+        let mut command = childenv::fixture_command("git");
         let mut child = command
             .args(args)
             .current_dir(self.dir.path())
@@ -270,7 +265,6 @@ impl TestRepo {
             // `GIT_INDEX_FILE` writes its objects into the developer's real
             // repository instead of this one. `tests/isolation.rs` reaches this
             // spawn through `commit_file_named_by_bytes`.
-            .without_inherited_git_environment()
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -471,10 +465,9 @@ impl NotARepo {
 pub fn not_a_repository() -> NotARepo {
     let dir = TempDir::new().expect("create temp dir");
 
-    let probe = Command::new("git")
+    let probe = childenv::fixture_command("git")
         .args(["rev-parse", "--git-dir"])
         .current_dir(dir.path())
-        .without_inherited_git_environment()
         .output()
         .expect("failed to spawn git rev-parse --git-dir");
 
@@ -1676,7 +1669,7 @@ impl DetachedGitDirRepo {
 
     /// Run git in `cwd`, panicking on failure.
     fn run(&self, cwd: &Path, args: &[&str]) -> String {
-        let mut command = Command::new("git");
+        let mut command = childenv::fixture_command("git");
         let output = command
             .args(args)
             .current_dir(cwd)
@@ -1689,7 +1682,6 @@ impl DetachedGitDirRepo {
             // so the sweep is the whole of the guard against this fixture's own
             // `git add` landing in the developer's index. `tests/isolation.rs`
             // reaches this spawn.
-            .without_inherited_git_environment()
             .output()
             .unwrap_or_else(|e| panic!("failed to spawn git {args:?}: {e}"));
 
@@ -1909,7 +1901,9 @@ pub fn child_ran() {
 /// Panics if the path of the running test binary cannot be read, or if the
 /// child cannot be spawned.
 pub fn run_child_half(filter: &str, configure: impl FnOnce(&mut Command)) -> Result<(), String> {
-    let mut child = Command::new(std::env::current_exe().expect("path of the running test binary"));
+    let mut child = childenv::fixture_command(
+        std::env::current_exe().expect("path of the running test binary"),
+    );
     child.args([filter, "--exact", "--nocapture"]);
     configure(&mut child);
 

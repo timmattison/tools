@@ -412,7 +412,7 @@ mod tests {
     #[test]
     fn process_is_alive_tells_a_live_process_from_an_ended_one() {
         assert!(process_is_alive(std::process::id()));
-        let mut child = std::process::Command::new("true")
+        let mut child = childenv::fixture_command("true")
             .spawn()
             .expect("start `true`");
         let pid = child.id();
@@ -429,7 +429,7 @@ mod tests {
     fn remove_abandoned_scratch_removes_only_a_strict_match_of_a_dead_process() {
         let scratch = Scratch::new();
         let place = scratch.dir.join("megarepo-data-a");
-        let mut child = std::process::Command::new("true")
+        let mut child = childenv::fixture_command("true")
             .spawn()
             .expect("start `true`");
         let dead = child.id();

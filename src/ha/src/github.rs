@@ -597,8 +597,7 @@ impl GhSource {
 
     /// The child that runs `gh` with `args`, before it starts.
     fn command(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(&self.program);
-        gitscratch::shed_inherited_git_environment_keeping_user_intent(&mut command);
+        let mut command = childenv::command(&self.program);
         command
             .env("GH_NO_UPDATE_NOTIFIER", "1")
             .env("GH_PROMPT_DISABLED", "1")

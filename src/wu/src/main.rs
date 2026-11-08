@@ -297,8 +297,6 @@ fn get_file_users_linux(target_path: &Path) -> Result<Vec<ProcessInfo>> {
 
 #[cfg(target_os = "macos")]
 fn get_file_users_macos(target_path: &Path) -> Result<Vec<ProcessInfo>> {
-    use std::process::Command;
-
     // Check if lsof is available
     if which::which("lsof").is_err() {
         anyhow::bail!("lsof command not found. Please install lsof to use this tool on macOS.");
@@ -312,13 +310,13 @@ fn get_file_users_macos(target_path: &Path) -> Result<Vec<ProcessInfo>> {
 
     let output = if is_dir {
         // Use +D for recursive directory search
-        Command::new("lsof")
+        childenv::command("lsof")
             .args(["+D", &target_str])
             .output()
             .context("Failed to execute lsof command")?
     } else {
         // Use regular lsof for files
-        Command::new("lsof")
+        childenv::command("lsof")
             .arg(target_str.as_ref())
             .output()
             .context("Failed to execute lsof command")?

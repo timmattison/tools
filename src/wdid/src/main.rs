@@ -4,7 +4,7 @@
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::ExitCode;
 
 use buildinfo::version_string;
 use chrono::NaiveDate;
@@ -116,7 +116,7 @@ fn definitions(shell: Option<OsString>) -> Result<Definitions, ShellError> {
     let kind = ShellKind::of(Path::new(&shell)).ok_or_else(|| ShellError::NotSupported {
         shell: shell.to_string_lossy().into_owned(),
     })?;
-    shell::read(Command::new(&shell), kind, shell::TIMEOUT)
+    shell::read(childenv::command(&shell), kind, shell::TIMEOUT)
 }
 
 /// Runs the whole report and gives the text for standard output.

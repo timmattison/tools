@@ -10,6 +10,7 @@ name = "install-bin"
 path = "src/main.rs"
 
 [dependencies]
+childenv.workspace = true
 thiserror.workspace = true
 wait-timeout.workspace = true
 clap.workspace = true

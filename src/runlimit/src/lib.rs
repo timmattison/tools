@@ -124,7 +124,7 @@ mod tests {
     fn run_with_limit_returns_the_output_of_a_fast_program() {
         let dir = TempDir::new().unwrap();
         let stub = write_stub(&dir, "fast", "echo out; echo err >&2; exit 0");
-        let output = run_with_limit(&mut Command::new(&stub), GENEROUS_LIMIT).unwrap();
+        let output = run_with_limit(&mut childenv::fixture_command(&stub), GENEROUS_LIMIT).unwrap();
         assert!(output.status.success());
         assert_eq!(String::from_utf8_lossy(&output.stdout), "out\n");
         assert_eq!(String::from_utf8_lossy(&output.stderr), "err\n");
@@ -134,7 +134,7 @@ mod tests {
     fn run_with_limit_reports_the_exit_status() {
         let dir = TempDir::new().unwrap();
         let stub = write_stub(&dir, "fails", "exit 3");
-        let output = run_with_limit(&mut Command::new(&stub), GENEROUS_LIMIT).unwrap();
+        let output = run_with_limit(&mut childenv::fixture_command(&stub), GENEROUS_LIMIT).unwrap();
         assert_eq!(output.status.code(), Some(3));
     }
 
@@ -142,7 +142,7 @@ mod tests {
     fn run_with_limit_reports_a_missing_program() {
         let dir = TempDir::new().unwrap();
         let missing = dir.path().join("does-not-exist");
-        let result = run_with_limit(&mut Command::new(&missing), GENEROUS_LIMIT);
+        let result = run_with_limit(&mut childenv::fixture_command(&missing), GENEROUS_LIMIT);
         assert!(
             matches!(result, Err(RunFailure::NotInstalled)),
             "{result:?}"
@@ -154,7 +154,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let not_executable = dir.path().join("plain");
         std::fs::write(&not_executable, "text").unwrap();
-        let result = run_with_limit(&mut Command::new(&not_executable), GENEROUS_LIMIT);
+        let result = run_with_limit(
+            &mut childenv::fixture_command(&not_executable),
+            GENEROUS_LIMIT,
+        );
         assert!(matches!(result, Err(RunFailure::Spawn(_))), "{result:?}");
     }
 
@@ -164,7 +167,7 @@ mod tests {
         let stub = write_stub(&dir, "hangs", "exec sleep 120");
         let limit = Duration::from_millis(500);
         let started = Instant::now();
-        let result = run_with_limit(&mut Command::new(&stub), limit);
+        let result = run_with_limit(&mut childenv::fixture_command(&stub), limit);
         assert!(started.elapsed() < Duration::from_secs(60));
         assert!(
             matches!(result, Err(RunFailure::TimedOut(reported)) if reported == limit),

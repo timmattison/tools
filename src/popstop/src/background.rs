@@ -26,7 +26,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::fd::AsFd;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -390,7 +390,7 @@ fn make_the_copy(settings: &Settings, log: File) -> Result<Child, Failure> {
             "the program of this process cannot be found: {problem}"
         ))
     })?;
-    let mut command = Command::new(program);
+    let mut command = childenv::command(program);
     command.arg(CHILD_FLAG);
     if let Some(dir) = settings.state_dir_argument() {
         command.arg(message::STATE_DIR_FLAG).arg(dir);

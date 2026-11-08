@@ -11,6 +11,9 @@ use std::process::{Command, Stdio};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 
+/// The program that this module runs.
+const GIT: &str = "git";
+
 /// The name of the main branch of a sidecar.
 pub const MAIN_BRANCH: &str = "main";
 
@@ -87,7 +90,7 @@ impl Git {
     #[must_use]
     pub fn command(&self, cwd: &Path) -> Command {
         command_with(
-            gitscratch::shed_inherited_git_environment_keeping_user_intent,
+            childenv::command(GIT),
             cwd,
             self.token.as_ref(),
             self.token_env.as_deref(),
@@ -123,20 +126,19 @@ impl Git {
 }
 
 /// Builds the git command. The steps are in this order:
-/// 1. The command, its directory, and a closed standard input.
-/// 2. The sweep of the inherited git environment.
-/// 3. The removal of the token variable.
-/// 4. The token as `GIT_CONFIG_*` variables, set after the sweep.
-/// 5. The arguments `-c color.ui=never`.
+/// `command` arrives with the sweep of the inherited git environment done.
+///
+/// 1. The directory and a closed standard input.
+/// 2. The removal of the token variable.
+/// 3. The token as `GIT_CONFIG_*` variables, set after the sweep.
+/// 4. The arguments `-c color.ui=never`.
 pub(crate) fn command_with(
-    sweep: impl FnOnce(&mut Command),
+    mut command: Command,
     cwd: &Path,
     token: Option<&Token>,
     token_env: Option<&str>,
 ) -> Command {
-    let mut command = Command::new("git");
     command.current_dir(cwd).stdin(Stdio::null());
-    sweep(&mut command);
     if let Some(variable) = token_env {
         command.env_remove(variable);
     }
@@ -167,9 +169,12 @@ mod tests {
 
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-    fn synthetic_sweep(command: &mut Command) {
-        gitscratch::shed_git_environment_from(
-            command,
+    /// A command that has the sweep of a fixed list of keys, so that a test does
+    /// not depend on the environment of this process.
+    fn synthetic_sweep() -> Command {
+        let mut command = childenv::command(GIT);
+        childenv::shed_git_environment_from(
+            &mut command,
             [
                 "GIT_DIR",
                 "GIT_CONFIG_COUNT",
@@ -178,8 +183,9 @@ mod tests {
                 "GIT_SSH_COMMAND",
                 "PATH",
             ],
-            gitscratch::InheritedGitEnvironment::KeepUserIntent,
+            childenv::InheritedGitEnvironment::KeepUserIntent,
         );
+        command
     }
 
     /// What a command does with one environment variable.
@@ -222,8 +228,7 @@ mod tests {
 
     fn init_repository(dir: &Path) {
         std::fs::create_dir_all(dir).expect("make the fixture directory");
-        let mut command = Command::new("git");
-        gitscratch::shed_inherited_git_environment(&mut command);
+        let mut command = childenv::fixture_command("git");
         let status = command
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
@@ -245,7 +250,7 @@ mod tests {
     fn builder_sets_the_token_header_after_the_sweep() {
         let token = Token(SECRET.to_string());
         let command = command_with(
-            synthetic_sweep,
+            synthetic_sweep(),
             Path::new("."),
             Some(&token),
             Some(TOKEN_VARIABLE),
@@ -265,7 +270,7 @@ mod tests {
     #[test]
     fn builder_puts_no_token_in_the_arguments() {
         let token = Token(SECRET.to_string());
-        let command = command_with(synthetic_sweep, Path::new("."), Some(&token), None);
+        let command = command_with(synthetic_sweep(), Path::new("."), Some(&token), None);
         let args: Vec<String> = command
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
@@ -277,7 +282,7 @@ mod tests {
 
     #[test]
     fn builder_without_a_token_sets_no_config_count() {
-        let command = command_with(synthetic_sweep, Path::new("."), None, None);
+        let command = command_with(synthetic_sweep(), Path::new("."), None, None);
 
         // The sweep removes the variable, and the builder does not set it again.
         assert_eq!(env_of(&command, "GIT_CONFIG_COUNT"), EnvState::Removed);

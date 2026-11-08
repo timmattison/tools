@@ -15,7 +15,6 @@ use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::net::Ipv4Addr;
-use std::process::Command;
 
 use anyhow::Result;
 use buildinfo::version_string;
@@ -225,7 +224,7 @@ fn report_powered_off(answered: &HashSet<Ipv4Addr>, vendor_filter: &str) {
 
 /// The system ARP table, or `None` if `arp` is unavailable.
 fn arp_table() -> Option<String> {
-    let output = Command::new("arp").args(["-a", "-n"]).output().ok()?;
+    let output = childenv::command("arp").args(["-a", "-n"]).output().ok()?;
     String::from_utf8(output.stdout).ok()
 }
 

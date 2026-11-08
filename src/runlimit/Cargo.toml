@@ -9,6 +9,7 @@ license = "MIT"
 wait-timeout.workspace = true
 
 [dev-dependencies]
+childenv.workspace = true
 tempfile.workspace = true
 
 [lints]

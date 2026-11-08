@@ -12,11 +12,6 @@ buildinfo.workspace = true
 childenv.workspace = true
 clap.workspace = true
 colored.workspace = true
-# For `shed_inherited_git_environment_keeping_user_intent`: cwt asks git for the
-# URL of `origin` and starts `gh`, and an inherited `GIT_DIR` would aim both at
-# another repository. Which variables to shed is knowledge that lives in
-# gitscratch rather than being copied here to drift.
-gitscratch.workspace = true
 repowalker.workspace = true
 runlimit.workspace = true
 # `serde` and `serde_json` read the JSON that `gh pr list --json` prints.
@@ -25,7 +20,6 @@ serde_json.workspace = true
 shellsetup.workspace = true
 
 [dev-dependencies]
-childenv.workspace = true
 gitscratch = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 testcolor.workspace = true

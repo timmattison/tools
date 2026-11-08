@@ -125,7 +125,7 @@ impl TeardownShim {
         use std::os::unix::fs::PermissionsExt;
 
         // Resolved before the shim can shadow it, so the shim can hand over.
-        let resolved = std::process::Command::new("sh")
+        let resolved = childenv::fixture_command("sh")
             .arg("-c")
             .arg("command -v git")
             .output()

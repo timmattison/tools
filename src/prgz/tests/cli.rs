@@ -111,7 +111,7 @@ struct Run {
 /// either one. POSIX gives those two variables precedence over `LANG`, thus a
 /// leaked value would silently override the locale that a test sets.
 fn prgz() -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_prgz"));
+    let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_prgz"));
     command.env(LANG_VARIABLE, AMERICAN_ENGLISH);
     command.env_remove(LC_ALL_VARIABLE);
     command.env_remove(LC_NUMERIC_VARIABLE);
@@ -721,7 +721,7 @@ impl Drop for KillOnDrop {
 /// Make a named pipe at `path` with the `mkfifo` command of the platform.
 #[cfg(unix)]
 fn mkfifo(path: &Path) {
-    let status = Command::new("mkfifo")
+    let status = childenv::fixture_command("mkfifo")
         .arg(path)
         .status()
         .expect("the platform has no mkfifo command");
@@ -794,7 +794,7 @@ fn wait_for_exit(child: &mut std::process::Child) -> Option<std::process::ExitSt
 /// platform.
 #[cfg(unix)]
 fn send_sigint(pid: u32) {
-    let status = Command::new("kill")
+    let status = childenv::fixture_command("kill")
         .arg("-INT")
         .arg(pid.to_string())
         .status()

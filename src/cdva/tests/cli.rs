@@ -148,7 +148,7 @@ const HELP_FLAG_INDENT: &str = "      --";
 
 /// The binary, with every `GIT_*` variable of the caller removed.
 fn cdva() -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_cdva"));
+    let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_cdva"));
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().starts_with(GIT_PREFIX) {
             command.env_remove(&key);

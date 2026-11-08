@@ -30,9 +30,7 @@
 //! directory, so nothing `nodenuke` deletes exists anywhere it can reach.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
-use gitscratch::shed_inherited_git_environment;
 use gitscratch::testing::{canonical, path_at_or_above, DetachedGitDirRepo};
 
 /// The words `nodenuke` uses when `find_git_repo` answered.
@@ -50,13 +48,12 @@ const SCAN_ROOT_PREFIX: &str = "Starting to scan from: ";
 /// which is the one call this file is about.
 ///
 /// The inherited `GIT_*` family goes, through
-/// [`gitscratch::shed_inherited_git_environment`]. This suite runs under a
+/// [`childenv::fixture_command`]. This suite runs under a
 /// pre-commit hook that exports `GIT_DIR` and its kin, and `GIT_DIR` beats the
 /// working directory, so a leaked one points anything that asks git at the
 /// repository being committed to.
 fn run_nodenuke_in(dir: &Path) -> String {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_nodenuke"));
-    shed_inherited_git_environment(&mut command);
+    let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_nodenuke"));
 
     let output = command
         .current_dir(dir)

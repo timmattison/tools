@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 anyhow.workspace = true
 buildinfo.workspace = true
+childenv.workspace = true
 clap.workspace = true
 git2.workspace = true
 indicatif.workspace = true

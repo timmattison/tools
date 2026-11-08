@@ -230,7 +230,7 @@ impl IOPSCollector {
 
         // Spawn fs_usage with diskio filter
         // -w forces wide output, -f diskio filters to disk I/O events only
-        let mut child = Command::new("fs_usage")
+        let mut child = Command::from(childenv::command("fs_usage"))
             .args(["-w", "-f", "diskio"])
             .stdout(Stdio::piped())
             .stderr(Stdio::null()) // Suppress DTrace warnings

@@ -15,7 +15,7 @@ use gitscratch::testing::{
     independent_branches_repo, multi_byte_names_repo, nested_conflict_repo, not_a_repository,
     unrelated_histories_repo, TestRepo, CHOICE_HEAD_BRANCH,
 };
-use gitscratch::{NoInheritedGitEnvironment, DEFAULT_BRANCHES};
+use gitscratch::DEFAULT_BRANCHES;
 use unicode_width::UnicodeWidthStr;
 
 /// Exit code for a replay that hit no conflicts.
@@ -93,11 +93,8 @@ const STATED_WIDTH: &str = "200";
 /// play nowhere else is what keeps them the only place the answer depends on
 /// it.
 fn grime_command(repo: &Path, args: &[&str]) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_grime"));
-    command
-        .args(args)
-        .current_dir(repo)
-        .without_inherited_git_environment();
+    let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_grime"));
+    command.args(args).current_dir(repo);
 
     // After the scrub, and for the reason `TestRepo::try_git` applies a
     // caller's own variables after its own: the rule the scrub applies is the
@@ -2272,7 +2269,7 @@ fn a_leaked_repository_location_does_not_redirect_the_replay() {
     let git_dir = hooks_repo.path().join(".git");
     let config = snapshot(&git_dir.join("config"));
 
-    let output = Command::new(env!("CARGO_BIN_EXE_grime"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_grime"))
         .arg("two")
         .current_dir(repo.path())
         .env("GIT_DIR", &git_dir)
@@ -2327,7 +2324,7 @@ fn a_leaked_index_file_is_neither_read_from_nor_written_to() {
     let index = hooks_repo.path().join(".git").join("index");
     let before = snapshot(&index);
 
-    let output = Command::new(env!("CARGO_BIN_EXE_grime"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_grime"))
         .arg("two")
         .current_dir(repo.path())
         .env("GIT_INDEX_FILE", &index)

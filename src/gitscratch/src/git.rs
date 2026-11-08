@@ -7,7 +7,7 @@
 //! otherwise move the very branch refs being simulated.
 //!
 //! The other half of "against the right repository" is the *environment*, which
-//! [`NoInheritedGitEnvironment`] strips, because a git invocation obeys it
+//! [`childenv::fixture_command`] strips, because a git invocation obeys it
 //! before it obeys the directory it was pointed at. The same sweep takes the
 //! rest of what a hook hands its children — who is committing, and when —
 //! because an environment variable outranks every config source, so the
@@ -17,7 +17,6 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 
 use anyhow::{Context, Result};
-use childenv::NoInheritedGitEnvironment;
 
 /// Who scratch commits are attributed to. Spelled once and used both as
 /// configuration and as environment, because those are two ways of saying the
@@ -121,7 +120,7 @@ impl Git {
     /// `an_argument_cannot_re_pin_a_setting_the_safety_config_fixed` and
     /// `an_argument_cannot_aim_the_runner_at_another_repository`.
     fn command(&self, subcommand: &str, args: &[&str]) -> Command {
-        let mut command = Command::new("git");
+        let mut command = childenv::fixture_command("git");
         command
             .args(self.safety_config())
             .arg(subcommand)
@@ -137,7 +136,6 @@ impl Git {
             // they put the developer's own name on scratch commits, which is
             // the single thing the pin exists to prevent. Both halves leave
             // with the one sweep, because the rule is the `GIT_` prefix.
-            .without_inherited_git_environment()
             // A rebase that stops would otherwise try to open an editor and
             // hang forever on a commit message or a todo list.
             .env("GIT_EDITOR", "true")
@@ -475,7 +473,7 @@ impl Git {
     /// alone catches every dash-leading revision git knows today, because an
     /// option prints no object id and `--verify` demands one. That is a fact
     /// about today's option list rather than a rule, and this crate takes the
-    /// rule: the same reasoning that makes [`NoInheritedGitEnvironment`] match
+    /// rule: the same reasoning that makes [`childenv::fixture_command`] match
     /// a prefix instead of a list of names.
     ///
     /// # Errors
@@ -677,7 +675,7 @@ impl Git {
         // harness that actually made them.
         .chain([
             // These two settle the identity only in company with
-            // `NoInheritedGitEnvironment`, which takes back off the identity
+            // `childenv::fixture_command`, which takes back off the identity
             // variables that would otherwise outrank them.
             format!("user.name={HARNESS_NAME}"),
             format!("user.email={HARNESS_EMAIL}"),
@@ -775,7 +773,7 @@ mod tests {
     use pulldown_cmark::{Event, Parser, Tag};
     use tempfile::TempDir;
 
-    use childenv::{NoInheritedGitEnvironment, GIT_ENVIRONMENT_PREFIX};
+    use childenv::GIT_ENVIRONMENT_PREFIX;
 
     use super::{Git, PathBuf, HARNESS_EMAIL, HARNESS_NAME, HOOKS_PATH_KEY};
     use crate::repo::PREFLIGHT_HOOKS_PATH;
@@ -1108,13 +1106,13 @@ mod tests {
     ///
     /// `update-index --index-info` reads its records from stdin and
     /// [`TestRepo::git`] passes none, so that one spawn is made directly here -
-    /// scrubbed through [`NoInheritedGitEnvironment`] like every other spawn in this
+    /// scrubbed through [`childenv::fixture_command`] like every other spawn in this
     /// crate, because an inherited `GIT_INDEX_FILE` would otherwise stage this
     /// name into whichever repository the hook that started the run belongs to.
     #[test]
     fn a_path_git_reports_comes_back_byte_for_byte_even_when_it_is_not_utf8() {
         use std::io::Write;
-        use std::process::{Command, Stdio};
+        use std::process::Stdio;
 
         let repo = TestRepo::init();
         repo.commit_file("seed.txt", "seed\n", "base");
@@ -1125,10 +1123,9 @@ mod tests {
         record.extend_from_slice(BAD_NAME);
         record.push(0);
 
-        let mut child = Command::new("git")
+        let mut child = childenv::fixture_command("git")
             .args(["update-index", "-z", "--index-info"])
             .current_dir(repo.path())
-            .without_inherited_git_environment()
             .stdin(Stdio::piped())
             .spawn()
             .expect("spawn git update-index");
@@ -1874,7 +1871,7 @@ mod tests {
     /// inherited means something other than the environment outranked the pin,
     /// and that is a different bug worth saying out loud.
     ///
-    /// Applies [`shed_inherited_git_environment`]'s own rule — the `GIT_`
+    /// Applies [`childenv::fixture_command`]'s own rule — the `GIT_`
     /// prefix, read off [`std::env::vars_os`] — rather than a list of its own,
     /// so the diagnosis names the variables the runner actually acts on. A list
     /// here would go stale the first time the rule widened, and it would go
@@ -1925,7 +1922,7 @@ mod tests {
              got:         {ident}\n  \
              inherited:   {}\n\
              An identity variable outranks every config source, `-c` included, so \
-             NoInheritedGitEnvironment removes every `GIT_` variable and \
+             childenv::fixture_command removes every `GIT_` variable and \
              Git::command pins the four name and email variables back to the \
              harness before git is spawned. git exports them into every hook it \
              runs, and into every commit that rebase, cherry-pick, or am \
@@ -2145,7 +2142,7 @@ mod tests {
     /// the runner puts on the command it builds.
     ///
     /// The armed control comes first, and it is what makes the assertion mean
-    /// anything. [`NoInheritedGitEnvironment`] schedules a removal for every
+    /// anything. [`childenv::fixture_command`] schedules a removal for every
     /// `GIT_` variable the process *holds*, so a run started from a git hook
     /// would see both date variables removed from the command whether or not
     /// [`Git::command`] says anything about them. Under a process that holds
@@ -2208,7 +2205,7 @@ mod tests {
     /// restated and two left to the sweep alone, a sweep that was edited away
     /// would hold the name and the address and let both dates through - and
     /// every commit a run makes would carry one identical timestamp, which is
-    /// the cost the crate already names at [`NoInheritedGitEnvironment`].
+    /// the cost the crate already names at [`childenv::fixture_command`].
     ///
     /// Read off the command rather than out of a commit, because the question
     /// is what the runner says rather than what git resolves. A commit made in

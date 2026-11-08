@@ -21,7 +21,7 @@
 //! status, and the host's global and system config is scrubbed out of the run.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 /// The per-developer override file `swt` looks for at the parent repo root.
 const OVERRIDE_FILE: &str = ".swt-check";
@@ -30,12 +30,6 @@ const OVERRIDE_FILE: &str = ".swt-check";
 /// names its source in this exact spelling when the rule comes from the file at
 /// the repository root.
 const COMMITTED_IGNORE_FILE: &str = ".gitignore";
-
-/// The git location variables git exports into a hook's environment. This
-/// repository's own pre-commit hook runs `cargo test`, so a test that shells out
-/// to git inherits them and answers for whatever repository they name rather
-/// than for this checkout.
-const INHERITED_GIT_ENV: [&str; 4] = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_PREFIX"];
 
 /// Absolute, canonical path to the repository root, two levels above this
 /// crate's manifest.
@@ -52,11 +46,8 @@ fn repo_root() -> PathBuf {
 /// per-developer setting, and a rule read from it would make this guard pass on
 /// one machine only.
 fn git_at_repo_root(args: &[&str]) -> Output {
-    let mut command = Command::new("git");
+    let mut command = childenv::fixture_command("git");
     command.current_dir(repo_root()).args(args);
-    for name in INHERITED_GIT_ENV {
-        command.env_remove(name);
-    }
     command.env("GIT_CONFIG_GLOBAL", "/dev/null");
     command.env("GIT_CONFIG_SYSTEM", "/dev/null");
     command

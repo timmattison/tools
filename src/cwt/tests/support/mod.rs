@@ -12,7 +12,6 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use gitscratch::shed_inherited_git_environment;
 use tempfile::TempDir;
 
 /// Shed the inherited git environment, then pin what these fixtures need.
@@ -21,7 +20,7 @@ use tempfile::TempDir;
 /// `GIT_INDEX_FILE` and `GIT_PREFIX` to the pre-commit hook. Those leak into
 /// child `git` and `cwt` processes and pin them to the real repository whatever
 /// `current_dir(tempdir)` says, so fixture commits would land in the real
-/// repository. [`gitscratch::shed_inherited_git_environment`] removes the whole
+/// repository. [`childenv::fixture_command`] removes the whole
 /// `GIT_` family rather than the four names this fixture used to list, because
 /// a list strips nothing new the day git adds a variable.
 ///
@@ -31,8 +30,6 @@ use tempfile::TempDir;
 /// observe. The identity is stated for the same reason: a fixture commit must
 /// behave the same under a commit as it does under a bare `cargo test`.
 pub fn scrub_git_env(cmd: &mut Command) -> &mut Command {
-    shed_inherited_git_environment(cmd);
-
     cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .env("GIT_AUTHOR_NAME", "cwt test")
@@ -43,7 +40,7 @@ pub fn scrub_git_env(cmd: &mut Command) -> &mut Command {
 
 /// Run `git <args>` in `dir` and assert it succeeded.
 pub fn git(dir: &Path, args: &[&str]) -> Output {
-    let mut cmd = Command::new("git");
+    let mut cmd = childenv::fixture_command("git");
     cmd.args(args).current_dir(dir);
     let output = scrub_git_env(&mut cmd).output().expect("failed to run git");
     assert!(
@@ -67,7 +64,7 @@ pub fn cwt(dir: &Path, args: &[&str]) -> Output {
 
 /// Run the real `cwt` binary in `dir` with extra environment variables.
 pub fn cwt_with_env(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_cwt"));
+    let mut cmd = childenv::fixture_command(env!("CARGO_BIN_EXE_cwt"));
     cmd.args(args).current_dir(dir).env("NO_COLOR", "1");
     for (key, value) in env {
         cmd.env(key, value);

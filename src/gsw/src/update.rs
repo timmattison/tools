@@ -840,8 +840,7 @@ fn abort_child(workdir: &Path, operation: &Operation) -> Command {
         Operation::Rebase { .. } => "rebase",
         Operation::Merge { .. } => "merge",
     };
-    let mut command = Command::new("git");
-    gitscratch::shed_inherited_git_environment_keeping_user_intent(&mut command);
+    let mut command = childenv::command("git");
     command
         .args([subcommand, "--abort"])
         .current_dir(workdir)
@@ -2835,7 +2834,7 @@ mod run_tests {
                  assertion below is measured against nothing",
             );
         }
-        for name in gitscratch::USER_INTENT_GIT_ENVIRONMENT {
+        for name in childenv::USER_INTENT_GIT_ENVIRONMENT {
             assert_eq!(
                 std::env::var(name).ok(),
                 Some(user_intent_value(name)),
@@ -2957,7 +2956,7 @@ mod run_tests {
                  assertions below are measured against nothing",
             );
         }
-        for name in gitscratch::USER_INTENT_GIT_ENVIRONMENT {
+        for name in childenv::USER_INTENT_GIT_ENVIRONMENT {
             assert_eq!(
                 std::env::var(name).ok(),
                 Some(user_intent_value(name)),

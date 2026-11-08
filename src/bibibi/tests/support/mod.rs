@@ -12,7 +12,6 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 use gitscratch::testing::TestRepo;
-use gitscratch::NoInheritedGitEnvironment;
 
 /// The width that each run of `bibibi` states.
 pub const STATED_WIDTH: &str = "200";
@@ -55,11 +54,8 @@ pub fn add_test_commit_with(repo: &TestRepo, script: &str) -> String {
 
 /// A `bibibi` run in `repo`, built and not yet started.
 pub fn bibibi_command(repo: &Path, args: &[&str]) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_bibibi"));
-    command
-        .args(args)
-        .current_dir(repo)
-        .without_inherited_git_environment();
+    let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_bibibi"));
+    command.args(args).current_dir(repo);
     // After the sweep, because the sweep removes every `GIT_` name.
     command.env("COLUMNS", STATED_WIDTH);
     command.env("LC_ALL", "C");

@@ -522,7 +522,7 @@ impl FakeClaude {
     fn start(folder: &Path) -> Self {
         let program = folder.join("claude");
         std::os::unix::fs::symlink("/bin/sleep", &program).unwrap();
-        let child = std::process::Command::new(&program)
+        let child = childenv::fixture_command(&program)
             .arg("120")
             .spawn()
             .expect("the fake claude should start");

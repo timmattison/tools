@@ -112,7 +112,7 @@ mod tests {
     use super::{identity, start_time, Identity};
     use crate::lock::{HolderRecord, Mode, StartTime};
     use std::io;
-    use std::process::{self, Command, Stdio};
+    use std::process::{self, Stdio};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     /// A bound that the age of this test process never comes near.
@@ -140,7 +140,7 @@ mod tests {
     /// Starts a child that sleeps until a drop kills it, for 60 s at most.
     fn sleeping_child() -> Child {
         Child(
-            Command::new("sleep")
+            childenv::fixture_command("sleep")
                 .arg("60")
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())

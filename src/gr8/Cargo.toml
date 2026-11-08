@@ -10,6 +10,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 buildinfo.workspace = true
+childenv.workspace = true
 chrono.workspace = true
 comfy-table.workspace = true
 serde.workspace = true

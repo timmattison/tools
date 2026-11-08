@@ -9,6 +9,7 @@ name = "diskhog"
 path = "src/main.rs"
 
 [dependencies]
+childenv.workspace = true
 sysinfo.workspace = true
 tokio.workspace = true
 ratatui.workspace = true

@@ -1853,7 +1853,7 @@ mod tests {
     #[test]
     fn a_fifo_in_the_tree_keeps_all_originals() {
         let fixture = sample_with(|src| {
-            let status = std::process::Command::new("mkfifo")
+            let status = childenv::fixture_command("mkfifo")
                 .arg(src.join("pipe"))
                 .status()
                 .unwrap();
@@ -2125,7 +2125,7 @@ mod tests {
     #[test]
     fn a_copy_leaves_out_a_skipped_special_file() {
         let fixture = sample_with(|src| {
-            let status = std::process::Command::new("mkfifo")
+            let status = childenv::fixture_command("mkfifo")
                 .arg(src.join("pipe"))
                 .status()
                 .unwrap();

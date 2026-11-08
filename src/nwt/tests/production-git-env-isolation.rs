@@ -17,9 +17,9 @@
 //! is how this file came to exist.
 //!
 //! Two tests are the two halves of one rule, which
-//! `gitscratch::shed_inherited_git_environment_keeping_user_intent` states:
+//! `childenv::command` states:
 //! shed the whole `GIT_` prefix, and keep the six names of
-//! `gitscratch::USER_INTENT_GIT_ENVIRONMENT`. A test of the shedding half alone
+//! `childenv::USER_INTENT_GIT_ENVIRONMENT`. A test of the shedding half alone
 //! passes for a tool that sheds everything, and such a tool breaks the user who
 //! states `GIT_SSH_COMMAND` or `GIT_CONFIG_GLOBAL` on purpose. So the keep half
 //! is pinned beside it.
@@ -819,7 +819,7 @@ fn install_fake_package_manager(bin_dir: &Path, record: &Path) {
 /// package-manager install, and the lifecycle scripts of that install run git.
 /// The install is a child of `nwt` like each git child, so it gets the same
 /// rule: shed the whole `GIT_` prefix, and keep the six names of
-/// `gitscratch::USER_INTENT_GIT_ENVIRONMENT`. This test holds both halves for
+/// `childenv::USER_INTENT_GIT_ENVIRONMENT`. This test holds both halves for
 /// that child.
 ///
 /// The fake of [`install_fake_package_manager`] runs `git config` in the new

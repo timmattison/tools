@@ -14,7 +14,7 @@ use std::process::{Command, Output};
 
 /// Invoke the freshly-built `bm` binary.
 fn bm() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_bm"))
+    childenv::fixture_command(env!("CARGO_BIN_EXE_bm"))
 }
 
 fn write_file(path: &Path, contents: &[u8]) {

@@ -27,7 +27,7 @@ fn block(mhz: u32) -> String {
 
 /// A stand-in for `powermetrics` that prints `script` and exits with `code`.
 fn stand_in(script: &str, code: i32) -> Command {
-    let mut command = Command::new("/bin/sh");
+    let mut command = childenv::fixture_command("/bin/sh");
     command
         .arg("-c")
         .arg(format!("printf '%s' \"$0\"; exit {code}"));

@@ -56,7 +56,7 @@ fn run_seescc_iso_columns(
 /// policy (removed vs. set) so the two width regimes stay deterministic
 /// regardless of whatever `COLUMNS` the test runner itself leaked.
 fn base_command(path_value: &str, iso: &Path, args: &[&str]) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_seescc"));
+    let mut cmd = childenv::fixture_command(env!("CARGO_BIN_EXE_seescc"));
     cmd.env("PATH", path_value)
         .env("HOME", iso)
         .env("XDG_CONFIG_HOME", iso)

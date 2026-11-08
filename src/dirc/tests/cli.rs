@@ -39,7 +39,7 @@ use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 /// The name of the file that stands in for the clipboard of the machine.
 ///
@@ -265,7 +265,7 @@ impl Scratch {
 /// that read it in place of `getcwd` would pass under an environment that
 /// carried none, and would put the wrong path on the clipboard for every user.
 fn run_in(scratch: &Scratch, working_dir: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_dirc"))
+    childenv::fixture_command(env!("CARGO_BIN_EXE_dirc"))
         .env_clear()
         .env(CLIPBOARD_FILE_ENV, scratch.clipboard())
         .env(LOGICAL_DIRECTORY_ENV, working_dir)
@@ -526,7 +526,7 @@ fn the_shell_runs_the_cd_line_of_a_name_that_holds_a_quote() {
     let written = stdout(&printed);
     let line = written.trim_end();
 
-    let landed = Command::new(SHELL)
+    let landed = childenv::fixture_command(SHELL)
         .env_clear()
         // The shell starts in the temporary directory, so a line the shell
         // refused leaves it here and this test then reads a directory that is
@@ -568,7 +568,7 @@ fn the_shell_runs_the_idiom_the_help_teaches_into_a_name_that_holds_a_tab() {
     let (idiom, _alias) = invocations(&help_page(), BASH_LABEL);
     let script = format!("{}{REPORT_WHERE}", with_built_binary(&idiom));
 
-    let landed = Command::new(SHELL)
+    let landed = childenv::fixture_command(SHELL)
         .env_clear()
         // The children of this shell read the clipboard of this test. No child
         // of this file reaches the clipboard of the machine.

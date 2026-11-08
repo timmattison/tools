@@ -3,7 +3,7 @@ use clap::Parser;
 use repowalker::{find_git_repo, RepoWalker};
 use std::env;
 use std::path::Path;
-use std::process::{exit, Command};
+use std::process::exit;
 use walkdir::WalkDir;
 
 #[derive(Parser)]
@@ -36,7 +36,7 @@ fn run_cargo_clean(dir: &Path, dry_run: bool) -> Result<(), std::io::Error> {
         return Ok(());
     }
 
-    let output = Command::new("cargo")
+    let output = childenv::command("cargo")
         .arg("clean")
         .current_dir(dir)
         .output()?;

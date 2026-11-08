@@ -8,8 +8,6 @@
 //! machine-independent), and `/tmp` (basename `tmp`) does no filesystem work, so
 //! the expected values are stable constants.
 
-use std::process::Command;
-
 /// `portplz /tmp --no-git` with `PORTPLZ_UID=0` derives the port from
 /// `"0\ntmp"`, which always yields this port.
 const TMP_PORT_UID0: &str = "19642";
@@ -21,7 +19,7 @@ const TMP_API_PORT_UID0: &str = "34296";
 /// Runs the binary with `PORTPLZ_UID` pinned so the derived port does not depend
 /// on whoever runs the test suite.
 fn run_with_uid(uid: &str, args: &[&str]) -> String {
-    let output = Command::new(env!("CARGO_BIN_EXE_portplz"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_portplz"))
         .env("PORTPLZ_UID", uid)
         .args(args)
         .output()
@@ -99,7 +97,7 @@ fn name_verbose_prints_the_name() {
 #[test]
 fn an_empty_name_is_refused() {
     for flag in ["--name", "-n"] {
-        let output = Command::new(env!("CARGO_BIN_EXE_portplz"))
+        let output = childenv::fixture_command(env!("CARGO_BIN_EXE_portplz"))
             .env("PORTPLZ_UID", "0")
             .args(["/tmp", "--no-git", flag, ""])
             .output()
@@ -126,7 +124,7 @@ fn an_empty_name_is_refused() {
 fn portplz_rejects_malformed_uid() {
     // A malformed PORTPLZ_UID must be a hard error, not silently ignored. Set the
     // env var on the child only so concurrent test runs stay isolated.
-    let output = Command::new(env!("CARGO_BIN_EXE_portplz"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_portplz"))
         .env("PORTPLZ_UID", "abc")
         .args(["/tmp", "--no-git"])
         .output()

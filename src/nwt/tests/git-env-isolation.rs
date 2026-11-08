@@ -15,8 +15,8 @@
 //! authored every subsequent commit as `Test <t@example.com>` until it was
 //! noticed. A config write is sticky: one leak outlives the run that caused it.
 //!
-//! `.husky/pre-commit` already scrubs a few of these vars before `cargo test`,
-//! but that is a single caller and a short list. This pins the guarantee at the
+//! `.husky/pre-commit` scrubs these vars before each cargo command, but that
+//! is a single caller. This pins the guarantee at the
 //! fixture itself — matching what `gsw`'s suite already does — so the sandbox
 //! holds for any other runner (`bacon`, an IDE, a future hook or CI job) that
 //! forgets the scrub.
@@ -74,23 +74,17 @@ const PROBE_VARS: &[&str] = &[
     "GIT_CONFIG_PARAMETERS",
 ];
 
-/// Removes every inherited `GIT_*` variable from `cmd`'s child environment.
+/// Gives `cmd` no inherited environment at all, apart from `PATH`.
 ///
-/// This is deliberately a private copy of the rule rather than a call to
-/// `support::run_git`'s scrub or to
-/// `gitscratch::shed_inherited_git_environment` itself: those are the code under
-/// test, and a probe that borrows its sandbox from the code it is probing cannot
-/// fail. Before the fix, that scrub is exactly what leaks.
-///
-/// The rule is the `GIT_` prefix, never a list of names — see this module's
-/// header. Enumerating `std::env::vars_os()` means a variable git adds tomorrow
-/// is swept without anyone editing this file.
+/// The probes of this file measure the sweep that each fixture takes, so their
+/// own `git` must not depend on that sweep. A probe that takes its sandbox from
+/// the code it probes cannot fail. `env_clear` names no variable, so it cannot
+/// go stale, and it does not share an implementation with the rule under test.
 fn scrub_inherited_git_env(cmd: &mut Command) {
-    for (key, _) in std::env::vars_os() {
-        if key.to_string_lossy().starts_with("GIT_") {
-            cmd.env_remove(&key);
-        }
-    }
+    cmd.env_clear().env(
+        "PATH",
+        std::env::var_os("PATH").expect("the test process has a PATH"),
+    );
 }
 
 /// Runs `git init` in `dir` with the whole inherited `GIT_*` family scrubbed.
@@ -99,7 +93,7 @@ fn scrub_inherited_git_env(cmd: &mut Command) {
 ///
 /// Panics if `git` cannot be spawned or `git init` reports failure.
 fn init_sandboxed_repo(dir: &Path) {
-    let mut cmd = Command::new("git");
+    let mut cmd = childenv::fixture_command("git");
     cmd.arg("init")
         .current_dir(dir)
         .stdin(Stdio::null())
@@ -122,7 +116,7 @@ fn init_sandboxed_repo(dir: &Path) {
 ///
 /// Panics if `git` cannot be spawned, exits non-zero, or writes non-UTF-8.
 fn sandboxed_git_stdout(dir: &Path, args: &[&str]) -> String {
-    let mut cmd = Command::new("git");
+    let mut cmd = childenv::fixture_command("git");
     cmd.args(args)
         .current_dir(dir)
         .stdin(Stdio::null())

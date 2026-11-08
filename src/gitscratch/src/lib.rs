@@ -16,7 +16,7 @@
 //! pointed at, and it exports them into every hook it runs. Run from inside one
 //! — a pre-push gate, `git bisect run`, `rebase --exec`, `cargo test` from
 //! `.husky/pre-commit` — an unscrubbed tool would aim the whole simulation at
-//! the hook's repository. [`NoInheritedGitEnvironment`] takes them back off, at
+//! the hook's repository. [`childenv::fixture_command`] takes them back off, at
 //! the single place a git process is created and at every fixture spawn
 //! besides. A hook exports who is committing as well as where, and those
 //! variables outrank every config source, so the same sweep takes that second
@@ -123,24 +123,6 @@ pub mod report;
 pub mod scratch;
 #[cfg(feature = "testing")]
 pub mod testing;
-
-/// The environment guards, which every consumer that spawns git of its own
-/// needs. Every one of them only *removes* variables, so none of them can point
-/// a command at a repository or give it a command to run.
-///
-/// There are two rules rather than one, and [`InheritedGitEnvironment`] names
-/// which is which. A fixture sheds the whole `GIT_` prefix through
-/// [`shed_inherited_git_environment`] or [`NoInheritedGitEnvironment`]. A
-/// production spawn sheds the same prefix through
-/// [`shed_inherited_git_environment_keeping_user_intent`] and keeps the six
-/// names of [`USER_INTENT_GIT_ENVIRONMENT`], which a person states on purpose.
-/// [`shed_git_environment_from`] is the one implementation of both, with the
-/// key source as a parameter so a test never touches the process environment.
-pub use childenv::{
-    shed_git_environment_from, shed_inherited_git_environment,
-    shed_inherited_git_environment_keeping_user_intent, InheritedGitEnvironment,
-    NoInheritedGitEnvironment, HOOK_EXPORTED_GIT_ENVIRONMENT, USER_INTENT_GIT_ENVIRONMENT,
-};
 
 /// The runner itself, and only for the test scaffolding.
 ///

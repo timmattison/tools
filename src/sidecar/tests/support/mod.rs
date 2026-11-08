@@ -269,8 +269,7 @@ impl Fixture {
 
     /// Runs git in `cwd` and returns the whole output.
     pub fn try_git(&self, cwd: &Path, args: &[&str]) -> Output {
-        let mut command = Command::new("git");
-        gitscratch::shed_inherited_git_environment(&mut command);
+        let mut command = childenv::fixture_command("git");
         command
             .current_dir(cwd)
             .args(args)
@@ -284,8 +283,7 @@ impl Fixture {
     /// Makes the command that runs the `sidecar` binary in `cwd`, with a prepared
     /// environment. The fake `gh` comes first in `PATH`.
     pub fn sidecar(&self, cwd: &Path, args: &[&str]) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_sidecar"));
-        gitscratch::shed_inherited_git_environment(&mut command);
+        let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_sidecar"));
         for variable in SCRUBBED_VARIABLES {
             command.env_remove(variable);
         }

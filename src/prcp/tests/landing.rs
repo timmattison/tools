@@ -41,7 +41,7 @@ const SAMPLE_FILES: [(&str, &str); 3] = [
 
 /// Make a `prcp` command with the given arguments. The caller sets the standard streams.
 fn prcp(args: &[OsString]) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_prcp"));
+    let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_prcp"));
     command.env("COLUMNS", TEST_COLUMNS.to_string()).args(args);
     command
 }

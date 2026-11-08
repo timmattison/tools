@@ -7,6 +7,7 @@ description = "Finds smart TVs on the local network and identifies vendor, model
 [dependencies]
 anyhow.workspace = true
 buildinfo.workspace = true
+childenv.workspace = true
 clap.workspace = true
 comfy-table.workspace = true
 futures.workspace = true

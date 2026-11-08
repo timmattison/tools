@@ -33,7 +33,6 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use repo_guards::target_lints::{self, Report, TargetLintsError};
 use tempfile::TempDir;
@@ -284,7 +283,7 @@ fn the_guard_resolves_exactly_the_roots_cargo_builds() {
 /// be an instance of the very defect it exists to catch: a check that reports
 /// clean because it never looked.
 fn cargo_target_roots(repo_root: &Path) -> BTreeSet<PathBuf> {
-    let output = Command::new(env!("CARGO"))
+    let output = childenv::fixture_command(env!("CARGO"))
         .args(["metadata", "--no-deps", "--format-version", "1"])
         .current_dir(repo_root)
         .output()

@@ -131,7 +131,7 @@ fn resign_and_reverify(dest: &Path, verify_arg: &str) -> Option<ExecVerdict> {
     #[cfg(target_os = "macos")]
     {
         eprintln!("exec check got SIGKILL; re-signing ad-hoc and retrying once…");
-        let _ = process::Command::new("codesign")
+        let _ = childenv::command("codesign")
             .arg("-f")
             .arg("-s")
             .arg("-")

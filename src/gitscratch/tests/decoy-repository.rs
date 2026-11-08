@@ -88,8 +88,13 @@ fn the_hostile_environment_aims_at_the_decoy() {
         "'gitscratch.envleakprobe=leaked'"
     );
 
-    let mut command = std::process::Command::new("/usr/bin/env");
+    let mut command = childenv::fixture_command("/usr/bin/env");
     decoy.aim(&mut command);
-    let aimed = command.get_envs().count();
+    // A sweep records each `GIT_` variable of this process as a removal, so
+    // only a value that the command sets counts here.
+    let aimed = command
+        .get_envs()
+        .filter(|(_, value)| value.is_some())
+        .count();
     assert_eq!(aimed, 4);
 }

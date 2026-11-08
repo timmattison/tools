@@ -3,7 +3,7 @@ use clap::Parser;
 use repowalker::{find_git_repo, RepoWalker};
 use std::env;
 use std::path::Path;
-use std::process::{exit, Command};
+use std::process::exit;
 
 #[derive(Parser)]
 #[command(name = "nodeup")]
@@ -148,7 +148,7 @@ fn main() {
                 dir_path.display()
             );
 
-            let output = Command::new(cmd_args[0])
+            let output = childenv::command(cmd_args[0])
                 .args(&cmd_args[1..])
                 .current_dir(dir_path)
                 .output();

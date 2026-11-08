@@ -54,7 +54,7 @@ pub fn run(argv: &[OsString], dir: &Path) -> Result<Ended> {
     let Some((program, arguments)) = argv.split_first() else {
         bail!("the test command is empty");
     };
-    let mut command = Command::new(program);
+    let mut command = childenv::command(program);
     command.args(arguments);
     run_command(command, dir).with_context(|| {
         format!(
@@ -73,7 +73,7 @@ pub fn run(argv: &[OsString], dir: &Path) -> Result<Ended> {
 /// Returns an error if the shell cannot start.
 /// Returns [`interrupt::Interrupted`] if a signal stopped the run.
 pub fn run_build(build: &str, dir: &Path) -> Result<Ended> {
-    let mut command = Command::new("sh");
+    let mut command = childenv::command("sh");
     command.arg("-c").arg(build);
     run_command(command, dir).context("could not start the build command")
 }
@@ -88,10 +88,9 @@ pub fn run_build(build: &str, dir: &Path) -> Result<Ended> {
 ///
 /// The child does not inherit the git environment. A `GIT_DIR` that a hook
 /// exported must not aim the test at another repository. The six names of
-/// `gitscratch::USER_INTENT_GIT_ENVIRONMENT` stay, for example the
+/// `childenv::USER_INTENT_GIT_ENVIRONMENT` stay, for example the
 /// `GIT_SSH_COMMAND` of the user.
 fn run_command(mut command: Command, dir: &Path) -> Result<Ended> {
-    gitscratch::shed_inherited_git_environment_keeping_user_intent(&mut command);
     let stdout = std::io::stderr()
         .as_fd()
         .try_clone_to_owned()

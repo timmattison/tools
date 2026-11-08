@@ -865,7 +865,7 @@ mod tests {
         let src = temp.path().join("src");
         write_file(&src.join("a.txt"), "a");
         let fifo = src.join("pipe");
-        let status = std::process::Command::new("mkfifo")
+        let status = childenv::fixture_command("mkfifo")
             .arg(&fifo)
             .status()
             .unwrap();

@@ -1623,7 +1623,7 @@ owner/b."
     fn a_timeout_no_clock_can_hold_kills_the_child_rather_than_panicking() {
         // The panic this pins left the child alive: `wn` died at the addition and
         // the run it started was reparented to PID 1.
-        let mut child = std::process::Command::new("/bin/sleep")
+        let mut child = childenv::fixture_command("/bin/sleep")
             .arg("5")
             .spawn()
             .expect("/bin/sleep");

@@ -13,9 +13,8 @@
 )]
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 
-use gitscratch::shed_inherited_git_environment;
 use tempfile::TempDir;
 
 /// Exit code that `cwt` returns when it finds no matching worktree.
@@ -28,14 +27,13 @@ pub const MULTIPLE_MATCHES: i32 = 6;
 ///
 /// Output is nulled so that concurrent test runs do not interleave noise. The
 /// whole inherited `GIT_` family is shed through
-/// [`gitscratch::shed_inherited_git_environment`], because a run started from a
+/// [`childenv::fixture_command`], because a run started from a
 /// git hook inherits an environment that points every command here at the
 /// repository being committed to. The rule is the prefix, never a list of
 /// names: a list strips nothing new the day git adds a variable, and this
 /// fixture named four.
 pub fn run_git(dir: &Path, args: &[&str]) -> bool {
-    let mut command = Command::new("git");
-    shed_inherited_git_environment(&mut command);
+    let mut command = childenv::fixture_command("git");
 
     command
         .args(args)
@@ -106,8 +104,7 @@ pub fn add_worktree(temp: &TempDir, repo: &Path, branch: &str) -> PathBuf {
 /// it: these tests can run from inside a pre-commit hook, and `cwt` spawns git
 /// of its own.
 pub fn cwt(dir: &Path, args: &[&str]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_cwt"));
-    shed_inherited_git_environment(&mut command);
+    let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_cwt"));
 
     command
         .args(args)

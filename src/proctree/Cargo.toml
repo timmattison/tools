@@ -5,5 +5,8 @@ edition.workspace = true
 description = "The walk of the process ancestry that every tool in this workspace shares"
 license = "MIT"
 
+[dependencies]
+childenv.workspace = true
+
 [lints]
 workspace = true

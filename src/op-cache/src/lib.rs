@@ -336,7 +336,10 @@ fn fetch_from_1password(op_path: &OpPath) -> Result<String> {
     ensure_op_available()?;
 
     for attempt in 1..=OP_MAX_RETRIES {
-        match childenv::command("op").args(["read", op_path.as_ref()]).output() {
+        match childenv::command("op")
+            .args(["read", op_path.as_ref()])
+            .output()
+        {
             Ok(output) if output.status.success() => {
                 let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if !value.is_empty() {

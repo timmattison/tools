@@ -16,7 +16,7 @@ use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 use thiserror::Error;
@@ -208,7 +208,7 @@ pub fn verify_exec(bin: &Path, arg: &str, timeout: Duration) -> ExecVerdict {
     // stdin/stdout/stderr all go to null: the verified binary's output must not
     // pollute install-bin's own output, and an unread pipe could otherwise
     // deadlock the timed wait below.
-    let mut child = match Command::new(bin)
+    let mut child = match childenv::command(bin)
         .arg(arg)
         .stdin(Stdio::null())
         .stdout(Stdio::null())

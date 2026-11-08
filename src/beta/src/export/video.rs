@@ -8,7 +8,7 @@ use imageproc::rect::Rect;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 // Helper functions for color analysis
 fn color_similarity(color1: (u8, u8, u8), color2: (u8, u8, u8)) -> u32 {
@@ -552,7 +552,7 @@ fn spawn_ffmpeg(
         .map(|ext| ext.to_lowercase() == "gif")
         .unwrap_or(false);
 
-    let mut cmd = Command::new("ffmpeg");
+    let mut cmd = childenv::command("ffmpeg");
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());

@@ -8,7 +8,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 
 use tempfile::TempDir;
 
@@ -42,7 +42,7 @@ fn fixture() -> (TempDir, PathBuf) {
 
 /// Runs `zth` with the given arguments and captures its output.
 fn run(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_zth"))
+    childenv::fixture_command(env!("CARGO_BIN_EXE_zth"))
         .args(args)
         .output()
         .expect("spawning zth should succeed")
@@ -212,7 +212,7 @@ fn a_failed_stdout_write_is_reported_through_the_exit_status() {
     // deliberately reports a write that fails that way as having succeeded.
     let unwritable = UnixDatagram::unbound().expect("creating a datagram socket should succeed");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_zth"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_zth"))
         .arg(root.as_os_str())
         .stdout(Stdio::from(OwnedFd::from(unwritable)))
         .stderr(Stdio::piped())
@@ -236,7 +236,7 @@ fn a_reader_that_stops_early_still_exits_zero() {
         write(&root, &format!("zero-{index:04}-{padding}.bin"), &[0_u8; 1]);
     }
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_zth"))
+    let mut child = childenv::fixture_command(env!("CARGO_BIN_EXE_zth"))
         .arg(root.as_os_str())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

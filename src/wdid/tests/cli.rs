@@ -97,8 +97,7 @@ fn real_git() -> PathBuf {
 /// Runs git in `dir` with no inherited git environment. `date` states the
 /// author and committer date, after the sweep.
 fn git(dir: &Path, args: &[&str], date: Option<&str>) {
-    let mut command = Command::new(real_git());
-    gitscratch::shed_inherited_git_environment(&mut command);
+    let mut command = childenv::fixture_command(real_git());
     if let Some(date) = date {
         command
             .env("GIT_AUTHOR_DATE", date)
@@ -224,8 +223,7 @@ impl Setup {
     /// The command for `wdid`, with the stub `PATH` and the width of the
     /// table. The shell is zsh. The caller adds the flags.
     fn command(&self) -> Command {
-        let mut command = Command::new(BIN);
-        gitscratch::shed_inherited_git_environment(&mut command);
+        let mut command = childenv::fixture_command(BIN);
         command
             .env("PATH", self.stubs.path())
             .env("HOME", self.home.path())
@@ -277,7 +275,10 @@ fn tool<'a>(document: &'a Value, name: &str) -> &'a Value {
 
 #[test]
 fn version_flag_prints_the_name_the_version_and_the_commit() {
-    let output = Command::new(BIN).arg("--version").output().unwrap();
+    let output = childenv::fixture_command(BIN)
+        .arg("--version")
+        .output()
+        .unwrap();
     assert!(output.status.success(), "{output:?}");
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(

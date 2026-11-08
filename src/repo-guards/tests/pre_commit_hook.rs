@@ -17,11 +17,8 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
-
-use gitscratch::shed_inherited_git_environment;
 
 /// A deliberately misformatted Rust source file. `cargo fmt --check` rejects it
 /// because of the run-together braces, doubled spaces, and stray whitespace.
@@ -96,8 +93,7 @@ fn run_git(dir: &Path, args: &[&str]) {
     // operates on, even when this runs from inside the repo's own hook. The
     // rule is the prefix and never a list of names: `GIT_DIR` overrides `-C`,
     // and so does a variable nobody here thought to name.
-    let mut command = Command::new("git");
-    shed_inherited_git_environment(&mut command);
+    let mut command = childenv::fixture_command("git");
 
     let output = command
         .arg("-C")
@@ -133,8 +129,7 @@ struct HookRun {
 /// family so the hook operates on the fixture repo rather than this test's
 /// repo. Gives back the exit status and the printed output of that one run.
 fn run_hook(dir: &Path) -> HookRun {
-    let mut command = Command::new("bash");
-    shed_inherited_git_environment(&mut command);
+    let mut command = childenv::fixture_command("bash");
 
     let completed = command
         .arg(hook_path())

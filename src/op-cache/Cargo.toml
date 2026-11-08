@@ -14,8 +14,8 @@ name = "op-cache"
 path = "src/main.rs"
 
 [dependencies]
-childenv.workspace = true
 buildinfo.workspace = true
+childenv.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true

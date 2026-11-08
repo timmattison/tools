@@ -7,6 +7,7 @@ description = "Finds the commit that caused a regression, with a test from a lat
 [dependencies]
 anyhow.workspace = true
 buildinfo.workspace = true
+childenv.workspace = true
 clap.workspace = true
 gitscratch.workspace = true
 tempfile.workspace = true

@@ -7,6 +7,7 @@ description = "Show whether an Apple Silicon Mac decreases its clock under susta
 [dependencies]
 anyhow.workspace = true
 buildinfo.workspace = true
+childenv.workspace = true
 clap.workspace = true
 colored.workspace = true
 core-foundation.workspace = true

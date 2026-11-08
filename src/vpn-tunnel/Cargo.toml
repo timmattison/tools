@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 buildinfo.workspace = true
+childenv.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 colored.workspace = true

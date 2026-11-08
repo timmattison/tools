@@ -18,7 +18,6 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use repo_guards::trippy_wall::{self, Report, TrippyWallError};
 use tempfile::TempDir;
@@ -751,7 +750,7 @@ fn the_guard_reads_exactly_the_krt_sources_on_disk() {
 /// be an instance of the very defect it exists to catch: a check that reports
 /// clean because it never looked.
 fn cargo_target_roots_of_krt(repo_root: &Path) -> BTreeSet<PathBuf> {
-    let output = Command::new(env!("CARGO"))
+    let output = childenv::fixture_command(env!("CARGO"))
         .args(["metadata", "--no-deps", "--format-version", "1"])
         .current_dir(repo_root)
         .output()

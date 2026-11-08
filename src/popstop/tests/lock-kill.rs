@@ -16,7 +16,7 @@ use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
-use std::process::{Child, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdout, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -103,7 +103,7 @@ fn a_holder_that_gets_sigkill_leaves_no_stale_lock() {
     let dir = StateDir::new(temp.path().join("state"));
 
     let mut helper = Helper(
-        Command::new(env::current_exe().expect("the path of this test binary"))
+        childenv::fixture_command(env::current_exe().expect("the path of this test binary"))
             .args(["--exact", HELPER_TEST_NAME, "--ignored", "--nocapture"])
             .env(HELPER_DIR_VARIABLE, dir.path())
             .stdin(Stdio::null())

@@ -41,7 +41,7 @@ fn spawn_lock() -> MutexGuard<'static, ()> {
 
 /// Invoke the freshly-built `spv` binary.
 fn spv() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_spv"))
+    childenv::fixture_command(env!("CARGO_BIN_EXE_spv"))
 }
 
 /// Builds a token that no concurrent run of this test can also build.
@@ -122,7 +122,7 @@ impl Sleeper {
 
     /// Starts the child for `spawn` and `spawn_in`.
     fn start(marker: &str, env: &[(&str, &str)], dir: Option<&Path>) -> Self {
-        let mut command = Command::new("/bin/sh");
+        let mut command = childenv::fixture_command("/bin/sh");
         command
             .arg("-c")
             .arg(format!("sleep {SLEEPER_SECONDS}; : {marker}"))
@@ -209,7 +209,7 @@ impl Drop for ScratchDir {
 
 /// Starts a child, waits for it to finish, and returns the id it no longer uses.
 fn reaped_pid() -> u32 {
-    let mut child = Command::new("/bin/sh")
+    let mut child = childenv::fixture_command("/bin/sh")
         .arg("-c")
         .arg("exit 0")
         .stdin(Stdio::null())
@@ -346,7 +346,7 @@ fn a_command_line_of_multi_byte_characters_is_found_and_shown() {
 /// * `flags` - The flags to pass to `spv`, before the process id
 /// * `env` - The whole environment for `spv`
 fn spv_on_itself(flags: &[&str], env: &[(&str, &str)]) -> Output {
-    let mut command = Command::new("/bin/sh");
+    let mut command = childenv::fixture_command("/bin/sh");
     command
         .arg("-c")
         .arg(format!("exec \"$0\" {} $$", flags.join(" ")))

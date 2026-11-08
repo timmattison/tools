@@ -18,7 +18,6 @@ mod support;
 
 use std::ffi::OsStr;
 use std::path::PathBuf;
-use std::process::Command;
 
 use support::{init_repo, nanos, nwt_command, FakeMultiplexer};
 
@@ -47,7 +46,7 @@ const SHELL: &str = "/bin/sh";
 /// search, not a copy of one. The shell gets only `PATH`, thus no inherited
 /// variable can change the answer. A name that does not resolve gives `None`.
 fn resolve_on_path(name: &str, path: &OsStr) -> Option<PathBuf> {
-    let output = Command::new(SHELL)
+    let output = childenv::fixture_command(SHELL)
         .env_clear()
         .env("PATH", path)
         .args(["-c", "command -v \"$1\"", SHELL, name])

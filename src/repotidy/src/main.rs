@@ -1,10 +1,10 @@
 use buildinfo::version_string;
 use repowalker::{find_git_repo, RepoWalker};
 use std::path::Path;
-use std::process::{exit, Command};
+use std::process::exit;
 
 fn run_command_in_directory(dir: &Path, command: &[&str]) -> Result<(), std::io::Error> {
-    let output = Command::new(command[0])
+    let output = childenv::command(command[0])
         .args(&command[1..])
         .current_dir(dir)
         .output()?;

@@ -182,6 +182,10 @@ pub async fn record(
     let pair = pty_system.openpty(pty_size).context("Failed to open PTY")?;
 
     let mut cmd = CommandBuilder::new(&shell);
+    for name in childenv::inherited_git_variables(childenv::InheritedGitEnvironment::KeepUserIntent)
+    {
+        cmd.env_remove(name);
+    }
     cmd.cwd(std::env::current_dir()?);
     cmd.env(
         "TERM",

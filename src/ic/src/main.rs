@@ -803,7 +803,7 @@ fn is_text_file(file_path: &Path) -> bool {
 }
 
 fn ensure_ffmpeg_available() -> Result<()> {
-    if std::process::Command::new("ffmpeg")
+    if childenv::command("ffmpeg")
         .arg("-version")
         .output()
         .is_err()
@@ -816,7 +816,7 @@ fn ensure_ffmpeg_available() -> Result<()> {
 }
 
 fn ensure_ffprobe_available() -> Result<()> {
-    if std::process::Command::new("ffprobe")
+    if childenv::command("ffprobe")
         .arg("-version")
         .output()
         .is_err()
@@ -1390,7 +1390,7 @@ fn play_video_inner(
         // Start ffmpeg from current position
         let (video_width, video_height) = get_video_dimensions(file_path)?;
 
-        let mut ffmpeg_child = std::process::Command::new("ffmpeg")
+        let mut ffmpeg_child = childenv::command("ffmpeg")
             .args([
                 "-i",
                 file_path.to_str().unwrap(),
@@ -1666,7 +1666,7 @@ fn get_video_dimensions(file_path: &Path) -> Result<(u32, u32)> {
     ensure_ffprobe_available()?;
 
     // Use ffprobe to get video dimensions
-    let output = std::process::Command::new("ffprobe")
+    let output = childenv::command("ffprobe")
         .args([
             // `error` (not `quiet`) so a genuinely unprobeable file still emits a
             // real diagnostic on stderr instead of an empty failure message.
@@ -1739,7 +1739,7 @@ fn get_video_fps(file_path: &Path) -> Result<f64> {
     // recordings, can be a large multiple of the real rate. We keep the keys
     // (no `nokey=1`) because ffprobe emits these fields in its own internal
     // order regardless of the requested order, so position alone is ambiguous.
-    let output = std::process::Command::new("ffprobe")
+    let output = childenv::command("ffprobe")
         .args([
             // `error` (not `quiet`) so a genuinely unprobeable file still emits a
             // real diagnostic on stderr instead of an empty failure message.
@@ -1824,7 +1824,7 @@ fn get_video_duration(file_path: &Path) -> Result<f64> {
     }
 
     // Use ffprobe to get video duration in seconds
-    let output = std::process::Command::new("ffprobe")
+    let output = childenv::command("ffprobe")
         .args([
             // `error` (not `quiet`) so a genuinely unprobeable file still emits a
             // real diagnostic on stderr instead of an empty failure message.

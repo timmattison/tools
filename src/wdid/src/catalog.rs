@@ -205,8 +205,7 @@ pub fn workspace_root(
             })?;
         return require_manifest(canonical);
     }
-    let mut command = Command::new(&programs.git);
-    gitscratch::shed_inherited_git_environment_keeping_user_intent(&mut command);
+    let mut command = childenv::command(&programs.git);
     command
         .args(TOP_LEVEL_ARGUMENTS)
         .current_dir(cwd)
@@ -262,7 +261,7 @@ pub fn read(
     cargo_bin: Option<&Path>,
 ) -> Result<Catalog, CatalogError> {
     let manifest = root.join(MANIFEST);
-    let mut metadata_command = Command::new(&programs.cargo);
+    let mut metadata_command = childenv::command(&programs.cargo);
     metadata_command
         .args(METADATA_ARGUMENTS)
         .arg(&manifest)
@@ -270,7 +269,7 @@ pub fn read(
     let metadata = run_checked(&mut metadata_command, &programs.cargo, METADATA_COMMAND)?;
     let found = binaries(&String::from_utf8_lossy(&metadata.stdout), root)?;
 
-    let mut install_command = Command::new(&programs.cargo);
+    let mut install_command = childenv::command(&programs.cargo);
     install_command.args(INSTALL_ARGUMENTS).stdin(Stdio::null());
     let install = run_checked(&mut install_command, &programs.cargo, INSTALL_COMMAND)?;
     let installed = installed_binaries(&String::from_utf8_lossy(&install.stdout));
@@ -330,8 +329,7 @@ fn read_added_dates(
     programs: &Programs,
     crate_dirs: &[PathBuf],
 ) -> Result<BTreeMap<PathBuf, NaiveDate>, CatalogError> {
-    let mut command = Command::new(&programs.git);
-    gitscratch::shed_inherited_git_environment_keeping_user_intent(&mut command);
+    let mut command = childenv::command(&programs.git);
     command
         .args(LOG_ARGUMENTS)
         .current_dir(root)

@@ -412,7 +412,6 @@ fn worktree_dirt_surfaces_a_git_failure_as_an_error() {
 mod process_group_shield {
     use super::{run_git, TestRepo};
     use std::path::Path;
-    use std::process::Command;
 
     /// Flag that defines the alias for one invocation only, leaving the
     /// fixture's own config untouched and beating any same-named alias in the
@@ -453,7 +452,7 @@ mod process_group_shield {
     /// This process's own process group — the one a terminal Ctrl-C aims at, and
     /// therefore the group teardown has to stay out of.
     fn own_process_group() -> String {
-        let out = Command::new("ps")
+        let out = childenv::fixture_command("ps")
             .args(["-o", "pgid=", "-p", &std::process::id().to_string()])
             .output()
             .expect("ps should run");
