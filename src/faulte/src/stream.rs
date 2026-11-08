@@ -378,6 +378,16 @@ impl TopChild {
             .unwrap_or_else(PoisonError::into_inner)
             .take()
     }
+
+    /// Stops the child and reaps it. A second call finds no child and does
+    /// nothing. The kill comes after the child left the cell, so the lock is
+    /// free while this waits.
+    fn stop(&self) {
+        if let Some(mut owned) = self.take() {
+            let _ = owned.kill();
+            let _ = owned.wait();
+        }
+    }
 }
 
 /// How many bytes of the error output the reader keeps.
@@ -443,6 +453,17 @@ impl TopStream {
                 }
                 Err(did_not_start(error.to_string()))
             }
+        }
+    }
+}
+
+impl Drop for TopStream {
+    /// Stops the child, reaps it, and joins the reader thread. The thread ends
+    /// when the pipe closes, and a killed child closes it.
+    fn drop(&mut self) {
+        self.child.stop();
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
         }
     }
 }
