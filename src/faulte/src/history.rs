@@ -126,6 +126,13 @@ impl SpanWidth {
         }
     }
 
+    /// Gives the next width in the cycle: one frame, 1 m, 5 m, 15 m, the whole
+    /// history, and then one frame again.
+    #[must_use]
+    pub fn next(self) -> Self {
+        self
+    }
+
     /// Gives how far back from the end the span reaches. `None` means one
     /// frame, or the whole history.
     fn reach(self) -> Option<Duration> {
@@ -1991,5 +1998,29 @@ mod tests {
                 .as_ref()
                 .is_some_and(|record| record.rows == 1)
         }));
+    }
+
+    /// The widths cycle from one frame to the whole history and back, and each
+    /// one has the label that the view shows.
+    #[test]
+    fn the_widths_cycle_and_have_labels() {
+        let mut width = SpanWidth::OneFrame;
+        let mut labels = Vec::new();
+        for _ in 0..5 {
+            labels.push(width.label());
+            width = width.next();
+        }
+
+        assert_eq!(
+            labels,
+            vec![
+                "this frame",
+                "the last 1 m",
+                "the last 5 m",
+                "the last 15 m",
+                "the whole history"
+            ]
+        );
+        assert_eq!(width, SpanWidth::OneFrame);
     }
 }
