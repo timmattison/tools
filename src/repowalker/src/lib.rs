@@ -2,7 +2,6 @@ use ignore::WalkBuilder;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use walkdir::{DirEntry, WalkDir};
 
 /// Walks the file system upward from the current directory for a `.git` entry.
@@ -111,7 +110,7 @@ pub fn find_main_repo() -> Option<PathBuf> {
     }
 
     // We're in a worktree - use git to find the common directory
-    let output = Command::new("git")
+    let output = childenv::command("git")
         .args(["rev-parse", "--git-common-dir"])
         .current_dir(&git_dir)
         .output()
@@ -251,14 +250,7 @@ fn resolve_against(dir: &Path, path: &str) -> Option<PathBuf> {
 /// Run git in `dir` and hand back its standard output, or `None` when git
 /// cannot be spawned or exits non-zero.
 fn git_stdout(dir: &Path, args: &[&str]) -> Option<String> {
-    let mut command = Command::new("git");
-    // This crate's whole job is to answer which repository a directory belongs
-    // to, and an inherited `GIT_DIR` answers with a different repository. The
-    // tests below prove it, so without this they fail under the pre-commit
-    // hook, which exports `GIT_DIR` and `GIT_INDEX_FILE` to every command it
-    // runs.
-    gitscratch::shed_inherited_git_environment(&mut command);
-
+    let mut command = childenv::command("git");
     let output = command.args(args).current_dir(dir).output().ok()?;
 
     if !output.status.success() {
