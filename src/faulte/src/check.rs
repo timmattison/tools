@@ -57,8 +57,16 @@ pub const CHURN_LIMIT_PER_SECOND: f64 = 50_000.0;
 /// measurement can change it.
 pub const PROCESS_LIMIT_PER_SECOND: f64 = 150.0;
 
-/// The largest process number of a Mac.
-pub const PID_SPACE: u64 = 99_999;
+/// The largest process number of a Mac. XNU sets `PID_MAX` to 99,999 and gives
+/// only numbers below it.
+pub const LAST_PID: u64 = 99_998;
+
+/// The number that XNU gives after [`LAST_PID`]. XNU runs
+/// `if (++pid >= PID_MAX) { pid = 100; }`.
+pub const FIRST_PID_AFTER_WRAP: u64 = 100;
+
+/// The count of process numbers in one cycle.
+pub const PID_CYCLE: u64 = LAST_PID - FIRST_PID_AFTER_WRAP + 1;
 
 /// The name of [`Verdict::ProcessChurn`].
 const PROCESS_NAME: &str = "PROCESS CHURN";
@@ -137,8 +145,9 @@ impl Reading {
     /// The kernel counts ticks in 32 bits, thus a tick counter can wrap, and
     /// the difference wraps with it. A compressor counter has 64 bits, thus a
     /// lower value means that the Mac started again, and it gives no rate.
-    /// Process numbers start again after [`PID_SPACE`]. An interval long
-    /// enough for two such starts counts too few processes.
+    /// Process numbers start again at [`FIRST_PID_AFTER_WRAP`] after
+    /// [`LAST_PID`]. An interval long enough for two such starts counts too
+    /// few processes.
     /// An interval of no time gives zeros, not a division by zero.
     #[must_use]
     pub fn between(before: CheckCounters, after: CheckCounters, elapsed: Duration) -> Self {
@@ -155,7 +164,7 @@ impl Reading {
             }
         };
         let started_again = if after.newest_pid < before.newest_pid {
-            PID_SPACE
+            PID_CYCLE
         } else {
             0
         };
