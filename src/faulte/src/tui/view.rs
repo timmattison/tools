@@ -278,6 +278,9 @@ const LABEL_WIDTH: usize = 7;
 /// The bars of the timeline, from the lowest to the highest.
 const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
+/// The glyph that marks the selected cell.
+const MARKER_GLYPH: char = '▲';
+
 /// The glyph of a cell that holds gaps only.
 const GAP_GLYPH: char = '╳';
 
@@ -309,6 +312,18 @@ fn cell_line(label: &'static str, cells: &[Cell]) -> Line<'static> {
     Line::from(spans)
 }
 
+/// Gives the line that holds the marker under `cell`, or an empty line when
+/// no cell is selected.
+fn marker_line(cell: Option<usize>) -> Line<'static> {
+    match cell {
+        Some(cell) => Line::raw(format!(
+            "{}{MARKER_GLYPH}",
+            " ".repeat(LABEL_WIDTH.saturating_add(cell))
+        )),
+        None => Line::default(),
+    }
+}
+
 /// Paints the timeline of the history in `area`.
 fn paint_timeline(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let cells = usize::from(area.width).saturating_sub(LABEL_WIDTH);
@@ -316,6 +331,7 @@ fn paint_timeline(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let lines = vec![
         cell_line(FAULTS_LABEL, &timeline.faults),
         cell_line(SWAP_LABEL, &timeline.swap),
+        marker_line(timeline.marker),
     ];
     frame.render_widget(Paragraph::new(lines), area);
 }
