@@ -47,10 +47,6 @@ const POLL: Duration = Duration::from_millis(10);
 /// and the run ending, so the signal cannot land after the check is over.
 const CHECK_HOLD_SECONDS: u32 = 30;
 
-/// How long the shimmed teardown git stalls, holding the teardown open for the
-/// second interrupt to land inside it.
-const TEARDOWN_HOLD_SECONDS: u32 = 2;
-
 /// Basename of the lock file inside a repository's shared git directory.
 const LOCK_FILE: &str = "swt.lock";
 
@@ -73,13 +69,25 @@ fn stalling_check(marker: &Path) -> String {
     )
 }
 
-/// How long the hangup check sleeps between two looks for its release file.
-const HANGUP_CHECK_POLL: Duration = Duration::from_millis(100);
+/// How long a fixture script sleeps between two looks for its release file.
+/// The hangup check and the teardown shim both use it.
+const RELEASE_POLL: Duration = Duration::from_millis(100);
 
-/// How many polls the hangup check makes before it stops waiting for its
-/// release file. It comes from [`DEADLINE`], so the check stops waiting when
+/// How many polls a fixture script makes before it stops waiting for its
+/// release file. It comes from [`DEADLINE`], so the script stops waiting when
 /// the test does.
-const HANGUP_CHECK_POLLS: u128 = DEADLINE.as_millis() / HANGUP_CHECK_POLL.as_millis();
+const RELEASE_POLLS: u128 = DEADLINE.as_millis() / RELEASE_POLL.as_millis();
+
+/// The shell lines of a bounded wait: they return when `release` exists, or
+/// when [`RELEASE_POLLS`] polls have passed.
+fn release_wait(release: &Path) -> String {
+    let release = shell_quote(&release.to_string_lossy());
+    let poll = RELEASE_POLL.as_secs_f64();
+    format!(
+        "i=0\n\
+         while [ ! -f {release} ] && [ \"$i\" -lt {RELEASE_POLLS} ]; do sleep {poll}; i=$((i + 1)); done\n"
+    )
+}
 
 /// The body of a `.swt-check` that announces itself by creating `started`,
 /// waits for `release`, sends itself SIGHUP and then exits 0.
@@ -88,13 +96,11 @@ const HANGUP_CHECK_POLLS: u128 = DEADLINE.as_millis() / HANGUP_CHECK_POLL.as_mil
 /// because `exec` keeps an ignored signal and resets a caught one.
 fn hangup_ignoring_check(started: &Path, release: &Path) -> String {
     let started = shell_quote(&started.to_string_lossy());
-    let release = shell_quote(&release.to_string_lossy());
-    let poll = HANGUP_CHECK_POLL.as_secs_f64();
+    let wait = release_wait(release);
     format!(
         "#!/bin/sh\n\
          : > {started}\n\
-         i=0\n\
-         while [ ! -f {release} ] && [ \"$i\" -lt {HANGUP_CHECK_POLLS} ]; do sleep {poll}; i=$((i + 1)); done\n\
+         {wait}\
          kill -HUP $$\n\
          exit 0\n"
     )
@@ -134,19 +140,23 @@ fn scratch() -> TempDir {
 /// A PATH-shadowing `git` that announces `swt`'s teardown and then holds its
 /// first command open.
 ///
-/// The second interrupt under test has to land *inside* teardown, and teardown
-/// is two back-to-back git commands that together take tens of milliseconds — so
+/// The signals under test have to land *inside* teardown, and teardown is two
+/// back-to-back git commands that together take tens of milliseconds — so
 /// timing a signal into that window with a sleep is a coin flip, and a flaky
 /// test for a flaky bug proves nothing. Making the first teardown command its
 /// own synchronization point removes the guesswork: it touches a sentinel the
-/// test waits on, then stalls before handing over to the real git. Every other
-/// git invocation is passed straight through, so nothing else about the run
-/// changes.
+/// test waits on, then holds until the test releases it, and only then hands
+/// over to the real git. The test releases it after it sent its signals. Thus
+/// each signal lands inside the teardown, whatever the load on the machine.
+/// Every other git invocation is passed straight through, so nothing else
+/// about the run changes.
 struct TeardownShim {
     /// Directory to prepend to PATH.
     dir: PathBuf,
     /// File the shim creates the moment teardown's first command runs.
     sentinel: PathBuf,
+    /// File that lets the held command go on to the real git.
+    release: PathBuf,
 }
 
 impl TeardownShim {
@@ -166,6 +176,7 @@ impl TeardownShim {
         let dir = scratch.join(unique("git-shim"));
         fs::create_dir_all(&dir).expect("shim directory");
         let sentinel = dir.join("teardown-started");
+        let release = dir.join("teardown-release");
         let shim = dir.join("git");
         fs::write(
             &shim,
@@ -173,17 +184,40 @@ impl TeardownShim {
                 "#!/bin/sh\n\
                  if [ \"$1\" = \"worktree\" ] && [ \"$2\" = \"remove\" ]; then\n\
                  \x20 : > {sentinel}\n\
-                 \x20 sleep {TEARDOWN_HOLD_SECONDS}\n\
+                 {wait}\
                  fi\n\
                  exec {real_git} \"$@\"\n",
                 sentinel = shell_quote(&sentinel.to_string_lossy()),
+                wait = release_wait(&release),
                 real_git = shell_quote(&real_git),
             ),
         )
         .expect("shim script");
         fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).expect("chmod shim");
 
-        Self { dir, sentinel }
+        Self {
+            dir,
+            sentinel,
+            release,
+        }
+    }
+
+    /// Lets the held teardown command go on to the real git.
+    fn release(&self) {
+        fs::write(&self.release, "").expect("release file");
+    }
+}
+
+/// Releases the shim when the test ends, also when it panics.
+///
+/// `swt` runs its teardown git in a process group of its own (the `shielded`
+/// flag in `src/swt/src/git.rs`), so the group kill in `RunningSwt::drop` does
+/// not reach the shim. A test that panics before it releases the shim thus
+/// releases it here. The shim then does not wait until [`RELEASE_POLLS`] runs
+/// out.
+impl Drop for TeardownShim {
+    fn drop(&mut self) {
+        let _ = fs::write(&self.release, "");
     }
 }
 
@@ -481,6 +515,7 @@ fn a_second_interrupt_cannot_truncate_the_teardown_the_first_asked_for() {
     for _ in 0..3 {
         run.signal(libc::SIGINT);
     }
+    shim.release();
 
     let status = run.wait();
     let stderr = run.stderr_text();
@@ -501,9 +536,9 @@ fn a_second_interrupt_cannot_truncate_the_teardown_the_first_asked_for() {
     );
 }
 
-/// Runs a `swt create` whose check is red, signals `swt` alone while the
-/// shimmed `git worktree remove` of the teardown stalls, and asserts that
-/// nothing survives.
+/// Runs a `swt create` whose check is red, signals `swt` alone while the shim
+/// holds the `git worktree remove` of the teardown, releases the shim after the
+/// signal, and asserts that nothing survives.
 fn signal_during_a_red_teardown_leaves_nothing_behind(signal: c_int) {
     let repo = TestRepo::new();
     let scratch = scratch();
@@ -513,10 +548,12 @@ fn signal_during_a_red_teardown_leaves_nothing_behind(signal: c_int) {
 
     let mut run = RunningSwt::spawn(repo.path(), &["create", &name], Some(&shim.dir));
     run.wait_for(&shim.sentinel, "the teardown of the red check to start");
-    // The shim stalls before the real removal, so the worktree is still there.
+    // The shim holds the real removal until the release below, so the worktree
+    // is still there.
     let worktree = repo.sole_created_worktree(&name);
 
     run.signal(signal);
+    shim.release();
     let status = run.wait();
     let stderr = run.stderr_text();
 
