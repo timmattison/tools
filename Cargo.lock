@@ -2541,8 +2541,10 @@ dependencies = [
  "crossterm",
  "libc",
  "occ",
+ "ratatui",
  "termsize",
  "testcolor",
+ "textfit",
  "thiserror 2.0.21",
 ]
 
