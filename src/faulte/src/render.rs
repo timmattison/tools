@@ -352,6 +352,28 @@ pub fn header(measurement: &Measurement<'_>) -> Vec<String> {
     lines
 }
 
+/// What a view states about the span of history that it shows.
+#[derive(Debug, Clone, Copy)]
+pub struct SpanTotals<'a> {
+    /// The span that the person asked for, for example `5 m`.
+    pub label: &'a str,
+    /// The count of frames that the span holds.
+    pub frames: usize,
+    /// The count of gaps in the span: times that the view tried to measure and
+    /// did not.
+    pub gaps: usize,
+}
+
+/// Gives the lines above the table of a view of a span of frames.
+///
+/// The first line states the measured time, the frames, and the gaps. The
+/// other lines are the lines of [`header`].
+#[must_use]
+pub fn span_header(measurement: &Measurement<'_>, span: &SpanTotals<'_>) -> Vec<String> {
+    let _ = (measurement, span);
+    Vec::new()
+}
+
 /// Gives the line of the processes that the ranking left out, or nothing when
 /// it left nothing out.
 ///
@@ -1211,6 +1233,70 @@ mod tests {
         assert_eq!(cells[4], ABSENT);
         assert_eq!(cells[7], OTHER_ACCOUNT);
         assert_eq!(cells[8], "");
+    }
+
+    /// `span_header` states the span, then the swap line, the Claude line, and
+    /// the skipped line.
+    #[test]
+    fn span_header_gives_the_span_line_and_the_lines_of_the_header() {
+        let mut long = ranking(vec![row(10, 3)], 1_234_567);
+        long.window = Duration::from_millis(297_400);
+        long.claude = ClaudeTotal {
+            processes: 3,
+            faults: 508_000,
+            other_account: 0,
+        };
+        let stated = Measurement {
+            processes: 812,
+            ..measurement(&long)
+        };
+        let span = SpanTotals {
+            label: "5 m",
+            frames: 58,
+            gaps: 1,
+        };
+        let lines = span_header(&stated, &span);
+
+        assert_eq!(
+            lines.first().map(String::as_str),
+            Some(
+                format!(
+                    "812 processes with faults over 297.4 s measured of the last 5 m (58 frames, 1 gap) \u{2014} 1,234,567 faults, {}/s",
+                    rate(long.faults_per_second(1_234_567))
+                )
+                .as_str()
+            )
+        );
+        assert_eq!(lines.get(1), header(&stated).get(1));
+        assert_eq!(lines.get(2), header(&stated).get(2));
+        assert_eq!(lines.len(), 3);
+
+        let one = SpanTotals {
+            label: "1 m",
+            frames: 1,
+            gaps: 0,
+        };
+        let skipped = with_skipped(
+            long.clone(),
+            Skipped {
+                exited: 0,
+                exited_faults: 0,
+                zombies: 72,
+                unsampled: 0,
+            },
+        );
+        let single = Measurement {
+            processes: 1,
+            ..measurement(&skipped)
+        };
+        let lines = span_header(&single, &one);
+        assert!(lines[0].starts_with(
+            "1 process with faults over 297.4 s measured of the last 1 m (1 frame, 0 gaps)"
+        ));
+        assert_eq!(
+            lines.get(3).map(String::as_str),
+            Some("skipped: 72 zombies")
+        );
     }
 
     /// The second line gives the swap traffic over the time that the tool
