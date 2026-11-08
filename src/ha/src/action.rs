@@ -293,9 +293,9 @@ impl ActionSender for GhActionSender {
             .name(THREAD_NAME.to_owned())
             .spawn(move || {
                 let result = match &thread_action {
-                    Action::Cancel { .. } | Action::RerunWorkflow | Action::RerunJob { .. } => {
-                        source.cancel_run(&thread_repo, run)
-                    }
+                    Action::Cancel { .. } => source.cancel_run(&thread_repo, run),
+                    Action::RerunWorkflow => source.rerun_run(&thread_repo, run),
+                    Action::RerunJob { .. } => source.cancel_run(&thread_repo, run),
                 };
                 // The receiver is gone when `ha` ends. Nobody reads the outcome then.
                 let _ = sender.send(ActionOutcome {
