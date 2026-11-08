@@ -216,7 +216,13 @@ impl Request {
                 run.id.0,
                 self.verb()
             )),
-            Request::Rerun => Prompt::Confirm(Confirm::new(run, Action::RerunWorkflow)),
+            Request::Rerun => Prompt::Confirm(Confirm::new(
+                run,
+                job.map_or(Action::RerunWorkflow, |job| Action::RerunJob {
+                    id: job.id,
+                    name: job.name.clone(),
+                }),
+            )),
         })
     }
 }
