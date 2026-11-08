@@ -423,8 +423,8 @@ mod tests {
         assert_close(result.new_processes_per_second, 324.0);
     }
 
-    /// The numbers of a Mac start again after 99,999. The processes after that
-    /// point still count.
+    /// The numbers of a Mac start again at 100 after 99,998. The processes after
+    /// that point still count.
     #[test]
     fn a_process_number_that_starts_again_still_counts() {
         let before = CheckCounters {
@@ -438,7 +438,25 @@ mod tests {
 
         let result = Reading::between(before, after, FIVE_SECONDS);
 
-        assert_close(result.new_processes_per_second, 50.0);
+        assert_close(result.new_processes_per_second, 30.0);
+    }
+
+    /// The first number of a new cycle is one process after the last number of
+    /// the old cycle.
+    #[test]
+    fn the_number_after_the_last_is_one_new_process() {
+        let before = CheckCounters {
+            newest_pid: 99_998,
+            ..CheckCounters::default()
+        };
+        let after = CheckCounters {
+            newest_pid: 100,
+            ..CheckCounters::default()
+        };
+
+        let result = Reading::between(before, after, FIVE_SECONDS);
+
+        assert_close(result.new_processes_per_second, 0.2);
     }
 
     /// The values are a sample of this Mac with a quiet compressor.
