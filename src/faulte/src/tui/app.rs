@@ -231,6 +231,12 @@ impl App {
         self.reading.as_ref()?.position_of(selection.key)
     }
 
+    /// Tells whether the detail view of the selected row is open.
+    #[must_use]
+    pub fn detail_open(&self) -> bool {
+        false
+    }
+
     /// Gives the key of the selected row.
     #[must_use]
     pub fn row_key(&self) -> Option<ProcessKey> {
@@ -510,5 +516,32 @@ mod tests {
         let mut fresh = three_rows();
         fresh.on_key(press(KeyCode::Up));
         assert_eq!(fresh.selected_row(), Some(0));
+    }
+
+    /// `Enter` opens the detail view only when a row is selected. The first
+    /// `Esc` closes it and keeps the time. The second `Esc` goes live.
+    #[test]
+    fn enter_opens_the_detail_and_escape_closes_it_first() {
+        let mut app = three_rows();
+
+        app.on_key(press(KeyCode::Enter));
+        assert!(!app.detail_open());
+
+        app.on_key(press(KeyCode::Down));
+        app.on_key(press(KeyCode::Enter));
+        assert!(app.detail_open());
+
+        app.on_key(press(KeyCode::Esc));
+        assert!(!app.detail_open());
+        assert_eq!(selected_pid(&app), Some(10));
+
+        let (mut app, ids) = five();
+        app.on_key(press(KeyCode::Left));
+        app.on_key(press(KeyCode::Down));
+        app.on_key(press(KeyCode::Enter));
+        app.on_key(press(KeyCode::Esc));
+        assert_eq!(app.selection(), Selection::Past(ids[3]));
+        app.on_key(press(KeyCode::Esc));
+        assert_eq!(app.selection(), Selection::Live);
     }
 }
