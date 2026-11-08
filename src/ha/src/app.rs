@@ -371,6 +371,9 @@ where
     /// `c` opens a box that asks to cancel the run of the highlighted row.
     /// On a finished run, and on a pull request row, it posts that there is
     /// nothing to cancel instead.
+    /// `R` opens a box that asks to re-run the highlighted run. On a job row,
+    /// it asks to re-run that job. On a run or job that is still active, and
+    /// on a pull request row, it posts why there is nothing to re-run instead.
     /// While the box shows, it takes every key. `y` cancels the run that the
     /// box names, Ctrl-C quits, and every other key closes the box and does
     /// nothing more. Thus `q`, `Esc`, and `Enter` do not quit, open, or move
@@ -3596,5 +3599,312 @@ mod tests {
             )],
         );
         assert!(!shows_title(&frame, RERUN_WORKFLOW_BOX_TITLE), "{frame:?}");
+    }
+
+    #[test]
+    fn capital_r_with_shift_opens_the_box() {
+        let channels = channels();
+        send_runs(&channels, vec![finished_run(1, 100, 60)]);
+        let (_, frame) = run_app_with(
+            Status::default(),
+            &opener(false),
+            &canceller(),
+            &channels,
+            vec![shift_r()],
+        );
+        assert!(shows_title(&frame, RERUN_WORKFLOW_BOX_TITLE), "{frame:?}");
+    }
+
+    #[test]
+    fn both_y_and_capital_y_confirm_the_re_run() {
+        for answer in ['y', 'Y'] {
+            let channels = channels();
+            send_runs(&channels, vec![finished_run(1, 100, 60)]);
+            let canceller = canceller();
+            let _ = run_app_with(
+                Status::default(),
+                &opener(false),
+                &canceller,
+                &channels,
+                vec![shift_r(), press(KeyCode::Char(answer))],
+            );
+            assert_eq!(
+                *canceller.reruns.borrow(),
+                vec![(repo(), RunId(1), Action::RerunWorkflow)],
+                "{answer:?}"
+            );
+        }
+    }
+
+    /// Runs `R` and then `other` on a board of two finished runs, and
+    /// returns the result, the last frame, and the re-runs that were sent.
+    fn answer_the_rerun_box_with(other: Event) -> (Result<(), RunError>, Vec<String>, usize) {
+        let channels = channels();
+        send_runs(
+            &channels,
+            vec![finished_run(1, 100, 60), finished_run(2, 50, 10)],
+        );
+        let canceller = canceller();
+        let (result, frame) = run_app_with(
+            Status::default(),
+            &opener(false),
+            &canceller,
+            &channels,
+            vec![shift_r(), other, press(KeyCode::Enter)],
+        );
+        let reruns = canceller.reruns.borrow().len();
+        (result, frame, reruns)
+    }
+
+    #[test]
+    fn every_key_but_y_closes_the_rerun_box_and_re_runs_nothing() {
+        let others = [
+            press(KeyCode::Enter),
+            press(KeyCode::Char('q')),
+            press(KeyCode::Esc),
+            press(KeyCode::Char('R')),
+            press(KeyCode::Char('n')),
+            press(KeyCode::Down),
+        ];
+        for other in others {
+            let (result, frame, reruns) = answer_the_rerun_box_with(other.clone());
+            assert_eq!(result.unwrap_err().to_string(), "script ended", "{other:?}");
+            assert_eq!(reruns, 0, "{other:?}");
+            assert!(
+                !shows_title(&frame, RERUN_WORKFLOW_BOX_TITLE),
+                "{other:?} {frame:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn control_c_with_the_rerun_box_open_quits_and_re_runs_nothing() {
+        let channels = channels();
+        send_runs(&channels, vec![finished_run(1, 100, 60)]);
+        let canceller = canceller();
+        let (result, _) = run_app_with(
+            Status::default(),
+            &opener(false),
+            &canceller,
+            &channels,
+            vec![shift_r(), ctrl_c()],
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert!(canceller.reruns.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_later_refresh_does_not_change_the_job_that_y_re_runs() {
+        let channels = channels();
+        send_runs(&channels, vec![finished_run(1, 100, 60)]);
+        let mut steps = steps_to_job_row(vec![passed_job(10, "build")]);
+        steps.extend([
+            key(KeyCode::Char('R')),
+            Step::Send(Update::Jobs {
+                run: RunId(1),
+                jobs: vec![passed_job(99, "deploy")],
+            }),
+            Step::Send(Update::Runs {
+                repo: repo(),
+                runs: vec![finished_run(1, 100, 60), finished_run(3, 200, 150)],
+            }),
+            Step::Idle,
+            key(KeyCode::Char('y')),
+            key(KeyCode::Char('q')),
+        ]);
+        let canceller = canceller();
+        let _ = run_steps_cancelling(&channels, &canceller, steps);
+        assert_eq!(
+            *canceller.reruns.borrow(),
+            vec![(
+                repo(),
+                RunId(1),
+                Action::RerunJob {
+                    id: crate::job::JobId(10),
+                    name: "build".to_owned()
+                }
+            )]
+        );
+    }
+
+    #[test]
+    fn capital_r_on_a_pull_request_row_says_that_it_is_not_a_run_and_shows_no_box() {
+        let channels = channels();
+        send_queue(&channels, vec![queue_entry(7)], Ok(Vec::new()));
+        let (_, frame) = run_app_with(
+            Status::default(),
+            &opener(false),
+            &canceller(),
+            &channels,
+            vec![press(KeyCode::Char('R'))],
+        );
+        assert!(!shows_title(&frame, RERUN_WORKFLOW_BOX_TITLE), "{frame:?}");
+        assert!(
+            frame[11].contains("pull request #7 is not a run: there is nothing to re-run"),
+            "{:?}",
+            frame[11]
+        );
+    }
+
+    #[test]
+    fn y_after_capital_r_on_a_pull_request_row_re_runs_nothing() {
+        let channels = channels();
+        send_queue(&channels, vec![queue_entry(7)], Ok(Vec::new()));
+        send_runs(&channels, vec![finished_run(1, 100, 60)]);
+        let canceller = canceller();
+        let _ = run_app_with(
+            Status::default(),
+            &opener(false),
+            &canceller,
+            &channels,
+            vec![press(KeyCode::Char('R')), press(KeyCode::Char('y'))],
+        );
+        assert!(canceller.reruns.borrow().is_empty());
+    }
+
+    #[test]
+    fn capital_r_on_an_empty_board_does_nothing() {
+        let (result, frame) = run_app_with(
+            Status::default(),
+            &opener(false),
+            &canceller(),
+            &channels(),
+            vec![press(KeyCode::Char('R'))],
+        );
+        assert_eq!(result.unwrap_err().to_string(), "script ended");
+        assert!(!shows_title(&frame, RERUN_WORKFLOW_BOX_TITLE), "{frame:?}");
+        assert!(!frame[11].contains("re-running"), "{:?}", frame[11]);
+        assert!(!frame[11].contains("nothing to re-run"), "{:?}", frame[11]);
+    }
+
+    #[test]
+    fn y_after_capital_r_on_an_empty_board_re_runs_nothing() {
+        let canceller = canceller();
+        let _ = run_app_with(
+            Status::default(),
+            &opener(false),
+            &canceller,
+            &channels(),
+            vec![press(KeyCode::Char('R')), press(KeyCode::Char('y'))],
+        );
+        assert!(canceller.reruns.borrow().is_empty());
+    }
+
+    #[test]
+    fn lowercase_r_still_refreshes_and_opens_no_box() {
+        let channels = channels();
+        send_runs(&channels, vec![finished_run(1, 100, 60)]);
+        let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
+        let tz = FixedOffset::east_opt(0).unwrap();
+        let clock = now;
+        let canceller = canceller();
+        let opener = opener(false);
+        let mut app = App::new(
+            Board::new(Duration::from_hours(8)),
+            Status::default(),
+            &opener,
+            &canceller,
+            &channels.worker,
+            &clock,
+            &tz,
+            None,
+        );
+        let result = app.run(
+            &mut terminal,
+            &mut script(vec![Some(press(KeyCode::Char('r')))]),
+        );
+        assert_eq!(result.unwrap_err().to_string(), "script ended");
+        let frame = lines(terminal.backend().buffer());
+        assert!(!shows_title(&frame, RERUN_WORKFLOW_BOX_TITLE), "{frame:?}");
+        let commands: Vec<Command> = channels.commands.try_iter().collect();
+        assert!(commands.contains(&Command::RefreshNow), "{commands:?}");
+    }
+
+    /// An outcome for run 7 of a re-run that `action` asked for.
+    fn rerun_outcome(action: Action, result: Result<(), SourceError>) -> ActionOutcome {
+        ActionOutcome {
+            repo: repo(),
+            run: RunId(7),
+            action,
+            result,
+        }
+    }
+
+    /// The re-run of job `build`, as the outcome of a job re-run holds it.
+    fn rerun_build() -> Action {
+        Action::RerunJob {
+            id: crate::job::JobId(10),
+            name: "build".to_owned(),
+        }
+    }
+
+    /// The refusal of GitHub for a user without admin rights.
+    fn no_admin_rights() -> SourceError {
+        SourceError::Http {
+            status: 403,
+            message: "Must have admin rights to Repository.".to_owned(),
+        }
+    }
+
+    /// Gives `outcome` to the loop, and returns the last frame and the
+    /// commands that the app sent.
+    fn finish_with(outcome: ActionOutcome) -> (Vec<String>, Vec<Command>) {
+        let channels = channels();
+        let canceller = canceller();
+        canceller.outcomes.borrow_mut().push_back(outcome);
+        run_steps_cancelling(
+            &channels,
+            &canceller,
+            vec![Step::Idle, key(KeyCode::Char('q'))],
+        )
+    }
+
+    #[test]
+    fn an_accepted_re_run_posts_that_github_is_re_running_the_run_and_asks_for_a_refresh() {
+        let (frame, commands) = finish_with(rerun_outcome(Action::RerunWorkflow, Ok(())));
+        assert!(
+            frame[11].contains("GitHub is re-running run 7"),
+            "{:?}",
+            frame[11]
+        );
+        assert!(commands.contains(&Command::RefreshNow), "{commands:?}");
+    }
+
+    #[test]
+    fn an_accepted_job_re_run_posts_that_github_is_re_running_the_job() {
+        let (frame, commands) = finish_with(rerun_outcome(rerun_build(), Ok(())));
+        assert!(
+            frame[11].contains("GitHub is re-running job build of run 7"),
+            "{:?}",
+            frame[11]
+        );
+        assert!(commands.contains(&Command::RefreshNow), "{commands:?}");
+    }
+
+    #[test]
+    fn a_refused_re_run_posts_the_run_and_the_error() {
+        let (frame, commands) =
+            finish_with(rerun_outcome(Action::RerunWorkflow, Err(no_admin_rights())));
+        assert!(
+            frame[11].contains(
+                "could not re-run run 7: GitHub answered 403: Must have admin rights to Repository."
+            ),
+            "{:?}",
+            frame[11]
+        );
+        assert!(!commands.contains(&Command::RefreshNow), "{commands:?}");
+    }
+
+    #[test]
+    fn a_refused_job_re_run_posts_the_job_and_the_error() {
+        let (frame, commands) = finish_with(rerun_outcome(rerun_build(), Err(no_admin_rights())));
+        assert!(
+            frame[11].contains(
+                "could not re-run job build of run 7: GitHub answered 403: Must have admin rights to Repository."
+            ),
+            "{:?}",
+            frame[11]
+        );
+        assert!(!commands.contains(&Command::RefreshNow), "{commands:?}");
     }
 }
