@@ -381,12 +381,22 @@ fn paint_table<Tz: TimeZone>(
     let cells = table_cells(reading, app.history().accounts());
     let widths = fit_widths(column_widths(&cells), usize::from(area.width));
     let mut lines = vec![Line::raw(table_line(render::COLUMNS, &widths))];
+    let selected = app.selected_row();
+    let top = app.top_row();
     lines.extend(
         cells
             .iter()
-            .skip(app.top_row())
+            .enumerate()
+            .skip(top)
             .take(page)
-            .map(|row| Line::raw(table_line(row.iter().map(String::as_str), &widths))),
+            .map(|(place, row)| {
+                let line = Line::raw(table_line(row.iter().map(String::as_str), &widths));
+                if selected == Some(place) {
+                    line.style(Style::new().reversed())
+                } else {
+                    line
+                }
+            }),
     );
     frame.render_widget(Paragraph::new(lines), area);
 }
@@ -539,6 +549,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
+    use ratatui::style::Modifier;
     use ratatui::text::Span;
     use ratatui::Terminal;
 
@@ -777,6 +788,14 @@ mod tests {
             .iter()
             .position(|line| line.starts_with(prefix))
             .unwrap_or_else(|| panic!("no line starts with {prefix:?} in {lines:#?}"))
+    }
+
+    /// Gives the index of the first line that contains `text`.
+    fn line_containing(lines: &[String], text: &str) -> usize {
+        lines
+            .iter()
+            .position(|line| line.contains(text))
+            .unwrap_or_else(|| panic!("no line contains {text:?} in {lines:#?}"))
     }
 
     /// The table has the columns of `render::COLUMNS`, in that order.
@@ -1110,5 +1129,34 @@ mod tests {
             let mut gaps_only = app_with(vec![gap(0, 2, "top stopped")]).0;
             paint(&mut gaps_only, width, height, 10);
         }
+    }
+
+    /// Tells whether the first cell of line `y` is reversed.
+    fn is_reversed(buffer: &Buffer, y: u16) -> bool {
+        buffer[(0, y)].modifier.contains(Modifier::REVERSED)
+    }
+
+    /// After moves down, the selected row is on the screen, and it is the one
+    /// row that is reversed.
+    #[test]
+    fn the_selected_row_is_on_screen_and_reversed_after_a_move() {
+        let rows = (1..=30)
+            .map(|pid| row(pid, u64::from(1_000 - pid)))
+            .collect();
+        let (mut app, _) = app_with(vec![frame(0, rows)]);
+        paint(&mut app, 120, 16, 3);
+        for _ in 0..9 {
+            app.on_key(press(KeyCode::Down));
+        }
+
+        let buffer = paint(&mut app, 120, 16, 3);
+
+        let lines = screen(&buffer);
+        let selected = line_containing(&lines, "/bin/command-9");
+        let reversed: Vec<usize> = (0..buffer.area.height)
+            .filter(|y| is_reversed(&buffer, *y))
+            .map(usize::from)
+            .collect();
+        assert_eq!(reversed, vec![selected], "{lines:#?}");
     }
 }
