@@ -401,7 +401,7 @@ pub fn span_header(measurement: &Measurement<'_>, span: &SpanTotals<'_>) -> Vec<
     let processes = measurement.processes;
     let mut lines = vec![
         format!(
-            "{} {} with faults over {} measured of the last {} ({} {}, {} {}) {DASH} {} faults, {}/s",
+            "{} {} with faults over {} measured of {} ({} {}, {} {}) {DASH} {} faults, {}/s",
             count_of(processes),
             plural(processes, PROCESS, PROCESSES),
             seconds(ranking.window),

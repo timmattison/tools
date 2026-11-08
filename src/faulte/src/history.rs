@@ -112,20 +112,6 @@ impl SpanWidth {
         }
     }
 
-    /// Gives the words that follow "of the last" in the header of a span.
-    ///
-    /// [`SpanWidth::label`] starts with "the last", and the header already
-    /// writes those words, so the header takes this shorter text.
-    fn header_label(self) -> &'static str {
-        match self {
-            Self::OneFrame => "frame",
-            Self::OneMinute => "1 m",
-            Self::FiveMinutes => "5 m",
-            Self::FifteenMinutes => "15 m",
-            Self::Whole => "whole history",
-        }
-    }
-
     /// Gives the next width in the cycle: one frame, 1 m, 5 m, 15 m, the whole
     /// history, and then one frame again.
     #[must_use]
@@ -1193,7 +1179,7 @@ impl History {
                 swap_window: frames.iter().map(|frame| frame.swap_window).sum(),
                 interval: newest.interval,
                 span: Some(SpanFacts {
-                    label: width.header_label(),
+                    label: width.label(),
                     frames: frames.len(),
                     gaps,
                 }),
