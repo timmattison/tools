@@ -13,9 +13,9 @@ use ratatui::Frame;
 use textfit::{pad_right, truncate_left_to_budget, truncate_to_budget};
 use unicode_width::UnicodeWidthStr;
 
+use crate::action::{Action, Confirm};
 use crate::billing::{AccountCell, BillingView, Total};
 use crate::board::{Board, Header, JobCounts, Row, Section};
-use crate::cancel::Confirm;
 use crate::cost::{JobCost, RunCost};
 use crate::job::{Job, RunnerName};
 use crate::queue::{Departure, EntryState, Outcome, PullNumber, QueueEntry};
@@ -94,19 +94,13 @@ const STATUS_SEPARATOR: &str = "  ·  ";
 /// The key hints at the end of the left part of the status line. The status line
 /// shows them only while no cancel box shows.
 const KEY_HINTS: &str = "↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  r refresh  q quit";
-/// The title in the top border of the box of the cancel prompt.
-const PROMPT_TITLE: &str = " Cancel run? ";
-/// The widest outer width of the box of the cancel prompt.
+/// The widest outer width of the box of the prompt.
 const PROMPT_WIDTH: usize = 44;
 /// The columns of the box that hold no text: a border column and a space of
 /// padding on each side.
 const PROMPT_FRAME_COLUMNS: usize = 4;
 /// The rows of the box that hold no text: the top border and the bottom border.
 const PROMPT_BORDER_ROWS: usize = 2;
-/// The note that the box shows when a job row is selected.
-const PROMPT_JOB_NOTE: &str = "GitHub cannot cancel one job. y cancels every job of this run.";
-/// The key that cancels the run.
-const PROMPT_KEY_CANCEL: &str = "y cancel the run";
 /// The text for each other key.
 const PROMPT_KEY_KEEP: &str = "any other key: keep";
 /// The text between the two keys when they share one line.
@@ -1210,7 +1204,7 @@ where
 /// replaces the lead only, thus it never hides the stale part.
 ///
 /// With `hints` false, the key hints and the separator before them are absent.
-/// The box of the cancel prompt names its own keys, thus the line drops the hints.
+/// The box of the prompt names its own keys, thus the line drops the hints.
 ///
 /// The parts stand in this order, with [`STATUS_SEPARATOR`] between them.
 /// The refresh mark is not part of it. [`layout_status`] puts the mark at the
@@ -1444,7 +1438,7 @@ fn draw_row<Tz: TimeZone>(
 /// two fixed lines. Times show in the time zone `tz`. The text of a finished
 /// row fades along [`ROW_RAMP`] over [`ROW_FADE_END`] (see [`age_style`]).
 /// The marker cells and the sleeping mark of a row keep `Color::Reset`. With
-/// a `prompt`, the box of the cancel prompt draws last, over the rows (see
+/// a `prompt`, the box of the prompt draws last, over the rows (see
 /// [`draw_prompt`]). While the box shows, the status line has no key hints.
 /// The merge history header names the started column `FINISHED`, because its
 /// rows show when each pull request left the queue. With no merge history, the
@@ -1816,7 +1810,7 @@ fn draw_billing_box(buffer: &mut Buffer, area: Rect, shown: &BillingBox) {
     }
 }
 
-/// The part of the box of the cancel prompt, in the order of the box.
+/// The part of the box of the prompt, in the order of the box.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PromptPart {
     /// The repository.
@@ -1883,12 +1877,12 @@ fn wrap_line(text: &str, width: usize) -> Vec<String> {
 
 /// The key lines of the box for a text `width`: one line when both keys fit,
 /// else two lines.
-fn prompt_key_lines(width: usize) -> Vec<String> {
-    let joined = format!("{PROMPT_KEY_CANCEL}{PROMPT_KEY_GAP}{PROMPT_KEY_KEEP}");
+fn prompt_key_lines(action: &Action, width: usize) -> Vec<String> {
+    let joined = format!("{}{PROMPT_KEY_GAP}{PROMPT_KEY_KEEP}", action.box_key());
     if Span::raw(joined.as_str()).width() <= width {
         return vec![joined];
     }
-    [PROMPT_KEY_CANCEL, PROMPT_KEY_KEEP]
+    [action.box_key(), PROMPT_KEY_KEEP]
         .into_iter()
         .flat_map(|key| wrap_line(key, width))
         .collect()
@@ -1906,9 +1900,11 @@ fn prompt_parts(prompt: &Confirm, width: usize) -> Vec<(PromptPart, Vec<String>)
         (PromptPart::Run, run_line),
         (PromptPart::Title, prompt.title.clone()),
     ];
-    if let Some(job) = &prompt.job {
+    if let Some(job) = prompt.action.box_job() {
         parts.push((PromptPart::Job, format!("job: {job}")));
-        parts.push((PromptPart::Note, PROMPT_JOB_NOTE.to_owned()));
+    }
+    if let Some(note) = prompt.action.box_note() {
+        parts.push((PromptPart::Note, note.to_owned()));
     }
     parts.push((PromptPart::Blank, String::new()));
     parts
@@ -1942,7 +1938,7 @@ fn clear_overlay(buffer: &mut Buffer, rect: Rect) {
     }
 }
 
-/// Draws the box of the cancel prompt over the frame.
+/// Draws the box of the prompt over the frame.
 ///
 /// The box is at most 44 columns wide and sits in the middle of the columns.
 /// It sits in the middle of the board rows, between the column header and the
@@ -1964,7 +1960,7 @@ fn draw_prompt(buffer: &mut Buffer, area: Rect, prompt: &Confirm) {
     let x = area.x + (area.width - outer) / 2;
     let height = usize::from(area.height);
     let text_width = usize::from(outer).saturating_sub(PROMPT_FRAME_COLUMNS);
-    let keys = prompt_key_lines(text_width);
+    let keys = prompt_key_lines(&prompt.action, text_width);
     let board_rows = height.saturating_sub(FIXED_LINES);
     let (first_row, rows) = if board_rows >= keys.len() + PROMPT_BORDER_ROWS {
         (1, board_rows)
@@ -1972,7 +1968,7 @@ fn draw_prompt(buffer: &mut Buffer, area: Rect, prompt: &Confirm) {
         (0, height)
     };
     if rows < keys.len() + PROMPT_BORDER_ROWS {
-        let keys = prompt_key_lines(usize::from(outer));
+        let keys = prompt_key_lines(&prompt.action, usize::from(outer));
         let used = keys.len().min(height);
         clear_overlay(buffer, Rect::new(x, area.y, outer, to_u16(used)));
         for (index, line) in keys.iter().take(used).enumerate() {
@@ -2006,7 +2002,9 @@ fn draw_prompt(buffer: &mut Buffer, area: Rect, prompt: &Confirm) {
     let y = area.y + to_u16(first_row + (rows - box_height) / 2);
     let rect = Rect::new(x, y, outer, to_u16(box_height));
     clear_overlay(buffer, rect);
-    Block::bordered().title(PROMPT_TITLE).render(rect, buffer);
+    Block::bordered()
+        .title(prompt.action.box_title())
+        .render(rect, buffer);
     for (index, line) in text.into_iter().enumerate() {
         buffer.set_stringn(
             x + 2,
@@ -5161,7 +5159,9 @@ mod tests {
             workflow: "CI".to_owned(),
             branch: "main".to_owned(),
             title: title.to_owned(),
-            job: job.map(str::to_owned),
+            action: Action::Cancel {
+                job: job.map(str::to_owned),
+            },
         }
     }
 

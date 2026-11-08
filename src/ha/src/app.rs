@@ -9,9 +9,9 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::backend::Backend;
 use ratatui::Terminal;
 
+use crate::action::{ActionSender, Confirm, Prompt, Request};
 use crate::billing::BillingBoard;
 use crate::board::Board;
-use crate::cancel::{Canceller, Confirm};
 use crate::first_cycle::{FirstCycle, NoTargetRead, Verdict};
 use crate::render;
 use crate::run::RunId;
@@ -76,7 +76,7 @@ impl Events for TerminalEvents {
 }
 
 /// The state of one run of the event loop.
-pub struct App<'a, O: Opener, C: Canceller, Tz: TimeZone> {
+pub struct App<'a, O: Opener, A: ActionSender, Tz: TimeZone> {
     /// The runs to show.
     pub board: Board,
     /// The text for the status line.
@@ -84,7 +84,7 @@ pub struct App<'a, O: Opener, C: Canceller, Tz: TimeZone> {
     /// The Actions billing box. It is `None` when billing is off.
     pub billing: Option<BillingBoard>,
     opener: &'a O,
-    canceller: &'a C,
+    actions: &'a A,
     worker: &'a Worker,
     now: &'a dyn Fn() -> DateTime<Utc>,
     tz: &'a Tz,
@@ -132,7 +132,7 @@ pub enum RunError {
     NoTargetRead(#[from] NoTargetRead),
 }
 
-impl<'a, O: Opener, C: Canceller, Tz: TimeZone> App<'a, O, C, Tz>
+impl<'a, O: Opener, A: ActionSender, Tz: TimeZone> App<'a, O, A, Tz>
 where
     Tz::Offset: std::fmt::Display,
 {
@@ -148,7 +148,7 @@ where
         board: Board,
         status: Status,
         opener: &'a O,
-        canceller: &'a C,
+        actions: &'a A,
         worker: &'a Worker,
         now: &'a dyn Fn() -> DateTime<Utc>,
         tz: &'a Tz,
@@ -159,7 +159,7 @@ where
             status,
             billing,
             opener,
-            canceller,
+            actions,
             worker,
             now,
             tz,
@@ -247,17 +247,17 @@ where
         while let Some(failure) = self.opener.late_failure() {
             self.status.message = Some(failed_open(&failure.url, &failure.reason, (self.now)()));
         }
-        while let Some(outcome) = self.canceller.finished() {
+        while let Some(outcome) = self.actions.finished() {
             // The run ID comes before the error, because the status line cuts
             // a long line at its end. Thus a narrow terminal still shows which
             // run the error is about.
             match outcome.result {
                 Ok(()) => {
-                    self.post(format!("GitHub is cancelling run {}", outcome.run.0));
+                    self.post(outcome.action.accepted_text(outcome.run));
                     self.refresh_now();
                 }
                 Err(error) => {
-                    self.post(format!("could not cancel run {}: {error}", outcome.run.0));
+                    self.post(outcome.action.refused_text(outcome.run, &error));
                 }
             }
         }
@@ -383,8 +383,9 @@ where
             return match key.code {
                 KeyCode::Char('c') if control => Flow::Quit,
                 KeyCode::Char('y' | 'Y') if !control => {
-                    self.canceller.cancel(&confirm.repo, confirm.run);
-                    self.post(format!("cancelling run {}…", confirm.run.0));
+                    self.actions
+                        .start(&confirm.repo, confirm.run, &confirm.action);
+                    self.post(confirm.action.started_text(confirm.run));
                     Flow::Continue
                 }
                 _ => Flow::Continue,
@@ -394,7 +395,7 @@ where
             KeyCode::Char('q') | KeyCode::Esc => Flow::Quit,
             KeyCode::Char('c') if control => Flow::Quit,
             KeyCode::Char('c') => {
-                self.ask_to_cancel();
+                self.ask(Request::Cancel);
                 Flow::Continue
             }
             KeyCode::Up => {
@@ -464,33 +465,18 @@ where
         self.sync_watch();
     }
 
-    /// Opens the box that asks to cancel the highlighted run, or posts that a
-    /// finished run has nothing to cancel. The box keeps a copy of what it
-    /// shows, thus a later refresh does not change the run that `y` cancels.
-    /// On a job row it names the run of the job. On a pull request row it
-    /// posts that a pull request is not a run.
-    fn ask_to_cancel(&mut self) {
+    /// Opens the box for `request` on the highlighted row, or posts why the
+    /// row cannot take it. The box keeps a copy of what it shows, thus a later
+    /// refresh does not change the run that `y` acts on. On a job row it names
+    /// the run of the job. On a pull request row it posts that a pull request
+    /// is not a run.
+    fn ask(&mut self, request: Request) {
         let now = (self.now)();
-        if let Some(pull) = self.board.selected_pull(now) {
-            self.post(format!(
-                "pull request #{} is not a run: there is nothing to cancel",
-                pull.0
-            ));
-            return;
-        }
-        let target = self.board.selected_target(now).map(|(run, job)| {
-            if run.state.is_active() {
-                Ok(Confirm::new(run, job))
-            } else {
-                Err(run.id)
-            }
-        });
-        match target {
+        let pull = self.board.selected_pull(now);
+        match request.prompt(pull, self.board.selected_target(now)) {
             None => {}
-            Some(Ok(confirm)) => self.confirm = Some(confirm),
-            Some(Err(id)) => {
-                self.post(format!("run {} finished: there is nothing to cancel", id.0));
-            }
+            Some(Prompt::Confirm(confirm)) => self.confirm = Some(confirm),
+            Some(Prompt::Refuse(text)) => self.post(text),
         }
     }
 
@@ -542,7 +528,7 @@ mod tests {
     use ratatui::layout::{Position, Size};
 
     use super::*;
-    use crate::cancel::CancelOutcome;
+    use crate::action::{Action, ActionOutcome};
     use crate::github::{RepoList, SourceError};
     use crate::queue::{Departure, EntryState, History, PullNumber, QueueEntry};
     use crate::run::{Run, RunId, RunState};
@@ -589,15 +575,17 @@ mod tests {
     /// call of `finished`, in order.
     struct RecordingCanceller {
         cancels: RefCell<Vec<(RepoName, RunId)>>,
-        outcomes: RefCell<VecDeque<CancelOutcome>>,
+        outcomes: RefCell<VecDeque<ActionOutcome>>,
     }
 
-    impl Canceller for RecordingCanceller {
-        fn cancel(&self, repo: &RepoName, run: RunId) {
-            self.cancels.borrow_mut().push((repo.clone(), run));
+    impl ActionSender for RecordingCanceller {
+        fn start(&self, repo: &RepoName, run: RunId, action: &Action) {
+            match action {
+                Action::Cancel { .. } => self.cancels.borrow_mut().push((repo.clone(), run)),
+            }
         }
 
-        fn finished(&self) -> Option<CancelOutcome> {
+        fn finished(&self) -> Option<ActionOutcome> {
             self.outcomes.borrow_mut().pop_front()
         }
     }
@@ -2981,10 +2969,11 @@ mod tests {
     }
 
     /// An outcome for run 7 that the canceller of a test gives to the loop.
-    fn outcome(result: Result<(), SourceError>) -> CancelOutcome {
-        CancelOutcome {
+    fn outcome(result: Result<(), SourceError>) -> ActionOutcome {
+        ActionOutcome {
             repo: repo(),
             run: RunId(7),
+            action: Action::Cancel { job: None },
             result,
         }
     }
