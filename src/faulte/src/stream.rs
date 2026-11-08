@@ -1269,4 +1269,19 @@ mod tests {
         assert!(reason.contains("/bin/sh"), "{reason}");
         assert_eq!(stream.next_event(POLL), None, "nothing follows the end");
     }
+
+    /// A child that never ends stops when its stream is dropped. The drop
+    /// reaps the child, so `ps` finds no such process afterwards.
+    #[test]
+    fn dropping_the_stream_stops_the_child() {
+        let (stream, pid) = stub_with_pid();
+        assert!(process_exists(pid), "the child runs before the drop");
+
+        drop(stream);
+
+        assert!(
+            !process_exists(pid),
+            "the child {pid} is gone after the drop"
+        );
+    }
 }
