@@ -95,14 +95,22 @@ impl<M: Machine> Run<M> {
             let Some(event) = stream.next_event(POLL) else {
                 continue;
             };
-            if let StreamEvent::Header { finished, .. } = event {
-                let before = reads.clone();
-                reads = [reads[1].take(), Some(self.read_counters())];
-                if let (Some(sample), [Some(older), Some(newer)]) = (finished, before) {
-                    if !self.send_sample(&sample, older, newer, ledger) {
+            match event {
+                StreamEvent::Header { finished, .. } => {
+                    let before = reads.clone();
+                    reads = [reads[1].take(), Some(self.read_counters())];
+                    if let (Some(sample), [Some(older), Some(newer)]) = (finished, before) {
+                        if !self.send_sample(&sample, older, newer, ledger) {
+                            return;
+                        }
+                    }
+                }
+                StreamEvent::Refused { at, reason } => {
+                    if !self.send_gap(ledger, at, reason) {
                         return;
                     }
                 }
+                StreamEvent::Ended { .. } => return,
             }
         }
     }
