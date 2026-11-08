@@ -527,4 +527,34 @@ mod tests {
         );
         assert_eq!(first.observed.swap_window, Duration::from_secs(4));
     }
+
+    /// Gives the error of a `ps` that failed.
+    fn ps_failure() -> MachineError {
+        MachineError::CommandFailed {
+            program: "/bin/ps".to_owned(),
+            status: "exit status: 1".to_owned(),
+            message: "ps is broken".to_owned(),
+        }
+    }
+
+    /// A `ps` that fails costs one sample. The view gets a gap with the text
+    /// of the error, and the next sample still makes a frame.
+    #[test]
+    fn a_failed_ps_makes_a_gap_and_the_next_sample_makes_a_frame() {
+        let rig = Rig::new().failing_table(ps_failure()).stream(vec![
+            header(10),
+            header(12),
+            finished(14, 12, 7_000),
+            finished(16, 14, 8_000),
+        ]);
+        let sampler = rig.start();
+
+        let gap = next_gap(&sampler);
+        let frame = next_frame(&sampler);
+
+        assert_eq!(gap.reason, ps_failure().to_string());
+        assert_eq!(gap.at, at(12));
+        assert_eq!(gap.lost, Duration::ZERO);
+        assert_eq!(frame.at, at(14));
+    }
 }
