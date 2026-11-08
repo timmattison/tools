@@ -3511,4 +3511,38 @@ mod tests {
             frame[11]
         );
     }
+
+    /// The refusal for a re-run of a run that still runs.
+    const STILL_ACTIVE: &str = "run 1 is still active: there is nothing to re-run yet";
+
+    #[test]
+    fn capital_r_on_an_active_run_says_it_is_still_active_and_shows_no_box() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        let (_, frame) = run_app_with(
+            Status::default(),
+            &opener(false),
+            &canceller(),
+            &channels,
+            vec![press(KeyCode::Char('R'))],
+        );
+        assert!(!shows_title(&frame, RERUN_WORKFLOW_BOX_TITLE), "{frame:?}");
+        assert!(frame[11].contains(STILL_ACTIVE), "{:?}", frame[11]);
+    }
+
+    #[test]
+    fn y_after_capital_r_on_an_active_run_re_runs_nothing() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        let canceller = canceller();
+        let _ = run_app_with(
+            Status::default(),
+            &opener(false),
+            &canceller,
+            &channels,
+            vec![press(KeyCode::Char('R')), press(KeyCode::Char('y'))],
+        );
+        assert!(canceller.reruns.borrow().is_empty());
+        assert!(canceller.cancels.borrow().is_empty());
+    }
 }
