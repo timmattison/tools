@@ -634,4 +634,26 @@ mod tests {
         app.on_key(press(KeyCode::PageUp));
         assert_eq!(app.detail_scroll(), 0);
     }
+
+    /// `w` cycles the span, and the cycle ends at one frame again.
+    #[test]
+    fn w_cycles_the_span() {
+        let (mut app, _) = forty_apart();
+        let mut seen = Vec::new();
+
+        for _ in 0..5 {
+            app.on_key(press(KeyCode::Char('w')));
+            seen.push(app.span());
+        }
+        assert_eq!(
+            seen,
+            [
+                SpanWidth::OneMinute,
+                SpanWidth::FiveMinutes,
+                SpanWidth::FifteenMinutes,
+                SpanWidth::Whole,
+                SpanWidth::OneFrame,
+            ]
+        );
+    }
 }
