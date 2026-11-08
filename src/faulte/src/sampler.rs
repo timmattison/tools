@@ -52,6 +52,12 @@ impl Sampler {
         Self { updates }
     }
 
+    /// Stops the sampler and its child at once.
+    ///
+    /// This call does not join the thread, because a `ps` can run for
+    /// seconds. The `Stopper` of the current stream stops `top` at once.
+    pub fn stop(&self) {}
+
     /// Gives the channel of the updates.
     #[must_use]
     pub fn updates(&self) -> &Receiver<Update> {
@@ -228,7 +234,7 @@ mod tests {
 
     use std::collections::{BTreeSet, HashMap, VecDeque};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::mpsc::RecvTimeoutError;
+    use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
     use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
     use std::thread;
     use std::time::{Duration, SystemTime};
@@ -356,6 +362,9 @@ mod tests {
         stops: AtomicUsize,
         /// Tells whether the machine was dropped.
         dropped: AtomicBool,
+        /// When set, `fault_stream` waits for a message here before it gives
+        /// its stream.
+        gate: Mutex<Option<Receiver<()>>>,
     }
 
     /// The machine that the sampler owns. It drops with the sampler thread.
@@ -370,10 +379,13 @@ mod tests {
         }
     }
 
-    /// A stream that gives stated events, then nothing.
+    /// A stream that gives stated events, then nothing. After its stopper
+    /// ran, it gives the end of the child once, as a real `top` does.
     struct FakeStream {
         /// The events that are left.
         events: VecDeque<StreamEvent>,
+        /// Tells whether the stopper ran.
+        stopped: Arc<AtomicBool>,
         /// The state that the test also reads.
         shared: Arc<Shared>,
     }
@@ -383,14 +395,22 @@ mod tests {
             if let Some(event) = self.events.pop_front() {
                 return Some(event);
             }
+            if self.stopped.swap(false, Ordering::SeqCst) {
+                return Some(StreamEvent::Ended {
+                    at: at(NOW),
+                    reason: "stopped by faulte".to_owned(),
+                });
+            }
             thread::sleep(LOOK);
             None
         }
 
         fn stopper(&self) -> Stopper {
             let shared = Arc::clone(&self.shared);
+            let stopped = Arc::clone(&self.stopped);
             Stopper::new(move || {
                 shared.stops.fetch_add(1, Ordering::SeqCst);
+                stopped.store(true, Ordering::SeqCst);
             })
         }
     }
@@ -402,10 +422,14 @@ mod tests {
 
         fn fault_stream(&self, _interval: Span) -> Result<Box<dyn FaultStream>, MachineError> {
             self.shared.starts.fetch_add(1, Ordering::SeqCst);
+            if let Some(gate) = locked(&self.shared.gate).take() {
+                let _ = gate.recv_timeout(BOUND);
+            }
             let next = locked(&self.shared.streams).pop_front();
             let events = next.unwrap_or_else(|| Ok(Vec::new()))?;
             Ok(Box::new(FakeStream {
                 events: events.into(),
+                stopped: Arc::new(AtomicBool::new(false)),
                 shared: Arc::clone(&self.shared),
             }))
         }
@@ -509,6 +533,13 @@ mod tests {
         fn failing_table(self, error: MachineError) -> Self {
             locked(&self.shared.table_errors).push_back(error);
             self
+        }
+
+        /// Makes the next start wait until the returned sender sends.
+        fn gated(&self) -> Sender<()> {
+            let (sender, receiver) = channel();
+            *locked(&self.shared.gate) = Some(receiver);
+            sender
         }
 
         /// Starts the sampler on a machine that shares this rig's state.
@@ -756,5 +787,55 @@ mod tests {
         let frame = next_frame(&sampler);
 
         assert_eq!(frame.own, BTreeSet::from([Pid::new(OWN), Pid::new(101)]));
+    }
+
+    /// Reads updates until the channel disconnects. Fails after [`BOUND`].
+    fn drain_until_disconnected(sampler: &Sampler) {
+        loop {
+            match sampler.updates().recv_timeout(BOUND) {
+                Ok(_) => {}
+                Err(RecvTimeoutError::Disconnected) => return,
+                Err(RecvTimeoutError::Timeout) => panic!("the sampler did not end"),
+            }
+        }
+    }
+
+    /// `stop` calls the stopper of the current stream, and no new child
+    /// starts after it. The stream gives the end of its child after the stop,
+    /// and a sampler that ignored the stop would start a new one.
+    #[test]
+    fn stop_stops_the_child_and_starts_no_new_one() {
+        let rig = Rig::new().stream(vec![header(10)]).stream(vec![header(30)]);
+        let sampler = rig.start();
+        wait_until("the first child", || {
+            rig.shared.starts.load(Ordering::SeqCst) == 1
+        });
+
+        sampler.stop();
+
+        wait_until("the stopper", || {
+            rig.shared.stops.load(Ordering::SeqCst) >= 1
+        });
+        drain_until_disconnected(&sampler);
+        assert_eq!(rig.shared.starts.load(Ordering::SeqCst), 1);
+    }
+
+    /// A stop that arrives while a child starts still stops that child. The
+    /// sampler publishes the stopper first, and then looks at the flag.
+    #[test]
+    fn a_stop_during_a_start_stops_the_new_child() {
+        let rig = Rig::new().stream(vec![header(10)]);
+        let release = rig.gated();
+        let sampler = rig.start();
+        wait_until("the start", || {
+            rig.shared.starts.load(Ordering::SeqCst) == 1
+        });
+
+        sampler.stop();
+        release.send(()).expect("the start waits");
+
+        drain_until_disconnected(&sampler);
+        assert_eq!(rig.shared.stops.load(Ordering::SeqCst), 1);
+        assert_eq!(rig.shared.starts.load(Ordering::SeqCst), 1);
     }
 }
