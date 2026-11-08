@@ -2029,8 +2029,41 @@ impl DecoyRepository {
     /// Panics when the decoy differs from its first snapshot. The message names
     /// `tool` and lists each path that appeared, vanished, or changed.
     pub fn assert_untouched(&self, tool: &str) {
-        let _ = tool;
+        let after = snapshot(self.repo.path());
+        let lines = difference(&self.before, &after);
+
+        assert!(
+            lines.is_empty(),
+            "{tool} touched the decoy repository at {}:\n{}",
+            self.repo.path().display(),
+            lines.join("\n"),
+        );
     }
+}
+
+/// How `after` differs from `before`, one line per path, in path order.
+///
+/// An empty list means the two snapshots are equal. Each line says whether a
+/// path appeared, vanished, or changed.
+fn difference(before: &Snapshot, after: &Snapshot) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    for (path, held) in after {
+        match before.get(path) {
+            None => lines.push(format!("appeared: {path}")),
+            Some(was) if was != held => lines.push(format!("changed:  {path}")),
+            Some(_) => {}
+        }
+    }
+
+    for path in before.keys() {
+        if !after.contains_key(path) {
+            lines.push(format!("vanished: {path}"));
+        }
+    }
+
+    lines.sort();
+    lines
 }
 
 /// The path of `path` under `root`, spelled with forward slashes.
