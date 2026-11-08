@@ -267,4 +267,23 @@ mod tests {
             .collect();
         assert_eq!(one_by_one, whole, "one byte in each read");
     }
+
+    /// The last sample has no end until the next header arrives, so it gives
+    /// no event, and neither does a line that has not ended. This behavior
+    /// follows from the rule that a header ends a sample. It has no code of its
+    /// own, so this test passed when it was written.
+    #[test]
+    fn an_incomplete_last_sample_gives_no_event() {
+        let complete =
+            sample("12:00:00", "10     9000000   \n") + &sample("12:00:03", "10     3         \n");
+        let partial = "10     5   ";
+        let mut parser = StreamParser::new();
+
+        let first = parser.feed(complete.as_bytes());
+        let second = parser.feed(partial.as_bytes());
+
+        let header = ParsedEvent::Header { finished: None };
+        assert_eq!(first, [header.clone(), header]);
+        assert_eq!(second, []);
+    }
 }
