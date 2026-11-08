@@ -1159,4 +1159,14 @@ mod tests {
             .collect();
         assert_eq!(reversed, vec![selected], "{lines:#?}");
     }
+
+    /// The line under the table counts the processes that made no fault.
+    #[test]
+    fn the_more_line_counts_the_hidden_processes() {
+        let (mut app, _) = app_with(vec![frame(0, vec![row(1, 50), row(2, 0), row(3, 0)])]);
+
+        let lines = screen(&paint(&mut app, 120, 24, 3));
+
+        assert_eq!(lines[22], "… 2 more processes made 0% of all faults");
+    }
 }
