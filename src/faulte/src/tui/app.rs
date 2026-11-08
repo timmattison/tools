@@ -246,6 +246,12 @@ impl App {
         self.quit
     }
 
+    /// Gives the notice that the view shows until the next key, if any.
+    #[must_use]
+    pub fn notice(&self) -> Option<&str> {
+        None
+    }
+
     /// Gives the reading that the table shows.
     #[must_use]
     pub fn reading(&self) -> Option<&Reading> {
@@ -703,5 +709,42 @@ mod tests {
         assert_eq!(past.selection(), Selection::Past(ids[3]));
         assert_eq!(past.reading().map(Reading::end), Some(ids[3]));
         assert_ne!(past.history().newest(), Some(ids[4]));
+    }
+
+    /// Builds a history that is full: one more frame makes the oldest leave.
+    fn full_history() -> (History, Vec<EntryId>) {
+        let make = |budget: usize| {
+            let mut history = History::with_budget(budget);
+            let ids: Vec<EntryId> = (0..3)
+                .map(|step| history.add(frame(step * 2, vec![row(1, 1), row(2, 2)])))
+                .collect();
+            (history, ids)
+        };
+        let (probe, _) = make(usize::MAX);
+        make(probe.bytes_used())
+    }
+
+    /// A selected frame that leaves the history moves the selection to the
+    /// oldest frame and sets a notice. The next key clears the notice.
+    #[test]
+    fn a_selected_frame_that_leaves_moves_to_the_oldest() {
+        let (history, ids) = full_history();
+        let mut app = App::new(history);
+        app.on_key(press(KeyCode::Home));
+        assert_eq!(app.selection(), Selection::Past(ids[0]));
+        assert_eq!(app.notice(), None);
+
+        app.on_update(frame(6, vec![row(1, 1), row(2, 2)]));
+        assert!(!app.history().contains(ids[0]));
+        let oldest = app.history().oldest().expect("the history is not empty");
+        assert_eq!(app.selection(), Selection::Past(oldest));
+        assert_eq!(app.reading().map(Reading::end), Some(oldest));
+        assert_eq!(
+            app.notice(),
+            Some("the selected frame left the history, so the view moved to the oldest frame")
+        );
+
+        app.on_key(press(KeyCode::Char('w')));
+        assert_eq!(app.notice(), None);
     }
 }
