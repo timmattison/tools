@@ -4,7 +4,9 @@
 use std::process::ExitCode;
 
 use buildinfo::version_string;
-use clap::{Parser, Subcommand};
+use clap::error::ErrorKind;
+use clap::parser::ValueSource;
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use faulte::duration::Span;
 #[cfg(target_os = "macos")]
 use faulte::machine::{macos::Mac, observe, MachineError};
@@ -197,7 +199,29 @@ enum Command {
 }
 
 fn main() -> ExitCode {
-    run(Cli::parse())
+    run(parse_cli())
+}
+
+/// What the usage error says when `faulte tui` gets `--limit`.
+const TUI_REFUSES_LIMIT: &str = "--limit belongs to the ranking, and faulte tui has no ranking to limit. Run faulte tui with no --limit.";
+
+/// Reads the command line and exits with a usage error when it is wrong.
+///
+/// `--limit` stands before the name of a command, so clap accepts it for
+/// `faulte tui`. The flag belongs to the ranking alone. A flag that a command
+/// takes and then ignores is worse than a flag that it refuses, so this
+/// function refuses `--limit` that the person typed with `tui`. The value
+/// source tells a typed flag from the default.
+fn parse_cli() -> Cli {
+    let matches = Cli::command().get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
+    let typed_limit = matches.value_source("limit") == Some(ValueSource::CommandLine);
+    if matches!(cli.command, Some(Command::Tui)) && typed_limit {
+        Cli::command()
+            .error(ErrorKind::ArgumentConflict, TUI_REFUSES_LIMIT)
+            .exit();
+    }
+    cli
 }
 
 /// Runs the command that the person gave.
