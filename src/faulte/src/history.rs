@@ -1102,4 +1102,24 @@ mod tests {
 
         assert_eq!(rows, vec![(7, Some(200), 6), (7, Some(100), 4)]);
     }
+
+    /// A gap adds to neither the faults nor the window of a span, so the rate
+    /// of a process is the same with the gap and without it.
+    #[test]
+    fn a_gap_changes_no_rate() {
+        let mut history = History::new();
+        history.add(frame(10, vec![row(1, 20)]));
+        history.add(gap(12, 2));
+        let end = history.add(frame(14, vec![row(1, 20)]));
+
+        let reading = history
+            .span(end, SpanWidth::Whole)
+            .expect("the span has frames");
+        let ranking = reading.ranking();
+
+        assert_eq!(ranking.window, Duration::from_secs(2 * WINDOW_SECS));
+        assert_eq!(ranking.rows[0].faults, 40);
+        assert!((ranking.faults_per_second(ranking.rows[0].faults) - 10.0).abs() < f64::EPSILON);
+        assert!(reading.header_lines()[0].contains("(2 frames, 1 gap)"));
+    }
 }
