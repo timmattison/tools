@@ -295,7 +295,7 @@ impl ActionSender for GhActionSender {
                 let result = match &thread_action {
                     Action::Cancel { .. } => source.cancel_run(&thread_repo, run),
                     Action::RerunWorkflow => source.rerun_run(&thread_repo, run),
-                    Action::RerunJob { .. } => source.cancel_run(&thread_repo, run),
+                    Action::RerunJob { id, .. } => source.rerun_job(&thread_repo, *id),
                 };
                 // The receiver is gone when `ha` ends. Nobody reads the outcome then.
                 let _ = sender.send(ActionOutcome {
