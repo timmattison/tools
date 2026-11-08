@@ -344,76 +344,67 @@ fn text_width(text: &str) -> usize {
 /// terminal theme sets the shade, also on a light background.
 const RUNNER_STYLE: Style = Style::new().fg(Color::Cyan);
 
-/// The fewest columns that a cut runner name gets: three characters and `…`.
-const MIN_RUNNER_WIDTH: usize = 4;
-
-/// The runner name cut to `room` columns, or `None` when it has no room.
-///
-/// A name that fits shows whole, also in fewer than [`MIN_RUNNER_WIDTH`]
-/// columns. A longer name keeps its start and ends in `…`. It needs
-/// [`MIN_RUNNER_WIDTH`] columns, because a shorter cut shows too little of the
-/// name to be of use.
-fn fit_runner(name: &RunnerName, room: usize) -> Option<String> {
-    if text_width(name.as_str()) <= room {
-        Some(name.as_str().to_owned())
-    } else if room >= MIN_RUNNER_WIDTH {
-        Some(truncate_to_budget(name.as_str(), room))
-    } else {
-        None
-    }
-}
-
-/// The number of characters of a runner name that a job row always shows. A
-/// name of this many characters or fewer is its own floor.
+/// The number of characters of a runner name that a job row always shows.
 const RUNNER_FLOOR_CHARS: usize = 6;
+
+/// The part of a runner name that a job row must always show.
+///
+/// A name of [`RUNNER_FLOOR_CHARS`] characters or fewer is its own floor. A
+/// longer name gives its first [`RUNNER_FLOOR_CHARS`] characters and `…`. If
+/// that cut saves no column, the whole name is the floor. The floor counts
+/// characters, not columns, thus a wide glyph uses its two columns in the
+/// layout.
+fn runner_floor(name: &RunnerName) -> String {
+    let start: String = name.as_str().chars().take(RUNNER_FLOOR_CHARS).collect();
+    truncate_to_budget(name.as_str(), text_width(&start) + 1)
+}
 
 /// The text of the text cell of a job row, and the runner name that follows it.
 ///
-/// The text is the tree glyph, one space, and the job name. The text keeps its
-/// start and gets the runner name only in the room that it leaves. A text wider
-/// than the cell keeps its end, and the runner name shows as its floor.
+/// The text is the tree glyph, one space, and the job name. The first rule
+/// that applies gives the result:
+///
+/// 1. The text and the whole runner name fit: both show whole.
+/// 2. The text and the runner floor fit (see [`runner_floor`]): the text shows
+///    whole. The runner name keeps its start and gets the columns that the
+///    text leaves.
+/// 3. The cell can hold the tree glyph, one space, `…`, one space, and the
+///    runner floor: the job name keeps its end and starts with `…`, and the
+///    runner name shows as its floor. The tree glyph stays.
+/// 4. In a narrower cell, or with no runner, the text keeps its start and no
+///    runner name shows.
 fn fit_job_text(
     glyph: &str,
     name: &str,
     runner: Option<&RunnerName>,
     cell: usize,
 ) -> (String, Option<String>) {
-    let whole = format!("{glyph} {name}");
-    let text = truncate_to_budget(&whole, cell);
-    let Some(runner) = runner else {
-        return (text, None);
-    };
-    let room = cell.saturating_sub(text_width(&text) + 1);
-    let start: String = runner.as_str().chars().take(RUNNER_FLOOR_CHARS).collect();
-    let floor = truncate_to_budget(runner.as_str(), text_width(&start) + 1);
-    let without_name = text_width(glyph) + 2 + text_width(&floor);
-    let fitted = if runner.as_str().chars().count() <= RUNNER_FLOOR_CHARS
-        || text_width(&floor) >= text_width(runner.as_str())
-    {
-        (text_width(runner.as_str()) <= room).then(|| runner.as_str().to_owned())
-    } else if room >= text_width(&floor) {
-        fit_runner(runner, room)
-    } else {
-        None
-    };
-    if fitted.is_some() {
-        return (text, fitted);
+    let text = format!("{glyph} {name}");
+    if let Some(runner) = runner {
+        let floor = runner_floor(runner);
+        let floor_width = text_width(&floor);
+        let text_and_gap = text_width(&text) + 1;
+        if text_and_gap + floor_width <= cell {
+            let room = cell - text_and_gap;
+            return (text, Some(truncate_to_budget(runner.as_str(), room)));
+        }
+        let without_name = text_width(glyph) + 2 + floor_width;
+        if without_name < cell {
+            let kept = truncate_left_to_budget(name, cell - without_name);
+            return (format!("{glyph} {kept}"), Some(floor));
+        }
     }
-    if without_name >= cell {
-        return (text, None);
-    }
-    let kept = truncate_left_to_budget(name, cell - without_name);
-    (format!("{glyph} {kept}"), Some(floor))
+    (truncate_to_budget(&text, cell), None)
 }
 
 /// Joins the cells of one job row into one line. One space stands between cells.
 ///
-/// The text fills the repository cell, one space, and the workflow-name cell.
-/// The text cut is the one that [`fit`] makes, and the job name has priority.
-/// The runner name follows the text, after one space, in [`RUNNER_STYLE`]. It
-/// gets only the columns that the text leaves free (see [`fit_runner`]). A job
-/// with no runner, or with no room for it, shows no runner name, and its line
-/// reads as it did before the runner name existed. The job ID stands in the ID
+/// The text cell is the repository cell, one space, and the workflow-name
+/// cell. [`fit_job_text`] fills it with the text and the runner name. The
+/// runner name follows the text, after one space, in [`RUNNER_STYLE`], also
+/// its `…`. A job with no runner, or a cell with no room for the runner
+/// floor, shows no runner name, and its line reads as it did before the
+/// runner name existed. The job ID stands in the ID
 /// part of a run row, right-aligned. The branch and title columns stay blank.
 /// Thus the ID, started, time, and right marker cells stand in the same columns
 /// as those of a run row, at every frame width. The right marker repeats the
@@ -699,8 +690,8 @@ where
 ///
 /// The text cell holds the tree glyph (`└` when `last` is true, else `├`), a
 /// space, and the name of the job. The runner name of the job follows the text
-/// in cyan, when the text leaves room for it (see [`job_cells`]). The job ID
-/// follows, in the columns of the run ID.
+/// in cyan, when the cell has room for the runner floor (see [`fit_job_text`]).
+/// The job ID follows, in the columns of the run ID.
 ///
 /// The started cell of a job of a finished `run` shows when the job finished
 /// (`Job::completed_at`), and is empty when the job has no finish time. The
