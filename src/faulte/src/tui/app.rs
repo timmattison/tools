@@ -686,4 +686,21 @@ mod tests {
         app.on_key(press(KeyCode::Char('q')));
         assert!(app.should_quit());
     }
+
+    /// A new frame moves the live view, and does not move a selected past
+    /// frame.
+    #[test]
+    fn a_new_frame_does_not_move_a_past_frame() {
+        let (mut live, _) = five();
+        live.on_update(frame(10, vec![row(1, 1)]));
+        let newest = live.history().newest_frame();
+        assert_eq!(live.reading().map(Reading::end), newest);
+
+        let (mut past, ids) = five();
+        past.on_key(press(KeyCode::Left));
+        past.on_update(frame(10, vec![row(1, 1)]));
+        assert_eq!(past.selection(), Selection::Past(ids[3]));
+        assert_eq!(past.reading().map(Reading::end), Some(ids[3]));
+        assert_ne!(past.history().newest(), Some(ids[4]));
+    }
 }
