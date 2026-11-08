@@ -161,6 +161,33 @@ struct RowExtra {
     own: bool,
 }
 
+/// One cell of a row of the timeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cell {
+    /// Nothing to show: the process has no row in the cell.
+    Blank,
+    /// The cell holds gaps only.
+    Gap,
+    /// The cell holds a frame.
+    Bar {
+        /// The height of the bar, from 0 to 7.
+        level: u8,
+        /// Whether the cell holds a gap besides the frame.
+        holds_gap: bool,
+    },
+}
+
+/// The two rows of the timeline, and the cell of the selected entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Timeline {
+    /// The fault rate of the Mac, one cell for each slice of the history.
+    pub faults: Vec<Cell>,
+    /// The swap rate of the Mac, in the same slices.
+    pub swap: Vec<Cell>,
+    /// The cell of the selected entry.
+    pub marker: Option<usize>,
+}
+
 /// The numbers of the header that a reading states beside its ranking.
 #[derive(Debug)]
 struct HeaderFacts {
@@ -933,6 +960,16 @@ impl History {
         })
     }
 
+    /// Gives the timeline of `cells` cells, with the marker at `selected`.
+    #[must_use]
+    pub fn timeline(&self, _cells: usize, _selected: Option<EntryId>) -> Timeline {
+        Timeline {
+            faults: Vec::new(),
+            swap: Vec::new(),
+            marker: None,
+        }
+    }
+
     /// Gives the reading of the one frame `id`.
     #[must_use]
     pub fn frame(&self, _id: EntryId) -> Option<Reading> {
@@ -1140,5 +1177,30 @@ mod tests {
             .collect();
 
         assert_eq!(rows, vec![(1, 9, time(10)), (2, 7, time(12))]);
+    }
+
+    /// A spike stays visible when the history holds more frames than cells: a
+    /// cell shows the highest rate of its slice, not the mean.
+    #[test]
+    fn a_spike_stays_visible_with_more_frames_than_cells() {
+        let mut history = History::new();
+        for index in 0..100 {
+            let faults = if index == 37 { 1_000 } else { 2 };
+            history.add(frame(index * WINDOW_SECS, vec![row(1, faults)]));
+        }
+
+        let timeline = history.timeline(10, None);
+        let levels: Vec<Option<u8>> = timeline
+            .faults
+            .iter()
+            .map(|cell| match cell {
+                Cell::Bar { level, .. } => Some(*level),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(levels.len(), 10);
+        assert_eq!(levels.iter().filter(|level| **level == Some(7)).count(), 1);
+        assert_eq!(levels[3], Some(7));
     }
 }
