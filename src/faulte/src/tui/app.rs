@@ -812,4 +812,23 @@ mod tests {
         }
         assert_eq!((app.selected_row(), app.top_row()), (Some(5), 5));
     }
+
+    /// A move stops at each end. `Right` at the newest entry stays in the past
+    /// and does not return to the live view.
+    #[test]
+    fn a_move_stops_at_each_end() {
+        let (mut app, ids) = five();
+
+        app.on_key(press(KeyCode::Home));
+        app.on_key(press(KeyCode::Left));
+        app.on_key(press(KeyCode::Char('[')));
+        assert_eq!(app.selection(), Selection::Past(ids[0]));
+
+        for _ in 0..6 {
+            app.on_key(press(KeyCode::Right));
+        }
+        assert_eq!(app.selection(), Selection::Past(ids[4]));
+        app.on_key(press(KeyCode::Char(']')));
+        assert_eq!(app.selection(), Selection::Past(ids[4]));
+    }
 }
