@@ -86,6 +86,15 @@ impl App {
                     .and_then(|base| self.history.back_by(base, JUMP));
                 self.go_past(target);
             }
+            KeyCode::Char(']') => {
+                if let Selection::Past(id) = self.selection {
+                    let target = self
+                        .history
+                        .forward_by(id, JUMP)
+                        .or_else(|| self.history.newest());
+                    self.go_past(target);
+                }
+            }
             _ => {}
         }
     }
