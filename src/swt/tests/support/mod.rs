@@ -24,13 +24,13 @@
 //!   repository, and that has happened here before. A leaked
 //!   `GIT_OBJECT_DIRECTORY` sends the objects of a fixture into another store,
 //!   and a leaked `GIT_CONFIG_PARAMETERS` injects configuration into the child.
-//!   So [`sandboxed`] sheds the whole `GIT_` prefix through
-//!   [`childenv::fixture_command`]. It holds no list of names,
+//!   So each child starts from [`childenv::fixture_command`], which sheds the
+//!   whole `GIT_` prefix. It holds no list of names,
 //!   because a list misses every variable that git adds later. The host's
 //!   global and system gitconfig is a quieter version of the same problem: it
 //!   decides hooks paths, aliases and credential helpers for a suite that must
 //!   depend on its own fixture and nothing else. [`sandboxed`] points both at
-//!   an empty file. It applies both rules at the one place that [`git_command`],
+//!   an empty file. It applies the pins at the one place that [`git_command`],
 //!   [`swt_command`] and [`shell_command`] share. [`TestRepo::new`] also
 //!   refuses to build a fixture while the git location variables are set. The
 //!   tests that call the git functions of `swt` *in process* inherit the
@@ -122,8 +122,8 @@ pub fn unique(label: &str) -> String {
 /// host's git configuration while the harness reads as sandboxed. Two rules, in
 /// this order:
 ///
-/// - **Every inherited `GIT_` variable is removed**, through
-///   [`childenv::fixture_command`]. The rule is the prefix,
+/// - **Every inherited `GIT_` variable is already gone**, because each entrance
+///   builds its child with [`childenv::fixture_command`]. The rule is the prefix,
 ///   not a list of names. Git obeys `GIT_OBJECT_DIRECTORY` and
 ///   `GIT_CONFIG_PARAMETERS` as it obeys `GIT_DIR`, and a list misses every
 ///   variable that git adds later. The child then acts on its working

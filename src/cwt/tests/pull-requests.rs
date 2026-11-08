@@ -15,7 +15,7 @@ use std::process::Output;
 
 use tempfile::TempDir;
 
-use support::{add_worktree, git, make_repo, scrub_git_env, stdout};
+use support::{add_worktree, git, make_repo, pin_git_config, stdout};
 
 /// An owner that cannot exist on GitHub, so a mistake in a test can never reach
 /// a real repository.
@@ -221,7 +221,7 @@ fn run_cwt(dir: &Path, args: &[&str], env: &[(&str, &str)], path: &OsStr) -> Out
     for (key, value) in env {
         command.env(key, value);
     }
-    scrub_git_env(&mut command)
+    pin_git_config(&mut command)
         .output()
         .expect("failed to run cwt")
 }

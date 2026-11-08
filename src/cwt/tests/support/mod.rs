@@ -14,7 +14,8 @@ use std::process::{Command, Output};
 
 use tempfile::TempDir;
 
-/// Shed the inherited git environment, then pin what these fixtures need.
+/// Pin what these fixtures need. The command arrives swept from
+/// [`childenv::fixture_command`].
 ///
 /// In a worktree, git exports an absolute `GIT_DIR`, `GIT_WORK_TREE`,
 /// `GIT_INDEX_FILE` and `GIT_PREFIX` to the pre-commit hook. Those leak into
@@ -29,7 +30,7 @@ use tempfile::TempDir;
 /// (aliases, `init.defaultBranch`, hooks) cannot change what these tests
 /// observe. The identity is stated for the same reason: a fixture commit must
 /// behave the same under a commit as it does under a bare `cargo test`.
-pub fn scrub_git_env(cmd: &mut Command) -> &mut Command {
+pub fn pin_git_config(cmd: &mut Command) -> &mut Command {
     cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .env("GIT_AUTHOR_NAME", "cwt test")
@@ -42,7 +43,9 @@ pub fn scrub_git_env(cmd: &mut Command) -> &mut Command {
 pub fn git(dir: &Path, args: &[&str]) -> Output {
     let mut cmd = childenv::fixture_command("git");
     cmd.args(args).current_dir(dir);
-    let output = scrub_git_env(&mut cmd).output().expect("failed to run git");
+    let output = pin_git_config(&mut cmd)
+        .output()
+        .expect("failed to run git");
     assert!(
         output.status.success(),
         "git {args:?} in {} failed: {}",
@@ -69,7 +72,9 @@ pub fn cwt_with_env(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
     for (key, value) in env {
         cmd.env(key, value);
     }
-    scrub_git_env(&mut cmd).output().expect("failed to run cwt")
+    pin_git_config(&mut cmd)
+        .output()
+        .expect("failed to run cwt")
 }
 
 /// Standard output of a `cwt` run, as visible glyphs.
