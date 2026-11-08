@@ -218,6 +218,7 @@ mod tests {
     use crate::pid::{Pid, Uid};
     use crate::ranking::{ClaudeTotal, ClaudeView, RankedRow, Ranking, Skipped};
     use crate::render::Accounts;
+    use crate::state::SessionState;
     use crate::vm::{SwapUsage, VmDelta};
 
     /// The window of a test frame, in seconds.
@@ -415,5 +416,55 @@ mod tests {
 
         assert!(expected[0].contains("the last 1 m"), "{expected:?}");
         assert_eq!(lines[1..=expected.len()], expected[..]);
+    }
+
+    /// The ID of the session of every Claude Code test row.
+    const SESSION_ID: &str = "d3b0d921-f0a1-41fc-b309-c11aa30c1173";
+
+    /// Makes a row of a busy Claude Code session with the command `command`.
+    fn claude_row(pid: u32, faults: u64, command: &str) -> RankedRow {
+        RankedRow {
+            command: command.to_string(),
+            claude: ClaudeView::Session {
+                id: occ::SessionId::parse(SESSION_ID).expect("the test ID is a UUID"),
+                state: SessionState::Busy,
+                directory: Some("/work/project".into()),
+                status_changed_at: None,
+            },
+            ..row(pid, faults)
+        }
+    }
+
+    /// Gives the index of the first line that starts with `prefix`.
+    fn line_starting(lines: &[String], prefix: &str) -> usize {
+        lines
+            .iter()
+            .position(|line| line.starts_with(prefix))
+            .unwrap_or_else(|| panic!("no line starts with {prefix:?} in {lines:#?}"))
+    }
+
+    /// The table has the columns of `render::COLUMNS`, in that order.
+    #[test]
+    fn the_table_has_the_same_columns_in_the_same_order() {
+        let (mut app, _) = app_with(vec![frame(
+            0,
+            vec![claude_row(10, 50, "claude"), claude_row(11, 30, "claude")],
+        )]);
+
+        let lines = screen(&paint(&mut app, 160, 24, 3));
+
+        let header = line_starting(&lines, "PID");
+        let names: Vec<&str> = lines[header].split_whitespace().collect();
+        assert_eq!(names, crate::render::COLUMNS);
+        assert!(
+            lines[header + 1].starts_with("10 "),
+            "{:?}",
+            lines[header + 1]
+        );
+        assert!(
+            lines[header + 2].starts_with("11 "),
+            "{:?}",
+            lines[header + 2]
+        );
     }
 }
