@@ -6,15 +6,23 @@
 //! source, because a `ps` can run for seconds and the view must answer a key
 //! at once.
 
-use std::sync::mpsc::{sync_channel, Receiver};
+use std::collections::BTreeSet;
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use std::thread;
+use std::time::Duration;
 
 use crate::duration::Span;
-use crate::history::Update;
-use crate::machine::Machine;
+use crate::history::{SampledFrame, Update};
+use crate::machine::{join_sources, sample_window, Machine, MachineError, SampleFacts};
 use crate::pid::Pid;
+use crate::stream::{FaultStream, StreamEvent, TimedSample};
+use crate::vm::VmCounters;
 
 /// How many updates the channel holds before the sampler waits for the view.
 pub const UPDATE_BACKLOG: usize = 64;
+
+/// How long the sampler waits for an event before it looks at the stop flag.
+const POLL: Duration = Duration::from_millis(200);
 
 /// The thread that samples this Mac, and the channel of its updates.
 pub struct Sampler {
@@ -29,8 +37,14 @@ impl Sampler {
     /// samples. `own_pid` is the PID of `faulte`, which marks the rows of
     /// `faulte` and of its child processes.
     pub fn spawn<M: Machine + Send + 'static>(machine: M, interval: Span, own_pid: Pid) -> Self {
-        let _ = (machine, interval, own_pid);
-        let (_sender, updates) = sync_channel(UPDATE_BACKLOG);
+        let (sender, updates) = sync_channel(UPDATE_BACKLOG);
+        let run = Run {
+            machine,
+            interval,
+            own_pid,
+            sender,
+        };
+        thread::spawn(move || run.start());
         Self { updates }
     }
 
@@ -38,6 +52,81 @@ impl Sampler {
     #[must_use]
     pub fn updates(&self) -> &Receiver<Update> {
         &self.updates
+    }
+}
+
+/// The result of a read of the counters: the counters, or the text of the
+/// error.
+type CounterRead = Result<VmCounters, String>;
+
+/// What the sampler thread owns.
+struct Run<M> {
+    /// The machine that the thread reads.
+    machine: M,
+    /// The delay between two samples.
+    interval: Span,
+    /// The PID of `faulte`.
+    own_pid: Pid,
+    /// The channel to the view.
+    sender: SyncSender<Update>,
+}
+
+impl<M: Machine> Run<M> {
+    /// Runs the thread until the view drops the channel.
+    fn start(self) {
+        if let Ok(stream) = self.machine.fault_stream(self.interval) {
+            self.read(stream);
+        }
+    }
+
+    /// Reads one stream until the channel closes.
+    fn read(&self, mut stream: Box<dyn FaultStream>) {
+        let mut reads: [Option<CounterRead>; 2] = [None, None];
+        loop {
+            let Some(event) = stream.next_event(POLL) else {
+                continue;
+            };
+            if let StreamEvent::Header { finished, .. } = event {
+                let before = reads.clone();
+                reads = [reads[1].take(), Some(self.read_counters())];
+                if let (Some(sample), [Some(Ok(older)), Some(Ok(newer))]) = (finished, before) {
+                    if !self.send_frame(&sample, older, newer) {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Reads the counters of the virtual memory system.
+    fn read_counters(&self) -> CounterRead {
+        self.machine
+            .vm_counters()
+            .map_err(|error: MachineError| error.to_string())
+    }
+
+    /// Joins `sample` to the other sources and sends the frame. Gives `false`
+    /// when the view dropped the channel.
+    fn send_frame(&self, sample: &TimedSample, before: VmCounters, after: VmCounters) -> bool {
+        let facts = SampleFacts {
+            interval: self.interval,
+            window: sample_window(self.interval, sample.sample.elapsed, sample.wall),
+            faults: &sample.sample.rows,
+            before,
+            after,
+            swap_window: sample.wall,
+        };
+        match join_sources(&self.machine, &facts) {
+            Ok(observed) => self
+                .sender
+                .send(Update::Frame(Box::new(SampledFrame {
+                    observed,
+                    at: sample.ended_at,
+                    own: BTreeSet::new(),
+                })))
+                .is_ok(),
+            Err(_) => true,
+        }
     }
 }
 
