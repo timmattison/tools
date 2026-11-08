@@ -558,7 +558,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
-    use ratatui::style::Modifier;
+    use ratatui::style::{Color, Modifier};
     use ratatui::text::Span;
     use ratatui::Terminal;
 
@@ -724,7 +724,7 @@ mod tests {
 
         assert_eq!(
             lines[0],
-            "LIVE · frame of 22:13:20 (11s ago) · history holds 2s (1 frames, 1 gaps) · the last read failed: top stopped"
+            "LIVE · frame of 22:13:20 (11s ago) · history holds 2s (1 frame, 1 gap) · the last read failed: top stopped"
         );
     }
 
@@ -1084,6 +1084,111 @@ mod tests {
             lines
                 .iter()
                 .any(|line| line == "the history no longer holds this process"),
+            "{lines:#?}"
+        );
+    }
+
+    /// A count of one reads in the singular, the same as the header lines.
+    #[test]
+    fn the_banner_counts_one_frame_and_one_gap_in_the_singular() {
+        let (mut app, _) = app_with(vec![frame(0, vec![row(1, 5)]), gap(2, 2, "top stopped")]);
+
+        let lines = screen(&paint(&mut app, 120, 24, 11));
+
+        assert!(lines[0].contains("(1 frame, 1 gap)"), "{lines:#?}");
+    }
+
+    /// A person must never read an old table as live, so a past banner has a
+    /// background that a live banner does not have. The text says the same
+    /// thing, for a person who cannot see the color.
+    #[test]
+    fn a_past_banner_has_a_background_and_a_live_banner_has_none() {
+        let (mut app, _) = app_with(vec![
+            frame(0, vec![row(1, 5)]),
+            gap(2, 2, "top stopped"),
+            frame(4, vec![row(1, 5)]),
+        ]);
+
+        let live = paint(&mut app, 120, 24, 11);
+        assert_eq!(live[(0, 0)].bg, Color::Reset);
+
+        app.on_key(press(KeyCode::Left));
+        let gap = paint(&mut app, 120, 24, 11);
+        assert!(line_text(&gap, 0).starts_with("PAST · GAP"));
+        assert_eq!(gap[(0, 0)].bg, Color::Red);
+
+        app.on_key(press(KeyCode::Left));
+        let past = paint(&mut app, 120, 24, 11);
+        assert!(line_text(&past, 0).starts_with("PAST · NOT LIVE"));
+        assert_eq!(past[(0, 0)].bg, Color::Yellow);
+    }
+
+    /// A command line can be longer than the screen. The detail view wraps it
+    /// and keeps every character, and the page keys scroll it.
+    #[test]
+    fn the_detail_view_wraps_and_scrolls_a_long_command() {
+        let words: Vec<String> = (0..60).map(|word| format!("日本語-{word}")).collect();
+        let command = words.join(" ");
+        let (mut app, _) = app_with(vec![frame(
+            0,
+            vec![
+                row(10, 50),
+                RankedRow {
+                    command: command.clone(),
+                    ..row(11, 40)
+                },
+            ],
+        )]);
+        app.on_key(press(KeyCode::Down));
+        app.on_key(press(KeyCode::Down));
+        app.on_key(press(KeyCode::Enter));
+
+        let lines = screen(&paint(&mut app, 40, 40, 3));
+        let start = line_starting(&lines, "日本語-0 ");
+        let shown = lines[start..lines.len() - 2].join(" ");
+        for word in &words[..40] {
+            assert!(
+                shown.contains(word.as_str()),
+                "{word} is missing: {lines:#?}"
+            );
+        }
+
+        app.on_key(press(KeyCode::PageDown));
+        let scrolled = screen(&paint(&mut app, 40, 40, 3));
+        assert!(
+            !scrolled[start].starts_with("日本語-0 "),
+            "the page key scrolls the command: {scrolled:#?}"
+        );
+    }
+
+    /// A process states its own arguments, so a command line can hold a tab or
+    /// an escape. The row stays aligned, and no such character reaches the
+    /// screen.
+    #[test]
+    fn a_control_character_in_a_command_does_not_move_the_next_column() {
+        let commands = ["claude \t tab", "claude \u{1b}[31m esc", "claude plain"];
+        let rows = commands
+            .iter()
+            .zip(10..)
+            .map(|(command, pid)| claude_row(pid, 50, command))
+            .collect();
+        let (mut app, _) = app_with(vec![frame(0, rows)]);
+
+        let buffer = paint(&mut app, 100, 24, 3);
+        let lines = screen(&buffer);
+
+        let header = line_starting(&lines, "PID");
+        let columns: Vec<Option<usize>> = lines[header + 1..header + 4]
+            .iter()
+            .map(|line| screen_column(line, "busy"))
+            .collect();
+        assert!(columns[0].is_some(), "{lines:#?}");
+        assert!(
+            columns.iter().all(|column| *column == columns[0]),
+            "{columns:?} {lines:#?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains(char::is_control)),
             "{lines:#?}"
         );
     }
