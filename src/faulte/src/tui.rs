@@ -213,6 +213,8 @@ mod tests {
         calls: usize,
         /// The call at which the flag is set, and the flag.
         raise: Option<(usize, Arc<AtomicBool>)>,
+        /// The call at which an update is sent, and the update.
+        deliver: Option<(usize, Sender<Update>, Update)>,
     }
 
     impl ScriptedEvents {
@@ -222,6 +224,7 @@ mod tests {
                 script: events.into(),
                 calls: 0,
                 raise: None,
+                deliver: None,
             }
         }
     }
@@ -232,6 +235,15 @@ mod tests {
             if let Some((call, flag)) = &self.raise {
                 if *call == self.calls {
                     flag.store(true, Ordering::SeqCst);
+                }
+            }
+            if self
+                .deliver
+                .as_ref()
+                .is_some_and(|(call, ..)| *call == self.calls)
+            {
+                if let Some((_, sender, update)) = self.deliver.take() {
+                    sender.send(update).expect("the channel is open");
                 }
             }
             self.script
@@ -386,5 +398,103 @@ mod tests {
             screen.contains("(1s ago)"),
             "the age stays at the first draw:\n{screen}"
         );
+    }
+
+    #[test]
+    fn a_pass_after_one_second_draws_again_with_no_change() {
+        let mut harness = Harness::new();
+        harness
+            .sender
+            .send(frame(COMMAND))
+            .expect("the channel is open");
+        let mut events = ScriptedEvents::new(vec![None, Some(key(KeyCode::Char('q')))]);
+
+        let result = harness.run(&mut events, &clock_of(&[1_000, 2_100]));
+
+        assert!(result.is_ok(), "{result:?}");
+        let screen = harness.screen();
+        assert!(
+            screen.contains("(2s ago)"),
+            "the age moved with the clock:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn a_resize_makes_the_next_pass_draw() {
+        let mut harness = Harness::new();
+        harness
+            .sender
+            .send(frame(COMMAND))
+            .expect("the channel is open");
+        let mut events = ScriptedEvents::new(vec![
+            Some(Event::Resize(WIDTH, HEIGHT)),
+            Some(key(KeyCode::Char('q'))),
+        ]);
+
+        let result = harness.run(&mut events, &clock_of(&[1_900, 2_100]));
+
+        assert!(result.is_ok(), "{result:?}");
+        assert!(
+            harness.screen().contains("(2s ago)"),
+            "{}",
+            harness.screen()
+        );
+    }
+
+    #[test]
+    fn a_key_makes_the_next_pass_draw() {
+        let mut harness = Harness::new();
+        harness
+            .sender
+            .send(frame(COMMAND))
+            .expect("the channel is open");
+        let mut events = ScriptedEvents::new(vec![
+            Some(key(KeyCode::Char('w'))),
+            Some(key(KeyCode::Char('q'))),
+        ]);
+
+        let result = harness.run(&mut events, &clock_of(&[1_900, 2_100]));
+
+        assert!(result.is_ok(), "{result:?}");
+        assert!(
+            harness.screen().contains("(2s ago)"),
+            "{}",
+            harness.screen()
+        );
+    }
+
+    #[test]
+    fn an_update_that_arrives_later_makes_the_next_pass_draw() {
+        let mut harness = Harness::new();
+        let mut events = ScriptedEvents::new(vec![None, Some(key(KeyCode::Char('q')))]);
+        events.deliver = Some((1, harness.sender.clone(), frame(COMMAND)));
+
+        let result = harness.run(&mut events, &clock_of(&[1_000, 1_100]));
+
+        assert!(result.is_ok(), "{result:?}");
+        assert!(
+            harness.screen().contains(COMMAND),
+            "the late frame is on the screen:\n{}",
+            harness.screen()
+        );
+    }
+
+    #[test]
+    fn a_closed_channel_does_not_end_the_view() {
+        let mut harness = Harness::new();
+        harness
+            .sender
+            .send(frame(COMMAND))
+            .expect("the channel is open");
+        let (sender, updates) = channel();
+        drop(sender);
+        harness.updates = updates;
+        harness.sender = channel().0;
+        let mut events = ScriptedEvents::new(vec![None, None, Some(key(KeyCode::Char('q')))]);
+
+        let result = harness.run(&mut events, &clock_of(&[1_000]));
+
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(events.calls, 3, "the loop kept reading keys until q");
     }
 }
