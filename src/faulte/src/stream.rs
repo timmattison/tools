@@ -7,8 +7,16 @@
 //! A sample ends when the `Processes:` line of the next sample arrives. A timer
 //! on an idle pipe would end it sooner, but it would also cut a sample that
 //! `top` is slow to write.
+//!
+//! [`TopStream`] adds the child process and the clock. A reader thread of its
+//! own stamps each read of the pipe, because the thread that uses the events
+//! can spend seconds in another command, and a stamp that it made late would
+//! make a false window.
 
-use std::time::Duration;
+use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant, SystemTime};
 
 use chrono::NaiveDateTime;
 
@@ -279,6 +287,121 @@ fn elapsed_between(
         .to_std()
         .ok()
         .filter(|elapsed| !elapsed.is_zero())
+}
+
+/// A sample with the times that its window began and ended.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimedSample {
+    /// The faults of each process over the window.
+    pub sample: TopSample,
+    /// The time between the arrival of the header before this sample's and of
+    /// this sample's. It is the window that the faults were made over.
+    pub wall: Duration,
+    /// When the header of this sample arrived: the end of its window.
+    pub ended_at: SystemTime,
+}
+
+/// What a [`FaultStream`] tells the caller.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StreamEvent {
+    /// The header of a sample arrived at `at`. `finished` is the sample before
+    /// it, when that sample is complete and usable.
+    Header {
+        /// When the reader thread read the header.
+        at: SystemTime,
+        /// The sample that this header ended.
+        finished: Option<TimedSample>,
+    },
+    /// Output that is not a sample. `reason` is the text of a
+    /// `MachineError::TopOutput`.
+    Refused {
+        /// When the reader thread read the output.
+        at: SystemTime,
+        /// Why the parser refused the output.
+        reason: String,
+    },
+    /// The source ended. No event follows this one.
+    Ended {
+        /// When the reader thread saw the end.
+        at: SystemTime,
+        /// The text of a `MachineError::CommandFailed` with the exit status and
+        /// the first line of the error output.
+        reason: String,
+    },
+}
+
+/// A source of [`StreamEvent`] values.
+pub trait FaultStream: Send {
+    /// Waits up to `wait`. `None` means that no event arrived in that time.
+    fn next_event(&mut self, wait: Duration) -> Option<StreamEvent>;
+
+    /// Gives the handle that stops the source of this stream from another
+    /// thread.
+    fn stopper(&self) -> Stopper;
+}
+
+/// A handle that stops the source of a stream from any thread.
+#[derive(Clone)]
+pub struct Stopper(Arc<dyn Fn() + Send + Sync>);
+
+impl Stopper {
+    /// Makes a handle that runs `stop`. `stop` must be safe to run twice.
+    pub fn new(stop: impl Fn() + Send + Sync + 'static) -> Self {
+        Self(Arc::new(stop))
+    }
+
+    /// Stops the source. A second call does nothing.
+    pub fn stop(&self) {
+        (self.0)();
+    }
+}
+
+/// The child process of a [`TopStream`].
+#[derive(Debug)]
+struct TopChild {
+    /// The child, until something takes it to stop it or to read its status.
+    child: Mutex<Option<std::process::Child>>,
+}
+
+/// An endless run of a sampler, as a stream of events.
+#[derive(Debug)]
+pub struct TopStream {
+    /// The events that the reader thread sent.
+    events: Receiver<StreamEvent>,
+    /// The child process.
+    child: Arc<TopChild>,
+    /// The reader thread.
+    reader: Option<JoinHandle<()>>,
+}
+
+impl TopStream {
+    /// Starts `program` with `arguments` and reads its output.
+    ///
+    /// # Errors
+    ///
+    /// Gives `MachineError::CommandDidNotStart` when the program does not
+    /// start.
+    pub fn spawn(program: &str, arguments: &[String]) -> Result<Self, MachineError> {
+        let _ = (program, arguments);
+        let (_sender, events) = mpsc::channel();
+        Ok(Self {
+            events,
+            child: Arc::new(TopChild {
+                child: Mutex::new(None),
+            }),
+            reader: None,
+        })
+    }
+}
+
+impl FaultStream for TopStream {
+    fn next_event(&mut self, wait: Duration) -> Option<StreamEvent> {
+        self.events.recv_timeout(wait).ok()
+    }
+
+    fn stopper(&self) -> Stopper {
+        Stopper::new(|| {})
+    }
 }
 
 #[cfg(test)]
@@ -739,5 +862,97 @@ mod tests {
             .collect();
 
         assert_eq!(events, events_of(REAL_CAPTURE));
+    }
+
+    /// The longest that a test waits for the child. The wait ends as soon as
+    /// the condition is true, so the bound only matters on a loaded machine.
+    const BOUND: Duration = Duration::from_secs(60);
+
+    /// The time between two checks while a test waits for an event.
+    const POLL: Duration = Duration::from_millis(100);
+
+    /// The pause after an answer of no event.
+    const PAUSE: Duration = Duration::from_millis(10);
+
+    /// The text that makes a stub live for at most 60 seconds. Every stub
+    /// carries it, so a stub cannot outlive a test run that was killed.
+    const STUB_LIFETIME: &str = "i=0; while [ $i -lt 600 ]; do i=$((i+1)); sleep 0.1; done";
+
+    /// Gives the arguments of `/bin/sh` that run `script`.
+    fn shell(script: &str) -> Vec<String> {
+        vec!["-c".to_owned(), script.to_owned()]
+    }
+
+    /// Starts a stub that runs `before`, prints `text`, and then lives on until
+    /// its time limit.
+    fn stub_printing(before: &str, text: &str) -> TopStream {
+        let script = format!("{before} printf '%s' '{text}'; {STUB_LIFETIME}");
+        TopStream::spawn("/bin/sh", &shell(&script)).expect("the shell starts")
+    }
+
+    /// Reads events until `done` is true for the events so far. Fails the test
+    /// when the bound passes first.
+    fn events_until(
+        stream: &mut TopStream,
+        done: impl Fn(&[StreamEvent]) -> bool,
+    ) -> Vec<StreamEvent> {
+        let deadline = Instant::now() + BOUND;
+        let mut events = Vec::new();
+        while !done(&events) {
+            assert!(
+                Instant::now() < deadline,
+                "no such events in time: {events:?}"
+            );
+            match stream.next_event(POLL) {
+                Some(event) => events.push(event),
+                // A stream that is closed answers at once, so the pause keeps
+                // the wait from spinning.
+                None => std::thread::sleep(PAUSE),
+            }
+        }
+        events
+    }
+
+    /// Tells whether `events` hold at least `count` headers.
+    fn headers_at_least(count: usize) -> impl Fn(&[StreamEvent]) -> bool {
+        move |events| {
+            events
+                .iter()
+                .filter(|event| matches!(event, StreamEvent::Header { .. }))
+                .count()
+                >= count
+        }
+    }
+
+    /// Gives the headers among `events`, as the sample that each one finished.
+    fn finished_of(events: &[StreamEvent]) -> Vec<Option<TimedSample>> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::Header { finished, .. } => Some(finished.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Three samples from a child give three headers in order. The first
+    /// sample holds the counter since each process started, so the first two
+    /// headers finish nothing. The third header finishes the second sample.
+    #[test]
+    fn a_child_that_prints_three_samples_gives_three_headers_in_order() {
+        let mut stream = stub_printing("", &three_samples());
+
+        let events = events_until(&mut stream, headers_at_least(3));
+
+        let finished = finished_of(&events);
+        assert_eq!(finished.len(), 3);
+        assert_eq!(finished.first(), Some(&None));
+        assert_eq!(finished.get(1), Some(&None));
+        let second = finished
+            .get(2)
+            .cloned()
+            .flatten()
+            .expect("a finished sample");
+        assert_eq!(second.sample.rows, vec![row(10, 3), row(20, 4000)]);
     }
 }
