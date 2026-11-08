@@ -48,6 +48,12 @@ const CHURN_NAME: &str = "MEMORY CHURN";
 /// The name of [`Verdict::OtherSystemTime`].
 const OTHER_NAME: &str = "OTHER SYSTEM TIME";
 
+/// The text before the verdict on the first line of a report.
+const REPORT_PREFIX: &str = "faulte check: ";
+
+/// The width of the verdict column of a watch: the longest name.
+const NAME_WIDTH: usize = OTHER_NAME.len();
+
 /// What a person reads after [`Verdict::Healthy`].
 const HEALTHY_ADVICE: &str = "The system time and the compressor are below their limits.";
 
@@ -102,8 +108,34 @@ impl Reading {
     /// lower value means that the Mac started again, and it gives no rate.
     /// An interval of no time gives zeros, not a division by zero.
     #[must_use]
-    pub fn between(_before: CheckCounters, _after: CheckCounters, _elapsed: Duration) -> Self {
-        Self::default()
+    pub fn between(before: CheckCounters, after: CheckCounters, elapsed: Duration) -> Self {
+        let user = f64::from(after.user_ticks.wrapping_sub(before.user_ticks));
+        let nice = f64::from(after.nice_ticks.wrapping_sub(before.nice_ticks));
+        let system = f64::from(after.system_ticks.wrapping_sub(before.system_ticks));
+        let idle = f64::from(after.idle_ticks.wrapping_sub(before.idle_ticks));
+        let total = user + nice + system + idle;
+        let percent = |ticks: f64| {
+            if total > 0.0 {
+                ticks / total * 100.0
+            } else {
+                0.0
+            }
+        };
+        let seconds = elapsed.as_secs_f64();
+        let rate = |first: u64, last: u64| {
+            if seconds > 0.0 {
+                last.saturating_sub(first) as f64 / seconds
+            } else {
+                0.0
+            }
+        };
+        Self {
+            user_percent: percent(user + nice),
+            system_percent: percent(system),
+            idle_percent: percent(idle),
+            compressions_per_second: rate(before.compressions, after.compressions),
+            decompressions_per_second: rate(before.decompressions, after.decompressions),
+        }
     }
 }
 
@@ -151,8 +183,17 @@ impl Verdict {
 /// A value at a limit counts as over that limit. High compressor rates with a
 /// low system time are healthy, because the CPU is not in the kernel.
 #[must_use]
-pub fn judge(_reading: &Reading) -> Verdict {
-    Verdict::Healthy
+pub fn judge(reading: &Reading) -> Verdict {
+    if reading.system_percent < SYSTEM_PERCENT_LIMIT {
+        return Verdict::Healthy;
+    }
+    if reading.compressions_per_second >= CHURN_LIMIT_PER_SECOND
+        && reading.decompressions_per_second >= CHURN_LIMIT_PER_SECOND
+    {
+        Verdict::MemoryChurn
+    } else {
+        Verdict::OtherSystemTime
+    }
 }
 
 /// One finished check.
@@ -214,32 +255,58 @@ impl<S: CheckSource> Sampler<S> {
     /// # Errors
     ///
     /// Gives an error when the kernel refuses the read.
-    pub fn sample(&mut self, _interval: Duration) -> Result<Check, MachineError> {
+    pub fn sample(&mut self, interval: Duration) -> Result<Check, MachineError> {
+        self.source.sleep(interval);
+        let after = self.source.counters()?;
+        let at = self.source.now();
+        let elapsed = at.saturating_duration_since(self.previous_at);
+        let reading = Reading::between(self.previous, after, elapsed);
+        self.previous = after;
+        self.previous_at = at;
         Ok(Check {
-            reading: Reading::default(),
-            verdict: Verdict::Healthy,
-            elapsed: Duration::ZERO,
+            reading,
+            verdict: judge(&reading),
+            elapsed,
         })
     }
 }
 
 /// Gives the lines that a person reads after one check.
+///
+/// The first line is the verdict, thus a script can read one line.
 #[must_use]
-pub fn report(_check: &Check) -> Vec<String> {
-    Vec::new()
+pub fn report(check: &Check) -> Vec<String> {
+    let reading = &check.reading;
+    vec![
+        format!("{REPORT_PREFIX}{}", check.verdict.name()),
+        format!("window: {:.1} s", check.elapsed.as_secs_f64()),
+        format!(
+            "CPU: {:.0}% system (limit {SYSTEM_PERCENT_LIMIT:.0}%), {:.0}% user, {:.0}% idle",
+            reading.system_percent, reading.user_percent, reading.idle_percent,
+        ),
+        format!(
+            "compressor: {} compressions/s, {} decompressions/s (limit {}/s each)",
+            render::rate(reading.compressions_per_second),
+            render::rate(reading.decompressions_per_second),
+            render::rate(CHURN_LIMIT_PER_SECOND),
+        ),
+        check.verdict.advice().to_owned(),
+    ]
 }
 
 /// Gives the one line of a run with `--watch`. `clock` is the time of the line.
 #[must_use]
-pub fn watch_line(_check: &Check, _clock: &str) -> String {
-    String::new()
-}
-
-/// A text that a test can ask [`render`] for, so that a build with no test
-/// also uses the import.
-#[must_use]
-pub fn limit_text() -> String {
-    render::rate(CHURN_LIMIT_PER_SECOND)
+pub fn watch_line(check: &Check, clock: &str) -> String {
+    let reading = &check.reading;
+    format!(
+        "{clock}  {:<NAME_WIDTH$}  system {:>3.0}%  user {:>3.0}%  idle {:>3.0}%  compress {}/s  decompress {}/s",
+        check.verdict.name(),
+        reading.system_percent,
+        reading.user_percent,
+        reading.idle_percent,
+        render::rate(reading.compressions_per_second),
+        render::rate(reading.decompressions_per_second),
+    )
 }
 
 #[cfg(test)]

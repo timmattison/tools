@@ -4987,11 +4987,27 @@ On 2026-09-17 and 2026-09-18, this Mac spent 78% of its time in the kernel. 34 M
 
 213 Claude Code processes made 90% of all page faults in that sample. No single one of them was the cause: the median session made 23,000 faults in the 20 seconds, and the `node` and `vitest` processes of a running pre-commit hook made 0.4% together. The answer was the sum of 213 small rates, and no row of a table says a sum. That is why `faulte` prints one total line for the Claude Code sessions, above the table. 86 of the 213 sessions were older than 7 days, and that is why `faulte kill` exists.
 
+### Is this the problem now?
+
+`faulte check` gives one verdict in 5 seconds. It reads the CPU counters and the compressor counters of the kernel and runs no command, thus it works when one `ps` takes 13 seconds.
+
+| Verdict | Meaning | Exit code |
+| --- | --- | --- |
+| `OK` | System time is below 30% of all CPU time. | 0 |
+| `MEMORY CHURN` | System time is at least 30%, and the compressor compresses and decompresses at least 50,000 pages each second. | 1 |
+| `OTHER SYSTEM TIME` | System time is at least 30%, and the compressor is not the cause. | 1 |
+
+An error gives the exit code 2. `faulte check --watch` prints one line for each interval until you stop it.
+
+On 2026-11-08, over 12 samples of 5 seconds, system time followed the rate of compressions (correlation 0.88). It did not follow the load average (0.32), and it moved opposite to the rate of new processes (-0.80). The limits come from the bad samples of that day and the mean over 10.9 days. No sample of a quiet period set them.
+
 ### Basic Usage
 
 ```bash
 faulte
 faulte --interval 20s --limit 40
+faulte check
+faulte check --watch --interval 10s
 faulte kill
 faulte kill --older-than 3d --idle-for 1h --max 5
 ```

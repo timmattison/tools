@@ -35,6 +35,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use occ::{classify, gather_processes, Role, SessionRecord, SessionRegistry};
 
+use crate::check::{CheckCounters, CheckSource};
 use crate::duration::Span;
 use crate::machine::{Machine, MachineError, Signal};
 use crate::pid::{Pid, Uid};
@@ -56,6 +57,9 @@ const SWAP_USAGE: &str = "vm.swapusage";
 
 /// The call that gives the counters of the virtual memory system.
 const VM_STATISTICS: &str = "host_statistics64(HOST_VM_INFO64)";
+
+/// The call that gives the CPU ticks of all cores.
+const CPU_STATISTICS: &str = "host_statistics(HOST_CPU_LOAD_INFO)";
 
 /// The size of a page of memory that `faulte` takes when `sysconf` gives none.
 ///
@@ -344,6 +348,63 @@ fn read_vm_statistics() -> Result<libc::vm_statistics64, MachineError> {
     // SAFETY: the call answered with success, and every field that it did not
     // write holds the zero that this function wrote first.
     Ok(unsafe { statistics.assume_init() })
+}
+
+/// Reads the CPU ticks of all cores of this Mac.
+fn read_cpu_load() -> Result<libc::host_cpu_load_info, MachineError> {
+    let mut count = libc::HOST_CPU_LOAD_INFO_COUNT;
+    // A structure of zeros is a valid value of its one array of counters.
+    let mut load = MaybeUninit::<libc::host_cpu_load_info>::zeroed();
+    #[expect(
+        deprecated,
+        reason = "libc asks for the mach2 crate, which this workspace does not take. The call is the one entrance to the CPU ticks of this host"
+    )]
+    // SAFETY: `mach_host_self` gives the port of this host, which is the port
+    // that `host_statistics` takes. The pointer names one whole structure of
+    // this function, and `count` states its size in the units that the call
+    // reads. The call writes no more than that.
+    let answer = unsafe {
+        libc::host_statistics(
+            libc::mach_host_self(),
+            libc::HOST_CPU_LOAD_INFO,
+            load.as_mut_ptr().cast::<libc::integer_t>(),
+            &mut count,
+        )
+    };
+    if answer != libc::KERN_SUCCESS {
+        return Err(MachineError::KernelRead {
+            call: CPU_STATISTICS.to_owned(),
+            reason: format!("the call ended with {answer}"),
+        });
+    }
+    // SAFETY: the call answered with success, and every field that it did not
+    // write holds the zero that this function wrote first.
+    Ok(unsafe { load.assume_init() })
+}
+
+impl CheckSource for Mac {
+    fn counters(&self) -> Result<CheckCounters, MachineError> {
+        let statistics = read_vm_statistics()?;
+        // The kernel orders the array as `CPU_STATE_USER`, `CPU_STATE_SYSTEM`,
+        // `CPU_STATE_IDLE`, and `CPU_STATE_NICE`.
+        let [user_ticks, system_ticks, idle_ticks, nice_ticks] = read_cpu_load()?.cpu_ticks;
+        Ok(CheckCounters {
+            user_ticks,
+            nice_ticks,
+            system_ticks,
+            idle_ticks,
+            compressions: statistics.compressions,
+            decompressions: statistics.decompressions,
+        })
+    }
+
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
+    fn sleep(&self, span: Duration) {
+        thread::sleep(span);
+    }
 }
 
 /// Reads the value of the `sysctl` `name`.

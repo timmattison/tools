@@ -5,6 +5,8 @@ use std::process::ExitCode;
 
 use buildinfo::version_string;
 use clap::{Parser, Subcommand};
+#[cfg(target_os = "macos")]
+use faulte::check::{self, Sampler};
 use faulte::duration::Span;
 #[cfg(target_os = "macos")]
 use faulte::machine::{macos::Mac, observe, MachineError};
@@ -67,6 +69,14 @@ const EXIT_ERROR: u8 = 2;
 /// not do the work that the command line asked for, so it is not a success.
 #[cfg(target_os = "macos")]
 const EXIT_NOT_A_TERMINAL: u8 = 1;
+
+/// The exit code when `faulte check` finds a problem.
+#[cfg(target_os = "macos")]
+const EXIT_PROBLEM: u8 = 1;
+
+/// The format of the time at the start of each line of a watch.
+#[cfg(target_os = "macos")]
+const CLOCK_FORMAT: &str = "%H:%M:%S";
 
 /// The name that each message on the error output starts with.
 #[cfg(target_os = "macos")]
@@ -169,6 +179,15 @@ enum Command {
         #[arg(long, value_name = COUNT_VALUE)]
         max: Option<usize>,
     },
+
+    /// Say if memory churn slows this Mac now. The exit code is 0 for no
+    /// problem and 1 for a problem. It reads kernel counters and runs no
+    /// command.
+    Check {
+        /// Print one line for each interval, until you stop the run.
+        #[arg(long)]
+        watch: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -197,6 +216,56 @@ fn run(cli: Cli) -> ExitCode {
                 max,
             },
         ),
+        Some(Command::Check { watch }) => check_now(interval, watch),
+    }
+}
+
+/// Gives one verdict on this Mac, or one line for each interval with `watch`.
+///
+/// The exit code is 0 for no problem, 1 for a problem, and 2 when the kernel
+/// refuses a read.
+#[cfg(target_os = "macos")]
+fn check_now(interval: Span, watch: bool) -> ExitCode {
+    let interval = Duration::from(interval);
+    let mut sampler = match Sampler::start(Mac::new()) {
+        Ok(sampler) => sampler,
+        Err(error) => return failed(&error),
+    };
+    if watch {
+        return check_watch(&mut sampler, interval);
+    }
+    match sampler.sample(interval) {
+        Ok(result) => {
+            for line in check::report(&result) {
+                println!("{line}");
+            }
+            if result.verdict.is_problem() {
+                ExitCode::from(EXIT_PROBLEM)
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        Err(error) => failed(&error),
+    }
+}
+
+/// Prints one line for each interval.
+///
+/// The watch ends with the exit code 0 when nothing reads its output. A
+/// `println!` panics at that point, thus this function writes the lines
+/// itself.
+#[cfg(target_os = "macos")]
+fn check_watch(sampler: &mut Sampler<Mac>, interval: Duration) -> ExitCode {
+    let mut output = io::stdout().lock();
+    loop {
+        let result = match sampler.sample(interval) {
+            Ok(result) => result,
+            Err(error) => return failed(&error),
+        };
+        let clock = chrono::Local::now().format(CLOCK_FORMAT).to_string();
+        if writeln!(output, "{}", check::watch_line(&result, &clock)).is_err() {
+            return ExitCode::SUCCESS;
+        }
     }
 }
 
