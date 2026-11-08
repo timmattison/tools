@@ -188,6 +188,35 @@ pub struct Timeline {
     pub marker: Option<usize>,
 }
 
+/// The history of one process, as a row of cells.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Series {
+    /// The name of the process.
+    pub key: ProcessKey,
+    /// The account.
+    pub uid: Uid,
+    /// The newest command, as the history stored it.
+    pub command: String,
+    /// Whether the process is `faulte` or its child.
+    pub own: bool,
+    /// The id of the session, when the process is one.
+    pub session: Option<String>,
+    /// The directory of the session.
+    pub directory: Option<String>,
+    /// The fault rate of the process in the slices of the timeline.
+    pub cells: Vec<Cell>,
+    /// The cell of the selected entry.
+    pub marker: Option<usize>,
+    /// The highest fault rate of the process over the whole history.
+    pub peak_rate: f64,
+    /// The time of the oldest frame in which the process made faults.
+    pub first_at: Option<SystemTime>,
+    /// The time of the newest frame in which the process made faults.
+    pub last_at: Option<SystemTime>,
+    /// The count of frames in which the process made faults.
+    pub frames_with_faults: usize,
+}
+
 /// The numbers of the header that a reading states beside its ranking.
 #[derive(Debug)]
 struct HeaderFacts {
@@ -1079,6 +1108,18 @@ impl History {
         }
     }
 
+    /// Gives the series of the process `key` in `cells` cells, with the marker
+    /// at `selected`, or `None` for a process that the history does not hold.
+    #[must_use]
+    pub fn series(
+        &self,
+        _key: ProcessKey,
+        _cells: usize,
+        _selected: Option<EntryId>,
+    ) -> Option<Series> {
+        None
+    }
+
     /// Gives the cell of the selected entry in a timeline of `cells` cells.
     fn marker_cell(&self, cells: usize, selected: Option<EntryId>) -> Option<usize> {
         let position = self.position(selected?)?;
@@ -1685,5 +1726,62 @@ mod tests {
 
         assert!(timeline.faults.is_empty() && timeline.swap.is_empty());
         assert_eq!(timeline.marker, None);
+    }
+
+    /// The series of one process: blank cells before it started, a level
+    /// against its own peak, and the full command.
+    #[test]
+    fn a_series_is_blank_before_the_process_started() {
+        let command = format!("/bin/long {}", "x".repeat(5_000));
+        let mut late = row(9, 10);
+        late.command = command.clone();
+        let mut history = History::new();
+        let mut ids = Vec::new();
+        for index in 0..6_u64 {
+            let mut rows = vec![row(1, 2)];
+            match index {
+                3 => rows.push(late.clone()),
+                4 => rows.push(RankedRow {
+                    faults: 30,
+                    ..late.clone()
+                }),
+                _ => {}
+            }
+            ids.push(history.add(frame(index * WINDOW_SECS, rows)));
+        }
+        let key = ProcessKey {
+            pid: Pid::new(9),
+            started_at_epoch_secs: Some(1_700_000_000),
+        };
+
+        let series = history
+            .series(key, 6, Some(ids[4]))
+            .expect("the process is known");
+
+        assert_eq!(
+            series.cells,
+            vec![
+                Cell::Blank,
+                Cell::Blank,
+                Cell::Blank,
+                bar(2, false),
+                bar(7, false),
+                Cell::Blank,
+            ]
+        );
+        assert_eq!(series.marker, Some(4));
+        assert!((series.peak_rate - 15.0).abs() < f64::EPSILON);
+        assert_eq!(series.command, command);
+        assert_eq!(series.uid, ACCOUNT);
+        assert_eq!(series.frames_with_faults, 2);
+        assert_eq!(series.first_at, Some(time(6)));
+        assert_eq!(series.last_at, Some(time(8)));
+        assert!(!series.own);
+        assert_eq!(series.session, None);
+        let unknown = ProcessKey {
+            pid: Pid::new(77),
+            ..key
+        };
+        assert!(history.series(unknown, 6, None).is_none());
     }
 }
