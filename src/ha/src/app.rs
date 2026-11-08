@@ -575,6 +575,7 @@ mod tests {
     /// call of `finished`, in order.
     struct RecordingCanceller {
         cancels: RefCell<Vec<(RepoName, RunId)>>,
+        reruns: RefCell<Vec<(RepoName, RunId, Action)>>,
         outcomes: RefCell<VecDeque<ActionOutcome>>,
     }
 
@@ -582,7 +583,11 @@ mod tests {
         fn start(&self, repo: &RepoName, run: RunId, action: &Action) {
             match action {
                 Action::Cancel { .. } => self.cancels.borrow_mut().push((repo.clone(), run)),
-                Action::RerunWorkflow | Action::RerunJob { .. } => {}
+                Action::RerunWorkflow | Action::RerunJob { .. } => {
+                    self.reruns
+                        .borrow_mut()
+                        .push((repo.clone(), run, action.clone()));
+                }
             }
         }
 
@@ -594,6 +599,7 @@ mod tests {
     fn canceller() -> RecordingCanceller {
         RecordingCanceller {
             cancels: RefCell::new(Vec::new()),
+            reruns: RefCell::new(Vec::new()),
             outcomes: RefCell::new(VecDeque::new()),
         }
     }
@@ -3335,5 +3341,64 @@ mod tests {
             vec![press(KeyCode::Char('c')), press(KeyCode::Char('y'))],
         );
         assert!(canceller.cancels.borrow().is_empty());
+    }
+
+    /// The title that the box of a workflow re-run shows.
+    const RERUN_WORKFLOW_BOX_TITLE: &str = " Re-run workflow? ";
+
+    /// The key `R` as a terminal delivers it: the capital letter, with Shift.
+    fn shift_r() -> Event {
+        key_event(
+            KeyCode::Char('R'),
+            KeyModifiers::SHIFT,
+            KeyEventKind::Press,
+        )
+    }
+
+    fn shows_title(frame: &[String], title: &str) -> bool {
+        frame.iter().any(|line| line.contains(title))
+    }
+
+    #[test]
+    fn capital_r_and_then_y_re_run_the_highlighted_run_and_show_re_running() {
+        let channels = channels();
+        send_runs(&channels, vec![finished_run(1, 100, 60)]);
+        let canceller = canceller();
+        let (frame, _) = run_steps_cancelling(
+            &channels,
+            &canceller,
+            vec![
+                Step::Idle,
+                key(KeyCode::Char('R')),
+                Step::Idle,
+                key(KeyCode::Char('y')),
+                Step::Idle,
+                key(KeyCode::Char('q')),
+            ],
+        );
+        assert_eq!(
+            *canceller.reruns.borrow(),
+            vec![(repo(), RunId(1), Action::RerunWorkflow)],
+            "{frame:?}"
+        );
+        assert!(canceller.cancels.borrow().is_empty());
+        assert!(frame[11].contains("re-running run 1…"), "{:?}", frame[11]);
+    }
+
+    #[test]
+    fn capital_r_on_a_finished_run_shows_the_box_of_a_workflow_re_run() {
+        let channels = channels();
+        send_runs(&channels, vec![finished_run(1, 100, 60)]);
+        let (_, frame) = run_app_with(
+            Status::default(),
+            &opener(false),
+            &canceller(),
+            &channels,
+            vec![press(KeyCode::Char('R'))],
+        );
+        assert!(
+            shows_title(&frame, RERUN_WORKFLOW_BOX_TITLE),
+            "{frame:?}"
+        );
     }
 }
