@@ -236,8 +236,13 @@ fn check_now(interval: Span, watch: bool) -> ExitCode {
     }
     match sampler.sample(interval) {
         Ok(result) => {
+            // A `println!` panics when the reader left, thus this function
+            // writes the lines itself. The verdict still decides the exit code.
+            let mut output = io::stdout().lock();
             for line in check::report(&result) {
-                println!("{line}");
+                if writeln!(output, "{line}").is_err() {
+                    break;
+                }
             }
             if result.verdict.is_problem() {
                 ExitCode::from(EXIT_PROBLEM)
