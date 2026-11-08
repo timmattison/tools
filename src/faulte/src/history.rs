@@ -1320,4 +1320,27 @@ mod tests {
         assert_eq!(levels.iter().filter(|level| **level == Some(7)).count(), 1);
         assert_eq!(levels[3], Some(7));
     }
+
+    /// A frame reading holds the rows with a fault, counts the others, and
+    /// states the full count of processes in its header.
+    #[test]
+    fn a_frame_reading_keeps_only_rows_with_faults() {
+        let mut rows = vec![row(30, 5), row(10, 2)];
+        rows.extend((100..108).map(|pid| row(pid, 0)));
+        let mut history = History::new();
+        let id = history.add(frame(10, rows));
+        let gap_id = history.add(gap(12, 2));
+
+        let reading = history.frame(id).expect("the frame is there");
+        let pids: Vec<u32> = reading.rows().map(|view| view.row.pid.get()).collect();
+
+        assert_eq!(pids, vec![30, 10]);
+        assert_eq!(reading.other_rows(), 8);
+        assert_eq!(reading.end(), id);
+        assert_eq!(reading.at(), time(10));
+        assert_eq!(reading.ranking().total_faults, 7);
+        assert!(reading.header_lines()[0].starts_with("10 processes over"));
+        assert!(history.frame(gap_id).is_none());
+        assert!(history.span(gap_id, SpanWidth::OneFrame).is_none());
+    }
 }
