@@ -689,4 +689,55 @@ mod tests {
             ]
         );
     }
+
+    /// The output of `top -l 3 -s 3 -c d -n 16000 -stats pid,faults` on this
+    /// Mac on 2026-11-08, byte for byte. It holds three samples, and the third
+    /// one is cut short, as the end of a stream is.
+    const REAL_CAPTURE: &str = include_str!("../tests/fixtures/top-l3-cd.txt");
+
+    /// The real capture finishes one sample, the second. Its header line says
+    /// `Processes: 1287 total`, and the sample holds 1,287 rows. The clock
+    /// lines are 3 s apart. The sum of the faults is the sum of the lines that
+    /// follow the second `PID` line, up to the third `Processes:` line. A scan
+    /// of every line that starts with a digit counts one line too many, because
+    /// the clock line of the third sample starts with a digit.
+    #[test]
+    fn the_real_capture_gives_its_second_sample() {
+        let events = events_of(REAL_CAPTURE);
+
+        let [first, second, third] = events.as_slice() else {
+            panic!("three headers expected, got {events:?}");
+        };
+        assert_eq!(first, &header_only());
+        assert_eq!(second, &header_only());
+        let ParsedEvent::Header {
+            finished: Some(sample),
+        } = third
+        else {
+            panic!("the third header finishes the second sample: {third:?}");
+        };
+        assert_eq!(sample.rows.len(), 1_287);
+        assert_eq!(sample.rows.first(), Some(&row(7_013, 15_069)));
+        assert_eq!(sample.rows.last(), Some(&row(210, 0)));
+        assert_eq!(
+            sample.rows.iter().map(|count| count.faults).sum::<u64>(),
+            432_130,
+            "the sum of the second sample, not the counts since start of the first"
+        );
+        assert_eq!(sample.elapsed, Some(Duration::from_secs(3)));
+    }
+
+    /// The real capture in reads of 4,096 bytes, as a pipe gives it, gives the
+    /// same events as the capture in one read.
+    #[test]
+    fn the_real_capture_in_pipe_sized_reads_gives_the_same_events() {
+        let mut parser = StreamParser::new();
+        let events: Vec<ParsedEvent> = REAL_CAPTURE
+            .as_bytes()
+            .chunks(4_096)
+            .flat_map(|chunk| parser.feed(chunk))
+            .collect();
+
+        assert_eq!(events, events_of(REAL_CAPTURE));
+    }
 }
