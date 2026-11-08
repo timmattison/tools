@@ -331,6 +331,89 @@ struct Newest {
     state: CompactState,
 }
 
+/// The highest level of a bar.
+const MAX_LEVEL: u8 = 7;
+
+/// The count of levels of a bar. A rate that equals the peak is the top level.
+const LEVELS: f64 = 8.0;
+
+/// What one entry says to a row of cells.
+#[derive(Debug, Clone, Copy)]
+enum Sample {
+    /// The entry is a gap.
+    Gap,
+    /// The entry is a frame. `None` means that the row has no value in it.
+    Frame(Option<f64>),
+}
+
+/// Gives `count` per second over `window`, or 0 for a window of no time.
+fn per_second(count: u64, window: Duration) -> f64 {
+    if window.is_zero() {
+        return 0.0;
+    }
+    count as f64 / window.as_secs_f64()
+}
+
+/// Gives the highest rate of `samples`, or 0 when there is none.
+fn peak_of(samples: &[Sample]) -> f64 {
+    samples
+        .iter()
+        .filter_map(|sample| match sample {
+            Sample::Frame(Some(rate)) => Some(*rate),
+            _ => None,
+        })
+        .fold(0.0, f64::max)
+}
+
+/// Gives `floor(rate / peak * 8)` clamped to the top level. A peak of 0 gives
+/// level 0.
+fn level_of(rate: f64, peak: f64) -> u8 {
+    if peak <= 0.0 {
+        return 0;
+    }
+    let reached = (1..=MAX_LEVEL)
+        .take_while(|step| rate * LEVELS >= f64::from(*step) * peak)
+        .count();
+    u8::try_from(reached).unwrap_or(MAX_LEVEL)
+}
+
+/// Squeezes `samples` into `min(cells, samples.len())` cells.
+///
+/// A slice with a value shows the highest of them, and `holds_gap` when the
+/// slice also holds a gap. A slice with frames and no value is blank. A slice
+/// with gaps only is a gap.
+fn cells_of(samples: &[Sample], cells: usize, peak: f64) -> Vec<Cell> {
+    let total = samples.len();
+    let used = cells.min(total);
+    (0..used)
+        .map(|index| {
+            let slice = &samples[index * total / used..(index + 1) * total / used];
+            let mut best: Option<f64> = None;
+            let mut holds_gap = false;
+            let mut holds_frame = false;
+            for sample in slice {
+                match sample {
+                    Sample::Gap => holds_gap = true,
+                    Sample::Frame(rate) => {
+                        holds_frame = true;
+                        if let Some(rate) = rate {
+                            best = Some(best.map_or(*rate, |best| best.max(*rate)));
+                        }
+                    }
+                }
+            }
+            match best {
+                Some(rate) => Cell::Bar {
+                    level: level_of(rate, peak),
+                    holds_gap,
+                },
+                None if holds_frame => Cell::Blank,
+                None => Cell::Gap,
+            }
+        })
+        .collect()
+}
+
 /// What a compact row says about Claude Code.
 ///
 /// The text and the session of a row live in its identity record, because
@@ -961,13 +1044,47 @@ impl History {
     }
 
     /// Gives the timeline of `cells` cells, with the marker at `selected`.
+    ///
+    /// `E` entries map onto `n = min(cells, E)` cells. Cell `i` holds the
+    /// entries from `floor(i * E / n)` up to, and not including,
+    /// `floor((i + 1) * E / n)`. A cell with a frame shows the highest rate of
+    /// its slice, so a spike survives the squeeze.
     #[must_use]
-    pub fn timeline(&self, _cells: usize, _selected: Option<EntryId>) -> Timeline {
+    pub fn timeline(&self, cells: usize, selected: Option<EntryId>) -> Timeline {
+        let fault_rates: Vec<Sample> = self
+            .entries
+            .iter()
+            .map(|entry| match entry {
+                Entry::Frame(frame) => {
+                    Sample::Frame(Some(per_second(frame.total_faults, frame.window)))
+                }
+                Entry::Gap(_) => Sample::Gap,
+            })
+            .collect();
+        let swap_rates: Vec<Sample> = self
+            .entries
+            .iter()
+            .map(|entry| match entry {
+                Entry::Frame(frame) => Sample::Frame(Some(per_second(
+                    frame.swap.swapins.saturating_add(frame.swap.swapouts),
+                    frame.swap_window,
+                ))),
+                Entry::Gap(_) => Sample::Gap,
+            })
+            .collect();
         Timeline {
-            faults: Vec::new(),
-            swap: Vec::new(),
-            marker: None,
+            faults: cells_of(&fault_rates, cells, peak_of(&fault_rates)),
+            swap: cells_of(&swap_rates, cells, peak_of(&swap_rates)),
+            marker: self.marker_cell(cells, selected),
         }
+    }
+
+    /// Gives the cell of the selected entry in a timeline of `cells` cells.
+    fn marker_cell(&self, cells: usize, selected: Option<EntryId>) -> Option<usize> {
+        let position = self.position(selected?)?;
+        let entries = self.entries.len();
+        let used = cells.min(entries);
+        Some(((position + 1) * used).div_ceil(entries) - 1)
     }
 
     /// Gives the reading of the one frame `id`.
