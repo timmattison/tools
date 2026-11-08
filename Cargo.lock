@@ -2899,6 +2899,7 @@ name = "gitnuke"
 version = "0.1.0"
 dependencies = [
  "buildinfo",
+ "childenv",
  "clap",
  "colored",
  "gitscratch",
