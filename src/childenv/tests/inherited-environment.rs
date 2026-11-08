@@ -1,4 +1,4 @@
-//! What [`childenv::shed_inherited_git_environment`] takes off a command, and
+//! What [`childenv::fixture_command`] takes off a command, and
 //! why the rule has to be the `GIT_` prefix rather than a list of names.
 //!
 //! Git hands every hook a family of `GIT_*` variables describing the commit
