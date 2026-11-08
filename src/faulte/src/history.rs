@@ -1122,4 +1122,23 @@ mod tests {
         assert!((ranking.faults_per_second(ranking.rows[0].faults) - 10.0).abs() < f64::EPSILON);
         assert!(reading.header_lines()[0].contains("(2 frames, 1 gap)"));
     }
+
+    /// A process that exited keeps its row in a span, with the faults that it
+    /// made and the time of the frame that last saw it.
+    #[test]
+    fn an_exited_process_keeps_its_row_in_a_span() {
+        let mut history = History::new();
+        history.add(frame(10, vec![row(1, 9), row(2, 3)]));
+        let end = history.add(frame(12, vec![row(2, 4)]));
+
+        let reading = history
+            .span(end, SpanWidth::Whole)
+            .expect("the span has frames");
+        let rows: Vec<(u32, u64, SystemTime)> = reading
+            .rows()
+            .map(|view| (view.row.pid.get(), view.row.faults, view.as_of))
+            .collect();
+
+        assert_eq!(rows, vec![(1, 9, time(10)), (2, 7, time(12))]);
+    }
 }
