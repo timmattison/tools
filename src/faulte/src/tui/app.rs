@@ -53,6 +53,10 @@ pub struct App {
     span: SpanWidth,
     /// The selected row, if any.
     row: Option<RowSelection>,
+    /// Whether the detail view of the selected row is open.
+    detail_open: bool,
+    /// How many lines the detail text is scrolled.
+    detail_scroll: u16,
     /// The reading that the table shows.
     reading: Option<Reading>,
 }
@@ -66,6 +70,8 @@ impl App {
             selection: Selection::Live,
             span: SpanWidth::OneFrame,
             row: None,
+            detail_open: false,
+            detail_scroll: 0,
             reading: None,
         };
         app.refresh();
@@ -164,7 +170,20 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => self.move_row(Way::Back, 1),
             KeyCode::Down | KeyCode::Char('j') => self.move_row(Way::Forward, 1),
             KeyCode::Home => self.go_past(self.history.oldest()),
-            KeyCode::End | KeyCode::Esc => self.go_live(),
+            KeyCode::End => self.go_live(),
+            KeyCode::Esc => {
+                if self.detail_open {
+                    self.detail_open = false;
+                } else {
+                    self.go_live();
+                }
+            }
+            KeyCode::Enter => {
+                if self.selected_row().is_some() {
+                    self.detail_open = true;
+                    self.detail_scroll = 0;
+                }
+            }
             _ => {}
         }
     }
@@ -234,7 +253,7 @@ impl App {
     /// Tells whether the detail view of the selected row is open.
     #[must_use]
     pub fn detail_open(&self) -> bool {
-        false
+        self.detail_open
     }
 
     /// Gives the key of the selected row.
