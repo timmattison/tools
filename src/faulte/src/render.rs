@@ -541,7 +541,7 @@ pub fn rows(
         ]);
     }
     let drawn = table.to_string();
-    match more_line(ranking, &rows[shown.len()..]) {
+    match hidden_line(ranking, &rows[shown.len()..]) {
         Some(line) => format!("{drawn}\n{line}"),
         None => drawn,
     }
@@ -554,13 +554,24 @@ pub fn rows(
 /// that the limit hid. One mark for both, so a reader learns it once.
 pub const MORE: char = '…';
 
+/// Gives the line that counts `hidden` rows which made `faults` together, or
+/// nothing when `hidden` is 0.
+///
+/// A view that keeps the rows in its own store calls this function with the
+/// count and the sum, and not with the rows.
+#[must_use]
+pub fn more_line(ranking: &Ranking, hidden: usize, faults: u64) -> Option<String> {
+    let _ = (ranking, hidden, faults);
+    None
+}
+
 /// Gives the line that counts the rows which the limit hid, or nothing when it
 /// hid no row.
 ///
 /// The limit hides the small rates, and on 2026-09-18 the sum of the small
 /// rates was the load. A reader must see what the limit took away, so the line
 /// gives the share of all faults that those rows made.
-fn more_line(ranking: &Ranking, hidden: &[RankedRow]) -> Option<String> {
+fn hidden_line(ranking: &Ranking, hidden: &[RankedRow]) -> Option<String> {
     if hidden.is_empty() {
         return None;
     }
@@ -1142,6 +1153,26 @@ mod tests {
         assert_eq!(
             header(&one).first().map(String::as_str),
             Some("1 process over a 4.0 s window (interval 5s) — 5 faults, 1.2/s")
+        );
+    }
+
+    /// `more_line` counts what its arguments state, and `rows` keeps its text.
+    #[test]
+    fn more_line_counts_the_count_and_the_sum_that_it_is_given() {
+        let ranking = ranking(vec![row(10, 60), row(20, 30), row(30, 10)], 100);
+
+        assert_eq!(more_line(&ranking, 0, 0), None);
+        assert_eq!(
+            more_line(&ranking, 1, 10).as_deref(),
+            Some("… 1 more process made 10.0% of all faults")
+        );
+        assert_eq!(
+            more_line(&ranking, 2, 40).as_deref(),
+            Some("… 2 more processes made 40.0% of all faults")
+        );
+        assert_eq!(
+            hidden_line(&ranking, &ranking.rows[1..]),
+            more_line(&ranking, 2, 40)
         );
     }
 
