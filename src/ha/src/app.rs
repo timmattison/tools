@@ -398,7 +398,7 @@ where
                 self.ask(Request::Cancel);
                 Flow::Continue
             }
-            KeyCode::Char('R') => {
+            KeyCode::Char('R') if !control => {
                 self.ask(Request::Rerun);
                 Flow::Continue
             }
