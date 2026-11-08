@@ -6,6 +6,7 @@ description = "The hardened scratch-worktree harness for dry-running git operati
 
 [dependencies]
 anyhow.workspace = true
+childenv.workspace = true
 colored.workspace = true
 # The pseudo-terminal of the tests, in `testing::pty`, and nothing else. A test
 # of a tool that lays text out for a terminal opens a terminal of a size it

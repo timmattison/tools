@@ -1,4 +1,4 @@
-//! What [`gitscratch::shed_inherited_git_environment`] takes off a command, and
+//! What [`childenv::shed_inherited_git_environment`] takes off a command, and
 //! why the rule has to be the `GIT_` prefix rather than a list of names.
 //!
 //! Git hands every hook a family of `GIT_*` variables describing the commit
@@ -87,7 +87,7 @@ fn sheds_every_inherited_git_variable_and_nothing_else() {
     }
 
     let mut command = Command::new("git");
-    gitscratch::shed_inherited_git_environment(&mut command);
+    childenv::shed_inherited_git_environment(&mut command);
 
     // `env_remove` records a removal as a `None` value against the key, so the
     // scheduled removals can be read back without spawning anything.

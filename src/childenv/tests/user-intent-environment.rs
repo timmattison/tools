@@ -1,4 +1,4 @@
-//! What [`gitscratch::shed_inherited_git_environment_keeping_user_intent`]
+//! What [`childenv::shed_inherited_git_environment_keeping_user_intent`]
 //! takes off a production command, what it deliberately leaves on, and what the
 //! fixture rule beside it takes off a command that keeps nothing.
 //!
@@ -27,7 +27,7 @@
 //! repository a tool writes into by mistake.
 //!
 //! Every test here feeds synthetic keys to
-//! [`gitscratch::shed_git_environment_from`] and never touches the process
+//! [`childenv::shed_git_environment_from`] and never touches the process
 //! environment. Cargo runs the tests of one binary on parallel threads, so a
 //! test that set a real `GIT_*` variable would redirect the git children of
 //! every sibling thread while it did so. That is why this file may hold more
@@ -37,7 +37,7 @@
 use std::ffi::OsStr;
 use std::process::Command;
 
-use gitscratch::{
+use childenv::{
     shed_git_environment_from, InheritedGitEnvironment, HOOK_EXPORTED_GIT_ENVIRONMENT,
     USER_INTENT_GIT_ENVIRONMENT,
 };

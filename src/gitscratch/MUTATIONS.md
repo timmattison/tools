@@ -69,7 +69,7 @@ not have to re-derive which guard belongs to which test.
 | `uncommitted_files_refuses_a_repository_with_no_working_tree` (`tests/repo.rs`) | The failure `Repo::uncommitted_files` answers with where git has no working tree to read | `src/repo.rs`, `Repo::uncommitted_files` — take the status with `unwrap_or_default()` in place of `?` | narrow |
 | `every_identity_variable_is_settled_on_the_command_the_runner_builds` | The two `env_remove` calls that take `GIT_AUTHOR_DATE` and `GIT_COMMITTER_DATE` off every command, which is the half of the restated identity a commit cannot show | `src/git.rs`, `Git::command` — drop both calls | remove |
 | `refuses_an_empty_hooks_path_rather_than_resolving_a_hook_outside_the_repository` | The refusal of an empty `hooks_path`, which git resolves at the root of the file system rather than at nothing | `src/git.rs`, `Git::new` — drop the `assert!` | remove |
-| `sheds_every_inherited_git_variable_and_nothing_else` (`tests/inherited-environment.rs`) | The `GIT_` prefix, which is the whole of what the scrub covers beyond a list of names | `src/git.rs`, `NoInheritedGitEnvironment for Command` — narrow the prefix test over `std::env::vars_os` back to a fifteen-name list | narrow |
+| `sheds_every_inherited_git_variable_and_nothing_else` (`src/childenv/tests/inherited-environment.rs`) | The `GIT_` prefix, which is the whole of what the scrub covers beyond a list of names | `src/childenv/src/lib.rs`, `NoInheritedGitEnvironment for Command` — narrow the prefix test over `std::env::vars_os` back to a fifteen-name list | narrow |
 | `each_halt_diff_holds_the_markers_of_its_own_region` (`tests/diffs.rs`) | The capture above `git add -A` in the rebase loop, which reads a stop before the replay stages its markers | `src/scratch.rs`, `Scratch::replay_rebase_within` — move the capture block below `git.run("add", &["-A"])` | move |
 | Nothing — see the record below | `--diff-filter=U` in `DIFF_AT_HALT`, which keeps a halt diff to the files the counter reads | `src/diffs.rs`, `DIFF_AT_HALT` — drop the entry | remove |
 | `a_replay_that_does_not_halt_captures_no_halt_diff` (`tests/diffs.rs`) | The merge capture below the early return for a merge git completed, which keeps a clean merge free of halt diffs | `src/scratch.rs`, `Scratch::replay_merge_capturing` — move the capture block above `if outcome.success` | move |
@@ -1912,7 +1912,7 @@ and the six identity names. Run as above.
 
 ```text
 thread 'sheds_every_inherited_git_variable_and_nothing_else'
-panicked at src/gitscratch/tests/inherited-environment.rs:
+panicked at src/childenv/tests/inherited-environment.rs:
 `GIT_CONFIG_PARAMETERS` survived the scrub: every git this crate spawns would
 run under configuration the launching shell injected, `user.email`, `core.bare`
 and `core.hooksPath` among it
@@ -1921,7 +1921,7 @@ test result: FAILED. 0 passed; 1 failed
 ```
 
 Exactly one test in the three crates goes red, and it is in
-`tests/inherited-environment.rs`. Every test of `tests/isolation.rs` stays
+`src/childenv/tests/inherited-environment.rs`. Every test of `tests/isolation.rs` stays
 green:
 
 ```text
@@ -1938,7 +1938,7 @@ That answer is a fact about what each suite leaks rather than a surprise.
 `GIT_INDEX_FILE`, and a name list removes every one of them. The
 `GIT_AUTHOR_NAME` it also sets goes on the control command *after* the scrub, so
 no scrub of any width takes that one either. So the hook now cites
-`tests/inherited-environment.rs` for the prefix: that file probes
+`src/childenv/tests/inherited-environment.rs` for the prefix: that file probes
 `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT` and a name git has never invented,
 and it keeps a `MUST_SURVIVE` list so the rule stays a prefix rather than a
 sweep of everything. `tests/isolation.rs` keeps the separate claim it does pin —
@@ -2000,7 +2000,7 @@ tests/conflicts.rs              test result: ok. 7 passed; 0 failed
 tests/diffs.rs                  test result: ok. 6 passed; 0 failed
 tests/halts.rs                  test result: ok. 8 passed; 0 failed
 tests/hook_environment.rs       test result: ok. 1 passed; 0 failed
-tests/inherited-environment.rs  test result: ok. 1 passed; 0 failed
+src/childenv/tests/inherited-environment.rs  test result: ok. 1 passed; 0 failed
 tests/isolation.rs              test result: ok. 3 passed; 0 failed
 tests/merges.rs                 test result: ok. 7 passed; 0 failed
 tests/repo.rs                   test result: ok. 20 passed; 0 failed
@@ -2249,7 +2249,7 @@ tests/conflicts.rs              test result: ok. 7 passed; 0 failed
 tests/diffs.rs                  test result: ok. 12 passed; 0 failed
 tests/halts.rs                  test result: ok. 8 passed; 0 failed
 tests/hook_environment.rs       test result: ok. 1 passed; 0 failed
-tests/inherited-environment.rs  test result: ok. 1 passed; 0 failed
+src/childenv/tests/inherited-environment.rs  test result: ok. 1 passed; 0 failed
 tests/isolation.rs              test result: ok. 3 passed; 0 failed
 tests/merges.rs                 test result: ok. 7 passed; 0 failed
 tests/repo.rs                   test result: ok. 20 passed; 0 failed
@@ -2378,7 +2378,7 @@ code moves. Every place below is load-bearing for the whole table:
   other way.
 - **The `GIT_` prefix in `NoInheritedGitEnvironment`** — the rule the whole
   scrub is, and the only part of it a list cannot imitate.
-  `tests/inherited-environment.rs` is the suite that pins it, and its probes are
+  `src/childenv/tests/inherited-environment.rs` is the suite that pins it, and its probes are
   a sample of the family rather than its definition; `tests/isolation.rs` leaks
   only names a list removes too, so it says nothing about the width of the rule.
 - **`Git::new`'s refusal of an empty hooks path** — an empty `core.hooksPath`
