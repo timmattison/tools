@@ -2058,6 +2058,42 @@ mod tests {
         )
     }
 
+    /// Runs the steps like `run_steps_cancelling`, but the script ends
+    /// while the loop still runs. It returns the last frame, so a test can
+    /// read a box that is still open.
+    fn run_steps_cancelling_open(
+        channels: &Channels,
+        canceller: &RecordingCanceller,
+        steps: Vec<Step>,
+    ) -> (Vec<String>, Vec<Command>) {
+        let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
+        let tz = FixedOffset::east_opt(0).unwrap();
+        let time = std::cell::Cell::new(now());
+        let clock = || time.get();
+        let opener = opener(false);
+        let mut app = App::new(
+            Board::new(Duration::from_hours(8)),
+            Status::default(),
+            &opener,
+            canceller,
+            &channels.worker,
+            &clock,
+            &tz,
+            None,
+        );
+        let mut events = StepEvents {
+            steps: steps.into(),
+            updates: channels.updates.clone(),
+            clock: &time,
+        };
+        let result = app.run(&mut terminal, &mut events);
+        assert_eq!(result.unwrap_err().to_string(), "script ended");
+        (
+            lines(terminal.backend().buffer()),
+            channels.commands.try_iter().collect::<Vec<_>>(),
+        )
+    }
+
     fn key(code: KeyCode) -> Step {
         Step::Key(press(code))
     }
@@ -3403,6 +3439,76 @@ mod tests {
         assert!(
             shows_title(&frame, RERUN_WORKFLOW_BOX_TITLE),
             "{frame:?}"
+        );
+    }
+
+    /// The title that the box of a job re-run shows.
+    const RERUN_JOB_BOX_TITLE: &str = " Re-run job? ";
+
+    /// The steps that expand run 1 and highlight its job: `jobs` arrive for
+    /// run 1, then the highlight moves down one row.
+    fn steps_to_job_row(jobs: Vec<crate::job::Job>) -> Vec<Step> {
+        vec![
+            key(KeyCode::Right),
+            Step::Send(Update::Jobs {
+                run: RunId(1),
+                jobs,
+            }),
+            Step::Idle,
+            key(KeyCode::Down),
+        ]
+    }
+
+    /// A job of a run that finished.
+    fn passed_job(id: u64, name: &str) -> crate::job::Job {
+        crate::job::Job {
+            state: RunState::Passed,
+            ..job(id, name)
+        }
+    }
+
+    #[test]
+    fn capital_r_on_a_job_row_of_a_finished_run_shows_the_box_of_a_job_re_run() {
+        let channels = channels();
+        send_runs(&channels, vec![finished_run(1, 100, 60)]);
+        let mut steps = steps_to_job_row(vec![passed_job(10, "build")]);
+        steps.push(key(KeyCode::Char('R')));
+        steps.push(Step::Idle);
+        let canceller = canceller();
+        let (frame, _) = run_steps_cancelling_open(&channels, &canceller, steps);
+        assert!(shows_title(&frame, RERUN_JOB_BOX_TITLE), "{frame:?}");
+        assert!(frame.iter().any(|l| l.contains("job: build")), "{frame:?}");
+    }
+
+    #[test]
+    fn capital_r_and_y_on_a_job_row_re_run_the_job_and_show_re_running_it() {
+        let channels = channels();
+        send_runs(&channels, vec![finished_run(1, 100, 60)]);
+        let mut steps = steps_to_job_row(vec![passed_job(10, "build")]);
+        steps.extend([
+            key(KeyCode::Char('R')),
+            key(KeyCode::Char('y')),
+            Step::Idle,
+            key(KeyCode::Char('q')),
+        ]);
+        let canceller = canceller();
+        let (frame, _) = run_steps_cancelling(&channels, &canceller, steps);
+        assert_eq!(
+            *canceller.reruns.borrow(),
+            vec![(
+                repo(),
+                RunId(1),
+                Action::RerunJob {
+                    id: crate::job::JobId(10),
+                    name: "build".to_owned()
+                }
+            )],
+            "{frame:?}"
+        );
+        assert!(
+            frame[11].contains("re-running job build of run 1…"),
+            "{:?}",
+            frame[11]
         );
     }
 }
