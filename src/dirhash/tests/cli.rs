@@ -51,7 +51,7 @@ impl Fixture {
     /// by `directory`, and require that it exits well.
     ///
     /// This is the one spawn in the file, so no test can reach the binary
-    /// without the scrub below. The child gets a scrubbed environment: a stray
+    /// without the scrub. The child gets a scrubbed environment: a stray
     /// `GIT_*` variable or the real global gitignore changes which files the
     /// walker sees, and a test that reads the machine it runs on is a test that
     /// passes for a reason nobody wrote down.
