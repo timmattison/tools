@@ -9,10 +9,10 @@
 use std::collections::BTreeSet;
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use crate::duration::Span;
-use crate::history::{SampledFrame, Update};
+use crate::history::{Gap, SampledFrame, Update};
 use crate::machine::{join_sources, sample_window, Machine, MachineError, SampleFacts};
 use crate::pid::Pid;
 use crate::stream::{FaultStream, StreamEvent, TimedSample};
@@ -71,16 +71,25 @@ struct Run<M> {
     sender: SyncSender<Update>,
 }
 
+/// What the sampler knows about the time that it covered.
+#[derive(Debug, Default)]
+struct Ledger {
+    /// The end of the last time that a frame or a gap covered. `None` before
+    /// the first one.
+    covered_until: Option<SystemTime>,
+}
+
 impl<M: Machine> Run<M> {
     /// Runs the thread until the view drops the channel.
     fn start(self) {
+        let mut ledger = Ledger::default();
         if let Ok(stream) = self.machine.fault_stream(self.interval) {
-            self.read(stream);
+            self.read(stream, &mut ledger);
         }
     }
 
     /// Reads one stream until the channel closes.
-    fn read(&self, mut stream: Box<dyn FaultStream>) {
+    fn read(&self, mut stream: Box<dyn FaultStream>, ledger: &mut Ledger) {
         let mut reads: [Option<CounterRead>; 2] = [None, None];
         loop {
             let Some(event) = stream.next_event(POLL) else {
@@ -89,8 +98,8 @@ impl<M: Machine> Run<M> {
             if let StreamEvent::Header { finished, .. } = event {
                 let before = reads.clone();
                 reads = [reads[1].take(), Some(self.read_counters())];
-                if let (Some(sample), [Some(Ok(older)), Some(Ok(newer))]) = (finished, before) {
-                    if !self.send_frame(&sample, older, newer) {
+                if let (Some(sample), [Some(older), Some(newer)]) = (finished, before) {
+                    if !self.send_sample(&sample, older, newer, ledger) {
                         return;
                     }
                 }
@@ -105,28 +114,53 @@ impl<M: Machine> Run<M> {
             .map_err(|error: MachineError| error.to_string())
     }
 
-    /// Joins `sample` to the other sources and sends the frame. Gives `false`
-    /// when the view dropped the channel.
-    fn send_frame(&self, sample: &TimedSample, before: VmCounters, after: VmCounters) -> bool {
-        let facts = SampleFacts {
-            interval: self.interval,
-            window: sample_window(self.interval, sample.sample.elapsed, sample.wall),
-            faults: &sample.sample.rows,
-            before,
-            after,
-            swap_window: sample.wall,
-        };
-        match join_sources(&self.machine, &facts) {
-            Ok(observed) => self
-                .sender
-                .send(Update::Frame(Box::new(SampledFrame {
-                    observed,
-                    at: sample.ended_at,
-                    own: BTreeSet::new(),
-                })))
-                .is_ok(),
-            Err(_) => true,
+    /// Makes the frame of `sample`, or a gap with the reason that it failed.
+    /// Gives `false` when the view dropped the channel.
+    fn send_sample(
+        &self,
+        sample: &TimedSample,
+        older: CounterRead,
+        newer: CounterRead,
+        ledger: &mut Ledger,
+    ) -> bool {
+        let outcome = older.and_then(|before| {
+            newer.and_then(|after| {
+                let facts = SampleFacts {
+                    interval: self.interval,
+                    window: sample_window(self.interval, sample.sample.elapsed, sample.wall),
+                    faults: &sample.sample.rows,
+                    before,
+                    after,
+                    swap_window: sample.wall,
+                };
+                join_sources(&self.machine, &facts).map_err(|error| error.to_string())
+            })
+        });
+        match outcome {
+            Ok(observed) => {
+                ledger.covered_until = Some(sample.ended_at);
+                self.sender
+                    .send(Update::Frame(Box::new(SampledFrame {
+                        observed,
+                        at: sample.ended_at,
+                        own: BTreeSet::new(),
+                    })))
+                    .is_ok()
+            }
+            Err(reason) => self.send_gap(ledger, sample.ended_at, reason),
         }
+    }
+
+    /// Sends a gap that ends at `at`. Gives `false` when the view dropped the
+    /// channel.
+    fn send_gap(&self, ledger: &mut Ledger, at: SystemTime, reason: String) -> bool {
+        let lost = ledger.covered_until.map_or(Duration::ZERO, |covered| {
+            at.duration_since(covered).unwrap_or(Duration::ZERO)
+        });
+        ledger.covered_until = Some(at);
+        self.sender
+            .send(Update::Gap(Gap { at, lost, reason }))
+            .is_ok()
     }
 }
 
