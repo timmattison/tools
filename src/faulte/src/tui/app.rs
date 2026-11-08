@@ -96,8 +96,15 @@ impl App {
                 }
             }
             KeyCode::Home => self.go_past(self.history.oldest()),
+            KeyCode::End => self.go_live(),
             _ => {}
         }
+    }
+
+    /// Selects the live view.
+    fn go_live(&mut self) {
+        self.selection = Selection::Live;
+        self.refresh();
     }
 
     /// Selects the past entry `target`. `None` means that the move found no
