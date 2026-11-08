@@ -173,6 +173,7 @@ mod tests {
     use std::time::Duration;
 
     use chrono::FixedOffset;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
     use ratatui::text::Span;
@@ -334,6 +335,26 @@ mod tests {
         assert_eq!(
             lines[0],
             "LIVE · frame of 22:13:20 (11s ago) · history holds 2s (1 frames, 1 gaps) · the last read failed: top stopped"
+        );
+    }
+
+    /// Makes a key press without modifiers.
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// A past view says that it is not live, and gives the clock and the age
+    /// of its frame.
+    #[test]
+    fn a_past_frame_shows_not_live_the_clock_and_the_age() {
+        let (mut app, _) = app_with(vec![frame(0, vec![row(1, 5)]), frame(2, vec![row(1, 5)])]);
+        app.on_key(press(KeyCode::Left));
+
+        let lines = screen(&paint(&mut app, 140, 24, 1_200));
+
+        assert_eq!(
+            lines[0],
+            "PAST · NOT LIVE · frame of 22:13:20 (20m 0s ago) · history holds 2s (2 frames, 0 gaps) · End returns to the live view"
         );
     }
 }
