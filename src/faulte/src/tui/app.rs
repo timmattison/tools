@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::history::{EntryId, Gap, History, ProcessKey, Reading, SpanWidth, Update};
 
@@ -62,6 +62,8 @@ pub struct App {
     detail_scroll: u16,
     /// How many table rows fit on one screen. It is never 0.
     page_rows: usize,
+    /// Whether the person asked to leave.
+    quit: bool,
     /// The reading that the table shows.
     reading: Option<Reading>,
 }
@@ -78,6 +80,7 @@ impl App {
             detail_open: false,
             detail_scroll: 0,
             page_rows: DEFAULT_PAGE_ROWS,
+            quit: false,
             reading: None,
         };
         app.refresh();
@@ -193,6 +196,10 @@ impl App {
                 self.span = self.span.next();
                 self.refresh();
             }
+            KeyCode::Char('q') => self.quit = true,
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.quit = true;
+            }
             KeyCode::Home => self.go_past(self.history.oldest()),
             KeyCode::End => self.go_live(),
             KeyCode::Esc => {
@@ -235,7 +242,7 @@ impl App {
     /// Tells whether the person asked to leave.
     #[must_use]
     pub fn should_quit(&self) -> bool {
-        false
+        self.quit
     }
 
     /// Gives the reading that the table shows.
@@ -313,8 +320,6 @@ impl App {
 mod tests {
     use std::collections::BTreeSet;
     use std::time::{Duration, SystemTime};
-
-    use crossterm::event::KeyModifiers;
 
     use super::*;
     use crate::history::SampledFrame;
