@@ -880,37 +880,58 @@ impl History {
     /// Gives the name of the oldest entry.
     #[must_use]
     pub fn oldest(&self) -> Option<EntryId> {
-        (!self.entries.is_empty()).then(|| EntryId(self.next_id - self.entries.len() as u64))
+        (!self.entries.is_empty()).then(|| self.id_at(0))
     }
 
     /// Gives the name of the newest entry.
     #[must_use]
     pub fn newest(&self) -> Option<EntryId> {
-        None
+        self.entries
+            .len()
+            .checked_sub(1)
+            .map(|last| self.id_at(last))
+    }
+
+    /// Gives the name of the entry at `position`.
+    fn id_at(&self, position: usize) -> EntryId {
+        EntryId(self.next_id - self.entries.len() as u64 + position as u64)
     }
 
     /// Gives the name of the entry before `id`.
     #[must_use]
-    pub fn previous(&self, _id: EntryId) -> Option<EntryId> {
-        None
+    pub fn previous(&self, id: EntryId) -> Option<EntryId> {
+        let position = self.position(id)?;
+        position.checked_sub(1).map(|earlier| self.id_at(earlier))
     }
 
     /// Gives the name of the entry after `id`.
     #[must_use]
-    pub fn next(&self, _id: EntryId) -> Option<EntryId> {
-        None
+    pub fn next(&self, id: EntryId) -> Option<EntryId> {
+        let position = self.position(id)? + 1;
+        (position < self.entries.len()).then(|| self.id_at(position))
     }
 
-    /// Gives the newest entry that is at least `by` older than `id`.
+    /// Gives the newest entry before `id` that is at least `by` older than it,
+    /// or `None` when no entry is old enough.
     #[must_use]
-    pub fn back_by(&self, _id: EntryId, _by: Duration) -> Option<EntryId> {
-        None
+    pub fn back_by(&self, id: EntryId, by: Duration) -> Option<EntryId> {
+        let position = self.position(id)?;
+        let limit = self.entry_at(position);
+        (0..position)
+            .rev()
+            .find(|earlier| self.entry_at(*earlier) + by <= limit)
+            .map(|earlier| self.id_at(earlier))
     }
 
-    /// Gives the oldest entry that is at least `by` newer than `id`.
+    /// Gives the oldest entry after `id` that is at least `by` newer than it,
+    /// or `None` when no entry is new enough.
     #[must_use]
-    pub fn forward_by(&self, _id: EntryId, _by: Duration) -> Option<EntryId> {
-        None
+    pub fn forward_by(&self, id: EntryId, by: Duration) -> Option<EntryId> {
+        let position = self.position(id)?;
+        let limit = self.entry_at(position) + by;
+        (position + 1..self.entries.len())
+            .find(|later| self.entry_at(*later) >= limit)
+            .map(|later| self.id_at(later))
     }
 
     /// Gives the bytes that the history holds. It counts the real sizes: the
