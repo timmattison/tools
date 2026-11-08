@@ -44,6 +44,8 @@
 //! - [`history`] — the compact history of the samples, with a fixed memory
 //!   budget, and the readings of it.
 //! - [`render`] — the text that a person reads. Nothing here prints.
+//! - [`sampler`] — the thread that reads a stream of samples, joins the other
+//!   sources to each sample, and sends the result over a channel.
 //! - [`machine`] — every fact of this Mac, behind one trait. The module
 //!   `machine::macos` is the one part of `faulte` that runs a command or calls
 //!   the kernel.
@@ -55,6 +57,7 @@ pub mod pid;
 pub mod plan;
 pub mod ranking;
 pub mod render;
+pub mod sampler;
 pub mod state;
 pub mod stop;
 pub mod stream;
