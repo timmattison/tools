@@ -372,4 +372,30 @@ mod tests {
             "PAST · NOT LIVE · frame of 22:13:20 (20m 0s ago) · history holds 2s (2 frames, 0 gaps) · End returns to the live view"
         );
     }
+
+    /// The header lines of a frame are the lines of the reading, directly
+    /// under the banner.
+    #[test]
+    fn the_header_lines_follow_the_banner_for_a_frame() {
+        let (mut app, _) = app_with(vec![frame(0, vec![row(1, 5)])]);
+        let expected = app.reading().expect("a frame").header_lines();
+
+        let lines = screen(&paint(&mut app, 160, 24, 3));
+
+        assert!(expected[0].contains("over a 2.0 s window"), "{expected:?}");
+        assert_eq!(lines[1..=expected.len()], expected[..]);
+    }
+
+    /// The header lines of a span state the span and its frames.
+    #[test]
+    fn the_header_lines_follow_the_banner_for_a_span() {
+        let (mut app, _) = app_with(vec![frame(0, vec![row(1, 5)]), frame(2, vec![row(1, 5)])]);
+        app.on_key(press(KeyCode::Char('w')));
+        let expected = app.reading().expect("a span").header_lines();
+
+        let lines = screen(&paint(&mut app, 160, 24, 3));
+
+        assert!(expected[0].contains("the last 1 m"), "{expected:?}");
+        assert_eq!(lines[1..=expected.len()], expected[..]);
+    }
 }
