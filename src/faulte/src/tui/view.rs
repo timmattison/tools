@@ -745,4 +745,47 @@ mod tests {
             Some(3)
         );
     }
+
+    /// Makes ten frames, with a spike of faults at the sixth.
+    fn ten_with_a_spike() -> crate::tui::app::App {
+        let updates = (0..10)
+            .map(|index| frame(index * 2, vec![row(1, if index == 5 { 1_000 } else { 10 })]))
+            .collect();
+        app_with(updates).0
+    }
+
+    /// The bars are block elements, and the spike reaches the top bar.
+    #[test]
+    fn the_bars_are_blocks_and_a_spike_reaches_level_seven() {
+        let mut app = ten_with_a_spike();
+
+        let lines = screen(&paint(&mut app, 120, 24, 100));
+
+        let faults: Vec<char> = lines[line_starting(&lines, "FAULTS ")]
+            .chars()
+            .skip(7)
+            .collect();
+        assert_eq!(faults.len(), 10, "{faults:?}");
+        assert!(
+            faults.iter().all(|glyph| ('▁'..='█').contains(glyph)),
+            "{faults:?}"
+        );
+        assert_eq!(faults[5], '█');
+        assert_eq!(faults.iter().filter(|glyph| **glyph == '█').count(), 1);
+    }
+
+    /// A spike survives a timeline that has fewer cells than entries.
+    #[test]
+    fn a_spike_survives_a_squeezed_timeline() {
+        let mut app = ten_with_a_spike();
+
+        let lines = screen(&paint(&mut app, 12, 24, 100));
+
+        let faults: Vec<char> = lines[line_starting(&lines, "FAULTS ")]
+            .chars()
+            .skip(7)
+            .collect();
+        assert_eq!(faults.len(), 5, "{faults:?}");
+        assert!(faults.contains(&'█'), "{faults:?}");
+    }
 }
