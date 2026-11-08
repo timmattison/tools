@@ -16,6 +16,7 @@ use crate::history::{Gap, SampledFrame, Update};
 use crate::machine::{join_sources, sample_window, Machine, MachineError, SampleFacts};
 use crate::pid::Pid;
 use crate::stream::{FaultStream, StreamEvent, TimedSample};
+use crate::table::ProcessRow;
 use crate::vm::VmCounters;
 
 /// How many updates the channel holds before the sampler waits for the view.
@@ -184,16 +185,28 @@ impl<M: Machine> Run<M> {
         match outcome {
             Ok(observed) => {
                 ledger.covered_until = Some(sample.ended_at);
+                let own = self.own_set(&observed.table);
                 self.sender
                     .send(Update::Frame(Box::new(SampledFrame {
                         observed,
                         at: sample.ended_at,
-                        own: BTreeSet::new(),
+                        own,
                     })))
                     .is_ok()
             }
             Err(reason) => self.send_gap(ledger, sample.ended_at, reason),
         }
+    }
+
+    /// Gives the PID of `faulte` and the PID of each child process of it in
+    /// `table`.
+    fn own_set(&self, table: &[ProcessRow]) -> BTreeSet<Pid> {
+        table
+            .iter()
+            .filter(|row| row.ppid == self.own_pid)
+            .map(|row| row.pid)
+            .chain(std::iter::once(self.own_pid))
+            .collect()
     }
 
     /// Sends a gap that ends at `at`. Gives `false` when the view dropped the
