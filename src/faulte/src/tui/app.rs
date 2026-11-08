@@ -189,6 +189,10 @@ impl App {
                     self.move_row(Way::Forward, self.page_rows);
                 }
             }
+            KeyCode::Char('w') => {
+                self.span = self.span.next();
+                self.refresh();
+            }
             KeyCode::Home => self.go_past(self.history.oldest()),
             KeyCode::End => self.go_live(),
             KeyCode::Esc => {
