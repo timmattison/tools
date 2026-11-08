@@ -864,4 +864,63 @@ mod tests {
         assert_eq!(app.selection(), Selection::Past(ids[3]));
         assert_eq!(app.reading().map(Reading::end), Some(ids[3]));
     }
+
+    /// A key that is not a press changes nothing.
+    #[test]
+    fn a_key_release_changes_nothing() {
+        let (mut app, _) = five();
+
+        app.on_key(KeyEvent::new_with_kind(
+            KeyCode::Left,
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        ));
+        app.on_key(KeyEvent::new_with_kind(
+            KeyCode::Char('q'),
+            KeyModifiers::NONE,
+            KeyEventKind::Repeat,
+        ));
+        assert_eq!(app.selection(), Selection::Live);
+        assert!(!app.should_quit());
+    }
+
+    /// With no history, each key does nothing and none panics.
+    #[test]
+    fn no_history_and_no_panic_for_each_key() {
+        let mut app = App::new(History::new());
+        let codes = [
+            KeyCode::Left,
+            KeyCode::Right,
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+            KeyCode::Home,
+            KeyCode::End,
+            KeyCode::Esc,
+            KeyCode::Enter,
+            KeyCode::Char('h'),
+            KeyCode::Char('l'),
+            KeyCode::Char('j'),
+            KeyCode::Char('k'),
+            KeyCode::Char('['),
+            KeyCode::Char(']'),
+            KeyCode::Char('w'),
+        ];
+        for code in codes {
+            app.on_key(press(code));
+        }
+        assert_eq!(app.selection(), Selection::Live);
+        assert!(app.reading().is_none());
+        assert_eq!(app.selected_entry(), None);
+        assert_eq!(app.selected_row(), None);
+        assert!(!app.detail_open());
+        assert_eq!(app.top_row(), 0);
+
+        app.set_page_rows(0);
+        app.on_update(gap(0, 2));
+        app.on_key(press(KeyCode::Down));
+        assert!(app.selected_gap().is_some());
+        assert!(app.reading().is_none());
+    }
 }
