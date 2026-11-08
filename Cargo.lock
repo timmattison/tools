@@ -8162,6 +8162,7 @@ name = "swt"
 version = "0.1.0"
 dependencies = [
  "buildinfo",
+ "childenv",
  "clap",
  "gitscratch",
  "libc",
