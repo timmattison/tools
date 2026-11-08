@@ -391,7 +391,7 @@ fn fit_job_text(
         || text_width(&floor) >= text_width(runner.as_str())
     {
         (text_width(runner.as_str()) <= room).then(|| runner.as_str().to_owned())
-    } else if room >= text_width(&floor) || without_name >= cell {
+    } else if room >= text_width(&floor) {
         fit_runner(runner, room)
     } else {
         None
