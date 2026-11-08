@@ -378,4 +378,14 @@ mod tests {
         assert_eq!(app.selection(), Selection::Live);
         assert_eq!(app.reading().map(Reading::end), Some(ids[4]));
     }
+
+    /// `Esc` returns to the live view when no detail view is open.
+    #[test]
+    fn escape_returns_to_the_live_view() {
+        let (mut app, _) = five();
+
+        app.on_key(press(KeyCode::Home));
+        app.on_key(press(KeyCode::Esc));
+        assert_eq!(app.selection(), Selection::Live);
+    }
 }
