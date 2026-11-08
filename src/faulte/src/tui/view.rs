@@ -923,4 +923,60 @@ mod tests {
         assert!(lines[header + 1].contains("idle 5m 0s"), "{lines:#?}");
         assert!(!lines[header + 1].contains("2h 46m"), "{lines:#?}");
     }
+
+    /// The detail view gives the facts of one process, its own timeline, its
+    /// session, its directory, and its whole command.
+    #[test]
+    fn the_detail_view_gives_the_facts_of_the_selected_process() {
+        let (mut app, _) = app_with(vec![
+            frame(
+                0,
+                vec![claude_row(10, 50, "claude --resume the-whole-command")],
+            ),
+            frame(
+                2,
+                vec![claude_row(10, 20, "claude --resume the-whole-command")],
+            ),
+        ]);
+        app.on_key(press(KeyCode::Down));
+        app.on_key(press(KeyCode::Enter));
+
+        let lines = screen(&paint(&mut app, 120, 24, 3));
+
+        let facts = line_starting(&lines, "PID 10");
+        assert_eq!(
+            lines[facts],
+            "PID 10 · OWNER 501 · FIRST 22:13:20 · LAST 22:13:22 · PEAK 25/s · 2 frames with faults"
+        );
+        assert!(lines[facts + 1].starts_with("FAULTS "), "{lines:#?}");
+        assert!(lines[facts + 2].contains('▲'), "{lines:#?}");
+        assert_eq!(lines[facts + 3], format!("SESSION {SESSION_ID}"));
+        assert_eq!(lines[facts + 4], "DIRECTORY /work/project");
+        assert_eq!(lines[facts + 5], "claude --resume the-whole-command");
+        assert!(
+            lines.iter().all(|line| !line.starts_with("PID  ")),
+            "{lines:#?}"
+        );
+    }
+
+    /// The detail view of a process that left the history says so.
+    #[test]
+    fn the_detail_view_says_when_the_history_lost_the_process() {
+        let mut history = History::with_budget(0);
+        history.add(frame(0, vec![row(10, 50)]));
+        let mut app = crate::tui::app::App::new(history);
+        app.on_key(press(KeyCode::Down));
+        app.on_key(press(KeyCode::Enter));
+        app.on_update(frame(2, vec![row(11, 50)]));
+
+        let lines = screen(&paint(&mut app, 120, 24, 3));
+
+        assert!(app.detail_open());
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "the history no longer holds this process"),
+            "{lines:#?}"
+        );
+    }
 }
