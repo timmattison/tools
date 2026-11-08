@@ -1113,11 +1113,52 @@ impl History {
     #[must_use]
     pub fn series(
         &self,
-        _key: ProcessKey,
-        _cells: usize,
-        _selected: Option<EntryId>,
+        key: ProcessKey,
+        cells: usize,
+        selected: Option<EntryId>,
     ) -> Option<Series> {
-        None
+        let slot = *self.identities.index.get(&key)?;
+        let identity = self.identities.slab[slot as usize].as_ref()?;
+        let mut first_at = None;
+        let mut last_at = None;
+        let mut frames_with_faults = 0;
+        let samples: Vec<Sample> = self
+            .entries
+            .iter()
+            .map(|entry| match entry {
+                Entry::Gap(_) => Sample::Gap,
+                Entry::Frame(frame) => {
+                    let found = frame.rows.iter().find(|row| row.identity == slot);
+                    Sample::Frame(found.map(|row| {
+                        frames_with_faults += 1;
+                        first_at.get_or_insert(frame.at);
+                        last_at = Some(frame.at);
+                        per_second(row.faults, frame.window)
+                    }))
+                }
+            })
+            .collect();
+        let peak_rate = peak_of(&samples);
+        Some(Series {
+            key,
+            uid: identity.uid,
+            command: identity.command.clone(),
+            own: identity.own,
+            session: identity
+                .session
+                .as_ref()
+                .map(|detail| detail.id.as_str().to_string()),
+            directory: identity
+                .session
+                .as_ref()
+                .and_then(|detail| detail.directory.clone()),
+            cells: cells_of(&samples, cells, peak_rate),
+            marker: self.marker_cell(cells, selected),
+            peak_rate,
+            first_at,
+            last_at,
+            frames_with_faults,
+        })
     }
 
     /// Gives the cell of the selected entry in a timeline of `cells` cells.
