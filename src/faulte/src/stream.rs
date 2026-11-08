@@ -32,6 +32,9 @@ pub enum ParsedEvent {
     },
 }
 
+/// The byte that ends a line.
+const NEWLINE: u8 = b'\n';
+
 /// Where the parser is inside the sample that it reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Position {
@@ -78,6 +81,9 @@ pub struct StreamParser {
     /// child holds the counter since each process started, so it gives no
     /// result.
     finished_one: bool,
+    /// The bytes of the line that has not ended yet. A read can end inside a
+    /// line, so the parser keeps the start of the line until the rest arrives.
+    pending: Vec<u8>,
 }
 
 impl StreamParser {
@@ -89,11 +95,17 @@ impl StreamParser {
 
     /// Reads `bytes` and gives the events that they complete.
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<ParsedEvent> {
-        let text = String::from_utf8_lossy(bytes);
         let mut events = Vec::new();
-        for line in text.lines() {
-            self.line(line, &mut events);
+        let mut rest = bytes;
+        while let Some(newline) = rest.iter().position(|byte| *byte == NEWLINE) {
+            let (head, tail) = rest.split_at(newline);
+            rest = tail.get(1..).unwrap_or_default();
+            self.pending.extend_from_slice(head);
+            let line = String::from_utf8_lossy(&self.pending).into_owned();
+            self.pending.clear();
+            self.line(line.strip_suffix('\r').unwrap_or(&line), &mut events);
         }
+        self.pending.extend_from_slice(rest);
         events
     }
 
