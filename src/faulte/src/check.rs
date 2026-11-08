@@ -97,7 +97,7 @@ const CHURN_ADVICE: &str = "The kernel moves pages in and out of compressed memo
 
 /// What a person reads after [`Verdict::OtherSystemTime`].
 const OTHER_ADVICE: &str =
-    "The compressor and new processes are below their limits. `faulte check` does not measure the other causes of system time.";
+    "The compressor does not reach its limit in both directions, and new processes are below their limit. `faulte check` does not measure the other causes of system time.";
 
 /// The counters that one read of the kernel gives.
 ///
@@ -197,10 +197,11 @@ pub enum Verdict {
     Healthy,
     /// System time is high, and pages leave and return to compressed memory.
     MemoryChurn,
-    /// System time is high, the compressor is quiet, and many processes start.
+    /// System time is high, the compressor does not reach its limit in both
+    /// directions, and many processes start.
     ProcessChurn,
-    /// System time is high, and neither the compressor nor new processes are
-    /// the cause.
+    /// System time is high, the compressor does not reach its limit in both
+    /// directions, and new processes are below their limit.
     OtherSystemTime,
 }
 

@@ -4995,8 +4995,8 @@ On 2026-09-17 and 2026-09-18, this Mac spent 78% of its time in the kernel. 34 M
 | --- | --- | --- |
 | `OK` | System time is below 30% of all CPU time. | 0 |
 | `MEMORY CHURN` | System time is at least 30%, and the compressor compresses and decompresses at least 50,000 pages each second. | 1 |
-| `PROCESS CHURN` | System time is at least 30%, the compressor is below its limit, and at least 150 processes start each second. | 1 |
-| `OTHER SYSTEM TIME` | System time is at least 30%, and both other rates are below their limits. | 1 |
+| `PROCESS CHURN` | System time is at least 30%, the compressor does not reach its limit in both directions, and at least 150 processes start each second. | 1 |
+| `OTHER SYSTEM TIME` | System time is at least 30%, the compressor does not reach its limit in both directions, and fewer than 150 processes start each second. | 1 |
 
 An error gives the exit code 2. `faulte check --watch` prints one line for each interval until you stop it.
 
