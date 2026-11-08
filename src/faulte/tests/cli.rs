@@ -578,6 +578,10 @@ fn check_states_a_verdict_and_the_exit_code_of_that_verdict() {
     );
     assert!(text.contains("compressions/s"), "the rates: {text}");
     assert!(text.contains("% system"), "the CPU split: {text}");
+    assert!(
+        text.contains("new processes/s"),
+        "the new processes: {text}"
+    );
 }
 
 /// One line of a watch reaches a reader that stops after that line, and the

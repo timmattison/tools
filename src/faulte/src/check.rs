@@ -39,6 +39,21 @@ pub const SYSTEM_PERCENT_LIMIT: f64 = 30.0;
 /// of a quiet period set this limit, thus a future measurement can change it.
 pub const CHURN_LIMIT_PER_SECOND: f64 = 50_000.0;
 
+/// The rate of new processes at which process creation is a cause of system
+/// time, in processes each second.
+///
+/// On 2026-11-08, the bad samples of this Mac were between 193 and 490 new
+/// processes each second. This limit is about three quarters of the lowest bad
+/// sample. No sample of a quiet period set this limit, thus a future
+/// measurement can change it.
+pub const PROCESS_LIMIT_PER_SECOND: f64 = 150.0;
+
+/// The name of [`Verdict::ProcessChurn`].
+const PROCESS_NAME: &str = "PROCESS CHURN";
+
+/// What a person reads after [`Verdict::ProcessChurn`].
+const PROCESS_ADVICE: &str = "New processes use kernel time. On this Mac, test runs and hooks start most of them. Stop the test runs that you do not need.";
+
 /// The name of [`Verdict::Healthy`].
 const HEALTHY_NAME: &str = "OK";
 
@@ -81,6 +96,8 @@ pub struct CheckCounters {
     pub compressions: u64,
     /// The pages that the compressor decompressed.
     pub decompressions: u64,
+    /// The newest process number that the kernel gave.
+    pub newest_pid: u32,
 }
 
 /// What the counters say over one interval.
@@ -97,6 +114,8 @@ pub struct Reading {
     pub compressions_per_second: f64,
     /// The pages that the compressor decompressed each second.
     pub decompressions_per_second: f64,
+    /// The processes that started each second.
+    pub new_processes_per_second: f64,
 }
 
 impl Reading {
@@ -135,6 +154,7 @@ impl Reading {
             idle_percent: percent(idle),
             compressions_per_second: rate(before.compressions, after.compressions),
             decompressions_per_second: rate(before.decompressions, after.decompressions),
+            new_processes_per_second: 0.0,
         }
     }
 }
@@ -146,7 +166,10 @@ pub enum Verdict {
     Healthy,
     /// System time is high, and pages leave and return to compressed memory.
     MemoryChurn,
-    /// System time is high, and the compressor is not the cause.
+    /// System time is high, the compressor is quiet, and many processes start.
+    ProcessChurn,
+    /// System time is high, and neither the compressor nor new processes are
+    /// the cause.
     OtherSystemTime,
 }
 
@@ -163,6 +186,7 @@ impl Verdict {
         match self {
             Self::Healthy => HEALTHY_NAME,
             Self::MemoryChurn => CHURN_NAME,
+            Self::ProcessChurn => PROCESS_NAME,
             Self::OtherSystemTime => OTHER_NAME,
         }
     }
@@ -173,6 +197,7 @@ impl Verdict {
         match self {
             Self::Healthy => HEALTHY_ADVICE,
             Self::MemoryChurn => CHURN_ADVICE,
+            Self::ProcessChurn => PROCESS_ADVICE,
             Self::OtherSystemTime => OTHER_ADVICE,
         }
     }
@@ -338,7 +363,91 @@ mod tests {
             idle_percent: 0.0,
             compressions_per_second: churn,
             decompressions_per_second: churn,
+            new_processes_per_second: 0.0,
         }
+    }
+
+    /// A reading with a quiet compressor and one rate of new processes.
+    fn busy_with_processes(system_percent: f64, new_processes: f64) -> Reading {
+        Reading {
+            new_processes_per_second: new_processes,
+            ..reading(system_percent, 1_000.0)
+        }
+    }
+
+    /// The kernel gives each new process the next number, thus the change of
+    /// the newest number counts the new processes.
+    #[test]
+    fn the_change_of_the_newest_pid_counts_the_new_processes() {
+        let before = CheckCounters {
+            newest_pid: 10_000,
+            ..CheckCounters::default()
+        };
+        let after = CheckCounters {
+            newest_pid: 11_620,
+            ..CheckCounters::default()
+        };
+
+        let result = Reading::between(before, after, FIVE_SECONDS);
+
+        assert_close(result.new_processes_per_second, 324.0);
+    }
+
+    /// The numbers of a Mac start again after 99,999. The processes after that
+    /// point still count.
+    #[test]
+    fn a_process_number_that_starts_again_still_counts() {
+        let before = CheckCounters {
+            newest_pid: 99_900,
+            ..CheckCounters::default()
+        };
+        let after = CheckCounters {
+            newest_pid: 151,
+            ..CheckCounters::default()
+        };
+
+        let result = Reading::between(before, after, FIVE_SECONDS);
+
+        assert_close(result.new_processes_per_second, 50.0);
+    }
+
+    /// The values are a sample of this Mac with a quiet compressor.
+    #[test]
+    fn high_system_time_with_many_new_processes_is_process_churn() {
+        assert_eq!(
+            judge(&busy_with_processes(43.0, 490.0)),
+            Verdict::ProcessChurn
+        );
+    }
+
+    /// A rate at the limit counts as over it, and a rate below it does not.
+    #[test]
+    fn the_rate_of_new_processes_at_its_limit_is_over_it() {
+        assert_eq!(
+            judge(&busy_with_processes(43.0, PROCESS_LIMIT_PER_SECOND)),
+            Verdict::ProcessChurn
+        );
+        assert_eq!(
+            judge(&busy_with_processes(43.0, PROCESS_LIMIT_PER_SECOND - 1.0)),
+            Verdict::OtherSystemTime
+        );
+    }
+
+    /// Memory churn names the larger cost, and the report shows both numbers.
+    #[test]
+    fn memory_churn_comes_before_process_churn() {
+        let both = Reading {
+            new_processes_per_second: 490.0,
+            ..reading(58.0, 212_384.0)
+        };
+
+        assert_eq!(judge(&both), Verdict::MemoryChurn);
+    }
+
+    /// With system time below its limit, new processes do not slow this Mac.
+    #[test]
+    fn low_system_time_is_healthy_whatever_the_processes_do() {
+        assert_eq!(judge(&busy_with_processes(29.9, 490.0)), Verdict::Healthy);
     }
 
     /// The share of each CPU state is its part of all ticks, and a rate is the
@@ -353,6 +462,7 @@ mod tests {
             idle_ticks: 3_000,
             compressions: 10_000_000,
             decompressions: 20_000_000,
+            ..CheckCounters::default()
         };
         let after = CheckCounters {
             user_ticks: 1_400,
@@ -361,6 +471,7 @@ mod tests {
             idle_ticks: 3_010,
             compressions: 11_061_920,
             decompressions: 21_017_675,
+            ..CheckCounters::default()
         };
 
         let result = Reading::between(before, after, FIVE_SECONDS);
@@ -471,6 +582,7 @@ mod tests {
     fn each_verdict_other_than_healthy_is_a_problem() {
         assert!(!Verdict::Healthy.is_problem());
         assert!(Verdict::MemoryChurn.is_problem());
+        assert!(Verdict::ProcessChurn.is_problem());
         assert!(Verdict::OtherSystemTime.is_problem());
     }
 
@@ -578,6 +690,7 @@ mod tests {
                 idle_percent: 1.0,
                 compressions_per_second: 212_384.0,
                 decompressions_per_second: 203_535.0,
+                new_processes_per_second: 324.0,
             },
             verdict: Verdict::MemoryChurn,
             elapsed: FIVE_SECONDS,
@@ -598,6 +711,7 @@ mod tests {
             "212,384 compressions/s",
             "203,535 decompressions/s",
             "limit 50,000/s each",
+            "324 new processes/s (limit 150/s)",
             "`faulte kill`",
         ] {
             assert!(text.contains(expected), "{expected:?} is not in:\n{text}");
@@ -608,14 +722,23 @@ mod tests {
     #[test]
     fn a_watch_line_holds_the_clock_the_verdict_and_each_number() {
         let check = Check {
-            reading: reading(58.0, 212_384.0),
+            reading: Reading {
+                new_processes_per_second: 324.0,
+                ..reading(58.0, 212_384.0)
+            },
             verdict: Verdict::MemoryChurn,
             elapsed: FIVE_SECONDS,
         };
 
         let line = watch_line(&check, "16:02:31");
 
-        for expected in ["16:02:31", "MEMORY CHURN", "system  58%", "212,384/s"] {
+        for expected in [
+            "16:02:31",
+            "MEMORY CHURN",
+            "system  58%",
+            "212,384/s",
+            "new 324/s",
+        ] {
             assert!(line.contains(expected), "{expected:?} is not in: {line}");
         }
         assert!(!line.contains('\n'), "the line is one line: {line:?}");

@@ -395,6 +395,7 @@ impl CheckSource for Mac {
             idle_ticks,
             compressions: statistics.compressions,
             decompressions: statistics.decompressions,
+            newest_pid: 0,
         })
     }
 
