@@ -883,6 +883,36 @@ impl History {
         (!self.entries.is_empty()).then(|| EntryId(self.next_id - self.entries.len() as u64))
     }
 
+    /// Gives the name of the newest entry.
+    #[must_use]
+    pub fn newest(&self) -> Option<EntryId> {
+        None
+    }
+
+    /// Gives the name of the entry before `id`.
+    #[must_use]
+    pub fn previous(&self, _id: EntryId) -> Option<EntryId> {
+        None
+    }
+
+    /// Gives the name of the entry after `id`.
+    #[must_use]
+    pub fn next(&self, _id: EntryId) -> Option<EntryId> {
+        None
+    }
+
+    /// Gives the newest entry that is at least `by` older than `id`.
+    #[must_use]
+    pub fn back_by(&self, _id: EntryId, _by: Duration) -> Option<EntryId> {
+        None
+    }
+
+    /// Gives the oldest entry that is at least `by` newer than `id`.
+    #[must_use]
+    pub fn forward_by(&self, _id: EntryId, _by: Duration) -> Option<EntryId> {
+        None
+    }
+
     /// Gives the bytes that the history holds. It counts the real sizes: the
     /// entries and the rows, the text of the identities and of the gaps, and
     /// each container by its capacity.
@@ -1824,5 +1854,52 @@ mod tests {
             ..key
         };
         assert!(history.series(unknown, 6, None).is_none());
+    }
+
+    /// Builds five entries, two seconds apart, with a gap at the third.
+    fn five_entries() -> (History, Vec<EntryId>) {
+        let mut history = History::new();
+        let ids = vec![
+            history.add(frame(0, vec![row(1, 1)])),
+            history.add(frame(2, vec![row(1, 1)])),
+            history.add(gap(4, 2)),
+            history.add(frame(6, vec![row(1, 1)])),
+            history.add(frame(8, vec![row(1, 1)])),
+        ];
+        (history, ids)
+    }
+
+    /// `previous` and `next` step one entry, a gap included, and stop at the
+    /// ends. An unknown name has no neighbor.
+    #[test]
+    fn previous_and_next_step_one_entry() {
+        let (history, ids) = five_entries();
+
+        assert_eq!(history.oldest(), Some(ids[0]));
+        assert_eq!(history.newest(), Some(ids[4]));
+        assert_eq!(history.previous(ids[0]), None);
+        assert_eq!(history.previous(ids[3]), Some(ids[2]));
+        assert_eq!(history.next(ids[2]), Some(ids[3]));
+        assert_eq!(history.next(ids[4]), None);
+        assert_eq!(history.next(EntryId(99)), None);
+        assert_eq!(History::new().newest(), None);
+    }
+
+    /// `back_by` and `forward_by` find the entry that is at least a time away,
+    /// and give `None` when no entry is far enough.
+    #[test]
+    fn back_by_and_forward_by_find_an_entry_far_enough_away() {
+        let (history, ids) = five_entries();
+        let five = Duration::from_secs(5);
+
+        assert_eq!(history.back_by(ids[4], five), Some(ids[1]));
+        assert_eq!(
+            history.back_by(ids[4], Duration::from_secs(2)),
+            Some(ids[3])
+        );
+        assert_eq!(history.back_by(ids[1], five), None);
+        assert_eq!(history.forward_by(ids[0], five), Some(ids[3]));
+        assert_eq!(history.forward_by(ids[3], five), None);
+        assert_eq!(history.forward_by(ids[0], Duration::ZERO), Some(ids[1]));
     }
 }
