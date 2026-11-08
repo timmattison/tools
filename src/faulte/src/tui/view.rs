@@ -191,12 +191,19 @@ fn display_width(text: &str) -> usize {
     Span::raw(text).width()
 }
 
-/// Gives the cells of each row of `reading`. The age of a row is the time
+/// Gives the cells of each row of `reading`. The command of an own row starts
+/// with [`OWN_PREFIX`]. The age of a row is the time
 /// from its start to the frame that the row comes from.
 fn table_cells(reading: &Reading, accounts: &Accounts) -> Vec<Cells> {
     reading
         .rows()
-        .map(|view| render::row_cells(reading.ranking(), view.row, accounts, view.as_of))
+        .map(|view| {
+            let mut cells = render::row_cells(reading.ranking(), view.row, accounts, view.as_of);
+            if view.own {
+                cells[COMMAND_COLUMN].insert_str(0, OWN_PREFIX);
+            }
+            cells
+        })
         .collect()
 }
 
@@ -220,6 +227,10 @@ fn column_widths(cells: &[Cells]) -> [usize; COLUMN_COUNT] {
 
 /// The place of the command column in [`render::COLUMNS`].
 const COMMAND_COLUMN: usize = 6;
+
+/// What stands before the command of `faulte` and of its children, so that a
+/// reader does not take the reader of the faults for the cause of them.
+const OWN_PREFIX: &str = "[faulte] ";
 
 /// The columns whose width never shrinks: the numbers and the state.
 const FIXED_COLUMNS: [usize; 7] = [0, 1, 2, 3, 4, 5, STATE_COLUMN];
