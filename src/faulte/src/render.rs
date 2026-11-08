@@ -424,7 +424,7 @@ fn claude_line(ranking: &Ranking) -> String {
 
 /// The name of each column of the table, in the order that the issue lists
 /// them.
-const COLUMNS: [&str; 10] = [
+pub const COLUMNS: [&str; 10] = [
     "PID",
     "OWNER",
     "FAULTS/S",
@@ -526,19 +526,7 @@ pub fn rows(
         table.set_width(width);
     }
     for row in shown {
-        let (session, state, directory) = claude_cells(&row.claude);
-        table.add_row([
-            row.pid.to_string(),
-            accounts.name_of(row.uid),
-            rate(ranking.faults_per_second(row.faults)),
-            share(ranking.share(row.faults)),
-            row.rss_kib.map_or_else(|| ABSENT.to_owned(), kibibytes),
-            age(row.started_at_epoch_secs, now),
-            command(&row.command),
-            session,
-            state,
-            directory,
-        ]);
+        table.add_row(row_cells(ranking, row, accounts, now));
     }
     let drawn = table.to_string();
     let hidden = &rows[shown.len()..];
@@ -562,8 +550,19 @@ pub fn row_cells(
     accounts: &Accounts,
     now: SystemTime,
 ) -> [String; 10] {
-    let _ = (ranking, row, accounts, now);
-    Default::default()
+    let (session, state, directory) = claude_cells(&row.claude);
+    [
+        row.pid.to_string(),
+        accounts.name_of(row.uid),
+        rate(ranking.faults_per_second(row.faults)),
+        share(ranking.share(row.faults)),
+        row.rss_kib.map_or_else(|| ABSENT.to_owned(), kibibytes),
+        age(row.started_at_epoch_secs, now),
+        command(&row.command),
+        session,
+        state,
+        directory,
+    ]
 }
 
 /// The mark of a text that gives a part of something, and not the whole of it.
@@ -600,7 +599,7 @@ pub fn more_line(ranking: &Ranking, hidden: usize, faults: u64) -> Option<String
 /// session with no registry record gives three empty cells too: the issue
 /// demands that such a row shows no session, because a guess names the wrong
 /// session and nothing in the text says that it is a guess.
-fn claude_cells(claude: &ClaudeView) -> (String, String, String) {
+pub fn claude_cells(claude: &ClaudeView) -> (String, String, String) {
     match claude {
         ClaudeView::NotClaude | ClaudeView::NoRecord => {
             (String::new(), String::new(), String::new())
