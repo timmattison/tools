@@ -7080,9 +7080,14 @@ mod tests {
 
     /// At every frame width, a job row keeps the job ID in the column of the
     /// run ID and keeps the started, time, and cost cells, whatever the job
-    /// name and the runner name are.
+    /// name and the runner name are. One board holds every combination of name
+    /// and runner, and the test draws one frame for each width.
     #[test]
     fn job_rows_keep_the_id_and_the_end_cells_in_the_run_columns_at_every_width() {
+        // The old one-job frame had 14 rows. The 14 jobs after the first make
+        // room for all 15 job rows, so the footer still shows.
+        const HEIGHT: u16 = 28;
+        const FIRST_ID: u64 = 900_000_000_101;
         let names = [
             "Full check list (Mac 22) and a long name after it",
             "日本語のジョブ名テスト一覧表示確認",
@@ -7095,38 +7100,52 @@ mod tests {
             Some("GitHub Actions 1000001050"),
             Some("日本語テスト株式"),
         ];
+        let mut cases = Vec::new();
+        let mut jobs = Vec::new();
+        for name in names {
+            for runner in runners {
+                let id = FIRST_ID + u64::try_from(jobs.len()).unwrap();
+                let built = job(
+                    id,
+                    name,
+                    RunState::Passed,
+                    Some("2026-10-14T11:46:00Z"),
+                    Some("2026-10-14T11:48:00Z"),
+                );
+                jobs.push(match runner {
+                    Some(runner) => on(runner, built),
+                    None => built,
+                });
+                cases.push((id, name, runner));
+            }
+        }
         for width in 0_u16..=200 {
-            for name in names {
-                for runner in runners {
-                    let job = match runner {
-                        Some(runner) => on(runner, passed_job(name)),
-                        None => passed_job(name),
-                    };
-                    let mut board = board_with_jobs(vec![job]);
-                    let buffer = render_with(width, 14, &mut board, &loaded());
-                    if usize::from(width) < FIXED_COLUMNS {
-                        continue;
-                    }
-                    let text = lines(&buffer);
-                    let context = format!("width {width}, name {name:?}, runner {runner:?}");
-                    let y = text
-                        .iter()
-                        .position(|line| line.contains(&LONE_JOB.to_string()))
-                        .unwrap_or_else(|| panic!("the job row shows its ID: {context}"));
-                    assert_eq!(
-                        last_digit_column(&text[y], &LONE_JOB.to_string()),
-                        last_digit_column(&text[2], "1"),
-                        "the ID column: {context}"
-                    );
-                    assert_eq!(started_cells(&text, y), "11:46:00", "started: {context}");
-                    assert_eq!(time_cells(&text, y), "2m 00s", "time: {context}");
-                    assert!(!cost_cells(&text, y).trim().is_empty(), "cost: {context}");
-                    assert_eq!(
-                        display_width(&text[y]),
-                        usize::from(width),
-                        "row width: {context}"
-                    );
-                }
+            let mut board = board_with_jobs(jobs.clone());
+            let buffer = render_with(width, HEIGHT, &mut board, &loaded());
+            if usize::from(width) < FIXED_COLUMNS {
+                continue;
+            }
+            let text = lines(&buffer);
+            for &(id, name, runner) in &cases {
+                let context = format!("width {width}, name {name:?}, runner {runner:?}");
+                let id = id.to_string();
+                let y = text
+                    .iter()
+                    .position(|line| line.contains(&id))
+                    .unwrap_or_else(|| panic!("the job row shows its ID: {context}"));
+                assert_eq!(
+                    last_digit_column(&text[y], &id),
+                    last_digit_column(&text[2], "1"),
+                    "the ID column: {context}"
+                );
+                assert_eq!(started_cells(&text, y), "11:46:00", "started: {context}");
+                assert_eq!(time_cells(&text, y), "2m 00s", "time: {context}");
+                assert!(!cost_cells(&text, y).trim().is_empty(), "cost: {context}");
+                assert_eq!(
+                    display_width(&text[y]),
+                    usize::from(width),
+                    "row width: {context}"
+                );
             }
         }
     }
