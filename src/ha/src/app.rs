@@ -2031,6 +2031,32 @@ mod tests {
         canceller: &RecordingCanceller,
         steps: Vec<Step>,
     ) -> (Vec<String>, Vec<Command>) {
+        let (result, frame, commands) = run_steps_to_end(channels, opener, canceller, steps);
+        assert!(result.is_ok(), "{result:?}");
+        (frame, commands)
+    }
+
+    /// Runs the steps like `run_steps_cancelling`, but the script ends
+    /// while the loop still runs. It returns the last frame, so a test can
+    /// read a box that is still open.
+    fn run_steps_cancelling_open(
+        channels: &Channels,
+        canceller: &RecordingCanceller,
+        steps: Vec<Step>,
+    ) -> (Vec<String>, Vec<Command>) {
+        let (result, frame, commands) =
+            run_steps_to_end(channels, &opener(false), canceller, steps);
+        assert_eq!(result.unwrap_err().to_string(), "script ended");
+        (frame, commands)
+    }
+
+    /// Runs the steps and gives the result of the loop, the last frame, and the commands sent.
+    fn run_steps_to_end(
+        channels: &Channels,
+        opener: &RecordingOpener,
+        canceller: &RecordingCanceller,
+        steps: Vec<Step>,
+    ) -> (Result<(), RunError>, Vec<String>, Vec<Command>) {
         let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
         let tz = FixedOffset::east_opt(0).unwrap();
         let time = std::cell::Cell::new(now());
@@ -2051,44 +2077,8 @@ mod tests {
             clock: &time,
         };
         let result = app.run(&mut terminal, &mut events);
-        assert!(result.is_ok(), "{result:?}");
         (
-            lines(terminal.backend().buffer()),
-            channels.commands.try_iter().collect::<Vec<_>>(),
-        )
-    }
-
-    /// Runs the steps like `run_steps_cancelling`, but the script ends
-    /// while the loop still runs. It returns the last frame, so a test can
-    /// read a box that is still open.
-    fn run_steps_cancelling_open(
-        channels: &Channels,
-        canceller: &RecordingCanceller,
-        steps: Vec<Step>,
-    ) -> (Vec<String>, Vec<Command>) {
-        let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
-        let tz = FixedOffset::east_opt(0).unwrap();
-        let time = std::cell::Cell::new(now());
-        let clock = || time.get();
-        let opener = opener(false);
-        let mut app = App::new(
-            Board::new(Duration::from_hours(8)),
-            Status::default(),
-            &opener,
-            canceller,
-            &channels.worker,
-            &clock,
-            &tz,
-            None,
-        );
-        let mut events = StepEvents {
-            steps: steps.into(),
-            updates: channels.updates.clone(),
-            clock: &time,
-        };
-        let result = app.run(&mut terminal, &mut events);
-        assert_eq!(result.unwrap_err().to_string(), "script ended");
-        (
+            result,
             lines(terminal.backend().buffer()),
             channels.commands.try_iter().collect::<Vec<_>>(),
         )
@@ -3844,27 +3834,14 @@ mod tests {
     fn lowercase_r_still_refreshes_and_opens_no_box() {
         let channels = channels();
         send_runs(&channels, vec![finished_run(1, 100, 60)]);
-        let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
-        let tz = FixedOffset::east_opt(0).unwrap();
-        let clock = now;
-        let canceller = canceller();
-        let opener = opener(false);
-        let mut app = App::new(
-            Board::new(Duration::from_hours(8)),
+        let (result, frame) = run_app_with(
             Status::default(),
-            &opener,
-            &canceller,
-            &channels.worker,
-            &clock,
-            &tz,
-            None,
-        );
-        let result = app.run(
-            &mut terminal,
-            &mut script(vec![Some(press(KeyCode::Char('r')))]),
+            &opener(false),
+            &canceller(),
+            &channels,
+            vec![press(KeyCode::Char('r'))],
         );
         assert_eq!(result.unwrap_err().to_string(), "script ended");
-        let frame = lines(terminal.backend().buffer());
         assert!(!shows_title(&frame, RERUN_WORKFLOW_BOX_TITLE), "{frame:?}");
         let commands: Vec<Command> = channels.commands.try_iter().collect();
         assert!(commands.contains(&Command::RefreshNow), "{commands:?}");
