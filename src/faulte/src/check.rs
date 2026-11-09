@@ -29,6 +29,7 @@
 use std::time::{Duration, Instant};
 
 use crate::machine::MachineError;
+use crate::pid::Pid;
 use crate::render;
 
 /// The share of all CPU time in the kernel, in percent, at which this Mac has
@@ -117,7 +118,7 @@ pub struct CheckCounters {
     /// The pages that the compressor decompressed.
     pub decompressions: u64,
     /// The newest process number that the kernel gave.
-    pub newest_pid: u32,
+    pub newest_pid: Pid,
 }
 
 /// What the counters say over one interval.
@@ -183,8 +184,8 @@ impl Reading {
             compressions_per_second: rate(before.compressions, after.compressions),
             decompressions_per_second: rate(before.decompressions, after.decompressions),
             new_processes_per_second: rate(
-                u64::from(before.newest_pid),
-                u64::from(after.newest_pid) + started_again,
+                u64::from(before.newest_pid.get()),
+                u64::from(after.newest_pid.get()) + started_again,
             ),
         }
     }
@@ -420,11 +421,11 @@ mod tests {
     #[test]
     fn the_change_of_the_newest_pid_counts_the_new_processes() {
         let before = CheckCounters {
-            newest_pid: 10_000,
+            newest_pid: Pid::new(10_000),
             ..CheckCounters::default()
         };
         let after = CheckCounters {
-            newest_pid: 11_620,
+            newest_pid: Pid::new(11_620),
             ..CheckCounters::default()
         };
 
@@ -438,11 +439,11 @@ mod tests {
     #[test]
     fn a_process_number_that_starts_again_still_counts() {
         let before = CheckCounters {
-            newest_pid: 99_900,
+            newest_pid: Pid::new(99_900),
             ..CheckCounters::default()
         };
         let after = CheckCounters {
-            newest_pid: 151,
+            newest_pid: Pid::new(151),
             ..CheckCounters::default()
         };
 
@@ -456,11 +457,11 @@ mod tests {
     #[test]
     fn the_number_after_the_last_is_one_new_process() {
         let before = CheckCounters {
-            newest_pid: 99_998,
+            newest_pid: Pid::new(99_998),
             ..CheckCounters::default()
         };
         let after = CheckCounters {
-            newest_pid: 100,
+            newest_pid: Pid::new(100),
             ..CheckCounters::default()
         };
 
