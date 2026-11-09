@@ -427,6 +427,15 @@ mod tests {
         table_errors: Mutex<VecDeque<MachineError>>,
         /// The process table.
         table: Mutex<Vec<ProcessRow>>,
+        /// The process table after a stated count of events, in place of
+        /// `table`. A test uses it to see when the sampler read the table.
+        tables_at: Mutex<HashMap<usize, Vec<ProcessRow>>>,
+        /// The count of the events that the streams gave.
+        given: AtomicUsize,
+        /// The count of the reads of the process table.
+        table_reads: AtomicUsize,
+        /// The count of the polls that found no event.
+        idle_polls: AtomicUsize,
         /// The argument of each call of `sleep`.
         sleeps: Mutex<Vec<Duration>>,
         /// The count of the streams that the sampler started.
@@ -466,6 +475,7 @@ mod tests {
     impl FaultStream for FakeStream {
         fn next_event(&mut self, _wait: Duration) -> Option<StreamEvent> {
             if let Some(event) = self.events.pop_front() {
+                self.shared.given.fetch_add(1, Ordering::SeqCst);
                 return Some(event);
             }
             if self.stopped.swap(false, Ordering::SeqCst) {
@@ -475,6 +485,7 @@ mod tests {
                 });
             }
             thread::sleep(LOOK);
+            self.shared.idle_polls.fetch_add(1, Ordering::SeqCst);
             None
         }
 
@@ -508,8 +519,13 @@ mod tests {
         }
 
         fn process_table(&self) -> Result<Vec<ProcessRow>, MachineError> {
+            self.shared.table_reads.fetch_add(1, Ordering::SeqCst);
             if let Some(error) = locked(&self.shared.table_errors).pop_front() {
                 return Err(error);
+            }
+            let given = self.shared.given.load(Ordering::SeqCst);
+            if let Some(table) = locked(&self.shared.tables_at).get(&given) {
+                return Ok(table.clone());
             }
             Ok(locked(&self.shared.table).clone())
         }
@@ -599,6 +615,12 @@ mod tests {
         /// States the answers of the reads of the counters.
         fn counters(self, reads: Vec<Result<VmCounters, MachineError>>) -> Self {
             *locked(&self.shared.counters) = reads.into();
+            self
+        }
+
+        /// States the process table that a read gets after `events` events.
+        fn table_after(self, events: usize, table: Vec<ProcessRow>) -> Self {
+            locked(&self.shared.tables_at).insert(events, table);
             self
         }
 
@@ -722,6 +744,49 @@ mod tests {
             }
         );
         assert_eq!(first.observed.swap_window, Duration::from_secs(4));
+    }
+
+    /// `top` prints a sample at the end of its window, and `faulte` learns
+    /// only at the next header that the sample is complete. A process can
+    /// exit in that time, so the table of a sample comes from the moment
+    /// that its own header arrived. A table of one sample later left 42% to
+    /// 51% of the faults of a busy Mac with no row.
+    #[test]
+    fn a_frame_joins_the_table_that_was_read_when_its_sample_arrived() {
+        let rig = Rig::new()
+            .table_after(2, vec![process(200, 1)])
+            .table_after(3, vec![process(300, 1)])
+            .stream(vec![header(10), header(12), finished(14, 12, 7_000)]);
+        let sampler = rig.start();
+
+        let frame = next_frame(&sampler);
+
+        let pids: Vec<u32> = frame
+            .observed
+            .ranking
+            .rows
+            .iter()
+            .map(|row| row.pid.get())
+            .collect();
+        assert_eq!(pids, [200]);
+        assert_eq!(frame.observed.ranking.skipped.exited, 0);
+    }
+
+    /// The first sample of a child holds the counter since each process
+    /// started and makes no frame, so the sampler reads no table for it. This
+    /// tool runs on a Mac that is short of memory.
+    #[test]
+    fn the_first_header_of_a_child_reads_no_table() {
+        let rig = Rig::new().stream(vec![header(10), header(12), finished(14, 12, 7_000)]);
+        let shared = Arc::clone(&rig.shared);
+        let sampler = rig.start();
+
+        let _ = next_frame(&sampler);
+        wait_until("the stream is idle", || {
+            shared.idle_polls.load(Ordering::SeqCst) > 0
+        });
+
+        assert_eq!(shared.table_reads.load(Ordering::SeqCst), 2);
     }
 
     /// Gives the error of a `ps` that failed.
