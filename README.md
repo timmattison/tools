@@ -5213,7 +5213,7 @@ faulte tui
 faulte tui --interval 2s
 ```
 
-The table has the same columns as `faulte`, and the header has the same lines. It shows every process that made at least one fault. The `--limit` flag does not apply, because a limit hides the small rates, and the small rates were the load. `faulte tui` refuses `--limit`. Under the table, a timeline shows the fault rate over the whole history. Each cell of the timeline shows the highest rate of its slice, so a spike stays visible on a narrow terminal. A second row shows the swap traffic. The two rows are separate, because faults and swap are two separate questions.
+The table has the same columns as `faulte`, and the header has the same lines. It shows every process that made at least one fault. The `--limit` flag does not apply, because a limit hides the small rates, and the small rates were the load. `faulte tui` refuses `--limit`. Above the table, a timeline shows the fault rate over the whole history. Each cell of the timeline shows the highest rate of its slice, so a spike stays visible on a narrow terminal. A second row shows the swap traffic. The two rows are separate, because faults and swap are two separate questions.
 
 In this section, a **frame** is the ranking and the memory counters of one sample. A **gap** is a time that the view tried to measure and did not measure. A failed read makes a gap with its reason. A gap has its own glyph on the timeline, and it is never the lowest bar. The view continues after a failed read.
 
@@ -5227,7 +5227,7 @@ The view is one sample behind the clock. A sample is complete when the header of
 | `End` | Return to the live view |
 | `Esc` | Close the detail view. With no detail view open, return to the live view |
 | `↑` or `k`, `↓` or `j` | Select the row above, or the row below |
-| `PageUp`, `PageDown` | Move the selection by one screen |
+| `PageUp`, `PageDown` | Move the selection by one screen. In the detail view, scroll the command line |
 | `w` | Change the span of the table: one frame, 1 m, 5 m, 15 m, the whole history |
 | `Enter` | Open the detail view of the selected process |
 | `q`, `Ctrl-C` | Quit |
