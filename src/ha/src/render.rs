@@ -2389,15 +2389,17 @@ mod tests {
     }
 
     /// The characters of a line that start in the display columns from `from` up
-    /// to `from + count`. A wide glyph counts by its start column.
+    /// to `from + count`. A wide glyph counts by its start column. The column
+    /// of a character is the width of the text before it, because a character
+    /// can change the width of the one before it: `\u{FE0F}` makes `\u{2601}`
+    /// two columns wide.
     fn columns(line: &str, from: usize, count: usize) -> String {
-        let mut column = 0;
         let mut cells = String::new();
-        for glyph in line.chars() {
+        for (index, glyph) in line.char_indices() {
+            let column = display_width(line.split_at(index).0);
             if (from..from + count).contains(&column) {
                 cells.push(glyph);
             }
-            column += unicode_width::UnicodeWidthChar::width(glyph).unwrap_or(0);
         }
         cells
     }

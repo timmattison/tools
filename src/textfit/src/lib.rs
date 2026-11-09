@@ -10,9 +10,14 @@
 //! a string holds characters. The two counts differ: `日` is one character and
 //! two columns, a combining accent is one character and no columns, and a byte
 //! is neither. So every function here spends the budget in columns, and it
-//! walks the string by character. That is also why none of them can index the
-//! string by byte. `&s[..n]` panics the moment `n` lands inside a character,
-//! and a process name or a branch name carries such characters.
+//! walks the string by grapheme cluster. A cluster is what a reader sees as one
+//! symbol. An emoji with a variation selector, for example `☁️`, is two columns,
+//! but its two characters add up to one column. A walk by character would
+//! count one column and overrun the budget. Each function measures a whole
+//! cluster with `UnicodeWidthStr`, as ratatui does, and never splits one.
+//! That is also why none of them can index the string by byte. `&s[..n]`
+//! panics the moment `n` lands inside a character, and a process name or a
+//! branch name carries such characters.
 //!
 //! # Why the answers stand in one crate
 //!
@@ -27,7 +32,7 @@
 //! input and they part company at the edges, which is where the whole of the
 //! correctness sits: the budget of no columns, the budget of one column that
 //! the marker alone fills, the wide character that straddles the last column,
-//! and the character of no width that lets two walks over one string pass each
+//! and the cluster of no width that lets two walks over one string pass each
 //! other. A test that notices such a difference is the test that fails once a
 //! year.
 //!
@@ -42,13 +47,51 @@
 //! empty string.
 
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 /// The marker that stands where characters were removed.
 const ELLIPSIS: char = '…';
 
 /// The number of columns [`ELLIPSIS`] occupies.
 const ELLIPSIS_WIDTH: usize = 1;
+
+/// Split `s` into grapheme clusters, each with its width in columns.
+///
+/// This is the one walk that every `truncate_*` function uses. The width of a
+/// cluster comes from `UnicodeWidthStr`, not from the sum of its characters,
+/// because `☁️` is two columns and its two characters add up to one.
+fn clusters(s: &str) -> Vec<(&str, usize)> {
+    s.graphemes(true)
+        .map(|cluster| (cluster, UnicodeWidthStr::width(cluster)))
+        .collect()
+}
+
+/// The number of leading clusters whose widths fit in `budget` columns.
+fn head_len(clusters: &[(&str, usize)], budget: usize) -> usize {
+    let mut spent = 0_usize;
+    for (i, &(_, width)) in clusters.iter().enumerate() {
+        if spent + width > budget {
+            return i;
+        }
+        spent += width;
+    }
+    clusters.len()
+}
+
+/// The index of the first trailing cluster in the longest tail whose widths fit
+/// in `budget` columns.
+fn tail_start(clusters: &[(&str, usize)], budget: usize) -> usize {
+    let mut spent = 0_usize;
+    let mut start = clusters.len();
+    for (i, &(_, width)) in clusters.iter().enumerate().rev() {
+        if spent + width > budget {
+            break;
+        }
+        spent += width;
+        start = i;
+    }
+    start
+}
 
 /// Pad `s` on the right with spaces until its display width reaches `width`.
 ///
@@ -81,16 +124,11 @@ pub fn truncate_right(s: &str, max_width: usize) -> String {
         return s.to_string();
     }
     let target = max_width.saturating_sub(ELLIPSIS_WIDTH);
-    let mut acc = 0_usize;
-    let mut result = String::new();
-    for c in s.chars() {
-        let cw = UnicodeWidthChar::width(c).unwrap_or(0);
-        if acc + cw > target {
-            break;
-        }
-        acc += cw;
-        result.push(c);
-    }
+    let parts = clusters(s);
+    let mut result: String = parts[..head_len(&parts, target)]
+        .iter()
+        .map(|&(cluster, _)| cluster)
+        .collect();
     result.push(ELLIPSIS);
     result
 }
@@ -110,21 +148,13 @@ pub fn truncate_left(s: &str, max_width: usize) -> String {
         return s.to_string();
     }
     let target = max_width.saturating_sub(ELLIPSIS_WIDTH);
-    let chars: Vec<char> = s.chars().collect();
-    let mut acc = 0_usize;
-    let mut start = chars.len();
-    for (i, c) in chars.iter().enumerate().rev() {
-        let cw = UnicodeWidthChar::width(*c).unwrap_or(0);
-        if acc + cw > target {
-            break;
-        }
-        acc += cw;
-        start = i;
-    }
+    let parts = clusters(s);
     let mut result = String::from(ELLIPSIS);
-    for c in &chars[start..] {
-        result.push(*c);
-    }
+    result.extend(
+        parts[tail_start(&parts, target)..]
+            .iter()
+            .map(|&(cluster, _)| cluster),
+    );
     result
 }
 
@@ -147,34 +177,18 @@ pub fn truncate_middle(s: &str, max_width: usize) -> String {
     let head_budget = keep.div_ceil(2);
     let tail_budget = keep - head_budget;
 
-    let mut head = String::new();
-    let mut spent = 0_usize;
-    for c in s.chars() {
-        let cw = UnicodeWidthChar::width(c).unwrap_or(0);
-        if spent + cw > head_budget {
-            break;
-        }
-        spent += cw;
-        head.push(c);
-    }
-    let chars: Vec<char> = s.chars().collect();
-    let mut tail_start = chars.len();
-    let mut spent = 0_usize;
-    for (i, c) in chars.iter().enumerate().rev() {
-        let cw = UnicodeWidthChar::width(*c).unwrap_or(0);
-        if spent + cw > tail_budget {
-            break;
-        }
-        spent += cw;
-        tail_start = i;
-    }
-    // Zero-width characters cost nothing, so both walks can run past each
+    let parts = clusters(s);
+    let head_end = head_len(&parts, head_budget);
+    // Clusters of no width cost nothing, so both walks can run past each
     // other and duplicate the middle. Keep the halves disjoint.
-    let tail_start = tail_start.max(head.chars().count());
+    let tail_begin = tail_start(&parts, tail_budget).max(head_end);
 
-    let mut result = head;
+    let mut result: String = parts[..head_end]
+        .iter()
+        .map(|&(cluster, _)| cluster)
+        .collect();
     result.push(ELLIPSIS);
-    result.extend(&chars[tail_start..]);
+    result.extend(parts[tail_begin..].iter().map(|&(cluster, _)| cluster));
     result
 }
 
@@ -365,7 +379,10 @@ mod tests {
             truncate_left_to_budget(name, 19),
             "\u{2026}\u{2601}\u{FE0F} staging env (2)"
         );
-        assert_eq!(truncate_left_to_budget(name, 18), "\u{2026} staging env (2)");
+        assert_eq!(
+            truncate_left_to_budget(name, 18),
+            "\u{2026} staging env (2)"
+        );
     }
 
     #[test]
