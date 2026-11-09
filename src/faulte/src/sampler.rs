@@ -5,6 +5,12 @@
 //! [`Update`] values over a bounded channel. The view never waits for a
 //! source, because a `ps` can run for seconds and the view must answer a key
 //! at once.
+//!
+//! The sampler reads the other sources when the header of a sample arrives,
+//! and joins them one header later, when the sample is complete. A process can
+//! exit between those two moments, and a table that came later has no row for
+//! it. On 2026-11-08, a table of one sample later left 42% to 51% of the
+//! faults of this Mac with no row.
 
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,7 +22,7 @@ use std::time::{Duration, SystemTime};
 use crate::duration::Span;
 use crate::history::{Gap, SampledFrame, Update};
 use crate::machine::{
-    join_sources, read_sources, sample_window, Machine, MachineError, SampleFacts,
+    join_sources, read_sources, sample_window, Machine, MachineError, SampleFacts, Sources,
 };
 use crate::pid::Pid;
 use crate::stream::{FaultStream, Stopper, StreamEvent, TimedSample};
@@ -120,6 +126,10 @@ impl Drop for Sampler {
 /// error.
 type CounterRead = Result<VmCounters, String>;
 
+/// The result of a read of the other sources: what they said, or the text of
+/// the error.
+type SourceRead = Result<Sources, String>;
+
 /// What the sampler thread owns.
 struct Run<M> {
     /// The machine that the thread reads.
@@ -191,6 +201,7 @@ impl<M: Machine> Run<M> {
     /// Reads one stream until it ends or the channel closes.
     fn read(&self, mut stream: Box<dyn FaultStream>, ledger: &mut Ledger) -> Flow {
         let mut reads: [Option<CounterRead>; 2] = [None, None];
+        let mut sources: Option<SourceRead> = None;
         let mut first_header = true;
         loop {
             let Some(event) = stream.next_event(POLL) else {
@@ -201,19 +212,28 @@ impl<M: Machine> Run<M> {
             };
             let delivered = match event {
                 StreamEvent::Header { at, finished } => {
-                    let waited = std::mem::replace(&mut first_header, false)
-                        && ledger.covered_until.is_some();
+                    let first = std::mem::replace(&mut first_header, false);
+                    let waited = first && ledger.covered_until.is_some();
                     let restart_sent =
                         !waited || self.send_gap(ledger, at, RESTART_REASON.to_owned());
                     let before = reads.clone();
                     reads = [reads[1].take(), Some(self.read_counters())];
-                    restart_sent
-                        && match (finished, before) {
-                            (Some(sample), [Some(older), Some(newer)]) => {
-                                self.send_sample(&sample, older, newer, ledger)
+                    let sent = restart_sent
+                        && match (finished, before, sources.take()) {
+                            (Some(sample), [Some(older), Some(newer)], Some(read)) => {
+                                self.send_sample(&sample, older, newer, read, ledger)
                             }
                             _ => true,
-                        }
+                        };
+                    // The rows of the sample of this header are in the pipe
+                    // now, so this read is the closest to that sample. It
+                    // comes after the send, because it is the slow one. The
+                    // first sample of a child makes no frame and needs no
+                    // read.
+                    if sent && !first {
+                        sources = Some(self.read_sources());
+                    }
+                    sent
                 }
                 StreamEvent::Refused { at, reason } => self.send_gap(ledger, at, reason),
                 StreamEvent::Ended { at, reason } => {
@@ -237,6 +257,11 @@ impl<M: Machine> Run<M> {
             .map_err(|error: MachineError| error.to_string())
     }
 
+    /// Reads every source other than the sample.
+    fn read_sources(&self) -> SourceRead {
+        read_sources(&self.machine).map_err(|error: MachineError| error.to_string())
+    }
+
     /// Makes the frame of `sample`, or a gap with the reason that it failed.
     /// Gives `false` when the view dropped the channel.
     fn send_sample(
@@ -244,6 +269,7 @@ impl<M: Machine> Run<M> {
         sample: &TimedSample,
         older: CounterRead,
         newer: CounterRead,
+        sources: SourceRead,
         ledger: &mut Ledger,
     ) -> bool {
         let outcome = older.and_then(|before| {
@@ -256,9 +282,7 @@ impl<M: Machine> Run<M> {
                     after,
                     swap_window: sample.wall,
                 };
-                read_sources(&self.machine)
-                    .map(|sources| join_sources(&self.machine, &facts, sources))
-                    .map_err(|error| error.to_string())
+                sources.map(|sources| join_sources(&self.machine, &facts, sources))
             })
         });
         match outcome {
