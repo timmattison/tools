@@ -34,6 +34,10 @@ const CANCEL_TITLE: &str = " Cancel run? ";
 const CANCEL_JOB_NOTE: &str = "GitHub cannot cancel one job. y cancels every job of this run.";
 /// The key that cancels the run.
 const CANCEL_KEY: &str = "y cancel the run";
+/// The verb of a cancel, in the base form.
+const CANCEL_VERB: &str = "cancel";
+/// The verb of a re-run, in the base form.
+const RERUN_VERB: &str = "re-run";
 
 /// The title in the top border of the box of a workflow re-run.
 const RERUN_WORKFLOW_TITLE: &str = " Re-run workflow? ";
@@ -141,8 +145,8 @@ impl Action {
     /// The verb of the action in the base form.
     fn verb(&self) -> &'static str {
         match self {
-            Action::Cancel { .. } => "cancel",
-            Action::RerunWorkflow | Action::RerunJob { .. } => "re-run",
+            Action::Cancel { .. } => CANCEL_VERB,
+            Action::RerunWorkflow | Action::RerunJob { .. } => RERUN_VERB,
         }
     }
 
@@ -178,8 +182,8 @@ impl Request {
     /// The verb of the request in the base form.
     fn verb(self) -> &'static str {
         match self {
-            Request::Cancel => "cancel",
-            Request::Rerun => "re-run",
+            Request::Cancel => CANCEL_VERB,
+            Request::Rerun => RERUN_VERB,
         }
     }
 
