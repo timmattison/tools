@@ -6818,7 +6818,7 @@ mod tests {
     const ROOM_OF_3_NAME: &str = "abcdefghijklmnopqrstuv";
 
     #[test]
-    fn a_short_runner_name_that_fits_shows_in_fewer_than_4_columns() {
+    fn a_short_runner_name_that_fits_shows_whole_in_a_room_of_3_columns() {
         // A name that fits whole shows in a room of 3.
         let (buffer, row, y) = lone_job_row(on("mbp", passed_job(ROOM_OF_3_NAME)), 129);
         assert_eq!(
