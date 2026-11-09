@@ -6969,14 +6969,30 @@ mod tests {
         assert_eq!(widths.repo + 1 + widths.workflow, 9);
         let width = u16::try_from(width).expect("a small width");
         let cases = [
-            ("a".to_owned(), "└ a".to_owned()),
-            ("n".repeat(40), format!("└ {}…", "n".repeat(6))),
+            (
+                "GitHub Actions 1000001050",
+                "a".to_owned(),
+                "└ a".to_owned(),
+            ),
+            (
+                "GitHub Actions 1000001050",
+                "n".repeat(40),
+                format!("└ {}…", "n".repeat(6)),
+            ),
+            ("m1-tsx", "n".repeat(40), format!("└ {}…", "n".repeat(6))),
         ];
-        for (job, text) in cases {
-            let (buffer, row, y) =
-                lone_job_row(on("GitHub Actions 1000001050", passed_job(&job)), width);
-            assert_eq!(columns(&row, 3, 9).trim_end(), text, "job {job}");
-            assert_eq!(cyan_columns(&buffer, y).len(), 0, "job {job}");
+        for (runner, job, text) in cases {
+            let (buffer, row, y) = lone_job_row(on(runner, passed_job(&job)), width);
+            assert_eq!(
+                columns(&row, 3, 9).trim_end(),
+                text,
+                "runner {runner} job {job}"
+            );
+            assert_eq!(
+                cyan_columns(&buffer, y).len(),
+                0,
+                "runner {runner} job {job}"
+            );
         }
     }
 
