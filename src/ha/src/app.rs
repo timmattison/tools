@@ -2851,10 +2851,12 @@ mod tests {
         assert_eq!(*canceller.cancels.borrow(), vec![(repo(), RunId(1))]);
     }
 
-    /// Runs the keys `c` and then `other` on a board of two runs, and returns
+    /// Runs the key `c` and then `keys` on a board of two runs, and returns
     /// the result, the last frame, the cancels, and the addresses opened.
+    /// The caller gives every key after `c`. The helper adds no key, so the
+    /// last frame shows the result of the last key of `keys`.
     fn answer_the_box_with(
-        other: Event,
+        keys: Vec<Event>,
     ) -> (Result<(), RunError>, Vec<String>, usize, Vec<String>) {
         let channels = channels();
         send_runs(&channels, vec![active_run(1, 5), active_run(2, 30)]);
@@ -2865,7 +2867,7 @@ mod tests {
             &opener,
             &canceller,
             &channels,
-            vec![press(KeyCode::Char('c')), other, press(KeyCode::Enter)],
+            [vec![press(KeyCode::Char('c'))], keys].concat(),
         );
         let cancels = canceller.cancels.borrow().len();
         let urls = opener.urls.borrow().clone();
@@ -2884,7 +2886,7 @@ mod tests {
             press(KeyCode::PageUp),
         ];
         for other in others {
-            let (result, frame, cancels, _) = answer_the_box_with(other.clone());
+            let (result, frame, cancels, _) = answer_the_box_with(vec![other.clone()]);
             // The loop did not quit: it read the last key, then the script ended.
             assert_eq!(result.unwrap_err().to_string(), "script ended", "{other:?}");
             assert_eq!(cancels, 0, "{other:?}");
@@ -2895,13 +2897,16 @@ mod tests {
     #[test]
     fn enter_with_the_box_open_opens_nothing_and_down_does_not_move_the_highlight() {
         // After `c` and Enter, the Enter that follows opens the first row.
-        let (_, _, _, urls) = answer_the_box_with(press(KeyCode::Enter));
+        let (_, _, _, urls) =
+            answer_the_box_with(vec![press(KeyCode::Enter), press(KeyCode::Enter)]);
         assert_eq!(urls, ["https://example.test/runs/2"]);
         // After `c` and Down, the Enter that follows opens the first row too.
-        let (_, _, _, urls) = answer_the_box_with(press(KeyCode::Down));
+        let (_, _, _, urls) =
+            answer_the_box_with(vec![press(KeyCode::Down), press(KeyCode::Enter)]);
         assert_eq!(urls, ["https://example.test/runs/2"]);
         // After `c` and Page Down, the Enter that follows opens the first row too.
-        let (_, _, _, urls) = answer_the_box_with(press(KeyCode::PageDown));
+        let (_, _, _, urls) =
+            answer_the_box_with(vec![press(KeyCode::PageDown), press(KeyCode::Enter)]);
         assert_eq!(urls, ["https://example.test/runs/2"]);
     }
 
@@ -3650,7 +3655,7 @@ mod tests {
             &opener(false),
             &canceller,
             &channels,
-            vec![shift_r(), other, press(KeyCode::Enter)],
+            vec![shift_r(), other],
         );
         let reruns = canceller.reruns.borrow().len();
         (result, frame, reruns)
