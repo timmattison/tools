@@ -409,6 +409,9 @@ fn newest_pid() -> Result<Pid, MachineError> {
 
 impl CheckSource for Mac {
     fn counters(&self) -> Result<CheckCounters, MachineError> {
+        // The process starts first, thus the read of the clock in `Sampler`
+        // comes directly after the reads of the kernel.
+        let newest_pid = newest_pid()?;
         let statistics = read_vm_statistics()?;
         // The kernel orders the array as `CPU_STATE_USER`, `CPU_STATE_SYSTEM`,
         // `CPU_STATE_IDLE`, and `CPU_STATE_NICE`.
@@ -420,7 +423,7 @@ impl CheckSource for Mac {
             idle_ticks,
             compressions: statistics.compressions,
             decompressions: statistics.decompressions,
-            newest_pid: newest_pid()?,
+            newest_pid,
         })
     }
 
