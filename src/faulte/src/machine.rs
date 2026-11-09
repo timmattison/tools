@@ -290,7 +290,8 @@ pub fn observe(machine: &dyn Machine, interval: Span) -> Result<Observed, Machin
     let (sample, wall) = machine.sample_faults(interval)?;
     let after = machine.vm_counters()?;
     let swap_window = started.elapsed();
-    join_sources(
+    let sources = read_sources(machine)?;
+    Ok(join_sources(
         machine,
         &SampleFacts {
             interval,
@@ -300,11 +301,13 @@ pub fn observe(machine: &dyn Machine, interval: Span) -> Result<Observed, Machin
             after,
             swap_window,
         },
-    )
+        sources,
+    ))
 }
 
 /// What one sample of faults and the two reads of the counters around it
-/// state. [`join_sources`] reads every other source and joins them to these.
+/// state. [`read_sources`] reads every other source, and [`join_sources`]
+/// joins them to these.
 #[derive(Debug, Clone, Copy)]
 pub struct SampleFacts<'a> {
     /// The interval that the person asked for.
@@ -321,11 +324,28 @@ pub struct SampleFacts<'a> {
     pub swap_window: Duration,
 }
 
-/// Reads every source that is not a sample and joins it to `facts`.
+/// What every source other than the sample says at one moment.
 ///
-/// This is the one join of the sources. [`observe`] calls it after its own
-/// sample, and a run that reads a stream of samples calls it for each sample,
-/// so the two never rank in different ways.
+/// [`read_sources`] makes this value and [`join_sources`] uses it. The two are
+/// separate because the read must come right after the sample, and a stream
+/// knows only one sample later that the sample is complete.
+#[derive(Debug, Clone)]
+pub struct Sources {
+    /// The swap file of this Mac, and how much of it is in use.
+    usage: SwapUsage,
+    /// The process table.
+    table: Vec<ProcessRow>,
+    /// The Claude Code role of each process that has one.
+    claude: HashMap<Pid, ClaudeRole>,
+    /// The account that runs `faulte`.
+    viewer: Viewer,
+    /// The time of the read. The idle time of a session is measured from it.
+    now: SystemTime,
+    /// The registry record of each Claude Code process that the viewer reads.
+    records: HashMap<Pid, SessionRecord>,
+}
+
+/// Reads every source that is not a sample.
 ///
 /// The order of the reads is the design. The swap file comes first, then the
 /// process table, because a process that the sampler saw is still in the table
@@ -334,16 +354,38 @@ pub struct SampleFacts<'a> {
 /// # Errors
 ///
 /// Gives the error of the first source that failed.
-pub fn join_sources(
-    machine: &dyn Machine,
-    facts: &SampleFacts<'_>,
-) -> Result<Observed, MachineError> {
+pub fn read_sources(machine: &dyn Machine) -> Result<Sources, MachineError> {
     let usage = machine.swap_usage()?;
     let table = machine.process_table()?;
     let claude = machine.claude_roles();
     let viewer = machine.viewer();
     let now = machine.now();
     let records = records_of(machine, &table, &claude, viewer);
+    Ok(Sources {
+        usage,
+        table,
+        claude,
+        viewer,
+        now,
+        records,
+    })
+}
+
+/// Joins `sources` to `facts` and ranks the result.
+///
+/// This is the one join of the sources. [`observe`] calls it after its own
+/// sample, and a run that reads a stream of samples calls it for each sample,
+/// so the two never rank in different ways.
+#[must_use]
+pub fn join_sources(machine: &dyn Machine, facts: &SampleFacts<'_>, sources: Sources) -> Observed {
+    let Sources {
+        usage,
+        table,
+        claude,
+        viewer,
+        now,
+        records,
+    } = sources;
     let ranking = rank(&Observation {
         window: facts.window,
         faults: facts.faults,
@@ -354,7 +396,7 @@ pub fn join_sources(
         now,
     });
     let accounts = accounts_of(machine, &ranking);
-    Ok(Observed {
+    Observed {
         ranking,
         table,
         swap: VmDelta::between(facts.before, facts.after),
@@ -366,7 +408,7 @@ pub fn join_sources(
         accounts,
         now,
         interval: facts.interval,
-    })
+    }
 }
 
 /// Reads the name of each account that owns a row of `ranking`.

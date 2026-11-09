@@ -15,7 +15,9 @@ use std::time::{Duration, SystemTime};
 
 use crate::duration::Span;
 use crate::history::{Gap, SampledFrame, Update};
-use crate::machine::{join_sources, sample_window, Machine, MachineError, SampleFacts};
+use crate::machine::{
+    join_sources, read_sources, sample_window, Machine, MachineError, SampleFacts,
+};
 use crate::pid::Pid;
 use crate::stream::{FaultStream, Stopper, StreamEvent, TimedSample};
 use crate::table::ProcessRow;
@@ -254,7 +256,9 @@ impl<M: Machine> Run<M> {
                     after,
                     swap_window: sample.wall,
                 };
-                join_sources(&self.machine, &facts).map_err(|error| error.to_string())
+                read_sources(&self.machine)
+                    .map(|sources| join_sources(&self.machine, &facts, sources))
+                    .map_err(|error| error.to_string())
             })
         });
         match outcome {

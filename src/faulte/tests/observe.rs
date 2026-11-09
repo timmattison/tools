@@ -11,7 +11,9 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use faulte::duration::Span;
-use faulte::machine::{join_sources, observe, Machine, MachineError, SampleFacts, Signal};
+use faulte::machine::{
+    join_sources, observe, read_sources, Machine, MachineError, SampleFacts, Signal,
+};
 use faulte::pid::{Pid, Uid};
 use faulte::ranking::{ClaudeRole, ClaudeView, Viewer};
 use faulte::state::SessionState;
@@ -459,7 +461,8 @@ fn the_join_ranks_the_facts_that_the_caller_states() {
         swap_window: Duration::from_secs(9),
     };
 
-    let observed = join_sources(&machine, &facts).expect("every source answers");
+    let sources = read_sources(&machine).expect("every source answers");
+    let observed = join_sources(&machine, &facts, sources);
 
     assert_eq!(observed.ranking.window, Duration::from_secs(7));
     assert_eq!(observed.swap_window, Duration::from_secs(9));
