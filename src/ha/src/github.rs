@@ -1826,12 +1826,24 @@ fn parse_response(text: &str) -> Option<Response> {
     })
 }
 
+/// The answers of GitHub that the tests of more than one module give to a
+/// fake `gh`.
+#[cfg(test)]
+pub(crate) mod test_answers {
+    /// The answer of GitHub for a cancel that it accepted.
+    pub(crate) const ACCEPTED: &str = "HTTP/2.0 202 Accepted\nContent-Type: application/json; charset=utf-8\r\nX-Ratelimit-Limit: 5000\r\nX-Ratelimit-Remaining: 4999\r\nX-Ratelimit-Reset: 1791977652\r\n\r\n{}";
+
+    /// The answer of GitHub for a re-run that it created.
+    pub(crate) const CREATED: &str = "HTTP/2.0 201 Created\nContent-Type: application/json; charset=utf-8\r\nX-Ratelimit-Limit: 5000\r\nX-Ratelimit-Remaining: 4999\r\nX-Ratelimit-Reset: 1791977652\r\n\r\n{}";
+}
+
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use tempfile::TempDir;
 
+    use super::test_answers::{ACCEPTED, CREATED};
     use super::*;
     use crate::billing::EnterpriseSlug;
 
@@ -4149,9 +4161,6 @@ mod tests {
         );
     }
 
-    /// The answer of GitHub for a cancel that it accepted.
-    const ACCEPTED: &str = "HTTP/2.0 202 Accepted\nContent-Type: application/json; charset=utf-8\r\nX-Ratelimit-Limit: 5000\r\nX-Ratelimit-Remaining: 4999\r\nX-Ratelimit-Reset: 1791977652\r\n\r\n{}";
-
     /// Runs `cancel_run` against a stub that prints `answer` and exits with `exit`.
     fn cancel_with(answer: &str, exit: u8) -> Result<(), SourceError> {
         let stub = Stub::new(&format!("cat \"$dir/cancel.out\"; exit {exit}"));
@@ -4227,9 +4236,6 @@ mod tests {
             .iter()
             .any(|arg| arg.starts_with("If-None-Match: ")));
     }
-
-    /// The answer of GitHub for a re-run that it created.
-    const CREATED: &str = "HTTP/2.0 201 Created\nContent-Type: application/json; charset=utf-8\r\nX-Ratelimit-Limit: 5000\r\nX-Ratelimit-Remaining: 4999\r\nX-Ratelimit-Reset: 1791977652\r\n\r\n{}";
 
     #[test]
     fn rerun_run_posts_to_the_rerun_path_of_the_run() {

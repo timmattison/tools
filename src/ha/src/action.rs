@@ -371,18 +371,13 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::github::test_answers::{ACCEPTED, CREATED};
 
     /// A time limit that no stub that finishes comes near.
     const GENEROUS_LIMIT: Duration = Duration::from_secs(60);
 
     /// How long a test waits for an outcome before it fails.
     const OUTCOME_DEADLINE: Duration = Duration::from_secs(60);
-
-    /// The answer of GitHub for a cancel that it accepted.
-    const ACCEPTED: &str = "HTTP/2.0 202 Accepted\nContent-Type: application/json; charset=utf-8\r\nX-Ratelimit-Limit: 5000\r\nX-Ratelimit-Remaining: 4999\r\nX-Ratelimit-Reset: 1791977652\r\n\r\n{}";
-
-    /// The answer of GitHub for a re-run that it created.
-    const CREATED: &str = "HTTP/2.0 201 Created\nContent-Type: application/json; charset=utf-8\r\nX-Ratelimit-Limit: 5000\r\nX-Ratelimit-Remaining: 4999\r\nX-Ratelimit-Reset: 1791977652\r\n\r\n{}";
 
     /// The answer of GitHub for a run that finished.
     const CONFLICT: &str = "HTTP/2.0 409 Conflict\nContent-Type: application/json\r\n\r\n{\"message\":\"Cannot cancel a workflow run that is completed.\"}";
