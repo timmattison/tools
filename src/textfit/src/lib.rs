@@ -41,6 +41,7 @@
 //! caller that can be handed a zero calls one of those instead, and gets an
 //! empty string.
 
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// The marker that stands where characters were removed.
@@ -350,6 +351,96 @@ mod tests {
         assert_eq!(truncate_left_to_budget("🎉🎊🎁🎈🎂", 4), "…🎂");
         assert_eq!(truncate_left_to_budget("café au lait", 10), "…é au lait");
         assert_eq!(truncate_left_to_budget("café au lait", 8), "…au lait");
+    }
+
+    #[test]
+    fn a_variation_selector_emoji_is_two_columns() {
+        assert_eq!(UnicodeWidthStr::width("\u{2601}\u{FE0F}"), 2);
+    }
+
+    #[test]
+    fn truncate_left_counts_an_emoji_with_a_variation_selector_as_two_columns() {
+        let name = "Deploy \u{2601}\u{FE0F} staging env (2)";
+        assert_eq!(
+            truncate_left_to_budget(name, 19),
+            "\u{2026}\u{2601}\u{FE0F} staging env (2)"
+        );
+        assert_eq!(truncate_left_to_budget(name, 18), "\u{2026} staging env (2)");
+    }
+
+    #[test]
+    fn truncate_right_counts_an_emoji_with_a_variation_selector_as_two_columns() {
+        let text = "\u{2601}\u{FE0F} cloud";
+        assert_eq!(truncate_right(text, 3), "\u{2601}\u{FE0F}\u{2026}");
+        assert_eq!(truncate_right(text, 2), "\u{2026}");
+    }
+
+    #[test]
+    fn truncate_middle_counts_an_emoji_with_a_variation_selector_as_two_columns() {
+        // `ab`, a cloud of two columns, and `cdefg` make 9 columns.
+        let text = "ab\u{2601}\u{FE0F}cdefg";
+        // A budget of 6 keeps 5 columns. The head gets 3 and holds `ab`,
+        // because the cloud would make 4. The tail gets 2 and holds `fg`.
+        assert_eq!(truncate_middle(text, 6), "ab\u{2026}fg");
+        // A budget of 7 keeps 6 columns. The head gets 3 and the tail gets 3.
+        assert_eq!(truncate_middle(text, 7), "ab\u{2026}efg");
+        // A budget of 8 keeps 7 columns. The head gets 4 and holds `ab` and
+        // the cloud. The tail gets 3.
+        assert_eq!(truncate_middle(text, 8), "ab\u{2601}\u{FE0F}\u{2026}efg");
+    }
+
+    #[test]
+    fn every_cut_stays_in_budget_and_keeps_whole_grapheme_clusters() {
+        for text in [
+            "Deploy \u{2601}\u{FE0F} staging env (2)",
+            "\u{2764}\u{FE0F}\u{2764}\u{FE0F}\u{2764}\u{FE0F} love",
+            "1\u{FE0F}\u{20E3}2\u{FE0F}\u{20E3}3\u{FE0F}\u{20E3} keys",
+            "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467} family",
+            "\u{1F44D}\u{1F3FD} ok",
+            "\u{1F1EF}\u{1F1F5}\u{1F1FA}\u{1F1F8} flags",
+            "cafe\u{301} au lait",
+        ] {
+            let clusters: Vec<&str> = text.graphemes(true).collect();
+            let width = UnicodeWidthStr::width(text);
+            for budget in 0..=width + 2 {
+                let right = truncate_to_budget(text, budget);
+                let left = truncate_left_to_budget(text, budget);
+                let middle = truncate_middle(text, budget);
+                for (kind, cut) in [("right", &right), ("left", &left), ("middle", &middle)] {
+                    assert!(
+                        UnicodeWidthStr::width(cut.as_str()) <= budget,
+                        "{kind} cut of {text:?} at {budget} gave {cut:?}"
+                    );
+                }
+                if right != text {
+                    let kept = right.strip_suffix(ELLIPSIS).unwrap_or(&right);
+                    let kept: Vec<&str> = kept.graphemes(true).collect();
+                    assert!(
+                        clusters.starts_with(&kept),
+                        "right cut of {text:?} at {budget} gave {right:?}"
+                    );
+                }
+                if left != text {
+                    let kept = left.strip_prefix(ELLIPSIS).unwrap_or(&left);
+                    let kept: Vec<&str> = kept.graphemes(true).collect();
+                    assert!(
+                        clusters.ends_with(&kept),
+                        "left cut of {text:?} at {budget} gave {left:?}"
+                    );
+                }
+                if middle != text && !middle.is_empty() {
+                    let (head, tail) = middle
+                        .split_once(ELLIPSIS)
+                        .unwrap_or_else(|| panic!("middle cut {middle:?} has no marker"));
+                    let head: Vec<&str> = head.graphemes(true).collect();
+                    let tail: Vec<&str> = tail.graphemes(true).collect();
+                    assert!(
+                        clusters.starts_with(&head) && clusters.ends_with(&tail),
+                        "middle cut of {text:?} at {budget} gave {middle:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

@@ -8402,6 +8402,7 @@ dependencies = [
 name = "textfit"
 version = "0.1.0"
 dependencies = [
+ "unicode-segmentation",
  "unicode-width",
 ]
 

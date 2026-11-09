@@ -7084,14 +7084,15 @@ mod tests {
     /// and runner, and the test draws one frame for each width.
     #[test]
     fn job_rows_keep_the_id_and_the_end_cells_in_the_run_columns_at_every_width() {
-        // The old one-job frame had 14 rows. The 14 jobs after the first make
-        // room for all 15 job rows, so the footer still shows.
-        const HEIGHT: u16 = 28;
+        // The old one-job frame had 14 rows. Each job after the first adds one
+        // row, so the footer still shows. The height follows the job count.
+        const ONE_JOB_ROWS: usize = 14;
         const FIRST_ID: u64 = 900_000_000_101;
         let names = [
             "Full check list (Mac 22) and a long name after it",
             "日本語のジョブ名テスト一覧表示確認",
             "🎉🎊🎁🎈🎂🎉🎊🎁🎈🎂🎉🎊🎁🎈",
+            "Deploy ☁\u{FE0F} staging env (2)",
         ];
         let runners = [
             None,
@@ -7119,9 +7120,10 @@ mod tests {
                 cases.push((id, name, runner));
             }
         }
+        let height = u16::try_from(ONE_JOB_ROWS + jobs.len() - 1).unwrap();
         for width in 0_u16..=200 {
             let mut board = board_with_jobs(jobs.clone());
-            let buffer = render_with(width, HEIGHT, &mut board, &loaded());
+            let buffer = render_with(width, height, &mut board, &loaded());
             if usize::from(width) < FIXED_COLUMNS {
                 continue;
             }
