@@ -2386,7 +2386,8 @@ cannot hang the caller. Used by `cwt` and `ha`.
          runner name shows as its floor. The job name gets the other columns. It keeps its end and
          starts with `…`, for example `…e-remotesensing (2) m1-ts`. Thus the part that divides the
          jobs of a matrix stays.
-      4. In a narrower cell, the text keeps its start and ends in `…`, and no runner name shows.
+      4. In a narrower cell, the text keeps its start, and no runner name shows. The text ends in `…`
+         only when it is wider than the cell.
 
       A job with no runner keeps the start of its text. On a highlighted job row, the runner name
       stays cyan, also its `…`.
