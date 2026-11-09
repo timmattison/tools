@@ -36,23 +36,26 @@ use crate::render;
 /// a problem.
 ///
 /// At 30%, more than 4 of the 14 cores of this Mac run kernel code. The bad
-/// samples of 2026-11-08 were between 44% and 66%. No sample of a quiet period
-/// set this limit, thus a future measurement can change it.
+/// samples of the two states in the module header were between 42% and 66%. No
+/// sample of a quiet period set this limit, thus a future measurement can
+/// change it.
 pub const SYSTEM_PERCENT_LIMIT: f64 = 30.0;
 
 /// The rate of compressions, and of decompressions, at which the compressor
 /// churns, in pages each second.
 ///
-/// On 2026-11-08, the bad samples of this Mac were between 151,721 and 290,697
-/// compressions each second, and the mean over 10.9 days was 13,145. This limit
-/// is about 4 times that mean and one third of the lowest bad sample. No sample
-/// of a quiet period set this limit, thus a future measurement can change it.
+/// On 2026-11-08, the samples of the state with 32 GB in the compressor were
+/// between 151,721 and 290,697 compressions each second, and the mean over
+/// 10.9 days was 13,145. This limit is about 4 times that mean and one third of
+/// the lowest of those samples. No sample of a quiet period set this limit,
+/// thus a future measurement can change it.
 pub const CHURN_LIMIT_PER_SECOND: f64 = 50_000.0;
 
-/// The rate of new processes at which process creation is a cause of system
-/// time, in processes each second.
+/// The rate of new processes at which the check reports process churn, in
+/// processes each second.
 ///
-/// On 2026-11-08, the bad samples of this Mac were between 193 and 490 new
+/// On 2026-11-08, the rate of new processes was high at the same time as the
+/// system time. The bad samples of this Mac were between 193 and 490 new
 /// processes each second. This limit is about three quarters of the lowest bad
 /// sample. No sample of a quiet period set this limit, thus a future
 /// measurement can change it.
@@ -699,7 +702,7 @@ mod tests {
     }
 
     /// Counters with `compressions` and the same value for decompressions, and
-    /// one second of system time for each compression.
+    /// one tick of system time for each compression.
     fn counters(compressions: u64) -> CheckCounters {
         CheckCounters {
             system_ticks: u32::try_from(compressions).expect("a small test value"),
