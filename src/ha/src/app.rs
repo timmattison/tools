@@ -575,15 +575,15 @@ mod tests {
         }
     }
 
-    /// Records each cancel. Each outcome in `outcomes` comes back from one
+    /// Records each cancel and each re-run. Each outcome in `outcomes` comes back from one
     /// call of `finished`, in order.
-    struct RecordingCanceller {
+    struct RecordingSender {
         cancels: RefCell<Vec<(RepoName, RunId)>>,
         reruns: RefCell<Vec<(RepoName, RunId, Action)>>,
         outcomes: RefCell<VecDeque<ActionOutcome>>,
     }
 
-    impl ActionSender for RecordingCanceller {
+    impl ActionSender for RecordingSender {
         fn start(&self, repo: &RepoName, run: RunId, action: &Action) {
             match action {
                 Action::Cancel { .. } => self.cancels.borrow_mut().push((repo.clone(), run)),
@@ -600,8 +600,8 @@ mod tests {
         }
     }
 
-    fn canceller() -> RecordingCanceller {
-        RecordingCanceller {
+    fn sender() -> RecordingSender {
+        RecordingSender {
             cancels: RefCell::new(Vec::new()),
             reruns: RefCell::new(Vec::new()),
             outcomes: RefCell::new(VecDeque::new()),
@@ -723,15 +723,15 @@ mod tests {
         channels: &Channels,
         events: Vec<Event>,
     ) -> (Result<(), RunError>, Vec<String>) {
-        run_app_with(status, opener, &canceller(), channels, events)
+        run_app_with(status, opener, &sender(), channels, events)
     }
 
-    /// Does the work of `run_app_from` with a canceller that the caller
+    /// Does the work of `run_app_from` with a sender that the caller
     /// keeps, so the caller can read the cancels that the app sent.
     fn run_app_with(
         status: Status,
         opener: &RecordingOpener,
-        canceller: &RecordingCanceller,
+        sender: &RecordingSender,
         channels: &Channels,
         events: Vec<Event>,
     ) -> (Result<(), RunError>, Vec<String>) {
@@ -739,7 +739,7 @@ mod tests {
             TestBackend::new(120, 12),
             status,
             opener,
-            canceller,
+            sender,
             channels,
             events,
         )
@@ -751,7 +751,7 @@ mod tests {
         backend: TestBackend,
         status: Status,
         opener: &RecordingOpener,
-        canceller: &RecordingCanceller,
+        sender: &RecordingSender,
         channels: &Channels,
         events: Vec<Event>,
     ) -> (Result<(), RunError>, Vec<String>) {
@@ -762,7 +762,7 @@ mod tests {
             Board::new(Duration::from_hours(8)),
             status,
             opener,
-            canceller,
+            sender,
             &channels.worker,
             &clock,
             &tz,
@@ -780,7 +780,7 @@ mod tests {
         use crate::billing::{AccountCell, DailyUsage};
         let channels = channels();
         let opener = opener(false);
-        let canceller = canceller();
+        let sender = sender();
         let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
         let tz = FixedOffset::east_opt(0).unwrap();
         let clock = now;
@@ -789,7 +789,7 @@ mod tests {
             Board::new(Duration::from_hours(8)),
             Status::default(),
             &opener,
-            &canceller,
+            &sender,
             &channels.worker,
             &clock,
             &tz,
@@ -821,7 +821,7 @@ mod tests {
         use crate::money::Usd;
         let channels = channels();
         let opener = opener(false);
-        let canceller = canceller();
+        let sender = sender();
         let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
         let tz = FixedOffset::east_opt(0).unwrap();
         let clock = now;
@@ -830,7 +830,7 @@ mod tests {
             Board::new(Duration::from_hours(8)),
             Status::default(),
             &opener,
-            &canceller,
+            &sender,
             &channels.worker,
             &clock,
             &tz,
@@ -1911,12 +1911,12 @@ mod tests {
         let tz = FixedOffset::east_opt(0).unwrap();
         let clock = now;
         let opener = opener(false);
-        let canceller = canceller();
+        let sender = sender();
         let mut app = App::new(
             Board::new(Duration::from_hours(8)),
             Status::default(),
             &opener,
-            &canceller,
+            &sender,
             &channels.worker,
             &clock,
             &tz,
@@ -2011,41 +2011,40 @@ mod tests {
         opener: &RecordingOpener,
         steps: Vec<Step>,
     ) -> (Vec<String>, Vec<Command>) {
-        run_steps_all(channels, opener, &canceller(), steps)
+        run_steps_all(channels, opener, &sender(), steps)
     }
 
-    /// Does the work of `run_steps` with a canceller that the caller keeps,
+    /// Does the work of `run_steps` with a sender that the caller keeps,
     /// so the caller can read the cancels that the app sent.
-    fn run_steps_cancelling(
+    fn run_steps_sending(
         channels: &Channels,
-        canceller: &RecordingCanceller,
+        sender: &RecordingSender,
         steps: Vec<Step>,
     ) -> (Vec<String>, Vec<Command>) {
-        run_steps_all(channels, &opener(false), canceller, steps)
+        run_steps_all(channels, &opener(false), sender, steps)
     }
 
-    /// Runs the steps with an opener and a canceller that the caller keeps.
+    /// Runs the steps with an opener and a sender that the caller keeps.
     fn run_steps_all(
         channels: &Channels,
         opener: &RecordingOpener,
-        canceller: &RecordingCanceller,
+        sender: &RecordingSender,
         steps: Vec<Step>,
     ) -> (Vec<String>, Vec<Command>) {
-        let (result, frame, commands) = run_steps_to_end(channels, opener, canceller, steps);
+        let (result, frame, commands) = run_steps_to_end(channels, opener, sender, steps);
         assert!(result.is_ok(), "{result:?}");
         (frame, commands)
     }
 
-    /// Runs the steps like `run_steps_cancelling`, but the script ends
+    /// Runs the steps like `run_steps_sending`, but the script ends
     /// while the loop still runs. It returns the last frame, so a test can
     /// read a box that is still open.
-    fn run_steps_cancelling_open(
+    fn run_steps_sending_open(
         channels: &Channels,
-        canceller: &RecordingCanceller,
+        sender: &RecordingSender,
         steps: Vec<Step>,
     ) -> (Vec<String>, Vec<Command>) {
-        let (result, frame, commands) =
-            run_steps_to_end(channels, &opener(false), canceller, steps);
+        let (result, frame, commands) = run_steps_to_end(channels, &opener(false), sender, steps);
         assert_eq!(result.unwrap_err().to_string(), "script ended");
         (frame, commands)
     }
@@ -2054,7 +2053,7 @@ mod tests {
     fn run_steps_to_end(
         channels: &Channels,
         opener: &RecordingOpener,
-        canceller: &RecordingCanceller,
+        sender: &RecordingSender,
         steps: Vec<Step>,
     ) -> (Result<(), RunError>, Vec<String>, Vec<Command>) {
         let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
@@ -2065,7 +2064,7 @@ mod tests {
             Board::new(Duration::from_hours(8)),
             Status::default(),
             opener,
-            canceller,
+            sender,
             &channels.worker,
             &clock,
             &tz,
@@ -2714,10 +2713,10 @@ mod tests {
     fn c_and_then_y_cancel_the_highlighted_run_and_show_cancelling() {
         let channels = channels();
         send_runs(&channels, vec![active_run(1, 5)]);
-        let canceller = canceller();
-        let (frame, _) = run_steps_cancelling(
+        let sender = sender();
+        let (frame, _) = run_steps_sending(
             &channels,
-            &canceller,
+            &sender,
             vec![
                 Step::Idle,
                 key(KeyCode::Char('c')),
@@ -2727,7 +2726,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            *canceller.cancels.borrow(),
+            *sender.cancels.borrow(),
             vec![(repo(), RunId(1))],
             "{frame:?}"
         );
@@ -2756,7 +2755,7 @@ mod tests {
         let (_, frame) = run_app_with(
             Status::default(),
             &opener(false),
-            &canceller(),
+            &sender(),
             &channels,
             vec![press(KeyCode::Char('c'))],
         );
@@ -2790,13 +2789,13 @@ mod tests {
         let tz = FixedOffset::east_opt(0).unwrap();
         let time = std::cell::Cell::new(now());
         let clock = || time.get();
-        let canceller = canceller();
+        let sender = sender();
         let opener = opener(false);
         let mut app = App::new(
             Board::new(Duration::from_hours(8)),
             Status::default(),
             &opener,
-            &canceller,
+            &sender,
             &channels.worker,
             &clock,
             &tz,
@@ -2818,10 +2817,10 @@ mod tests {
     fn c_and_y_on_a_job_row_cancel_the_run_of_the_job() {
         let channels = channels();
         send_runs(&channels, vec![active_run(1, 5)]);
-        let canceller = canceller();
-        run_steps_cancelling(
+        let sender = sender();
+        run_steps_sending(
             &channels,
-            &canceller,
+            &sender,
             vec![
                 key(KeyCode::Right),
                 Step::Send(Update::Jobs {
@@ -2835,7 +2834,7 @@ mod tests {
                 key(KeyCode::Char('q')),
             ],
         );
-        assert_eq!(*canceller.cancels.borrow(), vec![(repo(), RunId(1))]);
+        assert_eq!(*sender.cancels.borrow(), vec![(repo(), RunId(1))]);
     }
 
     /// Runs the key `c` and then `keys` on a board of two runs, and returns
@@ -2847,16 +2846,16 @@ mod tests {
     ) -> (Result<(), RunError>, Vec<String>, usize, Vec<String>) {
         let channels = channels();
         send_runs(&channels, vec![active_run(1, 5), active_run(2, 30)]);
-        let canceller = canceller();
+        let sender = sender();
         let opener = opener(false);
         let (result, frame) = run_app_with(
             Status::default(),
             &opener,
-            &canceller,
+            &sender,
             &channels,
             [vec![press(KeyCode::Char('c'))], keys].concat(),
         );
-        let cancels = canceller.cancels.borrow().len();
+        let cancels = sender.cancels.borrow().len();
         let urls = opener.urls.borrow().clone();
         (result, frame, cancels, urls)
     }
@@ -2901,10 +2900,10 @@ mod tests {
     fn a_run_that_moves_the_highlight_does_not_change_the_run_that_y_cancels() {
         let channels = channels();
         send_runs(&channels, vec![active_run(1, 5), active_run(2, 30)]);
-        let canceller = canceller();
-        run_steps_cancelling(
+        let sender = sender();
+        run_steps_sending(
             &channels,
-            &canceller,
+            &sender,
             vec![
                 Step::Idle,
                 key(KeyCode::Char('c')),
@@ -2917,7 +2916,7 @@ mod tests {
                 key(KeyCode::Char('q')),
             ],
         );
-        assert_eq!(*canceller.cancels.borrow(), vec![(repo(), RunId(2))]);
+        assert_eq!(*sender.cancels.borrow(), vec![(repo(), RunId(2))]);
     }
 
     #[test]
@@ -2926,7 +2925,7 @@ mod tests {
         let (result, frame) = run_app_with(
             Status::default(),
             &opener(false),
-            &canceller(),
+            &sender(),
             &channels(),
             vec![press(KeyCode::Char('c'))],
         );
@@ -2938,32 +2937,32 @@ mod tests {
 
     #[test]
     fn y_after_c_on_an_empty_board_cancels_nothing() {
-        let canceller = canceller();
+        let sender = sender();
         let (result, _) = run_app_with(
             Status::default(),
             &opener(false),
-            &canceller,
+            &sender,
             &channels(),
             vec![press(KeyCode::Char('c')), press(KeyCode::Char('y'))],
         );
         assert_eq!(result.unwrap_err().to_string(), "script ended");
-        assert!(canceller.cancels.borrow().is_empty());
+        assert!(sender.cancels.borrow().is_empty());
     }
 
     #[test]
     fn control_c_with_the_box_open_quits_and_cancels_nothing() {
         let channels = channels();
         send_runs(&channels, vec![active_run(1, 5)]);
-        let canceller = canceller();
+        let sender = sender();
         let (result, _) = run_app_with(
             Status::default(),
             &opener(false),
-            &canceller,
+            &sender,
             &channels,
             vec![press(KeyCode::Char('c')), ctrl_c()],
         );
         assert!(result.is_ok(), "{result:?}");
-        assert!(canceller.cancels.borrow().is_empty());
+        assert!(sender.cancels.borrow().is_empty());
     }
 
     /// A finished run, updated inside the window.
@@ -2981,7 +2980,7 @@ mod tests {
         let (result, frame) = run_app_with(
             Status::default(),
             &opener(false),
-            &canceller(),
+            &sender(),
             &channels,
             vec![press(KeyCode::Char('c'))],
         );
@@ -2998,19 +2997,19 @@ mod tests {
     fn y_after_c_on_a_finished_run_cancels_nothing() {
         let channels = channels();
         send_runs(&channels, vec![passed_run(4)]);
-        let canceller = canceller();
+        let sender = sender();
         let (result, _) = run_app_with(
             Status::default(),
             &opener(false),
-            &canceller,
+            &sender,
             &channels,
             vec![press(KeyCode::Char('c')), press(KeyCode::Char('y'))],
         );
         assert_eq!(result.unwrap_err().to_string(), "script ended");
-        assert!(canceller.cancels.borrow().is_empty());
+        assert!(sender.cancels.borrow().is_empty());
     }
 
-    /// An outcome for run 7 that the canceller of a test gives to the loop.
+    /// An outcome for run 7 that the sender of a test gives to the loop.
     fn outcome(result: Result<(), SourceError>) -> ActionOutcome {
         ActionOutcome {
             repo: repo(),
@@ -3023,11 +3022,11 @@ mod tests {
     #[test]
     fn an_accepted_cancel_says_so_and_asks_for_a_refresh_now() {
         let channels = channels();
-        let canceller = canceller();
-        canceller.outcomes.borrow_mut().push_back(outcome(Ok(())));
-        let (frame, commands) = run_steps_cancelling(
+        let sender = sender();
+        sender.outcomes.borrow_mut().push_back(outcome(Ok(())));
+        let (frame, commands) = run_steps_sending(
             &channels,
-            &canceller,
+            &sender,
             vec![Step::Idle, key(KeyCode::Char('q'))],
         );
         assert!(commands.contains(&Command::RefreshNow), "{commands:?}");
@@ -3037,11 +3036,11 @@ mod tests {
     #[test]
     fn an_accepted_cancel_posts_that_github_is_cancelling_the_run() {
         let channels = channels();
-        let canceller = canceller();
-        canceller.outcomes.borrow_mut().push_back(outcome(Ok(())));
-        let (frame, _) = run_steps_cancelling(
+        let sender = sender();
+        sender.outcomes.borrow_mut().push_back(outcome(Ok(())));
+        let (frame, _) = run_steps_sending(
             &channels,
-            &canceller,
+            &sender,
             vec![Step::Idle, key(KeyCode::Char('q'))],
         );
         assert!(
@@ -3054,17 +3053,17 @@ mod tests {
     #[test]
     fn a_refused_cancel_posts_the_run_and_the_error() {
         let channels = channels();
-        let canceller = canceller();
-        canceller
+        let sender = sender();
+        sender
             .outcomes
             .borrow_mut()
             .push_back(outcome(Err(SourceError::Http {
                 status: 409,
                 message: "Cannot cancel a workflow run that is completed.".to_owned(),
             })));
-        let (frame, commands) = run_steps_cancelling(
+        let (frame, commands) = run_steps_sending(
             &channels,
-            &canceller,
+            &sender,
             vec![Step::Idle, key(KeyCode::Char('q'))],
         );
         assert!(
@@ -3101,7 +3100,7 @@ mod tests {
             TestBackend::new(120, 12),
             Status::default(),
             &opener(false),
-            &canceller(),
+            &sender(),
             &on_blank,
             quit(),
         );
@@ -3112,7 +3111,7 @@ mod tests {
             screen_with_shell_text(120, 12),
             Status::default(),
             &opener(false),
-            &canceller(),
+            &sender(),
             &on_shell_text,
             quit(),
         );
@@ -3193,12 +3192,12 @@ mod tests {
         let tz = FixedOffset::east_opt(0).unwrap();
         let clock = now;
         let opener = opener(false);
-        let canceller = canceller();
+        let sender = sender();
         let mut app = App::new(
             Board::new(Duration::from_hours(8)),
             Status::default(),
             &opener,
-            &canceller,
+            &sender,
             &channels.worker,
             &clock,
             &tz,
@@ -3350,7 +3349,7 @@ mod tests {
         let (_, frame) = run_app_with(
             Status::default(),
             &opener(false),
-            &canceller(),
+            &sender(),
             &channels,
             vec![press(KeyCode::Char('c'))],
         );
@@ -3367,15 +3366,15 @@ mod tests {
         let channels = channels();
         send_queue(&channels, vec![queue_entry(7)], Ok(Vec::new()));
         send_runs(&channels, vec![active_run(1, 5)]);
-        let canceller = canceller();
+        let sender = sender();
         let _ = run_app_with(
             Status::default(),
             &opener(false),
-            &canceller,
+            &sender,
             &channels,
             vec![press(KeyCode::Char('c')), press(KeyCode::Char('y'))],
         );
-        assert!(canceller.cancels.borrow().is_empty());
+        assert!(sender.cancels.borrow().is_empty());
     }
 
     /// The title that the box of a workflow re-run shows.
@@ -3394,10 +3393,10 @@ mod tests {
     fn capital_r_and_then_y_re_run_the_highlighted_run_and_show_re_running() {
         let channels = channels();
         send_runs(&channels, vec![finished_run(1, 100, 60)]);
-        let canceller = canceller();
-        let (frame, _) = run_steps_cancelling(
+        let sender = sender();
+        let (frame, _) = run_steps_sending(
             &channels,
-            &canceller,
+            &sender,
             vec![
                 Step::Idle,
                 key(KeyCode::Char('R')),
@@ -3408,11 +3407,11 @@ mod tests {
             ],
         );
         assert_eq!(
-            *canceller.reruns.borrow(),
+            *sender.reruns.borrow(),
             vec![(repo(), RunId(1), Action::RerunWorkflow)],
             "{frame:?}"
         );
-        assert!(canceller.cancels.borrow().is_empty());
+        assert!(sender.cancels.borrow().is_empty());
         assert!(frame[11].contains("re-running run 1…"), "{:?}", frame[11]);
     }
 
@@ -3423,7 +3422,7 @@ mod tests {
         let (_, frame) = run_app_with(
             Status::default(),
             &opener(false),
-            &canceller(),
+            &sender(),
             &channels,
             vec![press(KeyCode::Char('R'))],
         );
@@ -3462,8 +3461,8 @@ mod tests {
         let mut steps = steps_to_job_row(vec![passed_job(10, "build")]);
         steps.push(key(KeyCode::Char('R')));
         steps.push(Step::Idle);
-        let canceller = canceller();
-        let (frame, _) = run_steps_cancelling_open(&channels, &canceller, steps);
+        let sender = sender();
+        let (frame, _) = run_steps_sending_open(&channels, &sender, steps);
         assert!(shows_title(&frame, RERUN_JOB_BOX_TITLE), "{frame:?}");
         assert!(frame.iter().any(|l| l.contains("job: build")), "{frame:?}");
     }
@@ -3479,10 +3478,10 @@ mod tests {
             Step::Idle,
             key(KeyCode::Char('q')),
         ]);
-        let canceller = canceller();
-        let (frame, _) = run_steps_cancelling(&channels, &canceller, steps);
+        let sender = sender();
+        let (frame, _) = run_steps_sending(&channels, &sender, steps);
         assert_eq!(
-            *canceller.reruns.borrow(),
+            *sender.reruns.borrow(),
             vec![(
                 repo(),
                 RunId(1),
@@ -3510,7 +3509,7 @@ mod tests {
         let (_, frame) = run_app_with(
             Status::default(),
             &opener(false),
-            &canceller(),
+            &sender(),
             &channels,
             vec![press(KeyCode::Char('R'))],
         );
@@ -3522,16 +3521,16 @@ mod tests {
     fn y_after_capital_r_on_an_active_run_re_runs_nothing() {
         let channels = channels();
         send_runs(&channels, vec![active_run(1, 5)]);
-        let canceller = canceller();
+        let sender = sender();
         let _ = run_app_with(
             Status::default(),
             &opener(false),
-            &canceller,
+            &sender,
             &channels,
             vec![press(KeyCode::Char('R')), press(KeyCode::Char('y'))],
         );
-        assert!(canceller.reruns.borrow().is_empty());
-        assert!(canceller.cancels.borrow().is_empty());
+        assert!(sender.reruns.borrow().is_empty());
+        assert!(sender.cancels.borrow().is_empty());
     }
 
     #[test]
@@ -3540,8 +3539,8 @@ mod tests {
         send_runs(&channels, vec![finished_run(1, 100, 60)]);
         let mut steps = steps_to_job_row(vec![job(10, "build")]);
         steps.extend([key(KeyCode::Char('R')), Step::Idle]);
-        let canceller = canceller();
-        let (frame, _) = run_steps_cancelling_open(&channels, &canceller, steps);
+        let sender = sender();
+        let (frame, _) = run_steps_sending_open(&channels, &sender, steps);
         assert!(!shows_title(&frame, RERUN_JOB_BOX_TITLE), "{frame:?}");
         assert!(!shows_title(&frame, RERUN_WORKFLOW_BOX_TITLE), "{frame:?}");
         assert!(frame[11].contains(STILL_ACTIVE), "{:?}", frame[11]);
@@ -3558,9 +3557,9 @@ mod tests {
             Step::Idle,
             key(KeyCode::Char('q')),
         ]);
-        let canceller = canceller();
-        let _ = run_steps_cancelling(&channels, &canceller, steps);
-        assert!(canceller.reruns.borrow().is_empty());
+        let sender = sender();
+        let _ = run_steps_sending(&channels, &sender, steps);
+        assert!(sender.reruns.borrow().is_empty());
     }
 
     #[test]
@@ -3569,8 +3568,8 @@ mod tests {
         send_runs(&channels, vec![active_run(1, 5)]);
         let mut steps = steps_to_job_row(vec![passed_job(10, "build")]);
         steps.extend([key(KeyCode::Char('R')), Step::Idle]);
-        let canceller = canceller();
-        let (frame, _) = run_steps_cancelling_open(&channels, &canceller, steps);
+        let sender = sender();
+        let (frame, _) = run_steps_sending_open(&channels, &sender, steps);
         assert!(!shows_title(&frame, RERUN_JOB_BOX_TITLE), "{frame:?}");
         assert!(frame[11].contains(STILL_ACTIVE), "{:?}", frame[11]);
     }
@@ -3582,7 +3581,7 @@ mod tests {
         let (_, frame) = run_app_with(
             Status::default(),
             &opener(false),
-            &canceller(),
+            &sender(),
             &channels,
             vec![key_event(
                 KeyCode::Char('R'),
@@ -3600,7 +3599,7 @@ mod tests {
         let (_, frame) = run_app_with(
             Status::default(),
             &opener(false),
-            &canceller(),
+            &sender(),
             &channels,
             vec![shift_r()],
         );
@@ -3612,16 +3611,16 @@ mod tests {
         for answer in ['y', 'Y'] {
             let channels = channels();
             send_runs(&channels, vec![finished_run(1, 100, 60)]);
-            let canceller = canceller();
+            let sender = sender();
             let _ = run_app_with(
                 Status::default(),
                 &opener(false),
-                &canceller,
+                &sender,
                 &channels,
                 vec![shift_r(), press(KeyCode::Char(answer))],
             );
             assert_eq!(
-                *canceller.reruns.borrow(),
+                *sender.reruns.borrow(),
                 vec![(repo(), RunId(1), Action::RerunWorkflow)],
                 "{answer:?}"
             );
@@ -3636,15 +3635,15 @@ mod tests {
             &channels,
             vec![finished_run(1, 100, 60), finished_run(2, 50, 10)],
         );
-        let canceller = canceller();
+        let sender = sender();
         let (result, frame) = run_app_with(
             Status::default(),
             &opener(false),
-            &canceller,
+            &sender,
             &channels,
             vec![shift_r(), other],
         );
-        let reruns = canceller.reruns.borrow().len();
+        let reruns = sender.reruns.borrow().len();
         (result, frame, reruns)
     }
 
@@ -3673,16 +3672,16 @@ mod tests {
     fn control_c_with_the_rerun_box_open_quits_and_re_runs_nothing() {
         let channels = channels();
         send_runs(&channels, vec![finished_run(1, 100, 60)]);
-        let canceller = canceller();
+        let sender = sender();
         let (result, _) = run_app_with(
             Status::default(),
             &opener(false),
-            &canceller,
+            &sender,
             &channels,
             vec![shift_r(), ctrl_c()],
         );
         assert!(result.is_ok(), "{result:?}");
-        assert!(canceller.reruns.borrow().is_empty());
+        assert!(sender.reruns.borrow().is_empty());
     }
 
     #[test]
@@ -3704,10 +3703,10 @@ mod tests {
             key(KeyCode::Char('y')),
             key(KeyCode::Char('q')),
         ]);
-        let canceller = canceller();
-        let _ = run_steps_cancelling(&channels, &canceller, steps);
+        let sender = sender();
+        let _ = run_steps_sending(&channels, &sender, steps);
         assert_eq!(
-            *canceller.reruns.borrow(),
+            *sender.reruns.borrow(),
             vec![(
                 repo(),
                 RunId(1),
@@ -3729,7 +3728,7 @@ mod tests {
             vec![finished_run(1, 40, 30), finished_run(2, 60, 50)],
         );
         let opener = opener(false);
-        let canceller = canceller();
+        let sender = sender();
         let rerun = Run {
             state: RunState::Queued,
             started_at: now() - chrono::Duration::minutes(1),
@@ -3739,7 +3738,7 @@ mod tests {
         let (frame, _) = run_steps_all(
             &channels,
             &opener,
-            &canceller,
+            &sender,
             vec![
                 Step::Idle,
                 key(KeyCode::Down),
@@ -3755,7 +3754,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            *canceller.reruns.borrow(),
+            *sender.reruns.borrow(),
             vec![(repo(), RunId(2), Action::RerunWorkflow)]
         );
         let last_section = row_of(&frame, "Last 8h");
@@ -3774,7 +3773,7 @@ mod tests {
         let (_, frame) = run_app_with(
             Status::default(),
             &opener(false),
-            &canceller(),
+            &sender(),
             &channels,
             vec![press(KeyCode::Char('R'))],
         );
@@ -3791,15 +3790,15 @@ mod tests {
         let channels = channels();
         send_queue(&channels, vec![queue_entry(7)], Ok(Vec::new()));
         send_runs(&channels, vec![finished_run(1, 100, 60)]);
-        let canceller = canceller();
+        let sender = sender();
         let _ = run_app_with(
             Status::default(),
             &opener(false),
-            &canceller,
+            &sender,
             &channels,
             vec![press(KeyCode::Char('R')), press(KeyCode::Char('y'))],
         );
-        assert!(canceller.reruns.borrow().is_empty());
+        assert!(sender.reruns.borrow().is_empty());
     }
 
     #[test]
@@ -3807,7 +3806,7 @@ mod tests {
         let (result, frame) = run_app_with(
             Status::default(),
             &opener(false),
-            &canceller(),
+            &sender(),
             &channels(),
             vec![press(KeyCode::Char('R'))],
         );
@@ -3819,15 +3818,15 @@ mod tests {
 
     #[test]
     fn y_after_capital_r_on_an_empty_board_re_runs_nothing() {
-        let canceller = canceller();
+        let sender = sender();
         let _ = run_app_with(
             Status::default(),
             &opener(false),
-            &canceller,
+            &sender,
             &channels(),
             vec![press(KeyCode::Char('R')), press(KeyCode::Char('y'))],
         );
-        assert!(canceller.reruns.borrow().is_empty());
+        assert!(sender.reruns.borrow().is_empty());
     }
 
     #[test]
@@ -3837,7 +3836,7 @@ mod tests {
         let (result, frame) = run_app_with(
             Status::default(),
             &opener(false),
-            &canceller(),
+            &sender(),
             &channels,
             vec![press(KeyCode::Char('r'))],
         );
@@ -3877,11 +3876,11 @@ mod tests {
     /// commands that the app sent.
     fn finish_with(outcome: ActionOutcome) -> (Vec<String>, Vec<Command>) {
         let channels = channels();
-        let canceller = canceller();
-        canceller.outcomes.borrow_mut().push_back(outcome);
-        run_steps_cancelling(
+        let sender = sender();
+        sender.outcomes.borrow_mut().push_back(outcome);
+        run_steps_sending(
             &channels,
-            &canceller,
+            &sender,
             vec![Step::Idle, key(KeyCode::Char('q'))],
         )
     }

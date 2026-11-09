@@ -387,8 +387,8 @@ mod tests {
     }
 
     /// Writes an executable `gh` script that runs `body` and returns the
-    /// canceller that uses it.
-    fn canceller(dir: &TempDir, body: &str) -> GhActionSender {
+    /// sender that uses it.
+    fn sender(dir: &TempDir, body: &str) -> GhActionSender {
         let path = dir.path().join("gh");
         std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -402,10 +402,10 @@ mod tests {
     }
 
     /// Reads outcomes every 20 ms until one arrives, for at most 60 s.
-    fn wait_for_outcome(canceller: &GhActionSender) -> ActionOutcome {
+    fn wait_for_outcome(sender: &GhActionSender) -> ActionOutcome {
         let start = Instant::now();
         while start.elapsed() < OUTCOME_DEADLINE {
-            if let Some(outcome) = canceller.finished() {
+            if let Some(outcome) = sender.finished() {
                 return outcome;
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -472,14 +472,14 @@ mod tests {
     fn cancel_returns_before_gh_ends_and_the_outcome_arrives_later() {
         let dir = TempDir::new().unwrap();
         let release = dir.path().join("release");
-        let canceller = canceller(&dir, &waiting_body(&dir));
+        let sender = sender(&dir, &waiting_body(&dir));
 
-        canceller.start(&repo("o/r"), RunId(7), &Action::Cancel { job: None });
+        sender.start(&repo("o/r"), RunId(7), &Action::Cancel { job: None });
 
-        assert_eq!(canceller.finished(), None);
+        assert_eq!(sender.finished(), None);
         std::fs::write(&release, "").unwrap();
         assert_eq!(
-            wait_for_outcome(&canceller),
+            wait_for_outcome(&sender),
             ActionOutcome {
                 repo: repo("o/r"),
                 run: RunId(7),
@@ -493,13 +493,13 @@ mod tests {
     fn a_stub_in_a_directory_whose_name_holds_a_quote_still_gives_its_outcome() {
         let dir = tempfile::Builder::new().prefix("it's-").tempdir().unwrap();
         let release = dir.path().join("release");
-        let canceller = canceller(&dir, &waiting_body(&dir));
+        let sender = sender(&dir, &waiting_body(&dir));
 
-        canceller.start(&repo("o/r"), RunId(7), &Action::Cancel { job: None });
+        sender.start(&repo("o/r"), RunId(7), &Action::Cancel { job: None });
 
         std::fs::write(&release, "").unwrap();
         assert_eq!(
-            wait_for_outcome(&canceller),
+            wait_for_outcome(&sender),
             ActionOutcome {
                 repo: repo("o/r"),
                 run: RunId(7),
@@ -513,30 +513,30 @@ mod tests {
     fn two_cancels_give_two_outcomes() {
         let dir = TempDir::new().unwrap();
         let body = answer_body(&dir, ACCEPTED, 0);
-        let canceller = canceller(&dir, &body);
+        let sender = sender(&dir, &body);
 
-        canceller.start(&repo("o/r"), RunId(7), &Action::Cancel { job: None });
-        canceller.start(&repo("o/r"), RunId(8), &Action::Cancel { job: None });
+        sender.start(&repo("o/r"), RunId(7), &Action::Cancel { job: None });
+        sender.start(&repo("o/r"), RunId(8), &Action::Cancel { job: None });
 
-        let mut outcomes = vec![wait_for_outcome(&canceller), wait_for_outcome(&canceller)];
+        let mut outcomes = vec![wait_for_outcome(&sender), wait_for_outcome(&sender)];
         outcomes.sort_by_key(|outcome| outcome.run.0);
         let runs: Vec<(RunId, Result<(), SourceError>)> = outcomes
             .into_iter()
             .map(|outcome| (outcome.run, outcome.result))
             .collect();
         assert_eq!(runs, vec![(RunId(7), Ok(())), (RunId(8), Ok(()))]);
-        assert_eq!(canceller.finished(), None);
+        assert_eq!(sender.finished(), None);
     }
 
     #[test]
     fn a_refused_cancel_gives_the_error_in_its_outcome() {
         let dir = TempDir::new().unwrap();
         let body = answer_body(&dir, CONFLICT, 1);
-        let canceller = canceller(&dir, &body);
+        let sender = sender(&dir, &body);
 
-        canceller.start(&repo("o/r"), RunId(7), &Action::Cancel { job: None });
+        sender.start(&repo("o/r"), RunId(7), &Action::Cancel { job: None });
 
-        let outcome = wait_for_outcome(&canceller);
+        let outcome = wait_for_outcome(&sender);
         assert_eq!(outcome.run, RunId(7));
         assert_eq!(
             outcome.result,
@@ -550,7 +550,7 @@ mod tests {
     #[test]
     fn rerun_workflow_sends_the_request_of_the_run() {
         let dir = TempDir::new().unwrap();
-        let sender = canceller(&dir, &logging_body(&dir, CREATED));
+        let sender = sender(&dir, &logging_body(&dir, CREATED));
 
         sender.start(&repo("o/r"), RunId(7), &Action::RerunWorkflow);
 
@@ -572,7 +572,7 @@ mod tests {
     #[test]
     fn rerun_job_sends_the_request_of_the_job() {
         let dir = TempDir::new().unwrap();
-        let sender = canceller(&dir, &logging_body(&dir, CREATED));
+        let sender = sender(&dir, &logging_body(&dir, CREATED));
         let action = Action::RerunJob {
             id: JobId(11),
             name: "build".to_owned(),
@@ -633,7 +633,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let forbidden = "HTTP/2.0 403 Forbidden\nContent-Type: application/json\r\n\r\n{\"message\":\"Must have admin rights to Repository.\"}";
         let body = answer_body(&dir, forbidden, 1);
-        let sender = canceller(&dir, &body);
+        let sender = sender(&dir, &body);
 
         sender.start(&repo("o/r"), RunId(7), &Action::RerunWorkflow);
 
