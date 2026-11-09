@@ -248,9 +248,6 @@ where
             self.status.message = Some(failed_open(&failure.url, &failure.reason, (self.now)()));
         }
         while let Some(outcome) = self.actions.finished() {
-            // The run ID comes before the error, because the status line cuts
-            // a long line at its end. Thus a narrow terminal still shows which
-            // run the error is about.
             match outcome.result {
                 Ok(()) => {
                     self.post(outcome.action.accepted_text(outcome.run));
