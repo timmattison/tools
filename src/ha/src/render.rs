@@ -1822,7 +1822,7 @@ enum PromptPart {
     Title,
     /// The name of the job.
     Job,
-    /// The note that GitHub cannot cancel one job.
+    /// The note that `Action::box_note` gives, when it gives one.
     Note,
     /// The empty line above the keys.
     Blank,
