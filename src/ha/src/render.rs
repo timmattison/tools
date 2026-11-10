@@ -344,33 +344,67 @@ fn text_width(text: &str) -> usize {
 /// terminal theme sets the shade, also on a light background.
 const RUNNER_STYLE: Style = Style::new().fg(Color::Cyan);
 
-/// The fewest columns that a cut runner name gets: three characters and `…`.
-const MIN_RUNNER_WIDTH: usize = 4;
+/// The number of characters of a runner name that a job row always shows.
+const RUNNER_FLOOR_CHARS: usize = 6;
 
-/// The runner name cut to `room` columns, or `None` when it has no room.
+/// The part of a runner name that a job row must always show.
 ///
-/// A name that fits shows whole, also in fewer than [`MIN_RUNNER_WIDTH`]
-/// columns. A longer name keeps its start and ends in `…`. It needs
-/// [`MIN_RUNNER_WIDTH`] columns, because a shorter cut shows too little of the
-/// name to be of use.
-fn fit_runner(name: &RunnerName, room: usize) -> Option<String> {
-    if text_width(name.as_str()) <= room {
-        Some(name.as_str().to_owned())
-    } else if room >= MIN_RUNNER_WIDTH {
-        Some(truncate_to_budget(name.as_str(), room))
-    } else {
-        None
+/// A name of [`RUNNER_FLOOR_CHARS`] characters or fewer is its own floor. A
+/// longer name gives its first [`RUNNER_FLOOR_CHARS`] characters and `…`. If
+/// that cut saves no column, the whole name is the floor. The floor counts
+/// characters, not columns, thus a wide glyph uses its two columns in the
+/// layout.
+fn runner_floor(name: &RunnerName) -> String {
+    let start: String = name.as_str().chars().take(RUNNER_FLOOR_CHARS).collect();
+    truncate_to_budget(name.as_str(), text_width(&start) + 1)
+}
+
+/// The text of the text cell of a job row, and the runner name that follows it.
+///
+/// The text is the tree glyph, one space, and the job name. The first rule
+/// that applies gives the result:
+///
+/// 1. The text and the whole runner name fit: both show whole.
+/// 2. The text and the runner floor fit (see [`runner_floor`]): the text shows
+///    whole. The runner name keeps its start and gets the columns that the
+///    text leaves.
+/// 3. The cell can hold the tree glyph, one space, `…`, one space, and the
+///    runner floor: the job name keeps its end and starts with `…`, and the
+///    runner name shows as its floor. The tree glyph stays.
+/// 4. In a narrower cell, or with no runner, the text keeps its start and no
+///    runner name shows.
+fn fit_job_text(
+    glyph: &str,
+    name: &str,
+    runner: Option<&RunnerName>,
+    cell: usize,
+) -> (String, Option<String>) {
+    let text = format!("{glyph} {name}");
+    if let Some(runner) = runner {
+        let floor = runner_floor(runner);
+        let floor_width = text_width(&floor);
+        let text_and_gap = text_width(&text) + 1;
+        if text_and_gap + floor_width <= cell {
+            let room = cell - text_and_gap;
+            return (text, Some(truncate_to_budget(runner.as_str(), room)));
+        }
+        let without_name = text_width(glyph) + 2 + floor_width;
+        if without_name < cell {
+            let kept = truncate_left_to_budget(name, cell - without_name);
+            return (format!("{glyph} {kept}"), Some(floor));
+        }
     }
+    (truncate_to_budget(&text, cell), None)
 }
 
 /// Joins the cells of one job row into one line. One space stands between cells.
 ///
-/// The text fills the repository cell, one space, and the workflow-name cell.
-/// The text cut is the one that [`fit`] makes, and the job name has priority.
-/// The runner name follows the text, after one space, in [`RUNNER_STYLE`]. It
-/// gets only the columns that the text leaves free (see [`fit_runner`]). A job
-/// with no runner, or with no room for it, shows no runner name, and its line
-/// reads as it did before the runner name existed. The job ID stands in the ID
+/// The text cell is the repository cell, one space, and the workflow-name
+/// cell. [`fit_job_text`] fills it with the text and the runner name. The
+/// runner name follows the text, after one space, in [`RUNNER_STYLE`], also
+/// its `…`. A job with no runner, or a cell with no room for the runner
+/// floor, shows no runner name, and its line reads as it did before the
+/// runner name existed. The job ID stands in the ID
 /// part of a run row, right-aligned. The branch and title columns stay blank.
 /// Thus the ID, started, time, and right marker cells stand in the same columns
 /// as those of a run row, at every frame width. The right marker repeats the
@@ -395,7 +429,8 @@ fn fit_runner(name: &RunnerName, room: usize) -> Option<String> {
 fn job_cells(
     widths: Widths,
     marker: &str,
-    text: &str,
+    glyph: &str,
+    name: &str,
     runner: Option<&RunnerName>,
     id: &str,
     end: EndCells<'_>,
@@ -407,9 +442,7 @@ fn job_cells(
         cost,
     } = end;
     let cell = widths.repo + 1 + widths.workflow;
-    let text = truncate_to_budget(text, cell);
-    let room = cell.saturating_sub(text_width(&text) + 1);
-    let runner = runner.and_then(|name| fit_runner(name, room));
+    let (text, runner) = fit_job_text(glyph, name, runner, cell);
     let mut used = text_width(&text);
     let mut lead = text;
     let mut spans = vec![Span::styled(
@@ -657,8 +690,8 @@ where
 ///
 /// The text cell holds the tree glyph (`└` when `last` is true, else `├`), a
 /// space, and the name of the job. The runner name of the job follows the text
-/// in cyan, when the text leaves room for it (see [`job_cells`]). The job ID
-/// follows, in the columns of the run ID.
+/// in cyan, when the cell has room for the runner floor (see [`fit_job_text`]).
+/// The job ID follows, in the columns of the run ID.
 ///
 /// The started cell of a job of a finished `run` shows when the job finished
 /// (`Job::completed_at`), and is empty when the job has no finish time. The
@@ -705,7 +738,8 @@ where
     job_cells(
         widths,
         marker(job.state),
-        &format!("{glyph} {}", job.name),
+        glyph,
+        &job.name,
         job.runner.as_ref(),
         &job.id.0.to_string(),
         EndCells {
@@ -2355,15 +2389,17 @@ mod tests {
     }
 
     /// The characters of a line that start in the display columns from `from` up
-    /// to `from + count`. A wide glyph counts by its start column.
+    /// to `from + count`. A wide glyph counts by its start column. The column
+    /// of a character is the width of the text before it, because a character
+    /// can change the width of the one before it: `\u{FE0F}` makes `\u{2601}`
+    /// two columns wide.
     fn columns(line: &str, from: usize, count: usize) -> String {
-        let mut column = 0;
         let mut cells = String::new();
-        for glyph in line.chars() {
+        for (index, glyph) in line.char_indices() {
+            let column = display_width(line.split_at(index).0);
             if (from..from + count).contains(&column) {
                 cells.push(glyph);
             }
-            column += unicode_width::UnicodeWidthChar::width(glyph).unwrap_or(0);
         }
         cells
     }
@@ -6735,7 +6771,7 @@ mod tests {
             [
                 "✅ ├ e2e-plan grwetky1t8721h17… 107851237701",
                 "⏳ ├ e2e-remotesensing (1)      107851237705",
-                "🏃 ├ e2e-remotesensing (2) m1-… 107851237702",
+                "🏃 ├ …e-remotesensing (2) m1-ts 107851237702",
                 "🏃 ├ e2e-remotesensing (3) mbp  107851237703",
                 "⏳ ├ e2e-remotesensing (4)      107851237704",
                 "🏃 └ sites gr96283qcxw61jpesqn… 107851237706",
@@ -6782,44 +6818,7 @@ mod tests {
     const ROOM_OF_3_NAME: &str = "abcdefghijklmnopqrstuv";
 
     #[test]
-    fn a_long_runner_name_with_fewer_than_4_columns_does_not_show() {
-        // The text `└ Full check list (Mac 22)` is 26 columns, thus the room is 1.
-        let (buffer, row, y) = lone_job_row(
-            on(
-                "GitHub Actions 1000001050",
-                passed_job("Full check list (Mac 22)"),
-            ),
-            129,
-        );
-        assert_eq!(
-            row,
-            job_golden(
-                "✅",
-                "└ Full check list (Mac 22)",
-                LONE_JOB,
-                PASSED_TIMES,
-                "?"
-            )
-        );
-        assert_eq!(cyan_columns(&buffer, y), Vec::<u16>::new());
-        // A name of 22 columns makes a text of 24 columns, thus the room is 3.
-        assert_eq!(display_width(ROOM_OF_3_NAME), 22);
-        let (buffer, row, y) = lone_job_row(on("m1-ts", passed_job(ROOM_OF_3_NAME)), 129);
-        assert_eq!(
-            row,
-            job_golden(
-                "✅",
-                &format!("└ {ROOM_OF_3_NAME}"),
-                LONE_JOB,
-                PASSED_TIMES,
-                "?"
-            )
-        );
-        assert_eq!(cyan_columns(&buffer, y), Vec::<u16>::new());
-    }
-
-    #[test]
-    fn a_short_runner_name_that_fits_shows_in_fewer_than_4_columns() {
+    fn a_short_runner_name_that_fits_shows_whole_in_a_room_of_3_columns() {
         // A name that fits whole shows in a room of 3.
         let (buffer, row, y) = lone_job_row(on("mbp", passed_job(ROOM_OF_3_NAME)), 129);
         assert_eq!(
@@ -6833,6 +6832,342 @@ mod tests {
             )
         );
         assert_eq!(cyan_columns(&buffer, y).len(), 3);
+    }
+
+    #[test]
+    fn a_long_job_name_gives_columns_to_the_floor_of_a_long_runner_name() {
+        let (_, row, _) = lone_job_row(
+            on(
+                "GitHub Actions 1000001050",
+                passed_job("Full check list (Mac 22)"),
+            ),
+            129,
+        );
+        assert_eq!(
+            row,
+            job_golden(
+                "✅",
+                "└ …eck list (Mac 22) GitHub…",
+                LONE_JOB,
+                PASSED_TIMES,
+                "?"
+            )
+        );
+        assert_eq!(
+            last_digit_column(&row, &LONE_JOB.to_string()),
+            Some(run_id_column(129))
+        );
+    }
+
+    #[test]
+    fn a_runner_name_of_6_characters_or_fewer_shows_whole_when_the_job_name_gives_columns() {
+        let cases = [
+            ("m1-ts", "└ …e-remotesensing (2) m1-ts", 5),
+            ("m1-tsx", "└ …-remotesensing (2) m1-tsx", 6),
+        ];
+        for (runner, text, cyan) in cases {
+            let (buffer, row, y) =
+                lone_job_row(on(runner, passed_job("e2e-remotesensing (2)")), 129);
+            assert_eq!(
+                row,
+                job_golden("✅", text, LONE_JOB, PASSED_TIMES, "?"),
+                "runner {runner}"
+            );
+            assert_eq!(cyan_columns(&buffer, y).len(), cyan, "runner {runner}");
+        }
+    }
+
+    #[test]
+    fn a_job_name_wider_than_the_cell_keeps_its_end_and_shows_the_runner() {
+        let job = format!("{} (Mac 22)", "n".repeat(40));
+        let (buffer, row, y) = lone_job_row(on("mbp", passed_job(&job)), 129);
+        assert_eq!(
+            row,
+            job_golden(
+                "✅",
+                &format!("└ …{} (Mac 22) mbp", "n".repeat(12)),
+                LONE_JOB,
+                PASSED_TIMES,
+                "?"
+            )
+        );
+        assert_eq!(cyan_columns(&buffer, y), (28..31).collect::<Vec<u16>>());
+        assert_eq!(
+            last_digit_column(&row, &LONE_JOB.to_string()),
+            Some(run_id_column(129))
+        );
+    }
+
+    #[test]
+    fn a_runner_name_of_7_ascii_characters_shows_whole_when_the_job_name_gives_columns() {
+        let (buffer, row, y) = lone_job_row(on("abcdefg", passed_job("abcdefghijklmnopqrs")), 129);
+        assert_eq!(
+            row,
+            job_golden(
+                "✅",
+                "└ …cdefghijklmnopqrs abcdefg",
+                LONE_JOB,
+                PASSED_TIMES,
+                "?"
+            )
+        );
+        assert_eq!(cyan_columns(&buffer, y).len(), 7);
+    }
+
+    #[test]
+    fn a_job_name_that_leaves_the_columns_of_the_floor_shows_whole() {
+        let cases = [
+            ("abcdefghijklmnopqr", "└ abcdefghijklmnopqr GitHub…"),
+            ("abcdefghijklmnopqrs", "└ …cdefghijklmnopqrs GitHub…"),
+        ];
+        for (job, text) in cases {
+            let (buffer, row, y) =
+                lone_job_row(on("GitHub Actions 1000001050", passed_job(job)), 129);
+            assert_eq!(
+                row,
+                job_golden("✅", text, LONE_JOB, PASSED_TIMES, "?"),
+                "job {job}"
+            );
+            assert_eq!(cyan_columns(&buffer, y).len(), 7, "job {job}");
+        }
+    }
+
+    #[test]
+    fn wide_glyphs_count_as_one_character_of_the_floor_and_two_columns_of_the_layout() {
+        let runner_text = "日本語テスト…";
+        let (buffer, row, y) = lone_job_row(
+            on("日本語テスト株式", passed_job("日本語のジョブ🎉🎊 (2)")),
+            129,
+        );
+        assert!(
+            row.starts_with("✅ └ …ブ🎉🎊 (2) 日本語テスト… "),
+            "row {row:?}"
+        );
+        assert_eq!(
+            last_digit_column(&row, &LONE_JOB.to_string()),
+            Some(run_id_column(129))
+        );
+        let (before, _) = row.split_once(runner_text).expect("the floor shows");
+        let from = display_width(before);
+        let mut column = from;
+        for glyph in runner_text.chars() {
+            let x = u16::try_from(column).expect("a small column");
+            assert_eq!(buffer[(x, y)].fg, Color::Cyan, "glyph {glyph:?}");
+            column += unicode_width::UnicodeWidthChar::width(glyph).unwrap_or(0);
+        }
+        assert_eq!(column, from + display_width(runner_text));
+        for x in column..129 {
+            let x = u16::try_from(x).expect("a small column");
+            assert_ne!(buffer[(x, y)].fg, Color::Cyan, "column {x}");
+        }
+    }
+
+    #[test]
+    fn a_text_cell_too_narrow_for_the_floor_shows_no_runner_name() {
+        let width = FIXED_COLUMNS + 20;
+        let widths = Widths::for_width(width);
+        assert_eq!(widths.repo + 1 + widths.workflow, 9);
+        let width = u16::try_from(width).expect("a small width");
+        let cases = [
+            (
+                "GitHub Actions 1000001050",
+                "a".to_owned(),
+                "└ a".to_owned(),
+            ),
+            (
+                "GitHub Actions 1000001050",
+                "n".repeat(40),
+                format!("└ {}…", "n".repeat(6)),
+            ),
+            ("m1-tsx", "n".repeat(40), format!("└ {}…", "n".repeat(6))),
+        ];
+        for (runner, job, text) in cases {
+            let (buffer, row, y) = lone_job_row(on(runner, passed_job(&job)), width);
+            assert_eq!(
+                columns(&row, 3, 9).trim_end(),
+                text,
+                "runner {runner} job {job}"
+            );
+            assert_eq!(
+                cyan_columns(&buffer, y).len(),
+                0,
+                "runner {runner} job {job}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_floor_shows_in_the_narrowest_cell_that_can_hold_it() {
+        let width = FIXED_COLUMNS + 22;
+        let widths = Widths::for_width(width);
+        assert_eq!(widths.repo + 1 + widths.workflow, 11);
+        let width = u16::try_from(width).expect("a small width");
+        let (buffer, row, y) = lone_job_row(
+            on("GitHub Actions 1000001050", passed_job(&"n".repeat(40))),
+            width,
+        );
+        assert_eq!(columns(&row, 3, 11).trim_end(), "└ … GitHub…");
+        assert_eq!(cyan_columns(&buffer, y).len(), 7);
+    }
+
+    #[test]
+    fn the_runner_name_and_its_cut_mark_stay_cyan_on_a_highlighted_row() {
+        let mut board = board_with_jobs(vec![on(
+            "GitHub Actions 1000001050",
+            passed_job(&"n".repeat(40)),
+        )]);
+        board.select_next(now());
+        let buffer = render_with(129, 14, &mut board, &loaded());
+        let text = lines(&buffer);
+        let y = u16::try_from(
+            text.iter()
+                .position(|line| line.contains(&LONE_JOB.to_string()))
+                .expect("the job row shows its ID"),
+        )
+        .expect("a small row");
+        assert!(
+            buffer[(5, y)].modifier.contains(Modifier::REVERSED),
+            "the row is highlighted: {:?}",
+            text[usize::from(y)]
+        );
+        assert_eq!(buffer[(5, y)].symbol(), "…");
+        assert_ne!(buffer[(5, y)].fg, Color::Cyan);
+        let (before, _) = text[usize::from(y)]
+            .split_once("GitHub…")
+            .expect("the floor shows");
+        let from = u16::try_from(display_width(before)).expect("a small column");
+        assert_eq!(
+            cyan_columns(&buffer, y),
+            (from..from + 7).collect::<Vec<u16>>()
+        );
+    }
+
+    #[test]
+    fn the_cut_mark_of_the_job_name_has_the_style_of_the_line() {
+        let mut board = fade_board(
+            Duration::from_hours(8),
+            "acme/widgets",
+            "2026-10-14T11:00:00Z",
+        );
+        board.select_next(now());
+        board.expand(now());
+        board.set_jobs(
+            RunId(FADE_JOBS_RUN),
+            vec![on(
+                "GitHub Actions 1000001050",
+                job(
+                    9001,
+                    &"n".repeat(40),
+                    RunState::Passed,
+                    Some("2026-10-14T10:55:00Z"),
+                    Some("2026-10-14T11:00:00Z"),
+                ),
+            )],
+        );
+        board.select_previous(now());
+        let buffer = render_with(120, 14, &mut board, &loaded());
+        let y = row_of(&buffer, "9001");
+        assert_eq!(buffer[(5, y)].symbol(), "…");
+        assert_eq!(buffer[(5, y)].fg, Color::Indexed(246));
+        let text = lines(&buffer);
+        let (before, _) = text[usize::from(y)]
+            .split_once("GitHub…")
+            .expect("the floor shows");
+        let from = u16::try_from(display_width(before)).expect("a small column");
+        assert_eq!(
+            cyan_columns(&buffer, y),
+            (from..from + 7).collect::<Vec<u16>>()
+        );
+    }
+
+    #[test]
+    fn a_job_with_no_runner_and_a_long_name_keeps_the_cut_at_the_end() {
+        let (buffer, row, y) = lone_job_row(passed_job(&"n".repeat(40)), 129);
+        assert_eq!(
+            row,
+            job_golden(
+                "✅",
+                &format!("└ {}…", "n".repeat(25)),
+                LONE_JOB,
+                PASSED_TIMES,
+                "$0"
+            )
+        );
+        assert_eq!(cyan_columns(&buffer, y), Vec::<u16>::new());
+    }
+
+    /// At every frame width, a job row keeps the job ID in the column of the
+    /// run ID and keeps the started, time, and cost cells, whatever the job
+    /// name and the runner name are. One board holds every combination of name
+    /// and runner, and the test draws one frame for each width.
+    #[test]
+    fn job_rows_keep_the_id_and_the_end_cells_in_the_run_columns_at_every_width() {
+        // The old one-job frame had 14 rows. Each job after the first adds one
+        // row, so the footer still shows. The height follows the job count.
+        const ONE_JOB_ROWS: usize = 14;
+        const FIRST_ID: u64 = 900_000_000_101;
+        let names = [
+            "Full check list (Mac 22) and a long name after it",
+            "日本語のジョブ名テスト一覧表示確認",
+            "🎉🎊🎁🎈🎂🎉🎊🎁🎈🎂🎉🎊🎁🎈",
+            "Deploy ☁\u{FE0F} staging env (2)",
+        ];
+        let runners = [
+            None,
+            Some("mbp"),
+            Some("abcdefg"),
+            Some("GitHub Actions 1000001050"),
+            Some("日本語テスト株式"),
+        ];
+        let mut cases = Vec::new();
+        let mut jobs = Vec::new();
+        for name in names {
+            for runner in runners {
+                let id = FIRST_ID + u64::try_from(jobs.len()).unwrap();
+                let built = job(
+                    id,
+                    name,
+                    RunState::Passed,
+                    Some("2026-10-14T11:46:00Z"),
+                    Some("2026-10-14T11:48:00Z"),
+                );
+                jobs.push(match runner {
+                    Some(runner) => on(runner, built),
+                    None => built,
+                });
+                cases.push((id, name, runner));
+            }
+        }
+        let height = u16::try_from(ONE_JOB_ROWS + jobs.len() - 1).unwrap();
+        for width in 0_u16..=200 {
+            let mut board = board_with_jobs(jobs.clone());
+            let buffer = render_with(width, height, &mut board, &loaded());
+            if usize::from(width) < FIXED_COLUMNS {
+                continue;
+            }
+            let text = lines(&buffer);
+            for &(id, name, runner) in &cases {
+                let context = format!("width {width}, name {name:?}, runner {runner:?}");
+                let id = id.to_string();
+                let y = text
+                    .iter()
+                    .position(|line| line.contains(&id))
+                    .unwrap_or_else(|| panic!("the job row shows its ID: {context}"));
+                assert_eq!(
+                    last_digit_column(&text[y], &id),
+                    last_digit_column(&text[2], "1"),
+                    "the ID column: {context}"
+                );
+                assert_eq!(started_cells(&text, y), "11:46:00", "started: {context}");
+                assert_eq!(time_cells(&text, y), "2m 00s", "time: {context}");
+                assert!(!cost_cells(&text, y).trim().is_empty(), "cost: {context}");
+                assert_eq!(
+                    display_width(&text[y]),
+                    usize::from(width),
+                    "row width: {context}"
+                );
+            }
+        }
     }
 
     /// The rule of `Job::runner` is that a runner name shows whatever the state
@@ -6934,21 +7269,6 @@ mod tests {
         let mut board = board_with_jobs(vec![passed_job("build")]);
         let text = lines(&render_with(width, 14, &mut board, &loaded()));
         last_digit_column(&text[2], "1").expect("the run row shows its ID")
-    }
-
-    #[test]
-    fn a_job_name_that_fills_the_cell_shows_no_runner_name() {
-        let name = "n".repeat(40);
-        let (buffer, row, y) = lone_job_row(on("mbp", passed_job(&name)), 129);
-        // The text is cut to the 28 columns of the cell and ends in `…`.
-        let cut = format!("└ {}…", "n".repeat(25));
-        assert_eq!(display_width(&cut), 28);
-        assert_eq!(row, job_golden("✅", &cut, LONE_JOB, PASSED_TIMES, "?"));
-        assert_eq!(cyan_columns(&buffer, y), Vec::<u16>::new());
-        assert_eq!(
-            last_digit_column(&row, &LONE_JOB.to_string()),
-            Some(run_id_column(129))
-        );
     }
 
     #[test]
