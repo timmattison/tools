@@ -12,6 +12,7 @@ pub mod app;
 pub mod excerpt;
 pub mod extract;
 pub mod index;
+pub mod launch;
 pub mod query;
 pub mod render;
 pub mod search;

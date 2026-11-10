@@ -1441,9 +1441,11 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "shellquote",
  "tempfile",
  "textfit",
  "unicode-width",
+ "wait-timeout",
 ]
 
 [[package]]

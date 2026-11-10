@@ -15,11 +15,13 @@ ratatui.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
+shellquote.workspace = true
 textfit.workspace = true
 unicode-width.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+wait-timeout.workspace = true
 
 [lints]
 workspace = true
