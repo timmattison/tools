@@ -2111,7 +2111,7 @@ mod tests {
         for (indicator, text) in cases {
             let snap = with_pull(snap_with(vec![]), indicator.clone());
             let got = forced_header_line(&snap, 80);
-            let gap = " ".repeat(80 - text.len() - header.len());
+            let gap = " ".repeat(80 - text.len() - UnicodeWidthStr::width(header));
             let expected = testcolor::with_forced_ansi(|| {
                 let painted = match indicator {
                     PullIndicator::Open { .. } => text.green().bold().to_string(),
