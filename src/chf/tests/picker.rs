@@ -49,15 +49,22 @@ fn write_session(home: &Path, title: &str, compacted: bool) {
                "message": {"role": "assistant", "content": [{"type": "text", "text": "world"}]}}),
     ];
     if compacted {
-        records.push(json!({"type": "system", "subtype": "compact_boundary", "uuid": "b1",
-            "timestamp": "2026-01-01T00:00:02Z", "compactMetadata": {"preTokens": 150_000}}));
+        records.push(
+            json!({"type": "system", "subtype": "compact_boundary", "uuid": "b1",
+            "timestamp": "2026-01-01T00:00:02Z", "compactMetadata": {"preTokens": 150_000}}),
+        );
         records.push(json!({"type": "user", "isCompactSummary": true,
             "timestamp": "2026-01-01T00:00:03Z",
             "message": {"role": "user", "content": "summary"}}));
         records.push(json!({"type": "user", "timestamp": "2026-01-01T00:00:04Z",
             "message": {"role": "user", "content": "after"}}));
     }
-    let text: String = records.iter().map(|record| format!("{record}\n")).collect();
+    let text = records
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
     std::fs::write(folder.join(format!("{ID}.jsonl")), text).expect("the transcript is written");
     std::fs::write(
         home.join(".bashrc"),
@@ -89,7 +96,12 @@ impl Picker {
             })
             .expect("the pseudo-terminal opens");
         let mut command = CommandBuilder::new("perl");
-        command.args(["-e", ALARM_WRAPPER, ALARM_SECONDS, env!("CARGO_BIN_EXE_chf")]);
+        command.args([
+            "-e",
+            ALARM_WRAPPER,
+            ALARM_SECONDS,
+            env!("CARGO_BIN_EXE_chf"),
+        ]);
         command.env_clear();
         command.env("HOME", home);
         command.env("PATH", "/usr/bin:/bin");
@@ -220,9 +232,14 @@ fn enter_on_a_plain_session_runs_ch() {
     assert_eq!(picker.wait_for_exit(), FAKE_STATUS);
     assert_eq!(crap_args(home.path()), ["--here", ID]);
     let shown = picker.shown();
-    let left = shown.find(LEAVE_SCREEN).expect("chf leaves the alternate screen");
+    let left = shown
+        .find(LEAVE_SCREEN)
+        .expect("chf leaves the alternate screen");
     let ran = shown.find(FAKE_RAN).expect("the fake crap ran");
-    assert!(left < ran, "chf must restore the terminal before the resume");
+    assert!(
+        left < ran,
+        "chf must restore the terminal before the resume"
+    );
 }
 
 #[test]
@@ -256,10 +273,14 @@ fn a_word_that_matches_nothing_empties_the_list_and_ctrl_u_restores_it() {
     write_session(home.path(), "Zanzibar-trip-notes", false);
     let mut picker = Picker::open(home.path(), "/bin/bash");
     picker.wait_for("Zanzibar-trip-notes");
+    // The screen can show "no session matches" once before the first hits
+    // arrive, so the wait is for one more than the screen showed so far.
+    let empty_before = picker.count_of("matches");
+    let title_before = picker.count_of("Zanzibar-trip-notes");
     picker.press(b"nomatchword");
-    picker.wait_for("matches");
+    picker.wait_for_count("matches", empty_before + 1);
     picker.press(b"\x15");
-    picker.wait_for_count("Zanzibar-trip-notes", 2);
+    picker.wait_for_count("Zanzibar-trip-notes", title_before + 1);
     picker.press(b"\r");
     assert_eq!(picker.wait_for_exit(), FAKE_STATUS);
     assert_eq!(crap_args(home.path()), ["--here", ID]);
