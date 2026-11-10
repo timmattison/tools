@@ -10,12 +10,13 @@ use std::process::ExitCode;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Duration;
 
-use chf::app::{App, Effect};
+use chf::app::{App, Effect, Version};
 use chf::index::{self, IndexEvent};
 use chf::launch;
 use chf::render::{self, Context};
 use chf::search::Searcher;
 use clap::Parser;
+use claude_transcript::SessionId;
 
 /// The exit status of a run that fails.
 const EXIT_FAILURE: u8 = 1;
@@ -61,8 +62,8 @@ impl Drop for TerminalGuard {
 enum Outcome {
     /// The person quit.
     Quit,
-    /// The person chose a session to resume.
-    Launch(chf::app::Effect),
+    /// The person chose this session, in this version, to resume.
+    Launch { id: SessionId, version: Version },
     /// The terminal failed with this error.
     DrawFailed(std::io::Error),
 }
@@ -121,14 +122,14 @@ fn run_picker(home: &Path, events: &Receiver<IndexEvent>, searcher: &Searcher) -
             match effect {
                 Effect::Search(job) => searcher.submit(job),
                 Effect::Quit => return Outcome::Quit,
-                launch @ Effect::Launch { .. } => return Outcome::Launch(launch),
+                Effect::Launch { id, version } => return Outcome::Launch { id, version },
             }
         }
     }
 }
 
 /// Resumes a session through the shell. It returns only when that fails.
-fn resume(id: &claude_transcript::SessionId, version: chf::app::Version) -> ExitCode {
+fn resume(id: &SessionId, version: Version) -> ExitCode {
     let shell = std::env::var_os("SHELL");
     if launch::shell_of(shell.as_deref()).is_none() {
         eprintln!("chf: $SHELL is not bash or zsh, so chf cannot run the crap shell function.");
@@ -166,7 +167,6 @@ fn main() -> ExitCode {
             eprintln!("chf: cannot draw the screen: {error}");
             ExitCode::from(EXIT_FAILURE)
         }
-        Outcome::Launch(Effect::Launch { id, version }) => resume(&id, version),
-        Outcome::Launch(_) => ExitCode::from(EXIT_FAILURE),
+        Outcome::Launch { id, version } => resume(&id, version),
     }
 }
