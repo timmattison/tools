@@ -4,11 +4,14 @@
 //! submodule of it. [`target`] decides which pull request the indicator asks about.
 //! [`indicator`] holds the states of the indicator and their text.
 //! [`lookup`] asks GitHub for the open pull requests and reads the reply.
+//! [`state`] decides when a lookup starts and what the indicator shows.
 
 mod indicator;
 mod lookup;
+mod state;
 mod target;
 
 pub(crate) use indicator::{from_numbers, PullHeader, PullIndicator};
 pub(crate) use lookup::{run_lookup, LookupOutcome, LOOKUP_LIMIT};
+pub(crate) use state::{LookupRequest, PullWatch};
 pub(crate) use target::{target_of, PullTarget};
