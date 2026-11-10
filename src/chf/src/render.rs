@@ -9,12 +9,12 @@ use std::path::Path;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Drawn, Mode, Version};
-use crate::excerpt::{preview, thousands, Tone};
+use crate::excerpt::{preview, thousands, wrap_text, Tone};
 use crate::query::Found;
 use crate::search::Hit;
 use crate::session::Session;
@@ -523,14 +523,17 @@ fn draw_ask(frame: &mut Frame, app: &App, session: usize, choice: Version, area:
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let lines = ask_lines(app, session, choice);
     let width = area.width.min(ASK_MAX_WIDTH);
-    let inner = usize::from(width.saturating_sub(2)).max(1);
-    let wrapped: usize = lines
+    let inner = width.saturating_sub(2).max(1);
+    // The box wraps its lines here and draws each row as it comes, so the
+    // count of rows is the count of lines it draws. A paragraph that wraps
+    // again at word breaks can need more rows than such a count.
+    let rows: Vec<Line> = ask_lines(app, session, choice)
         .iter()
-        .map(|line| line.width().div_ceil(inner).max(1))
-        .sum();
-    let height = u16::try_from(wrapped + 2)
+        .flat_map(|line| wrap_text(line, inner))
+        .map(Line::from)
+        .collect();
+    let height = u16::try_from(rows.len() + 2)
         .unwrap_or(u16::MAX)
         .min(area.height);
     let rect = Rect::new(
@@ -541,9 +544,5 @@ fn draw_ask(frame: &mut Frame, app: &App, session: usize, choice: Version, area:
     );
     frame.render_widget(Clear, rect);
     let block = Block::default().borders(Borders::ALL).title(ASK_TITLE);
-    let text: Vec<Line> = lines.into_iter().map(Line::from).collect();
-    frame.render_widget(
-        Paragraph::new(text).block(block).wrap(Wrap { trim: false }),
-        rect,
-    );
+    frame.render_widget(Paragraph::new(rows).block(block), rect);
 }

@@ -90,6 +90,27 @@ pub fn thousands(n: u64) -> String {
     out
 }
 
+/// Wrap `text` to `width` display columns with the rule of the preview.
+///
+/// The rule is the one that the preview uses for a message: the text splits
+/// at each `\n`, a line breaks after its last space when the next char does
+/// not fit, and the sanitizing of the preview applies. An empty part gives one
+/// empty line. A caller that must know how many rows a text takes wraps it
+/// here and draws the lines as they come. A second wrap of its own, for
+/// example the word wrap of a ratatui paragraph, can need more rows than the
+/// caller counted. A `width` of 0 gives no lines.
+#[must_use]
+pub fn wrap_text(text: &str, width: u16) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+    wrap_message(text, usize::from(width))
+        .lines
+        .iter()
+        .map(|line| line.items.iter().map(|item| item.ch).collect())
+        .collect()
+}
+
 /// The lines of the view of `session`.
 ///
 /// `found` picks the anchor. `Found::At` puts the line of the match 3 lines
