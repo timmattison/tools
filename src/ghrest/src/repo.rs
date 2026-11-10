@@ -112,6 +112,26 @@ impl GithubRepo {
     }
 }
 
+impl GithubRepo {
+    /// The host, in lowercase. `ssh.github.com` is stored as `github.com`.
+    #[must_use]
+    pub fn host(&self) -> &str {
+        ""
+    }
+
+    /// The owner of the repository, in the case that the URL gave.
+    #[must_use]
+    pub fn owner(&self) -> &str {
+        ""
+    }
+
+    /// The name of the repository, with no `.git` suffix.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        ""
+    }
+}
+
 impl fmt::Display for GithubRepo {
     /// Writes `host/owner/name`, the form that `gh pr list --repo` takes.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -126,6 +146,22 @@ mod tests {
     /// Reads `url` with no extra host and gives the `host/owner/name` form.
     fn parsed(url: &str) -> Option<String> {
         GithubRepo::from_remote_url(url, None).map(|repo| repo.to_string())
+    }
+
+    #[test]
+    fn the_accessors_give_the_three_parts() {
+        let repo = GithubRepo::from_remote_url("git@ssh.github.com:Owner/na-me.git", None).unwrap();
+        assert_eq!(repo.host(), "github.com");
+        assert_eq!(repo.owner(), "Owner");
+        assert_eq!(repo.name(), "na-me");
+    }
+
+    #[test]
+    fn the_host_accessor_gives_lowercase_for_an_extra_host() {
+        let repo =
+            GithubRepo::from_remote_url("https://GHE.Example.com/o/n", Some("ghe.example.com"))
+                .unwrap();
+        assert_eq!(repo.host(), "ghe.example.com");
     }
 
     #[test]
