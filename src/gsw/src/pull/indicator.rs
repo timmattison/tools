@@ -1,5 +1,7 @@
 //! The pull-request indicator that ends the header row of watch mode.
 
+use std::collections::BTreeSet;
+
 use colored::Colorize;
 use ghrest::PullNumber;
 
@@ -32,20 +34,35 @@ pub(crate) enum PullIndicator {
 /// [`PullIndicator::NoPull`]. Otherwise the result holds the lowest number and
 /// the count of the other distinct numbers.
 pub(crate) fn from_numbers(numbers: &[PullNumber]) -> PullIndicator {
-    let _ = numbers;
-    PullIndicator::Unknown
+    let distinct: BTreeSet<PullNumber> = numbers.iter().copied().collect();
+    match distinct.first() {
+        None => PullIndicator::NoPull,
+        Some(&lowest) => PullIndicator::Open {
+            lowest,
+            others: distinct.len() - 1,
+        },
+    }
 }
 
 impl PullIndicator {
     /// The plain text of the indicator: `PR #690`, `PR #690 +1`, `no PR`, or `PR ?`.
     pub(crate) fn text(&self) -> String {
-        String::new()
+        match self {
+            Self::Open { lowest, others: 0 } => format!("PR {lowest}"),
+            Self::Open { lowest, others } => format!("PR {lowest} +{others}"),
+            Self::NoPull => NO_PULL_TEXT.to_string(),
+            Self::Unknown => UNKNOWN_TEXT.to_string(),
+        }
     }
 
     /// The text of the indicator with its style: green and bold for an open
     /// pull request, dim for the other two states.
     pub(crate) fn paint(&self) -> String {
-        self.text().normal().to_string()
+        let text = self.text();
+        match self {
+            Self::Open { .. } => text.green().bold().to_string(),
+            Self::NoPull | Self::Unknown => text.dimmed().to_string(),
+        }
     }
 }
 

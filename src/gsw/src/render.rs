@@ -253,18 +253,58 @@ pub fn render(snapshot: &Snapshot, opts: &RenderOptions) -> String {
 /// segment, or the upstream field. A hard cut that removed the name leaves no
 /// red span. With the flag clear, the header is byte-for-byte what it was
 /// before the name had a color of its own.
+///
+/// When `snapshot.pull` is set, the indicator ends the header row. The row is
+/// then exactly `width` columns wide, with at least [`PULL_GAP`] plain spaces
+/// between the header and the indicator. The header must fit in the columns
+/// that the indicator leaves, through the ladder of [`header_segments`] with no
+/// hard cut. If it does not fit, the row has no indicator and the header takes
+/// the full width. The name of the branch outranks the indicator. With
+/// `pull` unset, the row is what it was before the indicator, byte for byte.
 pub(crate) fn render_head(
     snapshot: &Snapshot,
     width: usize,
     refresh: Option<&RefreshStatus>,
 ) -> Vec<String> {
-    let header_line = paint_header(header_segments(snapshot, width), snapshot.off_start_branch);
+    let header_line = header_row(snapshot, width);
     let mut lines = vec![header_line];
     if let Some(op) = &snapshot.operation {
         lines.push(render_operation_line(op, width));
     }
     lines.push(render_separator(width, refresh));
     lines
+}
+
+/// The header row: the painted header, and the pull-request indicator at the
+/// right end when both fit.
+///
+/// The indicator needs its own width and [`PULL_GAP`] columns. The header must
+/// fit in the rest through the ladder alone, with no hard cut. When it does,
+/// plain spaces fill the row up to the indicator, so the last column of the
+/// row is the last column of the indicator. Otherwise the row has no
+/// indicator and the header takes the full width. The name of the branch
+/// outranks the indicator.
+fn header_row(snapshot: &Snapshot, width: usize) -> String {
+    let paint = |segments| paint_header(segments, snapshot.off_start_branch);
+    let Some(pull) = &snapshot.pull else {
+        return paint(header_segments(snapshot, width));
+    };
+    let text_width = UnicodeWidthStr::width(pull.indicator.text().as_str());
+    let fitted = width
+        .checked_sub(text_width + PULL_GAP)
+        .and_then(|room| fit_header(snapshot, room));
+    match fitted {
+        Some(segments) => {
+            let gap = width - text_width - segments.width();
+            format!(
+                "{}{}{}",
+                paint(segments),
+                " ".repeat(gap),
+                pull.indicator.paint()
+            )
+        }
+        None => paint(header_segments(snapshot, width)),
+    }
 }
 
 /// Paints the segments of the header: the whole header bold, the name red when
@@ -470,6 +510,9 @@ fn compute_path_width(opts: &RenderOptions) -> usize {
 
 /// The header split into independently-styleable pieces.
 ///
+/// The pieces carry no pull-request indicator. [`render_head`] adds it after
+/// the pieces, when the header fits in the columns that the indicator leaves.
+///
 /// `render` paints `lead`, `rest` and `suffix` bold (as the whole header has
 /// always been) and, when present, paints `behind` yellow + bold as a rebase
 /// warning. `behind` is `None` exactly when the branch is up to date with its
@@ -587,6 +630,10 @@ const HEADER_NAME_FLOOR: usize = 10;
 /// tracking ref's name (a duplicate of the branch), then the branch and base
 /// names shaved toward [`HEADER_NAME_FLOOR`] longest-first, then the upstream
 /// field entirely, then a hard cut.
+///
+/// The pull-request indicator has no part in this ladder. The caller that
+/// shows it asks [`fit_header`] for a width smaller by the indicator and
+/// [`PULL_GAP`], so the indicator never takes a rung from the header.
 ///
 /// The header carries no age. Every age on the frame belongs to a row that
 /// names what it is aging — a file or a commit — and the newest commit's age
