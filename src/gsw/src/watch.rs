@@ -650,7 +650,8 @@ fn ceil_secs(remaining: Duration) -> Duration {
 /// Every input is already expressed as a duration from now, and a `None` from a
 /// source means that source imposes no deadline. Taking a slice rather than a
 /// fixed pair is what lets a new source (the timed refresh, the refresh clock's
-/// own cadence) join without every caller and test changing shape.
+/// own cadence, the end of a rate-limit block that holds a pull lookup) join
+/// without every caller and test changing shape.
 fn wait_window(deadlines: &[Option<Duration>]) -> Option<Duration> {
     deadlines.iter().flatten().min().copied()
 }
@@ -3090,6 +3091,10 @@ struct LoopHooks<
 /// The triggers one wake collected, before the render decides what to do with
 /// them. A burst can carry several at once, and they are not exclusive: a walk
 /// forced by `r` and a resize can arrive together.
+///
+/// The pull lookups need no flag of their own here. `r` is `force`, and the
+/// other causes show in the target of the cached snapshot, which the loop
+/// compares after the walk. A filesystem event starts no lookup.
 #[derive(Default)]
 struct Pending {
     /// A relevant filesystem path changed.
@@ -3216,8 +3221,13 @@ where
         Event::Quit => return Flow::Quit,
         Event::FsChanged => pending.fs = true,
         Event::Resize => pending.resize = true,
-        // Red step: the answer is not read yet.
-        Event::PullAnswered { .. } => {}
+        // The answer goes into the cache of its own target, whatever the
+        // frame shows now. A lookup that waited for this one starts here.
+        Event::PullAnswered { target, outcome } => {
+            if let Some(request) = state.pulls.answered(target, outcome, clock()) {
+                (hooks.start_pull)(request);
+            }
+        }
         Event::ForceRefresh => pending.force = true,
         Event::Key(key) => {
             let keys = state.base_updates.keys(state.issue.key(), state.tab.key());
@@ -3647,6 +3657,15 @@ where
 /// - while the list of the worktrees is open, the frame is the frame of the
 ///   list (`render_list` in `hooks`), and every other frame is the status
 ///   frame (`render`);
+/// - the loop starts a pull lookup ([`LoopHooks::start_pull`]) through
+///   [`PullWatch`], and only on these triggers: the start of the loop (after
+///   the first frame is on the screen), a timed refresh, `r`, a change of the
+///   worktree or the branch on the screen, and the end of a rate-limit block
+///   that held a lookup (a wake of its own, [`PullWatch::wake_at`]). A
+///   filesystem event starts none, so a build that writes many files sends no
+///   many requests. The answer arrives as [`Event::PullAnswered`] on the same
+///   channel, so the loop never waits for the network. Each frame takes its
+///   indicator from the cache of its own target ([`show_pull_indicator`]);
 /// - [`Event::Quit`] ends the loop, as does every sender hanging up.
 ///
 /// A failed collect is absorbed rather than propagated because the failures are
@@ -3773,6 +3792,16 @@ where
         start_branch,
         pulls,
     };
+    // The lookup of the first frame. The first frame is on the screen already,
+    // so the lookup delays nothing. The instant is the start of the walk that
+    // seeded the cache, and no clock is read for it.
+    if let Some(request) = state.pulls.refresh(
+        pull_target(&state.cache.snapshot),
+        false,
+        state.cache.collected_at,
+    ) {
+        (hooks.start_pull)(request);
+    }
     loop {
         // Wait for the first event, or — when the decay timer is enabled — wake
         // after `interval` of quiet for a tick.
@@ -3789,9 +3818,16 @@ where
             .schedule
             .next_walk_at()
             .map(|at| at.saturating_duration_since((hooks.clock)()));
+        // A lookup that waited for the end of a rate-limit block is the other
+        // source of a wake. The clock is read only when such a lookup waits.
+        let pull_wait = state
+            .pulls
+            .wake_at()
+            .map(|at| at.saturating_duration_since((hooks.clock)()));
         let wait = wait_window(&[
             (hooks.next_tick)(freshest),
             walk_wait,
+            pull_wait,
             state.schedule.interval.map(|_| CLOCK_CADENCE),
             state.ui.next_tick(&hooks.clock),
         ]);
@@ -3893,6 +3929,12 @@ where
         } else {
             false
         };
+
+        // Does this walk follow a timed refresh? It is asked before the walk
+        // records itself, because the record moves the timed deadline on. A walk
+        // that a filesystem event caused is not a timed refresh, so it asks
+        // GitHub again only when the target changed.
+        let timed_refresh = walk_now && state.schedule.timed_due(now);
 
         // Re-measure the pane before rendering, on the same two triggers as
         // before: a walk and a resize. Hoisted out of the branches so the frame
@@ -4000,6 +4042,19 @@ where
             }
         }
 
+        // One call decides every lookup of this wake. The target of the cached
+        // snapshot is the target on the screen, so the call sees a switch that
+        // `absorb` made, a branch that the walk found, a timed refresh, `r`, and
+        // the end of a rate-limit block. It starts none for a filesystem event
+        // that left the target as it was.
+        if let Some(request) = state.pulls.refresh(
+            pull_target(&state.cache.snapshot),
+            saw_force || timed_refresh,
+            now,
+        ) {
+            (hooks.start_pull)(request);
+        }
+
         // The open list takes the rows under the head of the frame. A pane
         // that leaves it no row closes it, so Enter never chooses a row that
         // the user did not see. The check comes after the walk, because the
@@ -4059,6 +4114,7 @@ where
             &state.schedule,
             now,
         );
+        show_pull_indicator(&mut state.cache.snapshot, &state.pulls, now);
         // The open list of the worktrees takes the pane, so its frame replaces
         // the status frame for as long as it is open.
         let render = match state.ui.list() {
@@ -4084,6 +4140,30 @@ where
         }
     }
     Ok(())
+}
+
+/// The pull target that the snapshot asks about, or `None` when the indicator
+/// does not apply to it.
+fn pull_target(snapshot: &Snapshot) -> Option<&crate::pull::PullTarget> {
+    snapshot.pull.as_ref().map(|header| &header.target)
+}
+
+/// Put into the header of `snapshot` what `pulls` shows for its target at `now`.
+///
+/// The walk gives a header with an unknown indicator, and the cache of the
+/// answers is the truth. So each frame takes its indicator from the cache of
+/// its own target, and an answer for another worktree never reaches it. When
+/// the watch shows nothing any more, as after a `gh` that went missing, the
+/// header goes away and the frame is the frame of a watch with no indicator.
+/// The loop calls this once for each frame, just before the render.
+fn show_pull_indicator(snapshot: &mut Snapshot, pulls: &PullWatch, now: Instant) {
+    let Some(header) = snapshot.pull.as_mut() else {
+        return;
+    };
+    match pulls.indicator(&header.target, now) {
+        Some(indicator) => header.indicator = indicator,
+        None => snapshot.pull = None,
+    }
 }
 
 /// Join a frame and the push overlay into the one string that gets painted.
@@ -14765,6 +14845,28 @@ mod push_loop_tests {
             "the block holds the lookup of r"
         );
         assert_eq!(paints, vec![format!("{ALONE} PR ?")]);
+    }
+
+    #[test]
+    fn the_pending_lookup_goes_out_by_itself_at_the_end_of_a_rate_limit() {
+        // The block lasts 200 ms of the real clock. The lookup that `r`
+        // left pending goes out when the loop wakes at the end of the block,
+        // with no event behind the wake. The empty burst keeps the loop
+        // waiting for that wake.
+        let (_screen, seen) = drive_bursts(
+            vec![
+                vec![pull_answer(
+                    ALONE,
+                    crate::pull::LookupOutcome::RateLimited(Duration::from_millis(200)),
+                )],
+                vec![Event::ForceRefresh],
+                vec![],
+                vec![Event::Quit],
+            ],
+            pull_setup(World::alone()),
+            Instant::now,
+        );
+        assert_eq!(seen.pull_lookups.len(), 2);
     }
 
     #[test]
