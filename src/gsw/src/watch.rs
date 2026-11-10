@@ -14853,20 +14853,33 @@ mod push_loop_tests {
         // left pending goes out when the loop wakes at the end of the block,
         // with no event behind the wake. The empty burst keeps the loop
         // waiting for that wake.
-        let (_screen, seen) = drive_bursts(
-            vec![
-                vec![pull_answer(
-                    ALONE,
-                    crate::pull::LookupOutcome::RateLimited(Duration::from_millis(200)),
-                )],
-                vec![Event::ForceRefresh],
-                vec![],
-                vec![Event::Quit],
-            ],
-            pull_setup(World::alone()),
-            Instant::now,
-        );
-        assert_eq!(seen.pull_lookups.len(), 2);
+        //
+        // A loop that never wakes by itself waits on its channel for ever, so
+        // the loop runs on a thread of its own and the test waits for it
+        // with a bound. A missing wake then fails this test instead of
+        // hanging the suite. The thread of such a failure stays blocked
+        // until the test process ends.
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let (_screen, seen) = drive_bursts(
+                vec![
+                    vec![pull_answer(
+                        ALONE,
+                        crate::pull::LookupOutcome::RateLimited(Duration::from_millis(200)),
+                    )],
+                    vec![Event::ForceRefresh],
+                    vec![],
+                    vec![Event::Quit],
+                ],
+                pull_setup(World::alone()),
+                Instant::now,
+            );
+            let _ = done_tx.send(seen.pull_lookups.len());
+        });
+        let lookups = done_rx
+            .recv_timeout(RESCUE_AFTER)
+            .expect("the loop must wake by itself at the end of the block and quit");
+        assert_eq!(lookups, 2);
     }
 
     #[test]
