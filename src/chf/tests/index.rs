@@ -454,8 +454,8 @@ fn old_temporary_files_are_removed() {
         fs::write(path, "x").unwrap();
     }
     let now = SystemTime::now();
-    set_mtime(&old, now - Duration::from_secs(11 * 60));
-    set_mtime(&fresh, now - Duration::from_secs(60));
+    set_mtime(&old, now - Duration::from_mins(11));
+    set_mtime(&fresh, now - Duration::from_mins(1));
 
     collect(store.path(), cache.path());
 
