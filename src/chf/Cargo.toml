@@ -5,11 +5,18 @@ edition.workspace = true
 description = "Find a Claude Code session by a word and resume it with ch or che"
 license = "MIT"
 
+[[bin]]
+name = "chf"
+path = "src/main.rs"
+
 [dependencies]
 blake3.workspace = true
+buildinfo.workspace = true
 chrono.workspace = true
+clap.workspace = true
 claude-transcript.workspace = true
 crossterm.workspace = true
+dirs.workspace = true
 rayon.workspace = true
 ratatui.workspace = true
 regex.workspace = true
@@ -20,6 +27,8 @@ textfit.workspace = true
 unicode-width.workspace = true
 
 [dev-dependencies]
+gitscratch = { workspace = true, features = ["testing"] }
+portable-pty.workspace = true
 tempfile.workspace = true
 wait-timeout.workspace = true
 

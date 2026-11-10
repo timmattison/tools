@@ -274,6 +274,8 @@ full path, `shellquote::shell_quote(...)`, where the call site sits behind a
 - `aws2env` - the value of each credential it prints, when the value needs
   quotes. A value that holds only letters, digits, `_`, `-`, `.` and `/`
   prints bare, because a person reads that output before they paste it
+- `chf` - the session id in the shell script it runs, and in the command it
+  prints for a person to paste
 - `crap` - the paths that the tests of the shell function put into the fake
   scripts
 - `gitscratch` - the log path, the path of the real git, and the subcommand

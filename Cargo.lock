@@ -1433,9 +1433,14 @@ name = "chf"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "buildinfo",
  "chrono",
+ "clap",
  "claude-transcript",
  "crossterm",
+ "dirs",
+ "gitscratch",
+ "portable-pty",
  "ratatui",
  "rayon",
  "regex",
