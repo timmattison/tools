@@ -62,21 +62,41 @@ pub struct Session {
 
 impl Session {
     /// The text of the message at `index`. A bad index gives an empty string.
+    ///
+    /// The spans sit on char boundaries by construction, so `get` does not fail
+    /// for a `Session` that `extract` made.
     #[must_use]
     pub fn message_text(&self, index: usize) -> &str {
-        let _ = index;
-        ""
+        self.messages
+            .get(index)
+            .and_then(|span| self.text.get(span.start..span.end))
+            .unwrap_or("")
     }
 
     /// `ai_title`, else the first non-empty line of the first user message, else `None`.
     #[must_use]
     pub fn title(&self) -> Option<&str> {
-        None
+        if let Some(title) = self.ai_title.as_deref() {
+            return Some(title);
+        }
+        let index = self.messages.iter().position(|span| {
+            span.role == Role::User && !self.message_text_of(span).trim().is_empty()
+        })?;
+        self.message_text(index)
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
     }
 
     /// `before_message` of the last compaction point.
     #[must_use]
     pub fn last_compaction_before(&self) -> Option<usize> {
-        None
+        self.compaction_points
+            .last()
+            .map(|point| point.before_message)
+    }
+
+    fn message_text_of(&self, span: &MessageSpan) -> &str {
+        self.text.get(span.start..span.end).unwrap_or("")
     }
 }
