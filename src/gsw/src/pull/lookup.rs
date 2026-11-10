@@ -69,7 +69,15 @@ pub(crate) enum LookupOutcome {
 /// UTF-8 form becomes `%XX` with uppercase hex. A `+` becomes `%2B`, because a
 /// `+` in a query means a space.
 fn percent_encode(text: &str) -> String {
-    text.to_owned()
+    let mut encoded = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
 }
 
 /// The path of the request, for example
@@ -108,7 +116,16 @@ where
     I: IntoIterator<Item = K>,
     K: AsRef<OsStr>,
 {
-    let _ = (command, inherited_keys);
+    gitscratch::shed_git_environment_from(
+        command,
+        inherited_keys,
+        InheritedGitEnvironment::KeepUserIntent,
+    );
+    command
+        .env_remove(GH_FORCE_TTY)
+        .env_remove(CLICOLOR_FORCE)
+        .env(GH_PROMPT_DISABLED, SWITCH_ON)
+        .env(GH_NO_UPDATE_NOTIFIER, SWITCH_ON);
 }
 
 /// Builds the command of one lookup, with `keys` as the names of the inherited environment.
@@ -238,8 +255,16 @@ fn interpret(
     cached: Option<&EtagEntry>,
     now: SystemTime,
 ) -> LookupOutcome {
-    let _ = (stdout, stderr, exit, path, target, cached, now);
-    LookupOutcome::Failed(String::new())
+    match parse_response(stdout) {
+        Some(response) => answer(response, path, target, cached, now),
+        None => LookupOutcome::Failed(match first_line(stderr) {
+            Some(line) => line.to_owned(),
+            None => match exit {
+                Some(code) => format!("gh printed no reply and exited with {code}"),
+                None => "gh printed no reply and ended on a signal".to_owned(),
+            },
+        }),
+    }
 }
 
 /// Runs one lookup with `program` as the `gh` program.
