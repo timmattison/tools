@@ -1,4 +1,4 @@
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// One answer of `gh api -i`, split into its parts.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,8 +80,28 @@ impl Response {
     ///    plain refusal, for example a missing permission.
     #[must_use]
     pub fn rate_limit_wait(&self, now: SystemTime) -> Option<RateLimitWait> {
-        let _ = now;
-        None
+        if self.status != 403 && self.status != 429 {
+            return None;
+        }
+        if let Some(value) = self.header("retry-after") {
+            return Some(match value.parse::<u64>() {
+                Ok(seconds) => RateLimitWait::Stated(Duration::from_secs(seconds)),
+                Err(_) => RateLimitWait::Unstated,
+            });
+        }
+        if self.header("x-ratelimit-remaining") != Some("0") {
+            return None;
+        }
+        let reset = self
+            .header("x-ratelimit-reset")
+            .and_then(|value| value.parse::<u64>().ok());
+        Some(match reset {
+            Some(reset) => {
+                let reset = UNIX_EPOCH + Duration::from_secs(reset);
+                RateLimitWait::Stated(reset.duration_since(now).unwrap_or(Duration::ZERO))
+            }
+            None => RateLimitWait::Unstated,
+        })
     }
 }
 
@@ -132,8 +152,6 @@ pub fn parse_response(text: &str) -> Option<Response> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::UNIX_EPOCH;
-
     use super::*;
 
     /// The output of `gh api -i` for a `200`: a status line that ends in a line
