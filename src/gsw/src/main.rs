@@ -66,6 +66,24 @@ mod worktrees;
                   separator under the header showing how stale the screen is and how long \
                   until the next refresh; with `--one-shot` (or when its output is piped) \
                   it renders once and exits.\n\n\
+                  In watch mode, the right end of the header row shows whether the branch on \
+                  the screen has an open pull request on GitHub. PR #690 in bold green means \
+                  one open pull request, and PR #690 +1 means two or more: the lowest number, \
+                  then the count of the others. A draft pull request counts as open. no PR, \
+                  dim, means none. PR ?, dim, means that no answer came yet or that the last \
+                  lookup failed. The pull request is the one whose head is the branch that \
+                  branch.<name>.merge names, in the repository of the remote of the branch. A \
+                  branch that tracks nothing asks about its own name, in the remote that p \
+                  pushes a new branch to. gsw asks GitHub through gh api, with REST and an \
+                  ETag, so an answer that did not change costs nothing against the rate limit. \
+                  It asks after the first frame, at each timed refresh, when r refreshes, and \
+                  when the branch or the worktree on the screen changes. It never asks because \
+                  of a filesystem event. One lookup runs at a time, for at most 10 seconds. A \
+                  rate limit shows PR ? and stops the lookups until GitHub lets them start \
+                  again. The name of the branch outranks the indicator: in a pane too narrow \
+                  for both, the indicator goes. There is no indicator in one-shot mode, with \
+                  --no-pr, without gh on PATH, on a detached HEAD, and for a remote that is \
+                  not on GitHub. GH_HOST names one more GitHub host.\n\n\
                   Watch-mode keys: q or Ctrl-C quits, r refreshes now, p pushes the current \
                   branch after a confirmation that names what it will do — a branch not yet on \
                   the remote is confirmed as creating one — P does the same push with \
