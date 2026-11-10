@@ -11,6 +11,7 @@ clap.workspace = true
 crossterm.workspace = true
 dirs.workspace = true
 gitscratch.workspace = true
+ghrest.workspace = true
 open.workspace = true
 ratatui.workspace = true
 rust_decimal.workspace = true

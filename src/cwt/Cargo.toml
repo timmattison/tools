@@ -16,6 +16,7 @@ colored.workspace = true
 # another repository. Which variables to shed is knowledge that lives in
 # gitscratch rather than being copied here to drift.
 gitscratch.workspace = true
+ghrest.workspace = true
 repowalker.workspace = true
 runlimit.workspace = true
 # `serde` and `serde_json` read the JSON that `gh pr list --json` prints.
