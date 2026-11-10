@@ -3,6 +3,7 @@
 //! The answer is a pure read of the repository configuration. It uses no network.
 
 use ghrest::GithubRepo;
+use gix::bstr::ByteSlice;
 
 /// The pull request that the indicator asks about: a repository and a head branch.
 ///
@@ -34,10 +35,55 @@ impl PullTarget {
     }
 }
 
+/// The prefix of the full name of a local branch.
+const HEADS_PREFIX: &str = "refs/heads/";
+
+/// The value of `branch.<name>.remote` that means a branch of this repository.
+const LOCAL_REMOTE: &str = ".";
+
 /// Decides which pull request the current branch of `repo` maps to.
+///
+/// The repository is the remote of the tracking ref of the branch. The head
+/// branch is the branch in `branch.<name>.merge`, without `refs/heads/`. Both
+/// come from the configuration values, so a remote name that holds a `/` stays
+/// whole. A branch with no tracking ref uses the push remote of
+/// [`crate::repo::push_remote`] and its own name. The URL is the URL that git
+/// fetches from, with `url.<base>.insteadOf` rewrites applied.
+///
+/// `extra_host` is the value of `GH_HOST`. The caller reads it from the environment.
+///
+/// Returns `None` when HEAD is detached, when the tracking ref is a local
+/// branch or is not under `refs/heads/`, when the remote is not configured, and
+/// when the remote is not a GitHub repository.
 pub(crate) fn target_of(repo: &gix::Repository, extra_host: Option<&str>) -> Option<PullTarget> {
-    let _ = (repo, extra_host);
-    None
+    use gix::remote::Direction;
+
+    let full = repo.head_name().ok()??;
+    let short = full.shorten();
+
+    let tracking_remote = repo.branch_remote_name(short, Direction::Fetch);
+    let tracking_merge = repo.branch_remote_ref_name(full.as_ref(), Direction::Fetch);
+
+    let (url, head) = match (tracking_remote, tracking_merge) {
+        (Some(remote), Some(merge)) => {
+            if remote.as_bstr() == LOCAL_REMOTE {
+                return None;
+            }
+            let merge = merge.ok()?;
+            let head = merge.as_bstr().to_str().ok()?.strip_prefix(HEADS_PREFIX)?;
+            let found = repo.branch_remote(short, Direction::Fetch)?.ok()?;
+            (found.url(Direction::Fetch)?.to_bstring(), head.to_owned())
+        }
+        _ => {
+            let name = crate::repo::push_remote(repo)?;
+            let found = repo.find_remote(name.as_str()).ok()?;
+            let head = short.to_str().ok()?.to_owned();
+            (found.url(Direction::Fetch)?.to_bstring(), head)
+        }
+    };
+
+    let repo = GithubRepo::from_remote_url(url.to_str().ok()?, extra_host)?;
+    Some(PullTarget { repo, head })
 }
 
 #[cfg(test)]
