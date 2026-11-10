@@ -89,6 +89,13 @@ pub struct Snapshot {
     /// mode leave it `false`: one-shot mode draws one frame, so no frame comes
     /// after the start. The header paints the name red when it is set.
     pub off_start_branch: bool,
+    /// The pull-request indicator for the header, or `None` when it does not apply.
+    ///
+    /// Only watch mode sets it. The watch loop puts the target in after each
+    /// walk and the indicator in before each render. One-shot mode leaves it
+    /// `None`, so the header of such a frame is byte for byte what it was
+    /// before the indicator.
+    pub pull: Option<crate::pull::PullHeader>,
 }
 
 /// State of the local branch relative to its upstream tracking ref.
@@ -251,17 +258,29 @@ pub(crate) fn render_head(
     width: usize,
     refresh: Option<&RefreshStatus>,
 ) -> Vec<String> {
+    let header_line = paint_header(header_segments(snapshot, width), snapshot.off_start_branch);
+    let mut lines = vec![header_line];
+    if let Some(op) = &snapshot.operation {
+        lines.push(render_operation_line(op, width));
+    }
+    lines.push(render_separator(width, refresh));
+    lines
+}
+
+/// Paints the segments of the header: the whole header bold, the name red when
+/// `off_start_branch` is set, and the behind segment yellow.
+fn paint_header(segments: HeaderSegments, off_start_branch: bool) -> String {
     let HeaderSegments {
         lead,
         name,
         rest,
         behind,
         suffix,
-    } = header_segments(snapshot, width);
+    } = segments;
     // The whole header is bold as before; the optional behind segment is
     // additionally warning-colored (yellow) to flag that the branch needs a
     // rebase.
-    let header_line = if snapshot.off_start_branch {
+    if off_start_branch {
         // The name is red as well as bold, as the behind segment is yellow as
         // well as bold. A cut that removed the name leaves it empty, and an
         // empty name gets no span at all, so the line has no red code.
@@ -287,13 +306,7 @@ pub(crate) fn render_head(
             Some(seg) => format!("{}{}{}", prefix.bold(), seg.yellow().bold(), suffix.bold()),
             None => format!("{prefix}{suffix}").bold().to_string(),
         }
-    };
-    let mut lines = vec![header_line];
-    if let Some(op) = &snapshot.operation {
-        lines.push(render_operation_line(op, width));
     }
-    lines.push(render_separator(width, refresh));
-    lines
 }
 
 /// Produce the colored, multi-line frame with every displayed age advanced
@@ -586,30 +599,53 @@ const HEADER_NAME_FLOOR: usize = 10;
 /// shaves the branch. The hard cut takes text from the right, so the badge is
 /// the last text to go.
 fn header_segments(snap: &Snapshot, width: usize) -> HeaderSegments {
+    ladder(snap, width).unwrap_or_else(|bare| bare.clamp(width))
+}
+
+/// Runs the ladder of [`header_segments`] and returns the first rung that
+/// fits in `width` columns: the full header, the header with the counts of the
+/// upstream only, the header with shaved names, and the header with no
+/// upstream field. Returns `None` when even the last rung is too wide, so the
+/// hard cut does not apply here.
+///
+/// The watch header calls this to learn if the header and the pull-request
+/// indicator fit in one row.
+fn fit_header(snap: &Snapshot, width: usize) -> Option<HeaderSegments> {
+    ladder(snap, width).ok()
+}
+
+/// The ladder itself. `Ok` holds the rung that fits. `Err` holds the last
+/// rung, which does not fit, for the hard cut.
+fn ladder(snap: &Snapshot, width: usize) -> Result<HeaderSegments, HeaderSegments> {
     let name = header_name(snap);
     let compose =
         |name: &str, base: &str, detail: UpstreamDetail| compose_header(snap, name, base, detail);
 
     let full = compose(name, &snap.base, UpstreamDetail::Full);
     if full.width() <= width {
-        return full;
+        return Ok(full);
     }
     let counts_only = compose(name, &snap.base, UpstreamDetail::CountsOnly);
     if counts_only.width() <= width {
-        return counts_only;
+        return Ok(counts_only);
     }
 
     let (name, base) = shave_names(name, &snap.base, counts_only.width().saturating_sub(width));
     let shaved = compose(&name, &base, UpstreamDetail::CountsOnly);
     if shaved.width() <= width {
-        return shaved;
+        return Ok(shaved);
     }
     let bare = compose(&name, &base, UpstreamDetail::Omitted);
     if bare.width() <= width {
-        return bare;
+        Ok(bare)
+    } else {
+        Err(bare)
     }
-    bare.clamp(width)
 }
+
+/// The least number of spaces between the header text and the pull-request
+/// indicator.
+const PULL_GAP: usize = 2;
 
 /// The name of the tool, where every header starts.
 const HEADER_TOOL: &str = "gsw";
@@ -1352,6 +1388,7 @@ mod tests {
             push_remote: None,
             worktree: None,
             off_start_branch: false,
+            pull: None,
         }
     }
 
@@ -1978,6 +2015,204 @@ mod tests {
         });
         assert_eq!(got, expected, "header: {got:?}");
         assert_eq!(got.matches(RED_FG).count(), 1, "header: {got:?}");
+    }
+
+    /// A pull target for the tests of the indicator.
+    fn pull_target() -> crate::pull::PullTarget {
+        crate::pull::PullTarget::new(
+            ghrest::GithubRepo::from_remote_url("git@github.com:owner/name.git", None).unwrap(),
+            "gsv",
+        )
+    }
+
+    /// The four states of the indicator that the table of the issue names.
+    fn pull_states() -> Vec<crate::pull::PullIndicator> {
+        use crate::pull::PullIndicator;
+        let open = |others| PullIndicator::Open {
+            lowest: ghrest::PullNumber::new(690),
+            others,
+        };
+        vec![
+            open(0),
+            open(1),
+            PullIndicator::NoPull,
+            PullIndicator::Unknown,
+        ]
+    }
+
+    fn with_pull(mut snap: Snapshot, indicator: crate::pull::PullIndicator) -> Snapshot {
+        snap.pull = Some(crate::pull::PullHeader {
+            target: pull_target(),
+            indicator,
+        });
+        snap
+    }
+
+    #[test]
+    fn each_state_of_the_indicator_ends_the_header_row_in_its_style() {
+        use crate::pull::PullIndicator;
+        let open = PullIndicator::Open {
+            lowest: ghrest::PullNumber::new(690),
+            others: 0,
+        };
+        let cases: Vec<(PullIndicator, &str)> = vec![
+            (open, "PR #690"),
+            (PullIndicator::NoPull, "no PR"),
+            (PullIndicator::Unknown, "PR ?"),
+        ];
+        let header = "gsw • gsv • 3 commits ahead of main";
+        for (indicator, text) in cases {
+            let snap = with_pull(snap_with(vec![]), indicator.clone());
+            let got = forced_header_line(&snap, 80);
+            let gap = " ".repeat(80 - text.len() - header.len());
+            let expected = testcolor::with_forced_ansi(|| {
+                let painted = match indicator {
+                    PullIndicator::Open { .. } => text.green().bold().to_string(),
+                    _ => text.dimmed().to_string(),
+                };
+                format!("{}{gap}{painted}", header.bold())
+            });
+            assert_eq!(got, expected, "header: {got:?}");
+            let glyphs = strip_ansi(&got);
+            assert_eq!(
+                UnicodeWidthStr::width(glyphs.as_str()),
+                80,
+                "row: {glyphs:?}"
+            );
+            assert!(glyphs.ends_with(text), "row: {glyphs:?}");
+        }
+    }
+
+    #[test]
+    fn the_indicator_with_more_pull_requests_shows_the_count_of_the_others() {
+        let snap = with_pull(
+            snap_with(vec![]),
+            crate::pull::PullIndicator::Open {
+                lowest: ghrest::PullNumber::new(690),
+                others: 1,
+            },
+        );
+        let row = painted_header(&snap, 80);
+        assert!(row.ends_with("PR #690 +1"), "row: {row:?}");
+        assert_eq!(UnicodeWidthStr::width(row.as_str()), 80);
+    }
+
+    #[test]
+    fn the_indicator_keeps_the_red_name_and_the_yellow_behind_segment() {
+        let mut snap = with_pull(
+            snap_with(vec![]),
+            crate::pull::PullIndicator::Open {
+                lowest: ghrest::PullNumber::new(690),
+                others: 0,
+            },
+        );
+        snap.worktree = Some(worktree_badge(1, 4, true, "gsv"));
+        snap.off_start_branch = true;
+        snap.commits_behind = 4;
+        let got = forced_header_line(&snap, 80);
+        let head = "gsw ⌂ 1/4 • gsv • 3 commits ahead of main, 4 behind";
+        let gap = " ".repeat(80 - "PR #690".len() - UnicodeWidthStr::width(head));
+        let expected = testcolor::with_forced_ansi(|| {
+            format!(
+                "{}{}{}{}{}{gap}{}",
+                "gsw ⌂ 1/4 • ".bold(),
+                "gsv".red().bold(),
+                " • 3 commits ahead of main".bold(),
+                ", 4 behind".yellow().bold(),
+                "".bold(),
+                "PR #690".green().bold(),
+            )
+        });
+        assert_eq!(got, expected, "header: {got:?}");
+        assert_eq!(got.matches(RED_FG).count(), 1, "header: {got:?}");
+    }
+
+    #[test]
+    fn the_indicator_never_wraps_and_drops_when_the_header_needs_the_room() {
+        let long_mix = "日本語/🎉/café/".repeat(6);
+        let names = [
+            "gsv",
+            "日本語",
+            "🎉",
+            "café",
+            long_mix.as_str(),
+            LONG_BRANCH,
+        ];
+        for indicator in pull_states() {
+            let text = indicator.text();
+            let w = UnicodeWidthStr::width(text.as_str());
+            for name in names {
+                for badge in [None, Some(worktree_badge(2, 3, false, name))] {
+                    let mut plain = snap_with_everything();
+                    plain.branch = name.into();
+                    plain.worktree = badge;
+                    for upstream in [true, false] {
+                        for behind in [0, 4] {
+                            if !upstream {
+                                plain.upstream = None;
+                            }
+                            plain.commits_behind = behind;
+                            let snap = with_pull(plain.clone(), indicator.clone());
+                            for width in 1..=200 {
+                                let frame = testcolor::with_forced_ansi(|| {
+                                    let mut o = opts();
+                                    o.terminal_width = width;
+                                    render(&snap, &o)
+                                });
+                                let rows: Vec<String> = frame.lines().map(strip_ansi).collect();
+                                for row in &rows {
+                                    assert!(
+                                        UnicodeWidthStr::width(row.as_str()) <= width,
+                                        "width {width}, name {name:?}, row {row:?}"
+                                    );
+                                }
+                                let row = &rows[0];
+                                let fits = width >= w + PULL_GAP
+                                    && fit_header(&snap, width - w - PULL_GAP).is_some();
+                                if fits {
+                                    assert_eq!(
+                                        UnicodeWidthStr::width(row.as_str()),
+                                        width,
+                                        "width {width}, name {name:?}, row {row:?}"
+                                    );
+                                    let head = row.strip_suffix(text.as_str());
+                                    assert!(
+                                        head.is_some_and(|h| h.ends_with(&" ".repeat(PULL_GAP))),
+                                        "width {width}, name {name:?}, row {row:?}"
+                                    );
+                                } else {
+                                    let mut bare = snap.clone();
+                                    bare.pull = None;
+                                    let expected = painted_header(&bare, width);
+                                    assert_eq!(
+                                        row, &expected,
+                                        "width {width}, name {name:?}, row {row:?}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_header_with_no_pull_is_the_painted_ladder_at_every_width() {
+        // The goldens lock the bytes at each rung. This test also locks every
+        // width from 1 to 200 against `header_segments` painted by the same
+        // helper that `render_head` uses, so no painting code repeats here.
+        for off in [false, true] {
+            let mut snap = snap_with_everything();
+            snap.off_start_branch = off;
+            for width in 1..=200 {
+                let got = forced_header_line(&snap, width);
+                let expected = testcolor::with_forced_ansi(|| {
+                    paint_header(header_segments(&snap, width), off)
+                });
+                assert_eq!(got, expected, "width {width}");
+            }
+        }
     }
 
     #[test]

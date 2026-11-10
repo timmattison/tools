@@ -1225,6 +1225,7 @@ mod tests {
             push_remote: None,
             worktree: None,
             off_start_branch: false,
+            pull: None,
         };
         let frame = render_frame(&snap, &cfg, dims, FrameTiming::at_walk(None));
         let lines = frame.output.lines().count();
@@ -1913,6 +1914,7 @@ mod tests {
             push_remote: None,
             worktree: None,
             off_start_branch: false,
+            pull: None,
         }
     }
 
@@ -2042,6 +2044,7 @@ mod tests {
             push_remote: None,
             worktree: None,
             off_start_branch: false,
+            pull: None,
         };
         let cfg = RenderConfig {
             base: None,

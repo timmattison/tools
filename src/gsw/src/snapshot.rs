@@ -74,6 +74,7 @@ pub fn build_snapshot(
         // mode puts the badge on the snapshot after the walk.
         worktree: None,
         off_start_branch: false,
+        pull: None,
     }
 }
 

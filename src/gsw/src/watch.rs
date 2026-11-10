@@ -6333,6 +6333,7 @@ mod tests {
             push_remote: None,
             worktree: None,
             off_start_branch: false,
+            pull: None,
         }
     }
 
@@ -9117,6 +9118,7 @@ mod push_loop_tests {
             push_remote: Some("origin".into()),
             worktree: None,
             off_start_branch: false,
+            pull: None,
         }
     }
 
