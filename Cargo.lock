@@ -1808,6 +1808,7 @@ dependencies = [
  "childenv",
  "chrono",
  "clap",
+ "claude-transcript",
  "colored",
  "comfy-table",
  "dirs",
