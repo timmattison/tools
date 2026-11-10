@@ -39,8 +39,14 @@ impl PullSettings {
         path_var: Option<&OsStr>,
         gh_host: Option<String>,
     ) -> Option<Self> {
-        let _ = (no_pr, path_var, gh_host);
-        None
+        if no_pr {
+            return None;
+        }
+        let program = find_program(GH_PROGRAM, path_var?)?;
+        Some(Self {
+            program,
+            extra_host: gh_host.filter(|host| !host.is_empty()),
+        })
     }
 
     /// The path of the `gh` program.
@@ -52,6 +58,33 @@ impl PullSettings {
     pub(crate) fn extra_host(&self) -> Option<&str> {
         self.extra_host.as_deref()
     }
+}
+
+/// Finds the program `name` on the search path `path_var`.
+///
+/// The first directory of `path_var` that holds a regular file named `name`
+/// with an execute bit gives the answer. A directory of that name does not
+/// count, and a file with no execute bit does not stop the search.
+#[cfg(unix)]
+fn find_program(name: &str, path_var: &OsStr) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::env::split_paths(path_var)
+        .map(|directory| directory.join(name))
+        .find(|candidate| {
+            std::fs::metadata(candidate)
+                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        })
+}
+
+/// Finds the program `name` on the search path `path_var`. This platform has
+/// no execute bit, so the first regular file of that name in a directory of
+/// `path_var` is the answer.
+#[cfg(not(unix))]
+fn find_program(name: &str, path_var: &OsStr) -> Option<PathBuf> {
+    std::env::split_paths(path_var)
+        .map(|directory| directory.join(name))
+        .find(|candidate| candidate.is_file())
 }
 
 #[cfg(test)]

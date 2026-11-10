@@ -28,7 +28,10 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::conflicts::ConflictsWorker;
-use crate::pull::{LookupRequest, PullSettings, PullWatch};
+use crate::pull::{
+    run_lookup, target_of, LookupRequest, PullHeader, PullIndicator, PullSettings, PullWatch,
+    LOOKUP_LIMIT,
+};
 use crate::push::{PushCommand, PushUi};
 use crate::render::Snapshot;
 use crate::repo::{LogStart, RepoHandle};
@@ -1554,6 +1557,12 @@ struct StartPoint {
 /// Put the badge of the worktree at `path` on `snapshot`, which a walk of
 /// `repo` collected. `start` is where the user started gsw.
 ///
+/// This is where every walk of watch mode gets what only watch mode adds. With
+/// `pulls`, a branch that maps to a GitHub repository gets a pull header with
+/// no answer yet, so the frame shows `PR ?` until a lookup answers. Without
+/// `pulls`, or on a branch that maps to no GitHub repository, the snapshot has
+/// no pull header and the header row stays as it is today.
+///
 /// The seed walk of [`run`] and every walk of a [`Watched`] go through here, so
 /// the first frame and every later frame name the worktree in the same way.
 /// The same place sets `off_start_branch`, which is true when the start branch
@@ -1575,7 +1584,12 @@ fn badged(
     start: &StartPoint,
     pulls: Option<&PullSettings>,
 ) -> Snapshot {
-    let _ = pulls;
+    snapshot.pull = pulls
+        .and_then(|settings| target_of(repo, settings.extra_host()))
+        .map(|target| PullHeader {
+            target,
+            indicator: PullIndicator::Unknown,
+        });
     snapshot.worktree =
         crate::worktrees::badge(&worktree_paths(repo), path, &start.home, head_label(repo));
     snapshot.off_start_branch = start
@@ -1801,7 +1815,11 @@ pub(crate) fn run(
             home: start.home.clone(),
             log: cfg.log,
             start_branch: start.branch.clone(),
-            pulls: PullWatch::disabled(),
+            pulls: if pulls.is_some() {
+                PullWatch::enabled()
+            } else {
+                PullWatch::disabled()
+            },
         },
         LoopHooks {
             // The loop passes the worktree on the screen. The loop moves to a
@@ -1958,9 +1976,31 @@ pub(crate) fn run(
                 )
             },
             on_start_branch: worktree_on_start_branch,
-            // The next slice starts the lookup on a thread here. `pulls` is
-            // disabled, so the loop never calls this hook.
-            start_pull: |_request: LookupRequest| {},
+            // One thread for each lookup, and nobody joins it. The loop never
+            // waits for the network. `run_lookup` kills a `gh` that runs past
+            // `LOOKUP_LIMIT`, so the thread ends. A quit drops the receiver of
+            // the loop, and a late answer then goes nowhere. The hook is
+            // called only when `pulls` is enabled, so the settings exist.
+            start_pull: |request: LookupRequest| {
+                let Some(program) = pulls.as_ref().map(|settings| settings.program().to_owned())
+                else {
+                    return;
+                };
+                let answer_tx = switch_tx.clone();
+                thread::spawn(move || {
+                    let outcome = run_lookup(
+                        program.as_os_str(),
+                        &request.target,
+                        request.cached.as_ref(),
+                        LOOKUP_LIMIT,
+                    );
+                    // A send error means the loop quit. The answer has no reader.
+                    let _ = answer_tx.send(Event::PullAnswered {
+                        target: request.target,
+                        outcome,
+                    });
+                });
+            },
             start_return: |child: std::process::Command| {
                 // Two senders on the one channel, as the push has. The lines
                 // are the push's own event, because the window under the frame
