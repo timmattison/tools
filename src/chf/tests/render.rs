@@ -324,6 +324,23 @@ fn the_question_warns_when_the_match_comes_before_the_last_compaction() {
     assert!(all(&app, 100, 30).contains("before the last compaction"));
 }
 
+/// The box wraps its lines at word breaks. A box whose height counts
+/// `ceil(width / inner)` rows for a line gets too few rows for a line that
+/// wraps at a word, and then it cuts its last line, which names the keys.
+#[test]
+fn the_question_shows_its_last_line_at_each_width() {
+    let mut app = app_with(vec![compacted(ID_A, &["needle early", "later"], 1)]);
+    type_text(&mut app, "needle");
+    app.on_key(press(KeyCode::Enter));
+    let cut: Vec<u16> = (20..=80)
+        .filter(|&width| !all(&app, width, 60).contains("back"))
+        .collect();
+    assert!(
+        cut.is_empty(),
+        "the box cuts its last line at the widths {cut:?}"
+    );
+}
+
 #[test]
 fn the_question_does_not_warn_when_the_match_comes_after_the_last_compaction() {
     let mut app = app_with(vec![compacted(ID_A, &["early", "needle late"], 1)]);
