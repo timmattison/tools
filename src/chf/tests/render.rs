@@ -361,7 +361,15 @@ fn no_size_makes_the_draw_panic() {
     let list = three();
     let mut ask = app_with(vec![compacted(ID_A, &["w"], 0)]);
     ask.on_key(press(KeyCode::Enter));
-    for (w, h) in [(0, 0), (1, 1), (10, 3), (20, 5), (200, 60), (100, 2), (99, 4)] {
+    for (w, h) in [
+        (0, 0),
+        (1, 1),
+        (10, 3),
+        (20, 5),
+        (200, 60),
+        (100, 2),
+        (99, 4),
+    ] {
         for app in [&list, &ask, &App::new()] {
             let (_, drawn) = render_to(app, w, h);
             assert!(drawn.list_rows >= 1);
