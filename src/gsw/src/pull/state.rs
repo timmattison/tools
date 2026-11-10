@@ -5,11 +5,11 @@
 //! and runs no child. The watch loop runs the lookups that it asks for.
 
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use ghrest::{EtagEntry, PullNumber};
 
-use super::{LookupOutcome, PullIndicator, PullTarget};
+use super::{from_numbers, LookupOutcome, PullIndicator, PullTarget};
 
 /// One lookup that the loop must start: the target, and the cache entry to send its `ETag`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,51 +59,138 @@ impl PullWatch {
         }
     }
 
-    /// Tells the watch which target the frame shows now, and whether this wake
-    /// is a timed refresh or `r` (`force`). Returns the lookup to start, if any.
+    /// Tells the watch which target the frame shows now (`None`: no target, for
+    /// example a detached HEAD or a remote that is not GitHub), and whether
+    /// this wake is a timed refresh or `r` (`force`). Returns the lookup to start, if any.
+    ///
+    /// A lookup is due when the target differs from the target of the last call
+    /// (the first call with `Some` counts as a change), when `force` is set, or when
+    /// a pending lookup waited for a rate-limit block that has ended at `now`.
+    /// A due lookup with a lookup in flight, or inside a rate-limit block, only
+    /// marks one lookup as pending. A disabled watch, and a `None` target, start nothing.
     pub(crate) fn refresh(
         &mut self,
         target: Option<&PullTarget>,
         force: bool,
         now: Instant,
     ) -> Option<LookupRequest> {
-        let _ = (target, force, now);
-        None
+        if !self.active {
+            return None;
+        }
+        let changed = self.last_target.as_ref() != target;
+        self.last_target = target.cloned();
+        self.end_block_if_over(now);
+        let ready = self.pending && !self.in_flight && self.blocked_until.is_none();
+        if changed || force || ready {
+            self.start(now)
+        } else {
+            None
+        }
     }
 
-    /// The lookup of `target` ended with `outcome` at `now`. Returns the pending
-    /// lookup to start, if any.
+    /// The lookup of `target` ended with `outcome` at `now`. Puts the outcome in the
+    /// cache of `target`, whatever target the frame shows now, and returns the pending
+    /// lookup to start, if any, for the target of the last `refresh`.
     pub(crate) fn answered(
         &mut self,
         target: PullTarget,
         outcome: LookupOutcome,
         now: Instant,
     ) -> Option<LookupRequest> {
-        let _ = (target, outcome, now);
-        None
+        self.in_flight = false;
+        match outcome {
+            LookupOutcome::Answered { numbers, entry } => {
+                self.entries.insert(
+                    target,
+                    Entry {
+                        numbers: Some(numbers),
+                        etag: entry,
+                    },
+                );
+            }
+            LookupOutcome::Failed(_) => self.forget_answer(target),
+            LookupOutcome::RateLimited(wait) => {
+                self.forget_answer(target);
+                self.blocked_until = Some(now + wait);
+            }
+            LookupOutcome::NotInstalled => self.active = false,
+        }
+        if !self.active || !self.pending {
+            return None;
+        }
+        self.pending = false;
+        self.end_block_if_over(now);
+        self.start(now)
     }
 
-    /// What the header shows for `target` at `now`.
+    /// What the header shows for `target` at `now`. `None` when the watch is disabled
+    /// or `gh` went missing. `Unknown` inside a rate-limit block, for a target with no
+    /// answer, and after a failed lookup. Otherwise `from_numbers` of the last answer.
     pub(crate) fn indicator(&self, target: &PullTarget, now: Instant) -> Option<PullIndicator> {
-        let _ = (target, now, &self.entries);
-        None
+        if !self.active {
+            return None;
+        }
+        let blocked = self.blocked_until.is_some_and(|until| now < until);
+        let numbers = self
+            .entries
+            .get(target)
+            .and_then(|entry| entry.numbers.as_deref());
+        Some(match numbers {
+            Some(numbers) if !blocked => from_numbers(numbers),
+            _ => PullIndicator::Unknown,
+        })
     }
 
-    /// The instant the loop must wake to send a lookup that waits for the end of a block.
+    /// The instant the loop must wake to send a lookup that waits for the end of a
+    /// rate-limit block. `None` when no lookup waits.
     pub(crate) fn wake_at(&self) -> Option<Instant> {
-        let _ = (
-            self.active,
-            &self.last_target,
-            self.in_flight,
-            self.pending,
-            self.blocked_until,
-        );
-        None
+        if self.active && self.pending && !self.in_flight {
+            self.blocked_until
+        } else {
+            None
+        }
+    }
+
+    /// Makes the answer of `target` unknown. Its `ETag` entry stays, so a later `304` still works.
+    fn forget_answer(&mut self, target: PullTarget) {
+        self.entries
+            .entry(target)
+            .and_modify(|entry| entry.numbers = None)
+            .or_insert(Entry {
+                numbers: None,
+                etag: None,
+            });
+    }
+
+    /// Clears the block when its end is not after `now`.
+    fn end_block_if_over(&mut self, now: Instant) {
+        if self.blocked_until.is_some_and(|until| until <= now) {
+            self.blocked_until = None;
+        }
+    }
+
+    /// Starts a lookup for the target of the last `refresh`. A lookup in flight or a
+    /// block makes it pending instead. Nothing starts when no target is on the screen.
+    fn start(&mut self, now: Instant) -> Option<LookupRequest> {
+        let target = self.last_target.clone()?;
+        if self.in_flight || self.blocked_until.is_some_and(|until| now < until) {
+            self.pending = true;
+            return None;
+        }
+        self.pending = false;
+        self.in_flight = true;
+        let cached = self
+            .entries
+            .get(&target)
+            .and_then(|entry| entry.etag.clone());
+        Some(LookupRequest { target, cached })
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use crate::pull::lookup::pulls_path;
     use ghrest::{parse_response, GithubRepo};
