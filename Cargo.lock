@@ -1429,6 +1429,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "chf"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "claude-transcript",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "childenv"
 version = "0.1.0"
 
