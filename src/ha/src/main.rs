@@ -11,11 +11,11 @@ use std::time::Duration;
 
 use chrono::{Local, Utc};
 use clap::{CommandFactory, FromArgMatches, Parser};
+use ha::action::GhActionSender;
 use ha::app::{App, RunError, TerminalEvents};
 use ha::billing::{accounts_of, BillingBoard};
 use ha::board::Board;
 use ha::browser::BrowserOpener;
-use ha::cancel::GhCanceller;
 use ha::github::GhSource;
 use ha::settings::{self, CommandLine, Settings};
 use ha::status::{RateLimit, Status};
@@ -143,12 +143,12 @@ fn run_view(settings: &Settings, rate: RateLimit, worker: &Worker) -> Result<(),
     };
     let tz = Local;
     let opener = BrowserOpener::from_environment();
-    let canceller = GhCanceller::new(GhSource::new());
+    let actions = GhActionSender::new(GhSource::new());
     let mut app = App::new(
         Board::new(settings.window),
         status,
         &opener,
-        &canceller,
+        &actions,
         worker,
         &Utc::now,
         &tz,

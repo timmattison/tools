@@ -13,9 +13,9 @@ use ratatui::Frame;
 use textfit::{pad_right, truncate_left_to_budget, truncate_to_budget};
 use unicode_width::UnicodeWidthStr;
 
+use crate::action::{Action, Confirm};
 use crate::billing::{AccountCell, BillingView, Total};
 use crate::board::{Board, Header, JobCounts, Row, Section};
-use crate::cancel::Confirm;
 use crate::cost::{JobCost, RunCost};
 use crate::job::{Job, RunnerName};
 use crate::queue::{Departure, EntryState, Outcome, PullNumber, QueueEntry};
@@ -92,21 +92,16 @@ const FIXED_LINES: usize = 2;
 /// The text that stands between two parts of the status line.
 const STATUS_SEPARATOR: &str = "  ·  ";
 /// The key hints at the end of the left part of the status line. The status line
-/// shows them only while no cancel box shows.
-const KEY_HINTS: &str = "↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  r refresh  q quit";
-/// The title in the top border of the box of the cancel prompt.
-const PROMPT_TITLE: &str = " Cancel run? ";
-/// The widest outer width of the box of the cancel prompt.
+/// shows them only while no box shows.
+const KEY_HINTS: &str =
+    "↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  R re-run  r refresh  q quit";
+/// The widest outer width of the box of the prompt.
 const PROMPT_WIDTH: usize = 44;
 /// The columns of the box that hold no text: a border column and a space of
 /// padding on each side.
 const PROMPT_FRAME_COLUMNS: usize = 4;
 /// The rows of the box that hold no text: the top border and the bottom border.
 const PROMPT_BORDER_ROWS: usize = 2;
-/// The note that the box shows when a job row is selected.
-const PROMPT_JOB_NOTE: &str = "GitHub cannot cancel one job. y cancels every job of this run.";
-/// The key that cancels the run.
-const PROMPT_KEY_CANCEL: &str = "y cancel the run";
 /// The text for each other key.
 const PROMPT_KEY_KEEP: &str = "any other key: keep";
 /// The text between the two keys when they share one line.
@@ -1244,7 +1239,7 @@ where
 /// replaces the lead only, thus it never hides the stale part.
 ///
 /// With `hints` false, the key hints and the separator before them are absent.
-/// The box of the cancel prompt names its own keys, thus the line drops the hints.
+/// The box of the prompt names its own keys, thus the line drops the hints.
 ///
 /// The parts stand in this order, with [`STATUS_SEPARATOR`] between them.
 /// The refresh mark is not part of it. [`layout_status`] puts the mark at the
@@ -1478,7 +1473,7 @@ fn draw_row<Tz: TimeZone>(
 /// two fixed lines. Times show in the time zone `tz`. The text of a finished
 /// row fades along [`ROW_RAMP`] over [`ROW_FADE_END`] (see [`age_style`]).
 /// The marker cells and the sleeping mark of a row keep `Color::Reset`. With
-/// a `prompt`, the box of the cancel prompt draws last, over the rows (see
+/// a `prompt`, the box of the prompt draws last, over the rows (see
 /// [`draw_prompt`]). While the box shows, the status line has no key hints.
 /// The merge history header names the started column `FINISHED`, because its
 /// rows show when each pull request left the queue. With no merge history, the
@@ -1850,7 +1845,7 @@ fn draw_billing_box(buffer: &mut Buffer, area: Rect, shown: &BillingBox) {
     }
 }
 
-/// The part of the box of the cancel prompt, in the order of the box.
+/// The part of the box of the prompt, in the order of the box.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PromptPart {
     /// The repository.
@@ -1861,7 +1856,7 @@ enum PromptPart {
     Title,
     /// The name of the job.
     Job,
-    /// The note that GitHub cannot cancel one job.
+    /// The note that `Action::box_note` gives, when it gives one.
     Note,
     /// The empty line above the keys.
     Blank,
@@ -1917,12 +1912,12 @@ fn wrap_line(text: &str, width: usize) -> Vec<String> {
 
 /// The key lines of the box for a text `width`: one line when both keys fit,
 /// else two lines.
-fn prompt_key_lines(width: usize) -> Vec<String> {
-    let joined = format!("{PROMPT_KEY_CANCEL}{PROMPT_KEY_GAP}{PROMPT_KEY_KEEP}");
+fn prompt_key_lines(action: &Action, width: usize) -> Vec<String> {
+    let joined = format!("{}{PROMPT_KEY_GAP}{PROMPT_KEY_KEEP}", action.box_key());
     if Span::raw(joined.as_str()).width() <= width {
         return vec![joined];
     }
-    [PROMPT_KEY_CANCEL, PROMPT_KEY_KEEP]
+    [action.box_key(), PROMPT_KEY_KEEP]
         .into_iter()
         .flat_map(|key| wrap_line(key, width))
         .collect()
@@ -1940,9 +1935,11 @@ fn prompt_parts(prompt: &Confirm, width: usize) -> Vec<(PromptPart, Vec<String>)
         (PromptPart::Run, run_line),
         (PromptPart::Title, prompt.title.clone()),
     ];
-    if let Some(job) = &prompt.job {
+    if let Some(job) = prompt.action.box_job() {
         parts.push((PromptPart::Job, format!("job: {job}")));
-        parts.push((PromptPart::Note, PROMPT_JOB_NOTE.to_owned()));
+    }
+    if let Some(note) = prompt.action.box_note() {
+        parts.push((PromptPart::Note, note.to_owned()));
     }
     parts.push((PromptPart::Blank, String::new()));
     parts
@@ -1976,7 +1973,7 @@ fn clear_overlay(buffer: &mut Buffer, rect: Rect) {
     }
 }
 
-/// Draws the box of the cancel prompt over the frame.
+/// Draws the box of the prompt over the frame.
 ///
 /// The box is at most 44 columns wide and sits in the middle of the columns.
 /// It sits in the middle of the board rows, between the column header and the
@@ -1998,7 +1995,7 @@ fn draw_prompt(buffer: &mut Buffer, area: Rect, prompt: &Confirm) {
     let x = area.x + (area.width - outer) / 2;
     let height = usize::from(area.height);
     let text_width = usize::from(outer).saturating_sub(PROMPT_FRAME_COLUMNS);
-    let keys = prompt_key_lines(text_width);
+    let keys = prompt_key_lines(&prompt.action, text_width);
     let board_rows = height.saturating_sub(FIXED_LINES);
     let (first_row, rows) = if board_rows >= keys.len() + PROMPT_BORDER_ROWS {
         (1, board_rows)
@@ -2006,7 +2003,7 @@ fn draw_prompt(buffer: &mut Buffer, area: Rect, prompt: &Confirm) {
         (0, height)
     };
     if rows < keys.len() + PROMPT_BORDER_ROWS {
-        let keys = prompt_key_lines(usize::from(outer));
+        let keys = prompt_key_lines(&prompt.action, usize::from(outer));
         let used = keys.len().min(height);
         clear_overlay(buffer, Rect::new(x, area.y, outer, to_u16(used)));
         for (index, line) in keys.iter().take(used).enumerate() {
@@ -2040,7 +2037,9 @@ fn draw_prompt(buffer: &mut Buffer, area: Rect, prompt: &Confirm) {
     let y = area.y + to_u16(first_row + (rows - box_height) / 2);
     let rect = Rect::new(x, y, outer, to_u16(box_height));
     clear_overlay(buffer, rect);
-    Block::bordered().title(PROMPT_TITLE).render(rect, buffer);
+    Block::bordered()
+        .title(prompt.action.box_title())
+        .render(rect, buffer);
     for (index, line) in text.into_iter().enumerate() {
         buffer.set_stringn(
             x + 2,
@@ -2383,7 +2382,7 @@ mod tests {
                 "❌ acme/widgets      Release             4 issue-11     Broken build             04:30:00    4h 40m  ❌",
                 "",
                 "",
-                "updated 30s ago      ·  ↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  r refresh  q quit",
+                "updated 30s ago      ·  ↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  R re-run  r refresh  q quit",
             ]
         );
     }
@@ -5089,7 +5088,7 @@ mod tests {
     fn the_status_line_says_loading_before_the_first_refresh() {
         assert_eq!(
             status_line(100, &Status::default()),
-            "loading…  ·  ↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  r refresh  q quit"
+            "loading…  ·  ↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  R re-run  r refresh  q quit"
         );
     }
 
@@ -5101,7 +5100,7 @@ mod tests {
         };
         assert_eq!(
             status_line(100, &status),
-            "updated 30s ago      ·  ↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  r refresh  q quit"
+            "updated 30s ago      ·  ↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  R re-run  r refresh  q quit"
         );
     }
 
@@ -5114,7 +5113,7 @@ mod tests {
         };
         assert_eq!(
             status_line(120, &status),
-            "updated 30s ago      ·  API 4821/5000  ·  ↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  r refresh  q quit"
+            "updated 30s ago      ·  API 4821/5000  ·  ↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  R re-run  r refresh  q quit"
         );
     }
 
@@ -5127,8 +5126,8 @@ mod tests {
             ..Status::default()
         };
         assert_eq!(
-            status_line(140, &status),
-            "updated 30s ago      ·  API low 412/5000, next refresh 12:34  ·  ↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  r refresh  q quit"
+            status_line(150, &status),
+            "updated 30s ago      ·  API low 412/5000, next refresh 12:34  ·  ↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  R re-run  r refresh  q quit"
         );
     }
 
@@ -5184,20 +5183,30 @@ mod tests {
     fn the_status_line_names_the_cancel_key_between_open_and_refresh() {
         let line = status_line(140, &Status::default());
         assert!(
-            line.ends_with("⏎ open  c cancel  r refresh  q quit"),
+            line.ends_with("⏎ open  c cancel  R re-run  r refresh  q quit"),
             "{line}"
         );
     }
 
     /// A cancel that waits, as `c` makes it over the run `run_id`.
     fn confirm(title: &str, job: Option<&str>) -> Confirm {
+        confirm_with(
+            title,
+            Action::Cancel {
+                job: job.map(str::to_owned),
+            },
+        )
+    }
+
+    /// A box that waits for `action`, over the run of the mocks.
+    fn confirm_with(title: &str, action: Action) -> Confirm {
         Confirm {
             repo: repo("timmattison/tools"),
             run: RunId(39_149_840_084),
             workflow: "CI".to_owned(),
             branch: "main".to_owned(),
             title: title.to_owned(),
-            job: job.map(str::to_owned),
+            action,
         }
     }
 
@@ -5261,6 +5270,51 @@ mod tests {
         let all = lines(&buffer);
         assert!(!all[2].contains('┌'), "{:?}", all[2]);
         assert!(!all[13].contains('└'), "{:?}", all[13]);
+    }
+
+    #[test]
+    fn the_rerun_workflow_box_matches_the_mock_of_issue_668() {
+        let prompt = confirm_with("fix(ha): show the run ID", Action::RerunWorkflow);
+        let buffer = render_prompt(80, 16, &prompt);
+        assert_eq!(
+            box_rows(&buffer, 18, 44, 4, 7),
+            vec![
+                "┌ Re-run workflow? ────────────────────────┐",
+                "│ timmattison/tools                        │",
+                "│ CI 39149840084 on main                   │",
+                "│ fix(ha): show the run ID                 │",
+                "│                                          │",
+                "│ y re-run all jobs   any other key: keep  │",
+                "└──────────────────────────────────────────┘",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_rerun_job_box_matches_the_mock_of_issue_668() {
+        let prompt = confirm_with(
+            "fix(ha): show the run ID",
+            Action::RerunJob {
+                id: JobId(11),
+                name: "build (ubuntu-latest)".to_owned(),
+            },
+        );
+        let buffer = render_prompt(80, 16, &prompt);
+        assert_eq!(
+            box_rows(&buffer, 18, 44, 3, 10),
+            vec![
+                "┌ Re-run job? ─────────────────────────────┐",
+                "│ timmattison/tools                        │",
+                "│ CI 39149840084 on main                   │",
+                "│ fix(ha): show the run ID                 │",
+                "│ job: build (ubuntu-latest)               │",
+                "│ GitHub also re-runs each job that needs  │",
+                "│ this job.                                │",
+                "│                                          │",
+                "│ y re-run this job   any other key: keep  │",
+                "└──────────────────────────────────────────┘",
+            ]
+        );
     }
 
     #[test]
@@ -5438,6 +5492,123 @@ mod tests {
         assert_eq!(box_rows(&one, 18, 44, 0, 1)[0].trim_end(), key_line);
     }
 
+    /// Both re-run actions, with the long name of a job in the job action.
+    fn rerun_actions(job_name: &str) -> [Action; 2] {
+        [
+            Action::RerunWorkflow,
+            Action::RerunJob {
+                id: JobId(11),
+                name: job_name.to_owned(),
+            },
+        ]
+    }
+
+    #[test]
+    fn wide_glyphs_do_not_break_the_border_of_a_rerun_box() {
+        let title = "日本語日本語日本語日本語日本語日本語日本語日本語日本語日本語日本語 \
+                     🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉 café café café café café café café \
+                     日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 🎉";
+        for action in rerun_actions("日本語 🎉 café") {
+            let buffer = render_prompt(80, 24, &confirm_with(title, action.clone()));
+            let tops: Vec<u16> = (0..24).filter(|&y| cell(&buffer, 18, y) == "┌").collect();
+            let bottoms: Vec<u16> = (0..24).filter(|&y| cell(&buffer, 18, y) == "└").collect();
+            assert_eq!((tops.len(), bottoms.len()), (1, 1), "{action:?}");
+            let (top, bottom) = (tops[0], bottoms[0]);
+            assert!(
+                bottom - top >= 8,
+                "the title wraps onto several rows: {action:?}"
+            );
+            assert_eq!(
+                (cell(&buffer, 61, top), cell(&buffer, 61, bottom)),
+                ("┐".to_owned(), "┘".to_owned()),
+                "{action:?}"
+            );
+            for y in top + 1..bottom {
+                assert_eq!(
+                    cell(&buffer, 18, y),
+                    "│",
+                    "left border, row {y}, {action:?}"
+                );
+                assert_eq!(
+                    cell(&buffer, 61, y),
+                    "│",
+                    "right border, row {y}, {action:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_low_terminal_keeps_the_key_line_of_a_rerun_box() {
+        let cases = [
+            (
+                Action::RerunWorkflow,
+                "┌ Re-run workflow? ────────────────────────┐",
+                "│ y re-run all jobs   any other key: keep  │",
+                "y re-run all jobs   any other key: keep",
+            ),
+            (
+                Action::RerunJob {
+                    id: JobId(11),
+                    name: "build".to_owned(),
+                },
+                "┌ Re-run job? ─────────────────────────────┐",
+                "│ y re-run this job   any other key: keep  │",
+                "y re-run this job   any other key: keep",
+            ),
+        ];
+        let bottom = "└──────────────────────────────────────────┘";
+        let repo_line = "│ timmattison/tools                        │";
+        for (action, top, key, bare) in cases {
+            let prompt = confirm_with("fix(ha): show the run ID", action);
+            // 4 board rows: the repository line and the key line stay.
+            assert_eq!(
+                box_rows(&render_prompt(80, 6, &prompt), 18, 44, 1, 4),
+                vec![top, repo_line, key, bottom]
+            );
+            // 1 board row: the box takes all 3 rows of the frame.
+            assert_eq!(
+                box_rows(&render_prompt(80, 3, &prompt), 18, 44, 0, 3),
+                vec![top, key, bottom]
+            );
+            // No room for a border: the key line stands alone.
+            let one = render_prompt(80, 1, &prompt);
+            assert_eq!(box_rows(&one, 18, 44, 0, 1)[0].trim_end(), bare);
+        }
+    }
+
+    #[test]
+    fn a_narrow_frame_puts_the_two_rerun_keys_on_two_lines() {
+        let cases = [
+            (Action::RerunWorkflow, "y re-run all jobs"),
+            (
+                Action::RerunJob {
+                    id: JobId(11),
+                    name: "build".to_owned(),
+                },
+                "y re-run this job",
+            ),
+        ];
+        for (action, key) in cases {
+            let buffer = render_prompt(30, 12, &confirm_with("fix(ha): show the run ID", action));
+            let text = lines(&buffer);
+            let first = text
+                .iter()
+                .position(|line| line.contains(key))
+                .expect("the first key line shows");
+            assert!(
+                text[first].starts_with(&format!("│ {key} ")),
+                "{:?}",
+                text[first]
+            );
+            assert!(
+                text[first + 1].starts_with("│ any other key: keep "),
+                "{:?}",
+                text[first + 1]
+            );
+        }
+    }
+
     #[test]
     fn the_status_line_shows_no_key_hints_while_the_box_shows() {
         let buffer = render_prompt(120, 12, &confirm("fix(ha): show the run ID", None));
@@ -5540,7 +5711,17 @@ mod tests {
     }
 
     const HINTS_TAIL: &str =
-        "loading…  ·  ↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  r refresh  q quit";
+        "loading…  ·  ↑↓ select  →← jobs  →→/←← all  ⏎ open  c cancel  R re-run  r refresh  q quit";
+
+    #[test]
+    fn the_status_line_names_the_rerun_key_between_cancel_and_refresh() {
+        let mut board = Board::new(std::time::Duration::from_hours(8));
+        let line = status_line_of(&mut board, &Status::default());
+        assert!(
+            line.ends_with("c cancel  R re-run  r refresh  q quit"),
+            "{line:?}"
+        );
+    }
 
     /// The tail of a status line whose board has stale repositories that
     /// never had a good read: the stale part with `counts`, and the hints.
