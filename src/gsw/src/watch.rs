@@ -557,9 +557,8 @@ impl WalkSchedule {
     /// The loop asks it before [`Self::record`], which moves the timed walk on.
     /// It tells a walk that a timed refresh caused from a walk that a
     /// filesystem event caused, because only the first one asks GitHub again.
-    fn timed_due(&self, _now: Instant) -> bool {
-        // Red step: nothing is due yet.
-        false
+    fn timed_due(&self, now: Instant) -> bool {
+        self.next_timed_at.is_some_and(|due| now >= due)
     }
 
     /// The instant a pending deferred walk should fire — the cooldown's expiry —
