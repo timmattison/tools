@@ -15,6 +15,7 @@ clap.workspace = true
 colored.workspace = true
 crossterm.workspace = true
 gitscratch.workspace = true
+ghrest.workspace = true
 gix.workspace = true
 ignore.workspace = true
 notify.workspace = true

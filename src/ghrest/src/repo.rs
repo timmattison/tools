@@ -61,7 +61,7 @@ fn is_name_part(part: &str) -> bool {
 /// `gh pr list` asks one repository for its pull requests. This type holds the
 /// three parts that name that repository. The host is in lowercase, because
 /// host names ignore ASCII case.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GithubRepo {
     host: String,
     owner: String,
