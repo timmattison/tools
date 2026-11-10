@@ -212,6 +212,11 @@ struct Cli {
     #[arg(long)]
     one_shot: bool,
 
+    /// Turn the pull-request indicator of watch mode off. gsw then shows no
+    /// indicator and starts no `gh`. One-shot mode never shows the indicator.
+    #[arg(long)]
+    no_pr: bool,
+
     /// Strip ANSI color codes from output.
     #[arg(long)]
     no_color: bool,
@@ -407,7 +412,15 @@ fn main() -> Result<()> {
         }
         // Hand the handle over: watch mode owns the repository from here and
         // re-opens it on every refresh.
-        watch::Mode::Watch => watch::run(handle, &cfg),
+        watch::Mode::Watch => watch::run(
+            handle,
+            &cfg,
+            pull::PullSettings::from_environment(
+                cli.no_pr,
+                std::env::var_os(pull::PATH_VARIABLE).as_deref(),
+                std::env::var(pull::GH_HOST_VARIABLE).ok(),
+            ),
+        ),
     }
 }
 
