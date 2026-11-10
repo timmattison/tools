@@ -52,7 +52,7 @@ fn matched<'a>(query: &str, messages: &'a [&str]) -> &'a str {
     match Query::parse(query).find(&s) {
         Some(Found::At(m)) => {
             let text = messages[m.message];
-            text.get(m.range.clone()).unwrap()
+            text.get(m.range).unwrap()
         }
         other => panic!("expected a match, got {other:?}"),
     }

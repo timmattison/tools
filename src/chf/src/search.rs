@@ -1,11 +1,17 @@
 //! The background search.
 //!
-//! A person types a key and the query changes. Each query gets a generation
-//! number. A new key cancels the old search, because its result is stale.
+//! A person types a key and the query changes. Each query has a generation
+//! number. A new key cancels the old search, because the result of the old
+//! search is stale. A job with an old generation stops at the next session,
+//! and the worker drops a queued job with an old generation.
 
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
+use std::thread;
 use std::time::Duration;
+
+use rayon::prelude::*;
 
 use crate::query::{Found, Query};
 use crate::session::Session;
@@ -39,43 +45,94 @@ pub struct Hits {
     pub hits: Vec<Hit>,
 }
 
-/// Run a job. Gives `None` when `latest` moved past the generation of the job.
+/// Run a job on the rayon pool.
+///
+/// Before each session, the job reads `latest`. When `latest` differs from the
+/// generation of the job, the job stops and the result is `None`.
 #[must_use]
 pub fn run_job(job: &Job, latest: &AtomicU64) -> Option<Hits> {
-    let _ = latest;
+    let hits: Option<Vec<Option<Hit>>> = job
+        .sessions
+        .par_iter()
+        .map(|(index, session)| {
+            if latest.load(Ordering::Acquire) != job.generation {
+                return None;
+            }
+            Some(job.query.find(session).map(|found| Hit {
+                session: *index,
+                found,
+            }))
+        })
+        .collect();
     Some(Hits {
         generation: job.generation,
-        hits: Vec::new(),
+        hits: hits?.into_iter().flatten().collect(),
     })
 }
 
 /// A worker thread that runs jobs.
+///
+/// The worker ends when the `Searcher` drops.
 pub struct Searcher {
-    _private: (),
+    jobs: Sender<Job>,
+    hits: Receiver<Hits>,
+    latest: Arc<AtomicU64>,
 }
 
 impl Searcher {
-    /// Start the worker.
+    /// Start the worker thread.
     #[must_use]
     pub fn spawn() -> Self {
-        Searcher { _private: () }
+        let (job_tx, job_rx) = channel::<Job>();
+        let (hit_tx, hit_rx) = channel::<Hits>();
+        let latest = Arc::new(AtomicU64::new(0));
+        let worker_latest = Arc::clone(&latest);
+        thread::spawn(move || work(&job_rx, &hit_tx, &worker_latest));
+        Searcher {
+            jobs: job_tx,
+            hits: hit_rx,
+            latest,
+        }
     }
 
-    /// Queue a job and mark its generation as the latest.
+    /// Store the generation of `job` as the latest, then queue the job.
     pub fn submit(&self, job: Job) {
-        let _ = job;
+        self.latest.store(job.generation, Ordering::Release);
+        // A send fails only when the worker has ended. Then no job can run.
+        let _ = self.jobs.send(job);
     }
 
     /// Take a finished result, when one is ready.
     #[must_use]
     pub fn try_recv(&self) -> Option<Hits> {
-        None
+        self.hits.try_recv().ok()
     }
 
     /// Wait for a result for at most `timeout`.
+    ///
+    /// This function serves tests and callers that wait. It is not a
+    /// performance bound.
     #[must_use]
     pub fn recv_timeout(&self, timeout: Duration) -> Option<Hits> {
-        let _ = timeout;
-        None
+        self.hits.recv_timeout(timeout).ok()
+    }
+}
+
+/// The loop of the worker. It takes a job and each job already queued, keeps
+/// the jobs of the latest generation, and runs them in order.
+fn work(jobs: &Receiver<Job>, hits: &Sender<Hits>, latest: &AtomicU64) {
+    while let Ok(first) = jobs.recv() {
+        let mut batch = vec![first];
+        while let Ok(next) = jobs.try_recv() {
+            batch.push(next);
+        }
+        let current = latest.load(Ordering::Acquire);
+        for job in batch.iter().filter(|job| job.generation == current) {
+            if let Some(result) = run_job(job, latest) {
+                if hits.send(result).is_err() {
+                    return;
+                }
+            }
+        }
     }
 }
