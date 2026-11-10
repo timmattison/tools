@@ -1436,6 +1436,7 @@ dependencies = [
  "chrono",
  "claude-transcript",
  "rayon",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",
