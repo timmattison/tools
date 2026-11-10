@@ -39,7 +39,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use ghrest::{parse_response, Response};
+use ghrest::{parse_response, EtagEntry, Response};
 use runlimit::{run_with_limit, RunFailure};
 use serde::Deserialize;
 
@@ -557,31 +557,22 @@ impl TokenEnvironment {
 pub struct GhSource {
     program: OsString,
     limit: Duration,
-    etags: Mutex<HashMap<String, Cached>>,
+    /// The `ETag` cache, with one `ghrest::EtagEntry` for each key.
+    ///
+    /// The key of a page of runs names the repository, the filter family, and
+    /// the page number, but not the value of the filter. A created-since filter
+    /// holds the start of the hour, thus its path changes each hour. With the
+    /// path as the key, the cache would keep one stale page for each hour, and
+    /// a session that runs for days would grow with no limit. Each entry keeps
+    /// the path instead, and the `ETag` goes out only when the path of the
+    /// request is the same.
+    ///
+    /// The key of a page of jobs names the repository, the run, and the page
+    /// number. `Source::forget_jobs` removes those pages when the worker stops
+    /// fetching the run.
+    etags: Mutex<HashMap<String, EtagEntry>>,
     rate: Mutex<Option<RateLimit>>,
     tokens: TokenEnvironment,
-}
-
-/// One answer in the `ETag` cache.
-///
-/// The key of a page of runs names the repository, the filter family, and the
-/// page number, but not the value of the filter. A created-since filter holds
-/// the start of the hour, thus its path changes each hour. With the path as the
-/// key, the cache would keep one stale page for each hour, and a session that
-/// runs for days would grow with no limit. The path is kept here instead, and
-/// the `ETag` goes out only when the path of the request is the same.
-///
-/// The key of a page of jobs names the repository, the run, and the page
-/// number. `Source::forget_jobs` removes those pages when the worker stops
-/// fetching the run.
-#[derive(Debug, Clone)]
-struct Cached {
-    /// The path of the request that gave this page.
-    path: String,
-    /// The `ETag` of that answer.
-    etag: String,
-    /// The body of that answer. A `304` parses this text again.
-    body: String,
 }
 
 impl GhSource {
@@ -624,17 +615,17 @@ impl GhSource {
 
     /// Fetches `path` with `gh api -i` and splits the answer.
     ///
-    /// With an `etag`, the request carries an `If-None-Match` header. A status
-    /// of 400 or more gives the error of [`http_error`].
-    fn request(&self, path: &str, etag: Option<&str>) -> Result<Response, SourceError> {
-        refuse_http_error(self.request_raw(path, etag)?)
+    /// With a `condition`, the request carries that whole header line, for
+    /// example the line of `ghrest::EtagEntry::condition_for`. A status of 400
+    /// or more gives the error of [`http_error`].
+    fn request(&self, path: &str, condition: Option<&str>) -> Result<Response, SourceError> {
+        refuse_http_error(self.request_raw(path, condition)?)
     }
 
     /// Like [`GhSource::request`], and the answer comes back for any status.
-    fn request_raw(&self, path: &str, etag: Option<&str>) -> Result<Response, SourceError> {
-        let condition = etag.map(|etag| format!("If-None-Match: {etag}"));
+    fn request_raw(&self, path: &str, condition: Option<&str>) -> Result<Response, SourceError> {
         let mut args = vec!["api", "-i"];
-        if let Some(condition) = &condition {
+        if let Some(condition) = condition {
             args.extend(["-H", condition]);
         }
         args.push(path);
@@ -748,7 +739,7 @@ impl GhSource {
     /// Fetches the page `number` of the runs of `repo` for `filter`.
     ///
     /// `family` names the kind of filter without its value, for the cache key
-    /// (see [`Cached`]).
+    /// (see the field `etags`).
     fn runs_page(
         &self,
         repo: &RepoName,
@@ -793,12 +784,11 @@ impl GhSource {
         parse: impl Fn(&str) -> Result<T, E>,
         refuse: impl Fn(&Response) -> E,
     ) -> Result<T, E> {
-        let etag = self
+        let condition = self
             .lock_etags()
             .get(key)
-            .filter(|cached| cached.path == path)
-            .map(|cached| cached.etag.clone());
-        let response = self.request_raw(path, etag.as_deref())?;
+            .and_then(|entry| entry.condition_for(path));
+        let response = self.request_raw(path, condition.as_deref())?;
         if response.status() >= 400 {
             return Err(refuse(&response));
         }
@@ -806,8 +796,7 @@ impl GhSource {
             let body = self
                 .lock_etags()
                 .get(key)
-                .filter(|cached| cached.path == path)
-                .map(|cached| cached.body.clone())
+                .and_then(|entry| entry.body_for(path).map(str::to_owned))
                 .ok_or_else(|| {
                     SourceError::BadResponse(
                         "GitHub said 304 for a page that ha has not seen".to_owned(),
@@ -816,13 +805,8 @@ impl GhSource {
             return parse(&body);
         }
         let parsed = parse(response.body())?;
-        if let Some(etag) = response.header("etag") {
-            let cached = Cached {
-                path: path.to_owned(),
-                etag: etag.to_owned(),
-                body: response.into_body(),
-            };
-            self.lock_etags().insert(key.to_owned(), cached);
+        if let Some(entry) = EtagEntry::from_response(path, response) {
+            self.lock_etags().insert(key.to_owned(), entry);
         }
         Ok(parsed)
     }
@@ -901,7 +885,7 @@ impl GhSource {
 
     /// The `ETag` cache. The guard lives for one statement. A poisoned lock still
     /// holds a usable map, thus the poison is ignored.
-    fn lock_etags(&self) -> std::sync::MutexGuard<'_, HashMap<String, Cached>> {
+    fn lock_etags(&self) -> std::sync::MutexGuard<'_, HashMap<String, EtagEntry>> {
         self.etags
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

@@ -116,19 +116,19 @@ impl GithubRepo {
     /// The host, in lowercase. `ssh.github.com` is stored as `github.com`.
     #[must_use]
     pub fn host(&self) -> &str {
-        ""
+        &self.host
     }
 
     /// The owner of the repository, in the case that the URL gave.
     #[must_use]
     pub fn owner(&self) -> &str {
-        ""
+        &self.owner
     }
 
     /// The name of the repository, with no `.git` suffix.
     #[must_use]
     pub fn name(&self) -> &str {
-        ""
+        &self.name
     }
 }
 

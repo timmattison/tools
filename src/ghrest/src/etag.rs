@@ -29,8 +29,12 @@ impl EtagEntry {
     /// answer cannot be asked for again.
     #[must_use]
     pub fn from_response(path: &str, response: Response) -> Option<EtagEntry> {
-        let _ = (path, response, IF_NONE_MATCH);
-        None
+        let etag = response.header("etag")?.to_owned();
+        Some(EtagEntry {
+            path: path.to_owned(),
+            etag,
+            body: response.into_body(),
+        })
     }
 
     /// The whole request header line for a read of `path`, for example
@@ -39,8 +43,7 @@ impl EtagEntry {
     /// Returns `None` when the kept path is not `path`.
     #[must_use]
     pub fn condition_for(&self, path: &str) -> Option<String> {
-        let _ = (&self.path, &self.etag, path);
-        None
+        (self.path == path).then(|| format!("{IF_NONE_MATCH}: {}", self.etag))
     }
 
     /// The kept body, for the `304` answer to a read of `path`.
@@ -48,8 +51,7 @@ impl EtagEntry {
     /// Returns `None` when the kept path is not `path`.
     #[must_use]
     pub fn body_for(&self, path: &str) -> Option<&str> {
-        let _ = (&self.body, path);
-        None
+        (self.path == path).then_some(self.body.as_str())
     }
 }
 
