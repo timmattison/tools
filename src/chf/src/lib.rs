@@ -13,5 +13,6 @@ pub mod excerpt;
 pub mod extract;
 pub mod index;
 pub mod query;
+pub mod render;
 pub mod search;
 pub mod session;

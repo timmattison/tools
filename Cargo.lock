@@ -1436,11 +1436,13 @@ dependencies = [
  "chrono",
  "claude-transcript",
  "crossterm",
+ "ratatui",
  "rayon",
  "regex",
  "serde",
  "serde_json",
  "tempfile",
+ "textfit",
  "unicode-width",
 ]
 

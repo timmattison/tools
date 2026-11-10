@@ -11,9 +11,11 @@ chrono.workspace = true
 claude-transcript.workspace = true
 crossterm.workspace = true
 rayon.workspace = true
+ratatui.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
+textfit.workspace = true
 unicode-width.workspace = true
 
 [dev-dependencies]
