@@ -8,6 +8,7 @@
 #![deny(unsafe_code)]
 #![warn(clippy::pedantic)]
 
+pub mod app;
 pub mod excerpt;
 pub mod extract;
 pub mod index;

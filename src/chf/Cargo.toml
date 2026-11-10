@@ -9,6 +9,7 @@ license = "MIT"
 blake3.workspace = true
 chrono.workspace = true
 claude-transcript.workspace = true
+crossterm.workspace = true
 rayon.workspace = true
 regex.workspace = true
 serde.workspace = true
