@@ -23,5 +23,5 @@ mod repo;
 
 pub use etag::EtagEntry;
 pub use pull::PullNumber;
-pub use reply::{parse_response, Response};
+pub use reply::{parse_response, RateLimitWait, Response};
 pub use repo::GithubRepo;
