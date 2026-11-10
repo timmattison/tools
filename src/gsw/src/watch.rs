@@ -550,6 +550,18 @@ impl WalkSchedule {
             .map(|interval| walk_start + interval.max(cooldown));
     }
 
+    /// Whether the timed walk is due at `now`: a timed walk is armed and its
+    /// instant is not after `now`. A deferred change does not make it due, and
+    /// a schedule with no interval never makes it due.
+    ///
+    /// The loop asks it before [`Self::record`], which moves the timed walk on.
+    /// It tells a walk that a timed refresh caused from a walk that a
+    /// filesystem event caused, because only the first one asks GitHub again.
+    fn timed_due(&self, _now: Instant) -> bool {
+        // Red step: nothing is due yet.
+        false
+    }
+
     /// The instant a pending deferred walk should fire — the cooldown's expiry —
     /// or `None` when no walk is owed. A change that arrives mid-cooldown is
     /// deferred (it sets the dirty flag) and registers exactly one coalesced
@@ -5040,6 +5052,30 @@ mod tests {
             Some(t0 + Duration::from_secs(15)),
             "an owed walk at 15 s beats the timed walk at 60 s",
         );
+    }
+
+    #[test]
+    fn the_timed_walk_is_due_from_its_instant_and_a_deferred_change_does_not_make_it_due() {
+        let t0 = Instant::now();
+        let mut schedule = WalkSchedule::new(Some(TEST_INTERVAL), t0, Duration::ZERO);
+        let due = t0 + TEST_INTERVAL;
+        assert!(!schedule.timed_due(due - Duration::from_millis(1)));
+        assert!(schedule.timed_due(due), "the instant itself is due");
+        assert!(schedule.timed_due(due + Duration::from_secs(1)));
+        // A walk moves the timed walk on a whole interval.
+        schedule.record(due, CHEAP);
+        assert!(!schedule.timed_due(due + Duration::from_secs(1)));
+        // A deferred change owes a walk at the end of its cooldown. That walk
+        // is not the timed one.
+        assert_eq!(
+            schedule.on_change(due + Duration::from_secs(1)),
+            Walk::Defer
+        );
+        assert!(!schedule.timed_due(due + CHEAP));
+        // No interval, no timed walk, at any instant.
+        let mut unscheduled = WalkSchedule::unscheduled();
+        unscheduled.record(t0, CHEAP);
+        assert!(!unscheduled.timed_due(t0 + Duration::from_secs(3600)));
     }
 
     #[test]
