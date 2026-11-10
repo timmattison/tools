@@ -135,7 +135,7 @@ fn multi_byte_text_wraps_by_columns() {
 #[test]
 fn no_panic_and_lossless_at_each_small_width() {
     for message in ["日本語テスト", "🎉🎉🎉", "cafe\u{301} au lait", "a b  c\td"] {
-        for width in 1..=8u16 {
+        for width in 1..=8_u16 {
             let lines = all(&session(&[message]), "au", width);
             assert!(!lines.is_empty());
         }
