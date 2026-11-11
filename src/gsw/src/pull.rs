@@ -19,6 +19,8 @@ mod target;
 
 pub(crate) use indicator::{from_numbers, PullHeader, PullIndicator};
 pub(crate) use lookup::{run_lookup, LookupOutcome, LOOKUP_LIMIT};
+#[cfg(test)]
+pub(crate) use settings::dir_with_gh;
 pub(crate) use settings::{PullSettings, GH_HOST_VARIABLE, PATH_VARIABLE};
 pub(crate) use state::{LookupRequest, PullWatch};
 pub(crate) use target::{target_of, PullTarget};

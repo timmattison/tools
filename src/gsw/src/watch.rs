@@ -16276,12 +16276,7 @@ mod watched_tests {
     /// A directory that holds an executable `gh` stub, and the settings that
     /// find it. The directory must outlive the settings.
     fn pull_settings() -> (TempDir, crate::pull::PullSettings) {
-        use std::os::unix::fs::PermissionsExt;
-
-        let bin = tempfile::tempdir().expect("tempdir");
-        let gh = bin.path().join("gh");
-        std::fs::write(&gh, "#!/bin/sh\n").expect("write the gh stub");
-        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let bin = crate::pull::dir_with_gh(0o755);
         let path = std::env::join_paths([bin.path()]).expect("join the path");
         let settings = crate::pull::PullSettings::from_environment(false, Some(&path), None)
             .expect("the stub is on the path");

@@ -356,6 +356,22 @@ fn effective_truecolor(
     }
 }
 
+impl Cli {
+    /// The settings of the pull-request lookups that watch mode starts.
+    ///
+    /// `path_var` is the value of `PATH`, and `gh_host` is the value of
+    /// `GH_HOST`. Returns `None` when the user gave `--no-pr`, and when no
+    /// `gh` that the user can run is on the search path. Watch mode then shows
+    /// no indicator and starts no `gh`.
+    fn pull_settings(
+        &self,
+        path_var: Option<&std::ffi::OsStr>,
+        gh_host: Option<String>,
+    ) -> Option<pull::PullSettings> {
+        pull::PullSettings::from_environment(self.no_pr, path_var, gh_host)
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -396,7 +412,7 @@ fn main() -> Result<()> {
     // Everything the renderer needs that doesn't depend on the live terminal
     // size. In watch mode this is computed once and reused for every repaint.
     let cfg = RenderConfig {
-        base: cli.base,
+        base: cli.base.clone(),
         max_files: cli.max_files,
         bar_width: cli.bar_width,
         log: LogDemand::from_cli(cli.no_log, cli.log_lines),
@@ -433,8 +449,7 @@ fn main() -> Result<()> {
         watch::Mode::Watch => watch::run(
             handle,
             &cfg,
-            pull::PullSettings::from_environment(
-                cli.no_pr,
+            cli.pull_settings(
                 std::env::var_os(pull::PATH_VARIABLE).as_deref(),
                 std::env::var(pull::GH_HOST_VARIABLE).ok(),
             ),
@@ -1124,6 +1139,31 @@ mod tests {
             refresh_interval(explicit.refresh_interval),
             Some(Duration::from_secs(5)),
         );
+    }
+
+    #[test]
+    fn the_no_pr_flag_turns_the_pull_lookups_of_watch_mode_off() {
+        // Issue #676: with `--no-pr`, watch mode shows no indicator and starts
+        // no `gh`, also when a `gh` that the user can run is on the path.
+        let bin = pull::dir_with_gh(0o755);
+        let path = std::env::join_paths([bin.path()]).expect("join the path");
+        assert_eq!(
+            Cli::parse_from(["gsw", "--no-pr"]).pull_settings(Some(&path), None),
+            None,
+        );
+    }
+
+    #[test]
+    fn with_no_flag_watch_mode_looks_up_pull_requests_through_gh() {
+        // The same path as the test of `--no-pr` gives settings when the flag
+        // is absent, so that test is not true only because of its fixture.
+        let bin = pull::dir_with_gh(0o755);
+        let path = std::env::join_paths([bin.path()]).expect("join the path");
+        let settings = Cli::parse_from(["gsw"])
+            .pull_settings(Some(&path), Some("ghe.example.com".to_string()))
+            .expect("gh is on the path");
+        assert!(settings.program().starts_with(bin.path()));
+        assert_eq!(settings.extra_host(), Some("ghe.example.com"));
     }
 
     /// The demand of the log that `args` state on the command line.

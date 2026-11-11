@@ -87,20 +87,25 @@ fn find_program(name: &str, path_var: &OsStr) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
+/// A temporary directory that holds a file `gh` with the Unix mode `mode`.
+///
+/// The file is a shell script that does nothing. A test puts the directory on
+/// the search path that it gives to [`PullSettings::from_environment`]. Keep
+/// the directory alive for as long as the settings are in use.
+#[cfg(test)]
+pub(crate) fn dir_with_gh(mode: u32) -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file = dir.path().join(GH_PROGRAM);
+    std::fs::write(&file, "#!/bin/sh\n").expect("write gh");
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(mode)).expect("chmod");
+    dir
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
-    use tempfile::TempDir;
-
-    /// A directory that holds a file `gh` with the given mode.
-    fn dir_with_gh(mode: u32) -> TempDir {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let file = dir.path().join(GH_PROGRAM);
-        std::fs::write(&file, "#!/bin/sh\n").expect("write gh");
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(mode)).expect("chmod");
-        dir
-    }
 
     fn joined(dirs: &[&Path]) -> std::ffi::OsString {
         std::env::join_paths(dirs).expect("join the directories")
