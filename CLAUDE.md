@@ -319,6 +319,14 @@ Take the crate with `ghrest.workspace = true`.
 - `gsw` - the pull-request indicator of the watch header
 - `ha` - every `gh api -i` reply, and its `ETag` cache
 
+### Known Exception
+
+- `sidecar` - `owner` in `src/sidecar/src/remote.rs` reads the GitHub owner of
+  `origin` with its own parser. Its tests use local paths as `origin`, and
+  `GithubRepo::from_remote_url` refuses a local path, so the move needs new
+  fixtures. Issue #678 moves the owner and the host onto `ghrest` and removes
+  this exception.
+
 ## Spawning Git
 
 Every command this workspace spawns that is git, or that runs git, **must**
