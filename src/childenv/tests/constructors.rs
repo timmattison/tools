@@ -97,8 +97,8 @@ fn in_hostile_child(test_name: &str, body: impl FnOnce()) {
 /// Define a test whose body runs in a child process that holds the hostile
 /// variables.
 ///
-/// One token names the function and the test that the child runs. A test thus
-/// cannot start the body of a different test.
+/// One token names the function and the test that the child runs. A test at
+/// the top level of this file thus cannot start the body of a different test.
 macro_rules! hostile_test {
     ($name:ident, $body:block) => {
         #[test]
