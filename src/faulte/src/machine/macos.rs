@@ -273,14 +273,25 @@ impl Machine for Mac {
 ///
 /// The kernel counts a PID as a signed number, and a PID of a Mac is far below
 /// the largest one. A number that does not fit is not a PID at all, and a
-/// negative first argument of `kill` names a group of processes.
+/// negative first argument of `kill` names a group of processes. A first
+/// argument of 0 names each process of the process group of the caller, which
+/// is `faulte` itself and the shell that started it. A [`Pid`] holds 0 when it
+/// is built by default, thus this function refuses 0 before any signal goes
+/// out.
 ///
 /// # Errors
 ///
 /// Gives the reason as text, which becomes the reason of
 /// [`MachineError::SignalFailed`].
 fn kill_target(pid: Pid) -> Result<libc::pid_t, String> {
-    libc::pid_t::try_from(pid.get()).map_err(|_| format!("the number {pid} is not a PID"))
+    let target =
+        libc::pid_t::try_from(pid.get()).map_err(|_| format!("the number {pid} is not a PID"))?;
+    if target == 0 {
+        return Err(format!(
+            "the number {pid} names each process of the process group of faulte, not one process"
+        ));
+    }
+    Ok(target)
 }
 
 /// Runs `program` and gives what it wrote on its standard output.
