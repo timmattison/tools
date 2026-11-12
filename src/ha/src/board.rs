@@ -1933,6 +1933,31 @@ mod tests {
         );
     }
 
+    /// A run that waits for more than 8 hours does not show in the active section.
+    #[test]
+    fn a_run_that_waits_for_more_than_8_hours_does_not_show_in_running() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Queued, 9 * 60, 1)],
+            now(),
+        );
+        board.set_jobs(
+            RunId(1),
+            vec![
+                runner_job(1, RunState::Queued, "pi5"),
+                job(2, RunState::Passed),
+            ],
+        );
+        let rows = board.rows(now());
+        assert_eq!(
+            shape(&rows)[..2],
+            ["Header(Active,0,0,0,0)", "Empty(Active)"]
+        );
+        assert_eq!(active_header(&rows).jobs, JobCounts::default());
+        assert!(active_runners(&rows).is_empty());
+    }
+
     #[test]
     fn replace_changes_only_the_runs_of_its_repository() {
         let mut board = board();
