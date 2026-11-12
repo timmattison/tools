@@ -26,6 +26,8 @@ mod git;
 mod issue;
 /// Cutting a child process's byte chunks into lines that are safe to paint.
 mod lines;
+/// The pull-request indicator of the watch-mode header.
+mod pull;
 mod push;
 /// Deciding whether the person who reads this screen sits at this machine.
 mod remote;
@@ -64,6 +66,24 @@ mod worktrees;
                   separator under the header showing how stale the screen is and how long \
                   until the next refresh; with `--one-shot` (or when its output is piped) \
                   it renders once and exits.\n\n\
+                  In watch mode, the right end of the header row shows whether the branch on \
+                  the screen has an open pull request on GitHub. PR #690 in bold green means \
+                  one open pull request, and PR #690 +1 means two or more: the lowest number, \
+                  then the count of the others. A draft pull request counts as open. no PR, \
+                  dim, means none. PR ?, dim, means that no answer came yet or that the last \
+                  lookup failed. The pull request is the one whose head is the branch that \
+                  branch.<name>.merge names, in the repository of the remote of the branch. A \
+                  branch that tracks nothing asks about its own name, in the remote that p \
+                  pushes a new branch to. gsw asks GitHub through gh api, with REST and an \
+                  ETag, so an answer that did not change costs nothing against the rate limit. \
+                  It asks after the first frame, at each timed refresh, when r refreshes, and \
+                  when the branch or the worktree on the screen changes. It never asks because \
+                  of a filesystem event. One lookup runs at a time, for at most 10 seconds. A \
+                  rate limit shows PR ? and stops the lookups until GitHub lets them start \
+                  again. The name of the branch outranks the indicator: in a pane too narrow \
+                  for both, the indicator goes. There is no indicator in one-shot mode, with \
+                  --no-pr, without gh on PATH, on a detached HEAD, and for a remote that is \
+                  not on GitHub. GH_HOST names one more GitHub host.\n\n\
                   Watch-mode keys: q or Ctrl-C quits, r refreshes now, p pushes the current \
                   branch after a confirmation that names what it will do — a branch not yet on \
                   the remote is confirmed as creating one — P does the same push with \
@@ -210,6 +230,11 @@ struct Cli {
     #[arg(long)]
     one_shot: bool,
 
+    /// Turn the pull-request indicator of watch mode off. gsw then shows no
+    /// indicator and starts no `gh`. One-shot mode never shows the indicator.
+    #[arg(long)]
+    no_pr: bool,
+
     /// Strip ANSI color codes from output.
     #[arg(long)]
     no_color: bool,
@@ -331,6 +356,22 @@ fn effective_truecolor(
     }
 }
 
+impl Cli {
+    /// The settings of the pull-request lookups that watch mode starts.
+    ///
+    /// `path_var` is the value of `PATH`, and `gh_host` is the value of
+    /// `GH_HOST`. Returns `None` when the user gave `--no-pr`, and when no
+    /// `gh` that the user can run is on the search path. Watch mode then shows
+    /// no indicator and starts no `gh`.
+    fn pull_settings(
+        &self,
+        path_var: Option<&std::ffi::OsStr>,
+        gh_host: Option<String>,
+    ) -> Option<pull::PullSettings> {
+        pull::PullSettings::from_environment(self.no_pr, path_var, gh_host)
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -371,7 +412,7 @@ fn main() -> Result<()> {
     // Everything the renderer needs that doesn't depend on the live terminal
     // size. In watch mode this is computed once and reused for every repaint.
     let cfg = RenderConfig {
-        base: cli.base,
+        base: cli.base.clone(),
         max_files: cli.max_files,
         bar_width: cli.bar_width,
         log: LogDemand::from_cli(cli.no_log, cli.log_lines),
@@ -405,7 +446,14 @@ fn main() -> Result<()> {
         }
         // Hand the handle over: watch mode owns the repository from here and
         // re-opens it on every refresh.
-        watch::Mode::Watch => watch::run(handle, &cfg),
+        watch::Mode::Watch => watch::run(
+            handle,
+            &cfg,
+            cli.pull_settings(
+                std::env::var_os(pull::PATH_VARIABLE).as_deref(),
+                std::env::var(pull::GH_HOST_VARIABLE).ok(),
+            ),
+        ),
     }
 }
 
@@ -1093,6 +1141,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_no_pr_flag_turns_the_pull_lookups_of_watch_mode_off() {
+        // Issue #676: with `--no-pr`, watch mode shows no indicator and starts
+        // no `gh`, also when a `gh` that the user can run is on the path.
+        let bin = pull::dir_with_gh(0o755);
+        let path = std::env::join_paths([bin.path()]).expect("join the path");
+        assert_eq!(
+            Cli::parse_from(["gsw", "--no-pr"]).pull_settings(Some(&path), None),
+            None,
+        );
+    }
+
+    #[test]
+    fn with_no_flag_watch_mode_looks_up_pull_requests_through_gh() {
+        // The same path as the test of `--no-pr` gives settings when the flag
+        // is absent, so that test is not true only because of its fixture.
+        let bin = pull::dir_with_gh(0o755);
+        let path = std::env::join_paths([bin.path()]).expect("join the path");
+        let settings = Cli::parse_from(["gsw"])
+            .pull_settings(Some(&path), Some("ghe.example.com".to_string()))
+            .expect("gh is on the path");
+        assert!(settings.program().starts_with(bin.path()));
+        assert_eq!(settings.extra_host(), Some("ghe.example.com"));
+    }
+
     /// The demand of the log that `args` state on the command line.
     fn log_demand_of(args: &[&str]) -> LogDemand {
         let cli = Cli::parse_from(std::iter::once("gsw").chain(args.iter().copied()));
@@ -1223,6 +1296,7 @@ mod tests {
             push_remote: None,
             worktree: None,
             off_start_branch: false,
+            pull: None,
         };
         let frame = render_frame(&snap, &cfg, dims, FrameTiming::at_walk(None));
         let lines = frame.output.lines().count();
@@ -1911,6 +1985,7 @@ mod tests {
             push_remote: None,
             worktree: None,
             off_start_branch: false,
+            pull: None,
         }
     }
 
@@ -2040,6 +2115,7 @@ mod tests {
             push_remote: None,
             worktree: None,
             off_start_branch: false,
+            pull: None,
         };
         let cfg = RenderConfig {
             base: None,

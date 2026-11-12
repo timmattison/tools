@@ -1959,6 +1959,7 @@ dependencies = [
  "buildinfo",
  "clap",
  "colored",
+ "ghrest",
  "gitscratch",
  "repowalker",
  "runlimit",
@@ -2850,6 +2851,14 @@ dependencies = [
  "r-efi 6.0.0",
  "rand_core 0.10.1",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "ghrest"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -3973,12 +3982,16 @@ dependencies = [
  "clap",
  "colored",
  "crossterm",
+ "ghrest",
  "gitscratch",
  "gix",
  "ignore",
  "libc",
  "notify",
  "proctree",
+ "runlimit",
+ "serde",
+ "serde_json",
  "shellquote",
  "tempfile",
  "termsize",
@@ -4016,6 +4029,7 @@ dependencies = [
  "clap",
  "crossterm",
  "dirs",
+ "ghrest",
  "gitscratch",
  "open",
  "ratatui",

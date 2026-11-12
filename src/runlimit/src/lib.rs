@@ -8,7 +8,7 @@
 //! grandchild that holds the write end of a pipe, and a join would block on
 //! the same stall that the limit exists to escape.
 //!
-//! `cwt` and `ha` both use this crate.
+//! `cwt`, `gsw`, and `ha` use this crate.
 
 #![deny(unsafe_code)]
 #![warn(clippy::pedantic)]

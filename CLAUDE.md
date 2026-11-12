@@ -283,6 +283,50 @@ full path, `shellquote::shell_quote(...)`, where the call site sits behind a
   for a person to paste
 - `wdid` - the paths and the history rows that the tests put into stub scripts
 
+## GitHub REST Through `gh`
+
+Every tool in this repository that names a GitHub repository by its remote URL,
+or reads the reply of `gh api -i`, **must** use the `ghrest` library crate at
+`src/ghrest/`.
+
+### Why
+
+`cwt` and `ha` each kept a private copy of this code, and `gsw` needed it too.
+`cwt` is a binary crate, so `gsw` could not import its copy. A third copy is
+the copy that drifts. `ghrest` holds the one parse of a `gh api -i` reply, the
+one reader of a remote URL, and the one cache entry for a conditional request.
+
+### Usage
+
+Take the crate with `ghrest.workspace = true`.
+
+- `GithubRepo::from_remote_url(url, extra_host)` - the host, the owner, and the
+  name of a GitHub remote, or `None`. The caller passes `GH_HOST` as
+  `extra_host`.
+- `PullNumber` - the number of a pull request. It displays as `#547`.
+- `parse_response(text)` - the status, the headers, and the body of a
+  `gh api -i` reply. Read the status line, not the exit status: `gh` exits 1
+  on a `304`.
+- `EtagEntry` - the `ETag` and the body of the last answer for one path. A poll
+  sends `condition_for(path)` as its `If-None-Match` line and reads
+  `body_for(path)` on a `304`, which costs nothing against the rate limit.
+- `Response::rate_limit_wait(now)` - how long a rate-limit refusal asks the
+  caller to wait.
+
+### Tools Currently Using ghrest
+
+- `cwt` - the repository of `origin`, and the numbers of its pull requests
+- `gsw` - the pull-request indicator of the watch header
+- `ha` - every `gh api -i` reply, and its `ETag` cache
+
+### Known Exception
+
+- `sidecar` - `owner` in `src/sidecar/src/remote.rs` reads the GitHub owner of
+  `origin` with its own parser. Its tests use local paths as `origin`, and
+  `GithubRepo::from_remote_url` refuses a local path, so the move needs new
+  fixtures. Issue #678 moves the owner and the host onto `ghrest` and removes
+  this exception.
+
 ## Spawning Git
 
 Every command this workspace spawns that is git, or that runs git, **must**

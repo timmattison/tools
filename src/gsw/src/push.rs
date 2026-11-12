@@ -2813,6 +2813,7 @@ mod ui_tests {
             push_remote: Some("origin".to_string()),
             worktree: None,
             off_start_branch: false,
+            pull: None,
         }
     }
 

@@ -99,7 +99,7 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
 ### runlimit
 A shared Rust library that runs a child program with a time limit. It drains stdout and stderr on reader threads,
 so a chatty child cannot fill a pipe. It kills and reaps a child that does not finish in time, so a hung child
-cannot hang the caller. Used by `cwt` and `ha`.
+cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
 
 ## The tools
 
@@ -563,6 +563,33 @@ cannot hang the caller. Used by `cwt` and `ha`.
     gsw purely event-driven. On a repository where a status walk is expensive, the 1% duty-cycle
     budget pushes the timed refresh out past the interval, and the countdown shows the longer wait
     rather than promising one it will not keep.
+  - Under the live watch, the right end of the header row shows whether the branch on the screen
+    has an open pull request on GitHub:
+
+    ```
+    gsw ⌂ 1/4 • issue-681 • 3 commits ahead of main • ↑0 ↓0 origin/issue-681        PR #690
+    ```
+
+    | State | Text | Style |
+    | --- | --- | --- |
+    | One open pull request | `PR #690` | green, bold |
+    | Two or more open pull requests | `PR #690 +1` (the lowest number, then the count of the others) | green, bold |
+    | No open pull request | `no PR` | dim |
+    | No answer yet, or the last lookup failed | `PR ?` | dim |
+
+    A draft pull request counts as open, and the text carries the meaning without color. The pull
+    request is the one whose head is the branch that `branch.<name>.merge` names, in the repository
+    of the remote of the branch. A branch that tracks nothing asks about its own name, in the
+    remote that `p` pushes a new branch to. gsw asks through `gh api` with REST and an `ETag`, so
+    an answer that did not change costs nothing against the GitHub rate limit. It asks after the
+    first frame, at each timed refresh, when `r` refreshes, and when the branch or the worktree on
+    the screen changes — never because of a filesystem event, so a build that writes many files
+    sends no requests. One lookup runs at a time, on a thread of its own, for at most 10 seconds,
+    and the screen never waits for it. A rate limit shows `PR ?` and stops the lookups until GitHub
+    lets them start again. The name of the branch outranks the indicator: in a pane too narrow for
+    both, the indicator goes. One-shot mode, `--no-pr`, a machine with no `gh` on `PATH`, a
+    detached HEAD, and a remote that is not on GitHub show no indicator, and the header is then
+    the same as before. `GH_HOST` names one more GitHub host, for GitHub Enterprise.
   - Watch-mode keys: `q` or Ctrl-C quits, `r` forces an immediate refresh, `p` pushes the
     current branch, `P` pushes it without the `pre-push` hook, `G` opens the pull request of the
     branch (or the issue the branch names when

@@ -1497,3 +1497,194 @@ mod hostile_environment {
         println!("{CHILD_RAN}");
     }
 }
+
+/// The pull-request indicator of watch mode, end to end against a stub `gh`.
+///
+/// Each test owns its temporary directories, and the stub `gh` writes only
+/// into a directory of its test, so the tests stay parallel-safe.
+#[cfg(unix)]
+mod pull_indicator {
+    use super::{gsw_command, run_git, setup_repo};
+
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    use tempfile::TempDir;
+
+    /// The branch of the fixture of [`setup_repo`].
+    const BRANCH: &str = "main";
+
+    /// The reply of GitHub that the stub gives: one open pull request.
+    const REPLY: &str =
+        r#"printf 'HTTP/2.0 200 OK\r\nEtag: "e1"\r\n\r\n[{"number":690,"head":{"ref":"main"}}]'"#;
+
+    /// Puts a 60 second alarm on the child, hands it the terminal as its
+    /// standard input and error, and starts it. The binary can never outlive
+    /// the test, whatever the test does.
+    const BOUND_ON_THE_TERMINAL: &str = r#"alarm(shift @ARGV); open(STDIN, '<&', \*STDOUT) or die "stdin: $!"; open(STDERR, '>&', \*STDOUT) or die "stderr: $!"; exec { $ARGV[0] } @ARGV or die "exec: $!";"#;
+
+    /// The fixture repository, with `origin` on GitHub and the branch tracking
+    /// `origin/<branch>` by configuration.
+    fn github_repo() -> TempDir {
+        let dir = setup_repo();
+        run_git(
+            dir.path(),
+            &["remote", "add", "origin", "git@github.com:owner/name.git"],
+        );
+        run_git(
+            dir.path(),
+            &["config", &format!("branch.{BRANCH}.remote"), "origin"],
+        );
+        run_git(
+            dir.path(),
+            &[
+                "config",
+                &format!("branch.{BRANCH}.merge"),
+                &format!("refs/heads/{BRANCH}"),
+            ],
+        );
+        dir
+    }
+
+    /// Writes `script` as the executable `gh` of a new `bin` directory in
+    /// `root`, and gives the directory.
+    fn stub_gh(root: &Path, script: &str) -> PathBuf {
+        let bin = root.join("bin");
+        fs::create_dir(&bin).expect("make the bin directory");
+        let gh = bin.join("gh");
+        fs::write(&gh, script).expect("write the gh stub");
+        fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).expect("make the stub run");
+        bin
+    }
+
+    /// A `PATH` value that puts `bin` before the inherited path.
+    fn path_with(bin: &Path) -> std::ffi::OsString {
+        let inherited = std::env::var_os("PATH").unwrap_or_default();
+        std::env::join_paths(
+            std::iter::once(bin.to_path_buf()).chain(std::env::split_paths(&inherited)),
+        )
+        .expect("join the path")
+    }
+
+    /// One-shot mode, forced and by a pipe, starts no `gh` and draws no
+    /// indicator, even with `gh` on the path and a GitHub remote.
+    #[test]
+    fn one_shot_runs_no_lookup_and_draws_no_indicator() {
+        let repo = github_repo();
+        let state = tempfile::tempdir().expect("tempdir");
+        let ran = state.path().join("ran");
+        let script = format!(
+            "#!/bin/sh\ntouch {}\n{REPLY}\n",
+            shellquote::shell_quote(&ran.display().to_string())
+        );
+        let bin = stub_gh(state.path(), &script);
+
+        for extra in [&["--one-shot"][..], &[][..]] {
+            let output = gsw_command(repo.path())
+                .arg("--no-color")
+                .args(extra)
+                .env("PATH", path_with(&bin))
+                .env("COLUMNS", "100")
+                .output()
+                .expect("run gsw");
+            assert!(output.status.success(), "gsw failed with {extra:?}");
+            let text = String::from_utf8_lossy(&output.stdout);
+            for word in ["PR ?", "no PR", "PR #"] {
+                assert!(!text.contains(word), "{extra:?} drew {word:?}: {text}");
+            }
+            assert!(!ran.exists(), "{extra:?} started gh");
+        }
+    }
+
+    /// `--no-pr` is a flag of the binary.
+    #[test]
+    fn the_no_pr_flag_is_accepted() {
+        let repo = setup_repo();
+        let status = gsw_command(repo.path())
+            .args(["--no-pr", "--one-shot", "--no-color"])
+            .status()
+            .expect("run gsw");
+        assert!(status.success());
+    }
+
+    /// Watch mode in a pseudo-terminal. The first frame shows `PR ?`, the
+    /// answer of the first lookup makes the header show `PR #690`, and the
+    /// lookup runs the `gh` that the search found with the arguments and the
+    /// environment that the design states.
+    ///
+    /// The stub counts its runs. Runs 1 and 2 answer. Run 3 and every later run
+    /// end gsw with SIGTERM, so the test needs no deadline of its own: the loop
+    /// paints the frame of answer 1 before any wake that can start lookup 3.
+    /// The alarm of [`BOUND_ON_THE_TERMINAL`] is the safety bound.
+    #[test]
+    fn watch_mode_shows_unknown_first_and_then_the_pull_request() {
+        let repo = github_repo();
+        let state = tempfile::tempdir().expect("tempdir");
+        let quoted =
+            |name: &str| shellquote::shell_quote(&state.path().join(name).display().to_string());
+        let script = format!(
+            "#!/bin/sh\n\
+             n=$(cat {count} 2>/dev/null || echo 0)\n\
+             n=$((n + 1))\n\
+             echo \"$n\" > {count}\n\
+             case \"$n\" in\n\
+             1) printf '%s\\n' \"$@\" > {args}; env > {env}; {REPLY} ;;\n\
+             2) {REPLY} ;;\n\
+             *) kill -TERM $PPID; exit 0 ;;\n\
+             esac\n",
+            count = quoted("count"),
+            args = quoted("args"),
+            env = quoted("env"),
+        );
+        let bin = stub_gh(state.path(), &script);
+        let home = tempfile::tempdir().expect("tempdir");
+
+        let mut command = Command::new("perl");
+        command
+            .arg("-e")
+            .arg(BOUND_ON_THE_TERMINAL)
+            .arg("60")
+            .arg(env!("CARGO_BIN_EXE_gsw"))
+            .args(["--refresh-interval", "1"])
+            .current_dir(repo.path())
+            .env_clear()
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env("HOME", home.path())
+            .env("XDG_CONFIG_HOME", home.path())
+            .env("TERM", "xterm-256color")
+            .env("COLUMNS", "100")
+            .env("GIT_CONFIG_NOSYSTEM", "1");
+
+        let output = gitscratch::testing::pty::Pty::open(100).run_with_stdout_on_terminal(command);
+        let raw = String::from_utf8_lossy(&output.stdout).into_owned();
+        let text = testcolor::strip_ansi(&raw);
+
+        let first = text.find("PR ?");
+        let later = text.find("PR #690");
+        assert!(
+            first.is_some() && later.is_some() && first < later,
+            "the first frame must show `PR ?` and a later frame `PR #690`. terminal: {text:?}",
+        );
+
+        let args = fs::read_to_string(state.path().join("args")).expect("the stub saw run 1");
+        let args: Vec<&str> = args.lines().collect();
+        for expected in ["api", "-i", "--hostname", "github.com"] {
+            assert!(
+                args.contains(&expected),
+                "{expected:?} missing from {args:?}"
+            );
+        }
+        assert!(
+            args.iter()
+                .any(|arg| arg.contains(&format!("head=owner:{BRANCH}"))),
+            "no argument names the head: {args:?}",
+        );
+        let env = fs::read_to_string(state.path().join("env")).expect("the stub saw its env");
+        assert!(
+            env.lines().any(|line| line == "GH_PROMPT_DISABLED=1"),
+            "gh must run with prompts off: {env}",
+        );
+    }
+}

@@ -218,6 +218,7 @@ buildinfo = { path = "src/buildinfo" }
 op-cache = { path = "src/op-cache" }
 clipboardmon = { path = "src/clipboardmon" }
 filewalker = { path = "src/filewalker" }
+ghrest = { path = "src/ghrest" }
 gitscratch = { path = "src/gitscratch" }
 httpfile = { path = "src/httpfile" }
 occ = { path = "src/occ" }

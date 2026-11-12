@@ -16,10 +16,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use colored::Colorize;
+use ghrest::PullNumber;
 use repowalker::{child_repositories, holds_git_entry};
 
 use crate::ascent::{climb, main_branch_rank};
-use crate::pulls::{self, Lookup, PullNumber};
+use crate::pulls::{self, Lookup};
 use crate::worktree::{canonical, list_worktrees, paths_equal, RepoWorktrees, Worktree};
 
 /// The indent that puts a worktree under its repository heading.
