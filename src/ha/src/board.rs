@@ -421,6 +421,14 @@ const QUEUE_ERROR_PREFIX: &str = "merge queue: ";
 /// The text before the error of a failed read of the events of a queue.
 const HISTORY_ERROR_PREFIX: &str = "merge history: ";
 
+/// How long a run can wait (`⏳`) and still show in the active section.
+///
+/// A GitHub outage left runs queued that never start, and they filled the
+/// section. This limit is temporary, and issue #680 removes it. It is not the
+/// window of the finished runs, so a change of that window does not change
+/// which active runs hide.
+const STUCK_WAIT: Duration = Duration::from_hours(8);
+
 impl Board {
     /// Makes an empty board. A finished run shows while its last update is
     /// inside `window` (see `Board::sections`). A pull request that left a
@@ -622,6 +630,16 @@ impl Board {
             .unwrap_or(DateTime::<Utc>::MIN_UTC)
     }
 
+    /// Whether GitHub reports `run` as queued and it started at least
+    /// [`STUCK_WAIT`] before `now`. Such a run does not show as active.
+    fn is_stuck(run: &Run, now: DateTime<Utc>) -> bool {
+        let cutoff = chrono::Duration::from_std(STUCK_WAIT)
+            .ok()
+            .and_then(|wait| now.checked_sub_signed(wait))
+            .unwrap_or(DateTime::<Utc>::MIN_UTC);
+        run.state == RunState::Queued && run.started_at <= cutoff
+    }
+
     /// Splits the shown runs into the active list and the recent list.
     ///
     /// Both lists are sorted. A run that is not shown at `now` is in neither.
@@ -641,7 +659,7 @@ impl Board {
             .runs
             .values()
             .flatten()
-            .filter(|run| run.state.is_active())
+            .filter(|run| run.state.is_active() && !Self::is_stuck(run, now))
             .collect();
         active.sort_by_key(|run| (run.started_at, run.id));
         let oldest = self.window_start(now);
@@ -1918,7 +1936,8 @@ mod tests {
             repo("a/x"),
             vec![
                 finished_run(1, RunState::Running, 3 * 24 * 3600, 3 * 24 * 3600),
-                finished_run(2, RunState::Queued, 20 * 3600, 20 * 3600),
+                // Run 2 waits for less than `STUCK_WAIT`.
+                finished_run(2, RunState::Queued, 7 * 3600, 7 * 3600),
             ],
             now(),
         );
@@ -2376,7 +2395,19 @@ mod tests {
 
     #[test]
     fn when_the_selected_run_leaves_the_window_the_nearest_run_is_selected() {
-        let mut board = four_runs_in_two_sections();
+        // The runs of `four_runs_in_two_sections`, but run 2 runs. The clock
+        // below moves past `STUCK_WAIT`, and a run that waits then hides.
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Running, 20, 1),
+                run(3, "a/x", RunState::Passed, 60, 10),
+                run(4, "a/x", RunState::Failed, 60, 20),
+            ],
+            now(),
+        );
         select_third(&mut board);
         let later = now() + Span::hours(8) + Span::minutes(15);
         let rows = board.rows(later);
