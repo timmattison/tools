@@ -17,8 +17,8 @@
 //! - `occ` reads the Claude Code role of each process and the registry record
 //!   of each session. It is the one reader of the registry in this workspace.
 //!
-//! Nothing here is a pure function, so no unit test covers this module. The
-//! one test that reads this Mac runs the built binary and holds the shape of
+//! Almost nothing here is a pure function, so only `kill_target` has a unit
+//! test in this module. The one test that reads this Mac runs the built binary and holds the shape of
 //! the output. Every rule that this module feeds is a pure function with tests
 //! of its own.
 
@@ -247,13 +247,9 @@ impl Machine for Mac {
             Signal::Kill => (libc::SIGKILL, KILL),
         };
         let call = || format!("{KILL_CALL}({pid}, {name})");
-        // The kernel counts a PID as a signed number, and a PID of a Mac is
-        // far below the largest one. A number that does not fit is not a PID
-        // at all, and a negative first argument of `kill` names a group of
-        // processes.
-        let target = libc::pid_t::try_from(pid.get()).map_err(|_| MachineError::SignalFailed {
+        let target = kill_target(pid).map_err(|reason| MachineError::SignalFailed {
             call: call(),
-            reason: format!("the number {pid} is not a PID"),
+            reason,
         })?;
         // SAFETY: `kill` takes two numbers of the C language. It takes no
         // pointer and writes no memory of this process.
@@ -270,6 +266,21 @@ impl Machine for Mac {
     fn sleep(&self, how_long: Duration) {
         thread::sleep(how_long);
     }
+}
+
+/// Gives the first argument of `kill` for `pid`, or the reason why `pid` names
+/// no single process.
+///
+/// The kernel counts a PID as a signed number, and a PID of a Mac is far below
+/// the largest one. A number that does not fit is not a PID at all, and a
+/// negative first argument of `kill` names a group of processes.
+///
+/// # Errors
+///
+/// Gives the reason as text, which becomes the reason of
+/// [`MachineError::SignalFailed`].
+fn kill_target(pid: Pid) -> Result<libc::pid_t, String> {
+    libc::pid_t::try_from(pid.get()).map_err(|_| format!("the number {pid} is not a PID"))
 }
 
 /// Runs `program` and gives what it wrote on its standard output.
@@ -545,4 +556,30 @@ unsafe fn text_of(pointer: *const libc::c_char) -> Option<String> {
     // a zero byte.
     let text = unsafe { CStr::from_ptr(pointer) };
     Some(text.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::kill_target;
+    use crate::pid::Pid;
+
+    /// A usual PID is the first argument of `kill` as it stands.
+    #[test]
+    fn a_usual_pid_is_its_own_kill_target() {
+        assert_eq!(kill_target(Pid::new(45_646)), Ok(45_646));
+    }
+
+    /// A number that does not fit in a signed PID is no PID.
+    #[test]
+    fn a_pid_that_does_not_fit_names_no_process() {
+        assert!(kill_target(Pid::new(u32::MAX)).is_err());
+    }
+
+    /// `kill` reads 0 as each process of the process group of the caller. The
+    /// test calls the pure function and sends no signal.
+    #[test]
+    fn a_pid_of_zero_names_no_single_process() {
+        let reason = kill_target(Pid::new(0)).expect_err("0 names a group");
+        assert!(reason.contains("process group"), "reason was: {reason}");
+    }
 }
