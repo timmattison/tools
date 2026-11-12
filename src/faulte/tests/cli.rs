@@ -288,6 +288,30 @@ fn check_help_says_what_the_interval_does_for_the_check() {
     );
 }
 
+/// The help names each exit code of the check. It does not say that the check
+/// finds the cause of the high system time, because no measurement of the
+/// check proves a cause.
+#[test]
+fn check_help_names_each_exit_code_and_claims_no_cause() {
+    let check = run(&["check", "--help"]);
+    assert!(check.status.success(), "faulte check --help exits 0");
+    let top = run(&["--help"]);
+    assert!(top.status.success(), "faulte --help exits 0");
+
+    let check = one_line(&check.stdout);
+    let top = one_line(&top.stdout);
+    assert!(
+        check.contains("0 for no problem, 1 for a problem, and 2 for an error"),
+        "faulte check --help names each exit code: {check}"
+    );
+    for (name, help) in [("faulte check --help", &check), ("faulte --help", &top)] {
+        assert!(
+            !help.contains("why the system time"),
+            "{name} claims a cause: {help}"
+        );
+    }
+}
+
 /// The tests of the real signals of this Mac.
 ///
 /// These are the one place where `faulte` signals a process for real, and each
