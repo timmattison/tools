@@ -913,8 +913,8 @@ impl Board {
     /// The order of the sections is: the merge queue, the active runs, the
     /// merge history, and the recent runs. The two merge sections show only
     /// when [`Board::shows_merge_sections`] is true. The header of the active
-    /// section counts the jobs of the active runs by state and names the
-    /// runners of the jobs that wait or run. The selected row carries the
+    /// section counts the jobs of the active runs that show by state and names
+    /// the runners of the jobs that wait or run. The selected row carries the
     /// selection mark. This is the row of the selected item, or the row of its
     /// selected job. The block of each expanded run follows the row of that
     /// run. The item rows come in the order of `shown_items`, and the selection

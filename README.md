@@ -2182,12 +2182,12 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
     bottom of the screen. Such a run shows again when one of its jobs starts. The header does not
     count it. To cancel it, use the GitHub web interface or `gh run cancel`. This rule is
     temporary.
-  - The header of "Running" counts the jobs of all active runs by state: the jobs that wait
-    (`⏳`), run (`🏃`), passed (`✅`), or failed (`❌`), the jobs that GitHub skipped (`💨`), and
-    the cancelled jobs (`🪦`). An active run can hold cancelled jobs, for example the jobs of a
-    matrix that `fail-fast` cancelled. The counts include a collapsed run and a run below the
-    bottom of the screen. Each count shows also when it is 0. After the counts, the header names
-    the runners of the jobs that wait or run, in cyan, each name one time, for example
+  - The header of "Running" counts the jobs of the active runs that show by state: the jobs
+    that wait (`⏳`), run (`🏃`), passed (`✅`), or failed (`❌`), the jobs that GitHub skipped
+    (`💨`), and the cancelled jobs (`🪦`). An active run can hold cancelled jobs, for example the
+    jobs of a matrix that `fail-fast` cancelled. The counts include a collapsed run and a run
+    below the bottom of the screen. Each count shows also when it is 0. After the counts, the
+    header names the runners of the jobs that wait or run, in cyan, each name one time, for example
     `Running · 2 ⏳ · 3 🏃 · 7 ✅ · 1 ❌ · 2 💨 · 1 🪦 · pi5, mini, GitHub Actions 1001`. The
     shortest name comes first, thus the names of the local runners show before the names of the
     GitHub-hosted runners. The right edge of the screen can cut the last names. Before the first
