@@ -33,7 +33,9 @@ use crate::target::RepoName;
 pub enum Section {
     /// Pull requests in a merge queue.
     Queue,
-    /// Runs that wait or run.
+    /// Runs that wait or run. A run that waits (`⏳`) and that started more
+    /// than `STUCK_WAIT` (8 hours) before now does not show, see
+    /// `Board::is_stuck`.
     Active,
     /// Pull requests that left a merge queue inside the window.
     History,
@@ -48,8 +50,9 @@ pub enum Section {
 /// `passed` counts the merged ones, `failed` the ones that the queue
 /// removed, and `cancelled` the ones that a person removed. Each one shows
 /// the marker of the run state of the same name. In the active section,
-/// `jobs` counts the jobs of the active runs, and `runners` names the runners
-/// that have a job that waits or runs.
+/// `jobs` counts the jobs of the active runs that show, and `runners` names
+/// the runners that have a job that waits or runs in those runs. A run that
+/// does not show (see `Board::is_stuck`) is in no count and gives no name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Header<'a> {
     /// The section that the header opens.
@@ -639,6 +642,10 @@ impl Board {
     /// GitHub reports a run as queued while one of its jobs waits, also when
     /// another job of the run is in progress. Thus the GitHub state alone
     /// cannot tell a stuck run from a live run.
+    ///
+    /// The worker still reads the jobs of each active run, also of a run that
+    /// does not show. Thus a hidden run shows again when one of its jobs
+    /// starts, because its marker then changes to the running marker.
     fn is_stuck(&self, run: &Run, now: DateTime<Utc>) -> bool {
         let cutoff = chrono::Duration::from_std(STUCK_WAIT)
             .ok()
@@ -652,7 +659,8 @@ impl Board {
     /// Splits the shown runs into the active list and the recent list.
     ///
     /// Both lists are sorted. A run that is not shown at `now` is in neither.
-    /// The active list is in order of the start, oldest first. The recent
+    /// The active list holds each active run except a stuck run (see
+    /// [`Board::is_stuck`]), in order of the start, oldest first. The recent
     /// list is in order of the end of each run ([`run_end`]), newest first,
     /// then by the run ID.
     ///
@@ -994,8 +1002,9 @@ impl Board {
         rows
     }
 
-    /// The jobs of the `active` runs. This covers each active run that the
-    /// board holds, expanded or not and in the view or not. A run with no job
+    /// The jobs of the `active` runs. This covers each run of the active list
+    /// of `Board::sections`, expanded or not and in the view or not. A stuck
+    /// run is not in that list (see [`Board::is_stuck`]). A run with no job
     /// answer gives no job. A run whose last fetch failed gives its last good
     /// jobs. A run that is not in `active` gives no job.
     fn active_jobs<'s, 'a>(&'s self, active: &'a [&Run]) -> impl Iterator<Item = &'s Job> + 'a

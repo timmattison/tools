@@ -2176,6 +2176,11 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
     when the run is expanded and when it is collapsed. A finished run always shows the marker of
     its GitHub state. Each row shows the start time in the local time zone and the elapsed time,
     which increases each second. A run that is active for too long is often a stuck runner.
+    "Running" does not show a run that waits (`⏳`) and that started more than 8 hours ago. A
+    GitHub outage left many runs queued that never start, and they pushed the live runs below the
+    bottom of the screen. Such a run shows again when one of its jobs starts. The header does not
+    count it. To cancel it, use the GitHub web interface or `gh run cancel`. This rule is
+    temporary.
   - The header of "Running" counts the jobs of all active runs by state: the jobs that wait
     (`⏳`), run (`🏃`), passed (`✅`), or failed (`❌`), the jobs that GitHub skipped (`💨`), and
     the cancelled jobs (`🪦`). An active run can hold cancelled jobs, for example the jobs of a
