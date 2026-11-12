@@ -1,5 +1,6 @@
-//! `faulte check`: one fast answer to the question "why is the system time of
-//! this Mac high now?"
+//! `faulte check`: one fast answer to the question "is the system time of this
+//! Mac high now, and does memory churn or process churn occur at the same
+//! time?"
 //!
 //! The ranking of `faulte` runs `top` and `ps`, and one `ps` took up to 13
 //! seconds on this Mac at its slowest. The check starts no `top` and no `ps`.
