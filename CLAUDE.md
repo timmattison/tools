@@ -346,9 +346,10 @@ has a user whose intent to honor:
   purpose, and a tool that runs for that person honors them.
 
 One production site takes `fixture_command` on purpose:
-`gitscratch::Git::command`, which `grind` and `grime` run. A replay works on
-local objects and needs no credential, and a `GIT_CONFIG_GLOBAL` that one shell
-states must not change what the replay reports. Do not move that site to
+`gitscratch::Git::command`, which each tool that takes `gitscratch` runs:
+`bibibi`, `grime`, `grind`, `grist` and `gsw`. A replay works on local objects
+and needs no credential, and a `GIT_CONFIG_GLOBAL` that one shell states must
+not change what the replay reports. Do not move that site to
 `childenv::command`.
 
 The rule covers every child for two reasons. A program that does not run git
