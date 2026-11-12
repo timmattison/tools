@@ -1992,6 +1992,45 @@ mod tests {
         );
     }
 
+    /// A run that waits for more than 8 hours shows again, with the running
+    /// marker, when one of its jobs starts.
+    #[test]
+    fn a_hidden_run_shows_again_with_the_running_marker_when_a_job_starts() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Queued, 9 * 60, 1)],
+            now(),
+        );
+        assert_eq!(
+            shape(&board.rows(now()))[..2],
+            ["Header(Active,0,0,0,0)", "Empty(Active)"]
+        );
+        board.set_jobs(
+            RunId(1),
+            vec![
+                runner_job(1, RunState::Running, "pi5"),
+                job(2, RunState::Queued),
+            ],
+        );
+        let rows = board.rows(now());
+        assert_eq!(shape(&rows)[..2], ["Header(Active,1,0,0,0)", "Run(1)"]);
+        let marker = rows.iter().find_map(|row| match row {
+            Row::Run { state, .. } => Some(*state),
+            _ => None,
+        });
+        assert_eq!(marker, Some(RunState::Running));
+        assert_eq!(
+            active_header(&rows).jobs,
+            JobCounts {
+                queued: 1,
+                running: 1,
+                ..JobCounts::default()
+            }
+        );
+        assert_eq!(active_runners(&rows), ["pi5"]);
+    }
+
     #[test]
     fn replace_changes_only_the_runs_of_its_repository() {
         let mut board = board();
