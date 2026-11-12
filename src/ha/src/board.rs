@@ -630,14 +630,23 @@ impl Board {
             .unwrap_or(DateTime::<Utc>::MIN_UTC)
     }
 
-    /// Whether GitHub reports `run` as queued and it started more than
-    /// [`STUCK_WAIT`] before `now`. Such a run does not show as active.
-    fn is_stuck(run: &Run, now: DateTime<Utc>) -> bool {
+    /// Whether the row of `run` shows the waiting marker and the run started
+    /// more than [`STUCK_WAIT`] before `now`. Such a run does not show as
+    /// active.
+    ///
+    /// The marker comes from `RunState::shown_with_jobs` on the state of the
+    /// run and the job states that the board holds for it, as in the row.
+    /// GitHub reports a run as queued while one of its jobs waits, also when
+    /// another job of the run is in progress. Thus the GitHub state alone
+    /// cannot tell a stuck run from a live run.
+    fn is_stuck(&self, run: &Run, now: DateTime<Utc>) -> bool {
         let cutoff = chrono::Duration::from_std(STUCK_WAIT)
             .ok()
             .and_then(|wait| now.checked_sub_signed(wait))
             .unwrap_or(DateTime::<Utc>::MIN_UTC);
-        run.state == RunState::Queued && run.started_at < cutoff
+        let jobs = last_good_jobs(self.jobs.get(&run.id));
+        let marker = run.state.shown_with_jobs(jobs.iter().map(|job| job.state));
+        marker == RunState::Queued && run.started_at < cutoff
     }
 
     /// Splits the shown runs into the active list and the recent list.
@@ -659,7 +668,7 @@ impl Board {
             .runs
             .values()
             .flatten()
-            .filter(|run| run.state.is_active() && !Self::is_stuck(run, now))
+            .filter(|run| run.state.is_active() && !self.is_stuck(run, now))
             .collect();
         active.sort_by_key(|run| (run.started_at, run.id));
         let oldest = self.window_start(now);
