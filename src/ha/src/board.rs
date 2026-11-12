@@ -2049,6 +2049,39 @@ mod tests {
         assert_eq!(active_runners(&rows), ["pi5"]);
     }
 
+    /// A run that started more than 8 hours ago, and whose last job ended
+    /// recently, shows while its next job waits for a runner.
+    #[test]
+    fn a_run_whose_last_job_ended_recently_still_shows() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Queued, 9 * 60, 1)],
+            now(),
+        );
+        board.set_jobs(
+            RunId(1),
+            vec![
+                Job {
+                    started_at: Some(now() - Span::minutes(20)),
+                    completed_at: Some(now() - Span::minutes(10)),
+                    ..job(2, RunState::Passed)
+                },
+                runner_job(1, RunState::Queued, "pi5"),
+            ],
+        );
+        let rows = board.rows(now());
+        assert_eq!(shape(&rows)[..2], ["Header(Active,1,0,0,0)", "Run(1)"]);
+        assert_eq!(
+            active_header(&rows).jobs,
+            JobCounts {
+                queued: 1,
+                passed: 1,
+                ..JobCounts::default()
+            }
+        );
+    }
+
     #[test]
     fn replace_changes_only_the_runs_of_its_repository() {
         let mut board = board();
