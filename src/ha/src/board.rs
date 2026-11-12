@@ -630,14 +630,14 @@ impl Board {
             .unwrap_or(DateTime::<Utc>::MIN_UTC)
     }
 
-    /// Whether GitHub reports `run` as queued and it started at least
+    /// Whether GitHub reports `run` as queued and it started more than
     /// [`STUCK_WAIT`] before `now`. Such a run does not show as active.
     fn is_stuck(run: &Run, now: DateTime<Utc>) -> bool {
         let cutoff = chrono::Duration::from_std(STUCK_WAIT)
             .ok()
             .and_then(|wait| now.checked_sub_signed(wait))
             .unwrap_or(DateTime::<Utc>::MIN_UTC);
-        run.state == RunState::Queued && run.started_at <= cutoff
+        run.state == RunState::Queued && run.started_at < cutoff
     }
 
     /// Splits the shown runs into the active list and the recent list.
