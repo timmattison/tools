@@ -18,9 +18,9 @@
 //!   of each session. It is the one reader of the registry in this workspace.
 //!
 //! Almost nothing here is a pure function, so only `kill_target` has a unit
-//! test in this module. The one test that reads this Mac runs the built binary and holds the shape of
-//! the output. Every rule that this module feeds is a pure function with tests
-//! of its own.
+//! test in this module. The one test that reads this Mac runs the built binary
+//! and holds the shape of the output. Every rule that this module feeds is a
+//! pure function with tests of its own.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -274,10 +274,10 @@ impl Machine for Mac {
 /// The kernel counts a PID as a signed number, and a PID of a Mac is far below
 /// the largest one. A number that does not fit is not a PID at all, and a
 /// negative first argument of `kill` names a group of processes. A first
-/// argument of 0 names each process of the process group of the caller, which
-/// is `faulte` itself and the shell that started it. A [`Pid`] holds 0 when it
-/// is built by default, thus this function refuses 0 before any signal goes
-/// out.
+/// argument of 0 names each process of the process group of the caller. That
+/// group holds `faulte` itself, and it can hold the script or the hook that
+/// started `faulte`. A [`Pid`] holds 0 when it is built by default, thus this
+/// function refuses 0 before any signal goes out.
 ///
 /// # Errors
 ///
