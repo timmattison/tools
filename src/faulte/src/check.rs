@@ -13,9 +13,10 @@
 //! - With 32 GB in the compressor, system time was 52% to 66% over 12 samples
 //!   of 5 seconds. It followed the rate of compressions (correlation 0.88) and
 //!   of decompressions (0.73), and it did not follow the load average (0.32).
-//!   The two compressor rates were almost equal, thus the same pages left
-//!   memory and came back. Both rates must be high, because one rate alone is
-//!   a one-time movement of pages and not churn.
+//!   Each second, 193 to 444 new processes started. The two compressor rates
+//!   were almost equal, thus the same pages left memory and came back. Both
+//!   rates must be high, because one rate alone is a one-time movement of
+//!   pages and not churn.
 //! - With 16 GB in the compressor and 14,009 to 51,323 compressions each
 //!   second, system time was still 42% to 56%, with 257 to 490 new processes
 //!   each second and 7 test runs.
@@ -56,10 +57,10 @@ pub const CHURN_LIMIT_PER_SECOND: f64 = 50_000.0;
 /// processes each second.
 ///
 /// On 2026-11-08, the rate of new processes was high at the same time as the
-/// system time. The bad samples of this Mac were between 193 and 490 new
-/// processes each second. This limit is about three quarters of the lowest bad
-/// sample. No sample of a quiet period set this limit, thus a future
-/// measurement can change it.
+/// system time. The bad samples of the two states in the module header were
+/// between 193 and 490 new processes each second. This limit is about three
+/// quarters of the lowest bad sample. No sample of a quiet period set this
+/// limit, thus a future measurement can change it.
 pub const PROCESS_LIMIT_PER_SECOND: f64 = 150.0;
 
 /// The largest process number of a Mac. XNU sets `PID_MAX` to 99,999 and gives

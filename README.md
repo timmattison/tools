@@ -5000,7 +5000,7 @@ On 2026-09-17 and 2026-09-18, this Mac spent 78% of its time in the kernel. 34 M
 
 An error gives the exit code 2. `faulte check --watch` prints one line for each interval until you stop it.
 
-On 2026-11-08, at 0% idle, this Mac showed two states. With 32 GB in the compressor, system time was 52% to 66%, and it followed the rate of compressions (correlation 0.88, over 12 samples of 5 seconds). It did not follow the load average (0.32). With 16 GB in the compressor and at most 51,323 compressions each second, system time was still 42% to 56%, with 257 to 490 new processes each second. The limits come from the bad samples of that day. No sample of a quiet period set them.
+On 2026-11-08, at 0% idle, this Mac showed two states. With 32 GB in the compressor, system time was 52% to 66%, and it followed the rate of compressions (correlation 0.88, over 12 samples of 5 seconds). It did not follow the load average (0.32). Each second, 193 to 444 new processes started. With 16 GB in the compressor and at most 51,323 compressions each second, system time was still 42% to 56%, with 257 to 490 new processes each second. The limits come from the bad samples of that day. No sample of a quiet period set them.
 
 ### Basic Usage
 
