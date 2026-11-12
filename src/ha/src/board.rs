@@ -1977,6 +1977,21 @@ mod tests {
         assert!(active_runners(&rows).is_empty());
     }
 
+    /// A run that waits for exactly 8 hours still shows in the active section.
+    #[test]
+    fn a_run_that_waits_for_exactly_8_hours_still_shows_in_running() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Queued, 8 * 60, 1)],
+            now(),
+        );
+        assert_eq!(
+            shape(&board.rows(now()))[..2],
+            ["Header(Active,1,0,0,0)", "Run(1)"]
+        );
+    }
+
     #[test]
     fn replace_changes_only_the_runs_of_its_repository() {
         let mut board = board();
