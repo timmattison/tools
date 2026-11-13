@@ -33,7 +33,8 @@ use crate::target::RepoName;
 pub enum Section {
     /// Pull requests in a merge queue.
     Queue,
-    /// Runs that wait or run.
+    /// Runs that wait or run. A run that waits (`⏳`) for more than
+    /// `STUCK_WAIT` (8 hours) does not show, see `Board::is_stuck`.
     Active,
     /// Pull requests that left a merge queue inside the window.
     History,
@@ -48,8 +49,9 @@ pub enum Section {
 /// `passed` counts the merged ones, `failed` the ones that the queue
 /// removed, and `cancelled` the ones that a person removed. Each one shows
 /// the marker of the run state of the same name. In the active section,
-/// `jobs` counts the jobs of the active runs, and `runners` names the runners
-/// that have a job that waits or runs.
+/// `jobs` counts the jobs of the active runs that show, and `runners` names
+/// the runners that have a job that waits or runs in those runs. A run that
+/// does not show (see `Board::is_stuck`) is in no count and gives no name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Header<'a> {
     /// The section that the header opens.
@@ -421,6 +423,16 @@ const QUEUE_ERROR_PREFIX: &str = "merge queue: ";
 /// The text before the error of a failed read of the events of a queue.
 const HISTORY_ERROR_PREFIX: &str = "merge history: ";
 
+/// How long a run can wait (`⏳`) and still show in the active section. The
+/// wait starts at the end of the newest finished job of the run, or at the
+/// start of the run when no job finished (see `Board::is_stuck`).
+///
+/// A GitHub outage left runs queued that never start, and they filled the
+/// section. This limit is temporary, and issue #680 removes it. It is not the
+/// window of the finished runs, so a change of that window does not change
+/// which active runs hide.
+const STUCK_WAIT: Duration = Duration::from_hours(8);
+
 impl Board {
     /// Makes an empty board. A finished run shows while its last update is
     /// inside `window` (see `Board::sections`). A pull request that left a
@@ -622,10 +634,48 @@ impl Board {
             .unwrap_or(DateTime::<Utc>::MIN_UTC)
     }
 
+    /// Whether the row of `run` shows the waiting marker and the run waited
+    /// for more than [`STUCK_WAIT`] at `now`. Such a run does not show as
+    /// active.
+    ///
+    /// The wait starts at the later of `run.started_at` and the newest
+    /// `completed_at` of the held jobs of the run. The later time also covers
+    /// a re-run, where the held jobs can be from an earlier attempt. A run
+    /// that waits for exactly [`STUCK_WAIT`] still shows.
+    ///
+    /// The marker comes from `RunState::shown_with_jobs` on the state of the
+    /// run and the job states that the board holds for it, as in the row.
+    /// GitHub reports a run as queued while one of its jobs waits, also when
+    /// another job of the run is in progress. Thus the GitHub state alone
+    /// cannot tell a stuck run from a live run.
+    ///
+    /// The worker still reads the jobs of each active run, also of a run that
+    /// does not show. Thus a hidden run shows again when one of its jobs
+    /// starts, because its marker then changes to the running marker.
+    ///
+    /// `Board::settle` drops the jobs of a hidden run, and the wait then
+    /// starts at `run.started_at`, which is never later than the old wait
+    /// start. Thus a hidden run stays hidden until a job runs.
+    fn is_stuck(&self, run: &Run, now: DateTime<Utc>) -> bool {
+        let cutoff = chrono::Duration::from_std(STUCK_WAIT)
+            .ok()
+            .and_then(|wait| now.checked_sub_signed(wait))
+            .unwrap_or(DateTime::<Utc>::MIN_UTC);
+        let jobs = last_good_jobs(self.jobs.get(&run.id));
+        let marker = run.state.shown_with_jobs(jobs.iter().map(|job| job.state));
+        let wait_start = jobs
+            .iter()
+            .filter_map(|job| job.completed_at)
+            .max()
+            .map_or(run.started_at, |ended| ended.max(run.started_at));
+        marker == RunState::Queued && wait_start < cutoff
+    }
+
     /// Splits the shown runs into the active list and the recent list.
     ///
     /// Both lists are sorted. A run that is not shown at `now` is in neither.
-    /// The active list is in order of the start, oldest first. The recent
+    /// The active list holds each active run except a stuck run (see
+    /// [`Board::is_stuck`]), in order of the start, oldest first. The recent
     /// list is in order of the end of each run ([`run_end`]), newest first,
     /// then by the run ID.
     ///
@@ -641,7 +691,7 @@ impl Board {
             .runs
             .values()
             .flatten()
-            .filter(|run| run.state.is_active())
+            .filter(|run| run.state.is_active() && !self.is_stuck(run, now))
             .collect();
         active.sort_by_key(|run| (run.started_at, run.id));
         let oldest = self.window_start(now);
@@ -863,8 +913,8 @@ impl Board {
     /// The order of the sections is: the merge queue, the active runs, the
     /// merge history, and the recent runs. The two merge sections show only
     /// when [`Board::shows_merge_sections`] is true. The header of the active
-    /// section counts the jobs of the active runs by state and names the
-    /// runners of the jobs that wait or run. The selected row carries the
+    /// section counts the jobs of the active runs that show by state and names
+    /// the runners of the jobs that wait or run. The selected row carries the
     /// selection mark. This is the row of the selected item, or the row of its
     /// selected job. The block of each expanded run follows the row of that
     /// run. The item rows come in the order of `shown_items`, and the selection
@@ -967,8 +1017,9 @@ impl Board {
         rows
     }
 
-    /// The jobs of the `active` runs. This covers each active run that the
-    /// board holds, expanded or not and in the view or not. A run with no job
+    /// The jobs of the `active` runs. This covers each run of the active list
+    /// of `Board::sections`, expanded or not and in the view or not. A stuck
+    /// run is not in that list (see [`Board::is_stuck`]). A run with no job
     /// answer gives no job. A run whose last fetch failed gives its last good
     /// jobs. A run that is not in `active` gives no job.
     fn active_jobs<'s, 'a>(&'s self, active: &'a [&Run]) -> impl Iterator<Item = &'s Job> + 'a
@@ -1918,7 +1969,8 @@ mod tests {
             repo("a/x"),
             vec![
                 finished_run(1, RunState::Running, 3 * 24 * 3600, 3 * 24 * 3600),
-                finished_run(2, RunState::Queued, 20 * 3600, 20 * 3600),
+                // Run 2 waits for less than `STUCK_WAIT`.
+                finished_run(2, RunState::Queued, 7 * 3600, 7 * 3600),
             ],
             now(),
         );
@@ -1930,6 +1982,145 @@ mod tests {
                 "Run(2)",
                 "Header(Recent,0,0,0,0)",
             ]
+        );
+    }
+
+    /// A run that waits for more than 8 hours does not show in the active section.
+    #[test]
+    fn a_run_that_waits_for_more_than_8_hours_does_not_show_in_running() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Queued, 9 * 60, 1)],
+            now(),
+        );
+        board.set_jobs(
+            RunId(1),
+            vec![
+                runner_job(1, RunState::Queued, "pi5"),
+                job(2, RunState::Passed),
+            ],
+        );
+        let rows = board.rows(now());
+        assert_eq!(
+            shape(&rows)[..2],
+            ["Header(Active,0,0,0,0)", "Empty(Active)"]
+        );
+        assert_eq!(active_header(&rows).jobs, JobCounts::default());
+        assert!(active_runners(&rows).is_empty());
+    }
+
+    /// A run that waits for exactly 8 hours still shows in the active section.
+    #[test]
+    fn a_run_that_waits_for_exactly_8_hours_still_shows_in_running() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Queued, 8 * 60, 1)],
+            now(),
+        );
+        assert_eq!(
+            shape(&board.rows(now()))[..2],
+            ["Header(Active,1,0,0,0)", "Run(1)"]
+        );
+    }
+
+    /// A run that waits for more than 8 hours shows again, with the running
+    /// marker, when one of its jobs starts.
+    #[test]
+    fn a_hidden_run_shows_again_with_the_running_marker_when_a_job_starts() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Queued, 9 * 60, 1)],
+            now(),
+        );
+        assert_eq!(
+            shape(&board.rows(now()))[..2],
+            ["Header(Active,0,0,0,0)", "Empty(Active)"]
+        );
+        board.set_jobs(
+            RunId(1),
+            vec![
+                runner_job(1, RunState::Running, "pi5"),
+                job(2, RunState::Queued),
+            ],
+        );
+        let rows = board.rows(now());
+        assert_eq!(shape(&rows)[..2], ["Header(Active,1,0,0,0)", "Run(1)"]);
+        let marker = rows.iter().find_map(|row| match row {
+            Row::Run { state, .. } => Some(*state),
+            _ => None,
+        });
+        assert_eq!(marker, Some(RunState::Running));
+        assert_eq!(
+            active_header(&rows).jobs,
+            JobCounts {
+                queued: 1,
+                running: 1,
+                ..JobCounts::default()
+            }
+        );
+        assert_eq!(active_runners(&rows), ["pi5"]);
+    }
+
+    /// A run that started more than 8 hours ago, and whose last job ended
+    /// recently, shows while its next job waits for a runner.
+    #[test]
+    fn a_run_whose_last_job_ended_recently_still_shows() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Queued, 9 * 60, 1)],
+            now(),
+        );
+        board.set_jobs(
+            RunId(1),
+            vec![
+                Job {
+                    started_at: Some(now() - Span::minutes(20)),
+                    completed_at: Some(now() - Span::minutes(10)),
+                    ..job(2, RunState::Passed)
+                },
+                runner_job(1, RunState::Queued, "pi5"),
+            ],
+        );
+        let rows = board.rows(now());
+        assert_eq!(shape(&rows)[..2], ["Header(Active,1,0,0,0)", "Run(1)"]);
+        assert_eq!(
+            active_header(&rows).jobs,
+            JobCounts {
+                queued: 1,
+                passed: 1,
+                ..JobCounts::default()
+            }
+        );
+    }
+
+    /// A run whose newest job ended more than 8 hours ago hides while its
+    /// next job waits for a runner.
+    #[test]
+    fn a_run_whose_last_job_ended_over_8_hours_ago_hides() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Queued, 10 * 60, 1)],
+            now(),
+        );
+        board.set_jobs(
+            RunId(1),
+            vec![
+                Job {
+                    started_at: Some(now() - Span::minutes(9 * 60 + 10)),
+                    completed_at: Some(now() - Span::minutes(9 * 60)),
+                    ..job(2, RunState::Passed)
+                },
+                runner_job(1, RunState::Queued, "pi5"),
+            ],
+        );
+        assert_eq!(
+            shape(&board.rows(now()))[..2],
+            ["Header(Active,0,0,0,0)", "Empty(Active)"]
         );
     }
 
@@ -2351,7 +2542,19 @@ mod tests {
 
     #[test]
     fn when_the_selected_run_leaves_the_window_the_nearest_run_is_selected() {
-        let mut board = four_runs_in_two_sections();
+        // The runs of `four_runs_in_two_sections`, but run 2 runs. The clock
+        // below moves past `STUCK_WAIT`, and a run that waits then hides.
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Running, 20, 1),
+                run(3, "a/x", RunState::Passed, 60, 10),
+                run(4, "a/x", RunState::Failed, 60, 20),
+            ],
+            now(),
+        );
         select_third(&mut board);
         let later = now() + Span::hours(8) + Span::minutes(15);
         let rows = board.rows(later);
