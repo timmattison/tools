@@ -87,6 +87,10 @@
 //! which stays with the tool because measuring one is a decision about a single
 //! program's output.
 //!
+//! A replay can also report its progress. [`Repo::scratch_with_progress`] makes
+//! the replays report to a [`ReplayObserver`], and `Console::progress`, behind
+//! the `progress` feature, draws those reports. [`Repo::scratch`] sends none.
+//!
 //! Not every question needs a worktree, though. [`Repo`] answers the cheap ones
 //! a caller should ask first — does this directory contain a repository, does
 //! that revision resolve, is the tree dirty — so a typo'd branch name fails in

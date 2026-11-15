@@ -159,6 +159,8 @@ Benefits of the channel-based shutdown:
 
 - `prcp` - Progress Copy (copy, verify, and batch styles)
 - `prhash` - Progress Hash (custom template with dynamic width)
+- `grind` - the progress bar of the replay, through `gitscratch`'s `Console` (feature `progress`)
+- `grime` - the spinner of the merge phases, through the same `Console`
 
 ## Colored Output in Tests
 
