@@ -277,7 +277,8 @@ fn pad_right(text: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::verdict::{CpuState, GroupLine, Pressure, Share};
+    use crate::fixtures;
+    use crate::verdict::{summarize, CpuState, GroupLine, Pressure, Share};
     use faulte::vm::SwapUsage;
 
     /// One gibibyte.
@@ -595,5 +596,91 @@ mod tests {
         let lines = render(&worktree);
         assert_eq!(lines.last().map(String::as_str), Some(footer));
         assert!(lines.iter().any(|l| l.ends_with("≥1.0 GiB")));
+    }
+
+    /// The column where each value ends.
+    const VALUE_END: usize = 53;
+
+    /// Every value ends at the same display column, with labels that are
+    /// ASCII, Japanese, emoji, or accented, and with labels that are too
+    /// wide. A padding by `char` count would break this.
+    #[test]
+    fn every_value_ends_in_the_same_display_column() {
+        let labels = [
+            "Claude Code",
+            "日本語のツール",
+            "🎉 party",
+            "café",
+            "日本語のツールの名前がとても長いので切ります",
+        ];
+        let mut full = summary(CpuState::Full, true);
+        full.unexplained_percent = Some(688);
+        full.cpu_groups = labels.iter().map(|l| line(l, 3, 100)).collect();
+        let mut compilers = line("Compilers and linkers", 9, 9);
+        compilers.worktrees = vec![share("日本語/🎉 issue-17", 5), share("café/issue-36", 4)];
+        compilers.more = Some((3, share("", 9)));
+        full.cpu_groups.push(compilers);
+        full.memory_groups = labels
+            .iter()
+            .map(|l| memory_line(l, 2 * GIB, l.len() % 2 == 0))
+            .collect();
+        let mut memory_compilers = memory_line("Compilers and linkers", 2 * GIB, false);
+        memory_compilers.worktrees = vec![Share {
+            label: "日本語/🎉 issue-17".to_owned(),
+            cpu_percent: 0,
+            memory_bytes: GIB,
+            at_least: true,
+        }];
+        memory_compilers.more = Some((1, share("", 0)));
+        full.memory_groups.push(memory_compilers);
+        let lines = render(&full);
+        let valued: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.starts_with("  ") && !l.starts_with("        "))
+            .collect();
+        assert_eq!(valued.len(), 18);
+        for line in valued {
+            assert_eq!(columns(line), VALUE_END, "{line}");
+        }
+    }
+
+    /// The most lines that the sample of 2026-11-15 gives.
+    const MOST_LINES: usize = 18;
+
+    /// The sample of 2026-11-15 gives the screen that a person needed: the
+    /// CPU is full, the memory is short, and the compilers come first with
+    /// their two worktrees. The memory block starts with Claude Code as a
+    /// lower bound. Each line fits the width. The screen has 18 lines, because
+    /// the memory block lists the worktrees of the compilers too.
+    #[test]
+    fn the_sample_of_2026_11_15_gives_the_screen() {
+        let lines = render(&summarize(&fixtures::sample_2026_11_15()));
+        assert_eq!(
+            lines.first().map(String::as_str),
+            Some("Likely cause: the CPU is full, and the memory is short.")
+        );
+        let position = |needle: &str| lines.iter().position(|l| l.contains(needle));
+        let compilers = position("Compilers and linkers").expect("compilers line");
+        assert!(position("Claude Code").expect("claude line") > 0);
+        assert!(lines[compilers + 1].contains("prediction-markets-worktrees/issue-17"));
+        assert!(lines[compilers + 2].contains("prediction-markets-worktrees/issue-36"));
+        let memory = lines
+            .iter()
+            .position(|l| l.starts_with("Memory"))
+            .expect("memory header");
+        assert!(lines[memory + 1].contains("Claude Code"));
+        assert!(lines[memory + 1].contains('≥'));
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("likely compression and swap")));
+        for line in &lines {
+            assert!(columns(line) <= WIDTH, "{line}");
+        }
+        assert!(
+            lines.len() <= MOST_LINES,
+            "{} lines:\n{}",
+            lines.len(),
+            lines.join("\n")
+        );
     }
 }
