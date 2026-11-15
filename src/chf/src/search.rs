@@ -4,6 +4,10 @@
 //! number. A new key cancels the old search, because the result of the old
 //! search is stale. A job with an old generation stops at the next session,
 //! and the worker drops a queued job with an old generation.
+//!
+//! The search runs on a rayon pool of its own. The index fills the global
+//! pool. Rayon starts a job from outside a pool only when the threads of that
+//! pool have no other work, so a search on the global pool waits for the index.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -45,7 +49,9 @@ pub struct Hits {
     pub hits: Vec<Hit>,
 }
 
-/// Run a job on the rayon pool.
+/// Run a job on the current rayon pool.
+///
+/// The worker of `Searcher` runs each job on a pool of its own.
 ///
 /// Before each session, the job reads `latest`. When `latest` differs from the
 /// generation of the job, the job stops and the result is `None`.
@@ -80,14 +86,23 @@ pub struct Searcher {
 }
 
 impl Searcher {
-    /// Start the worker thread.
+    /// Start the worker thread and the rayon pool of the search.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the operating system cannot start the threads of the
+    /// search, as `std::thread::spawn` does.
     #[must_use]
     pub fn spawn() -> Self {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .thread_name(|index| format!("chf-search-{index}"))
+            .build()
+            .expect("the operating system must start the threads of the search");
         let (job_tx, job_rx) = channel::<Job>();
         let (hit_tx, hit_rx) = channel::<Hits>();
         let latest = Arc::new(AtomicU64::new(0));
         let worker_latest = Arc::clone(&latest);
-        thread::spawn(move || work(&job_rx, &hit_tx, &worker_latest));
+        thread::spawn(move || work(&pool, &job_rx, &hit_tx, &worker_latest));
         Searcher {
             jobs: job_tx,
             hits: hit_rx,
@@ -120,7 +135,7 @@ impl Searcher {
 
 /// The loop of the worker. It takes a job and each job already queued, keeps
 /// the jobs of the latest generation, and runs them in order.
-fn work(jobs: &Receiver<Job>, hits: &Sender<Hits>, latest: &AtomicU64) {
+fn work(pool: &rayon::ThreadPool, jobs: &Receiver<Job>, hits: &Sender<Hits>, latest: &AtomicU64) {
     while let Ok(first) = jobs.recv() {
         let mut batch = vec![first];
         while let Ok(next) = jobs.try_recv() {
@@ -128,7 +143,7 @@ fn work(jobs: &Receiver<Job>, hits: &Sender<Hits>, latest: &AtomicU64) {
         }
         let current = latest.load(Ordering::Acquire);
         for job in batch.iter().filter(|job| job.generation == current) {
-            if let Some(result) = run_job(job, latest) {
+            if let Some(result) = pool.install(|| run_job(job, latest)) {
                 if hits.send(result).is_err() {
                     return;
                 }
