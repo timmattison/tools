@@ -16,7 +16,12 @@
 //!   arguments.
 //! - [`sample`] — the process table of `ps`, and the CPU time that each
 //!   process used between two samples.
+//! - [`tally`] — the CPU and the memory of each group, and of each worktree of
+//!   the compilers.
+//! - [`verdict`] — the thresholds, and the summary of the likely cause.
 
 pub mod groups;
 pub mod sample;
+pub mod tally;
+pub mod verdict;
 pub mod worktree;
