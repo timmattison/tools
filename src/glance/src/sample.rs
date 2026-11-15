@@ -27,10 +27,9 @@ impl Sample {
     /// The CPU share between the two readings, and the pressure of `later`.
     #[must_use]
     pub fn between(earlier: &Reading, later: &Reading) -> Sample {
-        let _ = (earlier, later);
         Sample {
-            cpu: CpuShare::between(Ticks::default(), Ticks::default()),
-            pressure: Pressure::from_raw(1, 100),
+            cpu: CpuShare::between(earlier.ticks, later.ticks),
+            pressure: Pressure::from_raw(later.pressure_level, later.free_percent),
         }
     }
 }
