@@ -5,10 +5,11 @@
 //! module holds the command line of `ps`, the parser of its output, the type
 //! of a CPU time, and the subtraction of two tables.
 
+use std::str::FromStr;
 use std::time::Duration;
 
 use faulte::pid::{Pid, Uid};
-use faulte::table::parse_ps_number;
+use faulte::table::{parse_ps_number, parse_ps_uid, split_fields};
 
 /// The character between the minutes and the seconds of a time token.
 const MINUTES_SEPARATOR: char = ':';
@@ -124,7 +125,7 @@ impl ProcessRow {
     /// Gives the name of the executable: the last part of its path.
     #[must_use]
     pub fn name(&self) -> &str {
-        ""
+        proctree::comm_basename(&self.executable)
     }
 }
 
@@ -170,16 +171,100 @@ pub enum SampleParseError {
     },
 }
 
+/// The column of the PID, as `ps -o` names it.
+const PID_COLUMN: &str = "pid";
+
+/// The column of the PID of the parent.
+const PPID_COLUMN: &str = "ppid";
+
+/// The column of the UID of the owner.
+const UID_COLUMN: &str = "uid";
+
+/// The column of the resident memory, in KiB.
+const RSS_COLUMN: &str = "rss";
+
 /// The count of tokens before the executable.
 const FIELDS: usize = 10;
 
 /// Reads the process table from the output of `ps`.
 ///
+/// Each line that is not blank is one row, in the order of `ps`. A row is ten
+/// tokens, then the executable. The tokens are the PID, the parent, the UID,
+/// the five tokens of the start time, the CPU time, and the RSS. The parser
+/// splits on ASCII white space, because `ps` pads a day of one digit with a
+/// space. The executable is the rest of the line. It keeps the spaces inside
+/// it.
+///
 /// # Errors
 ///
-/// Gives the error of the first line that fails.
-pub fn parse(_output: &str) -> Result<Vec<ProcessRow>, SampleParseError> {
-    Ok(Vec::new())
+/// The parser reads the lines in order, and the first line that fails gives
+/// the error. In one line, it checks in this order: the count of tokens, the
+/// PID, the parent, the UID, the RSS, and the CPU time. When every line
+/// passes, [`SampleParseError::NoRows`] means that the output holds no row.
+/// The parser fails closed: it never gives a table that lacks a row.
+pub fn parse(output: &str) -> Result<Vec<ProcessRow>, SampleParseError> {
+    let rows: Vec<ProcessRow> = output
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| !line.trim_ascii().is_empty())
+        .map(|(index, line)| parse_row(line).map_err(|fault| fault.at(index + 1, line)))
+        .collect::<Result<_, _>>()?;
+    if rows.is_empty() {
+        return Err(SampleParseError::NoRows);
+    }
+    Ok(rows)
+}
+
+/// The reason why one line is not a row.
+enum RowFault {
+    /// The line holds fewer than [`FIELDS`] tokens.
+    TooFewFields,
+    /// The numeric column of this name holds a value that is not a number.
+    MalformedNumber(&'static str),
+    /// The CPU time is not in the layout `M:SS.cc`.
+    MalformedTime,
+}
+
+impl RowFault {
+    /// Gives the error of this fault at the line `line`, whose number is
+    /// `number`.
+    fn at(self, number: usize, line: &str) -> SampleParseError {
+        let line = line.to_owned();
+        match self {
+            Self::TooFewFields => SampleParseError::TooFewFields { number, line },
+            Self::MalformedNumber(column) => SampleParseError::MalformedNumber {
+                column,
+                number,
+                line,
+            },
+            Self::MalformedTime => SampleParseError::MalformedTime { number, line },
+        }
+    }
+}
+
+/// Reads one row.
+fn parse_row(line: &str) -> Result<ProcessRow, RowFault> {
+    let ([pid, ppid, uid, weekday, month, day, clock, year, time, rss], executable) =
+        split_fields::<FIELDS>(line).ok_or(RowFault::TooFewFields)?;
+    let pid = Pid::new(number(PID_COLUMN, pid)?);
+    let ppid = Pid::new(number(PPID_COLUMN, ppid)?);
+    let uid = parse_ps_uid(uid).ok_or(RowFault::MalformedNumber(UID_COLUMN))?;
+    let rss_kib = number(RSS_COLUMN, rss)?;
+    let cpu = CpuTime::parse(time).ok_or(RowFault::MalformedTime)?;
+    Ok(ProcessRow {
+        pid,
+        ppid,
+        uid,
+        started: [weekday, month, day, clock, year].join(" "),
+        cpu,
+        rss_kib,
+        executable: executable.to_owned(),
+    })
+}
+
+/// Reads the value `token` of the numeric column `column`.
+fn number<T: FromStr>(column: &'static str, token: &str) -> Result<T, RowFault> {
+    parse_ps_number(token).ok_or(RowFault::MalformedNumber(column))
 }
 
 impl std::ops::Add for CpuTime {
@@ -316,7 +401,7 @@ mod tests {
                 ppid: Pid::new(0),
                 uid: Uid::new(0),
                 started: "Wed Oct 28 21:29:02 2026".to_owned(),
-                cpu: CpuTime::from_centiseconds(29_930_047),
+                cpu: CpuTime::from_centiseconds(1_797_047),
                 rss_kib: 14_288,
                 executable: "/sbin/launchd".to_owned(),
             }
