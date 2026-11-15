@@ -277,7 +277,17 @@ impl Pty {
     /// Panics when the system gives no copy of the slave end, when the child
     /// does not start, when a read of the master end fails for a reason other
     /// than the end of the output, or when the wait for the child fails.
-    pub fn run_with_stdout_on_terminal(self, mut command: Command) -> Output {
+    pub fn run_with_stdout_on_terminal(self, command: Command) -> Output {
+        self.run_on_terminal(command, false)
+    }
+
+    /// The one body of the two runs that put standard output on the terminal.
+    ///
+    /// `stderr_on_terminal` picks where standard error goes: to the terminal
+    /// when it is true, and to a pipe that the method reads when it is false.
+    /// One body keeps the spawn, the reader thread, and the close order the
+    /// same in both runs.
+    fn run_on_terminal(self, mut command: Command, _stderr_on_terminal: bool) -> Output {
         self.give_as_controlling_terminal(&mut command);
         let stdout = self
             .slave
@@ -312,6 +322,29 @@ impl Pty {
             });
 
         Output { stdout, ..finished }
+    }
+
+    /// Run `command` with its standard output and its standard error on this
+    /// terminal, and give back what the child wrote there.
+    ///
+    /// A tool that draws a display on standard error only when that stream is a
+    /// terminal needs this shape. A person at a terminal sees both streams in
+    /// one place, in the order that the child wrote them. So the bytes of both
+    /// streams come back together from the master end, and the `stderr` of the
+    /// result is empty.
+    ///
+    /// # Arguments
+    /// * `command` - The command to start the child from. This method sets its
+    ///   three standard streams, and the caller sets every other part of it.
+    ///
+    /// # Returns
+    /// The exit status of the child, and every byte it wrote to the terminal
+    /// in `stdout`, in the shape that [`Command::output`] gives.
+    ///
+    /// # Panics
+    /// Panics in the same cases as [`Pty::run_with_stdout_on_terminal`].
+    pub fn run_with_output_on_terminal(self, command: Command) -> Output {
+        self.run_on_terminal(command, true)
     }
 
     /// Run `command` with its standard input on this terminal, and type

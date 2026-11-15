@@ -192,3 +192,28 @@ fn the_controlling_terminal_of_the_child_is_the_terminal_at_its_opened_size() {
         described(&output)
     );
 }
+
+/// A child whose two output streams are on the terminal gives back both of
+/// them through the terminal.
+///
+/// A tool that draws a display on standard error only when that stream is a
+/// terminal needs a run where both streams reach one terminal, as they do for
+/// a person. The `stderr` of the result is then empty, because nothing went
+/// to a pipe.
+#[test]
+fn a_child_whose_stdout_and_stderr_are_on_the_terminal_gives_back_both_there() {
+    let output =
+        Pty::open(COLUMNS).run_with_output_on_terminal(shell("printf out; printf err >&2"));
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains("out") && text.contains("err"),
+        "the terminal must carry both streams\n{}",
+        described(&output)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "no stream may go to a pipe\n{}",
+        described(&output)
+    );
+}
