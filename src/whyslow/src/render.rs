@@ -61,6 +61,11 @@ fn pad_right(text: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::verdict::{CpuState, Pressure};
+    use faulte::vm::SwapUsage;
+
+    /// One gibibyte.
+    const GIB: u64 = 1 << 30;
     /// A label that fits gets spaces up to the column, counted in display
     /// columns and not in characters.
     #[test]
@@ -105,5 +110,84 @@ mod tests {
     #[test]
     fn an_empty_label_gives_only_spaces() {
         assert_eq!(fit("", 4), "    ");
+    }
+
+    /// Makes a summary with the given states and no group lines. The CPU is
+    /// 0% idle on 14 processors, and the pressure is warning when the memory
+    /// is short, else normal.
+    fn summary(cpu_state: CpuState, memory_short: bool) -> Summary {
+        let calm = cpu_state == CpuState::Calm;
+        Summary {
+            cpu_state,
+            memory_short,
+            idle_percent: if calm { 85 } else { 0 },
+            system_percent: 44,
+            load: 152.0,
+            processors: 14,
+            compression_likely: false,
+            cpu_groups: Vec::new(),
+            unexplained_percent: None,
+            pressure: if memory_short {
+                Pressure::Warning
+            } else {
+                Pressure::Normal
+            },
+            compressor_bytes: 26 * GIB,
+            swap: SwapUsage {
+                total_bytes: 5 * GIB,
+                used_bytes: 4 * GIB,
+            },
+            memory_groups: Vec::new(),
+        }
+    }
+
+    /// A full CPU and short memory give one headline that names both.
+    #[test]
+    fn the_headline_names_a_full_cpu_and_short_memory() {
+        let lines = render(&summary(CpuState::Full, true));
+        assert_eq!(
+            lines.first().map(String::as_str),
+            Some("Likely cause: the CPU is full, and the memory is short.")
+        );
+    }
+
+    /// A busy CPU uses the word busy.
+    #[test]
+    fn the_headline_names_a_busy_cpu() {
+        let lines = render(&summary(CpuState::Busy, false));
+        assert_eq!(
+            lines.first().map(String::as_str),
+            Some("Likely cause: the CPU is busy.")
+        );
+        let both = render(&summary(CpuState::Busy, true));
+        assert_eq!(
+            both.first().map(String::as_str),
+            Some("Likely cause: the CPU is busy, and the memory is short.")
+        );
+    }
+
+    /// Short memory alone gives its own headline and no CPU line.
+    #[test]
+    fn the_headline_names_short_memory_alone() {
+        let lines = render(&summary(CpuState::Calm, true));
+        assert_eq!(
+            lines.first().map(String::as_str),
+            Some("Likely cause: the memory is short.")
+        );
+        assert!(lines.iter().all(|line| !line.starts_with("CPU")));
+    }
+
+    /// With no short resource, the output is the two lines that point to the
+    /// disk and the clock speed, and nothing else.
+    #[test]
+    fn a_calm_machine_gets_exactly_two_lines() {
+        let lines = render(&summary(CpuState::Calm, false));
+        assert_eq!(
+            lines,
+            vec![
+                "The CPU and the memory are not short: 85% idle, pressure normal.",
+                "For the disk, run diskhog. For the clock speed, run thermal-watch.",
+            ]
+        );
     }
 }
