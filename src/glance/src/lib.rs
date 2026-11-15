@@ -26,5 +26,6 @@
 pub mod chart;
 pub mod cpu;
 pub mod history;
+pub mod interval;
 pub mod pressure;
 pub mod sample;
