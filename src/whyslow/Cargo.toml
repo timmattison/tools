@@ -10,6 +10,10 @@ description = "Why slow: a short summary of the likely cause when this Mac is sl
 name = "whyslow"
 path = "src/lib.rs"
 
+[[bin]]
+name = "whyslow"
+path = "src/main.rs"
+
 [dependencies]
 faulte.workspace = true
 proctree.workspace = true
@@ -19,6 +23,10 @@ thiserror.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc.workspace = true
+
+[dev-dependencies]
+childenv.workspace = true
+testcolor.workspace = true
 
 [lints]
 workspace = true

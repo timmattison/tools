@@ -9668,11 +9668,13 @@ dependencies = [
 name = "whyslow"
 version = "0.1.0"
 dependencies = [
+ "childenv",
  "faulte",
  "libc",
  "occ",
  "proctree",
  "termbar",
+ "testcolor",
  "thiserror 2.0.21",
 ]
 
