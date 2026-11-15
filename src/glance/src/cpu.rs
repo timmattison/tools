@@ -31,11 +31,22 @@ impl CpuShare {
     /// counters have 32 bits. If no ticks occurred, the share is all idle.
     #[must_use]
     pub fn between(earlier: Ticks, later: Ticks) -> CpuShare {
-        let _ = (earlier, later);
+        let user = f64::from(later.user.wrapping_sub(earlier.user))
+            + f64::from(later.nice.wrapping_sub(earlier.nice));
+        let system = f64::from(later.system.wrapping_sub(earlier.system));
+        let idle = f64::from(later.idle.wrapping_sub(earlier.idle));
+        let total = user + system + idle;
+        if total == 0.0 {
+            return CpuShare {
+                user: 0.0,
+                system: 0.0,
+                idle: 1.0,
+            };
+        }
         CpuShare {
-            user: 0.0,
-            system: 0.0,
-            idle: 0.0,
+            user: user / total,
+            system: system / total,
+            idle: idle / total,
         }
     }
 
@@ -66,13 +77,21 @@ mod tests {
 
     /// Asserts the three shares and that their sum is 1.
     fn assert_share(share: CpuShare, user: f64, system: f64, idle: f64) {
-        assert!((share.user() - user).abs() < TOLERANCE, "user {}", share.user());
+        assert!(
+            (share.user() - user).abs() < TOLERANCE,
+            "user {}",
+            share.user()
+        );
         assert!(
             (share.system() - system).abs() < TOLERANCE,
             "system {}",
             share.system()
         );
-        assert!((share.idle() - idle).abs() < TOLERANCE, "idle {}", share.idle());
+        assert!(
+            (share.idle() - idle).abs() < TOLERANCE,
+            "idle {}",
+            share.idle()
+        );
         let sum = share.user() + share.system() + share.idle();
         assert!((sum - 1.0).abs() < TOLERANCE, "sum {sum}");
     }
