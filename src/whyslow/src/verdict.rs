@@ -61,6 +61,44 @@ impl CpuTicks {
     }
 }
 
+/// The level that the kernel gives for normal memory pressure.
+const LEVEL_NORMAL: i32 = 1;
+
+/// The level that the kernel gives for warning memory pressure.
+const LEVEL_WARNING: i32 = 2;
+
+/// The level that the kernel gives for critical memory pressure.
+const LEVEL_CRITICAL: i32 = 4;
+
+/// The memory pressure that the kernel reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pressure {
+    /// The memory is not short.
+    Normal,
+    /// The kernel compresses and swaps to keep memory free.
+    Warning,
+    /// The kernel can hardly keep memory free.
+    Critical,
+}
+
+impl Pressure {
+    /// Gives the pressure for a level of `kern.memorystatus_vm_pressure_level`:
+    /// 1 is normal, 2 is warning, and 4 is critical. Any other level gives
+    /// `None`.
+    #[must_use]
+    pub fn from_level(level: i32) -> Option<Self> {
+        let _ = (level, LEVEL_NORMAL, LEVEL_WARNING, LEVEL_CRITICAL);
+        None
+    }
+
+    /// Gives the word that a person reads: `normal`, `warning`, or `critical`.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        let _ = self;
+        ""
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,5 +147,25 @@ mod tests {
             nice: 1,
         };
         assert_eq!(huge.total(), u64::MAX);
+    }
+
+    /// The three levels of the kernel map to the three pressures. Any other
+    /// level is unknown, and the caller refuses it.
+    #[test]
+    fn the_levels_of_the_kernel_map_to_pressures() {
+        assert_eq!(Pressure::from_level(1), Some(Pressure::Normal));
+        assert_eq!(Pressure::from_level(2), Some(Pressure::Warning));
+        assert_eq!(Pressure::from_level(4), Some(Pressure::Critical));
+        for level in [0, 3, 5, -1] {
+            assert_eq!(Pressure::from_level(level), None, "level {level}");
+        }
+    }
+
+    /// Each pressure has the word that a person reads.
+    #[test]
+    fn each_pressure_has_its_name() {
+        assert_eq!(Pressure::Normal.name(), "normal");
+        assert_eq!(Pressure::Warning.name(), "warning");
+        assert_eq!(Pressure::Critical.name(), "critical");
     }
 }
