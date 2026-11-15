@@ -4,6 +4,12 @@
 //! needs no Mac. Each threshold is a named constant, and each comparison uses
 //! whole numbers, so a value at the limit gives the same answer on each run.
 
+use std::time::Duration;
+
+use faulte::vm::SwapUsage;
+
+use crate::tally::GroupTotal;
+
 /// The CPU is full when the idle part is below this percent.
 pub const FULL_IDLE_PERCENT: u64 = 10;
 
@@ -154,9 +160,135 @@ pub fn memory_short(pressure: Pressure, swapouts: u64) -> bool {
     pressure != Pressure::Normal || swapouts > 0
 }
 
+/// Everything that `observe` read, as plain values.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Facts {
+    /// The change of the CPU ticks over the window.
+    pub ticks: CpuTicks,
+    /// The number of processors.
+    pub processors: u32,
+    /// The load average of the last minute.
+    pub load: f64,
+    /// The time between the two snapshots of the process table.
+    pub window: Duration,
+    /// The memory pressure at the end of the window.
+    pub pressure: Pressure,
+    /// The number of pages that the kernel swapped out over the window.
+    pub swapouts: u64,
+    /// The size of the memory compressor, in bytes.
+    pub compressor_bytes: u64,
+    /// The swap file.
+    pub swap: SwapUsage,
+    /// The totals of each group, from `tally`.
+    pub groups: Vec<GroupTotal>,
+}
+
+/// A share of one resource, for a worktree or for a rest of worktrees.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Share {
+    /// What a person reads. It is empty for a rest of worktrees.
+    pub label: String,
+    /// The CPU, as a percent of one processor.
+    pub cpu_percent: u64,
+    /// The memory, in bytes.
+    pub memory_bytes: u64,
+    /// True when the memory is a lower bound.
+    pub at_least: bool,
+}
+
+/// One group that the summary names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupLine {
+    /// The label of the group.
+    pub label: String,
+    /// The number of processes.
+    pub processes: usize,
+    /// The number of accounts that own them.
+    pub accounts: usize,
+    /// The CPU, as a percent of one processor.
+    pub cpu_percent: u64,
+    /// The memory, in bytes.
+    pub memory_bytes: u64,
+    /// True when the memory is a lower bound.
+    pub at_least: bool,
+    /// Only for the compilers: the [`WORKTREE_LIMIT`] largest worktrees by
+    /// the resource of the block. The list is empty for any other group.
+    pub worktrees: Vec<Share>,
+    /// Only for the compilers: the count and the sum of the worktrees that
+    /// the list leaves out. `None` when no worktree is left out.
+    pub more: Option<(usize, Share)>,
+}
+
+/// The verdict, as plain values for `render`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Summary {
+    /// How much of the CPU is free.
+    pub cpu_state: CpuState,
+    /// True when the memory is short.
+    pub memory_short: bool,
+    /// The idle part of the CPU, in percent, rounded half up.
+    pub idle_percent: u64,
+    /// The system part of the CPU, in percent, rounded half up.
+    pub system_percent: u64,
+    /// The load average of the last minute.
+    pub load: f64,
+    /// The number of processors.
+    pub processors: u32,
+    /// True when the system part is high and the memory is short.
+    pub compression_likely: bool,
+    /// The groups that use the most CPU. Empty when the CPU is calm.
+    pub cpu_groups: Vec<GroupLine>,
+    /// The CPU that no group explains, in percent of one processor. `Some`
+    /// only when the CPU is not calm and the value is at least
+    /// [`UNEXPLAINED_PERCENT`].
+    pub unexplained_percent: Option<u64>,
+    /// The memory pressure.
+    pub pressure: Pressure,
+    /// The size of the memory compressor, in bytes.
+    pub compressor_bytes: u64,
+    /// The swap file.
+    pub swap: SwapUsage,
+    /// The groups that use the most memory. Empty when the memory is not
+    /// short.
+    pub memory_groups: Vec<GroupLine>,
+}
+
+/// Gives the verdict for the facts of one sample.
+///
+/// The CPU block lists the [`GROUP_LIMIT`] groups with the most CPU, the
+/// largest first, and ties by label. A group with no CPU is left out. The
+/// memory block does the same for the memory. A group of the compilers lists
+/// its [`WORKTREE_LIMIT`] largest worktrees by the resource of the block, and
+/// one line for the rest.
+///
+/// The machine CPU is the busy part of the ticks times the processors. The
+/// groups CPU is the sum of the CPU of all groups. The difference, which
+/// saturates at zero, is the CPU that no group explains: the kernel, and the
+/// processes that started and stopped between the two snapshots.
+#[must_use]
+pub fn summarize(facts: &Facts) -> Summary {
+    Summary {
+        cpu_state: CpuState::Calm,
+        memory_short: false,
+        idle_percent: 0,
+        system_percent: 0,
+        load: facts.load,
+        processors: facts.processors,
+        compression_likely: false,
+        cpu_groups: Vec::new(),
+        unexplained_percent: None,
+        pressure: facts.pressure,
+        compressor_bytes: facts.compressor_bytes,
+        swap: facts.swap,
+        memory_groups: Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::groups::Group;
+    use crate::sample::CpuTime;
 
     /// The change is the difference of each counter. A counter that went back
     /// gives 0 and does not wrap, and the other fields stay right.
@@ -276,5 +408,161 @@ mod tests {
         assert!(memory_short(Pressure::Normal, 1));
         assert!(memory_short(Pressure::Warning, 0));
         assert!(memory_short(Pressure::Critical, 0));
+    }
+
+    /// Makes the total of one group with no worktree.
+    fn group(label: &str, cpu: u64, memory_bytes: u64) -> GroupTotal {
+        GroupTotal {
+            group: Group::Named(label.to_owned()),
+            processes: 1,
+            accounts: 1,
+            cpu: CpuTime::from_centiseconds(cpu),
+            memory_bytes,
+            at_least: false,
+            worktrees: Vec::new(),
+        }
+    }
+
+    /// Makes facts over one second on 14 processors.
+    fn facts(ticks: CpuTicks, pressure: Pressure, swapouts: u64, groups: Vec<GroupTotal>) -> Facts {
+        Facts {
+            ticks,
+            processors: 14,
+            load: 3.0,
+            window: Duration::from_secs(1),
+            pressure,
+            swapouts,
+            compressor_bytes: 1 << 30,
+            swap: SwapUsage {
+                total_bytes: 2 << 30,
+                used_bytes: 1 << 30,
+            },
+            groups,
+        }
+    }
+
+    /// The summary carries the states, and the percents round half up: 0.5%
+    /// idle is 1%, and 30.5% system is 31%.
+    #[test]
+    fn the_summary_carries_the_states_and_rounds_half_up() {
+        let ticks = CpuTicks {
+            user: 690,
+            system: 305,
+            idle: 5,
+            nice: 0,
+        };
+        let summary = summarize(&facts(ticks, Pressure::Warning, 0, Vec::new()));
+        assert_eq!(summary.cpu_state, CpuState::Full);
+        assert!(summary.memory_short);
+        assert_eq!(summary.idle_percent, 1);
+        assert_eq!(summary.system_percent, 31);
+        assert_eq!(summary.pressure, Pressure::Warning);
+        assert_eq!(summary.processors, 14);
+        assert_eq!(summary.compressor_bytes, 1 << 30);
+    }
+
+    /// Compression is likely only when the system part is high and the memory
+    /// is short.
+    #[test]
+    fn compression_is_likely_only_with_high_system_and_short_memory() {
+        let high = CpuTicks {
+            user: 500,
+            system: 400,
+            idle: 100,
+            nice: 0,
+        };
+        let low = CpuTicks {
+            user: 800,
+            system: 100,
+            idle: 100,
+            nice: 0,
+        };
+        let likely =
+            |ticks, pressure| summarize(&facts(ticks, pressure, 0, Vec::new())).compression_likely;
+        assert!(likely(high, Pressure::Warning));
+        assert!(!likely(high, Pressure::Normal));
+        assert!(!likely(low, Pressure::Warning));
+    }
+
+    /// The CPU block lists at most [`GROUP_LIMIT`] groups, the largest first,
+    /// ties by label. A group with no CPU is left out.
+    #[test]
+    fn the_cpu_groups_are_the_largest_three_and_skip_zero() {
+        let full = CpuTicks {
+            user: 1000,
+            system: 0,
+            idle: 0,
+            nice: 0,
+        };
+        let groups = vec![
+            group("zeta", 50, 1),
+            group("alpha", 50, 1),
+            group("big", 200, 1),
+            group("idle", 0, 1),
+            group("small", 10, 1),
+        ];
+        let summary = summarize(&facts(full, Pressure::Normal, 0, groups));
+        let labels: Vec<&str> = summary
+            .cpu_groups
+            .iter()
+            .map(|g| g.label.as_str())
+            .collect();
+        assert_eq!(labels, vec!["big", "alpha", "zeta"]);
+        assert_eq!(summary.cpu_groups[0].cpu_percent, 200);
+        assert_eq!(summary.cpu_groups.len(), GROUP_LIMIT);
+    }
+
+    /// The CPU block is empty when the CPU is calm.
+    #[test]
+    fn the_cpu_groups_are_empty_when_the_cpu_is_calm() {
+        let calm = CpuTicks {
+            user: 100,
+            system: 0,
+            idle: 900,
+            nice: 0,
+        };
+        let summary = summarize(&facts(calm, Pressure::Normal, 0, vec![group("a", 10, 1)]));
+        assert_eq!(summary.cpu_state, CpuState::Calm);
+        assert!(summary.cpu_groups.is_empty());
+    }
+
+    /// The memory block lists the largest groups by memory, ties by label,
+    /// and leaves out a group with no memory.
+    #[test]
+    fn the_memory_groups_are_the_largest_three_and_skip_zero() {
+        let calm = CpuTicks {
+            user: 100,
+            system: 0,
+            idle: 900,
+            nice: 0,
+        };
+        let groups = vec![
+            group("zeta", 1, 50),
+            group("alpha", 1, 50),
+            group("big", 1, 200),
+            group("none", 1, 0),
+            group("small", 1, 10),
+        ];
+        let summary = summarize(&facts(calm, Pressure::Critical, 0, groups));
+        let labels: Vec<&str> = summary
+            .memory_groups
+            .iter()
+            .map(|g| g.label.as_str())
+            .collect();
+        assert_eq!(labels, vec!["big", "alpha", "zeta"]);
+        assert_eq!(summary.memory_groups[0].memory_bytes, 200);
+    }
+
+    /// The memory block is empty when the memory is not short.
+    #[test]
+    fn the_memory_groups_are_empty_when_the_memory_is_not_short() {
+        let calm = CpuTicks {
+            user: 100,
+            system: 0,
+            idle: 900,
+            nice: 0,
+        };
+        let summary = summarize(&facts(calm, Pressure::Normal, 0, vec![group("a", 1, 10)]));
+        assert!(summary.memory_groups.is_empty());
     }
 }
