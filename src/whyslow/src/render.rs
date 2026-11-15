@@ -1,4 +1,11 @@
-//! The lines of text that show a [`Summary`](crate::verdict::Summary).
+//! The lines of text that show a [`Summary`].
+
+#![cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the next commits call the fit helper from render")
+)]
+
+use termbar::str_display_width_as_u16;
 
 use crate::verdict::Summary;
 
@@ -11,22 +18,49 @@ pub fn render(_summary: &Summary) -> Vec<String> {
     Vec::new()
 }
 
+/// The mark that ends a label that was cut.
+const ELLIPSIS: &str = "…";
+
+/// Gives the display width of `text`, in columns.
+fn columns(text: &str) -> usize {
+    usize::from(str_display_width_as_u16(text))
+}
+
 /// Cuts `label` to `width` display columns, or pads it with spaces to that
-/// width.
-fn fit(label: &str, _width: usize) -> String {
-    label.to_owned()
+/// width. A label that is too wide loses whole characters from its end, and
+/// it ends with an ellipsis. A character of two columns that does not fit
+/// leaves one space before the ellipsis, so the result always fills the
+/// column and always ends with the ellipsis.
+fn fit(label: &str, width: usize) -> String {
+    if columns(label) <= width {
+        return pad_right(label, width);
+    }
+    let budget = width.saturating_sub(columns(ELLIPSIS));
+    let mut cut = String::new();
+    let mut used = 0;
+    for character in label.chars() {
+        let next = used + columns(character.encode_utf8(&mut [0; 4]));
+        if next > budget {
+            break;
+        }
+        cut.push(character);
+        used = next;
+    }
+    let gap = budget.saturating_sub(used);
+    cut.push_str(&" ".repeat(gap));
+    cut.push_str(ELLIPSIS);
+    cut
+}
+
+/// Adds spaces after `text` until it fills `width` display columns.
+fn pad_right(text: &str, width: usize) -> String {
+    let missing = width.saturating_sub(columns(text));
+    format!("{text}{}", " ".repeat(missing))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use termbar::str_display_width_as_u16;
-
-    /// Gives the display width of `text` as a `usize`.
-    fn columns(text: &str) -> usize {
-        usize::from(str_display_width_as_u16(text))
-    }
-
     /// A label that fits gets spaces up to the column, counted in display
     /// columns and not in characters.
     #[test]
