@@ -18,13 +18,15 @@ impl Memory {
     /// Gives the number of bytes, whatever the way of measure.
     #[must_use]
     pub fn bytes(self) -> u64 {
-        0
+        match self {
+            Self::Footprint(bytes) | Self::Resident(bytes) => bytes,
+        }
     }
 
     /// Tells whether the number is a lower bound: true for [`Memory::Resident`].
     #[must_use]
     pub fn at_least(self) -> bool {
-        false
+        matches!(self, Self::Resident(_))
     }
 }
 
