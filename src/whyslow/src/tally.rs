@@ -4,6 +4,7 @@
 //! slow Mac. This module adds the CPU and the memory of the processes of each
 //! group, and, for the compilers, of each worktree.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use faulte::pid::Uid;
@@ -99,8 +100,35 @@ pub struct GroupTotal {
 /// to the number of processes.
 #[must_use]
 pub fn tally(processes: &[ProcessSample]) -> Vec<GroupTotal> {
-    let _ = processes;
-    Vec::new()
+    let mut by_group: BTreeMap<Group, (GroupTotal, BTreeSet<Uid>)> = BTreeMap::new();
+    for process in processes {
+        let (total, accounts) = by_group.entry(process.group.clone()).or_insert_with(|| {
+            (
+                GroupTotal {
+                    group: process.group.clone(),
+                    processes: 0,
+                    accounts: 0,
+                    cpu: CpuTime::default(),
+                    memory_bytes: 0,
+                    at_least: false,
+                    worktrees: Vec::new(),
+                },
+                BTreeSet::new(),
+            )
+        });
+        total.processes += 1;
+        total.cpu = total.cpu + process.cpu;
+        total.memory_bytes = total.memory_bytes.saturating_add(process.memory.bytes());
+        total.at_least |= process.memory.at_least();
+        accounts.insert(process.uid);
+    }
+    by_group
+        .into_values()
+        .map(|(mut total, accounts)| {
+            total.accounts = accounts.len();
+            total
+        })
+        .collect()
 }
 
 #[cfg(test)]
