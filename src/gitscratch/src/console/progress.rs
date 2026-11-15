@@ -9,13 +9,18 @@
 //! the action go through the prefix and the message of the bar, so a brace in
 //! a branch name stays text and never reads as a template key.
 
-use std::fmt::Write as _;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressState, ProgressStyle};
 
 use crate::progress::{Phase, ReplayObserver, ReplayProgress};
+
+/// How long the display thread waits between two ticks, so the spinner and the
+/// clock move while no report arrives.
+const TICK: Duration = Duration::from_millis(100);
 
 /// The key of the template that writes the elapsed time.
 const CLOCK_KEY: &str = "clock";
@@ -98,6 +103,37 @@ struct Live {
 pub(super) struct Active {
     /// The bar to clear.
     bar: ProgressBar,
+    /// The sender that keeps the thread of the display alive. The thread ends
+    /// when the sender drops.
+    sender: Sender<()>,
+    /// The thread that waits for the delay, and then ticks the display.
+    thread: JoinHandle<()>,
+}
+
+/// The loop of the display thread.
+///
+/// The thread waits for `delay`. A disconnect during the wait means the run
+/// ended before the display had to show, so the thread returns and the bar
+/// never draws. When the delay passes, the thread points the bar at standard
+/// error. The thread then ticks the bar each [`TICK`], so the spinner and the
+/// clock move while no report arrives. A disconnect ends the loop.
+///
+/// A delay of zero skips the wait, because the caller points the bar at
+/// standard error itself, and a report right after the start then draws at
+/// once, with no race against this thread.
+fn tick_loop(bar: &ProgressBar, receiver: &Receiver<()>, delay: Duration) {
+    if !delay.is_zero() {
+        match receiver.recv_timeout(delay) {
+            Err(RecvTimeoutError::Timeout) => {
+                bar.set_draw_target(ProgressDrawTarget::stderr());
+                bar.tick();
+            }
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => return,
+        }
+    }
+    while let Err(RecvTimeoutError::Timeout) = receiver.recv_timeout(TICK) {
+        bar.tick();
+    }
 }
 
 impl Progress {
@@ -106,18 +142,31 @@ impl Progress {
         Progress { live: None }
     }
 
-    /// Start a display for `tool` and `action`.
+    /// Start a display for `tool` and `action`, which shows after `delay`.
     ///
     /// Returns the handle for the replay and the part that the console keeps.
-    pub(super) fn start(tool: &str, action: &str) -> (Self, Active) {
+    /// Returns `None` when the thread of the display does not start. The bar
+    /// then stays on the hidden target, and its drop draws nothing, so a
+    /// failure of the display costs the display and never the verdict.
+    pub(super) fn start(tool: &str, action: &str, delay: Duration) -> Option<(Self, Active)> {
         let width = termbar::TerminalWidth::get_or_default();
-        let bar = ProgressBar::with_draw_target(None, ProgressDrawTarget::stderr());
+        let bar = ProgressBar::with_draw_target(None, ProgressDrawTarget::hidden());
         if let Some(phase_style) = style(PHASE_TEMPLATE) {
             bar.set_style(phase_style);
         }
         bar.set_prefix(tool.to_string());
         bar.set_message(action.to_string());
-        bar.tick();
+
+        let (sender, receiver) = mpsc::channel();
+        let thread_bar = bar.clone();
+        let thread = std::thread::Builder::new()
+            .name("gitscratch-progress".to_string())
+            .spawn(move || tick_loop(&thread_bar, &receiver, delay))
+            .ok()?;
+        if delay.is_zero() {
+            bar.set_draw_target(ProgressDrawTarget::stderr());
+            bar.tick();
+        }
 
         let fixed_columns = termbar::str_display_width_as_u16(tool)
             .saturating_add(PREFIX_SEPARATOR_COLUMNS)
@@ -131,23 +180,35 @@ impl Progress {
             fixed_columns,
             built_for: Mutex::new(None),
         };
-        (
+        Some((
             Progress {
                 live: Some(Arc::new(live)),
             },
-            Active { bar },
-        )
+            Active {
+                bar,
+                sender,
+                thread,
+            },
+        ))
     }
 }
 
 impl Active {
     /// End the display and take its lines off the screen.
     ///
-    /// The draw target turns hidden last, so a report that arrives later draws
-    /// nothing.
+    /// The thread ends first, so no tick draws after the clear. The draw
+    /// target turns hidden last, so a report that arrives later draws nothing.
     pub(super) fn stop(self) {
-        self.bar.finish_and_clear();
-        self.bar.set_draw_target(ProgressDrawTarget::hidden());
+        let Active {
+            bar,
+            sender,
+            thread,
+        } = self;
+        drop(sender);
+        // A panic of the thread costs the display and nothing else.
+        let _ = thread.join();
+        bar.finish_and_clear();
+        bar.set_draw_target(ProgressDrawTarget::hidden());
     }
 }
 

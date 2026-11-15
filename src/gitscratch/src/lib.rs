@@ -136,6 +136,8 @@ pub mod testing;
 pub use git::Git;
 
 pub use console::Console;
+#[cfg(feature = "progress")]
+pub use console::Progress;
 pub use diffs::{HaltDiff, HaltDiffs};
 pub use metrics::{BranchName, Files, Hunks, Stops, Uncommitted};
 pub use progress::{Phase, ReplayObserver, ReplayProgress};

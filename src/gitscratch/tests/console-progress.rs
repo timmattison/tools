@@ -162,8 +162,8 @@ fn screen(bytes: &[u8]) -> Vec<String> {
                 }
             }
             '\r' => column = 0,
-            '\u{1b}' => match chars.next() {
-                Some('[') => {
+            '\u{1b}' => {
+                if let Some('[') = chars.next() {
                     let mut parameters = String::new();
                     let mut last = None;
                     for next in chars.by_ref() {
@@ -195,8 +195,7 @@ fn screen(bytes: &[u8]) -> Vec<String> {
                         _ => {}
                     }
                 }
-                _ => {}
-            },
+            }
             control if control.is_control() => {}
             printable => {
                 let cells = &mut rows[row];
