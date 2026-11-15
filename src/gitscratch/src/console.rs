@@ -33,6 +33,8 @@
 //! this crate, prints no breakdown at all, and must not pay for a
 //! terminal-size dependency it would never read.
 
+#[cfg(feature = "progress")]
+use std::io::IsTerminal;
 use std::io::Write;
 use std::process::ExitCode;
 #[cfg(feature = "progress")]
@@ -226,6 +228,9 @@ impl Console {
     #[cfg(feature = "progress")]
     pub fn progress(&self, action: &str) -> Progress {
         self.clear_progress();
+        if self.quiet || !std::io::stderr().is_terminal() {
+            return Progress::hidden();
+        }
         let (handle, active) = Progress::start(self.tool, action);
         *self.active.lock().unwrap_or_else(PoisonError::into_inner) = Some(active);
         handle
