@@ -5902,10 +5902,12 @@ When you press Enter on a compacted session, `chf` asks which version to resume.
 
 | Exit | Meaning |
 | --- | --- |
-| 0 | `chf` does not use this code. After Enter, the exit status is the status of the shell that runs `crap`. |
+| 0 | `chf --help` and `chf --version` print their text and exit with this code. |
 | 1 | A failure, or a `$SHELL` that is not `bash` or `zsh`. |
 | 2 | Standard input or standard output is not a terminal, or `chf` cannot find the home directory. |
 | 130 | You pressed Esc or `Ctrl-C`. |
+
+After Enter, `chf` replaces itself with the shell that runs `crap`. The exit status is then the status of that shell. This status can be any of the codes above or another code.
 
 ### Install
 
