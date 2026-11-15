@@ -3902,6 +3902,7 @@ name = "glance"
 version = "0.1.0"
 dependencies = [
  "buildinfo",
+ "childenv",
  "clap",
  "libc",
  "serde_json",

@@ -22,5 +22,8 @@ serde_json.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 libc.workspace = true
 
+[dev-dependencies]
+childenv.workspace = true
+
 [lints]
 workspace = true
