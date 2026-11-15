@@ -72,6 +72,8 @@ pub enum IndexEvent {
     Session(Box<Session>),
     /// A transcript that chf can not open or read, or a folder or the store that
     /// it can not list. A store or a folder that chf can not list keeps its cache.
+    /// A store that chf can list but not search counts as not listed. A
+    /// transcript that chf can not stat keeps its cache entry.
     Unreadable {
         /// The path of the transcript, of the folder, or of the store.
         path: PathBuf,
@@ -162,7 +164,9 @@ struct Store {
 ///
 /// The run removes stale cache files only when it listed the whole store. A
 /// folder that chf did not see is not a folder that is gone. A folder that chf
-/// can not list keeps its cache file as it is.
+/// can not list keeps its cache file as it is. A store that chf can list but
+/// not search counts as not listed. A transcript that chf can not stat keeps its
+/// cache entry.
 pub fn run(projects: &Path, cache: &Path, sink: &(dyn Fn(IndexEvent) + Sync)) {
     let Store {
         mut folders,
@@ -210,8 +214,9 @@ pub fn spawn(projects: PathBuf, cache: PathBuf) -> std::sync::mpsc::Receiver<Ind
 /// store is complete.
 ///
 /// A store that does not exist has no sessions, and its listing is complete.
-/// Any other error of the store, or an error while chf reads its entries, makes
-/// the listing not complete.
+/// Any other error of the store, or an error while chf reads or stats its
+/// entries, makes the listing not complete. A store that chf can list but not
+/// search counts as not listed. An entry that vanished before its stat is skipped.
 fn discover(projects: &Path) -> Store {
     let mut store = Store {
         folders: Vec::new(),
@@ -239,9 +244,14 @@ fn discover(projects: &Path) -> Store {
             }
         };
         let path = entry.path();
-        let is_dir = fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_dir());
-        if !is_dir {
-            continue;
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                entry_error.get_or_insert(error.to_string());
+                continue;
+            }
         }
         let name = entry.file_name().to_string_lossy().into_owned();
         let hex = folder_hex(&entry.file_name());
@@ -307,6 +317,10 @@ fn list_candidates(folder: &Path) -> std::io::Result<Vec<Candidate>> {
 ///
 /// A folder that chf could not list sends nothing, and its cache file stays as
 /// it is. `run` already sent the `Unreadable` event of that folder.
+///
+/// A transcript that chf can not stat sends `Unreadable` and no `Session`. Its
+/// old cache entry stays, because a transcript that chf can not stat is not a
+/// transcript that is gone.
 fn process_folder(folder: &Folder, cache: Option<&Path>, sink: &(dyn Fn(IndexEvent) + Sync)) {
     let Some(candidates) = &folder.candidates else {
         return;
@@ -319,16 +333,25 @@ fn process_folder(folder: &Folder, cache: Option<&Path>, sink: &(dyn Fn(IndexEve
     let mut kept: Vec<CacheEntry> = Vec::new();
     let mut misses: Vec<(&Candidate, Stat)> = Vec::new();
     for candidate in candidates {
-        let stat = match &candidate.stat {
-            Ok(stat) => *stat,
-            Err(reason) => {
-                sink(IndexEvent::Unreadable {
-                    path: candidate.path.clone(),
-                    reason: reason.clone(),
-                });
-                continue;
-            }
-        };
+        let stat =
+            match &candidate.stat {
+                Ok(stat) => *stat,
+                Err(reason) => {
+                    sink(IndexEvent::Unreadable {
+                        path: candidate.path.clone(),
+                        reason: reason.clone(),
+                    });
+                    kept.extend(old.iter().filter(|entry| entry.file == candidate.file).map(
+                        |entry| CacheEntry {
+                            file: entry.file.clone(),
+                            size: entry.size,
+                            mtime_ns: entry.mtime_ns,
+                            session: entry.session.clone(),
+                        },
+                    ));
+                    continue;
+                }
+            };
         let hit = old.iter().find(|entry| {
             entry.file == candidate.file
                 && entry.size == stat.size
