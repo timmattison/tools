@@ -77,7 +77,7 @@ fn help_names_the_command_the_flag_and_the_default() {
         "the help states the default: {stdout:?}"
     );
     assert!(
-        stdout.contains("A bare number is a number of seconds."),
+        stdout.contains("A bare number is a number of seconds"),
         "the help states the rule for a bare number: {stdout:?}"
     );
 }

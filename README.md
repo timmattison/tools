@@ -2765,6 +2765,13 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
   - `sidecar` never deletes a repository, a main clone, a worktree, a branch, or a change. It removes only its own scratch clones.
   - See [docs/sidecar.md](./docs/sidecar.md) for the pattern, the rules, and the setup of a host.
   - To install: `cargo install --git https://github.com/timmattison/tools sidecar`
+- whyslow (why slow)
+  - Takes one sample of 1 s and prints a short summary of the likely cause when a Mac is slow. It
+    names which resource is short (CPU, memory, or both), and the groups of processes that use it.
+  - Puts each process into one group and adds the CPU and the memory of each group. Many small
+    processes, such as 176 Claude Code sessions, then count as one cause. It uses no language
+    model. It supports macOS only. See below for the full entry.
+  - To install: `cargo install --git https://github.com/timmattison/tools whyslow`
 
 ## dirhash
 
@@ -5485,4 +5492,132 @@ bibibi: skips leave 3 candidates for the first bad commit
 
 ```bash
 cargo install --git https://github.com/timmattison/tools bibibi
+```
+
+## whyslow (why slow)
+
+`whyslow` answers one question: why is this Mac slow? It takes one sample of 1 s, puts each process into a group, adds the CPU and the memory of each group, and prints a short summary of the likely cause. It uses no language model.
+
+On 2026-11-15 at 13:17, the load average was 152 on 14 processors, and the CPU was 0% idle. The memory was full: 63 of 64 GiB used, 26 GiB in the compressor, and 3.9 of 5 GiB of swap in use. No row of `ps` or `top` showed the cause. These were the causes:
+
+| Group | Processes | CPU | Memory |
+| --- | --- | --- | --- |
+| Claude Code sessions, 2 accounts | 176 | 288% | 24.2 GiB RSS |
+| `clang` for the C++ code of DuckDB (`libduckdb-sys`), in 2 worktrees | 12 | 284% | 2.7 GiB RSS |
+| `kernel_task`, for memory compression and swap | 1 | 245% | — |
+| `WindowServer` | 1 | 75% | 3.0 GiB footprint |
+
+It took about 10 commands to find them. Some facts mislead when a person reads them alone:
+
+- Sorted by CPU, the list shows 12 `clang` rows at about 20% each. The 176 Claude Code rows, at about 1.6% each, are far down the list. But the sums of the two groups are about equal.
+- The parent of each `clang` is the `sccache` server, and the parent of that server is `launchd`. Thus the ancestry does not lead to the build.
+- The working directory of each `clang` is the crate source in `~/.cargo/registry`, not the worktree. Only the output path in the arguments (`-o <worktree>/target/...`) names the worktree.
+- `top` names each Claude Code process `2.1.325`, the file name of its version. `ps` names it `claude`.
+- RSS does not include compressed memory. For `WindowServer`, `ps` gave 94 MiB of RSS, and `top` gave 2,990 MiB of footprint.
+- `memory_pressure` said "free percentage: 49%". At the same time, `top` said "91M unused".
+
+`faulte` answers a different question: which processes make page faults. Its table has 25 rows or more, and the person must still find the cause in that table.
+
+### Basic Usage
+
+```bash
+whyslow
+whyslow --interval 5s
+```
+
+- `--interval <DURATION>`: The time between the two samples of the process table, for example `1s`, `5s`, or `2m`. A bare number is a number of seconds. Defaults to `1s`. Zero is refused, because a sample of no time measures nothing.
+- `-V`, `--version`: Print the version, the git hash, and whether the build was clean.
+- `-h`, `--help`: Print the usage.
+
+`whyslow` has no `--shell-setup`. It needs nothing from the shell.
+
+This is the output for the sample of 2026-11-15. It is the fixture of the tests of `render`, and it has 18 lines:
+
+```
+Likely cause: the CPU is full, and the memory is short.
+CPU     0% idle, 44% system, load 152 on 14 processors
+        High system time and short memory: likely compression and swap.
+  Compilers and linkers        68 processes       322%
+    prediction-markets-worktrees/issue-17         166%
+    prediction-markets-worktrees/issue-36         118%
+    1 more worktree                                38%
+  Claude Code                 176 processes       290%   2 accounts
+  WindowServer                  1 process          75%
+  Kernel and short-lived processes                688%
+Memory  pressure warning, 26.0 GiB compressed, swap 3.9 of 5.0 GiB in use
+  Claude Code                 176 processes  ≥24.2 GiB   2 accounts
+  wezterm-gui                   1 process      3.4 GiB
+  Compilers and linkers        68 processes    2.7 GiB
+    prediction-markets-worktrees/issue-17      1.5 GiB
+    prediction-markets-worktrees/issue-36      0.8 GiB
+    1 more worktree                            0.4 GiB
+≥ counts the RSS of other accounts. Run with sudo for the footprint.
+```
+
+Each line has 80 columns or fewer. Each value ends at display column 54. A name that is too wide ends with `…`, and the cut is on a character boundary. The widths come from the display-width function of `termbar`, thus Japanese, emoji, and accented names stay aligned.
+
+If no resource is short, `whyslow` prints two lines: the idle share and the pressure level, and then the tools for the other causes. For the disk, run `diskhog`. For the clock speed, run `thermal-watch`.
+
+```
+The CPU and the memory are not short: 85% idle, pressure normal.
+For the disk, run diskhog. For the clock speed, run thermal-watch.
+```
+
+### The groups
+
+Each process goes into exactly one group. The first rule that matches decides.
+
+1. **Claude Code**: each process that `occ::classify` gives the role `Session`, `Unreadable`, or `Support`. The name does not count, because `top` gives the version (`2.1.325`) as the name.
+2. **Compilers and linkers**: `clang`, `clang++`, `cc`, `c++`, `cc1`, `cc1plus`, `gcc`, `g++`, `ld`, `ld64`, `lld`, `ld.lld`, `rust-lld`, `rustc`, `clippy-driver`, `cargo`, `cargo-clippy`, `sccache`, `swift-frontend`, `swiftc`, `cmake`, `make`, `gmake`, `ninja`, and each name that starts with `build-script-`.
+3. **Spotlight**: `mds`, `mds_stores`, `mdworker`, `mdworker_shared`, `corespotlightd`, and each name that starts with `spotlightknowledged`.
+4. **Each other process** goes into a group of its executable name. Thus 40 copies of an unknown tool add up, and a new cause shows.
+
+The group of compilers divides by worktree. `whyslow` reads the arguments of each compiler process and takes the candidate paths in this order: the value of `-o`, the value of `--out-dir`, and then each other absolute path from left to right, `argv[0]` included. A path after an `=` counts too, for example `dependency=/x`. A relative path is skipped, because `whyslow` never reads the working directory. For each candidate, `whyslow` looks for the nearest parent directory that holds `.git`. The first candidate that lies in a worktree gives the worktree. If a candidate lies in no worktree (for example `argv[0]` under `/Applications/Xcode.app`), `whyslow` tries the next candidate. A process with no such candidate goes into "no worktree". A worktree shows as the last two parts of its path.
+
+### The sources
+
+The measurements are from 2026-11-15, at a load of 81 to 96.
+
+| Fact | Source | Reason |
+| --- | --- | --- |
+| CPU of each process | Two snapshots of `ps -A -ww` with `pid`, `ppid`, `uid`, `lstart`, `time`, `rss`, and `comm`, one interval apart. The CPU of a process is the change of `time`. | `ps` is setuid root, reads each account, and took 0.11 s. `top -l 2 -s 1` took 8.8 s. |
+| The identity of a process | The PID and the start time (`lstart`) | A reused PID is a different process. |
+| The arguments of a compiler | `proctree::ps_arguments`, which runs `ps -eo pid=,args=` | `proctree` is the shared reader of the process table. |
+| Footprint of each process | `proc_pid_rusage` with `RUSAGE_INFO_V4`, field `ri_phys_footprint` | RSS does not include compressed memory (94 MiB of RSS against 2,990 MiB of footprint for `WindowServer`). If the kernel refuses a process (another account and no root), `whyslow` uses its RSS and marks its group with `≥`. |
+| CPU of the machine | `host_statistics` with `HOST_CPU_LOAD_INFO`, over the same interval | `ps` does not list `kernel_task`. `top` took 4.9 s for PID 0 alone. |
+| Memory of the machine | `kern.memorystatus_vm_pressure_level` (1 normal, 2 warning, 4 critical), the compressor pages and the swapouts of `host_statistics64` over the interval, and `vm.swapusage` | These are the numbers of the kernel. The free percentage of `memory_pressure` is not used. |
+| Load and processors | `getloadavg` and `hw.ncpu` | — |
+
+`ps` runs with `LC_ALL=en_US.UTF-8` and `TZ=UTC`, not with `LC_ALL=C`. The C locale makes `ps` print each non-ASCII byte of a name as an escape (`é` is `M-CM-)`). In `en_US.UTF-8`, the name prints as UTF-8, and `lstart` is the same English text. `whyslow` does not run `top`, because one sample of `top -l 1` took 4.7 s.
+
+### The verdict
+
+All thresholds are named constants in `src/whyslow/src/verdict.rs`, and a test holds each one at the limit and one step on each side.
+
+- The CPU is **full** if it is less than 10% idle over the interval, and **busy** if it is less than 40% idle.
+- The memory is **short** if the pressure level is warning or critical, or if the interval had swapouts.
+- The first line names the resources that are short. Each short resource then lists its 3 largest groups. A compiler group also lists its 2 largest worktrees, and then one line for the rest. The compiler group lists its worktrees in the memory block too. That is why the summary of 2026-11-15 has 18 lines.
+- If the system time is 30% or more, and the memory is short, the CPU block says that the likely cause is memory compression and swap.
+- The CPU that no group explains is the CPU of the machine minus the sum of the groups. If it is 100% (one processor) or more, the CPU block shows it as `Kernel and short-lived processes`. `ps` does not list `kernel_task`, and the kernel refuses `proc_pid_rusage` for PID 0 without root, so this CPU holds the kernel as well as the processes that start and stop between the two snapshots. On 2026-11-15, `kernel_task` alone used 245%.
+- If no resource is short, the summary is the two lines above.
+
+### Exit codes
+
+- `0`: A summary was printed.
+- `1`: The platform is not macOS. `whyslow` prints `whyslow supports macOS only.`
+- `2`: A source failed, or its output failed a parser, or the CPU counters of the kernel did not move. `whyslow` prints `whyslow: <the reason>` on the error output and no summary, because a summary with a missing source can look like a quiet Mac. A bad `--interval` also gives 2, from the parser of the command line.
+
+### Limits
+
+- **macOS only.** The process table, the CPU ticks, and the footprint come from `ps` and from calls of macOS.
+- **One sample.** The summary is what the Mac did in one interval. The numbers come from one Mac on one day, and the thresholds are a first choice.
+- **`≥` and sudo.** Without root, the kernel refuses the footprint of each process of another account. `whyslow` then uses the RSS, which is a lower bound, and it marks the value with `≥`. Run with `sudo` to get the footprint.
+- **The kernel line.** `kernel_task` has no row of its own. Its CPU is part of `Kernel and short-lived processes`.
+- **The arguments have no boundaries.** `ps` prints the arguments of a process as one line of words with spaces between them. A path with a space in it is read as two words, so such a path can fail to find its worktree. The process then goes into the next candidate path, or into "no worktree".
+- **Out of scope:** a language model, a live view and a history (issue #669 makes a live view for `faulte`), an action on a process (`faulte kill` stops old idle Claude Code sessions), disk I/O and the clock speed (the summary only names `diskhog` and `thermal-watch`), JSON output, and a platform other than macOS.
+
+### Install
+
+```bash
+cargo install --git https://github.com/timmattison/tools whyslow
 ```
