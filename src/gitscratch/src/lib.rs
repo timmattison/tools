@@ -118,6 +118,7 @@ pub mod diffs;
 /// this module are the two that can do no harm.
 mod git;
 pub mod metrics;
+pub mod progress;
 pub mod repo;
 pub mod report;
 pub mod scratch;
@@ -137,6 +138,7 @@ pub use git::Git;
 pub use console::Console;
 pub use diffs::{HaltDiff, HaltDiffs};
 pub use metrics::{BranchName, Files, Hunks, Stops, Uncommitted};
+pub use progress::{Phase, ReplayObserver, ReplayProgress};
 pub use repo::{Repo, DEFAULT_BRANCHES};
 pub use report::{Report, UnwordedReport};
 pub use scratch::{Conflicts, Scratch};

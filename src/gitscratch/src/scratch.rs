@@ -54,6 +54,7 @@ use tempfile::TempDir;
 use crate::diffs::{HaltDiff, HaltDiffs};
 use crate::git::Git;
 use crate::metrics::{Files, Hunks, Stops};
+use crate::progress::{Phase, ReplayObserver, ReplayProgress};
 
 /// Upper bound on the rounds one replay may spend advancing a halted rebase, so
 /// a git state we failed to anticipate stalls the run instead of spinning
@@ -155,6 +156,8 @@ pub struct Scratch {
     /// so a path that cannot be spelled for git has to fail the run, not
     /// degrade into one. [`Git::new`] refuses the empty value outright.
     hooks: String,
+    /// The receiver of progress reports, when the caller asked for one.
+    observer: Option<Box<dyn ReplayObserver>>,
 }
 
 impl Scratch {
@@ -174,7 +177,11 @@ impl Scratch {
     /// Returns an error if the temporary directory cannot be created, if its
     /// path cannot be spelled for git as UTF-8, or if git refuses to add the
     /// worktree - most commonly because `at` does not name a commit.
-    pub(crate) fn create(repo: &Path, at: &str) -> Result<Self> {
+    pub(crate) fn create(
+        repo: &Path,
+        at: &str,
+        observer: Option<Box<dyn ReplayObserver>>,
+    ) -> Result<Self> {
         let dir = TempDir::new().context("could not create a scratch directory")?;
         let worktree = dir.path().join("worktree");
         let hooks_dir = dir.path().join("hooks");
@@ -189,6 +196,7 @@ impl Scratch {
             dir,
             worktree,
             hooks,
+            observer,
         };
 
         // `--end-of-options` ahead of both positionals, because `at` arrives
