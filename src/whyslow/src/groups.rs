@@ -83,7 +83,12 @@ impl Group {
     /// `Compilers and linkers`, `Spotlight`, or the name of the process.
     #[must_use]
     pub fn label(&self) -> &str {
-        ""
+        match self {
+            Self::ClaudeCode => CLAUDE_CODE_LABEL,
+            Self::Compilers => COMPILERS_LABEL,
+            Self::Spotlight => SPOTLIGHT_LABEL,
+            Self::Named(name) => name,
+        }
     }
 }
 
@@ -101,8 +106,20 @@ impl Group {
 /// The match of a name is exact and case-sensitive.
 #[must_use]
 pub fn group_of(name: &str, claude: bool) -> Group {
-    let _ = claude;
-    Group::Named(name.to_owned())
+    if claude {
+        Group::ClaudeCode
+    } else if in_table(name, &COMPILER_NAMES, &COMPILER_PREFIXES) {
+        Group::Compilers
+    } else if in_table(name, &SPOTLIGHT_NAMES, &SPOTLIGHT_PREFIXES) {
+        Group::Spotlight
+    } else {
+        Group::Named(name.to_owned())
+    }
+}
+
+/// Tells whether `name` is one of `names`, or starts with one of `prefixes`.
+fn in_table(name: &str, names: &[&str], prefixes: &[&str]) -> bool {
+    names.contains(&name) || prefixes.iter().any(|prefix| name.starts_with(prefix))
 }
 
 #[cfg(test)]
@@ -147,9 +164,9 @@ mod tests {
         assert_eq!(group_of("2.1.325", true), Group::ClaudeCode);
     }
 
-    /// The Claude Code flag wins over the name. A Claude Code session that
-    /// runs a compiler as its child must not move the compiler out of its own
-    /// group, but a process that occ names a part of Claude Code stays in it.
+    /// The Claude Code flag wins over the name. A process that occ names a
+    /// part of Claude Code stays in that group, also when its name is the name
+    /// of a compiler.
     #[test]
     fn the_claude_code_flag_wins_over_a_compiler_name() {
         assert_eq!(group_of("clang", true), Group::ClaudeCode);
