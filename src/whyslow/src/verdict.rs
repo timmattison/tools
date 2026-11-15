@@ -818,4 +818,45 @@ mod tests {
         assert!(summary.cpu_groups[1].worktrees.is_empty());
         assert_eq!(summary.cpu_groups[1].more, None);
     }
+
+    /// Gives the unexplained CPU for one group that used `cpu` centiseconds
+    /// on a machine that was full: 14 processors, 1400 ticks, none idle.
+    fn unexplained(cpu: u64) -> Option<u64> {
+        let full = CpuTicks {
+            user: 1400,
+            system: 0,
+            idle: 0,
+            nice: 0,
+        };
+        summarize(&facts(full, Pressure::Normal, 0, vec![group("g", cpu, 1)])).unexplained_percent
+    }
+
+    /// The machine used 1400%. The CPU that no group explains shows at 100%
+    /// and above. The test checks the limit and one step on each side.
+    #[test]
+    fn the_unexplained_cpu_shows_at_one_processor() {
+        assert_eq!(unexplained(1300), Some(100));
+        assert_eq!(unexplained(1301), None);
+        assert_eq!(unexplained(1299), Some(101));
+    }
+
+    /// Groups that use more than the machine give no unexplained CPU, and
+    /// the subtraction does not panic.
+    #[test]
+    fn groups_above_the_machine_give_no_unexplained_cpu() {
+        assert_eq!(unexplained(5000), None);
+    }
+
+    /// A calm CPU has no unexplained line, whatever the groups use.
+    #[test]
+    fn a_calm_cpu_has_no_unexplained_cpu() {
+        let calm = CpuTicks {
+            user: 100,
+            system: 0,
+            idle: 900,
+            nice: 0,
+        };
+        let summary = summarize(&facts(calm, Pressure::Normal, 0, vec![group("g", 1, 1)]));
+        assert_eq!(summary.unexplained_percent, None);
+    }
 }
