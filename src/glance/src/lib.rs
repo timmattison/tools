@@ -16,6 +16,21 @@
 //! The rules are pure functions over plain values, so a test can read each
 //! pixel of a chart without AppKit.
 //!
+//! - [`cpu`] — the share of the CPU time between two readings of the tick
+//!   counters. The counters wrap, so the difference wraps too.
+//! - [`pressure`] — the memory pressure level, and the memory in use as a
+//!   percentage.
+//! - [`sample`] — one raw reading of the kernel, and the sample of two
+//!   readings that one column of each chart shows.
+//! - [`history`] — the ring buffer of the last samples. It allocates once.
+//! - [`chart`] — the layout and the colors of the two charts, drawn into an
+//!   RGBA pixel buffer.
+//! - [`interval`] — the time between two samples, from the command line.
+//! - [`text`] — the lines of the menu, and the JSON line of `--sample`.
+//! - `reader` (macOS only) — the one module that calls the kernel.
+//! - `shell` (macOS only) — the status item, its menu, and its timer, through
+//!   AppKit.
+//!
 //! The two modules `reader` and `shell` are the only modules that are
 //! specific to macOS, and the only modules that can hold unsafe code. The
 //! crate denies `unsafe_code`, and only their two declarations expect it, so
