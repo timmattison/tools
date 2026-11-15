@@ -3,7 +3,7 @@
 //! The left chart shows the CPU share. The right chart shows the memory in use,
 //! in the color of the pressure level. Each chart has one column for each
 //! sample that the history holds, and the newest sample sits at the right edge.
-//! The drawing is pure integer work on a plain buffer, so a test reads each
+//! The drawing is pure arithmetic on a plain buffer, so a test reads each
 //! pixel and AppKit only has to show the bytes.
 //!
 //! All sizes in the layout are in points. Each point is `scale` pixels wide
