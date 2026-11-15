@@ -20,6 +20,8 @@
 //!   the compilers.
 //! - [`verdict`] — the thresholds, and the summary of the likely cause.
 
+#[cfg(test)]
+mod fixtures;
 pub mod groups;
 pub mod sample;
 pub mod tally;

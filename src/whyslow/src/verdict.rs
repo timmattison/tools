@@ -446,6 +446,7 @@ fn worktree_shares(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fixtures;
     use crate::groups::Group;
     use crate::sample::CpuTime;
     use crate::tally::WorktreeTotal;
@@ -883,70 +884,6 @@ mod tests {
         assert_eq!(summary.unexplained_percent, None);
     }
 
-    /// One gibibyte.
-    const GIB: u64 = 1 << 30;
-
-    /// One mebibyte.
-    const MIB: u64 = 1 << 20;
-
-    /// The sample of 2026-11-15 at 13:17: load 152 on 14 processors, 0%
-    /// idle, 44% system, warning pressure, 26 GiB in the compressor, and 3.9
-    /// of 5.0 GiB of swap in use. The groups are the ones that `top` hid.
-    fn fixture_2026_11_15() -> Facts {
-        let root = "/Volumes/SamsungSSDs/code/prediction-markets-worktrees";
-        let compiler_worktrees = vec![
-            worktree(Some(&format!("{root}/issue-17")), 166, GIB + GIB / 2),
-            worktree(Some(&format!("{root}/issue-36")), 118, GIB * 4 / 5),
-            worktree(Some(&format!("{root}/issue-8")), 38, GIB * 2 / 5),
-        ];
-        let mut compiler_total = compilers(compiler_worktrees);
-        compiler_total.processes = 68;
-        compiler_total.memory_bytes = GIB * 27 / 10;
-        let claude = GroupTotal {
-            group: Group::ClaudeCode,
-            processes: 176,
-            accounts: 2,
-            cpu: CpuTime::from_centiseconds(290),
-            memory_bytes: 24 * GIB + GIB / 5,
-            at_least: true,
-            worktrees: Vec::new(),
-        };
-        let named = |name: &str, cpu: u64, memory_bytes: u64, at_least: bool| GroupTotal {
-            group: Group::Named(name.to_owned()),
-            processes: 1,
-            accounts: 1,
-            cpu: CpuTime::from_centiseconds(cpu),
-            memory_bytes,
-            at_least,
-            worktrees: Vec::new(),
-        };
-        Facts {
-            ticks: CpuTicks {
-                user: 784,
-                system: 616,
-                idle: 0,
-                nice: 0,
-            },
-            processors: 14,
-            load: 152.0,
-            window: Duration::from_secs(1),
-            pressure: Pressure::Warning,
-            swapouts: 1200,
-            compressor_bytes: 26 * GIB,
-            swap: SwapUsage {
-                total_bytes: 5_368_709_120,
-                used_bytes: 4_187_593_113,
-            },
-            groups: vec![
-                claude,
-                compiler_total,
-                named("WindowServer", 75, 94 * MIB, true),
-                named("wezterm-gui", 20, GIB * 34 / 10, false),
-                named("Raycast Backend", 5, GIB * 9 / 10, false),
-            ],
-        }
-    }
-
     /// The sample of 2026-11-15 gives the verdict that a person needed: the
     /// CPU is full, the memory is short, and compression is likely. The CPU
     /// block names the compilers first, with the two worktrees that build
@@ -954,7 +891,7 @@ mod tests {
     /// lower bound. About 688% of CPU stays unexplained.
     #[test]
     fn the_sample_of_2026_11_15_names_the_compilers_and_claude_code() {
-        let summary = summarize(&fixture_2026_11_15());
+        let summary = summarize(&fixtures::sample_2026_11_15());
         assert_eq!(summary.cpu_state, CpuState::Full);
         assert!(summary.memory_short);
         assert!(summary.compression_likely);
