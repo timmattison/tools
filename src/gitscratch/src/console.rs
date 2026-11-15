@@ -36,6 +36,8 @@
 use std::io::Write;
 use std::process::ExitCode;
 #[cfg(feature = "progress")]
+use std::sync::{Mutex, PoisonError};
+#[cfg(feature = "progress")]
 use std::time::Duration;
 
 use anyhow::Result;
@@ -118,6 +120,18 @@ pub struct Console {
     /// Whether `-q` was given, and therefore whether any of the three writes
     /// below happens at all.
     quiet: bool,
+
+    /// The live progress display, if one is.
+    #[cfg(feature = "progress")]
+    active: Mutex<Option<progress::Active>>,
+}
+
+/// A body that returns with no verdict leaves no bar on the screen.
+#[cfg(feature = "progress")]
+impl Drop for Console {
+    fn drop(&mut self) {
+        self.clear_progress();
+    }
 }
 
 impl Console {
@@ -148,10 +162,13 @@ impl Console {
         F: FnOnce(&Console) -> Result<Conflicts>,
     {
         #[cfg(feature = "progress")]
-        return Self::answer_with_progress_delay(tool, quiet, PROGRESS_DELAY, ask);
-
+        {
+            Self::answer_with_progress_delay(tool, quiet, PROGRESS_DELAY, ask)
+        }
         #[cfg(not(feature = "progress"))]
-        Self::run(Console { tool, quiet }, ask)
+        {
+            Self::run(Console { tool, quiet }, ask)
+        }
     }
 
     /// Answer the question as [`Console::answer`] does, with a progress display
@@ -164,13 +181,20 @@ impl Console {
     pub fn answer_with_progress_delay<F>(
         tool: &'static str,
         quiet: bool,
-        delay: Duration,
+        _delay: Duration,
         ask: F,
     ) -> ExitCode
     where
         F: FnOnce(&Console) -> Result<Conflicts>,
     {
-        Self::run(Console { tool, quiet }, ask)
+        Self::run(
+            Console {
+                tool,
+                quiet,
+                active: Mutex::new(None),
+            },
+            ask,
+        )
     }
 
     /// Run `ask` against `console` and map its answer onto the exit code.
@@ -201,12 +225,28 @@ impl Console {
     /// `replaying HEAD onto main`.
     #[cfg(feature = "progress")]
     pub fn progress(&self, action: &str) -> Progress {
-        let _ = action;
-        Progress
+        self.clear_progress();
+        let (handle, active) = Progress::start(self.tool, action);
+        *self.active.lock().unwrap_or_else(PoisonError::into_inner) = Some(active);
+        handle
+    }
+
+    /// End the display, if one is live, and take its lines off the screen.
+    fn clear_progress(&self) {
+        let taken = self
+            .active
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(active) = taken {
+            active.stop();
+        }
     }
 
     /// A caveat that qualifies the verdict without changing it.
     pub fn note(&self, note: &str) {
+        #[cfg(feature = "progress")]
+        self.clear_progress();
         if !self.quiet {
             let _ = writeln!(std::io::stderr(), "{note}");
         }
@@ -214,6 +254,8 @@ impl Console {
 
     /// The answer itself.
     pub fn verdict(&self, verdict: &str) {
+        #[cfg(feature = "progress")]
+        self.clear_progress();
         if !self.quiet {
             let _ = writeln!(std::io::stdout(), "{verdict}");
         }
@@ -221,6 +263,8 @@ impl Console {
 
     /// Why there is no answer.
     fn failure(&self, err: &anyhow::Error) {
+        #[cfg(feature = "progress")]
+        self.clear_progress();
         if !self.quiet {
             // Alternate formatting so the whole context chain arrives, not just
             // the outermost sentence: git's own stderr is carried in the causes
