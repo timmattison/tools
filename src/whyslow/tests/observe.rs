@@ -10,10 +10,12 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use faulte::duration::Span;
-use faulte::pid::Pid;
+use faulte::pid::{Pid, Uid};
 use faulte::vm::{SwapUsage, VmCounters};
+use whyslow::groups::Group;
 use whyslow::machine::{observe, Machine, SourceError};
-use whyslow::sample::ProcessRow;
+use whyslow::sample::{CpuTime, ProcessRow};
+use whyslow::tally::GroupTotal;
 use whyslow::verdict::{CpuTicks, Facts, Pressure};
 
 /// The size of one page of memory of an Apple Silicon Mac, in bytes.
@@ -25,6 +27,19 @@ const REFUSED: &str = "refused by the test";
 /// Gives the interval that the person asked for in the tests.
 fn interval() -> Span {
     "2s".parse().expect("2s is a span")
+}
+
+/// Gives one row of the process table.
+fn row(pid: u32, cpu_centiseconds: u64, rss_kib: u64, executable: &str) -> ProcessRow {
+    ProcessRow {
+        pid: Pid::new(pid),
+        ppid: Pid::new(1),
+        uid: Uid::new(501),
+        started: "Sat Nov 14 10:00:00 2026".to_owned(),
+        cpu: CpuTime::from_centiseconds(cpu_centiseconds),
+        rss_kib,
+        executable: executable.to_owned(),
+    }
 }
 
 /// Gives the error that a failed source of the tests gives.
@@ -370,4 +385,138 @@ fn cpu_ticks_that_did_not_move_stop_the_run() {
     };
     let result = run_with(|m| *m.ticks.get_mut() = VecDeque::from([Ok(still), Ok(still)]));
     assert_eq!(result, Err(SourceError::CpuTicksDidNotMove));
+}
+
+/// The PID of the Claude Code process of the groups scenario.
+const CLAUDE_PID: u32 = 10;
+
+/// The PID of the compiler that builds for a worktree.
+const BUILDER_PID: u32 = 20;
+
+/// The PID of the compiler that has no argument text.
+const BLIND_PID: u32 = 21;
+
+/// The PID of the shell whose arguments name a worktree.
+const SHELL_PID: u32 = 30;
+
+/// The PID of the process that exists in the second table only.
+const NEWCOMER_PID: u32 = 50;
+
+/// The worktree of the groups scenario.
+const WORKTREE: &str = "/wt/issue-17";
+
+/// Gives a machine with five processes, as the second table of a window
+/// shows them.
+///
+/// Process 10 is Claude Code, named for its version. Process 20 is a `clang`
+/// that writes into a worktree, and process 21 is a `clang` that `ps` gave no
+/// arguments. Process 30 is a shell whose arguments name the worktree. Process
+/// 50 started inside the window.
+fn groups_machine() -> FakeMachine {
+    let mut machine = FakeMachine::new();
+    *machine.tables.get_mut() = VecDeque::from([
+        Ok(vec![
+            row(CLAUDE_PID, 100, 2_000, "/v/claude/versions/2.1.325"),
+            row(BUILDER_PID, 1_000, 1_000, "/usr/bin/clang"),
+            row(BLIND_PID, 500, 100, "/usr/bin/clang"),
+            row(SHELL_PID, 50, 10, "/bin/zsh"),
+        ]),
+        Ok(vec![
+            row(CLAUDE_PID, 160, 2_000, "/v/claude/versions/2.1.325"),
+            row(BUILDER_PID, 1_250, 1_000, "/usr/bin/clang"),
+            row(BLIND_PID, 700, 100, "/usr/bin/clang"),
+            row(SHELL_PID, 50, 10, "/bin/zsh"),
+            row(NEWCOMER_PID, 80, 7, "/usr/bin/newtool"),
+        ]),
+    ]);
+    machine.claude = HashSet::from([Pid::new(CLAUDE_PID)]);
+    machine.footprints = HashMap::from([(Pid::new(CLAUDE_PID), 3_000_000)]);
+    machine.git = HashSet::from([PathBuf::from(WORKTREE)]);
+    machine.arguments = Ok(HashMap::from([
+        (
+            Pid::new(BUILDER_PID),
+            format!("clang -c a.c -o {WORKTREE}/target/x.o"),
+        ),
+        (Pid::new(SHELL_PID), format!("zsh -c cd {WORKTREE}")),
+    ]));
+    machine
+}
+
+/// Runs the run over the groups scenario and gives the total of one group.
+fn total_of(group: &Group) -> GroupTotal {
+    let facts = observe(&groups_machine(), interval()).expect("every source answers");
+    facts
+        .groups
+        .into_iter()
+        .find(|total| &total.group == group)
+        .unwrap_or_else(|| panic!("no total for {group:?}"))
+}
+
+/// A process that `occ` classified as Claude Code goes into that group,
+/// although its name is a version number. Its CPU is what it used in the
+/// window, and its memory is the footprint that the kernel gave.
+#[test]
+fn a_claude_code_process_goes_into_its_group_with_its_footprint() {
+    let total = total_of(&Group::ClaudeCode);
+    assert_eq!(total.processes, 1);
+    assert_eq!(total.cpu, CpuTime::from_centiseconds(60));
+    assert_eq!(total.memory_bytes, 3_000_000);
+    assert!(!total.at_least);
+}
+
+/// A compiler takes the worktree that its arguments name, and a compiler with
+/// no argument text takes none. The compilers without a worktree sort first.
+#[test]
+fn a_compiler_takes_the_worktree_of_its_arguments() {
+    let total = total_of(&Group::Compilers);
+    assert_eq!(total.processes, 2);
+    assert_eq!(total.cpu, CpuTime::from_centiseconds(450));
+    let worktrees: Vec<(Option<PathBuf>, CpuTime)> = total
+        .worktrees
+        .iter()
+        .map(|each| (each.worktree.clone(), each.cpu))
+        .collect();
+    assert_eq!(
+        worktrees,
+        [
+            (None, CpuTime::from_centiseconds(200)),
+            (
+                Some(PathBuf::from(WORKTREE)),
+                CpuTime::from_centiseconds(250)
+            ),
+        ]
+    );
+}
+
+/// A process that is not a compiler gets no worktree, although its arguments
+/// name one. Only a build writes for a worktree.
+#[test]
+fn a_process_that_is_not_a_compiler_gets_no_worktree() {
+    let total = total_of(&Group::Named("zsh".to_owned()));
+    assert_eq!(total.processes, 1);
+    assert!(total.worktrees.is_empty());
+}
+
+/// A process that started inside the window has no row in the first table,
+/// and all of its CPU time counts. A process that was in both tables counts
+/// only the change.
+#[test]
+fn a_process_that_started_in_the_window_counts_all_of_its_cpu() {
+    assert_eq!(
+        total_of(&Group::Named("newtool".to_owned())).cpu,
+        CpuTime::from_centiseconds(80)
+    );
+    assert_eq!(
+        total_of(&Group::Named("zsh".to_owned())).cpu,
+        CpuTime::from_centiseconds(0)
+    );
+}
+
+/// A process that the kernel gave no footprint for counts its resident size
+/// in bytes, and the total says that the number is a lower bound.
+#[test]
+fn a_process_with_no_footprint_counts_its_resident_size_as_a_lower_bound() {
+    let total = total_of(&Group::Named("newtool".to_owned()));
+    assert_eq!(total.memory_bytes, 7 * 1024);
+    assert!(total.at_least);
 }
