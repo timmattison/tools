@@ -2,10 +2,10 @@ use buildinfo::version_string;
 use clap::Parser;
 use repowalker::{find_git_repo, RepoWalker};
 use std::path::{Path, PathBuf};
-use std::process::{exit, Command};
+use std::process::exit;
 
 fn run_command_in_directory(dir: &Path, command: &[&str]) -> Result<(), std::io::Error> {
-    let output = Command::new(command[0])
+    let output = childenv::command(command[0])
         .args(&command[1..])
         .current_dir(dir)
         .output()?;
@@ -25,7 +25,7 @@ fn run_command_in_directory(dir: &Path, command: &[&str]) -> Result<(), std::io:
 }
 
 fn check_cargo_edit_installed() -> bool {
-    Command::new("cargo")
+    childenv::command("cargo")
         .args(["upgrade", "--help"])
         .output()
         .map(|output| output.status.success())

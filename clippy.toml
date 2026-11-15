@@ -72,4 +72,20 @@ disallowed-methods = [
     { path = "crossterm::terminal::size", reason = "call termsize::controlling_size or termsize::controlling_columns instead; a terminal that carries no window answers this call with Ok((0, 0)), and zero columns is not a width" },
     { path = "terminal_size::terminal_size", reason = "call termsize::stdout_size or termsize::stdout_columns instead; this call hands a zero back on Windows, and zero columns is not a width" },
     { path = "libc::ioctl", reason = "call termsize::drawing_window instead; a raw TIOCGWINSZ on one file descriptor is the bypass that termgfx held, and GitHub issue #350 reports what it cost. An ioctl of another request says so at its call site with an #[expect]" },
+    # A child process inherits each `GIT_` variable of its parent, and git obeys
+    # those variables before it obeys the directory of the command. A hook exports
+    # them, so a tool that a hook starts acts on the repository of the hook. The
+    # defect arrived one spawn at a time, and each repair covered the spawns that
+    # somebody found.
+    #
+    # `childenv::command` and `childenv::fixture_command` are the one entrance. A
+    # program that never runs git ignores the sweep, so the rule covers every
+    # spawn and needs no knowledge of what a program runs. `go`, `cargo`, `gh`,
+    # `claude`, a shell, and `tmux` all run git later.
+    #
+    # A site that must stay raw says so with an `#[expect]` and a reason, where a
+    # reader sees it. `childenv` holds the one call that the entrance needs.
+    { path = "std::process::Command::new", reason = "call childenv::command in production code or childenv::fixture_command in test code; a raw spawn inherits the GIT_ variables of a hook, and git obeys them before the directory of the command" },
+    { path = "tokio::process::Command::new", reason = "build the command with tokio::process::Command::from(childenv::command(program)); a raw spawn inherits the GIT_ variables of a hook" },
+    { path = "portable_pty::CommandBuilder::new", reason = "remove each name that childenv::inherited_git_variables gives, then state the exemption with an #[expect] at this site; a raw spawn inherits the GIT_ variables of a hook" },
 ]

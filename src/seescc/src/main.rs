@@ -226,7 +226,7 @@ fn run_stats_process(bin: &str, timeout: Duration) -> Result<String> {
 
     use wait_timeout::ChildExt;
 
-    let mut child = std::process::Command::new(bin)
+    let mut child = childenv::command(bin)
         .args(["--show-stats", "--stats-format=json"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

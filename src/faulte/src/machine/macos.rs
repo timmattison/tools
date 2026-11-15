@@ -28,7 +28,6 @@ use std::ffi::{CStr, CString};
 use std::io;
 use std::mem::{size_of, MaybeUninit};
 use std::path::PathBuf;
-use std::process::Command;
 use std::ptr;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -276,7 +275,7 @@ fn run(
     arguments: &[String],
     environment: &[(&str, &str)],
 ) -> Result<String, MachineError> {
-    let output = Command::new(program)
+    let output = childenv::command(program)
         .args(arguments)
         .envs(environment.iter().copied())
         .output()

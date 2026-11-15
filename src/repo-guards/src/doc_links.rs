@@ -147,7 +147,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 use serde_json::Value;
 use thiserror::Error;
@@ -871,7 +871,7 @@ fn cargo_program() -> OsString {
 /// starts goes through it, so no call site can inherit a flag that changes the
 /// verdict. See the module header.
 fn run(program: &OsStr, dir: &Path, args: &[&str]) -> Result<Output, DocLinksError> {
-    let mut command = Command::new(program);
+    let mut command = childenv::command(program);
     command.current_dir(dir).args(args);
 
     for name in SCRUBBED_VARS {

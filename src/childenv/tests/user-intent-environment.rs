@@ -1,6 +1,6 @@
-//! What [`gitscratch::shed_inherited_git_environment_keeping_user_intent`]
-//! takes off a production command, what it deliberately leaves on, and what the
-//! fixture rule beside it takes off a command that keeps nothing.
+//! What [`childenv::command`] takes off a production command, what it
+//! deliberately leaves on, and what the fixture rule beside it takes off a
+//! command that keeps nothing.
 //!
 //! A fixture and a production tool differ in one way that decides the rule. A
 //! fixture builds a throwaway repository and has no user whose intent to honor,
@@ -27,7 +27,7 @@
 //! repository a tool writes into by mistake.
 //!
 //! Every test here feeds synthetic keys to
-//! [`gitscratch::shed_git_environment_from`] and never touches the process
+//! [`childenv::shed_git_environment_from`] and never touches the process
 //! environment. Cargo runs the tests of one binary on parallel threads, so a
 //! test that set a real `GIT_*` variable would redirect the git children of
 //! every sibling thread while it did so. That is why this file may hold more
@@ -37,7 +37,7 @@
 use std::ffi::OsStr;
 use std::process::Command;
 
-use gitscratch::{
+use childenv::{
     shed_git_environment_from, InheritedGitEnvironment, HOOK_EXPORTED_GIT_ENVIRONMENT,
     USER_INTENT_GIT_ENVIRONMENT,
 };
@@ -99,6 +99,19 @@ const NOT_GIT: &[(&str, &str)] = &[
     ),
 ];
 
+/// A command that has no sweep yet.
+///
+/// A constructor of this crate adds the `GIT_` names of the real environment to
+/// the removals, and these tests read exactly what a synthetic list of keys
+/// schedules.
+fn raw_git() -> Command {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "these tests measure the rule alone, so the command must not hold a sweep already"
+    )]
+    Command::new("git")
+}
+
 /// The removals `command` holds, read back without spawning anything.
 ///
 /// `env_remove` records a removal as a `None` value against the key, so
@@ -126,7 +139,7 @@ fn keeps_the_user_s_own_git_variables_and_sheds_the_rest_of_the_prefix() {
         .chain(NOT_GIT.iter().map(|(key, _)| *key))
         .collect();
 
-    let mut command = Command::new("git");
+    let mut command = raw_git();
     shed_git_environment_from(&mut command, &keys, InheritedGitEnvironment::KeepUserIntent);
     let removed = scheduled_removals(&command);
 
@@ -195,7 +208,7 @@ fn no_name_git_hands_a_hook_is_read_as_the_user_s_intent() {
 /// that works.
 #[test]
 fn sheds_a_git_variable_that_does_not_exist_yet() {
-    let mut command = Command::new("git");
+    let mut command = raw_git();
     shed_git_environment_from(
         &mut command,
         [INVENTED_LATER],
@@ -230,7 +243,7 @@ fn the_fixture_rule_sheds_every_name_a_leak_arrives_under() {
         .chain(NOT_GIT.iter().map(|(key, _)| *key))
         .collect();
 
-    let mut command = Command::new("git");
+    let mut command = raw_git();
     shed_git_environment_from(&mut command, &keys, InheritedGitEnvironment::ShedEverything);
     let removed = scheduled_removals(&command);
 
@@ -263,7 +276,7 @@ fn the_fixture_rule_sheds_a_name_the_production_rule_keeps() {
         .first()
         .expect("the keep-list names at least one variable");
 
-    let mut command = Command::new("git");
+    let mut command = raw_git();
     shed_git_environment_from(
         &mut command,
         [OsStr::new(kept_by_production)],

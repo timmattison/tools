@@ -49,7 +49,6 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use tempfile::NamedTempFile;
 
 mod audit;
@@ -341,7 +340,7 @@ impl OpCache {
 }
 
 fn find_repo_root() -> Result<PathBuf> {
-    let output = Command::new("git")
+    let output = childenv::command("git")
         .args(["rev-parse", "--show-toplevel"])
         .output()
         .map_err(|_| Error::GitRootNotFound)?;

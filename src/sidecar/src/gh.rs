@@ -4,7 +4,7 @@
 //! `sidecar` asks `gh` for strings only, with `--jq`, thus a color setting of the
 //! environment cannot paint the answer.
 
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 
 use anyhow::{anyhow, bail, Context};
 
@@ -24,8 +24,7 @@ pub enum Visibility {
 
 /// Runs `gh` with `args`.
 fn gh(args: &[&str]) -> anyhow::Result<Output> {
-    let mut command = Command::new("gh");
-    gitscratch::shed_inherited_git_environment_keeping_user_intent(&mut command);
+    let mut command = childenv::command("gh");
     command
         .args(args)
         .stdin(Stdio::null())

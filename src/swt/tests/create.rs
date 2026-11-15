@@ -15,7 +15,7 @@ mod support;
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Child, Output, Stdio};
 
 use support::{
     entry_names, exiting_check, git, recorded_calls, recording_function, run_swt, shell_command,
@@ -726,7 +726,7 @@ fn uncommitted_parent_state_cannot_fake_a_green() {
     // Mutation guard: run the very same check against the parent, where it must
     // pass. Without this the test could be passing because the check is simply
     // broken everywhere.
-    let in_parent = Command::new(&check)
+    let in_parent = childenv::fixture_command(&check)
         .current_dir(repo.path())
         .status()
         .expect("the fixture check should run");

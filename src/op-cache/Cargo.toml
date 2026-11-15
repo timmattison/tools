@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 buildinfo.workspace = true
+childenv.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -25,7 +26,7 @@ sysinfo.workspace = true
 tempfile = "3"
 
 [dev-dependencies]
-gitscratch.workspace = true
+gitscratch = { workspace = true, features = ["testing"] }
 
 [lints]
 workspace = true

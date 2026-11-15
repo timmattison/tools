@@ -5,7 +5,7 @@
 //! never share a path.
 
 use gitscratch::testing::TestRepo;
-use gitscratch::{NoInheritedGitEnvironment, Repo};
+use gitscratch::Repo;
 use tempfile::TempDir;
 
 /// Open the fixture as a `Repo`.
@@ -300,8 +300,7 @@ fn restore_puts_back_a_changed_tracked_file_and_unstages_an_index_change() {
     let scratch = fixture.scratch("HEAD");
     std::fs::write(scratch.path().join("a.txt"), "changed in the tree\n").expect("write a file");
     std::fs::write(scratch.path().join("b.txt"), "changed in the index\n").expect("write a file");
-    let staged = std::process::Command::new("git")
-        .without_inherited_git_environment()
+    let staged = childenv::fixture_command("git")
         .args(["add", "b.txt"])
         .current_dir(scratch.path())
         .status()
@@ -313,8 +312,7 @@ fn restore_puts_back_a_changed_tracked_file_and_unstages_an_index_change() {
 
     scratch.restore().expect("restore");
 
-    let status = std::process::Command::new("git")
-        .without_inherited_git_environment()
+    let status = childenv::fixture_command("git")
         .args(["status", "--porcelain"])
         .current_dir(scratch.path())
         .output()

@@ -1,6 +1,6 @@
 //! Tests that run the built `faulte` binary.
 
-use std::process::{Command, Output};
+use std::process::Output;
 
 /// The path of the binary that cargo built for these tests.
 const BIN: &str = env!("CARGO_BIN_EXE_faulte");
@@ -24,7 +24,7 @@ const USAGE_ERROR: i32 = 2;
 
 /// Runs the binary with `args` and returns what it wrote and how it ended.
 fn run(args: &[&str]) -> Output {
-    Command::new(BIN)
+    childenv::fixture_command(BIN)
         .args(args)
         .env("COLUMNS", COLUMNS)
         .env(CLICOLOR_FORCE, PAINT)
@@ -283,7 +283,7 @@ fn help_gives_each_flag_and_its_default() {
 #[cfg(target_os = "macos")]
 mod signals {
     use std::os::unix::process::ExitStatusExt;
-    use std::process::{Child, Command, ExitStatus, Stdio};
+    use std::process::{Child, ExitStatus, Stdio};
     use std::thread;
     use std::time::{Duration, SystemTime};
 
@@ -330,7 +330,7 @@ mod signals {
     /// the test and it. Thus the number that [`Child::id`] gives is the number
     /// of the process that the test signals.
     fn sleeping_child() -> Child {
-        Command::new(SLEEP)
+        childenv::fixture_command(SLEEP)
             .arg(SLEEP_SECONDS)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -347,7 +347,7 @@ mod signals {
     /// one process, the same as [`sleeping_child`], and it answers no
     /// `SIGTERM`.
     fn deaf_child() -> Child {
-        Command::new(SHELL)
+        childenv::fixture_command(SHELL)
             .arg("-c")
             .arg(format!("trap '' TERM; exec {SLEEP} {SLEEP_SECONDS}"))
             .stdin(Stdio::null())

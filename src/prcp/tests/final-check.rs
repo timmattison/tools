@@ -24,7 +24,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -128,7 +128,7 @@ fn write_file(path: &Path, content: &str) {
 /// question before the first copy. It asks only at the file that exists.
 fn run_and_meddle_at_the_question(args: Vec<OsString>, meddle: impl FnOnce()) -> Run {
     let mut child = KillOnDrop(
-        Command::new(env!("CARGO_BIN_EXE_prcp"))
+        childenv::fixture_command(env!("CARGO_BIN_EXE_prcp"))
             .env("COLUMNS", TEST_COLUMNS)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -182,7 +182,7 @@ fn run_and_meddle_at_the_question(args: Vec<OsString>, meddle: impl FnOnce()) ->
 
 /// Run `prcp` to its end with standard input on null, as a script runs it.
 fn run_without_questions(args: Vec<OsString>) -> Run {
-    let output = Command::new(env!("CARGO_BIN_EXE_prcp"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_prcp"))
         .env("COLUMNS", TEST_COLUMNS)
         .stdin(Stdio::null())
         .args(args)

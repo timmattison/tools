@@ -6,8 +6,9 @@ use std::process::Command;
 
 use tempfile::TempDir;
 
-/// Shed the git environment a hook exports, so `cmd` takes its repository, and
-/// its configuration, from nothing it inherited.
+/// Pin what these fixtures need. The command arrives swept from
+/// [`childenv::fixture_command`], so `cmd` takes its repository, and its
+/// configuration, from nothing it inherited.
 ///
 /// Every git and gsw invocation here routes through this, so the per-test
 /// tempdir is the target. Without it, a run from inside this repo's pre-commit
@@ -26,7 +27,7 @@ use tempfile::TempDir;
 /// the fixture keeps an empty store of its own and every later read of it
 /// answers about another repository. `GIT_CONFIG_PARAMETERS` sets any key at
 /// all, and git exports it to every `pre-commit` hook.
-/// [`gitscratch::shed_inherited_git_environment`] enumerates the environment
+/// [`childenv::fixture_command`] enumerates the environment
 /// of this process instead of a list, so it takes whatever git invents next
 /// with no edit here.
 ///
@@ -39,8 +40,7 @@ use tempfile::TempDir;
 /// developer set never decides what a test reads.
 ///
 /// Pinned by `hostile_environment::a_fixture_obeys_no_git_variable_out_of_a_hostile_environment`.
-fn scrub_git_env(cmd: &mut Command) -> &mut Command {
-    gitscratch::shed_inherited_git_environment(cmd);
+fn pin_git_config(cmd: &mut Command) -> &mut Command {
     cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
 }
@@ -48,16 +48,16 @@ fn scrub_git_env(cmd: &mut Command) -> &mut Command {
 /// Build a `gsw` binary command with the git env already scrubbed and
 /// `current_dir` set, ready for callers to add flags/env before running.
 fn gsw_command(dir: &Path) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_gsw"));
+    let mut cmd = childenv::fixture_command(env!("CARGO_BIN_EXE_gsw"));
     cmd.current_dir(dir);
-    scrub_git_env(&mut cmd);
+    pin_git_config(&mut cmd);
     cmd
 }
 
 fn run_git(dir: &Path, args: &[&str]) {
-    let mut cmd = Command::new("git");
+    let mut cmd = childenv::fixture_command("git");
     cmd.args(args).current_dir(dir);
-    let status = scrub_git_env(&mut cmd)
+    let status = pin_git_config(&mut cmd)
         .status()
         .expect("failed to invoke git");
     assert!(status.success(), "git {args:?} failed");
@@ -66,9 +66,9 @@ fn run_git(dir: &Path, args: &[&str]) {
 /// Like `run_git` but does NOT assert success — for commands that exit
 /// non-zero as part of normal operation (e.g. `git merge` on a conflict).
 fn run_git_allow_fail(dir: &Path, args: &[&str]) {
-    let mut cmd = Command::new("git");
+    let mut cmd = childenv::fixture_command("git");
     cmd.args(args).current_dir(dir);
-    let _ = scrub_git_env(&mut cmd)
+    let _ = pin_git_config(&mut cmd)
         .status()
         .expect("failed to invoke git");
 }
@@ -978,7 +978,7 @@ fn one_shot_flag_matches_default_piped_output() {
     // the formatter renders them as `XdYh` (smallest shown unit is hours);
     // sub-second drift between the runs then cannot change the bytes.
     const FIXED_PAST: &str = "2020-01-01T12:34:56 +0000";
-    let mut amend_cmd = Command::new("git");
+    let mut amend_cmd = childenv::fixture_command("git");
     amend_cmd
         .args(["commit", "--amend", "--no-edit", "--date", FIXED_PAST])
         .current_dir(dir.path());
@@ -986,7 +986,7 @@ fn one_shot_flag_matches_default_piped_output() {
     // scrub removes every `GIT_` variable this process holds, so a date set
     // ahead of it leaves with the rest under this repo's pre-commit hook,
     // which exports both date variables into `cargo test`.
-    let amend = scrub_git_env(&mut amend_cmd)
+    let amend = pin_git_config(&mut amend_cmd)
         .env("GIT_COMMITTER_DATE", FIXED_PAST)
         .status()
         .expect("failed to backdate commit");
@@ -1091,13 +1091,13 @@ fn shows_rebase_indicator_with_step_counts_during_a_conflicted_rebase() {
 /// Commit everything staged with both git dates pinned to `date`, so the
 /// commit's age is deterministic instead of "however old the fixture is".
 fn commit_dated(dir: &Path, message: &str, date: &str) {
-    let mut cmd = Command::new("git");
+    let mut cmd = childenv::fixture_command("git");
     cmd.args(["commit", "-q", "-m", message]).current_dir(dir);
     // Both dates go on after the scrub, and that order is load-bearing. The
     // scrub removes every `GIT_` variable this process holds, so a date set
     // ahead of it leaves with the rest under this repo's pre-commit hook,
     // which exports both date variables into `cargo test`.
-    let status = scrub_git_env(&mut cmd)
+    let status = pin_git_config(&mut cmd)
         .env("GIT_AUTHOR_DATE", date)
         .env("GIT_COMMITTER_DATE", date)
         .status()
@@ -1231,16 +1231,16 @@ fn a_future_dated_commit_renders_an_unknown_log_age_not_zero_seconds() {
     );
 }
 
-/// The one test that proves [`scrub_git_env`] sheds the whole git environment,
+/// The one test that proves a fixture of this file sheds the whole git environment,
 /// and not the three names it once listed.
 mod hostile_environment {
     use std::path::{Path, PathBuf};
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     use std::time::{Duration, Instant};
 
     use tempfile::NamedTempFile;
 
-    use super::{scrub_git_env, setup_repo, FIXTURE_EMAIL};
+    use super::{pin_git_config, setup_repo, FIXTURE_EMAIL};
 
     /// The variable that tells this test binary it is the child, and that the
     /// child must do the work rather than start a child of its own.
@@ -1329,15 +1329,15 @@ mod hostile_environment {
             .sum()
     }
 
-    /// Run git in `dir` through [`scrub_git_env`] and hand back what it said.
+    /// Run git in `dir` through [`pin_git_config`] and hand back what it said.
     ///
     /// The read goes through the helper under test on purpose. A read through
     /// a git invocation of its own would answer about a repository this test
     /// never asked about.
     fn read(dir: &Path, args: &[&str]) -> String {
-        let mut command = Command::new("git");
+        let mut command = childenv::fixture_command("git");
         command.args(args).current_dir(dir);
-        let output = scrub_git_env(&mut command).output().expect("invoke git");
+        let output = pin_git_config(&mut command).output().expect("invoke git");
         assert!(output.status.success(), "git {args:?} failed");
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
@@ -1371,7 +1371,7 @@ mod hostile_environment {
         let stdout = NamedTempFile::new().expect("a file for what the child says");
         let stderr = NamedTempFile::new().expect("a file for why the child stopped");
         let mut child_command =
-            Command::new(std::env::current_exe().expect("the path of this binary"));
+            childenv::fixture_command(std::env::current_exe().expect("the path of this binary"));
         child_command
             .args(["--exact", "--nocapture", test])
             .current_dir(workdir.path())
@@ -1509,7 +1509,6 @@ mod pull_indicator {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
-    use std::process::Command;
 
     use tempfile::TempDir;
 
@@ -1641,7 +1640,7 @@ mod pull_indicator {
         let bin = stub_gh(state.path(), &script);
         let home = tempfile::tempdir().expect("tempdir");
 
-        let mut command = Command::new("perl");
+        let mut command = childenv::fixture_command("perl");
         command
             .arg("-e")
             .arg(BOUND_ON_THE_TERMINAL)

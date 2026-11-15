@@ -2,8 +2,6 @@
 #![warn(clippy::pedantic)]
 //! The `--version` line of the binary.
 
-use std::process::Command;
-
 /// True when `text` is `<hash>, <state>` with a 7 digit hex hash or `unknown`,
 /// and a state of `clean`, `dirty`, or `unknown`.
 fn is_build_info(text: &str) -> bool {
@@ -17,8 +15,7 @@ fn is_build_info(text: &str) -> bool {
 
 #[test]
 fn version_line_holds_the_build_information() {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_sidecar"));
-    gitscratch::shed_inherited_git_environment(&mut command);
+    let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_sidecar"));
     let output = command.arg("--version").output().unwrap();
     assert!(output.status.success(), "{output:?}");
     let stdout = String::from_utf8(output.stdout).unwrap();

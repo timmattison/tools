@@ -7,11 +7,11 @@
 //! fixture, and [`nwt_command`] is that entrance.
 //!
 //! The first escape is git, and
-//! [`gitscratch::shed_inherited_git_environment`] is the single answer to it:
+//! [`childenv::fixture_command`] is the single answer to it:
 //! every `git` child this module spawns — the fixture's own commands and the
 //! real `nwt` binary alike — has the entire inherited `GIT_*` family removed, so
 //! it can only act on the directory it was handed. The rule is the prefix, never
-//! a list of names, and it lives in `gitscratch` because every git-spawning
+//! a list of names, and it lives in `childenv` because every git-spawning
 //! caller in this repository is broken the same way by the same environment.
 //! That function explains why a list is the bug.
 //!
@@ -37,7 +37,6 @@ use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use gitscratch::shed_inherited_git_environment;
 use tempfile::TempDir;
 
 /// What one path of a [`Snapshot`] holds.
@@ -162,7 +161,7 @@ pub fn difference(before: &Snapshot, after: &Snapshot) -> Vec<String> {
 /// `bacon` loop alongside the pre-commit hook's own run) don't interleave noise.
 ///
 /// Sheds the whole inherited `GIT_*` family through
-/// [`gitscratch::shed_inherited_git_environment`], which is what makes `dir` the
+/// [`childenv::fixture_command`], which is what makes `dir` the
 /// repo git operates on. `current_dir(dir)` alone is not enough: when the suite
 /// runs from inside a git hook, git exports its own variables into the hook's
 /// environment, `cargo test` inherits them, and `GIT_DIR` overrides cwd-based
@@ -188,8 +187,7 @@ pub fn difference(before: &Snapshot, after: &Snapshot) -> Vec<String> {
 /// That is true of the git of the fixture only. [`nwt_command`] gives the `nwt`
 /// child a private home, so the git children of `nwt` read no `~/.gitconfig`.
 pub fn run_git(dir: &Path, args: &[&str]) -> bool {
-    let mut cmd = Command::new("git");
-    shed_inherited_git_environment(&mut cmd);
+    let mut cmd = childenv::fixture_command("git");
     cmd.args(args)
         .current_dir(dir)
         .stdin(Stdio::null())
@@ -205,7 +203,7 @@ pub fn run_git(dir: &Path, args: &[&str]) -> bool {
 /// [`run_git`] nulls every stream, so a test that has to *read* an answer out of
 /// git — `git worktree list --porcelain`, say — needs this one instead. The two
 /// share the one rule that matters: the whole inherited `GIT_*` family is shed
-/// through [`gitscratch::shed_inherited_git_environment`], so `dir` is the only
+/// through [`childenv::fixture_command`], so `dir` is the only
 /// repository the command can reach. See [`run_git`] for why a list of names is
 /// the bug and the prefix is the rule.
 ///
@@ -214,8 +212,7 @@ pub fn run_git(dir: &Path, args: &[&str]) -> bool {
 /// Panics if git cannot be spawned or exits non-zero. The panic message carries
 /// the command, its standard output and its standard error.
 pub fn git_stdout(dir: &Path, args: &[&str]) -> String {
-    let mut cmd = Command::new("git");
-    shed_inherited_git_environment(&mut cmd);
+    let mut cmd = childenv::fixture_command("git");
 
     let output = cmd
         .args(args)
@@ -241,7 +238,7 @@ pub fn git_stdout(dir: &Path, args: &[&str]) -> String {
 /// A test that expects `nwt` to repeat an error of git takes the text from the
 /// same failed command, and does not copy a message that changes between
 /// versions of git. The command sheds the whole inherited `GIT_*` family
-/// through [`gitscratch::shed_inherited_git_environment`], as [`run_git`] and
+/// through [`childenv::fixture_command`], as [`run_git`] and
 /// [`git_stdout`] do.
 ///
 /// # Panics
@@ -249,8 +246,7 @@ pub fn git_stdout(dir: &Path, args: &[&str]) -> String {
 /// Panics if git cannot be spawned or exits zero. The panic message carries
 /// the command and its standard output.
 pub fn git_failure_stderr(dir: &Path, args: &[&str]) -> String {
-    let mut cmd = Command::new("git");
-    shed_inherited_git_environment(&mut cmd);
+    let mut cmd = childenv::fixture_command("git");
 
     let output = cmd
         .args(args)
@@ -571,7 +567,7 @@ fn private_home() -> &'static Path {
 /// null stdin, so that a prompt cannot stop the suite.
 ///
 /// It sheds the whole inherited `GIT_*` family via
-/// [`gitscratch::shed_inherited_git_environment`], so the spawned `nwt` — which
+/// [`childenv::fixture_command`], so the spawned `nwt` — which
 /// shells out to `git worktree add` — operates on
 /// `repo` and not on whatever repo an inherited `GIT_DIR` names, writes its
 /// objects into `repo`'s own store, and reads no config the launching
@@ -593,14 +589,13 @@ fn private_home() -> &'static Path {
 /// (`tests/worktrees-dir-override.rs`). That `.env(...)` call runs after the
 /// scrub here, so it wins for that child.
 pub fn nwt_command(repo: &Path) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_nwt"));
+    let mut cmd = childenv::fixture_command(env!("CARGO_BIN_EXE_nwt"));
     cmd.current_dir(repo).stdin(Stdio::null());
     // A git hook exports GIT_* variables, `cargo test` inherits them, and
     // GIT_DIR beats `current_dir`. Left in place, the spawned nwt would add its
     // worktree to the real repo, write objects into it, or run under config the
     // launching shell injected. Shed by prefix, never by name — see `run_git`
-    // above, and `gitscratch::shed_inherited_git_environment` for the rule.
-    shed_inherited_git_environment(&mut cmd);
+    // above, and `childenv::fixture_command` for the rule.
     // Same idea for the home: nwt reads ~/.nwt.toml, and its git children read
     // ~/.gitconfig and $XDG_CONFIG_HOME/git/config. See `private_home` above.
     cmd.env("HOME", private_home())

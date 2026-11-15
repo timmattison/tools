@@ -42,7 +42,7 @@
 //! nothing writes.
 
 use std::io::{Read, Write};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::thread;
 use std::time::Duration;
 
@@ -151,7 +151,7 @@ fn run_ic_against(answer: &[u8]) -> (Vec<u8>, Vec<u8>) {
     // the test runner inherited can pick another display routine. The `PATH`
     // points at a directory that does not exist, which keeps `ps` out of reach
     // of the remote transport detection.
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ic"));
+    let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_ic"));
     command
         .arg("--stdin")
         .arg("--height")

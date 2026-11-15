@@ -3,10 +3,10 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use gitscratch::shed_inherited_git_environment;
 use tempfile::TempDir;
 
-/// Shed the inherited git environment, then pin what these fixtures need.
+/// Pin what these fixtures need. The command arrives swept from
+/// [`childenv::fixture_command`].
 ///
 /// In a *worktree*, git exports an absolute `GIT_DIR`, `GIT_WORK_TREE`,
 /// `GIT_INDEX_FILE` and `GIT_PREFIX` to the pre-commit hook. Those leak into
@@ -15,7 +15,7 @@ use tempfile::TempDir;
 /// and `gitnuke` would nuke real worktrees. Every git and gitnuke invocation
 /// here routes through this so the per-test tempdir is the only thing at risk.
 ///
-/// [`gitscratch::shed_inherited_git_environment`] removes the whole `GIT_`
+/// [`childenv::fixture_command`] removes the whole `GIT_`
 /// family rather than the four names this fixture used to list, because a list
 /// strips nothing new the day git adds a variable.
 ///
@@ -23,18 +23,18 @@ use tempfile::TempDir;
 /// `GIT_CONFIG_SYSTEM` point at `/dev/null` so the developer's own git config
 /// (aliases, `init.defaultBranch`, hooks) cannot change what these tests
 /// observe.
-fn scrub_git_env(cmd: &mut Command) -> &mut Command {
-    shed_inherited_git_environment(cmd);
-
+fn pin_git_config(cmd: &mut Command) -> &mut Command {
     cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
 }
 
 /// Run `git <args>` in `dir` and assert it succeeded.
 fn git(dir: &Path, args: &[&str]) -> Output {
-    let mut cmd = Command::new("git");
+    let mut cmd = childenv::fixture_command("git");
     cmd.args(args).current_dir(dir);
-    let output = scrub_git_env(&mut cmd).output().expect("failed to run git");
+    let output = pin_git_config(&mut cmd)
+        .output()
+        .expect("failed to run git");
     assert!(
         output.status.success(),
         "git {args:?} in {} failed: {}",
@@ -46,16 +46,18 @@ fn git(dir: &Path, args: &[&str]) -> Output {
 
 /// Run `git <args>` in `dir` without asserting success.
 fn git_allow_fail(dir: &Path, args: &[&str]) -> Output {
-    let mut cmd = Command::new("git");
+    let mut cmd = childenv::fixture_command("git");
     cmd.args(args).current_dir(dir);
-    scrub_git_env(&mut cmd).output().expect("failed to run git")
+    pin_git_config(&mut cmd)
+        .output()
+        .expect("failed to run git")
 }
 
 /// Run the real `gitnuke` binary in `dir` and capture its result.
 fn gitnuke(dir: &Path, args: &[&str]) -> Output {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_gitnuke"));
+    let mut cmd = childenv::fixture_command(env!("CARGO_BIN_EXE_gitnuke"));
     cmd.args(args).current_dir(dir);
-    scrub_git_env(&mut cmd)
+    pin_git_config(&mut cmd)
         .output()
         .expect("failed to run gitnuke")
 }

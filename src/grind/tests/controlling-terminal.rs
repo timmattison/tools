@@ -29,11 +29,10 @@
 #![cfg(unix)]
 
 use std::path::Path;
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 
 use gitscratch::testing::nested_conflict_repo;
 use gitscratch::testing::pty::Pty;
-use gitscratch::NoInheritedGitEnvironment;
 
 /// The branch that [`nested_conflict_repo`] stands on for every run here.
 const HEAD_BRANCH: &str = "left";
@@ -102,11 +101,8 @@ const UNCLAMPED: [&str; 2] = [
 fn grind_within(repo: &Path, terminal_columns: u16, stated_columns: Option<u16>) -> Output {
     let pty = Pty::open(terminal_columns);
 
-    let mut command = Command::new(env!("CARGO_BIN_EXE_grind"));
-    command
-        .arg(ONTO_BRANCH)
-        .current_dir(repo)
-        .without_inherited_git_environment();
+    let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_grind"));
+    command.arg(ONTO_BRANCH).current_dir(repo);
 
     // After the scrub, for the reason `cli.rs` gives: the rule the scrub
     // applies is the `GIT_` prefix, and no name below wears it.
