@@ -1,13 +1,8 @@
 //! The lines of text that show a [`Summary`].
 
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the next commits call the fit helper from render")
-)]
-
 use termbar::str_display_width_as_u16;
 
-use crate::verdict::{CpuState, Summary};
+use crate::verdict::{CpuState, GroupLine, Share, Summary};
 
 /// The widest line that [`render`] writes, in display columns.
 pub const WIDTH: usize = 80;
@@ -27,7 +22,133 @@ pub fn render(summary: &Summary) -> Vec<String> {
             POINTER_LINE.to_owned(),
         ];
     }
-    vec![headline(summary)]
+    let mut lines = vec![headline(summary)];
+    if cpu {
+        lines.extend(cpu_block(summary));
+    }
+    lines
+}
+
+/// The width of the label of a group line, in display columns.
+const GROUP_LABEL_WIDTH: usize = 26;
+
+/// The width of the label of a worktree line, in display columns.
+const WORKTREE_LABEL_WIDTH: usize = 39;
+
+/// The width of the label of the short-lived line, in display columns.
+const SHORT_LIVED_LABEL_WIDTH: usize = 41;
+
+/// The width of the process count of a group line.
+const COUNT_WIDTH: usize = 5;
+
+/// The width of the noun that follows the process count.
+const NOUN_WIDTH: usize = 9;
+
+/// The width of the value at the end of a line. Each value ends in the same
+/// column: 2 + 26 + 5 + 1 + 9 + 10 = 4 + 39 + 10 = 2 + 41 + 10 = 53.
+const VALUE_WIDTH: usize = 10;
+
+/// The indent of a group line.
+const GROUP_INDENT: &str = "  ";
+
+/// The indent of a worktree line and of the line of the rest.
+const WORKTREE_INDENT: &str = "    ";
+
+/// The label of the line for the CPU that no group explains. `ps` does not
+/// list `kernel_task`, and the kernel refuses `proc_pid_rusage` for PID 0
+/// without root. Thus the CPU that no group explains holds the kernel as
+/// well as the processes that start and stop between the two snapshots. On
+/// 2026-11-15 `kernel_task` alone used 245%.
+const SHORT_LIVED_LABEL: &str = "Kernel and short-lived processes";
+
+/// The note under the header when the system time and the memory both point
+/// to compression.
+const COMPRESSION_LINE: &str =
+    "        High system time and short memory: likely compression and swap.";
+
+/// Gives the lines of the CPU block: the header, the compression note, the
+/// groups with their worktrees, and the short-lived line.
+fn cpu_block(summary: &Summary) -> Vec<String> {
+    let noun = if summary.processors == 1 {
+        "processor"
+    } else {
+        "processors"
+    };
+    let mut lines = vec![format!(
+        "CPU     {}% idle, {}% system, load {:.0} on {} {noun}",
+        summary.idle_percent, summary.system_percent, summary.load, summary.processors
+    )];
+    if summary.compression_likely {
+        lines.push(COMPRESSION_LINE.to_owned());
+    }
+    for group in &summary.cpu_groups {
+        lines.push(group_line(group, &percent(group.cpu_percent)));
+        lines.extend(worktree_lines(group, |share| percent(share.cpu_percent)));
+    }
+    if let Some(unexplained) = summary.unexplained_percent {
+        lines.push(format!(
+            "{GROUP_INDENT}{}{}",
+            fit(SHORT_LIVED_LABEL, SHORT_LIVED_LABEL_WIDTH),
+            pad_left(&percent(unexplained), VALUE_WIDTH)
+        ));
+    }
+    lines
+}
+
+/// Writes a percent of one processor, as `290%`.
+fn percent(value: u64) -> String {
+    format!("{value}%")
+}
+
+/// Adds spaces before `text` until it fills `width` display columns.
+fn pad_left(text: &str, width: usize) -> String {
+    let missing = width.saturating_sub(columns(text));
+    format!("{}{text}", " ".repeat(missing))
+}
+
+/// Writes one group line with `value` at its end.
+fn group_line(group: &GroupLine, value: &str) -> String {
+    let noun = if group.processes == 1 {
+        "process"
+    } else {
+        "processes"
+    };
+    let accounts = if group.accounts > 1 {
+        format!("   {} accounts", group.accounts)
+    } else {
+        String::new()
+    };
+    format!(
+        "{GROUP_INDENT}{}{} {}{}{accounts}",
+        fit(&group.label, GROUP_LABEL_WIDTH),
+        pad_left(&group.processes.to_string(), COUNT_WIDTH),
+        pad_right(noun, NOUN_WIDTH),
+        pad_left(value, VALUE_WIDTH),
+    )
+}
+
+/// Writes the worktree lines of a group, and the line of the rest. Only the
+/// compilers have them. `value` writes the value of one share.
+fn worktree_lines(group: &GroupLine, value: impl Fn(&Share) -> String) -> Vec<String> {
+    let mut lines: Vec<String> = group
+        .worktrees
+        .iter()
+        .map(|share| worktree_line(&share.label, &value(share)))
+        .collect();
+    if let Some((count, rest)) = &group.more {
+        let noun = if *count == 1 { "worktree" } else { "worktrees" };
+        lines.push(worktree_line(&format!("{count} more {noun}"), &value(rest)));
+    }
+    lines
+}
+
+/// Writes one worktree line, or the line of the rest.
+fn worktree_line(label: &str, value: &str) -> String {
+    format!(
+        "{WORKTREE_INDENT}{}{}",
+        fit(label, WORKTREE_LABEL_WIDTH),
+        pad_left(value, VALUE_WIDTH)
+    )
 }
 
 /// The second line of a machine with no short resource.
@@ -289,11 +410,11 @@ mod tests {
         let lines = render(&full);
         assert_eq!(
             lines.get(2).map(String::as_str),
-            Some("  Claude Code                 176 processes       290%   2 accounts")
+            Some("  Claude Code                 176 processes      290%   2 accounts")
         );
         assert_eq!(
             lines.get(3).map(String::as_str),
-            Some("  WindowServer                  1 process          75%")
+            Some("  WindowServer                  1 process         75%")
         );
     }
 
@@ -338,7 +459,7 @@ mod tests {
         let lines = render(&full);
         assert_eq!(
             lines.last().map(String::as_str),
-            Some("  Kernel and short-lived processes                   688%")
+            Some("  Kernel and short-lived processes               688%")
         );
     }
 }
