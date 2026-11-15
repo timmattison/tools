@@ -413,6 +413,70 @@ fn an_empty_list_says_what_it_waits_for() {
 }
 
 #[test]
+fn the_list_says_searching_before_the_first_hits() {
+    let mut app = App::new();
+    let effects = app.on_index(vec![
+        IndexEvent::Session(Box::new(session(ID_A, &["alpha one"], 10))),
+        IndexEvent::Done,
+    ]);
+    let before = all(&app, 80, 20);
+    assert!(before.contains("searching…"), "{before}");
+    assert!(!before.contains("no session matches"), "{before}");
+    settle(&mut app, effects);
+    let after = all(&app, 80, 20);
+    assert!(after.contains("Title"), "{after}");
+}
+
+#[test]
+fn a_key_that_empties_the_list_says_searching_until_its_hits_arrive() {
+    let mut app = app_with(vec![session(ID_A, &["alpha one"], 10)]);
+    type_text(&mut app, "z");
+    assert!(all(&app, 80, 20).contains("no session matches"));
+    let effects = app.on_key(press(KeyCode::Char('q')));
+    let waiting = all(&app, 80, 20);
+    assert!(waiting.contains("searching…"), "{waiting}");
+    settle(&mut app, effects);
+    let answered = all(&app, 80, 20);
+    assert!(answered.contains("no session matches"), "{answered}");
+}
+
+#[test]
+fn searching_lasts_until_the_last_job_of_the_generation_answers() {
+    let mut app = App::new();
+    let e0 = app.on_key(press(KeyCode::Char('z')));
+    let e1 = app.on_index(vec![IndexEvent::Session(Box::new(session(
+        ID_A,
+        &["alpha one"],
+        10,
+    )))]);
+    let e2 = app.on_index(vec![IndexEvent::Session(Box::new(session(
+        ID_B,
+        &["beta one"],
+        11,
+    )))]);
+    settle(&mut app, e0);
+    settle(&mut app, e1);
+    let waiting = all(&app, 80, 20);
+    assert!(waiting.contains("searching…"), "{waiting}");
+    settle(&mut app, e2);
+    let answered = all(&app, 80, 20);
+    assert!(answered.contains("no session matches"), "{answered}");
+}
+
+#[test]
+fn hits_of_an_old_generation_do_not_end_searching() {
+    let mut app = App::new();
+    let e1 = app.on_key(press(KeyCode::Char('z')));
+    let e2 = app.on_key(press(KeyCode::Char('q')));
+    settle(&mut app, e1);
+    let waiting = all(&app, 80, 20);
+    assert!(waiting.contains("searching…"), "{waiting}");
+    settle(&mut app, e2);
+    let answered = all(&app, 80, 20);
+    assert!(answered.contains("no session matches"), "{answered}");
+}
+
+#[test]
 fn the_footer_names_the_keys() {
     let app = three();
     let rows = screen(&app, 120, 30);
