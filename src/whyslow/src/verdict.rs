@@ -267,21 +267,89 @@ pub struct Summary {
 /// processes that started and stopped between the two snapshots.
 #[must_use]
 pub fn summarize(facts: &Facts) -> Summary {
+    let cpu_state = cpu_state(facts.ticks);
+    let memory_short = memory_short(facts.pressure, facts.swapouts);
+    let total = facts.ticks.total();
     Summary {
-        cpu_state: CpuState::Calm,
-        memory_short: false,
-        idle_percent: 0,
-        system_percent: 0,
+        cpu_state,
+        memory_short,
+        idle_percent: percent(facts.ticks.idle, total),
+        system_percent: percent(facts.ticks.system, total),
         load: facts.load,
         processors: facts.processors,
-        compression_likely: false,
-        cpu_groups: Vec::new(),
+        compression_likely: high_system(facts.ticks) && memory_short,
+        cpu_groups: if cpu_state == CpuState::Calm {
+            Vec::new()
+        } else {
+            lines(facts, Resource::Cpu)
+        },
         unexplained_percent: None,
         pressure: facts.pressure,
         compressor_bytes: facts.compressor_bytes,
         swap: facts.swap,
-        memory_groups: Vec::new(),
+        memory_groups: if memory_short {
+            lines(facts, Resource::Memory)
+        } else {
+            Vec::new()
+        },
     }
+}
+
+/// The resource that a block of the summary ranks by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Resource {
+    /// The CPU time.
+    Cpu,
+    /// The memory.
+    Memory,
+}
+
+/// Gives `part` as a percent of `total`, rounded half up. A total of zero
+/// gives 0.
+fn percent(part: u64, total: u64) -> u64 {
+    if total == 0 {
+        return 0;
+    }
+    let part = u128::from(part) * 100;
+    let total = u128::from(total);
+    u64::try_from((part * 2 + total) / (total * 2)).unwrap_or(u64::MAX)
+}
+
+/// Gives the number that ranks one group by `resource`.
+fn weight(total: &GroupTotal, resource: Resource) -> u64 {
+    match resource {
+        Resource::Cpu => total.cpu.centiseconds(),
+        Resource::Memory => total.memory_bytes,
+    }
+}
+
+/// Gives the lines of the groups that use the most of `resource`: the
+/// largest first, ties by label, at most [`GROUP_LIMIT`], none with zero.
+fn lines(facts: &Facts, resource: Resource) -> Vec<GroupLine> {
+    let mut ranked: Vec<&GroupTotal> = facts
+        .groups
+        .iter()
+        .filter(|total| weight(total, resource) > 0)
+        .collect();
+    ranked.sort_by(|left, right| {
+        weight(right, resource)
+            .cmp(&weight(left, resource))
+            .then_with(|| left.group.label().cmp(right.group.label()))
+    });
+    ranked
+        .into_iter()
+        .take(GROUP_LIMIT)
+        .map(|total| GroupLine {
+            label: total.group.label().to_owned(),
+            processes: total.processes,
+            accounts: total.accounts,
+            cpu_percent: total.cpu.percent_of(facts.window),
+            memory_bytes: total.memory_bytes,
+            at_least: total.at_least,
+            worktrees: Vec::new(),
+            more: None,
+        })
+        .collect()
 }
 
 #[cfg(test)]
