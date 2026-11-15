@@ -462,4 +462,73 @@ mod tests {
             Some("  Kernel and short-lived processes               688%")
         );
     }
+
+    /// Makes a group line for the memory block, with one account.
+    fn memory_line(label: &str, bytes: u64, at_least: bool) -> GroupLine {
+        GroupLine {
+            memory_bytes: bytes,
+            at_least,
+            ..line(label, 1, 0)
+        }
+    }
+
+    /// The header of the memory block states the pressure, the compressor,
+    /// and the swap, with the unit of the swap once, after the total.
+    #[test]
+    fn the_memory_header_states_pressure_compressor_and_swap() {
+        let mut short = summary(CpuState::Calm, true);
+        short.swap = SwapUsage {
+            total_bytes: 5_368_709_120,
+            used_bytes: 4_187_593_113,
+        };
+        let lines = render(&short);
+        assert_eq!(
+            lines.get(1).map(String::as_str),
+            Some("Memory  pressure warning, 26.0 GiB compressed, swap 3.9 of 5.0 GiB in use")
+        );
+    }
+
+    /// A memory value has one decimal of GiB. A lower bound has `≥` in front,
+    /// and the value still ends in the same column as the others.
+    #[test]
+    fn a_memory_line_shows_gib_and_marks_a_lower_bound() {
+        let mut short = summary(CpuState::Calm, true);
+        short.memory_groups = vec![
+            memory_line("Claude Code", 24 * GIB + GIB / 5, true),
+            memory_line("wezterm-gui", GIB * 9 / 10, false),
+        ];
+        let lines = render(&short);
+        assert_eq!(
+            lines.iter().skip(2).map(String::as_str).collect::<Vec<_>>(),
+            vec![
+                "  Claude Code                   1 process     ≥24.2 GiB",
+                "  wezterm-gui                   1 process       0.9 GiB",
+                "≥ counts the RSS of other accounts. Run with sudo for the footprint.",
+            ]
+        );
+    }
+
+    /// The footer shows when a memory line that is shown has a lower bound,
+    /// also a worktree line. A lower bound in a CPU line does not cause it.
+    #[test]
+    fn the_footer_follows_the_lower_bounds_of_the_memory_lines() {
+        let footer = "≥ counts the RSS of other accounts. Run with sudo for the footprint.";
+        let mut cpu_only = summary(CpuState::Full, true);
+        cpu_only.cpu_groups = vec![memory_line("WindowServer", 1, true)];
+        cpu_only.memory_groups = vec![memory_line("g", GIB, false)];
+        assert!(!render(&cpu_only).iter().any(|l| l == footer));
+
+        let mut worktree = summary(CpuState::Calm, true);
+        let mut compilers = memory_line("Compilers and linkers", 2 * GIB, false);
+        compilers.worktrees = vec![Share {
+            label: "w/issue-17".to_owned(),
+            cpu_percent: 0,
+            memory_bytes: GIB,
+            at_least: true,
+        }];
+        worktree.memory_groups = vec![compilers];
+        let lines = render(&worktree);
+        assert_eq!(lines.last().map(String::as_str), Some(footer));
+        assert!(lines.iter().any(|l| l.ends_with("≥1.0 GiB")));
+    }
 }
