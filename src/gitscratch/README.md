@@ -1761,7 +1761,8 @@ It also holds `gitscratch::testing::git_shim`, a `git` that goes first on
 argument, and then runs the real git. `GitShim::calls` reads the log back, and
 `GitShim::path_variable` gives the `PATH` for a child process. The shim can
 also pause for one second before a subcommand that a test names, so a display
-that waits for its delay has time to show. It exists because gitscratch sheds
+that waits for its delay has time to show. The terminal tests of `grind` and
+`grime` use that pause. It exists because gitscratch sheds
 every `GIT_*` variable from its children, so `GIT_TRACE` logs nothing. Only a
 `git` on `PATH` sees which git processes a replay starts.
 

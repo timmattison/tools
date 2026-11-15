@@ -2005,6 +2005,53 @@ fn diff_on_a_terminal_is_painted_with_no_color_variable_set() {
     );
 }
 
+/// A run on a terminal draws the spinner, with the phase.
+///
+/// This holds the wiring of the display in the binary: issue #682, criterion 2.
+/// A `grime` that merges with `scratch` in place of `scratch_with_progress`,
+/// or a crate that drops the `progress` feature, draws nothing, and no run
+/// through a pipe can show it. The shim pauses for 1 s before each `merge`
+/// call, because the display waits for `PROGRESS_DELAY` (500 ms) before it
+/// shows. The pause only lengthens the run, so the test has no upper time bound.
+#[cfg(unix)]
+#[test]
+fn spinner_shows_its_phase_on_a_terminal() {
+    use gitscratch::testing::git_shim::GitShim;
+    use gitscratch::testing::pty::Pty;
+
+    /// The width of the terminal. Any width serves, because the width that
+    /// the builder states wins.
+    const TERMINAL_COLUMNS: u16 = 80;
+    /// The text that only the display writes: the prefix, then the two spaces
+    /// that part the action from the spinner.
+    const DISPLAY_PREFIX: &str = "grime: merging right into HEAD  ";
+
+    let repo = conflicting_repo();
+    repo.checkout("left");
+    let plain = String::from_utf8_lossy(&grime(repo.path(), &["right"]).stdout).into_owned();
+    assert!(
+        !plain.contains(DISPLAY_PREFIX),
+        "the verdict through a pipe must not hold the display:\n{plain}"
+    );
+
+    let shim = GitShim::new(&["merge"]);
+    let mut command = grime_command(repo.path(), &["right"]);
+    command.env("PATH", shim.path_variable());
+    let output = Pty::open(TERMINAL_COLUMNS).run_with_output_on_terminal(command);
+    let bytes = testcolor::strip_ansi(&String::from_utf8_lossy(&output.stdout));
+
+    assert_eq!(
+        output.status.code(),
+        Some(CONFLICTS),
+        "bytes:\n{bytes}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        bytes.contains(DISPLAY_PREFIX),
+        "the spinner names the tool and the phase:\n{bytes}"
+    );
+}
+
 /// Which of `grime`'s streams is handed a pipe nobody is reading.
 #[derive(Debug, Clone, Copy)]
 enum Unread {
