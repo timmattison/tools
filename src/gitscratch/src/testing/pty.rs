@@ -313,7 +313,8 @@ impl Pty {
         let child = command.spawn();
 
         // Every copy of the slave end that this process holds closes here: the
-        // copy that the command holds for standard output, and the copy that
+        // copies that the command holds for standard output and, when
+        // `stderr_on_terminal` is true, for standard error, and the copy that
         // the terminal opened with. The child holds the rest. They close before
         // the result of the spawn is read, so a child that did not start still
         // ends the read, and the reader ends with it.
