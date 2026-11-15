@@ -16,10 +16,28 @@ impl ReplayObserver for Progress {
     fn report(&self, _progress: ReplayProgress) {}
 }
 
+/// The number of seconds in one minute.
+const SECONDS_PER_MINUTE: u64 = 60;
+
+/// The number of seconds in one hour.
+const SECONDS_PER_HOUR: u64 = 3600;
+
 /// Format the elapsed time of a display as `M:SS`, or as `H:MM:SS` from one
 /// hour on.
-fn clock(_elapsed: Duration) -> String {
-    String::new()
+///
+/// The part of a second is dropped, so the clock counts whole seconds. The
+/// format of `indicatif` for elapsed time reads `5s`, and a clock that a
+/// person reads at a glance needs the colon form.
+fn clock(elapsed: Duration) -> String {
+    let seconds = elapsed.as_secs();
+    let hours = seconds / SECONDS_PER_HOUR;
+    let minutes = seconds % SECONDS_PER_HOUR / SECONDS_PER_MINUTE;
+    let rest = seconds % SECONDS_PER_MINUTE;
+    if hours == 0 {
+        format!("{minutes}:{rest:02}")
+    } else {
+        format!("{hours}:{minutes:02}:{rest:02}")
+    }
 }
 
 #[cfg(test)]
