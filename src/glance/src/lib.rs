@@ -24,3 +24,4 @@
 #![deny(unsafe_code)]
 
 pub mod cpu;
+pub mod pressure;
