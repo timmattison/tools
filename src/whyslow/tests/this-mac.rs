@@ -11,9 +11,10 @@
 
 use std::time::Duration;
 
+use faulte::pid::{Pid, Uid};
 use whyslow::groups::Group;
 use whyslow::machine::macos::Mac;
-use whyslow::machine::observe;
+use whyslow::machine::{observe, Machine};
 
 /// The window that this test asks for.
 const INTERVAL: &str = "1s";
@@ -52,4 +53,35 @@ fn the_real_mac_gives_facts_of_the_expected_shape() {
             .any(|total| total.group == Group::Named(program.clone())),
         "no group for the program {program}"
     );
+}
+
+/// The kernel tells a process that exited apart from a process that it
+/// refuses. A child that the test reaped holds no memory, so its footprint is
+/// zero. The test process itself has a footprint above zero. Process 1 belongs
+/// to the root account, so the kernel refuses it and the footprint is `None`,
+/// unless the test runs as root.
+#[test]
+fn the_footprint_of_an_exited_process_is_zero_and_a_refusal_is_none() {
+    let mac = Mac::new();
+    let mut child = childenv::fixture_command("/usr/bin/true")
+        .spawn()
+        .expect("/usr/bin/true starts");
+    let child_pid = child.id();
+    child.wait().expect("the child ends");
+    assert_eq!(mac.footprint(Pid::new(child_pid)), Some(0));
+
+    let own = mac
+        .footprint(Pid::new(std::process::id()))
+        .expect("the kernel gives the footprint of this process");
+    assert!(own > 0, "footprint {own}");
+
+    let own_row = mac
+        .process_table()
+        .expect("this Mac gives its process table")
+        .into_iter()
+        .find(|row| row.pid == Pid::new(std::process::id()))
+        .expect("the table holds this process");
+    if own_row.uid != Uid::new(0) {
+        assert_eq!(mac.footprint(Pid::new(1)), None);
+    }
 }

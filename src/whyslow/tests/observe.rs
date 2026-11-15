@@ -4,7 +4,7 @@
 //! calls the kernel, reads a process, or reads a clock. The one test that
 //! reads the real Mac is `tests/this-mac.rs`.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -80,6 +80,12 @@ struct FakeMachine {
     arguments: Result<HashMap<Pid, String>, SourceError>,
     /// The directories that hold a `.git` entry.
     git: HashSet<PathBuf>,
+    /// The process that exits right after the second process table, if any.
+    departs: Option<Pid>,
+    /// The number of process tables that the run has read.
+    tables_read: Cell<u32>,
+    /// Tells whether the process of `departs` has exited.
+    departed: Cell<bool>,
 }
 
 impl FakeMachine {
@@ -131,6 +137,18 @@ impl FakeMachine {
             claude: HashSet::new(),
             arguments: Ok(HashMap::new()),
             git: HashSet::new(),
+            departs: None,
+            tables_read: Cell::new(0),
+            departed: Cell::new(false),
+        }
+    }
+
+    /// Marks the process of `departs` as exited, when the run has read the
+    /// second process table. Each read that follows the memory and argument
+    /// reads of a good run calls this function.
+    fn depart_after_second_table(&self) {
+        if self.tables_read.get() >= 2 {
+            self.departed.set(true);
         }
     }
 
@@ -151,6 +169,7 @@ impl FakeMachine {
 impl Machine for FakeMachine {
     fn process_table(&self) -> Result<Vec<ProcessRow>, SourceError> {
         self.note("ps");
+        self.tables_read.set(self.tables_read.get() + 1);
         Self::next(&self.tables)
     }
 
@@ -161,26 +180,31 @@ impl Machine for FakeMachine {
 
     fn vm_counters(&self) -> Result<VmCounters, SourceError> {
         self.note("vm");
+        self.depart_after_second_table();
         Self::next(&self.counters)
     }
 
     fn swap_usage(&self) -> Result<SwapUsage, SourceError> {
         self.note("swap");
+        self.depart_after_second_table();
         self.swap.clone()
     }
 
     fn pressure(&self) -> Result<Pressure, SourceError> {
         self.note("pressure");
+        self.depart_after_second_table();
         self.pressure.clone()
     }
 
     fn load(&self) -> Result<f64, SourceError> {
         self.note("load");
+        self.depart_after_second_table();
         self.load.clone()
     }
 
     fn processors(&self) -> Result<u32, SourceError> {
         self.note("processors");
+        self.depart_after_second_table();
         self.processors.clone()
     }
 
@@ -189,17 +213,26 @@ impl Machine for FakeMachine {
     }
 
     fn footprint(&self, pid: Pid) -> Option<u64> {
+        self.note("footprint");
+        if self.departed.get() && self.departs == Some(pid) {
+            return Some(0);
+        }
         self.footprints.get(&pid).copied()
     }
 
     fn claude_pids(&self) -> HashSet<Pid> {
         self.note("claude");
+        self.depart_after_second_table();
         self.claude.clone()
     }
 
     fn arguments(&self) -> Result<HashMap<Pid, String>, SourceError> {
         self.note("arguments");
-        self.arguments.clone()
+        let mut arguments = self.arguments.clone();
+        if let (Ok(map), true, Some(gone)) = (&mut arguments, self.departed.get(), self.departs) {
+            map.remove(&gone);
+        }
+        arguments
     }
 
     fn holds_git(&self, directory: &Path) -> bool {
@@ -220,10 +253,17 @@ impl Machine for FakeMachine {
 /// The run reads the sources in one fixed order, and it sleeps the interval
 /// between the two snapshots. The order is the design: the counters of the
 /// virtual memory system bracket the window, and the clock sits beside each
-/// process table, so the window is the time between the two tables.
+/// process table, so the window is the time between the two tables. The
+/// footprints and the arguments follow the second table at once, before any
+/// slow read, so a process that exits later still has both. The footprints
+/// come first, because each one is one call and the arguments are one `ps`.
 #[test]
 fn the_run_reads_the_sources_in_the_fixed_order_and_sleeps_the_interval() {
-    let machine = FakeMachine::new();
+    let mut machine = FakeMachine::new();
+    *machine.tables.get_mut() = VecDeque::from([
+        Ok(vec![row(7, 10, 100, "/bin/zsh")]),
+        Ok(vec![row(7, 20, 100, "/bin/zsh")]),
+    ]);
     let _ = observe(&machine, interval());
     assert_eq!(
         *machine.log.borrow(),
@@ -236,13 +276,14 @@ fn the_run_reads_the_sources_in_the_fixed_order_and_sleeps_the_interval() {
             "ps",
             "clock",
             "ticks",
+            "footprint",
+            "arguments",
             "vm",
             "pressure",
             "swap",
             "load",
             "processors",
             "claude",
-            "arguments",
         ]
     );
     assert_eq!(*machine.slept.borrow(), [Duration::from_secs(2)]);
@@ -519,4 +560,38 @@ fn a_process_with_no_footprint_counts_its_resident_size_as_a_lower_bound() {
     let total = total_of(&Group::Named("newtool".to_owned()));
     assert_eq!(total.memory_bytes, 7 * 1024);
     assert!(total.at_least);
+}
+
+/// A compiler exits right after the second table. The run read its footprint
+/// and its arguments beside that table, so the group counts the footprint
+/// that the machine gave, with no lower-bound mark, and the compiler keeps its
+/// worktree. A later read would find a footprint of zero and no arguments.
+#[test]
+fn a_compiler_that_exits_after_the_second_table_keeps_its_footprint_and_worktree() {
+    let mut machine = FakeMachine::new();
+    *machine.tables.get_mut() = VecDeque::from([
+        Ok(vec![row(BUILDER_PID, 1_000, 1_000, "/usr/bin/clang")]),
+        Ok(vec![row(BUILDER_PID, 1_250, 1_000, "/usr/bin/clang")]),
+    ]);
+    machine.footprints = HashMap::from([(Pid::new(BUILDER_PID), 4_000_000)]);
+    machine.departs = Some(Pid::new(BUILDER_PID));
+    machine.git = HashSet::from([PathBuf::from(WORKTREE)]);
+    machine.arguments = Ok(HashMap::from([(
+        Pid::new(BUILDER_PID),
+        format!("clang -c a.c -o {WORKTREE}/target/x.o"),
+    )]));
+    let facts = observe(&machine, interval()).expect("every source answers");
+    let total = facts
+        .groups
+        .into_iter()
+        .find(|total| total.group == Group::Compilers)
+        .expect("a total for the compilers");
+    assert_eq!(total.memory_bytes, 4_000_000);
+    assert!(!total.at_least);
+    let worktrees: Vec<Option<PathBuf>> = total
+        .worktrees
+        .iter()
+        .map(|each| each.worktree.clone())
+        .collect();
+    assert_eq!(worktrees, [Some(PathBuf::from(WORKTREE))]);
 }
