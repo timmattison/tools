@@ -598,6 +598,21 @@ mod tests {
         assert!(lines.iter().any(|l| l.ends_with("≥1.0 GiB")));
     }
 
+    /// A memory value of 10 columns, such as `≥100.0 GiB`, keeps one space
+    /// after the noun. The noun `processes` fills its column, so a value that
+    /// fills its own column too joins the two words into one.
+    #[test]
+    fn a_wide_memory_value_keeps_a_space_after_the_noun() {
+        let mut short = summary(CpuState::Calm, true);
+        short.memory_groups = vec![GroupLine {
+            processes: 176,
+            ..memory_line("Claude Code", 100 * GIB, true)
+        }];
+        let lines = render(&short);
+        let group = lines.get(2).map(String::as_str).unwrap_or_default();
+        assert!(group.contains("processes ≥100.0 GiB"), "{group}");
+    }
+
     /// The column where each value ends.
     const VALUE_END: usize = 53;
 
