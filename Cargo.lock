@@ -9667,6 +9667,9 @@ dependencies = [
 [[package]]
 name = "whyslow"
 version = "0.1.0"
+dependencies = [
+ "faulte",
+]
 
 [[package]]
 name = "wide"

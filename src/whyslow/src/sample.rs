@@ -7,6 +7,26 @@
 
 use std::time::Duration;
 
+use faulte::table::parse_ps_number;
+
+/// The character between the minutes and the seconds of a time token.
+const MINUTES_SEPARATOR: char = ':';
+
+/// The character between the seconds and the hundredths of a time token.
+const HUNDREDTHS_SEPARATOR: char = '.';
+
+/// The count of digits of the seconds and of the hundredths.
+const DIGITS_OF_A_FIELD: usize = 2;
+
+/// The seconds in one minute.
+const SECONDS_PER_MINUTE: u64 = 60;
+
+/// The hundredths of a second in one second.
+const CENTISECONDS_PER_SECOND: u64 = 100;
+
+/// The milliseconds in one hundredth of a second.
+const MILLIS_PER_CENTISECOND: u128 = 10;
+
 /// CPU time in hundredths of a second, as `ps -o time` gives it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct CpuTime(u64);
@@ -25,35 +45,72 @@ impl CpuTime {
     }
 
     /// Reads a CPU time from a token of `ps -o time`.
+    ///
+    /// The layout is `M:SS.cc`. The minutes are ASCII digits and have no
+    /// upper bound. The seconds are exactly two digits below 60. The
+    /// hundredths are exactly two digits. Any other text gives `None`, so a
+    /// layout that the parser does not know never gives a wrong time.
     #[must_use]
-    pub fn parse(_token: &str) -> Option<Self> {
-        None
+    pub fn parse(token: &str) -> Option<Self> {
+        let (minutes, rest) = token.split_once(MINUTES_SEPARATOR)?;
+        let (seconds, hundredths) = rest.split_once(HUNDREDTHS_SEPARATOR)?;
+        let minutes: u64 = parse_ps_number(minutes)?;
+        let seconds: u64 = fixed_digits(seconds)?;
+        let hundredths: u64 = fixed_digits(hundredths)?;
+        if seconds >= SECONDS_PER_MINUTE {
+            return None;
+        }
+        minutes
+            .checked_mul(SECONDS_PER_MINUTE)?
+            .checked_add(seconds)?
+            .checked_mul(CENTISECONDS_PER_SECOND)?
+            .checked_add(hundredths)
+            .map(Self)
     }
 
     /// Takes `other` from this CPU time. The result stops at zero.
     #[must_use]
-    pub fn saturating_sub(self, _other: Self) -> Self {
-        self
+    pub fn saturating_sub(self, other: Self) -> Self {
+        Self(self.0.saturating_sub(other.0))
     }
 
     /// Gives this CPU time as a percent of one processor over `window`.
+    ///
+    /// The result is `(cs * 100 + w / 2) / w`, where `w` is the window in
+    /// hundredths of a second. This rounds half up. A window of zero, or a
+    /// window shorter than one hundredth of a second, gives 0.
     #[must_use]
-    pub fn percent_of(self, _window: Duration) -> u64 {
-        0
+    pub fn percent_of(self, window: Duration) -> u64 {
+        let window = u64::try_from(window.as_millis() / MILLIS_PER_CENTISECOND).unwrap_or(u64::MAX);
+        if window == 0 {
+            return 0;
+        }
+        let scaled = u128::from(self.0) * 100 + u128::from(window / 2);
+        u64::try_from(scaled / u128::from(window)).unwrap_or(u64::MAX)
+    }
+}
+
+/// Reads exactly two ASCII digits.
+fn fixed_digits(token: &str) -> Option<u64> {
+    if token.len() == DIGITS_OF_A_FIELD {
+        parse_ps_number(token)
+    } else {
+        None
     }
 }
 
 impl std::ops::Add for CpuTime {
     type Output = Self;
 
-    fn add(self, _other: Self) -> Self {
-        self
+    /// Adds two times. The sum stops at the largest value.
+    fn add(self, other: Self) -> Self {
+        Self(self.0.saturating_add(other.0))
     }
 }
 
 impl std::iter::Sum for CpuTime {
-    fn sum<I: Iterator<Item = Self>>(_times: I) -> Self {
-        Self(0)
+    fn sum<I: Iterator<Item = Self>>(times: I) -> Self {
+        times.fold(Self::default(), |total, time| total + time)
     }
 }
 
