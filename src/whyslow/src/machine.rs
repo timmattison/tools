@@ -22,11 +22,17 @@ use faulte::machine::MachineError;
 use faulte::pid::Pid;
 use faulte::vm::{SwapUsage, VmCounters, VmDelta};
 
-use crate::sample::{ProcessRow, SampleParseError};
+use crate::groups::{group_of, Group};
+use crate::sample::{cpu_used, ProcessRow, SampleParseError};
+use crate::tally::{tally, Memory, ProcessSample};
 use crate::verdict::{CpuTicks, Facts, Pressure};
+use crate::worktree::worktree_of;
 
 #[cfg(target_os = "macos")]
 pub mod macos;
+
+/// The number of bytes in one KiB, the unit of the `rss` column of `ps`.
+const BYTES_PER_KIB: u64 = 1024;
 
 /// The call that a kernel read names when an error of `faulte` is one that
 /// `whyslow` never expects.
@@ -237,11 +243,11 @@ pub trait Machine {
 /// because a percent of nothing has no meaning.
 pub fn observe(machine: &dyn Machine, interval: Span) -> Result<Facts, SourceError> {
     let vm_before = machine.vm_counters()?;
-    let _before = machine.process_table()?;
+    let before = machine.process_table()?;
     let started = machine.clock();
     let ticks_before = machine.cpu_ticks()?;
     machine.sleep(Duration::from(interval));
-    let _after = machine.process_table()?;
+    let after = machine.process_table()?;
     let finished = machine.clock();
     let ticks_after = machine.cpu_ticks()?;
     let vm_after = machine.vm_counters()?;
@@ -249,13 +255,14 @@ pub fn observe(machine: &dyn Machine, interval: Span) -> Result<Facts, SourceErr
     let swap = machine.swap_usage()?;
     let load = machine.load()?;
     let processors = machine.processors()?;
-    let _claude = machine.claude_pids();
-    let _arguments = machine.arguments()?;
+    let claude = machine.claude_pids();
+    let arguments = machine.arguments()?;
 
     let ticks = CpuTicks::between(ticks_before, ticks_after);
     if ticks.total() == 0 {
         return Err(SourceError::CpuTicksDidNotMove);
     }
+    let samples = samples(machine, &before, &after, &claude, &arguments);
     Ok(Facts {
         ticks,
         processors,
@@ -265,8 +272,50 @@ pub fn observe(machine: &dyn Machine, interval: Span) -> Result<Facts, SourceErr
         swapouts: VmDelta::between(vm_before, vm_after).swapouts,
         compressor_bytes: vm_after.compressor_bytes(machine.page_size()),
         swap,
-        groups: Vec::new(),
+        groups: tally(&samples),
     })
+}
+
+/// Makes one sample for each process of the second table.
+///
+/// The CPU of a process is the change between the two tables. A process that
+/// is in the second table only counts all of its time. A process in the first
+/// table only has ended, and it has no sample. A process of the compilers
+/// takes its worktree from its arguments, and any other process takes none.
+/// The memory is the footprint when the kernel gives one, and the resident
+/// size otherwise.
+fn samples(
+    machine: &dyn Machine,
+    before: &[ProcessRow],
+    after: &[ProcessRow],
+    claude: &HashSet<Pid>,
+    arguments: &HashMap<Pid, String>,
+) -> Vec<ProcessSample> {
+    after
+        .iter()
+        .zip(cpu_used(before, after))
+        .map(|(row, cpu)| {
+            let group = group_of(row.name(), claude.contains(&row.pid));
+            let worktree = if group == Group::Compilers {
+                arguments
+                    .get(&row.pid)
+                    .and_then(|text| worktree_of(text, |directory| machine.holds_git(directory)))
+            } else {
+                None
+            };
+            let memory = machine.footprint(row.pid).map_or_else(
+                || Memory::Resident(row.rss_kib.saturating_mul(BYTES_PER_KIB)),
+                Memory::Footprint,
+            );
+            ProcessSample {
+                uid: row.uid,
+                group,
+                worktree,
+                cpu,
+                memory,
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
