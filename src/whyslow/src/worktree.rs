@@ -200,6 +200,24 @@ mod tests {
         assert_eq!(find(&arguments), worktree());
     }
 
+    /// The path of the program is not an argument, so it never gives the
+    /// worktree. Homebrew keeps its own git checkout at `/opt/homebrew`, and
+    /// the `sccache` server runs as `/opt/homebrew/bin/sccache` with no
+    /// argument. On 2026-11-15 that server showed as the worktree
+    /// `opt/homebrew`.
+    #[test]
+    fn the_path_of_the_program_never_gives_the_worktree() {
+        let homebrew = git_in(&["/opt/homebrew", WORKTREE]);
+        assert_eq!(worktree_of("/opt/homebrew/bin/sccache", &homebrew), None);
+        assert_eq!(
+            worktree_of(
+                &format!("/opt/homebrew/bin/clang -c a.c {WORKTREE}/src/a.c"),
+                &homebrew
+            ),
+            worktree()
+        );
+    }
+
     /// A source file in the cargo registry never decides when an output path
     /// names a worktree.
     #[test]
