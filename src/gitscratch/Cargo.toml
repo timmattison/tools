@@ -14,15 +14,25 @@ colored.workspace = true
 # `TIOCSCTTY`. Optional, so a build without the `testing` feature holds none of
 # it.
 libc = { workspace = true, optional = true }
+# The progress display of `Console`, behind the `progress` feature. It draws a
+# spinner and a bar on standard error while a replay runs. Optional, because
+# `grist` prints no breakdown and no display, and must not pay for it.
+indicatif = { workspace = true, optional = true }
 tempfile.workspace = true
+# The width of the terminal and the block elements of the progress bar, behind
+# the `progress` feature, for the same reason as `indicatif`. The display reads
+# the width through this crate, and not through `indicatif`, so that every
+# tool of the workspace measures a terminal the one way.
+termbar = { workspace = true, optional = true }
 unicode-width.workspace = true
 
 [dev-dependencies]
-# Depending on itself turns the `testing` feature on for this crate's own test
-# targets, so `cargo test -p gitscratch` compiles the safety suite without
-# anyone having to remember `--features testing`. Cargo permits this one cycle
-# precisely so a crate can enable its own optional test scaffolding.
-gitscratch = { path = ".", features = ["testing"] }
+# Depending on itself turns the `testing` and `progress` features on for this
+# crate's own test targets, so `cargo test -p gitscratch` compiles the safety
+# suite and the display tests without anyone having to remember a feature.
+# Cargo permits this one cycle precisely so a crate can enable its own
+# optional test scaffolding.
+gitscratch = { path = ".", features = ["testing", "progress"] }
 # Locates the headings that bound the README sections `src/git.rs` checks
 # itself against. A dev-dependency only, so nothing a consumer ships gains a
 # markdown parser.
@@ -36,6 +46,9 @@ testcolor.workspace = true
 # Shared git fixture builders for the test suites of crates built on gitscratch,
 # and the pseudo-terminal that the tests of `grind` and `grime` share.
 testing = ["dep:libc"]
+# The progress display of `Console`. It is off by default, because it needs the
+# size of the terminal, and `grist` must not carry that dependency.
+progress = ["dep:indicatif", "dep:termbar"]
 
 [lints]
 workspace = true

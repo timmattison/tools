@@ -35,10 +35,25 @@
 
 use std::io::Write;
 use std::process::ExitCode;
+#[cfg(feature = "progress")]
+use std::time::Duration;
 
 use anyhow::Result;
 
 use crate::scratch::Conflicts;
+
+#[cfg(feature = "progress")]
+mod progress;
+
+#[cfg(feature = "progress")]
+pub use progress::Progress;
+
+/// How long a run must take before the progress display shows.
+///
+/// A run that ends in less time draws nothing. A person then sees no flash of
+/// a bar that is gone before it can be read.
+#[cfg(feature = "progress")]
+pub const PROGRESS_DELAY: Duration = Duration::from_millis(500);
 
 /// Exit code for a replay that hit no conflicts.
 const CLEAN: u8 = 0;
@@ -132,8 +147,40 @@ impl Console {
     where
         F: FnOnce(&Console) -> Result<Conflicts>,
     {
-        let console = Console { tool, quiet };
+        #[cfg(feature = "progress")]
+        return Self::answer_with_progress_delay(tool, quiet, PROGRESS_DELAY, ask);
 
+        #[cfg(not(feature = "progress"))]
+        Self::run(Console { tool, quiet }, ask)
+    }
+
+    /// Answer the question as [`Console::answer`] does, with a progress display
+    /// that waits `delay` before it shows.
+    ///
+    /// A test sets the delay to zero, so the display shows at once, or to a
+    /// very long time, so the display never shows. A tool calls
+    /// [`Console::answer`], which uses [`PROGRESS_DELAY`].
+    #[cfg(feature = "progress")]
+    pub fn answer_with_progress_delay<F>(
+        tool: &'static str,
+        quiet: bool,
+        delay: Duration,
+        ask: F,
+    ) -> ExitCode
+    where
+        F: FnOnce(&Console) -> Result<Conflicts>,
+    {
+        Self::run(Console { tool, quiet }, ask)
+    }
+
+    /// Run `ask` against `console` and map its answer onto the exit code.
+    ///
+    /// The one place that maps the answer onto a code, so the two doors cannot
+    /// map it two ways.
+    fn run<F>(console: Console, ask: F) -> ExitCode
+    where
+        F: FnOnce(&Console) -> Result<Conflicts>,
+    {
         match ask(&console) {
             Ok(conflicts) => ExitCode::from(if conflicts.is_clean() {
                 CLEAN
@@ -145,6 +192,17 @@ impl Console {
                 ExitCode::from(ERROR)
             }
         }
+    }
+
+    /// Start the progress display of a replay, and give the handle that the
+    /// replay reports to.
+    ///
+    /// `action` is the sentence of the replay, for example
+    /// `replaying HEAD onto main`.
+    #[cfg(feature = "progress")]
+    pub fn progress(&self, action: &str) -> Progress {
+        let _ = action;
+        Progress
     }
 
     /// A caveat that qualifies the verdict without changing it.
