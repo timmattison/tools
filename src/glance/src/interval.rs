@@ -64,7 +64,10 @@ impl fmt::Display for IntervalError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             IntervalError::NotANumber { text } => {
-                write!(f, "the interval must be a number of seconds, and {text:?} is not")
+                write!(
+                    f,
+                    "the interval must be a number of seconds, and {text:?} is not"
+                )
             }
             IntervalError::NotFinite { text } => {
                 write!(f, "the interval must be a finite number, and {text} is not")
@@ -75,7 +78,10 @@ impl fmt::Display for IntervalError {
                 Interval::MINIMUM_SECONDS
             ),
             IntervalError::TooLarge { text } => {
-                write!(f, "the interval is too large, and {text} seconds do not fit")
+                write!(
+                    f,
+                    "the interval is too large, and {text} seconds do not fit"
+                )
             }
         }
     }
@@ -93,7 +99,20 @@ impl FromStr for Interval {
     /// Returns an error if the text is not a number, is not finite, is below
     /// `Interval::MINIMUM_SECONDS`, or is too large for a duration.
     fn from_str(text: &str) -> Result<Interval, IntervalError> {
-        Ok(Interval::DEFAULT)
+        let trimmed = text.trim();
+        let owned = || trimmed.to_owned();
+        let seconds: f64 = trimmed
+            .parse()
+            .map_err(|_| IntervalError::NotANumber { text: owned() })?;
+        if !seconds.is_finite() {
+            return Err(IntervalError::NotFinite { text: owned() });
+        }
+        if seconds < Interval::MINIMUM_SECONDS {
+            return Err(IntervalError::BelowMinimum { text: owned() });
+        }
+        Duration::try_from_secs_f64(seconds)
+            .map(Interval)
+            .map_err(|_| IntervalError::TooLarge { text: owned() })
     }
 }
 
@@ -112,7 +131,10 @@ mod tests {
 
     #[test]
     fn the_minimum_is_accepted() {
-        assert_eq!(parse("0.25").unwrap().duration(), Duration::from_millis(250));
+        assert_eq!(
+            parse("0.25").unwrap().duration(),
+            Duration::from_millis(250)
+        );
     }
 
     #[test]
@@ -154,7 +176,10 @@ mod tests {
 
     #[test]
     fn a_number_too_large_for_a_duration_is_refused() {
-        assert!(matches!(parse("1e300"), Err(IntervalError::TooLarge { .. })));
+        assert!(matches!(
+            parse("1e300"),
+            Err(IntervalError::TooLarge { .. })
+        ));
     }
 
     #[test]
