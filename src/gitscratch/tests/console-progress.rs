@@ -273,3 +273,25 @@ fn with_quiet_the_display_writes_no_byte() {
         );
     }
 }
+
+/// A display that waits for its delay writes nothing before the verdict.
+///
+/// The delay is one hour, and the run ends in far less. The proof needs no
+/// clock in the test: the run ends before the delay, so the display never
+/// shows. The model of the terminal still holds the verdict.
+#[test]
+fn a_display_that_waits_for_its_delay_writes_nothing_before_the_verdict() {
+    let output = on_a_terminal("verdict", ONE_HOUR_MS, false);
+
+    let text = raw(&output);
+    assert!(
+        screen(&output.stdout).iter().any(|row| row == VERDICT),
+        "a row must hold the verdict\n{text:?}"
+    );
+    for forbidden in [ACTION, "commits"] {
+        assert!(
+            !text.contains(forbidden),
+            "the display must wait for its delay, but the bytes hold {forbidden:?}\n{text:?}"
+        );
+    }
+}
