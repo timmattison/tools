@@ -67,7 +67,10 @@ impl Appearance {
     /// The color of the frame. It is the label color of the appearance.
     #[must_use]
     pub fn frame(self) -> Rgba {
-        TRANSPARENT
+        match self {
+            Appearance::Light => FRAME_LIGHT,
+            Appearance::Dark => FRAME_DARK,
+        }
     }
 }
 
@@ -115,6 +118,12 @@ impl Geometry {
     ///
     /// Returns an error if the height is below `MIN_HEIGHT_POINTS` or the scale is 0.
     pub fn new(height_points: u32, scale: u32) -> Result<Geometry, GeometryError> {
+        if height_points < Self::MIN_HEIGHT_POINTS {
+            return Err(GeometryError::HeightTooSmall { height_points });
+        }
+        if scale == 0 {
+            return Err(GeometryError::ZeroScale);
+        }
         Ok(Geometry {
             height_points,
             scale,
@@ -122,12 +131,21 @@ impl Geometry {
     }
 
     /// Makes the geometry of the status bar of the screen.
+    ///
+    /// The inputs are `NSStatusBar.thickness` and `NSScreen.backingScaleFactor`.
+    /// The height is the whole points of the thickness less the inset above and
+    /// below, and at least `MIN_HEIGHT_POINTS`. The scale is the backing scale
+    /// rounded, and at least 1. An input that is not finite gives the minimum.
     #[must_use]
     pub fn from_status_bar(thickness_points: f64, backing_scale: f64) -> Geometry {
-        let _ = (thickness_points, backing_scale);
+        let thickness = whole_number(thickness_points.floor());
+        let height_points = thickness
+            .saturating_sub(2 * VERTICAL_INSET_POINTS)
+            .max(Self::MIN_HEIGHT_POINTS);
+        let scale = whole_number(backing_scale.round()).max(1);
         Geometry {
-            height_points: Self::MIN_HEIGHT_POINTS,
-            scale: 1,
+            height_points,
+            scale,
         }
     }
 
@@ -141,6 +159,39 @@ impl Geometry {
     #[must_use]
     pub fn scale(self) -> u32 {
         self.scale
+    }
+}
+
+/// Converts a number that is already whole into a `u32`.
+///
+/// A value that is not finite gives 0. A negative value gives 0, and a value
+/// above `u32::MAX` gives `u32::MAX`.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the value is finite and clamped into the range of u32 first"
+)]
+fn whole_number(value: f64) -> u32 {
+    if value.is_finite() {
+        value.clamp(0.0, f64::from(u32::MAX)) as u32
+    } else {
+        0
+    }
+}
+
+/// The number of rows that a fraction of `rows` fills: `round(fraction * rows)`,
+/// clamped to `0..=rows`.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the value is rounded and clamped to 0..=rows first, and rows is a u32"
+)]
+fn rows_of_fraction(fraction: f64, rows: u32) -> u32 {
+    let filled = (fraction * f64::from(rows)).round();
+    if filled.is_nan() {
+        0
+    } else {
+        filled.clamp(0.0, f64::from(rows)) as u32
     }
 }
 
@@ -165,6 +216,22 @@ impl Pixmap {
             height,
             scale,
             bytes: vec![0; length],
+        }
+    }
+
+    /// The byte offset of a pixel that is inside of the image.
+    fn offset(&self, x: u32, y: u32) -> usize {
+        let index = u64::from(y) * u64::from(self.width) + u64::from(x);
+        usize::try_from(index).map_or(usize::MAX, |pixels| pixels.saturating_mul(BYTES_PER_PIXEL))
+    }
+
+    /// Paints a rectangle in pixels. The caller keeps it inside of the image.
+    fn fill(&mut self, left: u32, top: u32, width: u32, height: u32, color: Rgba) {
+        for y in top..top + height {
+            for x in left..left + width {
+                let offset = self.offset(x, y);
+                self.bytes[offset..offset + BYTES_PER_PIXEL].copy_from_slice(&color);
+            }
         }
     }
 
@@ -205,8 +272,7 @@ impl Pixmap {
             self.width,
             self.height
         );
-        let offset = (u64::from(y) * u64::from(self.width) + u64::from(x)) * 4;
-        let offset = usize::try_from(offset).expect("the offset fits in memory");
+        let offset = self.offset(x, y);
         let mut color = TRANSPARENT;
         color.copy_from_slice(&self.bytes[offset..offset + BYTES_PER_PIXEL]);
         color
@@ -219,14 +285,98 @@ impl Pixmap {
     }
 }
 
+/// The color of the memory column at a pressure level.
+fn level_color(level: Level) -> Rgba {
+    match level {
+        Level::Normal => NORMAL,
+        Level::Warn => WARN,
+        Level::Critical => CRITICAL,
+        Level::Unknown(_) => UNKNOWN,
+    }
+}
+
+/// The number of rows of the memory column: `round(percent * rows / 100)`.
+fn memory_rows(percent_in_use: u8, rows: u32) -> u32 {
+    (u32::from(percent_in_use) * rows + PERCENT_HALF) / PERCENT_MAX
+}
+
 /// Draws the two charts of the history.
+///
+/// Each chart has `history.capacity()` columns inside of a frame. The CPU chart
+/// is on the left, then a transparent gap, then the memory chart. The newest
+/// sample sits in the rightmost column of each chart. A column that has no
+/// sample yet stays empty.
+///
+/// # Panics
+///
+/// Panics if the capacity of the history does not fit in a `u32`.
 #[must_use]
 pub fn render(history: &History<Sample>, geometry: Geometry, appearance: Appearance) -> Pixmap {
-    let _ = appearance;
-    let capacity = u32::try_from(history.capacity()).unwrap_or(u32::MAX);
+    let scale = geometry.scale;
+    let capacity = u32::try_from(history.capacity()).expect("the capacity fits in a u32");
     let chart_width = capacity + 2 * FRAME_POINTS;
-    let width = CHART_COUNT * chart_width + GAP_POINTS;
-    Pixmap::empty(width, geometry.height_points, geometry.scale)
+    let mut pixmap = Pixmap::empty(
+        CHART_COUNT * chart_width + GAP_POINTS,
+        geometry.height_points,
+        scale,
+    );
+
+    let rows = (geometry.height_points - 2 * FRAME_POINTS) * scale;
+    let interior_top = FRAME_POINTS * scale;
+    let interior_bottom = interior_top + rows;
+    let chart_origins = [0, chart_width + GAP_POINTS];
+
+    for origin in chart_origins {
+        pixmap.fill(
+            origin * scale,
+            0,
+            chart_width * scale,
+            geometry.height_points * scale,
+            appearance.frame(),
+        );
+        pixmap.fill(
+            (origin + FRAME_POINTS) * scale,
+            interior_top,
+            capacity * scale,
+            rows,
+            TRANSPARENT,
+        );
+    }
+
+    let count = u32::try_from(history.len()).unwrap_or(capacity);
+    for (position, item) in (0..count).zip(history.iter()) {
+        let slot = capacity - count + position;
+        let [cpu_origin, memory_origin] = chart_origins;
+        let cpu_x = (cpu_origin + FRAME_POINTS + slot) * scale;
+        let memory_x = (memory_origin + FRAME_POINTS + slot) * scale;
+
+        let system_rows = rows_of_fraction(item.cpu.system(), rows);
+        let busy_rows = rows_of_fraction(item.cpu.system() + item.cpu.user(), rows);
+        pixmap.fill(
+            cpu_x,
+            interior_bottom - system_rows,
+            scale,
+            system_rows,
+            SYSTEM,
+        );
+        pixmap.fill(
+            cpu_x,
+            interior_bottom - busy_rows,
+            scale,
+            busy_rows - system_rows,
+            USER,
+        );
+
+        let used_rows = memory_rows(item.pressure.percent_in_use(), rows);
+        pixmap.fill(
+            memory_x,
+            interior_bottom - used_rows,
+            scale,
+            used_rows,
+            level_color(item.pressure.level()),
+        );
+    }
+    pixmap
 }
 
 #[cfg(test)]
