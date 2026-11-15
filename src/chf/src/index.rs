@@ -65,13 +65,15 @@ static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// One event of an indexing run.
 #[derive(Debug)]
 pub enum IndexEvent {
-    /// The count of session files found. Sent once, before the first `Session`.
+    /// The count of session files found. Sent once, as the first event of a run.
+    /// A folder that chf can not list counts 0.
     Total(usize),
     /// One indexed session.
     Session(Box<Session>),
-    /// A transcript that chf can not open or read, or a folder that it can not list.
+    /// A transcript that chf can not open or read, or a folder or the store that
+    /// it can not list. A store or a folder that chf can not list keeps its cache.
     Unreadable {
-        /// The path of the transcript, or of the folder.
+        /// The path of the transcript, of the folder, or of the store.
         path: PathBuf,
         /// The text of the io error.
         reason: String,
@@ -135,26 +137,53 @@ impl Stat {
 struct Folder {
     name: String,
     hex: String,
-    candidates: Vec<Candidate>,
+    /// The session files, or `None` when chf could not list the folder.
+    candidates: Option<Vec<Candidate>>,
     newest: SystemTime,
+}
+
+/// What `discover` learned about the store.
+struct Store {
+    folders: Vec<Folder>,
+    /// Each store or folder that chf could not list, with the io error text.
+    unreadable: Vec<(PathBuf, String)>,
+    /// True only when chf listed the store from start to end. A missing store
+    /// counts as listed, because it holds no sessions.
+    complete: bool,
 }
 
 /// Index the store synchronously. Each event goes to `sink`.
 ///
 /// `projects` is the Claude Code `projects` directory. `cache` is the cache
-/// directory. The run sends `Total` once, then one `Session` or `Unreadable` for
-/// each session file, then `Done`. A failure to write the cache is not an event.
+/// directory. The run sends `Total` first. Then it sends one `Unreadable` for
+/// the store, if chf can not list it, and one for each folder that chf can not
+/// list. Then it sends one `Session` or `Unreadable` for each session file.
+/// `Done` is the last event. A failure to write the cache is not an event.
+///
+/// The run removes stale cache files only when it listed the whole store. A
+/// folder that chf did not see is not a folder that is gone. A folder that chf
+/// can not list keeps its cache file as it is.
 pub fn run(projects: &Path, cache: &Path, sink: &(dyn Fn(IndexEvent) + Sync)) {
-    let mut folders = discover(projects, sink);
-    let total: usize = folders.iter().map(|folder| folder.candidates.len()).sum();
+    let Store {
+        mut folders,
+        unreadable,
+        complete,
+    } = discover(projects);
+    let total: usize = folders
+        .iter()
+        .map(|folder| folder.candidates.as_ref().map_or(0, Vec::len))
+        .sum();
 
     let cache = prepare_cache_dir(cache).then_some(cache);
-    if let Some(cache) = cache {
+    if let Some(cache) = cache.filter(|_| complete) {
         let live: HashSet<&str> = folders.iter().map(|folder| folder.hex.as_str()).collect();
         clean_cache_dir(cache, &live);
     }
 
     sink(IndexEvent::Total(total));
+    for (path, reason) in unreadable {
+        sink(IndexEvent::Unreadable { path, reason });
+    }
     folders.sort_by_key(|folder| std::cmp::Reverse(folder.newest));
     folders
         .par_iter()
@@ -176,14 +205,39 @@ pub fn spawn(projects: PathBuf, cache: PathBuf) -> std::sync::mpsc::Receiver<Ind
     receiver
 }
 
-/// List each project folder and stat each session file. This function sends only
-/// `Unreadable` events, for folders that it can not list.
-fn discover(projects: &Path, sink: &(dyn Fn(IndexEvent) + Sync)) -> Vec<Folder> {
-    let Ok(entries) = fs::read_dir(projects) else {
-        return Vec::new();
+/// List each project folder and stat each session file. This function sends no
+/// event. It returns what chf could not list, and whether the listing of the
+/// store is complete.
+///
+/// A store that does not exist has no sessions, and its listing is complete.
+/// Any other error of the store, or an error while chf reads its entries, makes
+/// the listing not complete.
+fn discover(projects: &Path) -> Store {
+    let mut store = Store {
+        folders: Vec::new(),
+        unreadable: Vec::new(),
+        complete: true,
     };
-    let mut folders = Vec::new();
-    for entry in entries.flatten() {
+    let entries = match fs::read_dir(projects) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return store,
+        Err(error) => {
+            store.complete = false;
+            store
+                .unreadable
+                .push((projects.to_path_buf(), error.to_string()));
+            return store;
+        }
+    };
+    let mut entry_error = None;
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                entry_error.get_or_insert(error.to_string());
+                continue;
+            }
+        };
         let path = entry.path();
         let is_dir = fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_dir());
         if !is_dir {
@@ -192,29 +246,31 @@ fn discover(projects: &Path, sink: &(dyn Fn(IndexEvent) + Sync)) -> Vec<Folder> 
         let name = entry.file_name().to_string_lossy().into_owned();
         let hex = folder_hex(&entry.file_name());
         let candidates = match list_candidates(&path) {
-            Ok(candidates) => candidates,
+            Ok(candidates) => Some(candidates),
             Err(error) => {
-                sink(IndexEvent::Unreadable {
-                    path,
-                    reason: error.to_string(),
-                });
-                Vec::new()
+                store.unreadable.push((path, error.to_string()));
+                None
             }
         };
         let newest = candidates
             .iter()
+            .flatten()
             .filter_map(|candidate| candidate.stat.as_ref().ok())
             .map(|stat| stat.mtime)
             .max()
             .unwrap_or(SystemTime::UNIX_EPOCH);
-        folders.push(Folder {
+        store.folders.push(Folder {
             name,
             hex,
             candidates,
             newest,
         });
     }
-    folders
+    if let Some(reason) = entry_error {
+        store.complete = false;
+        store.unreadable.insert(0, (projects.to_path_buf(), reason));
+    }
+    store
 }
 
 /// The session files directly inside one project folder.
@@ -248,7 +304,13 @@ fn list_candidates(folder: &Path) -> std::io::Result<Vec<Candidate>> {
 }
 
 /// Send the sessions of one folder and update its cache file.
+///
+/// A folder that chf could not list sends nothing, and its cache file stays as
+/// it is. `run` already sent the `Unreadable` event of that folder.
 fn process_folder(folder: &Folder, cache: Option<&Path>, sink: &(dyn Fn(IndexEvent) + Sync)) {
+    let Some(candidates) = &folder.candidates else {
+        return;
+    };
     let old = cache
         .map(|cache| load_cache(cache, folder))
         .unwrap_or_default();
@@ -256,7 +318,7 @@ fn process_folder(folder: &Folder, cache: Option<&Path>, sink: &(dyn Fn(IndexEve
 
     let mut kept: Vec<CacheEntry> = Vec::new();
     let mut misses: Vec<(&Candidate, Stat)> = Vec::new();
-    for candidate in &folder.candidates {
+    for candidate in candidates {
         let stat = match &candidate.stat {
             Ok(stat) => *stat,
             Err(reason) => {
