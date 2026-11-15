@@ -20,10 +20,13 @@
 //!   the compilers.
 //! - [`verdict`] — the thresholds, and the summary of the likely cause.
 //! - [`render`] — the lines of text that show the summary.
+//! - [`machine`] — the facts of this Mac behind one trait, and the read of
+//!   them in one fixed order.
 
 #[cfg(test)]
 mod fixtures;
 pub mod groups;
+pub mod machine;
 pub mod render;
 pub mod sample;
 pub mod tally;
