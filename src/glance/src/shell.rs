@@ -33,7 +33,7 @@ use crate::history::{History, DEFAULT_CAPACITY};
 use crate::interval::Interval;
 use crate::reader::Reader;
 use crate::sample::{Reading, Sample};
-use crate::text::{menu_lines, read_error_line, QUIT_TITLE, WAITING_LINE};
+use crate::text::{menu_titles, QUIT_TITLE};
 
 /// The exit status of a start off the main thread.
 const EXIT_NOT_MAIN_THREAD: u8 = 1;
@@ -261,18 +261,13 @@ impl Monitor {
         button.setImage(Some(&image));
     }
 
-    /// Writes the four info lines of the menu.
+    /// Sets the four info lines of the menu to the titles of `menu_titles`.
     fn update_menu(&self) {
         let state = self.ivars().state.borrow();
         let items = &self.ivars().info_items;
-        if let Some(error) = &state.error {
-            items[0].setTitle(&NSString::from_str(&read_error_line(error)));
-        } else if let Some(newest) = state.history.newest() {
-            for (item, line) in items.iter().zip(menu_lines(&newest)) {
-                item.setTitle(&NSString::from_str(&line));
-            }
-        } else {
-            items[0].setTitle(&NSString::from_str(WAITING_LINE));
+        let titles = menu_titles(state.error.as_deref(), state.history.newest().as_ref());
+        for (item, title) in items.iter().zip(titles) {
+            item.setTitle(&NSString::from_str(&title));
         }
     }
 }
@@ -340,8 +335,9 @@ fn build_menu(
 ) -> [Retained<NSMenuItem>; INFO_LINES] {
     let menu = NSMenu::new(mtm);
     menu.setAutoenablesItems(false);
+    let titles = menu_titles(None, None);
     let info_items: [Retained<NSMenuItem>; INFO_LINES] = std::array::from_fn(|index| {
-        let title = if index == 0 { WAITING_LINE } else { "" };
+        let title = titles[index].as_str();
         // SAFETY: The selector is absent, which AppKit allows for an item
         // that does nothing.
         let item = unsafe {

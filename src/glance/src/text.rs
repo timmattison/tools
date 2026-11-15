@@ -54,27 +54,22 @@ pub fn menu_lines(sample: &Sample) -> [String; 4] {
 }
 
 /// The four info lines of the menu, from the last read error and the newest sample.
+///
+/// An error wins over a sample. After an error, the three lower lines are
+/// empty, so the values of an older sample do not look current. With no error
+/// and no sample, the first line is [`WAITING_LINE`].
 #[must_use]
 pub fn menu_titles(error: Option<&str>, newest: Option<&Sample>) -> [String; 4] {
     match (error, newest) {
-        (Some(reason), Some(sample)) => {
-            let [_, second, third, fourth] = menu_lines(sample);
-            [read_error_line(reason), second, third, fourth]
-        }
-        (Some(reason), None) => [
-            read_error_line(reason),
-            String::new(),
-            String::new(),
-            String::new(),
-        ],
+        (Some(reason), _) => lines_under(read_error_line(reason)),
         (None, Some(sample)) => menu_lines(sample),
-        (None, None) => [
-            WAITING_LINE.to_owned(),
-            String::new(),
-            String::new(),
-            String::new(),
-        ],
+        (None, None) => lines_under(WAITING_LINE.to_owned()),
     }
+}
+
+/// The first menu line, with three empty lines under it.
+fn lines_under(first: String) -> [String; 4] {
+    [first, String::new(), String::new(), String::new()]
 }
 
 /// Rounds a share from 0 to 1 to a whole percentage.
