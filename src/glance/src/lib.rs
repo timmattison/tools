@@ -23,6 +23,7 @@
 
 #![deny(unsafe_code)]
 
+pub mod chart;
 pub mod cpu;
 pub mod history;
 pub mod pressure;
