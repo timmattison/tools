@@ -687,7 +687,13 @@ impl Scratch {
         let onto_option = new_base.map(|base| format!("--onto={base}"));
         let mut rebase_args: Vec<&str> = onto_option.as_deref().into_iter().collect();
         rebase_args.extend(["--end-of-options", upstream]);
-        let mut outcome = git.try_run("rebase", &rebase_args)?;
+        // Each `git rebase` call goes through here, so the poll covers the first
+        // rebase, each `--continue`, and each `--skip`.
+        let run_rebase = |args: &[&str]| match &watch {
+            Some(watch) => watch.watch(|| git.try_run("rebase", args)),
+            None => git.try_run("rebase", args),
+        };
+        let mut outcome = run_rebase(&rebase_args)?;
         let mut rounds = 0;
 
         loop {
@@ -742,13 +748,12 @@ impl Scratch {
                     }
 
                     git.run("add", &["-A"])?;
-                    outcome = git.try_run("rebase", &["--continue"])?;
+                    outcome = run_rebase(&["--continue"])?;
                 }
                 Halt::EmptyCommit { stopped } => {
                     // Nothing for a human to resolve and nothing lost by
                     // dropping it, so it costs nothing.
-                    outcome = git
-                        .try_run("rebase", &["--skip"])
+                    outcome = run_rebase(&["--skip"])
                         .with_context(|| format!("could not skip the empty commit {stopped}"))?;
 
                     // Read here, before the loop can come round again, because

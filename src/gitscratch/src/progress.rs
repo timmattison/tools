@@ -37,7 +37,9 @@
 //! A position never decreases, and a repeated position is reported once.
 
 use std::path::PathBuf;
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 /// A stage of a replay, named by the work git does in it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,6 +83,9 @@ impl<T: ReplayObserver + ?Sized> ReplayObserver for Arc<T> {
         (**self).report(progress);
     }
 }
+
+/// How long the poll waits between two reads of the state files.
+const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// The name of the state file that holds the number of the commit that git
 /// replays now.
@@ -133,9 +138,34 @@ impl<'a> RebaseWatch<'a> {
         }
     }
 
-    /// Run `call` and read the state files while it runs.
+    /// Run `call` on this thread and poll the state files while it runs.
+    ///
+    /// A `git rebase` command can replay many commits before it returns, and
+    /// the state files change during that time. A scoped thread polls every
+    /// [`POLL_INTERVAL`] until `call` returns. A channel stops the thread: the
+    /// thread waits on the channel for one interval, polls on each timeout, and
+    /// ends when the sender drops. The scope joins the thread before this
+    /// method returns, so no poll outlives the call.
+    ///
+    /// If the system cannot start the thread, `call` runs with no poll. A
+    /// failure of the display costs the display and never the replay.
     pub(crate) fn watch<T>(&self, call: impl FnOnce() -> T) -> T {
-        call()
+        std::thread::scope(|scope| {
+            let (stop, stopped) = mpsc::channel::<()>();
+            let spawned = std::thread::Builder::new()
+                .name("rebase-watch".to_owned())
+                .spawn_scoped(scope, move || {
+                    while let Err(RecvTimeoutError::Timeout) = stopped.recv_timeout(POLL_INTERVAL) {
+                        self.poll();
+                    }
+                });
+            let result = call();
+            // Dropping the sender ends the thread, and the scope joins it. When
+            // the spawn failed, there is no thread and the drop does nothing.
+            drop(stop);
+            drop(spawned);
+            result
+        })
     }
 
     /// Report the end of the rebase.
