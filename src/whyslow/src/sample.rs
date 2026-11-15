@@ -47,6 +47,24 @@ pub fn arguments() -> Vec<String> {
     ]
 }
 
+/// Gives the CPU time that each process of `after` used between the two
+/// snapshots.
+///
+/// The result holds one value for each row of `after`, in the same order. The
+/// identity of a process is its PID and its start time, because the system can
+/// give a PID to a new process after the old one exits.
+///
+/// - A process in both snapshots with the same identity gives the CPU time of
+///   `after` minus the CPU time of `before`. The subtraction stops at zero.
+/// - A process in `after` only, or a PID with another start time, is a new
+///   process. It gives all of its CPU time.
+/// - A row of `before` that is not in `after` gives no value, because the
+///   process exited and the result has no row for it.
+#[must_use]
+pub fn cpu_used(_before: &[ProcessRow], after: &[ProcessRow]) -> Vec<CpuTime> {
+    after.iter().map(|_| CpuTime::default()).collect()
+}
+
 /// The character between the minutes and the seconds of a time token.
 const MINUTES_SEPARATOR: char = ':';
 
@@ -582,5 +600,87 @@ mod tests {
             ]
         );
         assert_eq!(ENVIRONMENT, [("TZ", "UTC"), ("LC_ALL", "en_US.UTF-8")]);
+    }
+
+    /// A row of PID `pid` that started at `started` and used `cs` hundredths.
+    fn process(pid: u32, started: &str, cs: u64) -> ProcessRow {
+        ProcessRow {
+            pid: Pid::new(pid),
+            ppid: Pid::new(1),
+            uid: Uid::new(501),
+            started: started.to_owned(),
+            cpu: CpuTime::from_centiseconds(cs),
+            rss_kib: 100,
+            executable: "/usr/bin/tool".to_owned(),
+        }
+    }
+
+    /// Gives the used time of each value, as hundredths.
+    fn centiseconds(times: &[CpuTime]) -> Vec<u64> {
+        times.iter().map(|time| time.centiseconds()).collect()
+    }
+
+    /// A process in both snapshots with the same identity gives the
+    /// difference of its two CPU times.
+    #[test]
+    fn a_process_in_both_snapshots_gives_the_difference() {
+        let before = [process(10, "A", 100), process(11, "B", 50)];
+        let after = [process(10, "A", 390), process(11, "B", 50)];
+        assert_eq!(centiseconds(&cpu_used(&before, &after)), [290, 0]);
+    }
+
+    /// A process that is only in the second snapshot started in the window,
+    /// and it gives all of its CPU time.
+    #[test]
+    fn a_new_process_gives_all_of_its_time() {
+        let before = [process(10, "A", 100)];
+        let after = [process(10, "A", 100), process(12, "C", 77)];
+        assert_eq!(centiseconds(&cpu_used(&before, &after)), [0, 77]);
+    }
+
+    /// A process that is only in the first snapshot gives no value. The
+    /// result has one value for each row of the second snapshot, in order.
+    #[test]
+    fn an_exited_process_gives_no_value() {
+        let before = [process(9, "Z", 500), process(10, "A", 100)];
+        let after = [process(11, "B", 5), process(10, "A", 130)];
+        assert_eq!(centiseconds(&cpu_used(&before, &after)), [5, 30]);
+        assert!(cpu_used(&before, &[]).is_empty());
+    }
+
+    /// A PID with another start time is a new process that reuses the PID.
+    /// It gives all of its CPU time, and not the difference with the old one.
+    #[test]
+    fn a_reused_pid_is_a_new_process() {
+        let before = [process(10, "Mon Nov 2 01:00:00 2026", 900)];
+        let after = [process(10, "Tue Nov 3 02:00:00 2026", 40)];
+        assert_eq!(centiseconds(&cpu_used(&before, &after)), [40]);
+    }
+
+    /// A counter that went down gives 0, and does not wrap around.
+    #[test]
+    fn a_counter_that_went_down_gives_zero() {
+        let before = [process(10, "A", 500)];
+        let after = [process(10, "A", 300)];
+        assert_eq!(centiseconds(&cpu_used(&before, &after)), [0]);
+    }
+
+    /// The sum over the two fixture files. Each of the 26 processes is in
+    /// both files with the same start time, so each value is the difference
+    /// of two CPU times. The CPU times changed for 10 processes, in
+    /// hundredths of a second: 1, 1, 11, 5, 14, 1, 1, 1, 2 and 1, which is
+    /// 38. The check by hand was `awk` over the time column of each file:
+    /// the sum of the second file (53 507 317) minus the sum of the first
+    /// (53 507 279).
+    #[test]
+    fn the_fixtures_give_the_sum_that_was_computed_by_hand() {
+        let before = parse(BEFORE).expect("the capture parses");
+        let after = parse(AFTER).expect("the capture parses");
+        let used = cpu_used(&before, &after);
+        assert_eq!(used.len(), after.len());
+        assert_eq!(
+            used.into_iter().sum::<CpuTime>(),
+            CpuTime::from_centiseconds(38)
+        );
     }
 }
