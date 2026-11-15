@@ -9,12 +9,12 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use faulte::duration::Span;
-use faulte::pid::{Pid, Uid};
+use faulte::pid::Pid;
 use faulte::vm::{SwapUsage, VmCounters};
 use whyslow::machine::{observe, Machine, SourceError};
 use whyslow::render::render;
 use whyslow::report::{report, EXIT_SOURCE_FAILED};
-use whyslow::sample::{CpuTime, ProcessRow};
+use whyslow::sample::ProcessRow;
 use whyslow::verdict::summarize;
 use whyslow::verdict::{CpuTicks, Pressure};
 
@@ -27,19 +27,6 @@ const REFUSED: &str = "refused by the test";
 /// Gives the interval that the person asked for in the tests.
 fn interval() -> Span {
     "2s".parse().expect("2s is a span")
-}
-
-/// Gives one row of the process table.
-fn row(pid: u32, cpu_centiseconds: u64, rss_kib: u64, executable: &str) -> ProcessRow {
-    ProcessRow {
-        pid: Pid::new(pid),
-        ppid: Pid::new(1),
-        uid: Uid::new(501),
-        started: "Sat Nov 14 10:00:00 2026".to_owned(),
-        cpu: CpuTime::from_centiseconds(cpu_centiseconds),
-        rss_kib,
-        executable: executable.to_owned(),
-    }
 }
 
 /// Gives the error that a failed source of the tests gives.

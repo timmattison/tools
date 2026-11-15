@@ -2,7 +2,9 @@
 
 use faulte::duration::Span;
 
-use crate::machine::Machine;
+use crate::machine::{observe, Machine};
+use crate::render::render;
+use crate::verdict::summarize;
 
 /// The exit code when a source of this Mac failed.
 pub const EXIT_SOURCE_FAILED: u8 = 2;
@@ -19,11 +21,21 @@ pub struct Outcome {
 }
 
 /// Reads `machine` and gives what the binary prints.
+///
+/// A source that fails gives its reason and no summary, because a summary with
+/// a missing source can look like a quiet Mac.
 #[must_use]
-pub fn report(_machine: &dyn Machine, _interval: Span) -> Outcome {
-    Outcome {
-        stdout: vec![],
-        stderr: None,
-        code: 0,
+pub fn report(machine: &dyn Machine, interval: Span) -> Outcome {
+    match observe(machine, interval) {
+        Ok(facts) => Outcome {
+            stdout: render(&summarize(&facts)),
+            stderr: None,
+            code: 0,
+        },
+        Err(error) => Outcome {
+            stdout: Vec::new(),
+            stderr: Some(format!("whyslow: {error}")),
+            code: EXIT_SOURCE_FAILED,
+        },
     }
 }
