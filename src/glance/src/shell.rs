@@ -24,8 +24,8 @@ use objc2_app_kit::{
     NSMenuItem, NSScreen, NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
 };
 use objc2_foundation::{
-    ns_string, NSArray, NSDistributedNotificationCenter, NSNotification, NSNotificationCenter,
-    NSNotificationName, NSObject, NSSize, NSString, NSTimer,
+    ns_string, NSArray, NSDefaultRunLoopMode, NSDistributedNotificationCenter, NSNotification,
+    NSNotificationCenter, NSNotificationName, NSObject, NSRunLoop, NSSize, NSString, NSTimer,
 };
 
 use crate::chart::{render, Appearance, Geometry, Pixmap};
@@ -44,6 +44,12 @@ const NOT_MAIN_THREAD: &str = "glance: the status item must start on the main th
 /// The share of the interval that the timer may drift. The slack lets macOS
 /// merge the wakeups of the timer with other wakeups.
 const TIMER_TOLERANCE: f64 = 0.1;
+
+/// Adds a repeating timer to a run loop.
+fn add_repeating_timer(run_loop: &NSRunLoop, timer: &NSTimer) {
+    // SAFETY: The mode is a constant of Foundation that exists at run time.
+    unsafe { run_loop.addTimer_forMode(timer, NSDefaultRunLoopMode) }
+}
 
 /// The name of the notification that the system posts when the appearance
 /// changes between light and dark.
@@ -172,7 +178,7 @@ impl Monitor {
         // SAFETY: The target is this monitor, which answers `tick:` with one
         // timer argument. No user info is given.
         let timer = unsafe {
-            NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+            NSTimer::timerWithTimeInterval_target_selector_userInfo_repeats(
                 seconds,
                 self,
                 sel!(tick:),
@@ -180,6 +186,7 @@ impl Monitor {
                 true,
             )
         };
+        add_repeating_timer(&NSRunLoop::mainRunLoop(), &timer);
         timer.setTolerance(seconds * TIMER_TOLERANCE);
     }
 
@@ -403,4 +410,84 @@ pub fn run(interval: Interval) -> ExitCode {
     register_observers(&monitor);
     app.run();
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::time::Duration;
+
+    use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass};
+    use objc2_app_kit::NSEventTrackingRunLoopMode;
+    use objc2_core_foundation::{CFRunLoop, CFString};
+    use objc2_foundation::{NSDate, NSObject, NSRunLoop, NSTimer};
+
+    use super::add_repeating_timer;
+
+    /// The interval of the probe timer, in seconds.
+    const PROBE_INTERVAL: f64 = 0.02;
+
+    /// How long the test waits for one fire, in seconds. The bound is wide
+    /// because a full workspace run is often heavily loaded.
+    const FIRE_DEADLINE: f64 = 5.0;
+
+    define_class!(
+        /// A timer target that counts its fires.
+        #[unsafe(super = NSObject)]
+        #[name = "GlanceTimerProbe"]
+        #[ivars = Cell<u32>]
+        struct Probe;
+
+        impl Probe {
+            #[unsafe(method(fire:))]
+            fn fire(&self, _timer: &NSTimer) {
+                let ivars = self.ivars();
+                ivars.set(ivars.get() + 1);
+            }
+        }
+    );
+
+    impl Probe {
+        /// Makes a probe with a count of zero.
+        fn new() -> objc2::rc::Retained<Self> {
+            let this = Self::alloc().set_ivars(Cell::new(0));
+            // SAFETY: `NSObject` answers `init`.
+            unsafe { msg_send![super(this), init] }
+        }
+    }
+
+    #[test]
+    fn a_repeating_timer_fires_while_a_menu_tracks_events() {
+        // SAFETY: This is a constant of AppKit that exists at run time.
+        let mode = unsafe { NSEventTrackingRunLoopMode };
+        // The main run loop of an application lists the tracking mode among
+        // its common modes, and the run loop of a test thread does not.
+        CFRunLoop::current()
+            .expect("the test thread has a run loop")
+            .add_common_mode(Some(&CFString::from_str(&mode.to_string())));
+        let probe = Probe::new();
+        // SAFETY: The target answers `fire:` with one timer argument.
+        let timer = unsafe {
+            NSTimer::timerWithTimeInterval_target_selector_userInfo_repeats(
+                PROBE_INTERVAL,
+                &probe,
+                sel!(fire:),
+                None,
+                true,
+            )
+        };
+        let run_loop = NSRunLoop::currentRunLoop();
+        add_repeating_timer(&run_loop, &timer);
+        let deadline = NSDate::dateWithTimeIntervalSinceNow(FIRE_DEADLINE);
+        while probe.ivars().get() == 0 && deadline.timeIntervalSinceNow() > 0.0 {
+            if !run_loop.runMode_beforeDate(mode, &deadline) {
+                std::thread::sleep(Duration::from_secs_f64(PROBE_INTERVAL));
+            }
+        }
+        timer.invalidate();
+        assert!(
+            probe.ivars().get() > 0,
+            "the timer did not fire in the mode {mode}"
+        );
+    }
 }

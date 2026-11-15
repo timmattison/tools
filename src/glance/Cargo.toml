@@ -48,9 +48,15 @@ objc2-foundation = { workspace = true, features = [
     "std",
     "NSDistributedNotificationCenter",
     "NSTimer",
+    "NSRunLoop",
+    "NSDate",
+    "NSString",
     "NSEnumerator",
     "objc2-core-foundation",
 ] }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2-core-foundation = { workspace = true, features = ["CFRunLoop", "CFString"] }
 
 [dev-dependencies]
 childenv.workspace = true
