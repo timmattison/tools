@@ -101,6 +101,7 @@ pub struct GroupTotal {
 #[must_use]
 pub fn tally(processes: &[ProcessSample]) -> Vec<GroupTotal> {
     let mut by_group: BTreeMap<Group, (GroupTotal, BTreeSet<Uid>)> = BTreeMap::new();
+    let mut by_worktree: BTreeMap<Option<PathBuf>, WorktreeTotal> = BTreeMap::new();
     for process in processes {
         let (total, accounts) = by_group.entry(process.group.clone()).or_insert_with(|| {
             (
@@ -121,11 +122,30 @@ pub fn tally(processes: &[ProcessSample]) -> Vec<GroupTotal> {
         total.memory_bytes = total.memory_bytes.saturating_add(process.memory.bytes());
         total.at_least |= process.memory.at_least();
         accounts.insert(process.uid);
+        if process.group == Group::Compilers {
+            let entry = by_worktree
+                .entry(process.worktree.clone())
+                .or_insert_with(|| WorktreeTotal {
+                    worktree: process.worktree.clone(),
+                    processes: 0,
+                    cpu: CpuTime::default(),
+                    memory_bytes: 0,
+                    at_least: false,
+                });
+            entry.processes += 1;
+            entry.cpu = entry.cpu + process.cpu;
+            entry.memory_bytes = entry.memory_bytes.saturating_add(process.memory.bytes());
+            entry.at_least |= process.memory.at_least();
+        }
     }
+    let compiler_worktrees: Vec<WorktreeTotal> = by_worktree.into_values().collect();
     by_group
         .into_values()
         .map(|(mut total, accounts)| {
             total.accounts = accounts.len();
+            if total.group == Group::Compilers {
+                total.worktrees.clone_from(&compiler_worktrees);
+            }
             total
         })
         .collect()
