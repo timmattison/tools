@@ -91,7 +91,7 @@ fn pad_right(text: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::verdict::{CpuState, Pressure};
+    use crate::verdict::{CpuState, GroupLine, Pressure, Share};
     use faulte::vm::SwapUsage;
 
     /// One gibibyte.
@@ -218,6 +218,127 @@ mod tests {
                 "The CPU and the memory are not short: 85% idle, pressure normal.",
                 "For the disk, run diskhog. For the clock speed, run thermal-watch.",
             ]
+        );
+    }
+
+    /// Makes a group line with one account and no worktree.
+    fn line(label: &str, processes: usize, cpu_percent: u64) -> GroupLine {
+        GroupLine {
+            label: label.to_owned(),
+            processes,
+            accounts: 1,
+            cpu_percent,
+            memory_bytes: 0,
+            at_least: false,
+            worktrees: Vec::new(),
+            more: None,
+        }
+    }
+
+    /// Makes a share for a worktree line.
+    fn share(label: &str, cpu_percent: u64) -> Share {
+        Share {
+            label: label.to_owned(),
+            cpu_percent,
+            memory_bytes: 0,
+            at_least: false,
+        }
+    }
+
+    /// The header line of the CPU block states the idle part, the system
+    /// part, the load, and the number of processors. One processor is the
+    /// singular.
+    #[test]
+    fn the_cpu_header_states_idle_system_load_and_processors() {
+        let lines = render(&summary(CpuState::Full, false));
+        assert_eq!(
+            lines.get(1).map(String::as_str),
+            Some("CPU     0% idle, 44% system, load 152 on 14 processors")
+        );
+        let mut one = summary(CpuState::Full, false);
+        one.processors = 1;
+        assert_eq!(
+            render(&one).get(1).map(String::as_str),
+            Some("CPU     0% idle, 44% system, load 152 on 1 processor")
+        );
+    }
+
+    /// The compression line shows only when the summary says that
+    /// compression is likely.
+    #[test]
+    fn the_compression_line_shows_only_when_compression_is_likely() {
+        let compression = "        High system time and short memory: likely compression and swap.";
+        let mut likely = summary(CpuState::Full, true);
+        likely.compression_likely = true;
+        assert_eq!(
+            render(&likely).get(2).map(String::as_str),
+            Some(compression)
+        );
+        let unlikely = render(&summary(CpuState::Full, true));
+        assert!(!unlikely.iter().any(|l| l == compression));
+    }
+
+    /// A group line has the label, the count with its noun, and the value.
+    /// A second account adds its own note at the end.
+    #[test]
+    fn a_group_line_shows_the_count_the_noun_and_the_value() {
+        let mut full = summary(CpuState::Full, false);
+        let mut claude = line("Claude Code", 176, 290);
+        claude.accounts = 2;
+        full.cpu_groups = vec![claude, line("WindowServer", 1, 75)];
+        let lines = render(&full);
+        assert_eq!(
+            lines.get(2).map(String::as_str),
+            Some("  Claude Code                 176 processes       290%   2 accounts")
+        );
+        assert_eq!(
+            lines.get(3).map(String::as_str),
+            Some("  WindowServer                  1 process          75%")
+        );
+    }
+
+    /// The worktree lines follow the compiler group at once. The line of the
+    /// rest says `1 more worktree` or `3 more worktrees`. The next group
+    /// comes after them.
+    #[test]
+    fn the_worktree_lines_follow_the_compiler_group() {
+        let mut full = summary(CpuState::Full, false);
+        let mut compilers = line("Compilers and linkers", 68, 322);
+        compilers.worktrees = vec![share("w/issue-17", 166), share("w/issue-36", 118)];
+        compilers.more = Some((1, share("", 38)));
+        full.cpu_groups = vec![compilers, line("Claude Code", 2, 10)];
+        let lines = render(&full);
+        assert_eq!(
+            lines.iter().skip(2).map(String::as_str).collect::<Vec<_>>(),
+            vec![
+                "  Compilers and linkers        68 processes      322%",
+                "    w/issue-17                                   166%",
+                "    w/issue-36                                   118%",
+                "    1 more worktree                               38%",
+                "  Claude Code                   2 processes       10%",
+            ]
+        );
+        let mut many = summary(CpuState::Full, false);
+        let mut compilers = line("Compilers and linkers", 9, 9);
+        compilers.more = Some((3, share("", 9)));
+        many.cpu_groups = vec![compilers];
+        assert!(render(&many)
+            .iter()
+            .any(|l| l.contains("    3 more worktrees ")));
+    }
+
+    /// The short-lived line comes last in the CPU block, and only when the
+    /// summary holds a number for it.
+    #[test]
+    fn the_short_lived_line_comes_last_in_the_cpu_block() {
+        let mut full = summary(CpuState::Full, false);
+        full.cpu_groups = vec![line("Claude Code", 2, 10)];
+        assert!(!render(&full).iter().any(|l| l.contains("short-lived")));
+        full.unexplained_percent = Some(688);
+        let lines = render(&full);
+        assert_eq!(
+            lines.last().map(String::as_str),
+            Some("  Kernel and short-lived processes                   688%")
         );
     }
 }
