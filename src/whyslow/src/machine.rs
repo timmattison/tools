@@ -28,6 +28,10 @@ use crate::verdict::{CpuTicks, Facts, Pressure};
 #[cfg(target_os = "macos")]
 pub mod macos;
 
+/// The call that a kernel read names when an error of `faulte` is one that
+/// `whyslow` never expects.
+const UNEXPECTED_CALL: &str = "faulte";
+
 /// The reason why `whyslow` cannot read this Mac.
 ///
 /// Each one of these makes `whyslow` print the reason and exit 2. A summary
@@ -55,7 +59,10 @@ pub enum SourceError {
         message: String,
     },
     /// The output of `ps` is not a process table.
-    #[error("the output of {} is not a process table: {source}", crate::sample::PROGRAM)]
+    #[error(
+        "the output of {} is not a process table: {source}",
+        crate::sample::PROGRAM
+    )]
     Table {
         /// What the parser refused.
         #[from]
@@ -93,7 +100,27 @@ impl From<MachineError> for SourceError {
     /// does, it becomes a kernel read with the call `faulte` and the text of
     /// the error, and no fact is lost.
     fn from(error: MachineError) -> Self {
-        Self::NoArguments
+        match error {
+            MachineError::CommandDidNotStart { program, reason } => {
+                Self::CommandDidNotStart { program, reason }
+            }
+            MachineError::CommandFailed {
+                program,
+                status,
+                message,
+            } => Self::CommandFailed {
+                program,
+                status,
+                message,
+            },
+            MachineError::KernelRead { call, reason } => Self::KernelRead { call, reason },
+            other @ (MachineError::TopOutput { .. }
+            | MachineError::TableOutput { .. }
+            | MachineError::SignalFailed { .. }) => Self::KernelRead {
+                call: UNEXPECTED_CALL.to_owned(),
+                reason: other.to_string(),
+            },
+        }
     }
 }
 
@@ -186,6 +213,10 @@ pub trait Machine {
 }
 
 /// Reads this machine over `interval` and gives the facts.
+///
+/// # Errors
+///
+/// Gives the error of the first source that fails.
 pub fn observe(machine: &dyn Machine, interval: Span) -> Result<Facts, SourceError> {
     let _ = (machine, interval);
     Ok(Facts {
