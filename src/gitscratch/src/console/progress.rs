@@ -218,6 +218,10 @@ impl Live {
     /// The bar is as wide as the terminal leaves room for, after the text of
     /// the line. The text holds `total/total commits`, the widest that the
     /// position can be. A template that does not parse leaves the old style.
+    ///
+    /// A new style draws at once. `set_style` of `indicatif` draws nothing, so
+    /// without the tick the line keeps the spinner until the next tick of the
+    /// thread, and a verdict that comes first clears a bar that never showed.
     fn build_commit_style(&self, total: usize) {
         let mut built = self
             .built_for
@@ -235,6 +239,7 @@ impl Live {
             self.bar
                 .set_style(commit_style.progress_chars(termbar::PROGRESS_CHARS));
             *built = Some(total);
+            self.bar.tick();
         }
     }
 }
@@ -252,10 +257,15 @@ impl ReplayObserver for Progress {
                 Phase::CountHunks => COUNT_HUNKS_MESSAGE.to_string(),
             }),
             ReplayProgress::Commit { position, total } => {
-                live.build_commit_style(total);
+                // Each call below draws a frame. The values come first and
+                // the bar style last, so no frame shows a count that no
+                // report gave: under the spinner style, the length and the
+                // position are not on the line. The style first drew
+                // `0/0 commits` and then `0/10 commits` before `3/10`.
                 live.bar.set_message(live.action.clone());
                 live.bar.set_length(total as u64);
                 live.bar.set_position(position as u64);
+                live.build_commit_style(total);
             }
         }
     }
