@@ -26,8 +26,23 @@ pub fn render(summary: &Summary) -> Vec<String> {
     if cpu {
         lines.extend(cpu_block(summary));
     }
+    if summary.memory_short {
+        lines.extend(memory_block(summary));
+        if summary.memory_groups.iter().any(has_lower_bound) {
+            lines.push(FOOTER_LINE.to_owned());
+        }
+    }
     lines
 }
+
+/// The line that explains the mark of a lower bound.
+const FOOTER_LINE: &str = "≥ counts the RSS of other accounts. Run with sudo for the footprint.";
+
+/// The mark in front of a memory value that is a lower bound.
+const LOWER_BOUND_MARK: &str = "≥";
+
+/// The number of bytes in one GiB.
+const BYTES_PER_GIB: f64 = 1_073_741_824.0;
 
 /// The width of the label of a group line, in display columns.
 const GROUP_LABEL_WIDTH: usize = 26;
@@ -93,6 +108,56 @@ fn cpu_block(summary: &Summary) -> Vec<String> {
         ));
     }
     lines
+}
+
+/// Gives the lines of the memory block: the header, and the groups with their
+/// worktrees.
+fn memory_block(summary: &Summary) -> Vec<String> {
+    let mut lines = vec![format!(
+        "Memory  pressure {}, {} compressed, swap {} of {} in use",
+        summary.pressure.name(),
+        gib(summary.compressor_bytes),
+        number_of_gib(summary.swap.used_bytes),
+        gib(summary.swap.total_bytes),
+    )];
+    for group in &summary.memory_groups {
+        lines.push(group_line(
+            group,
+            &memory_value(group.memory_bytes, group.at_least),
+        ));
+        lines.extend(worktree_lines(group, |share| {
+            memory_value(share.memory_bytes, share.at_least)
+        }));
+    }
+    lines
+}
+
+/// Is true when the line, or one of its worktree lines, is a lower bound.
+fn has_lower_bound(group: &GroupLine) -> bool {
+    group.at_least
+        || group.worktrees.iter().any(|share| share.at_least)
+        || group.more.as_ref().is_some_and(|(_, rest)| rest.at_least)
+}
+
+/// Writes a memory value, with the mark of a lower bound when it is one.
+fn memory_value(bytes: u64, at_least: bool) -> String {
+    let mark = if at_least { LOWER_BOUND_MARK } else { "" };
+    format!("{mark}{}", gib(bytes))
+}
+
+/// Writes a number of bytes as GiB with one decimal, as `24.2 GiB`.
+fn gib(bytes: u64) -> String {
+    format!("{} GiB", number_of_gib(bytes))
+}
+
+/// Writes a number of bytes as GiB with one decimal and no unit.
+fn number_of_gib(bytes: u64) -> String {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "one decimal of GiB needs far fewer bits than an f64 holds"
+    )]
+    let value = bytes as f64 / BYTES_PER_GIB;
+    format!("{value:.1}")
 }
 
 /// Writes a percent of one processor, as `290%`.
@@ -501,8 +566,8 @@ mod tests {
         assert_eq!(
             lines.iter().skip(2).map(String::as_str).collect::<Vec<_>>(),
             vec![
-                "  Claude Code                   1 process     ≥24.2 GiB",
-                "  wezterm-gui                   1 process       0.9 GiB",
+                "  Claude Code                   1 process   ≥24.2 GiB",
+                "  wezterm-gui                   1 process     0.9 GiB",
                 "≥ counts the RSS of other accounts. Run with sudo for the footprint.",
             ]
         );
