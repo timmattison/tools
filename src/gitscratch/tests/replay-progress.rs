@@ -5,7 +5,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use gitscratch::testing::conflicting_repo;
+use gitscratch::testing::{conflicting_repo, independent_branches_repo};
 use gitscratch::{Phase, ReplayObserver, ReplayProgress, Repo};
 
 /// An observer that keeps each report, in the order it arrived.
@@ -54,6 +54,28 @@ fn a_merge_reports_its_three_phases_in_order_and_no_commit() {
             ReplayProgress::Phase(Phase::CreateScratch),
             ReplayProgress::Phase(Phase::Replay),
             ReplayProgress::Phase(Phase::CountHunks),
+        ]
+    );
+}
+
+/// A clean merge never reads a conflicted file, so it has no `CountHunks`
+/// phase. The report sits after the early return for that reason.
+#[test]
+fn a_clean_merge_reports_no_hunk_count() {
+    let fixture = independent_branches_repo();
+    let repo = Repo::open(fixture.path()).expect("open the fixture");
+    let recorder = Recorder::new();
+    let scratch = repo
+        .scratch_with_progress("alpha", Arc::clone(&recorder))
+        .expect("build a scratch worktree");
+
+    scratch.replay_merge("beta").expect("replay the merge");
+
+    assert_eq!(
+        recorder.reports(),
+        [
+            ReplayProgress::Phase(Phase::CreateScratch),
+            ReplayProgress::Phase(Phase::Replay),
         ]
     );
 }
