@@ -86,7 +86,9 @@ pub struct App {
     catalog: Vec<Arc<Session>>,
     hits: Vec<Hit>,
     selected: usize,
-    /// The id of the session in the selected row. The app follows it when the
+    /// The id of the session that the person moved the selection to. It is
+    /// `None` until the first move, so an untouched selection stays on row 0,
+    /// the newest session. After a move, the app follows this session when the
     /// list changes.
     selected_id: Option<SessionId>,
     list_offset: usize,
@@ -171,6 +173,7 @@ impl App {
         if hits.generation != self.generation {
             return;
         }
+        let shown_before = self.id_at(self.selected);
         if self.shown_generation == self.generation {
             for hit in hits.hits {
                 match self.hits.iter_mut().find(|old| old.session == hit.session) {
@@ -190,6 +193,9 @@ impl App {
                 .then_with(|| a.id.cmp(&b.id))
         });
         self.reselect();
+        if self.id_at(self.selected) != shown_before {
+            self.preview_scroll = 0;
+        }
     }
 
     /// Take the size that the last draw measured.
@@ -422,8 +428,11 @@ impl App {
             .map(|hit| self.catalog[hit.session].id.clone())
     }
 
-    /// Follow the selected session after the list changes. When it left the
-    /// list, keep the row number and reset the preview scroll.
+    /// Keep the selection right after the list changes. An untouched selection
+    /// stays on its row, which is row 0. A moved selection follows its session.
+    /// When that session left the list, the selection keeps its row number,
+    /// clamped, and the app then follows the session now in that row. This
+    /// function does not touch the preview scroll.
     fn reselect(&mut self) {
         let followed = self.selected_id.as_ref().and_then(|id| {
             self.hits
@@ -434,8 +443,9 @@ impl App {
             self.selected = row;
         } else {
             self.selected = self.selected.min(self.hits.len().saturating_sub(1));
-            self.preview_scroll = 0;
-            self.selected_id = self.id_at(self.selected);
+            if self.selected_id.is_some() {
+                self.selected_id = self.id_at(self.selected);
+            }
         }
         self.fix_offset();
     }
