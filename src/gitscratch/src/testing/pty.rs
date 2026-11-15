@@ -6,7 +6,7 @@
 //! in a wide window and another answer in a narrow one. A test therefore opens
 //! a pseudo-terminal of a size it chose, and gives it to the child.
 //!
-//! A test gives the terminal to the child in one of three shapes.
+//! A test gives the terminal to the child in one of four shapes.
 //!
 //! - [`Pty::give_as_controlling_terminal`] makes the pseudo-terminal the
 //!   controlling terminal of the child. `/dev/tty` in the child then resolves
@@ -16,6 +16,10 @@
 //!   standard output of the child on the pseudo-terminal and reads back what
 //!   the child wrote there. A test of a tool that decides color by whether
 //!   standard output is a terminal needs this shape.
+//! - [`Pty::run_with_output_on_terminal`] does the same as the second shape,
+//!   and also puts standard error of the child on the pseudo-terminal. A test
+//!   of a tool that draws a display on standard error only when that stream is
+//!   a terminal needs this shape.
 //! - [`Pty::run_with_stdin_on_terminal`] does the same as the first shape, and
 //!   also puts standard input of the child on the pseudo-terminal and types an
 //!   answer into it. A test of a tool that asks a question only when a person
@@ -287,16 +291,22 @@ impl Pty {
     /// when it is true, and to a pipe that the method reads when it is false.
     /// One body keeps the spawn, the reader thread, and the close order the
     /// same in both runs.
-    fn run_on_terminal(self, mut command: Command, _stderr_on_terminal: bool) -> Output {
+    fn run_on_terminal(self, mut command: Command, stderr_on_terminal: bool) -> Output {
         self.give_as_controlling_terminal(&mut command);
         let stdout = self
             .slave
             .try_clone()
             .expect("the system must give a copy of the slave end for standard output");
-        command
-            .stdin(Stdio::null())
-            .stdout(stdout)
-            .stderr(Stdio::piped());
+        let stderr = if stderr_on_terminal {
+            Stdio::from(
+                self.slave
+                    .try_clone()
+                    .expect("the system must give a copy of the slave end for standard error"),
+            )
+        } else {
+            Stdio::piped()
+        };
+        command.stdin(Stdio::null()).stdout(stdout).stderr(stderr);
 
         let Pty { master, slave } = self;
         let reader = std::thread::spawn(move || read_until_hangup(master));
