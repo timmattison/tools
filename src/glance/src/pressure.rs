@@ -41,20 +41,34 @@ impl Level {
     /// Converts the kernel value into a level.
     #[must_use]
     pub fn from_raw(raw: i32) -> Level {
-        let _ = raw;
-        Level::Normal
+        match raw {
+            RAW_NORMAL => Level::Normal,
+            RAW_WARN => Level::Warn,
+            RAW_CRITICAL => Level::Critical,
+            other => Level::Unknown(other),
+        }
     }
 
     /// Gives the kernel value back.
     #[must_use]
     pub fn raw(self) -> i32 {
-        0
+        match self {
+            Level::Normal => RAW_NORMAL,
+            Level::Warn => RAW_WARN,
+            Level::Critical => RAW_CRITICAL,
+            Level::Unknown(raw) => raw,
+        }
     }
 
     /// The name of the level, in lower case.
     #[must_use]
     pub fn name(self) -> &'static str {
-        ""
+        match self {
+            Level::Normal => NAME_NORMAL,
+            Level::Warn => NAME_WARN,
+            Level::Critical => NAME_CRITICAL,
+            Level::Unknown(_) => NAME_UNKNOWN,
+        }
     }
 }
 
@@ -72,10 +86,11 @@ impl Pressure {
     /// is `kern.memorystatus_level`. A free value outside 0 to 100 clamps.
     #[must_use]
     pub fn from_raw(level_raw: i32, free_percent_raw: i32) -> Pressure {
-        let _ = (level_raw, free_percent_raw, PERCENT_MAX, PERCENT_FALLBACK);
+        let free = free_percent_raw.clamp(0, PERCENT_MAX);
+        let in_use = u8::try_from(PERCENT_MAX - free).unwrap_or(PERCENT_FALLBACK);
         Pressure {
-            level: Level::Normal,
-            percent_in_use: 0,
+            level: Level::from_raw(level_raw),
+            percent_in_use: in_use,
         }
     }
 
