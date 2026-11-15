@@ -357,6 +357,9 @@ mod tests {
     use super::*;
     use crate::groups::Group;
     use crate::sample::CpuTime;
+    use crate::tally::WorktreeTotal;
+    use crate::worktree::NO_WORKTREE;
+    use std::path::PathBuf;
 
     /// The change is the difference of each counter. A counter that went back
     /// gives 0 and does not wrap, and the other fields stay right.
@@ -632,5 +635,119 @@ mod tests {
         };
         let summary = summarize(&facts(calm, Pressure::Normal, 0, vec![group("a", 1, 10)]));
         assert!(summary.memory_groups.is_empty());
+    }
+
+    /// Makes the total of one worktree. `None` is the entry for no worktree.
+    fn worktree(path: Option<&str>, cpu: u64, memory_bytes: u64) -> WorktreeTotal {
+        WorktreeTotal {
+            worktree: path.map(PathBuf::from),
+            processes: 1,
+            cpu: CpuTime::from_centiseconds(cpu),
+            memory_bytes,
+            at_least: false,
+        }
+    }
+
+    /// Makes the total of the compilers over some worktrees.
+    fn compilers(worktrees: Vec<WorktreeTotal>) -> GroupTotal {
+        let cpu = worktrees.iter().map(|w| w.cpu).sum();
+        let memory_bytes = worktrees.iter().map(|w| w.memory_bytes).sum();
+        GroupTotal {
+            group: Group::Compilers,
+            processes: worktrees.len(),
+            accounts: 1,
+            cpu,
+            memory_bytes,
+            at_least: false,
+            worktrees,
+        }
+    }
+
+    /// The four worktrees of one compiler group. The CPU order is `a`, `b`,
+    /// then no worktree and `c` tied by label. The memory order is `c`, `b`.
+    fn four_worktrees() -> GroupTotal {
+        compilers(vec![
+            worktree(None, 10, 5),
+            worktree(Some("/w/x/a"), 100, 1),
+            worktree(Some("/w/x/b"), 50, 20),
+            worktree(Some("/w/x/c"), 10, 30),
+            worktree(Some("/w/x/z"), 0, 0),
+        ])
+    }
+
+    /// The CPU block of a compiler group lists the two worktrees with the
+    /// most CPU, named by their last two parts. The rest is one line with its
+    /// count and its sum. A worktree with no CPU is not in the rest.
+    #[test]
+    fn the_cpu_block_lists_the_largest_worktrees_and_the_rest() {
+        let full = CpuTicks {
+            user: 1000,
+            system: 0,
+            idle: 0,
+            nice: 0,
+        };
+        let summary = summarize(&facts(full, Pressure::Normal, 0, vec![four_worktrees()]));
+        let line = &summary.cpu_groups[0];
+        let labels: Vec<&str> = line.worktrees.iter().map(|w| w.label.as_str()).collect();
+        assert_eq!(labels, vec!["x/a", "x/b"]);
+        assert_eq!(line.worktrees[0].cpu_percent, 100);
+        let (count, rest) = line.more.clone().expect("a rest");
+        assert_eq!(count, 2);
+        assert_eq!(rest.cpu_percent, 20);
+        assert_eq!(rest.memory_bytes, 35);
+        assert_eq!(rest.label, "");
+    }
+
+    /// The memory block ranks the worktrees by memory, and it names the
+    /// entry for no worktree with the text for that case.
+    #[test]
+    fn the_memory_block_ranks_the_worktrees_by_memory() {
+        let calm = CpuTicks {
+            user: 100,
+            system: 0,
+            idle: 900,
+            nice: 0,
+        };
+        let summary = summarize(&facts(calm, Pressure::Critical, 0, vec![four_worktrees()]));
+        let line = &summary.memory_groups[0];
+        let labels: Vec<&str> = line.worktrees.iter().map(|w| w.label.as_str()).collect();
+        assert_eq!(labels, vec!["x/c", "x/b"]);
+        let (count, rest) = line.more.clone().expect("a rest");
+        assert_eq!(count, 2);
+        assert_eq!(rest.memory_bytes, 6);
+        let none = group_with_none();
+        let summary = summarize(&facts(calm, Pressure::Critical, 0, vec![none]));
+        assert_eq!(summary.memory_groups[0].worktrees[0].label, NO_WORKTREE);
+    }
+
+    /// Makes compilers with one worktree entry that has no worktree.
+    fn group_with_none() -> GroupTotal {
+        compilers(vec![worktree(None, 5, 5)])
+    }
+
+    /// No rest line shows when the worktrees fit in the list. A group that is
+    /// not the compilers lists no worktree.
+    #[test]
+    fn no_rest_line_shows_when_the_worktrees_fit() {
+        let full = CpuTicks {
+            user: 1000,
+            system: 0,
+            idle: 0,
+            nice: 0,
+        };
+        let two = compilers(vec![
+            worktree(Some("/w/x/a"), 5, 5),
+            worktree(Some("/w/x/b"), 4, 4),
+        ]);
+        let summary = summarize(&facts(
+            full,
+            Pressure::Normal,
+            0,
+            vec![two, group("other", 3, 3)],
+        ));
+        assert_eq!(summary.cpu_groups[0].worktrees.len(), 2);
+        assert_eq!(summary.cpu_groups[0].more, None);
+        assert!(summary.cpu_groups[1].worktrees.is_empty());
+        assert_eq!(summary.cpu_groups[1].more, None);
     }
 }
