@@ -3903,6 +3903,7 @@ version = "0.1.0"
 dependencies = [
  "buildinfo",
  "clap",
+ "libc",
  "serde_json",
 ]
 

@@ -28,5 +28,11 @@ pub mod cpu;
 pub mod history;
 pub mod interval;
 pub mod pressure;
+#[cfg(target_os = "macos")]
+#[expect(
+    unsafe_code,
+    reason = "the reader calls the kernel through libc. It is one of the two modules that can hold unsafe code"
+)]
+pub mod reader;
 pub mod sample;
 pub mod text;
