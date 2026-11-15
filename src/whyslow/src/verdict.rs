@@ -43,14 +43,21 @@ impl CpuTicks {
     /// that went back gives 0.
     #[must_use]
     pub fn between(before: Self, after: Self) -> Self {
-        let _ = (before, after);
-        Self::default()
+        Self {
+            user: after.user.saturating_sub(before.user),
+            system: after.system.saturating_sub(before.system),
+            idle: after.idle.saturating_sub(before.idle),
+            nice: after.nice.saturating_sub(before.nice),
+        }
     }
 
     /// Gives the sum of the four counters. The sum saturates.
     #[must_use]
     pub fn total(self) -> u64 {
-        0
+        self.user
+            .saturating_add(self.system)
+            .saturating_add(self.idle)
+            .saturating_add(self.nice)
     }
 }
 
