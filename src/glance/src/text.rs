@@ -3,7 +3,28 @@
 //! These functions are pure. They turn a sample into text, so a test can read
 //! each line without AppKit.
 
+use crate::cpu::CpuShare;
+use crate::pressure::Level;
 use crate::sample::Sample;
+use serde_json::json;
+
+/// The start of the first menu line after a failed read.
+const READ_ERROR_PREFIX: &str = "Cannot read the kernel: ";
+/// The key of the user share in the JSON line.
+const KEY_USER: &str = "user";
+/// The key of the system share in the JSON line.
+const KEY_SYSTEM: &str = "system";
+/// The key of the idle share in the JSON line.
+const KEY_IDLE: &str = "idle";
+/// The key of the level name in the JSON line.
+const KEY_LEVEL: &str = "pressure_level";
+/// The key of the raw level in the JSON line.
+const KEY_LEVEL_RAW: &str = "pressure_level_raw";
+/// The key of the percentage in use in the JSON line.
+const KEY_PERCENT: &str = "pressure_percent";
+
+/// The largest percentage.
+const PERCENT_MAX: f64 = 100.0;
 
 /// The title of the menu item that quits the tool.
 pub const QUIT_TITLE: &str = "Quit glance";
@@ -14,8 +35,32 @@ pub const WAITING_LINE: &str = "Waiting for the first sample";
 /// The four info lines of the menu.
 #[must_use]
 pub fn menu_lines(sample: &Sample) -> [String; 4] {
-    let _ = sample;
-    [String::new(), String::new(), String::new(), String::new()]
+    let cpu = sample.cpu;
+    let pressure = sample.pressure;
+    let level = pressure.level();
+    let level_text = match level {
+        Level::Unknown(raw) => format!("{} (raw {raw})", level.name()),
+        _ => level.name().to_owned(),
+    };
+    [
+        format!("User: {}%", percent(cpu.user())),
+        format!("System: {}%", percent(cpu.system())),
+        format!("Idle: {}%", percent(cpu.idle())),
+        format!(
+            "Memory pressure: {level_text}, {}% in use",
+            pressure.percent_in_use()
+        ),
+    ]
+}
+
+/// Rounds a share from 0 to 1 to a whole percentage.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the value is clamped to 0 to 100 and rounded, so it fits in a u8"
+)]
+fn percent(share: f64) -> u8 {
+    (share * PERCENT_MAX).clamp(0.0, PERCENT_MAX).round() as u8
 }
 
 /// The sample as one JSON object on one line, with no trailing newline.
@@ -24,15 +69,29 @@ pub fn menu_lines(sample: &Sample) -> [String; 4] {
 /// `pressure_level_raw`, and `pressure_percent`, in this order.
 #[must_use]
 pub fn sample_json(sample: &Sample) -> String {
-    let _ = sample;
-    String::from("{}")
+    let cpu: &CpuShare = &sample.cpu;
+    let level = sample.pressure.level();
+    // The `json!` macro sorts the keys, so each value goes through serde_json
+    // alone and the line keeps the order of the design.
+    let fields = [
+        (KEY_USER, json!(cpu.user())),
+        (KEY_SYSTEM, json!(cpu.system())),
+        (KEY_IDLE, json!(cpu.idle())),
+        (KEY_LEVEL, json!(level.name())),
+        (KEY_LEVEL_RAW, json!(level.raw())),
+        (KEY_PERCENT, json!(sample.pressure.percent_in_use())),
+    ];
+    let body: Vec<String> = fields
+        .iter()
+        .map(|(key, value)| format!("{}:{value}", json!(key)))
+        .collect();
+    format!("{{{}}}", body.join(","))
 }
 
 /// The first menu line after a failed read.
 #[must_use]
 pub fn read_error_line(reason: &str) -> String {
-    let _ = reason;
-    String::new()
+    format!("{READ_ERROR_PREFIX}{reason}")
 }
 
 #[cfg(test)]
