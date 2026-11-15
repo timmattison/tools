@@ -285,7 +285,7 @@ pub fn summarize(facts: &Facts) -> Summary {
         } else {
             lines(facts, Resource::Cpu)
         },
-        unexplained_percent: None,
+        unexplained_percent: unexplained(facts, cpu_state),
         pressure: facts.pressure,
         compressor_bytes: facts.compressor_bytes,
         swap: facts.swap,
@@ -295,6 +295,25 @@ pub fn summarize(facts: &Facts) -> Summary {
             Vec::new()
         },
     }
+}
+
+/// Gives the CPU that no group explains, in percent of one processor, when
+/// the CPU is not calm and the value reaches [`UNEXPLAINED_PERCENT`].
+///
+/// The machine CPU is the busy ticks over the total, times the processors,
+/// rounded half up. The groups CPU is the sum of all groups over the window.
+/// The subtraction saturates, so groups that use more than the machine give
+/// `None`.
+fn unexplained(facts: &Facts, state: CpuState) -> Option<u64> {
+    if state == CpuState::Calm {
+        return None;
+    }
+    let total = facts.ticks.total();
+    let busy = u128::from(total.saturating_sub(facts.ticks.idle));
+    let machine = percent_u128(busy * u128::from(facts.processors), u128::from(total));
+    let groups: CpuTime = facts.groups.iter().map(|total| total.cpu).sum();
+    let left = machine.saturating_sub(groups.percent_of(facts.window));
+    (left >= UNEXPLAINED_PERCENT).then_some(left)
 }
 
 /// The resource that a block of the summary ranks by.
@@ -309,12 +328,16 @@ enum Resource {
 /// Gives `part` as a percent of `total`, rounded half up. A total of zero
 /// gives 0.
 fn percent(part: u64, total: u64) -> u64 {
+    percent_u128(u128::from(part), u128::from(total))
+}
+
+/// Gives `part` as a percent of `total`, rounded half up, with room for a
+/// part that is many times the total. A total of zero gives 0.
+fn percent_u128(part: u128, total: u128) -> u64 {
     if total == 0 {
         return 0;
     }
-    let part = u128::from(part) * 100;
-    let total = u128::from(total);
-    u64::try_from((part * 2 + total) / (total * 2)).unwrap_or(u64::MAX)
+    u64::try_from((part * 100 * 2 + total) / (total * 2)).unwrap_or(u64::MAX)
 }
 
 /// Gives the number that ranks one group by `resource`.
