@@ -218,6 +218,7 @@ buildinfo = { path = "src/buildinfo" }
 childenv = { path = "src/childenv" }
 op-cache = { path = "src/op-cache" }
 clipboardmon = { path = "src/clipboardmon" }
+faulte = { path = "src/faulte" }
 filewalker = { path = "src/filewalker" }
 ghrest = { path = "src/ghrest" }
 gitscratch = { path = "src/gitscratch" }
