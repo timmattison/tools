@@ -7,15 +7,45 @@
 
 use termbar::str_display_width_as_u16;
 
-use crate::verdict::Summary;
+use crate::verdict::{CpuState, Summary};
 
 /// The widest line that [`render`] writes, in display columns.
 pub const WIDTH: usize = 80;
 
-/// Gives the lines that show `summary`.
+/// Gives the lines that show `summary`, with no blank line. The first line is
+/// the headline. A calm machine gets two lines that point to other tools.
 #[must_use]
-pub fn render(_summary: &Summary) -> Vec<String> {
-    Vec::new()
+pub fn render(summary: &Summary) -> Vec<String> {
+    let cpu = summary.cpu_state != CpuState::Calm;
+    if !cpu && !summary.memory_short {
+        return vec![
+            format!(
+                "The CPU and the memory are not short: {}% idle, pressure {}.",
+                summary.idle_percent,
+                summary.pressure.name()
+            ),
+            POINTER_LINE.to_owned(),
+        ];
+    }
+    vec![headline(summary)]
+}
+
+/// The second line of a machine with no short resource.
+const POINTER_LINE: &str = "For the disk, run diskhog. For the clock speed, run thermal-watch.";
+
+/// Gives the headline of a machine with at least one short resource.
+fn headline(summary: &Summary) -> String {
+    let cpu = match summary.cpu_state {
+        CpuState::Full => Some("full"),
+        CpuState::Busy => Some("busy"),
+        CpuState::Calm => None,
+    };
+    let cause = match (cpu, summary.memory_short) {
+        (Some(word), true) => format!("the CPU is {word}, and the memory is short"),
+        (Some(word), false) => format!("the CPU is {word}"),
+        (None, _) => "the memory is short".to_owned(),
+    };
+    format!("Likely cause: {cause}.")
 }
 
 /// The mark that ends a label that was cut.
