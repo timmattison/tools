@@ -316,3 +316,48 @@ fn missing_arguments_stop_the_run() {
     let result = run_with(|m| m.arguments = Err(SourceError::NoArguments));
     assert_eq!(result, Err(SourceError::NoArguments));
 }
+
+/// The facts hold the change of each counter, and the values that the machine
+/// gave as they are. The window is the time between the two readings of the
+/// clock, and the compressor is the pages after the window times the page
+/// size.
+#[test]
+fn the_facts_hold_the_changes_and_the_values_of_the_machine() {
+    let facts = run_with(|_| {}).expect("every source answers");
+    assert_eq!(facts.window, Duration::from_millis(2_050));
+    assert_eq!(
+        facts.ticks,
+        CpuTicks {
+            user: 60,
+            system: 20,
+            idle: 120,
+            nice: 0
+        }
+    );
+    assert_eq!(facts.swapouts, 5);
+    assert_eq!(facts.compressor_bytes, 20 * PAGE_SIZE);
+    assert_eq!(facts.pressure, Pressure::Warning);
+    assert_eq!(
+        facts.swap,
+        SwapUsage {
+            total_bytes: 5_368_709_120,
+            used_bytes: 4_187_593_113,
+        }
+    );
+    assert!((facts.load - 152.0).abs() < f64::EPSILON);
+    assert_eq!(facts.processors, 14);
+}
+
+/// CPU ticks that are the same twice give no window to measure in. The run
+/// refuses them, because a percent of nothing has no meaning.
+#[test]
+fn cpu_ticks_that_did_not_move_stop_the_run() {
+    let still = CpuTicks {
+        user: 5,
+        system: 5,
+        idle: 5,
+        nice: 5,
+    };
+    let result = run_with(|m| *m.ticks.get_mut() = VecDeque::from([Ok(still), Ok(still)]));
+    assert_eq!(result, Err(SourceError::CpuTicksDidNotMove));
+}
