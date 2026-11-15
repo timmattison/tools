@@ -7,6 +7,7 @@
 
 use std::time::Duration;
 
+use faulte::pid::{Pid, Uid};
 use faulte::table::parse_ps_number;
 
 /// The character between the minutes and the seconds of a time token.
@@ -97,6 +98,88 @@ fn fixed_digits(token: &str) -> Option<u64> {
     } else {
         None
     }
+}
+
+/// One process, as one line of the output of `ps`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessRow {
+    /// The process.
+    pub pid: Pid,
+    /// The parent of the process.
+    pub ppid: Pid,
+    /// The account that owns the process.
+    pub uid: Uid,
+    /// The five tokens of `lstart`, joined by one space. It is an identity
+    /// of the process and nothing else: the code never reads it as a time.
+    pub started: String,
+    /// The CPU time that the process used since it started.
+    pub cpu: CpuTime,
+    /// The resident memory of the process, in KiB.
+    pub rss_kib: u64,
+    /// The `comm` column: the full path of the executable. It can hold spaces.
+    pub executable: String,
+}
+
+impl ProcessRow {
+    /// Gives the name of the executable: the last part of its path.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        ""
+    }
+}
+
+/// The reason why the output of `ps` is not a process table.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SampleParseError {
+    /// The output holds no row. A Mac always runs processes, so the output is
+    /// incomplete.
+    #[error("ps listed no process: a Mac always runs processes, so the output is incomplete")]
+    NoRows,
+    /// A line holds fewer than ten tokens before the executable.
+    #[error(
+        "ps printed a row of fewer than {FIELDS} fields, at line {number}: {line:?}. A row holds \
+         the PID, the parent, the UID, the five fields of the start time, the CPU time, and the \
+         RSS, then the executable"
+    )]
+    TooFewFields {
+        /// The number of the line in the output, from 1.
+        number: usize,
+        /// The line as `ps` printed it.
+        line: String,
+    },
+    /// A numeric column holds a value that is not a number of its type.
+    #[error(
+        "ps printed a value of the column {column} that is not a number of its type, at line \
+         {number}: {line:?}"
+    )]
+    MalformedNumber {
+        /// The name of the column, as `ps -o` names it.
+        column: &'static str,
+        /// The number of the line in the output, from 1.
+        number: usize,
+        /// The line as `ps` printed it.
+        line: String,
+    },
+    /// The CPU time is not in the layout `M:SS.cc`.
+    #[error("ps printed a CPU time that is not in the layout M:SS.cc, at line {number}: {line:?}")]
+    MalformedTime {
+        /// The number of the line in the output, from 1.
+        number: usize,
+        /// The line as `ps` printed it.
+        line: String,
+    },
+}
+
+/// The count of tokens before the executable.
+const FIELDS: usize = 10;
+
+/// Reads the process table from the output of `ps`.
+///
+/// # Errors
+///
+/// Gives the error of the first line that fails.
+pub fn parse(_output: &str) -> Result<Vec<ProcessRow>, SampleParseError> {
+    Ok(Vec::new())
 }
 
 impl std::ops::Add for CpuTime {
@@ -194,5 +277,172 @@ mod tests {
         assert_eq!(a.saturating_sub(b), CpuTime::from_centiseconds(18));
         assert_eq!(b.saturating_sub(a), CpuTime::from_centiseconds(0));
         assert_eq!(CpuTime::default().centiseconds(), 0);
+    }
+
+    /// The fixture before the one second wait, as `ps` printed it.
+    const BEFORE: &str = include_str!("../tests/fixtures/ps-before.txt");
+
+    /// The fixture after the one second wait.
+    const AFTER: &str = include_str!("../tests/fixtures/ps-after.txt");
+
+    /// Finds the row of `pid` in `rows`.
+    fn row_of(rows: &[ProcessRow], pid: u32) -> &ProcessRow {
+        rows.iter()
+            .find(|row| row.pid == Pid::new(pid))
+            .expect("the fixture holds the row")
+    }
+
+    /// Each line of a real capture is a row, and the order stays. A parser
+    /// that drops a row would make a process look as if it had exited.
+    #[test]
+    fn every_line_of_the_fixtures_is_a_row() {
+        for text in [BEFORE, AFTER] {
+            let rows = parse(text).expect("the capture parses");
+            assert_eq!(rows.len(), text.lines().count());
+            assert_eq!(rows.first().map(|row| row.pid), Some(Pid::new(1)));
+        }
+    }
+
+    /// The row of `launchd` has each field as the file shows it. The day of
+    /// the start time has a padding space in `Mon Nov  2`, and the joined
+    /// start has one space.
+    #[test]
+    fn the_row_of_launchd_has_each_field() {
+        let rows = parse(BEFORE).expect("the capture parses");
+        assert_eq!(
+            row_of(&rows, 1),
+            &ProcessRow {
+                pid: Pid::new(1),
+                ppid: Pid::new(0),
+                uid: Uid::new(0),
+                started: "Wed Oct 28 21:29:02 2026".to_owned(),
+                cpu: CpuTime::from_centiseconds(29_930_047),
+                rss_kib: 14_288,
+                executable: "/sbin/launchd".to_owned(),
+            }
+        );
+        assert_eq!(row_of(&rows, 1).name(), "launchd");
+        assert_eq!(row_of(&rows, 56_844).started, "Mon Nov 2 01:37:25 2026");
+    }
+
+    /// A path with spaces stays whole, and its name is the last part.
+    #[test]
+    fn an_executable_with_spaces_stays_whole() {
+        let rows = parse(BEFORE).expect("the capture parses");
+        let row = row_of(&rows, 569);
+        assert_eq!(
+            row.executable,
+            "/Applications/Menu Bar Controller for Sonos.app/Contents/MacOS/Menu Bar Controller for Sonos"
+        );
+        assert_eq!(row.name(), "Menu Bar Controller for Sonos");
+    }
+
+    /// The capture holds both human accounts of this Mac, and the accounts
+    /// of the system.
+    #[test]
+    fn the_fixtures_hold_each_kind_of_account() {
+        let rows = parse(AFTER).expect("the capture parses");
+        for uid in [0, 88, 501, 503] {
+            assert!(rows.iter().any(|row| row.uid == Uid::new(uid)), "uid {uid}");
+        }
+    }
+
+    /// A row of `ps` text with the given tokens.
+    fn line(pid: &str, ppid: &str, uid: &str, time: &str, rss: &str) -> String {
+        format!("{pid:>5} {ppid:>5} {uid:>5} Tue Aug 25 16:45:30 2026 {time:>12} {rss:>6} /usr/bin/tool")
+    }
+
+    /// A good row.
+    fn good() -> String {
+        line("700", "1", "501", "0:01.00", "2048")
+    }
+
+    /// Output with `bad` at line 3, after a blank line.
+    fn with_bad_line_at_3(bad: &str) -> String {
+        format!("{}\n\n{bad}\n{}\n", good(), good())
+    }
+
+    /// An output with no row is refused, because an empty table makes each
+    /// process of a sample look as if it had exited.
+    #[test]
+    fn an_output_with_no_row_is_refused() {
+        for text in ["", "\n", "  \n\t\n"] {
+            assert_eq!(parse(text), Err(SampleParseError::NoRows), "text {text:?}");
+        }
+    }
+
+    /// A line of fewer than ten tokens is refused, with its number from 1.
+    #[test]
+    fn a_short_line_is_refused_with_its_number() {
+        for bad in [
+            "  700     1   501",
+            "日本語 🎉 café",
+            "700 1 501 Tue Aug 25 16:45:30 2026 0:01.00",
+        ] {
+            assert_eq!(
+                parse(&with_bad_line_at_3(bad)),
+                Err(SampleParseError::TooFewFields {
+                    number: 3,
+                    line: bad.to_owned()
+                }),
+                "line {bad:?}"
+            );
+        }
+    }
+
+    /// A bad PID, parent, UID or RSS is refused, and the error names the
+    /// column.
+    #[test]
+    fn a_bad_number_is_refused_with_its_column() {
+        let cases = [
+            ("pid", line("x", "1", "501", "0:01.00", "2048")),
+            ("ppid", line("700", "-1", "501", "0:01.00", "2048")),
+            ("uid", line("700", "1", "+5", "0:01.00", "2048")),
+            ("rss", line("700", "1", "501", "0:01.00", "2k")),
+        ];
+        for (column, bad) in cases {
+            assert_eq!(
+                parse(&with_bad_line_at_3(&bad)),
+                Err(SampleParseError::MalformedNumber {
+                    column,
+                    number: 3,
+                    line: bad.clone()
+                }),
+                "column {column}"
+            );
+        }
+    }
+
+    /// A CPU time that is not `M:SS.cc` is refused with its line.
+    #[test]
+    fn a_bad_time_is_refused_with_its_line() {
+        for time in ["1:60.00", "1:05", "abc", "1:05.5"] {
+            let bad = line("700", "1", "501", time, "2048");
+            assert_eq!(
+                parse(&with_bad_line_at_3(&bad)),
+                Err(SampleParseError::MalformedTime {
+                    number: 3,
+                    line: bad.clone()
+                }),
+                "time {time:?}"
+            );
+        }
+    }
+
+    /// The first bad line gives the error, also when a later line is bad
+    /// in another way.
+    #[test]
+    fn the_first_bad_line_wins() {
+        let first = line("x", "1", "501", "0:01.00", "2048");
+        let second = line("700", "1", "501", "bad", "2048");
+        let text = format!("{}\n{first}\n{second}\n", good());
+        assert_eq!(
+            parse(&text),
+            Err(SampleParseError::MalformedNumber {
+                column: "pid",
+                number: 2,
+                line: first
+            })
+        );
     }
 }
