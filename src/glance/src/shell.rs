@@ -13,7 +13,7 @@ use std::cell::RefCell;
 use std::process::ExitCode;
 
 use objc2::rc::{autoreleasepool, Retained};
-use objc2::runtime::AnyObject;
+use objc2::runtime::{AnyObject, Sel};
 use objc2::{
     define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly,
 };
@@ -45,14 +45,36 @@ const NOT_MAIN_THREAD: &str = "glance: the status item must start on the main th
 /// merge the wakeups of the timer with other wakeups.
 const TIMER_TOLERANCE: f64 = 0.1;
 
-/// Adds a repeating timer to a run loop in the common modes.
+/// Starts a repeating timer on a run loop in the common modes.
+///
+/// The function makes the timer, adds it to the run loop, gives it its share
+/// of tolerance, and returns it. The run loop keeps the timer, and the timer
+/// keeps its target alive.
 ///
 /// An open menu runs the main run loop in the event tracking mode, which
 /// AppKit lists among the common modes. A timer in the default mode only
 /// would stop while the menu is open.
-fn add_repeating_timer(run_loop: &NSRunLoop, timer: &NSTimer) {
+///
+/// # Safety
+///
+/// The `target` must answer `selector` with one `NSTimer` argument.
+unsafe fn start_repeating_timer(
+    run_loop: &NSRunLoop,
+    seconds: f64,
+    target: &AnyObject,
+    selector: Sel,
+) -> Retained<NSTimer> {
+    // SAFETY: The caller promises that the target answers the selector with
+    // one timer argument. No user info is given.
+    let timer = unsafe {
+        NSTimer::timerWithTimeInterval_target_selector_userInfo_repeats(
+            seconds, target, selector, None, true,
+        )
+    };
     // SAFETY: The mode is a constant of Foundation that exists at run time.
-    unsafe { run_loop.addTimer_forMode(timer, NSRunLoopCommonModes) }
+    unsafe { run_loop.addTimer_forMode(&timer, NSRunLoopCommonModes) };
+    timer.setTolerance(seconds * TIMER_TOLERANCE);
+    timer
 }
 
 /// The name of the notification that the system posts when the appearance
@@ -179,20 +201,16 @@ impl Monitor {
     /// The timer keeps its target alive, and the caller keeps the monitor
     /// alive for the whole run.
     fn start_timer(&self) {
-        let seconds = self.ivars().interval.seconds();
         // SAFETY: The target is this monitor, which answers `tick:` with one
-        // timer argument. No user info is given.
-        let timer = unsafe {
-            NSTimer::timerWithTimeInterval_target_selector_userInfo_repeats(
-                seconds,
+        // timer argument.
+        unsafe {
+            start_repeating_timer(
+                &NSRunLoop::mainRunLoop(),
+                self.ivars().interval.seconds(),
                 self,
                 sel!(tick:),
-                None,
-                true,
             )
         };
-        add_repeating_timer(&NSRunLoop::mainRunLoop(), &timer);
-        timer.setTolerance(seconds * TIMER_TOLERANCE);
     }
 
     /// Draws the charts into the status item and writes the menu lines.
@@ -423,7 +441,7 @@ mod tests {
     use objc2_core_foundation::{CFRunLoop, CFString};
     use objc2_foundation::{NSDate, NSObject, NSRunLoop, NSTimer};
 
-    use super::add_repeating_timer;
+    use super::{start_repeating_timer, TIMER_TOLERANCE};
 
     /// The interval of the probe timer, in seconds.
     const PROBE_INTERVAL: f64 = 0.02;
@@ -472,18 +490,10 @@ mod tests {
             .expect("the test thread has a run loop")
             .add_common_mode(Some(&CFString::from_str(&mode.to_string())));
         let probe = Probe::new();
-        // SAFETY: The target answers `fire:` with one timer argument.
-        let timer = unsafe {
-            NSTimer::timerWithTimeInterval_target_selector_userInfo_repeats(
-                PROBE_INTERVAL,
-                &probe,
-                sel!(fire:),
-                None,
-                true,
-            )
-        };
         let run_loop = NSRunLoop::currentRunLoop();
-        add_repeating_timer(&run_loop, &timer);
+        // SAFETY: The target answers `fire:` with one timer argument.
+        let timer =
+            unsafe { start_repeating_timer(&run_loop, PROBE_INTERVAL, &probe, sel!(fire:)) };
         let deadline = NSDate::dateWithTimeIntervalSinceNow(FIRE_DEADLINE);
         while probe.ivars().get() == 0 && deadline.timeIntervalSinceNow() > 0.0 {
             let slice = NSDate::dateWithTimeIntervalSinceNow(LOOP_SLICE);
@@ -495,6 +505,26 @@ mod tests {
         assert!(
             probe.ivars().get() > 0,
             "the timer did not fire in the mode {mode}"
+        );
+    }
+
+    #[test]
+    fn a_repeating_timer_takes_its_share_of_tolerance() {
+        let probe = Probe::new();
+        // SAFETY: The target answers `fire:` with one timer argument.
+        let timer = unsafe {
+            start_repeating_timer(
+                &NSRunLoop::currentRunLoop(),
+                PROBE_INTERVAL,
+                &probe,
+                sel!(fire:),
+            )
+        };
+        let tolerance = timer.tolerance();
+        timer.invalidate();
+        assert!(
+            (tolerance - PROBE_INTERVAL * TIMER_TOLERANCE).abs() < f64::EPSILON,
+            "the tolerance of the timer is {tolerance}"
         );
     }
 }
