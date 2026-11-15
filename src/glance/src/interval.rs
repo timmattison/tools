@@ -35,6 +35,15 @@ impl Interval {
     }
 }
 
+impl fmt::Display for Interval {
+    /// Writes the interval as a plain number of seconds. The text parses back
+    /// through `FromStr` to the same interval, and clap needs this to show and
+    /// to read the default value.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.seconds())
+    }
+}
+
 /// The reason that a text is not an interval.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IntervalError {
@@ -185,6 +194,19 @@ mod tests {
     #[test]
     fn the_default_is_one_second() {
         assert_eq!(Interval::DEFAULT.duration(), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn the_text_of_an_interval_parses_back_to_the_same_interval() {
+        for text in ["0.25", "1", "2.5"] {
+            let interval = parse(text).unwrap();
+            assert_eq!(parse(&interval.to_string()).unwrap(), interval, "{text}");
+        }
+        assert_eq!(
+            parse(&Interval::DEFAULT.to_string()).unwrap(),
+            Interval::DEFAULT
+        );
+        assert_eq!(Interval::DEFAULT.to_string(), "1");
     }
 
     #[test]

@@ -35,7 +35,7 @@ const EXIT_READ_FAILED: u8 = 1;
 #[command(name = "glance", version = version_string!(), about = ABOUT)]
 struct Cli {
     /// The time between two samples, in seconds, at least 0.25.
-    #[arg(long, value_name = "SECONDS", default_value = "1")]
+    #[arg(long, value_name = "SECONDS", default_value_t = Interval::DEFAULT)]
     interval: Interval,
 
     /// Take two readings one interval apart, print one JSON object, and stop.
@@ -84,4 +84,15 @@ fn sample(interval: Interval) -> ExitCode {
 fn run(_cli: Cli) -> ExitCode {
     eprintln!("{UNSUPPORTED_PLATFORM}");
     ExitCode::from(EXIT_UNSUPPORTED)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_default_interval_is_the_constant_of_the_interval_module() {
+        let cli = Cli::try_parse_from(["glance"]).unwrap();
+        assert_eq!(cli.interval, Interval::DEFAULT);
+    }
 }
