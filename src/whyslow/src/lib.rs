@@ -19,10 +19,12 @@
 //! - [`tally`] — the CPU and the memory of each group, and of each worktree of
 //!   the compilers.
 //! - [`verdict`] — the thresholds, and the summary of the likely cause.
+//! - [`render`] — the lines of text that show the summary.
 
 #[cfg(test)]
 mod fixtures;
 pub mod groups;
+pub mod render;
 pub mod sample;
 pub mod tally;
 pub mod verdict;

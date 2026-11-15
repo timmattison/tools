@@ -13,6 +13,7 @@ path = "src/lib.rs"
 [dependencies]
 faulte.workspace = true
 proctree.workspace = true
+termbar.workspace = true
 thiserror.workspace = true
 
 [lints]

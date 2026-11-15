@@ -9670,6 +9670,7 @@ version = "0.1.0"
 dependencies = [
  "faulte",
  "proctree",
+ "termbar",
  "thiserror 2.0.21",
 ]
 
