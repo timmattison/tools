@@ -571,6 +571,22 @@ mod tests {
         assert_eq!(rows[0].executable, "/usr/bin/tool");
     }
 
+    /// `ps` prints `argv[0]` in the `comm` column, and a login shell has a `-`
+    /// in front of it. `-zsh` and `zsh` thus must give one name, and a bare
+    /// `-` must stay as it is.
+    #[test]
+    fn a_login_shell_and_a_shell_have_one_name() {
+        let name_of = |comm: &str| {
+            let text = format!("  700   501 Tue Aug 25 16:45:30 2026 0:01.00 2048 {comm}");
+            let rows = parse(&text).expect("the row parses");
+            rows[0].name().to_owned()
+        };
+        for comm in ["-zsh", "zsh", "/bin/zsh", "-/bin/zsh"] {
+            assert_eq!(name_of(comm), "zsh", "comm {comm:?}");
+        }
+        assert_eq!(name_of("-"), "-");
+    }
+
     /// A CPU time that is not `M:SS.cc` is refused with its line.
     #[test]
     fn a_bad_time_is_refused_with_its_line() {
