@@ -255,3 +255,21 @@ fn on_a_terminal_the_bar_shows_and_the_verdict_line_holds_no_part_of_it() {
         screen(&output.stdout)
     );
 }
+
+/// With `-q`, the display writes no byte.
+///
+/// The delay is zero, so a display that `-q` did not hide would draw at once.
+/// The raw bytes then hold the action, the word `commits`, a clear of a row,
+/// or a block element of the bar.
+#[test]
+fn with_quiet_the_display_writes_no_byte() {
+    let output = on_a_terminal("verdict", "0", true);
+
+    let text = raw(&output);
+    for forbidden in [ACTION, "commits", CLEAR_ROW, "█"] {
+        assert!(
+            !text.contains(forbidden),
+            "-q must hide the display, but the bytes hold {forbidden:?}\n{text:?}"
+        );
+    }
+}
