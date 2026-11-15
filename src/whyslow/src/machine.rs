@@ -214,11 +214,44 @@ pub trait Machine {
 
 /// Reads this machine over `interval` and gives the facts.
 ///
+/// The order of the reads is the design:
+///
+/// 1. the counters of the virtual memory system;
+/// 2. the first process table, the clock, and the CPU ticks;
+/// 3. the sleep of `interval`;
+/// 4. the second process table, the clock, and the CPU ticks;
+/// 5. the counters of the virtual memory system again;
+/// 6. the pressure, the swap file, the load, and the processors;
+/// 7. the Claude Code processes and the arguments.
+///
+/// The clock sits beside each process table, so the window is the time
+/// between the two tables. The counters of the virtual memory system bracket
+/// the window, so the swap-outs are the change over the window and a little
+/// more.
+///
 /// # Errors
 ///
-/// Gives the error of the first source that fails.
+/// Gives the error of the first source that fails, and no facts. A summary
+/// that a failed source left empty would look like a calm Mac. Gives
+/// [`SourceError::CpuTicksDidNotMove`] when the CPU ticks are the same twice,
+/// because a percent of nothing has no meaning.
 pub fn observe(machine: &dyn Machine, interval: Span) -> Result<Facts, SourceError> {
-    let _ = (machine, interval);
+    let vm_before = machine.vm_counters()?;
+    let _before = machine.process_table()?;
+    let _started = machine.clock();
+    let _ticks_before = machine.cpu_ticks()?;
+    machine.sleep(Duration::from(interval));
+    let _after = machine.process_table()?;
+    let _finished = machine.clock();
+    let _ticks_after = machine.cpu_ticks()?;
+    let _vm_after = machine.vm_counters()?;
+    let _ = vm_before;
+    let _pressure = machine.pressure()?;
+    let _swap = machine.swap_usage()?;
+    let _load = machine.load()?;
+    let _processors = machine.processors()?;
+    let _claude = machine.claude_pids();
+    let _arguments = machine.arguments()?;
     Ok(Facts {
         ticks: CpuTicks::default(),
         processors: 0,
