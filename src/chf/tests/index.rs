@@ -494,3 +494,69 @@ fn spawn_delivers_the_same_events() {
     assert!(has_word(&events, "alpha"));
     assert!(has_word(&events, "bravo"));
 }
+
+/// True when a mode 000 directory stays listable, which is the case for root.
+#[cfg(unix)]
+fn mode_zero_stays_listable(path: &Path) -> bool {
+    set_mode(path, 0o000);
+    let listable = fs::read_dir(path).is_ok();
+    set_mode(path, 0o755);
+    listable
+}
+
+#[cfg(unix)]
+#[test]
+fn a_store_that_cannot_be_listed_gives_unreadable_and_keeps_the_cache() {
+    let store = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    write_session(store.path(), FOLDER, UUID_A, "alpha");
+    collect(store.path(), cache.path());
+    let files = json_files(cache.path());
+    assert_eq!(files.len(), 1);
+    let before = fs::read(&files[0]).unwrap();
+    if mode_zero_stays_listable(store.path()) {
+        eprintln!("note: running as root, a mode 000 directory stays listable, test skipped");
+        return;
+    }
+
+    set_mode(store.path(), 0o000);
+    let events = collect(store.path(), cache.path());
+    set_mode(store.path(), 0o755);
+
+    assert_eq!(json_files(cache.path()), files);
+    assert_eq!(fs::read(&files[0]).unwrap(), before);
+    assert_eq!(unreadable(&events), vec![store.path()]);
+    assert_eq!(total(&events), Some(0));
+    assert_framed(&events);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_folder_that_cannot_be_listed_keeps_its_cache_file() {
+    let store = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    write_session(store.path(), "-one", UUID_A, "alpha");
+    write_session(store.path(), "-two", UUID_B, "bravo");
+    collect(store.path(), cache.path());
+    let files = json_files(cache.path());
+    assert_eq!(files.len(), 2);
+    let before: Vec<Vec<u8>> = files.iter().map(|file| fs::read(file).unwrap()).collect();
+    let locked = store.path().join("-two");
+    if mode_zero_stays_listable(&locked) {
+        eprintln!("note: running as root, a mode 000 directory stays listable, test skipped");
+        return;
+    }
+
+    set_mode(&locked, 0o000);
+    let events = collect(store.path(), cache.path());
+    set_mode(&locked, 0o755);
+
+    assert_eq!(json_files(cache.path()), files);
+    let after: Vec<Vec<u8>> = files.iter().map(|file| fs::read(file).unwrap()).collect();
+    assert_eq!(after, before);
+    assert_eq!(unreadable(&events), vec![locked.as_path()]);
+    assert!(has_word(&events, "alpha"));
+    assert!(!has_word(&events, "bravo"));
+    assert_eq!(total(&events), Some(1));
+    assert_framed(&events);
+}
