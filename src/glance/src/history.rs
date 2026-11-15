@@ -20,6 +20,8 @@ pub const DEFAULT_CAPACITY: NonZeroUsize =
 pub struct History<T> {
     items: Vec<T>,
     capacity: usize,
+    /// The index of the oldest item once the storage is full. Before that it is 0.
+    start: usize,
 }
 
 impl<T: Copy> History<T> {
@@ -29,18 +31,24 @@ impl<T: Copy> History<T> {
         History {
             items: Vec::with_capacity(capacity.get()),
             capacity: capacity.get(),
+            start: 0,
         }
     }
 
     /// Adds an item as the newest. A full history drops its oldest item.
     pub fn push(&mut self, item: T) {
-        let _ = item;
+        if self.items.len() < self.capacity {
+            self.items.push(item);
+        } else if let Some(slot) = self.items.get_mut(self.start) {
+            *slot = item;
+            self.start = (self.start + 1) % self.capacity;
+        }
     }
 
     /// The number of items in the history.
     #[must_use]
     pub fn len(&self) -> usize {
-        0
+        self.items.len()
     }
 
     /// Tells if the history holds no item.
@@ -57,13 +65,14 @@ impl<T: Copy> History<T> {
 
     /// Gives the items from the oldest to the newest.
     pub fn iter(&self) -> impl Iterator<Item = T> + '_ {
-        self.items.iter().take(0).copied()
+        let (newer, older) = self.items.split_at(self.start);
+        older.iter().chain(newer.iter()).copied()
     }
 
     /// The item that `push` added last, or `None` when the history is empty.
     #[must_use]
     pub fn newest(&self) -> Option<T> {
-        None
+        self.iter().last()
     }
 }
 
