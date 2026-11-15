@@ -41,9 +41,12 @@ const LABEL_PARTS: usize = 2;
 ///
 /// 1. the value of `-o`, as a separate word or joined (`-o/abs/x.o`);
 /// 2. the value of `--out-dir`, as a separate word or joined with `=`;
-/// 3. each other absolute path from left to right, the name of the program
-///    included: a word that starts with `/`, or the part after the first `=`
-///    of a word when that part starts with `/`.
+/// 3. each other absolute path of the arguments from left to right: a word
+///    that starts with `/`, or the part after the first `=` of a word when
+///    that part starts with `/`. The first word is the program and not an
+///    argument, so it is not a candidate. Homebrew keeps a git checkout at
+///    `/opt/homebrew`, and a program path such as `/opt/homebrew/bin/sccache`
+///    names that checkout.
 ///
 /// Only an absolute path counts, because this function never reads the
 /// working directory. For each candidate, the function walks the path and its
@@ -51,7 +54,7 @@ const LABEL_PARTS: usize = 2;
 /// The first candidate that gives a directory wins.
 ///
 /// This is a refinement of the rule "take the first path". When the first
-/// path lies in no worktree, as the program path under
+/// path lies in no worktree, as a header path under
 /// `/Applications/Xcode.app` does, the next candidate gets its turn. A source
 /// file in `~/.cargo/registry` never decides when an output path names a
 /// worktree, because the output path comes first.
@@ -86,7 +89,10 @@ fn candidates(arguments: &str) -> Vec<PathBuf> {
             found.push(joined);
         }
     }
-    for word in &words {
+    // The first word is the program, not an argument. The `sccache` server
+    // runs as `/opt/homebrew/bin/sccache`, and `/opt/homebrew` is a git
+    // checkout, so the program path names a "worktree" that builds nothing.
+    for word in words.iter().skip(1) {
         found.push(word);
         if let Some((_, value)) = word.split_once(KEY_VALUE_JOINT) {
             found.push(value);
@@ -190,12 +196,12 @@ mod tests {
         assert_eq!(find(&dependency), worktree());
     }
 
-    /// A program under Xcode lies in no worktree, so the next path gets its
-    /// turn.
+    /// A header path under Xcode lies in no worktree, so the next path gets
+    /// its turn.
     #[test]
-    fn a_program_outside_any_worktree_does_not_stop_the_search() {
+    fn a_path_outside_any_worktree_does_not_stop_the_search() {
         let arguments = format!(
-            "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang -c a.c {WORKTREE}/src/a.c"
+            "clang -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -c a.c {WORKTREE}/src/a.c"
         );
         assert_eq!(find(&arguments), worktree());
     }
