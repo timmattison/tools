@@ -5,7 +5,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use gitscratch::testing::{conflicting_repo, independent_branches_repo};
+use gitscratch::testing::{
+    conflicting_repo, independent_branches_repo, numbered_lines, replace_line, TestRepo,
+};
 use gitscratch::{Phase, ReplayObserver, ReplayProgress, Repo};
 
 /// An observer that keeps each report, in the order it arrived.
@@ -77,5 +79,93 @@ fn a_clean_merge_reports_no_hunk_count() {
             ReplayProgress::Phase(Phase::CreateScratch),
             ReplayProgress::Phase(Phase::Replay),
         ]
+    );
+}
+
+/// Every position that the `Commit` reports in `reports` name, in order.
+fn commit_reports(reports: &[ReplayProgress]) -> Vec<(usize, usize)> {
+    reports
+        .iter()
+        .filter_map(|report| match report {
+            ReplayProgress::Commit { position, total } => Some((*position, *total)),
+            ReplayProgress::Phase(_) => None,
+        })
+        .collect()
+}
+
+/// A rebase of five commits halts at the third, which collides with `main`.
+/// The halt reports its own position, and the last report names the whole
+/// rebase, whatever the timing of the poll.
+#[test]
+fn a_halt_reports_its_position_and_the_last_report_is_the_whole_rebase() {
+    const CONTESTED_LINE: usize = 15;
+
+    let fixture = TestRepo::init();
+    let base = numbered_lines(30);
+    fixture.commit_file("shared.txt", &base, "base");
+
+    fixture.branch("feature");
+    fixture.commit_file("one.txt", "one\n", "one");
+    fixture.commit_file("two.txt", "two\n", "two");
+    fixture.commit_file(
+        "shared.txt",
+        &replace_line(&base, CONTESTED_LINE, "feature-edit"),
+        "three",
+    );
+    fixture.commit_file("four.txt", "four\n", "four");
+    fixture.commit_file("five.txt", "five\n", "five");
+
+    fixture.checkout("main");
+    fixture.commit_file(
+        "shared.txt",
+        &replace_line(&base, CONTESTED_LINE, "main-edit"),
+        "main work",
+    );
+
+    let repo = Repo::open(fixture.path()).expect("open the fixture");
+    let recorder = Recorder::new();
+    let scratch = repo
+        .scratch_with_progress("feature", Arc::clone(&recorder))
+        .expect("build a scratch worktree");
+
+    let cost = scratch.replay_rebase("main").expect("replay the rebase");
+
+    let reports = recorder.reports();
+    assert_eq!(
+        cost.stops().digits(),
+        "1",
+        "the fixture must halt once, at commit 3"
+    );
+    assert_eq!(
+        reports.get(..2),
+        Some(
+            &[
+                ReplayProgress::Phase(Phase::CreateScratch),
+                ReplayProgress::Phase(Phase::Replay),
+            ][..]
+        )
+    );
+    let commits = commit_reports(&reports);
+    assert!(
+        commits.iter().all(|&(_, total)| total == 5),
+        "every total is 5: {commits:?}"
+    );
+    assert!(
+        commits.windows(2).all(|pair| pair[0].0 <= pair[1].0),
+        "a position never decreases: {commits:?}"
+    );
+    assert!(
+        reports.contains(&ReplayProgress::Commit {
+            position: 3,
+            total: 5
+        }),
+        "the halt reports commit 3: {reports:?}"
+    );
+    assert_eq!(
+        reports.last(),
+        Some(&ReplayProgress::Commit {
+            position: 5,
+            total: 5
+        })
     );
 }
