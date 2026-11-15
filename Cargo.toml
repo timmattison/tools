@@ -202,10 +202,13 @@ io-kit-sys = "0.5"
 # Core Audio bindings for popstop. They ship generated bindings, so the build
 # needs no bindgen and no libclang. A member turns on only the features that
 # it uses.
+objc2 = "0.6.5"
+objc2-app-kit = { version = "0.3.2", default-features = false }
 objc2-audio-toolbox = { version = "0.3.2", default-features = false }
 objc2-core-audio = { version = "0.3.2", default-features = false }
 objc2-core-audio-types = { version = "0.3.2", default-features = false }
 objc2-core-foundation = { version = "0.3.2", default-features = false }
+objc2-foundation = { version = "0.3.2", default-features = false }
 windows-sys = { version = "0.60", features = [
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_Foundation",

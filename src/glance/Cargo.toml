@@ -21,6 +21,36 @@ serde_json.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc.workspace = true
+objc2.workspace = true
+objc2-app-kit = { workspace = true, features = [
+    "std",
+    "NSAppearance",
+    "NSApplication",
+    "NSBitmapImageRep",
+    "NSColorSpace",
+    "NSGraphics",
+    "NSImage",
+    "NSImageRep",
+    "NSMenu",
+    "NSMenuItem",
+    "NSResponder",
+    "NSScreen",
+    "NSStatusBar",
+    "NSStatusBarButton",
+    "NSStatusItem",
+    "NSButton",
+    "NSRunningApplication",
+    "objc2-core-foundation",
+    "NSControl",
+    "NSView",
+] }
+objc2-foundation = { workspace = true, features = [
+    "std",
+    "NSDistributedNotificationCenter",
+    "NSTimer",
+    "NSEnumerator",
+    "objc2-core-foundation",
+] }
 
 [dev-dependencies]
 childenv.workspace = true

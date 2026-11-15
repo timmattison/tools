@@ -35,4 +35,10 @@ pub mod pressure;
 )]
 pub mod reader;
 pub mod sample;
+#[cfg(target_os = "macos")]
+#[expect(
+    unsafe_code,
+    reason = "the shell calls AppKit through objc2. It is one of the two modules that can hold unsafe code"
+)]
+pub mod shell;
 pub mod text;

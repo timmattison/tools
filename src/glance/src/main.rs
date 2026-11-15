@@ -53,7 +53,7 @@ fn run(cli: Cli) -> ExitCode {
     if cli.sample {
         return sample(cli.interval);
     }
-    ExitCode::SUCCESS
+    glance::shell::run(cli.interval)
 }
 
 /// Takes two readings one interval apart and prints the sample as JSON.
