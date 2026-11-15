@@ -29,3 +29,4 @@ pub mod history;
 pub mod interval;
 pub mod pressure;
 pub mod sample;
+pub mod text;
