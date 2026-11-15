@@ -18,7 +18,7 @@ pub const PROGRAM: &str = faulte::table::PROGRAM;
 
 /// The columns of a row, in the order that [`parse`] reads them. Each column
 /// has an empty header, so `ps` prints no header line.
-pub const COLUMNS: &str = "pid=,ppid=,uid=,lstart=,time=,rss=,comm=";
+pub const COLUMNS: &str = "pid=,uid=,lstart=,time=,rss=,comm=";
 
 /// The variables that the caller sets in the environment of [`PROGRAM`].
 ///
@@ -172,8 +172,6 @@ fn fixed_digits(token: &str) -> Option<u64> {
 pub struct ProcessRow {
     /// The process.
     pub pid: Pid,
-    /// The parent of the process.
-    pub ppid: Pid,
     /// The account that owns the process.
     pub uid: Uid,
     /// The five tokens of `lstart`, joined by one space. It is an identity
@@ -202,10 +200,10 @@ pub enum SampleParseError {
     /// incomplete.
     #[error("ps listed no process: a Mac always runs processes, so the output is incomplete")]
     NoRows,
-    /// A line holds fewer than ten tokens before the executable.
+    /// A line holds fewer than nine tokens before the executable.
     #[error(
         "ps printed a row of fewer than {FIELDS} fields, at line {number}: {line:?}. A row holds \
-         the PID, the parent, the UID, the five fields of the start time, the CPU time, and the \
+         the PID, the UID, the five fields of the start time, the CPU time, and the \
          RSS, then the executable"
     )]
     TooFewFields {
@@ -240,9 +238,6 @@ pub enum SampleParseError {
 /// The column of the PID, as `ps -o` names it.
 const PID_COLUMN: &str = "pid";
 
-/// The column of the PID of the parent.
-const PPID_COLUMN: &str = "ppid";
-
 /// The column of the UID of the owner.
 const UID_COLUMN: &str = "uid";
 
@@ -250,12 +245,12 @@ const UID_COLUMN: &str = "uid";
 const RSS_COLUMN: &str = "rss";
 
 /// The count of tokens before the executable.
-const FIELDS: usize = 10;
+const FIELDS: usize = 9;
 
 /// Reads the process table from the output of `ps`.
 ///
-/// Each line that is not blank is one row, in the order of `ps`. A row is ten
-/// tokens, then the executable. The tokens are the PID, the parent, the UID,
+/// Each line that is not blank is one row, in the order of `ps`. A row is nine
+/// tokens, then the executable. The tokens are the PID, the UID,
 /// the five tokens of the start time, the CPU time, and the RSS. The parser
 /// splits on ASCII white space, because `ps` pads a day of one digit with a
 /// space. The executable is the rest of the line. It keeps the spaces inside
@@ -265,7 +260,7 @@ const FIELDS: usize = 10;
 ///
 /// The parser reads the lines in order, and the first line that fails gives
 /// the error. In one line, it checks in this order: the count of tokens, the
-/// PID, the parent, the UID, the RSS, and the CPU time. When every line
+/// PID, the UID, the RSS, and the CPU time. When every line
 /// passes, [`SampleParseError::NoRows`] means that the output holds no row.
 /// The parser fails closed: it never gives a table that lacks a row.
 pub fn parse(output: &str) -> Result<Vec<ProcessRow>, SampleParseError> {
@@ -310,16 +305,14 @@ impl RowFault {
 
 /// Reads one row.
 fn parse_row(line: &str) -> Result<ProcessRow, RowFault> {
-    let ([pid, ppid, uid, weekday, month, day, clock, year, time, rss], executable) =
+    let ([pid, uid, weekday, month, day, clock, year, time, rss], executable) =
         split_fields::<FIELDS>(line).ok_or(RowFault::TooFewFields)?;
     let pid = Pid::new(number(PID_COLUMN, pid)?);
-    let ppid = Pid::new(number(PPID_COLUMN, ppid)?);
     let uid = parse_ps_uid(uid).ok_or(RowFault::MalformedNumber(UID_COLUMN))?;
     let rss_kib = number(RSS_COLUMN, rss)?;
     let cpu = CpuTime::parse(time).ok_or(RowFault::MalformedTime)?;
     Ok(ProcessRow {
         pid,
-        ppid,
         uid,
         started: [weekday, month, day, clock, year].join(" "),
         cpu,
@@ -466,7 +459,6 @@ mod tests {
             row_of(&rows, 1),
             &ProcessRow {
                 pid: Pid::new(1),
-                ppid: Pid::new(0),
                 uid: Uid::new(0),
                 started: "Wed Oct 28 21:29:02 2026".to_owned(),
                 cpu: CpuTime::from_centiseconds(1_797_047),
@@ -619,12 +611,7 @@ mod tests {
         assert_eq!(PROGRAM, "/bin/ps");
         assert_eq!(
             arguments(),
-            [
-                "-A",
-                "-ww",
-                "-o",
-                "pid=,uid=,lstart=,time=,rss=,comm="
-            ]
+            ["-A", "-ww", "-o", "pid=,uid=,lstart=,time=,rss=,comm="]
         );
         assert_eq!(ENVIRONMENT, [("TZ", "UTC"), ("LC_ALL", "en_US.UTF-8")]);
     }
@@ -633,7 +620,6 @@ mod tests {
     fn process(pid: u32, started: &str, cs: u64) -> ProcessRow {
         ProcessRow {
             pid: Pid::new(pid),
-            ppid: Pid::new(1),
             uid: Uid::new(501),
             started: started.to_owned(),
             cpu: CpuTime::from_centiseconds(cs),

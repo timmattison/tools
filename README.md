@@ -5580,7 +5580,7 @@ The measurements are from 2026-11-15, at a load of 81 to 96.
 
 | Fact | Source | Reason |
 | --- | --- | --- |
-| CPU of each process | Two snapshots of `ps -A -ww` with `pid`, `ppid`, `uid`, `lstart`, `time`, `rss`, and `comm`, one interval apart. The CPU of a process is the change of `time`. | `ps` is setuid root, reads each account, and took 0.11 s. `top -l 2 -s 1` took 8.8 s. |
+| CPU of each process | Two snapshots of `ps -A -ww` with `pid`, `uid`, `lstart`, `time`, `rss`, and `comm`, one interval apart. The CPU of a process is the change of `time`. | `ps` is setuid root, reads each account, and took 0.11 s. `top -l 2 -s 1` took 8.8 s. |
 | The identity of a process | The PID and the start time (`lstart`) | A reused PID is a different process. |
 | The arguments of a compiler | `proctree::ps_arguments`, which runs `ps -eo pid=,args=` | `proctree` is the shared reader of the process table. |
 | Footprint of each process | `proc_pid_rusage` with `RUSAGE_INFO_V4`, field `ri_phys_footprint` | RSS does not include compressed memory (94 MiB of RSS against 2,990 MiB of footprint for `WindowServer`). If the kernel refuses a process (another account and no root), `whyslow` uses its RSS and marks its group with `≥`. A process that exits before the read of its footprint counts 0 bytes and gets no `≥`, because `sudo` does not help there. |

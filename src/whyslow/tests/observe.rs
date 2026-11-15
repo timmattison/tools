@@ -33,7 +33,6 @@ fn interval() -> Span {
 fn row(pid: u32, cpu_centiseconds: u64, rss_kib: u64, executable: &str) -> ProcessRow {
     ProcessRow {
         pid: Pid::new(pid),
-        ppid: Pid::new(1),
         uid: Uid::new(501),
         started: "Sat Nov 14 10:00:00 2026".to_owned(),
         cpu: CpuTime::from_centiseconds(cpu_centiseconds),
