@@ -275,6 +275,8 @@ full path, `shellquote::shell_quote(...)`, where the call site sits behind a
   prints bare, because a person reads that output before they paste it
 - `crap` - the paths that the tests of the shell function put into the fake
   scripts
+- `gitscratch` - the log path, the path of the real git, and the subcommand
+  names that the `git` shim of `testing::git_shim` puts into its script
 - `gsw` - the command it asks an interactive shell to run
 - `ha` - the paths of the scripts that the browser tests put into `BROWSER`
 - `nwt` - the worktree path and the branch in the cleanup commands it prints

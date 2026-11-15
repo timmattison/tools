@@ -36,6 +36,14 @@ use crate::scratch::Scratch;
 #[cfg(unix)]
 pub mod pty;
 
+/// A `git` on `PATH` that logs each call and can pause before a subcommand, so a
+/// test sees which git processes a replay starts. `gitscratch` sheds `GIT_*`, so
+/// only a `git` on `PATH` sees the calls.
+///
+/// Unix only, because the shim is a shell script.
+#[cfg(unix)]
+pub mod git_shim;
+
 /// The name every fixture commit is authored and committed under.
 const FIXTURE_USER_NAME: &str = "gitscratch test";
 

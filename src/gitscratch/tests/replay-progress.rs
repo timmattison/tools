@@ -3,8 +3,14 @@
 //! The observer is opt-in, so these tests build the scratch worktree through
 //! `scratch_with_progress` and read back what the observer received.
 
+#[cfg(unix)]
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+#[cfg(unix)]
+use gitscratch::testing::git_shim::GitShim;
+#[cfg(unix)]
+use gitscratch::testing::run_child_half;
 use gitscratch::testing::{
     conflicting_repo, independent_branches_repo, numbered_lines, replace_line, TestRepo,
 };
@@ -226,4 +232,99 @@ fn a_rebase_of_thirty_commits_reports_each_position_against_a_total_of_thirty() 
             total: COMMITS
         })
     );
+}
+
+/// The name of the variable that hands the child half the fixture path. It does
+/// not start with `GIT_`, because `childenv` sheds that prefix.
+#[cfg(unix)]
+const FIXTURE_VARIABLE: &str = "GITSCRATCH_SHIM_FIXTURE";
+
+/// The name of the variable that says whether the child half builds its scratch
+/// with an observer (`1`) or without one (`0`).
+#[cfg(unix)]
+const OBSERVER_VARIABLE: &str = "GITSCRATCH_SHIM_OBSERVER";
+
+/// The filter that the parent halves hand to the child half.
+#[cfg(unix)]
+const STATE_DIRECTORY_CHILD: &str = "state_directory_child";
+
+/// A clean rebase that must write a commit: `feature` holds one commit on its
+/// own file, and `main` moved on another file.
+#[cfg(unix)]
+fn clean_rebase_fixture() -> TestRepo {
+    let fixture = TestRepo::init();
+    fixture.commit_file("base.txt", "base\n", "base");
+    fixture.branch("feature");
+    fixture.commit_file("feature.txt", "feature\n", "feature work");
+    fixture.checkout("main");
+    fixture.commit_file("main.txt", "main\n", "main work");
+    fixture
+}
+
+/// The child half of the two tests below. It replays the rebase of `feature`
+/// onto `main` under the `PATH` that the parent chose, and returns at once when
+/// the parent set no fixture.
+#[cfg(unix)]
+#[test]
+fn state_directory_child() {
+    let Some(fixture) = std::env::var_os(FIXTURE_VARIABLE) else {
+        return;
+    };
+    let repo = Repo::open(Path::new(&fixture)).expect("open the fixture");
+    let scratch = if std::env::var(OBSERVER_VARIABLE).as_deref() == Ok("1") {
+        repo.scratch_with_progress("feature", Recorder::new())
+    } else {
+        repo.scratch("feature")
+    }
+    .expect("build a scratch worktree");
+    scratch.replay_rebase("main").expect("replay the rebase");
+    drop(scratch);
+    gitscratch::testing::child_ran();
+}
+
+/// Run the child half under a `git` shim, with or without an observer, and
+/// count the calls before the first `git rebase` that ask for the state
+/// directory of the rebase.
+#[cfg(unix)]
+fn state_directory_calls_before_the_rebase(observer: bool) -> usize {
+    let fixture = clean_rebase_fixture();
+    let shim = GitShim::new(&[]);
+    let path = shim.path_variable();
+    run_child_half(STATE_DIRECTORY_CHILD, |child| {
+        child
+            .env("PATH", path)
+            .env(FIXTURE_VARIABLE, fixture.path())
+            .env(OBSERVER_VARIABLE, if observer { "1" } else { "0" });
+    })
+    .expect("the child half ran the replay");
+
+    let calls = shim.calls();
+    let first_rebase = calls
+        .iter()
+        .position(|call| call.subcommand() == Some("rebase"))
+        .expect("the shim saw a `git rebase`, so it saw the replay");
+    calls[..first_rebase]
+        .iter()
+        .filter(|call| call.has_arguments(&["--git-path", "rebase-merge"]))
+        .count()
+}
+
+/// A replay with no observer is what `gsw` and `grist` run, and it must start
+/// no git process for a display that does not exist. So no call before the
+/// first `git rebase` asks for the state directory of the rebase. The calls
+/// after the rebase ask for it too, on each round, so only the calls before it
+/// count.
+#[cfg(unix)]
+#[test]
+fn a_replay_with_no_observer_asks_git_for_no_rebase_state_directory() {
+    assert_eq!(state_directory_calls_before_the_rebase(false), 0);
+}
+
+/// The armed control of the test above. A replay with an observer asks for the
+/// state directory once, before the rebase. It proves that the log sees the call
+/// that the test above rules out.
+#[cfg(unix)]
+#[test]
+fn a_replay_with_an_observer_asks_git_for_the_rebase_state_directory_once() {
+    assert_eq!(state_directory_calls_before_the_rebase(true), 1);
 }

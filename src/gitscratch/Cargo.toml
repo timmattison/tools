@@ -18,6 +18,9 @@ libc = { workspace = true, optional = true }
 # spinner and a bar on standard error while a replay runs. Optional, because
 # `grist` prints no breakdown and no display, and must not pay for it.
 indicatif = { workspace = true, optional = true }
+# Quotes each value that the `git` shim of `testing::git_shim` puts into its
+# script. Optional, so a build without the `testing` feature holds none of it.
+shellquote = { workspace = true, optional = true }
 tempfile.workspace = true
 # The width of the terminal and the block elements of the progress bar, behind
 # the `progress` feature, for the same reason as `indicatif`. The display reads
@@ -44,8 +47,8 @@ testcolor.workspace = true
 
 [features]
 # Shared git fixture builders for the test suites of crates built on gitscratch,
-# and the pseudo-terminal that the tests of `grind` and `grime` share.
-testing = ["dep:libc"]
+# the pseudo-terminal, and the `git` shim that the tests of `grind` and `grime` share.
+testing = ["dep:libc", "dep:shellquote"]
 # The progress display of `Console`. It is off by default, because it needs the
 # size of the terminal, and `grist` must not carry that dependency.
 progress = ["dep:indicatif", "dep:termbar"]
