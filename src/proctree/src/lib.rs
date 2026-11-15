@@ -265,8 +265,17 @@ pub fn ps_arguments() -> Option<String> {
 /// `whyslow` reads the output path of each compiler from this text.
 #[must_use]
 pub fn parse_arguments(ps_args_output: &str) -> HashMap<Pid, String> {
-    let _ = ps_args_output;
-    HashMap::new()
+    ps_args_output
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            // The pid ends at the first white space. `split_once` cuts only at
+            // a character it found, so it never cuts a multi-byte character.
+            let (pid, rest) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+            let pid = pid.parse::<u32>().ok()?;
+            Some((Pid(pid), rest.trim().to_owned()))
+        })
+        .collect()
 }
 
 /// Run `ps` with `args` and give back what it wrote to standard output.
