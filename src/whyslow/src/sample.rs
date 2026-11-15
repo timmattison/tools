@@ -39,7 +39,12 @@ pub const ENVIRONMENT: [(&str, &str); 2] = [("TZ", "UTC"), ("LC_ALL", "en_US.UTF
 /// the width, so `ps` does not cut a long path. `-o` gives the [`COLUMNS`].
 #[must_use]
 pub fn arguments() -> Vec<String> {
-    Vec::new()
+    vec![
+        "-A".to_owned(),
+        "-ww".to_owned(),
+        "-o".to_owned(),
+        COLUMNS.to_owned(),
+    ]
 }
 
 /// The character between the minutes and the seconds of a time token.
