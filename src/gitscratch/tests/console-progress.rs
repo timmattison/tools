@@ -294,3 +294,63 @@ fn a_display_that_waits_for_its_delay_writes_nothing_before_the_verdict() {
         );
     }
 }
+
+/// With standard error on a pipe, the display writes no byte.
+///
+/// Standard output and standard error are both pipes here, as they are for a
+/// script that captures a run. Standard error holds nothing, and standard
+/// output holds the verdict that the run held before the display existed.
+#[test]
+fn with_stderr_on_a_pipe_the_display_writes_no_byte() {
+    let output = child("verdict", "0", false)
+        .output()
+        .expect("the child half must start");
+
+    assert_ran(&output);
+    assert!(
+        output.stderr.is_empty(),
+        "standard error must hold no byte\n{:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        raw(&output).contains(VERDICT),
+        "standard output must hold the verdict\n{:?}",
+        raw(&output)
+    );
+}
+
+/// The note line holds no part of the bar.
+///
+/// The note goes to standard error, the same stream as the display. It must
+/// clear the display first, or the text of the bar stays on the row that the
+/// note takes.
+#[test]
+fn the_note_line_holds_no_part_of_the_bar() {
+    let output = on_a_terminal("note", "0", false);
+
+    let rows = screen(&output.stdout);
+    assert!(
+        rows.iter().any(|row| row == NOTE),
+        "a row must hold the note and nothing else\n{rows:?}"
+    );
+    assert!(
+        rows.iter().any(|row| row == VERDICT),
+        "a row must hold the verdict and nothing else\n{rows:?}"
+    );
+}
+
+/// The error line holds no part of the bar.
+///
+/// The failure line of `Console::answer` goes to standard error as well, and
+/// it clears the display first for the same reason as the note.
+#[test]
+fn the_error_line_holds_no_part_of_the_bar() {
+    let output = on_a_terminal("failure", "0", false);
+
+    let rows = screen(&output.stdout);
+    let expected = format!("grind: error: {FAILURE}");
+    assert!(
+        rows.contains(&expected),
+        "a row must hold the error line and nothing else\n{rows:?}"
+    );
+}
