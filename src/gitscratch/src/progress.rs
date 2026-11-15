@@ -133,6 +133,11 @@ impl<'a> RebaseWatch<'a> {
         }
     }
 
+    /// Run `call` and read the state files while it runs.
+    pub(crate) fn watch<T>(&self, call: impl FnOnce() -> T) -> T {
+        call()
+    }
+
     /// Report the end of the rebase.
     ///
     /// Git deletes the state directory when the rebase completes, so the poll
@@ -346,5 +351,29 @@ mod tests {
         watch.finish(|| None);
 
         assert_eq!(recorder.reports(), []);
+    }
+
+    #[test]
+    fn the_poll_reads_while_the_watched_call_blocks() {
+        const WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+        const STEP: std::time::Duration = std::time::Duration::from_millis(10);
+
+        let dir = tempfile::tempdir().expect("make a state directory");
+        let recorder = Recorder::default();
+        let watch = RebaseWatch::new(&recorder, dir.path().to_path_buf());
+
+        let arrived = watch.watch(|| {
+            write_state(dir.path(), "3", "7");
+            let started = std::time::Instant::now();
+            while started.elapsed() < WAIT {
+                if recorder.reports().contains(&commit(3, 7)) {
+                    return true;
+                }
+                std::thread::sleep(STEP);
+            }
+            false
+        });
+
+        assert!(arrived, "no poll read the files while the call blocked");
     }
 }
