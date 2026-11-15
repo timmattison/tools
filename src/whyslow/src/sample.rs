@@ -430,10 +430,12 @@ mod tests {
         assert_eq!(CpuTime::default().centiseconds(), 0);
     }
 
-    /// The fixture before the one second wait, as `ps` printed it.
+    /// The fixture before the one second wait, as `ps` printed it. The column
+    /// of the parent was removed from each line after the capture.
     const BEFORE: &str = include_str!("../tests/fixtures/ps-before.txt");
 
-    /// The fixture after the one second wait.
+    /// The fixture after the one second wait, as `ps` printed it. The column
+    /// of the parent was removed from each line after the capture.
     const AFTER: &str = include_str!("../tests/fixtures/ps-after.txt");
 
     /// Finds the row of `pid` in `rows`.
@@ -499,13 +501,13 @@ mod tests {
     }
 
     /// A row of `ps` text with the given tokens.
-    fn line(pid: &str, ppid: &str, uid: &str, time: &str, rss: &str) -> String {
-        format!("{pid:>5} {ppid:>5} {uid:>5} Tue Aug 25 16:45:30 2026 {time:>12} {rss:>6} /usr/bin/tool")
+    fn line(pid: &str, uid: &str, time: &str, rss: &str) -> String {
+        format!("{pid:>5} {uid:>5} Tue Aug 25 16:45:30 2026 {time:>12} {rss:>6} /usr/bin/tool")
     }
 
     /// A good row.
     fn good() -> String {
-        line("700", "1", "501", "0:01.00", "2048")
+        line("700", "501", "0:01.00", "2048")
     }
 
     /// Output with `bad` at line 3, after a blank line.
@@ -522,13 +524,13 @@ mod tests {
         }
     }
 
-    /// A line of fewer than ten tokens is refused, with its number from 1.
+    /// A line of fewer than nine tokens is refused, with its number from 1.
     #[test]
     fn a_short_line_is_refused_with_its_number() {
         for bad in [
             "  700     1   501",
             "日本語 🎉 café",
-            "700 1 501 Tue Aug 25 16:45:30 2026 0:01.00",
+            "700 501 Tue Aug 25 16:45:30 2026 0:01.00",
         ] {
             assert_eq!(
                 parse(&with_bad_line_at_3(bad)),
@@ -541,15 +543,14 @@ mod tests {
         }
     }
 
-    /// A bad PID, parent, UID or RSS is refused, and the error names the
+    /// A bad PID, UID or RSS is refused, and the error names the
     /// column.
     #[test]
     fn a_bad_number_is_refused_with_its_column() {
         let cases = [
-            ("pid", line("x", "1", "501", "0:01.00", "2048")),
-            ("ppid", line("700", "-1", "501", "0:01.00", "2048")),
-            ("uid", line("700", "1", "+5", "0:01.00", "2048")),
-            ("rss", line("700", "1", "501", "0:01.00", "2k")),
+            ("pid", line("x", "501", "0:01.00", "2048")),
+            ("uid", line("700", "+5", "0:01.00", "2048")),
+            ("rss", line("700", "501", "0:01.00", "2k")),
         ];
         for (column, bad) in cases {
             assert_eq!(
@@ -564,11 +565,25 @@ mod tests {
         }
     }
 
+    /// A row is the six columns of `ps`: the PID, the UID, the five tokens
+    /// of the start, the CPU time, the RSS, and the executable.
+    #[test]
+    fn a_row_is_the_six_columns_of_ps() {
+        let text = line("700", "501", "1:02.03", "2048");
+        let rows = parse(&text).expect("the row parses");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pid, Pid::new(700));
+        assert_eq!(rows[0].uid, Uid::new(501));
+        assert_eq!(rows[0].cpu, CpuTime::from_centiseconds(6_203));
+        assert_eq!(rows[0].rss_kib, 2048);
+        assert_eq!(rows[0].executable, "/usr/bin/tool");
+    }
+
     /// A CPU time that is not `M:SS.cc` is refused with its line.
     #[test]
     fn a_bad_time_is_refused_with_its_line() {
         for time in ["1:60.00", "1:05", "abc", "1:05.5"] {
-            let bad = line("700", "1", "501", time, "2048");
+            let bad = line("700", "501", time, "2048");
             assert_eq!(
                 parse(&with_bad_line_at_3(&bad)),
                 Err(SampleParseError::MalformedTime {
@@ -584,8 +599,8 @@ mod tests {
     /// in another way.
     #[test]
     fn the_first_bad_line_wins() {
-        let first = line("x", "1", "501", "0:01.00", "2048");
-        let second = line("700", "1", "501", "bad", "2048");
+        let first = line("x", "501", "0:01.00", "2048");
+        let second = line("700", "501", "bad", "2048");
         let text = format!("{}\n{first}\n{second}\n", good());
         assert_eq!(
             parse(&text),
@@ -598,7 +613,7 @@ mod tests {
     }
 
     /// The command is exact: every process of every account, no limit on the
-    /// width, and the seven columns that the parser reads.
+    /// width, and the six columns that the parser reads.
     #[test]
     fn the_arguments_ask_for_every_process_with_the_columns_of_a_row() {
         assert_eq!(PROGRAM, "/bin/ps");
@@ -608,7 +623,7 @@ mod tests {
                 "-A",
                 "-ww",
                 "-o",
-                "pid=,ppid=,uid=,lstart=,time=,rss=,comm="
+                "pid=,uid=,lstart=,time=,rss=,comm="
             ]
         );
         assert_eq!(ENVIRONMENT, [("TZ", "UTC"), ("LC_ALL", "en_US.UTF-8")]);

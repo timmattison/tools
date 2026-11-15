@@ -1,26 +1,26 @@
-    1     0     0 Wed Oct 28 21:29:02 2026     299:30.48  14096 /sbin/launchd
-  596     1     0 Wed Oct 28 21:31:02 2026     228:57.11  15520 /usr/libexec/logd
-  599     1     0 Wed Oct 28 21:31:02 2026       5:31.49   3232 /usr/libexec/UserEventAgent
-  602     1     0 Wed Oct 28 21:31:02 2026       4:57.62   3744 /System/Library/PrivateFrameworks/MediaRemote.framework/Support/mediaremoted
-  612     1     0 Wed Oct 28 21:31:02 2026      13:04.20   3952 /System/Library/CoreServices/powerd.bundle/powerd
-  669     1    88 Wed Oct 28 21:31:03 2026     4847:21.09 113360 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
-  780     1    88 Wed Oct 28 21:31:03 2026       1:05.56    816 /usr/sbin/distnoted
-  473     1   501 Sun Nov  8 18:39:27 2026       1:16.30   4512 /System/Library/PrivateFrameworks/UserActivity.framework/Agents/useractivityd
-  569     1   501 Fri Nov 13 17:35:10 2026       9:06.15  71920 /Applications/Menu Bar Controller for Sonos.app/Contents/MacOS/Menu Bar Controller for Sonos
-  672     1   501 Wed Oct 28 21:31:03 2026      82:24.05  25984 /System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow
- 1410     1   501 Wed Oct 28 21:31:40 2026      46:21.81   6336 /System/Applications/Siri AI.app/Contents/MacOS/Siri AI
- 1377     1   501 Wed Oct 28 21:31:39 2026     1339:03.97 222352 /Applications/WezTerm.app/Contents/MacOS/wezterm-gui
- 1634     1     0 Mon Nov  9 13:32:16 2026     301:26.99   9184 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/FSEvents.framework/Versions/A/Support/fseventsd
- 5758     1   503 Wed Oct 28 21:40:39 2026       1:18.32    912 /usr/sbin/distnoted
- 6853     1   503 Wed Oct 28 21:42:21 2026      24:17.54   2640 mosh-server
- 7013     1   503 Wed Oct 28 21:42:26 2026     1482:12.55  92832 /opt/homebrew/bin/zellij
- 9870     1   503 Wed Oct 28 21:43:10 2026       1:05.58    864 /usr/libexec/lsd
-56844     1   502 Mon Nov  2 01:37:25 2026       1:00.64    896 /usr/sbin/distnoted
-76632     1   502 Mon Nov  2 16:39:14 2026       0:21.51    832 /usr/libexec/lsd
-28760     1   504 Sat Oct 31 19:28:58 2026       1:06.71    896 /usr/sbin/distnoted
-  794     1     0 Wed Oct 28 21:31:04 2026       0:07.82   1072 /System/Library/CoreServices/Software Update.app/Contents/Resources/suhelperd
- 1131     1   501 Wed Oct 28 21:31:25 2026       7:00.72   2624 /usr/libexec/ContinuityCaptureAgent
- 1247     1   501 Wed Oct 28 21:31:32 2026      73:35.27  39248 /System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter
-14420 14095   501 Sun Nov 15 18:28:30 2026       1:50.21 305088 claude
- 1325     1   501 Wed Oct 28 21:31:38 2026       0:00.22    864 /System/Library/CoreServices/Screen Time.app/Contents/PlugIns/ScreenTimeWidgetExtension.appex/Contents/MacOS/ScreenTimeWidgetExtension
-17385 17265   501 Sat Nov  7 18:06:43 2026     143:49.26 185104 claude
+    1     0 Wed Oct 28 21:29:02 2026     299:30.48  14096 /sbin/launchd
+  596     0 Wed Oct 28 21:31:02 2026     228:57.11  15520 /usr/libexec/logd
+  599     0 Wed Oct 28 21:31:02 2026       5:31.49   3232 /usr/libexec/UserEventAgent
+  602     0 Wed Oct 28 21:31:02 2026       4:57.62   3744 /System/Library/PrivateFrameworks/MediaRemote.framework/Support/mediaremoted
+  612     0 Wed Oct 28 21:31:02 2026      13:04.20   3952 /System/Library/CoreServices/powerd.bundle/powerd
+  669    88 Wed Oct 28 21:31:03 2026     4847:21.09 113360 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+  780    88 Wed Oct 28 21:31:03 2026       1:05.56    816 /usr/sbin/distnoted
+  473   501 Sun Nov  8 18:39:27 2026       1:16.30   4512 /System/Library/PrivateFrameworks/UserActivity.framework/Agents/useractivityd
+  569   501 Fri Nov 13 17:35:10 2026       9:06.15  71920 /Applications/Menu Bar Controller for Sonos.app/Contents/MacOS/Menu Bar Controller for Sonos
+  672   501 Wed Oct 28 21:31:03 2026      82:24.05  25984 /System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow
+ 1410   501 Wed Oct 28 21:31:40 2026      46:21.81   6336 /System/Applications/Siri AI.app/Contents/MacOS/Siri AI
+ 1377   501 Wed Oct 28 21:31:39 2026     1339:03.97 222352 /Applications/WezTerm.app/Contents/MacOS/wezterm-gui
+ 1634     0 Mon Nov  9 13:32:16 2026     301:26.99   9184 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/FSEvents.framework/Versions/A/Support/fseventsd
+ 5758   503 Wed Oct 28 21:40:39 2026       1:18.32    912 /usr/sbin/distnoted
+ 6853   503 Wed Oct 28 21:42:21 2026      24:17.54   2640 mosh-server
+ 7013   503 Wed Oct 28 21:42:26 2026     1482:12.55  92832 /opt/homebrew/bin/zellij
+ 9870   503 Wed Oct 28 21:43:10 2026       1:05.58    864 /usr/libexec/lsd
+56844   502 Mon Nov  2 01:37:25 2026       1:00.64    896 /usr/sbin/distnoted
+76632   502 Mon Nov  2 16:39:14 2026       0:21.51    832 /usr/libexec/lsd
+28760   504 Sat Oct 31 19:28:58 2026       1:06.71    896 /usr/sbin/distnoted
+  794     0 Wed Oct 28 21:31:04 2026       0:07.82   1072 /System/Library/CoreServices/Software Update.app/Contents/Resources/suhelperd
+ 1131   501 Wed Oct 28 21:31:25 2026       7:00.72   2624 /usr/libexec/ContinuityCaptureAgent
+ 1247   501 Wed Oct 28 21:31:32 2026      73:35.27  39248 /System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter
+14420   501 Sun Nov 15 18:28:30 2026       1:50.21 305088 claude
+ 1325   501 Wed Oct 28 21:31:38 2026       0:00.22    864 /System/Library/CoreServices/Screen Time.app/Contents/PlugIns/ScreenTimeWidgetExtension.appex/Contents/MacOS/ScreenTimeWidgetExtension
+17385   501 Sat Nov  7 18:06:43 2026     143:49.26 185104 claude
