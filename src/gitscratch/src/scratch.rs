@@ -699,7 +699,7 @@ impl Scratch {
                     outcome.stderr
                 );
                 if let Some(watch) = &watch {
-                    watch.finish(|| None);
+                    watch.finish(|| landed_commits(&git, new_base.unwrap_or(upstream)));
                 }
                 return Ok((cost, halt_diffs));
             }
@@ -1557,6 +1557,21 @@ fn rebase_in_progress(git: &Git, worktree: &Path) -> Result<bool> {
         }
     }
     Ok(false)
+}
+
+/// How many commits the replay put on `base`, or `None` when git cannot say.
+///
+/// This is the fallback of [`RebaseWatch::finish`], for a rebase that no read
+/// of the state files saw. It never fails the replay, because a failed count
+/// costs one report and nothing else.
+fn landed_commits(git: &Git, base: &str) -> Option<usize> {
+    git.run(
+        "rev-list",
+        &["--count", "--end-of-options", &format!("{base}..HEAD")],
+    )
+    .ok()?
+    .parse()
+    .ok()
 }
 
 /// How many brackets git writes in a conflict marker.

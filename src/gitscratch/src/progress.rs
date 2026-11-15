@@ -148,9 +148,13 @@ impl<'a> RebaseWatch<'a> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .map(|(_, total)| total);
-        let _ = landed;
-        if let Some(total) = known_total {
-            self.offer(total, total);
+        match known_total {
+            Some(total) => self.offer(total, total),
+            None => {
+                if let Some(count) = landed().filter(|&count| count > 0) {
+                    self.offer(count, count);
+                }
+            }
         }
     }
 
