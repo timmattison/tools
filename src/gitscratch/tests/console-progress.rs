@@ -255,6 +255,33 @@ fn on_a_terminal_the_bar_shows_and_the_verdict_line_holds_no_part_of_it() {
     );
 }
 
+/// The bar draws only a position that a report gave.
+///
+/// The child reports one commit, `3/10`. A bar that takes its new style before
+/// it takes the length and the position draws a frame for each call between.
+/// Such a frame shows `0/0 commits` or `0/10 commits`, which no report gave. A
+/// person sees the bar jump back, and a slow terminal can show that frame for a
+/// whole tick. So every count in the raw bytes must be `3/10`.
+#[test]
+fn the_bar_draws_only_a_position_that_a_report_gave() {
+    let output = on_a_terminal("verdict", "0", false);
+    let text = raw(&output);
+
+    let pieces: Vec<&str> = text.split(" commits").collect();
+    let counts: Vec<&str> = pieces
+        .split_last()
+        .map_or(&[][..], |(_, before)| before)
+        .iter()
+        .filter_map(|piece| piece.split_whitespace().last())
+        .collect();
+
+    assert!(!counts.is_empty(), "the bar must show\n{text:?}");
+    assert!(
+        counts.iter().all(|count| *count == "3/10"),
+        "the bar must draw only the reported position, got {counts:?}\n{text:?}"
+    );
+}
+
 /// With `-q`, the display writes no byte.
 ///
 /// The delay is zero, so a display that `-q` did not hide would draw at once.
