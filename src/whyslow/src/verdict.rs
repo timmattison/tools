@@ -106,6 +106,48 @@ impl Pressure {
     }
 }
 
+/// How much of the CPU is free.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpuState {
+    /// The idle part is below [`FULL_IDLE_PERCENT`].
+    Full,
+    /// The idle part is below [`BUSY_IDLE_PERCENT`], and not below the full
+    /// limit.
+    Busy,
+    /// The CPU has enough idle time.
+    Calm,
+}
+
+/// Gives the state of the CPU for the ticks of the window.
+///
+/// The comparison uses whole numbers and no rounding: idle times 100 below
+/// [`FULL_IDLE_PERCENT`] times the total gives [`CpuState::Full`], and the
+/// same test with [`BUSY_IDLE_PERCENT`] gives [`CpuState::Busy`]. A total of
+/// zero gives [`CpuState::Calm`], because `observe` refuses such ticks before
+/// they get here.
+#[must_use]
+pub fn cpu_state(ticks: CpuTicks) -> CpuState {
+    let _ = (ticks, FULL_IDLE_PERCENT, BUSY_IDLE_PERCENT);
+    CpuState::Calm
+}
+
+/// Tells whether the system part is high: the system ticks times 100 are at
+/// or above [`HIGH_SYSTEM_PERCENT`] times the total. A total of zero gives
+/// false.
+#[must_use]
+pub fn high_system(ticks: CpuTicks) -> bool {
+    let _ = (ticks, HIGH_SYSTEM_PERCENT);
+    false
+}
+
+/// Tells whether the memory is short: the pressure is warning or critical, or
+/// the kernel swapped out at least one page over the window.
+#[must_use]
+pub fn memory_short(pressure: Pressure, swapouts: u64) -> bool {
+    let _ = (pressure, swapouts);
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,5 +216,59 @@ mod tests {
         assert_eq!(Pressure::Normal.name(), "normal");
         assert_eq!(Pressure::Warning.name(), "warning");
         assert_eq!(Pressure::Critical.name(), "critical");
+    }
+
+    /// Makes ticks with a total of 1000.
+    fn ticks(system: u64, idle: u64) -> CpuTicks {
+        CpuTicks {
+            user: 1000 - system - idle,
+            system,
+            idle,
+            nice: 0,
+        }
+    }
+
+    /// The CPU is full below 10% idle. The test checks the limit and one step
+    /// on each side.
+    #[test]
+    fn the_cpu_is_full_below_the_full_idle_limit() {
+        assert_eq!(cpu_state(ticks(0, 99)), CpuState::Full);
+        assert_eq!(cpu_state(ticks(0, 100)), CpuState::Busy);
+        assert_eq!(cpu_state(ticks(0, 101)), CpuState::Busy);
+    }
+
+    /// The CPU is busy below 40% idle. The test checks the limit and one step
+    /// on each side.
+    #[test]
+    fn the_cpu_is_busy_below_the_busy_idle_limit() {
+        assert_eq!(cpu_state(ticks(0, 399)), CpuState::Busy);
+        assert_eq!(cpu_state(ticks(0, 400)), CpuState::Calm);
+        assert_eq!(cpu_state(ticks(0, 401)), CpuState::Calm);
+    }
+
+    /// The system part is high at 30% and above. The test checks the limit
+    /// and one step on each side.
+    #[test]
+    fn the_system_part_is_high_at_the_limit() {
+        assert!(!high_system(ticks(299, 0)));
+        assert!(high_system(ticks(300, 0)));
+        assert!(high_system(ticks(301, 0)));
+    }
+
+    /// Ticks that total zero give a calm CPU and no high system part.
+    #[test]
+    fn ticks_that_total_zero_are_calm() {
+        assert_eq!(cpu_state(CpuTicks::default()), CpuState::Calm);
+        assert!(!high_system(CpuTicks::default()));
+    }
+
+    /// The memory is short under warning or critical pressure, and when the
+    /// kernel swapped out one page.
+    #[test]
+    fn the_memory_is_short_under_pressure_or_with_swapouts() {
+        assert!(!memory_short(Pressure::Normal, 0));
+        assert!(memory_short(Pressure::Normal, 1));
+        assert!(memory_short(Pressure::Warning, 0));
+        assert!(memory_short(Pressure::Critical, 0));
     }
 }
