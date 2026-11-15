@@ -11,6 +11,37 @@ use std::time::Duration;
 use faulte::pid::{Pid, Uid};
 use faulte::table::{parse_ps_number, parse_ps_uid, split_fields};
 
+/// The path of the process table. It is the `/bin/ps` of macOS, which is
+/// setuid root and reads the processes of every account.
+pub const PROGRAM: &str = faulte::table::PROGRAM;
+
+/// The columns of a row, in the order that [`parse`] reads them. Each column
+/// has an empty header, so `ps` prints no header line.
+pub const COLUMNS: &str = "pid=,ppid=,uid=,lstart=,time=,rss=,comm=";
+
+/// The variables that the caller sets in the environment of [`PROGRAM`].
+///
+/// `ps` prints the start time in the local zone and names no zone, so
+/// `TZ=UTC` gives one text for each start time, also when daylight saving
+/// time ends.
+///
+/// The locale is `en_US.UTF-8` and not `C`. The C locale makes `ps` write
+/// each non-ASCII byte of a name as an escape: `é` is `M-CM-)`. A person reads
+/// the names, so the escape would hide them. `en_US.UTF-8` prints UTF-8 as it
+/// is, and gives the same English names in `lstart` as the C locale. A Mac
+/// without that locale falls back to the C locale, which gives the same
+/// `lstart`.
+pub const ENVIRONMENT: [(&str, &str); 2] = [("TZ", "UTC"), ("LC_ALL", "en_US.UTF-8")];
+
+/// Gives the arguments of [`PROGRAM`].
+///
+/// `-A` asks for every process of every account. `-ww` removes the limit on
+/// the width, so `ps` does not cut a long path. `-o` gives the [`COLUMNS`].
+#[must_use]
+pub fn arguments() -> Vec<String> {
+    Vec::new()
+}
+
 /// The character between the minutes and the seconds of a time token.
 const MINUTES_SEPARATOR: char = ':';
 
@@ -529,5 +560,22 @@ mod tests {
                 line: first
             })
         );
+    }
+
+    /// The command is exact: every process of every account, no limit on the
+    /// width, and the seven columns that the parser reads.
+    #[test]
+    fn the_arguments_ask_for_every_process_with_the_columns_of_a_row() {
+        assert_eq!(PROGRAM, "/bin/ps");
+        assert_eq!(
+            arguments(),
+            [
+                "-A",
+                "-ww",
+                "-o",
+                "pid=,ppid=,uid=,lstart=,time=,rss=,comm="
+            ]
+        );
+        assert_eq!(ENVIRONMENT, [("TZ", "UTC"), ("LC_ALL", "en_US.UTF-8")]);
     }
 }
