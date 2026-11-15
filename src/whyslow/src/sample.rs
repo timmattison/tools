@@ -5,6 +5,7 @@
 //! module holds the command line of `ps`, the parser of its output, the type
 //! of a CPU time, and the subtraction of two tables.
 
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -61,8 +62,19 @@ pub fn arguments() -> Vec<String> {
 /// - A row of `before` that is not in `after` gives no value, because the
 ///   process exited and the result has no row for it.
 #[must_use]
-pub fn cpu_used(_before: &[ProcessRow], after: &[ProcessRow]) -> Vec<CpuTime> {
-    after.iter().map(|_| CpuTime::default()).collect()
+pub fn cpu_used(before: &[ProcessRow], after: &[ProcessRow]) -> Vec<CpuTime> {
+    let earlier: HashMap<(Pid, &str), CpuTime> = before
+        .iter()
+        .map(|row| ((row.pid, row.started.as_str()), row.cpu))
+        .collect();
+    after
+        .iter()
+        .map(|row| {
+            earlier
+                .get(&(row.pid, row.started.as_str()))
+                .map_or(row.cpu, |first| row.cpu.saturating_sub(*first))
+        })
+        .collect()
 }
 
 /// The character between the minutes and the seconds of a time token.
