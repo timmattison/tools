@@ -2969,6 +2969,7 @@ dependencies = [
  "indicatif",
  "libc",
  "pulldown-cmark",
+ "shellquote",
  "tempfile",
  "termbar",
  "testcolor",

@@ -658,17 +658,16 @@ impl Scratch {
 
         self.report(ReplayProgress::Phase(Phase::Replay));
         // Resolved once, before the rebase starts, because a start of
-        // `git rev-parse` in each poll is slow on a loaded machine. Git gives
+        // `git rev-parse` in each poll is slow on a loaded machine. It is
+        // resolved only when an observer listens, because a replay with no
+        // observer (`gsw`, `grist`) must start no more git processes. Git gives
         // the path also when the directory does not exist yet. A path that does
         // not resolve costs the display and never the replay.
-        let state_dir = git
-            .path("rev-parse", &["--git-path", "rebase-merge"])
-            .ok()
-            .map(|path| worktree.join(path));
-        let watch = match (self.observer.as_deref(), state_dir) {
-            (Some(observer), Some(state_dir)) => Some(RebaseWatch::new(observer, state_dir)),
-            _ => None,
-        };
+        let watch = self.observer.as_deref().and_then(|observer| {
+            git.path("rev-parse", &["--git-path", "rebase-merge"])
+                .ok()
+                .map(|path| RebaseWatch::new(observer, worktree.join(path)))
+        });
 
         let mut cost = Conflicts::nothing_replayed();
         let mut halt_diffs = HaltDiffs::nothing_captured();
