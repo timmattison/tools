@@ -87,15 +87,22 @@ impl Pressure {
     /// `None`.
     #[must_use]
     pub fn from_level(level: i32) -> Option<Self> {
-        let _ = (level, LEVEL_NORMAL, LEVEL_WARNING, LEVEL_CRITICAL);
-        None
+        match level {
+            LEVEL_NORMAL => Some(Self::Normal),
+            LEVEL_WARNING => Some(Self::Warning),
+            LEVEL_CRITICAL => Some(Self::Critical),
+            _ => None,
+        }
     }
 
     /// Gives the word that a person reads: `normal`, `warning`, or `critical`.
     #[must_use]
     pub fn name(self) -> &'static str {
-        let _ = self;
-        ""
+        match self {
+            Self::Normal => "normal",
+            Self::Warning => "warning",
+            Self::Critical => "critical",
+        }
     }
 }
 
