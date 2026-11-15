@@ -54,7 +54,7 @@ use tempfile::TempDir;
 use crate::diffs::{HaltDiff, HaltDiffs};
 use crate::git::Git;
 use crate::metrics::{Files, Hunks, Stops};
-use crate::progress::{Phase, ReplayObserver, ReplayProgress};
+use crate::progress::{Phase, RebaseWatch, ReplayObserver, ReplayProgress};
 
 /// Upper bound on the rounds one replay may spend advancing a halted rebase, so
 /// a git state we failed to anticipate stalls the run instead of spinning
@@ -656,6 +656,20 @@ impl Scratch {
         let git = self.git();
         let worktree = self.path();
 
+        self.report(ReplayProgress::Phase(Phase::Replay));
+        // Resolved once, before the rebase starts, because a start of
+        // `git rev-parse` in each poll is slow on a loaded machine. Git gives
+        // the path also when the directory does not exist yet. A path that does
+        // not resolve costs the display and never the replay.
+        let state_dir = git
+            .path("rev-parse", &["--git-path", "rebase-merge"])
+            .ok()
+            .map(|path| worktree.join(path));
+        let watch = match (self.observer.as_deref(), state_dir) {
+            (Some(observer), Some(state_dir)) => Some(RebaseWatch::new(observer, state_dir)),
+            _ => None,
+        };
+
         let mut cost = Conflicts::nothing_replayed();
         let mut halt_diffs = HaltDiffs::nothing_captured();
         // `--end-of-options` ahead of `upstream`, because `upstream` arrives
@@ -684,7 +698,16 @@ impl Scratch {
                     outcome.stdout,
                     outcome.stderr
                 );
+                if let Some(watch) = &watch {
+                    watch.finish(|| None);
+                }
                 return Ok((cost, halt_diffs));
+            }
+
+            // The halt reads its own position, so the report does not depend on
+            // the timing of a poll.
+            if let Some(watch) = &watch {
+                watch.poll();
             }
 
             anyhow::ensure!(
