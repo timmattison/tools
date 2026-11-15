@@ -8,7 +8,7 @@
 //! The rules are pure. The caller gives a function that tells whether a
 //! directory holds a `.git` entry, so a test needs no file system.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// The text for a compiler that builds for no worktree.
 pub const NO_WORKTREE: &str = "no worktree";
@@ -27,6 +27,9 @@ const ROOT: char = '/';
 
 /// The character that joins a key to its value, as in `dependency=/x`.
 const KEY_VALUE_JOINT: char = '=';
+
+/// The number of parts of a worktree path that [`label`] keeps.
+const LABEL_PARTS: usize = 2;
 
 /// Gives the worktree that a compiler builds for, from its argument text.
 ///
@@ -57,8 +60,44 @@ const KEY_VALUE_JOINT: char = '=';
 /// [`NO_WORKTREE`].
 #[must_use]
 pub fn worktree_of(arguments: &str, holds_git: impl Fn(&Path) -> bool) -> Option<PathBuf> {
-    let _ = (arguments, holds_git);
-    None
+    candidates(arguments)
+        .iter()
+        .find_map(|candidate| candidate.ancestors().find(|directory| holds_git(directory)))
+        .map(Path::to_path_buf)
+}
+
+/// Gives the absolute paths of `arguments` in the order of the rules of
+/// [`worktree_of`].
+fn candidates(arguments: &str) -> Vec<PathBuf> {
+    let words: Vec<&str> = arguments.split_ascii_whitespace().collect();
+    let mut found: Vec<&str> = Vec::new();
+
+    for (index, word) in words.iter().enumerate() {
+        if *word == OUTPUT_FLAG {
+            found.extend(words.get(index + 1).copied());
+        } else if let Some(joined) = word.strip_prefix(OUTPUT_FLAG) {
+            found.push(joined);
+        }
+    }
+    for (index, word) in words.iter().enumerate() {
+        if *word == OUT_DIR_FLAG {
+            found.extend(words.get(index + 1).copied());
+        } else if let Some(joined) = word.strip_prefix(OUT_DIR_JOINED) {
+            found.push(joined);
+        }
+    }
+    for word in &words {
+        found.push(word);
+        if let Some((_, value)) = word.split_once(KEY_VALUE_JOINT) {
+            found.push(value);
+        }
+    }
+
+    found
+        .into_iter()
+        .filter(|path| path.starts_with(ROOT))
+        .map(PathBuf::from)
+        .collect()
 }
 
 /// Gives the last two parts of a worktree path, for a person to read:
@@ -68,8 +107,18 @@ pub fn worktree_of(arguments: &str, holds_git: impl Fn(&Path) -> bool) -> Option
 /// works on whole parts, so a part with multi-byte characters stays intact.
 #[must_use]
 pub fn label(worktree: &Path) -> String {
-    let _ = worktree;
-    String::new()
+    let parts: Vec<String> = worktree
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    let first = parts.len().saturating_sub(LABEL_PARTS);
+    if parts.is_empty() {
+        return worktree.to_string_lossy().into_owned();
+    }
+    parts[first..].join("/")
 }
 
 #[cfg(test)]
