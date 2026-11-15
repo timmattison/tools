@@ -53,6 +53,30 @@ pub fn menu_lines(sample: &Sample) -> [String; 4] {
     ]
 }
 
+/// The four info lines of the menu, from the last read error and the newest sample.
+#[must_use]
+pub fn menu_titles(error: Option<&str>, newest: Option<&Sample>) -> [String; 4] {
+    match (error, newest) {
+        (Some(reason), Some(sample)) => {
+            let [_, second, third, fourth] = menu_lines(sample);
+            [read_error_line(reason), second, third, fourth]
+        }
+        (Some(reason), None) => [
+            read_error_line(reason),
+            String::new(),
+            String::new(),
+            String::new(),
+        ],
+        (None, Some(sample)) => menu_lines(sample),
+        (None, None) => [
+            WAITING_LINE.to_owned(),
+            String::new(),
+            String::new(),
+            String::new(),
+        ],
+    }
+}
+
 /// Rounds a share from 0 to 1 to a whole percentage.
 #[expect(
     clippy::cast_possible_truncation,
@@ -128,6 +152,44 @@ mod tests {
 
     fn warn_sample() -> Sample {
         sample(50, 25, 25, 2, 47)
+    }
+
+    fn empty_lines(first: &str) -> [String; 4] {
+        [
+            first.to_owned(),
+            String::new(),
+            String::new(),
+            String::new(),
+        ]
+    }
+
+    #[test]
+    fn an_error_with_a_sample_clears_the_three_lower_lines() {
+        assert_eq!(
+            menu_titles(Some("cannot read x: y"), Some(&warn_sample())),
+            empty_lines(&read_error_line("cannot read x: y"))
+        );
+    }
+
+    #[test]
+    fn an_error_with_no_sample_clears_the_three_lower_lines() {
+        assert_eq!(
+            menu_titles(Some("cannot read x: y"), None),
+            empty_lines(&read_error_line("cannot read x: y"))
+        );
+    }
+
+    #[test]
+    fn a_sample_with_no_error_gives_the_menu_lines() {
+        assert_eq!(
+            menu_titles(None, Some(&warn_sample())),
+            menu_lines(&warn_sample())
+        );
+    }
+
+    #[test]
+    fn no_error_and_no_sample_gives_the_waiting_line() {
+        assert_eq!(menu_titles(None, None), empty_lines(WAITING_LINE));
     }
 
     #[test]
