@@ -26,3 +26,4 @@
 pub mod cpu;
 pub mod history;
 pub mod pressure;
+pub mod sample;
