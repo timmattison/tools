@@ -306,6 +306,59 @@ fn the_selection_follows_its_session_when_a_newer_one_arrives() {
     assert_eq!(app.preview_scroll(), 1, "the scroll stays");
 }
 
+/// An app with sessions a (hour 1) and b (hour 2), settled.
+fn loaded_first_batch() -> App {
+    let mut app = App::new();
+    let effects = app.on_index(vec![
+        event(ID_A, "alpha", 1, false),
+        event(ID_B, "beta", 2, false),
+    ]);
+    settle(&mut app, effects);
+    app
+}
+
+#[test]
+fn an_untouched_selection_stays_on_the_newest_session() {
+    let mut app = loaded_first_batch();
+    let effects = app.on_index(vec![event(ID_D, "delta", 9, false)]);
+    settle(&mut app, effects);
+    assert_eq!(app.selected(), 0);
+    assert_eq!(id_of(&app, 0), ID_D);
+}
+
+#[test]
+fn enter_resumes_the_newest_match_when_the_person_did_not_move() {
+    let mut app = loaded_first_batch();
+    let effects = app.on_index(vec![event(ID_D, "delta", 9, false)]);
+    settle(&mut app, effects);
+    // "alpha", "beta" and "delta" all hold an "a".
+    let effects = app.on_key(ch('a'));
+    settle(&mut app, effects);
+    let effects = app.on_key(press(KeyCode::Enter));
+    assert_eq!(launch_of(&effects).0, ID_D);
+}
+
+#[test]
+fn an_untouched_selection_resets_the_scroll_when_a_newer_session_takes_row_0() {
+    let mut app = loaded_first_batch();
+    app.on_key(shift(KeyCode::Down));
+    assert_eq!(app.preview_scroll(), 1);
+    let effects = app.on_index(vec![event(ID_D, "delta", 9, false)]);
+    settle(&mut app, effects);
+    assert_eq!(app.preview_scroll(), 0);
+}
+
+#[test]
+fn an_untouched_selection_keeps_the_scroll_when_row_0_does_not_change() {
+    let mut app = loaded_first_batch();
+    app.on_key(shift(KeyCode::Down));
+    let effects = app.on_index(vec![event(ID_C, "gamma", 0, false)]);
+    settle(&mut app, effects);
+    assert_eq!(app.selected(), 0);
+    assert_eq!(id_of(&app, 0), ID_B);
+    assert_eq!(app.preview_scroll(), 1);
+}
+
 #[test]
 fn the_selection_keeps_its_row_when_its_session_leaves() {
     let mut app = loaded();
