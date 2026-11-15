@@ -127,8 +127,15 @@ pub enum CpuState {
 /// they get here.
 #[must_use]
 pub fn cpu_state(ticks: CpuTicks) -> CpuState {
-    let _ = (ticks, FULL_IDLE_PERCENT, BUSY_IDLE_PERCENT);
-    CpuState::Calm
+    let total = u128::from(ticks.total());
+    let idle = u128::from(ticks.idle) * 100;
+    if idle < u128::from(FULL_IDLE_PERCENT) * total {
+        CpuState::Full
+    } else if idle < u128::from(BUSY_IDLE_PERCENT) * total {
+        CpuState::Busy
+    } else {
+        CpuState::Calm
+    }
 }
 
 /// Tells whether the system part is high: the system ticks times 100 are at
@@ -136,16 +143,15 @@ pub fn cpu_state(ticks: CpuTicks) -> CpuState {
 /// false.
 #[must_use]
 pub fn high_system(ticks: CpuTicks) -> bool {
-    let _ = (ticks, HIGH_SYSTEM_PERCENT);
-    false
+    let total = u128::from(ticks.total());
+    total > 0 && u128::from(ticks.system) * 100 >= u128::from(HIGH_SYSTEM_PERCENT) * total
 }
 
 /// Tells whether the memory is short: the pressure is warning or critical, or
 /// the kernel swapped out at least one page over the window.
 #[must_use]
 pub fn memory_short(pressure: Pressure, swapouts: u64) -> bool {
-    let _ = (pressure, swapouts);
-    false
+    pressure != Pressure::Normal || swapouts > 0
 }
 
 #[cfg(test)]
