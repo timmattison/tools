@@ -188,3 +188,123 @@ impl<'a> RebaseWatch<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    /// An observer that keeps each report, in the order it arrived.
+    #[derive(Default)]
+    struct Recorder {
+        reports: Mutex<Vec<ReplayProgress>>,
+    }
+
+    impl Recorder {
+        /// A copy of the reports so far.
+        fn reports(&self) -> Vec<ReplayProgress> {
+            self.reports
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    impl ReplayObserver for Recorder {
+        fn report(&self, progress: ReplayProgress) {
+            self.reports
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(progress);
+        }
+    }
+
+    /// The `Commit` report for `position` of `total`.
+    fn commit(position: usize, total: usize) -> ReplayProgress {
+        ReplayProgress::Commit { position, total }
+    }
+
+    /// Write the two state files into `dir`.
+    fn write_state(dir: &Path, position: &str, total: &str) {
+        std::fs::write(dir.join(POSITION_FILE), position).expect("write the position file");
+        std::fs::write(dir.join(TOTAL_FILE), total).expect("write the total file");
+    }
+
+    #[test]
+    fn a_poll_reports_the_position_the_files_hold() {
+        let dir = tempfile::tempdir().expect("make a state directory");
+        let recorder = Recorder::default();
+        let watch = RebaseWatch::new(&recorder, dir.path().to_path_buf());
+        write_state(dir.path(), "3\n", "7\n");
+
+        watch.poll();
+
+        assert_eq!(recorder.reports(), [commit(3, 7)]);
+    }
+
+    #[test]
+    fn a_poll_before_the_files_exist_reports_nothing() {
+        let dir = tempfile::tempdir().expect("make a state directory");
+        let missing = dir.path().join("not-yet");
+        let recorder = Recorder::default();
+        let watch = RebaseWatch::new(&recorder, missing);
+
+        watch.poll();
+
+        assert_eq!(recorder.reports(), []);
+    }
+
+    #[test]
+    fn a_missing_empty_or_unparsable_file_keeps_the_last_position() {
+        let dir = tempfile::tempdir().expect("make a state directory");
+        let recorder = Recorder::default();
+        let watch = RebaseWatch::new(&recorder, dir.path().to_path_buf());
+        write_state(dir.path(), "2", "7");
+        watch.poll();
+
+        std::fs::remove_file(dir.path().join(POSITION_FILE)).expect("remove the position file");
+        watch.poll();
+        write_state(dir.path(), "", "7");
+        watch.poll();
+        write_state(dir.path(), "three", "7");
+        watch.poll();
+        write_state(dir.path(), "3", "");
+        watch.poll();
+        assert_eq!(recorder.reports(), [commit(2, 7)]);
+
+        write_state(dir.path(), "3", "7");
+        watch.poll();
+        assert_eq!(recorder.reports(), [commit(2, 7), commit(3, 7)]);
+    }
+
+    #[test]
+    fn a_read_that_cannot_be_a_position_reports_nothing() {
+        let dir = tempfile::tempdir().expect("make a state directory");
+        let recorder = Recorder::default();
+        let watch = RebaseWatch::new(&recorder, dir.path().to_path_buf());
+
+        write_state(dir.path(), "0", "0");
+        watch.poll();
+        write_state(dir.path(), "8", "7");
+        watch.poll();
+
+        assert_eq!(recorder.reports(), []);
+    }
+
+    #[test]
+    fn a_position_never_decreases_and_a_repeat_is_not_reported_twice() {
+        let dir = tempfile::tempdir().expect("make a state directory");
+        let recorder = Recorder::default();
+        let watch = RebaseWatch::new(&recorder, dir.path().to_path_buf());
+
+        write_state(dir.path(), "4", "7");
+        watch.poll();
+        watch.poll();
+        write_state(dir.path(), "2", "7");
+        watch.poll();
+        write_state(dir.path(), "5", "7");
+        watch.poll();
+
+        assert_eq!(recorder.reports(), [commit(4, 7), commit(5, 7)]);
+    }
+}
