@@ -14,6 +14,9 @@
 //! - [`groups`] — the table of groups, and the group of a process name.
 //! - [`worktree`] — the worktree that a compiler builds for, from its
 //!   arguments.
+//! - [`sample`] — the process table of `ps`, and the CPU time that each
+//!   process used between two samples.
 
 pub mod groups;
+pub mod sample;
 pub mod worktree;
