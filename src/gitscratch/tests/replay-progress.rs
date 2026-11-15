@@ -169,3 +169,61 @@ fn a_halt_reports_its_position_and_the_last_report_is_the_whole_rebase() {
         })
     );
 }
+
+/// A clean rebase of thirty commits, which git may finish between two polls.
+/// The reports that arrive depend on timing, but the first two phases, the
+/// total, the order, and the last report do not.
+#[test]
+fn a_rebase_of_thirty_commits_reports_each_position_against_a_total_of_thirty() {
+    const COMMITS: usize = 30;
+
+    let fixture = TestRepo::init();
+    fixture.commit_file("shared.txt", &numbered_lines(30), "base");
+
+    fixture.branch("feature");
+    for number in 1..=COMMITS {
+        fixture.commit_file(
+            &format!("file-{number:02}.txt"),
+            &format!("{number}\n"),
+            &format!("commit {number}"),
+        );
+    }
+
+    fixture.checkout("main");
+    fixture.commit_file("main.txt", "main\n", "main work");
+
+    let repo = Repo::open(fixture.path()).expect("open the fixture");
+    let recorder = Recorder::new();
+    let scratch = repo
+        .scratch_with_progress("feature", Arc::clone(&recorder))
+        .expect("build a scratch worktree");
+
+    scratch.replay_rebase("main").expect("replay the rebase");
+
+    let reports = recorder.reports();
+    assert_eq!(
+        reports.get(..2),
+        Some(
+            &[
+                ReplayProgress::Phase(Phase::CreateScratch),
+                ReplayProgress::Phase(Phase::Replay),
+            ][..]
+        )
+    );
+    let commits = commit_reports(&reports);
+    assert!(
+        commits.iter().all(|&(_, total)| total == COMMITS),
+        "every total is {COMMITS}: {commits:?}"
+    );
+    assert!(
+        commits.windows(2).all(|pair| pair[0].0 <= pair[1].0),
+        "a position never decreases: {commits:?}"
+    );
+    assert_eq!(
+        reports.last(),
+        Some(&ReplayProgress::Commit {
+            position: COMMITS,
+            total: COMMITS
+        })
+    );
+}
