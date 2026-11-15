@@ -230,4 +230,61 @@ mod tests {
         assert_eq!(exact.len(), 1);
         assert!(!exact[0].at_least);
     }
+
+    /// Makes a sample of a compiler for one worktree.
+    fn compiler(worktree: Option<&str>, cpu: u64, memory: Memory) -> ProcessSample {
+        ProcessSample {
+            worktree: worktree.map(PathBuf::from),
+            ..sample(501, Group::Compilers, cpu, memory)
+        }
+    }
+
+    /// The compilers of two worktrees, and a compiler with no worktree, give
+    /// three worktree totals. Each has its own count, CPU, memory, and bound.
+    #[test]
+    fn the_compilers_get_a_total_for_each_worktree() {
+        let totals = tally(&[
+            compiler(Some("/w/b"), 5, Memory::Footprint(50)),
+            compiler(None, 1, Memory::Footprint(10)),
+            compiler(Some("/w/a"), 10, Memory::Footprint(100)),
+            compiler(Some("/w/a"), 20, Memory::Resident(200)),
+        ]);
+        assert_eq!(totals.len(), 1);
+        let expected = vec![
+            WorktreeTotal {
+                worktree: None,
+                processes: 1,
+                cpu: CpuTime::from_centiseconds(1),
+                memory_bytes: 10,
+                at_least: false,
+            },
+            WorktreeTotal {
+                worktree: Some(PathBuf::from("/w/a")),
+                processes: 2,
+                cpu: CpuTime::from_centiseconds(30),
+                memory_bytes: 300,
+                at_least: true,
+            },
+            WorktreeTotal {
+                worktree: Some(PathBuf::from("/w/b")),
+                processes: 1,
+                cpu: CpuTime::from_centiseconds(5),
+                memory_bytes: 50,
+                at_least: false,
+            },
+        ];
+        assert_eq!(totals[0].worktrees, expected);
+    }
+
+    /// A process of another group adds no worktree, also when its sample
+    /// names one.
+    #[test]
+    fn a_process_that_is_not_a_compiler_adds_no_worktree() {
+        let mut other = sample(501, Group::ClaudeCode, 1, Memory::Footprint(1));
+        other.worktree = Some(PathBuf::from("/w/a"));
+        let totals = tally(&[other]);
+        assert_eq!(totals.len(), 1);
+        assert!(totals[0].worktrees.is_empty());
+        assert_eq!(totals[0].processes, 1);
+    }
 }
