@@ -311,4 +311,40 @@ mod tests {
 
         assert_eq!(recorder.reports(), [commit(4, 7), commit(5, 7)]);
     }
+
+    #[test]
+    fn finish_reports_the_whole_rebase_and_skips_landed_when_a_total_is_known() {
+        let dir = tempfile::tempdir().expect("make a state directory");
+        let recorder = Recorder::default();
+        let watch = RebaseWatch::new(&recorder, dir.path().to_path_buf());
+        write_state(dir.path(), "2", "7");
+        watch.poll();
+
+        watch.finish(|| panic!("a known total needs no count"));
+
+        assert_eq!(recorder.reports(), [commit(2, 7), commit(7, 7)]);
+    }
+
+    #[test]
+    fn finish_reports_the_landed_count_when_no_read_gave_a_total() {
+        let dir = tempfile::tempdir().expect("make a state directory");
+        let recorder = Recorder::default();
+        let watch = RebaseWatch::new(&recorder, dir.path().to_path_buf());
+
+        watch.finish(|| Some(4));
+
+        assert_eq!(recorder.reports(), [commit(4, 4)]);
+    }
+
+    #[test]
+    fn finish_reports_nothing_for_a_count_of_zero_or_no_count() {
+        let dir = tempfile::tempdir().expect("make a state directory");
+        let recorder = Recorder::default();
+        let watch = RebaseWatch::new(&recorder, dir.path().to_path_buf());
+
+        watch.finish(|| Some(0));
+        watch.finish(|| None);
+
+        assert_eq!(recorder.reports(), []);
+    }
 }
