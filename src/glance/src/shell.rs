@@ -24,8 +24,8 @@ use objc2_app_kit::{
     NSMenuItem, NSScreen, NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
 };
 use objc2_foundation::{
-    ns_string, NSArray, NSDefaultRunLoopMode, NSDistributedNotificationCenter, NSNotification,
-    NSNotificationCenter, NSNotificationName, NSObject, NSRunLoop, NSSize, NSString, NSTimer,
+    ns_string, NSArray, NSDistributedNotificationCenter, NSNotification, NSNotificationCenter,
+    NSNotificationName, NSObject, NSRunLoop, NSRunLoopCommonModes, NSSize, NSString, NSTimer,
 };
 
 use crate::chart::{render, Appearance, Geometry, Pixmap};
@@ -45,10 +45,14 @@ const NOT_MAIN_THREAD: &str = "glance: the status item must start on the main th
 /// merge the wakeups of the timer with other wakeups.
 const TIMER_TOLERANCE: f64 = 0.1;
 
-/// Adds a repeating timer to a run loop.
+/// Adds a repeating timer to a run loop in the common modes.
+///
+/// An open menu runs the main run loop in the event tracking mode, which
+/// AppKit lists among the common modes. A timer in the default mode only
+/// would stop while the menu is open.
 fn add_repeating_timer(run_loop: &NSRunLoop, timer: &NSTimer) {
     // SAFETY: The mode is a constant of Foundation that exists at run time.
-    unsafe { run_loop.addTimer_forMode(timer, NSDefaultRunLoopMode) }
+    unsafe { run_loop.addTimer_forMode(timer, NSRunLoopCommonModes) }
 }
 
 /// The name of the notification that the system posts when the appearance
@@ -169,7 +173,8 @@ impl Monitor {
         self.redraw();
     }
 
-    /// Starts the repeating timer on the main run loop.
+    /// Starts the repeating timer on the main run loop, in the common modes,
+    /// so that it keeps firing while the menu is open.
     ///
     /// The timer keeps its target alive, and the caller keeps the monitor
     /// alive for the whole run.
@@ -427,6 +432,11 @@ mod tests {
     /// The interval of the probe timer, in seconds.
     const PROBE_INTERVAL: f64 = 0.02;
 
+    /// How long one run of the loop lasts, in seconds. A timer fire does not
+    /// end a run, so the test runs the loop in short slices and checks the
+    /// count between them.
+    const LOOP_SLICE: f64 = 0.1;
+
     /// How long the test waits for one fire, in seconds. The bound is wide
     /// because a full workspace run is often heavily loaded.
     const FIRE_DEADLINE: f64 = 5.0;
@@ -480,7 +490,8 @@ mod tests {
         add_repeating_timer(&run_loop, &timer);
         let deadline = NSDate::dateWithTimeIntervalSinceNow(FIRE_DEADLINE);
         while probe.ivars().get() == 0 && deadline.timeIntervalSinceNow() > 0.0 {
-            if !run_loop.runMode_beforeDate(mode, &deadline) {
+            let slice = NSDate::dateWithTimeIntervalSinceNow(LOOP_SLICE);
+            if !run_loop.runMode_beforeDate(mode, &slice) {
                 std::thread::sleep(Duration::from_secs_f64(PROBE_INTERVAL));
             }
         }
