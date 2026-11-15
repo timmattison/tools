@@ -22,12 +22,14 @@
 //! - [`render`] — the lines of text that show the summary.
 //! - [`machine`] — the facts of this Mac behind one trait, and the read of
 //!   them in one fixed order.
+//! - [`report`] — what the binary prints, and the exit code that it gives.
 
 #[cfg(test)]
 mod fixtures;
 pub mod groups;
 pub mod machine;
 pub mod render;
+pub mod report;
 pub mod sample;
 pub mod tally;
 pub mod verdict;
