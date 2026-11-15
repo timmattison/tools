@@ -94,7 +94,7 @@ impl Group {
 
 /// Gives the group of one process.
 ///
-/// `name` is the name of the executable: the last part of the `comm` column.
+/// `name` is what [`ProcessRow::name`](crate::sample::ProcessRow::name) gives.
 /// `claude` is true when `occ` classified the process as a session, an
 /// unreadable session, or a support process of Claude Code.
 ///

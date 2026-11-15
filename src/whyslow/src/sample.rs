@@ -181,15 +181,24 @@ pub struct ProcessRow {
     pub cpu: CpuTime,
     /// The resident memory of the process, in KiB.
     pub rss_kib: u64,
-    /// The `comm` column: the full path of the executable. It can hold spaces.
-    pub executable: String,
+    /// The `comm` column, which is `argv[0]` of the process as `ps` prints it.
+    /// A process that `launchd` starts has the full path of its executable
+    /// here. A process that a shell starts can have a bare name, such as
+    /// `claude`. It can hold spaces.
+    pub comm: String,
 }
 
 impl ProcessRow {
-    /// Gives the name of the executable: the last part of its path.
+    /// Gives the name of the process: the last part of `comm`, without the
+    /// `-` that marks a login shell. Thus `-zsh` and `zsh` are one group.
+    /// A `comm` of `-` alone stays `-`.
     #[must_use]
     pub fn name(&self) -> &str {
-        proctree::comm_basename(&self.executable)
+        let base = proctree::comm_basename(&self.comm);
+        match base.strip_prefix('-') {
+            Some(rest) if !rest.is_empty() => rest,
+            _ => base,
+        }
     }
 }
 
@@ -200,11 +209,11 @@ pub enum SampleParseError {
     /// incomplete.
     #[error("ps listed no process: a Mac always runs processes, so the output is incomplete")]
     NoRows,
-    /// A line holds fewer than nine tokens before the executable.
+    /// A line holds fewer than nine tokens before the command name.
     #[error(
         "ps printed a row of fewer than {FIELDS} fields, at line {number}: {line:?}. A row holds \
          the PID, the UID, the five fields of the start time, the CPU time, and the \
-         RSS, then the executable"
+         RSS, then the command name"
     )]
     TooFewFields {
         /// The number of the line in the output, from 1.
@@ -244,17 +253,17 @@ const UID_COLUMN: &str = "uid";
 /// The column of the resident memory, in KiB.
 const RSS_COLUMN: &str = "rss";
 
-/// The count of tokens before the executable.
+/// The count of tokens before the `comm` column.
 const FIELDS: usize = 9;
 
 /// Reads the process table from the output of `ps`.
 ///
 /// Each line that is not blank is one row, in the order of `ps`. A row is nine
-/// tokens, then the executable. The tokens are the PID, the UID,
+/// tokens, then the `comm` column. The tokens are the PID, the UID,
 /// the five tokens of the start time, the CPU time, and the RSS. The parser
 /// splits on ASCII white space, because `ps` pads a day of one digit with a
-/// space. The executable is the rest of the line. It keeps the spaces inside
-/// it.
+/// space. The `comm` column is the rest of the line. It keeps the spaces
+/// inside it.
 ///
 /// # Errors
 ///
@@ -305,7 +314,7 @@ impl RowFault {
 
 /// Reads one row.
 fn parse_row(line: &str) -> Result<ProcessRow, RowFault> {
-    let ([pid, uid, weekday, month, day, clock, year, time, rss], executable) =
+    let ([pid, uid, weekday, month, day, clock, year, time, rss], comm) =
         split_fields::<FIELDS>(line).ok_or(RowFault::TooFewFields)?;
     let pid = Pid::new(number(PID_COLUMN, pid)?);
     let uid = parse_ps_uid(uid).ok_or(RowFault::MalformedNumber(UID_COLUMN))?;
@@ -317,7 +326,7 @@ fn parse_row(line: &str) -> Result<ProcessRow, RowFault> {
         started: [weekday, month, day, clock, year].join(" "),
         cpu,
         rss_kib,
-        executable: executable.to_owned(),
+        comm: comm.to_owned(),
     })
 }
 
@@ -463,7 +472,7 @@ mod tests {
                 started: "Wed Oct 28 21:29:02 2026".to_owned(),
                 cpu: CpuTime::from_centiseconds(1_797_047),
                 rss_kib: 14_288,
-                executable: "/sbin/launchd".to_owned(),
+                comm: "/sbin/launchd".to_owned(),
             }
         );
         assert_eq!(row_of(&rows, 1).name(), "launchd");
@@ -472,11 +481,11 @@ mod tests {
 
     /// A path with spaces stays whole, and its name is the last part.
     #[test]
-    fn an_executable_with_spaces_stays_whole() {
+    fn a_comm_with_spaces_stays_whole() {
         let rows = parse(BEFORE).expect("the capture parses");
         let row = row_of(&rows, 569);
         assert_eq!(
-            row.executable,
+            row.comm,
             "/Applications/Menu Bar Controller for Sonos.app/Contents/MacOS/Menu Bar Controller for Sonos"
         );
         assert_eq!(row.name(), "Menu Bar Controller for Sonos");
@@ -558,7 +567,7 @@ mod tests {
     }
 
     /// A row is the six columns of `ps`: the PID, the UID, the five tokens
-    /// of the start, the CPU time, the RSS, and the executable.
+    /// of the start, the CPU time, the RSS, and the `comm` column.
     #[test]
     fn a_row_is_the_six_columns_of_ps() {
         let text = line("700", "501", "1:02.03", "2048");
@@ -568,7 +577,7 @@ mod tests {
         assert_eq!(rows[0].uid, Uid::new(501));
         assert_eq!(rows[0].cpu, CpuTime::from_centiseconds(6_203));
         assert_eq!(rows[0].rss_kib, 2048);
-        assert_eq!(rows[0].executable, "/usr/bin/tool");
+        assert_eq!(rows[0].comm, "/usr/bin/tool");
     }
 
     /// `ps` prints `argv[0]` in the `comm` column, and a login shell has a `-`
@@ -640,7 +649,7 @@ mod tests {
             started: started.to_owned(),
             cpu: CpuTime::from_centiseconds(cs),
             rss_kib: 100,
-            executable: "/usr/bin/tool".to_owned(),
+            comm: "/usr/bin/tool".to_owned(),
         }
     }
 

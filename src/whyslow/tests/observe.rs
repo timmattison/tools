@@ -30,14 +30,14 @@ fn interval() -> Span {
 }
 
 /// Gives one row of the process table.
-fn row(pid: u32, cpu_centiseconds: u64, rss_kib: u64, executable: &str) -> ProcessRow {
+fn row(pid: u32, cpu_centiseconds: u64, rss_kib: u64, comm: &str) -> ProcessRow {
     ProcessRow {
         pid: Pid::new(pid),
         uid: Uid::new(501),
         started: "Sat Nov 14 10:00:00 2026".to_owned(),
         cpu: CpuTime::from_centiseconds(cpu_centiseconds),
         rss_kib,
-        executable: executable.to_owned(),
+        comm: comm.to_owned(),
     }
 }
 
