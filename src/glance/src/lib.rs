@@ -22,3 +22,5 @@
 //! a review of those two files covers all of the unsafe code.
 
 #![deny(unsafe_code)]
+
+pub mod cpu;
