@@ -273,8 +273,8 @@ fn a_word_that_matches_nothing_empties_the_list_and_ctrl_u_restores_it() {
     write_session(home.path(), "Zanzibar-trip-notes", false);
     let mut picker = Picker::open(home.path(), "/bin/bash");
     picker.wait_for("Zanzibar-trip-notes");
-    // The screen can show "no session matches" once before the first hits
-    // arrive, so the wait is for one more than the screen showed so far.
+    // The wait is for one more than the screen showed so far. Text that an
+    // earlier frame drew cannot satisfy it.
     let empty_before = picker.count_of("matches");
     let title_before = picker.count_of("Zanzibar-trip-notes");
     picker.press(b"nomatchword");

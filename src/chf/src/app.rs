@@ -83,6 +83,9 @@ pub struct App {
     generation: u64,
     /// The generation of the hits that the list holds.
     shown_generation: u64,
+    /// The count of the search jobs of the current generation that have not
+    /// answered.
+    pending: usize,
     catalog: Vec<Arc<Session>>,
     hits: Vec<Hit>,
     selected: usize,
@@ -113,6 +116,7 @@ impl App {
             query: Arc::new(Query::parse("")),
             generation: 0,
             shown_generation: 0,
+            pending: 0,
             catalog: Vec::new(),
             hits: Vec::new(),
             selected: 0,
@@ -173,6 +177,7 @@ impl App {
         if hits.generation != self.generation {
             return;
         }
+        self.pending = self.pending.saturating_sub(1);
         let shown_before = self.id_at(self.selected);
         if self.shown_generation == self.generation {
             for hit in hits.hits {
@@ -215,6 +220,12 @@ impl App {
     #[must_use]
     pub fn query(&self) -> &Arc<Query> {
         &self.query
+    }
+
+    /// True while a search of the current query has not answered.
+    #[must_use]
+    pub fn searching(&self) -> bool {
+        self.pending > 0
     }
 
     /// The generation of the query.
@@ -291,7 +302,8 @@ impl App {
 
 impl App {
     /// A search job at the current generation over the catalog from `first`.
-    fn search_from(&self, first: usize) -> Effect {
+    /// The job counts as pending until its hits arrive.
+    fn search_from(&mut self, first: usize) -> Effect {
         let sessions = self
             .catalog
             .iter()
@@ -299,6 +311,7 @@ impl App {
             .skip(first)
             .map(|(index, session)| (index, Arc::clone(session)))
             .collect();
+        self.pending += 1;
         Effect::Search(Job {
             generation: self.generation,
             query: Arc::clone(&self.query),
@@ -309,6 +322,7 @@ impl App {
     /// Start a new generation for the current query text.
     fn change_query(&mut self) -> Vec<Effect> {
         self.generation += 1;
+        self.pending = 0;
         self.query = Arc::new(Query::parse(&self.query_text));
         self.preview_scroll = 0;
         vec![self.search_from(0)]

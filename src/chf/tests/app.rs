@@ -685,3 +685,36 @@ fn the_catalog_session_is_readable_by_index() {
     assert_eq!(app.session(1).id.as_str(), ID_B);
     let _: &Arc<Session> = app.session(0);
 }
+
+#[test]
+fn searching_is_true_from_a_key_until_its_hits_arrive() {
+    let mut app = loaded();
+    assert!(!app.searching());
+    let effects = app.on_key(ch('z'));
+    assert!(app.searching());
+    settle(&mut app, effects);
+    assert!(!app.searching());
+}
+
+#[test]
+fn searching_counts_each_job_of_the_generation() {
+    let mut app = App::new();
+    let first = app.on_index(vec![event(ID_A, "alpha", 10, false)]);
+    let second = app.on_index(vec![event(ID_B, "beta", 11, false)]);
+    assert!(app.searching());
+    settle(&mut app, first);
+    assert!(app.searching());
+    settle(&mut app, second);
+    assert!(!app.searching());
+}
+
+#[test]
+fn the_hits_of_an_old_generation_do_not_end_searching() {
+    let mut app = loaded();
+    let old = app.on_key(ch('a'));
+    let new = app.on_key(ch('b'));
+    settle(&mut app, old);
+    assert!(app.searching());
+    settle(&mut app, new);
+    assert!(!app.searching());
+}

@@ -34,6 +34,8 @@ const UNREADABLE_LABEL: &str = " unreadable";
 const UNREADABLE_GAP: &str = "  ";
 /// The list text before the index finishes.
 const READING: &str = "reading sessions…";
+/// The list text while a search of the query has not answered.
+const SEARCHING: &str = "searching…";
 /// The list text when nothing matches.
 const NO_MATCH: &str = "no session matches";
 /// The title of a session that has none.
@@ -274,7 +276,13 @@ where
     }
     if app.hits().is_empty() {
         let done = app.progress().done || !app.query_text().is_empty();
-        let text = if done { NO_MATCH } else { READING };
+        let text = if app.searching() {
+            SEARCHING
+        } else if done {
+            NO_MATCH
+        } else {
+            READING
+        };
         let text = textfit::truncate_to_budget(text, usize::from(area.width));
         frame.render_widget(Paragraph::new(text), line_at(area, 0));
         return;
