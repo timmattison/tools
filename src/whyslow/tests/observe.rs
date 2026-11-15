@@ -348,6 +348,16 @@ fn the_facts_hold_the_changes_and_the_values_of_the_machine() {
     assert_eq!(facts.processors, 14);
 }
 
+/// A clock that went back gives a window of zero and no panic.
+#[test]
+fn a_clock_that_went_back_gives_a_window_of_zero() {
+    let facts = run_with(|m| {
+        *m.clock.get_mut() = VecDeque::from([Duration::from_secs(9), Duration::from_secs(3)]);
+    })
+    .expect("every source answers");
+    assert_eq!(facts.window, Duration::ZERO);
+}
+
 /// CPU ticks that are the same twice give no window to measure in. The run
 /// refuses them, because a percent of nothing has no meaning.
 #[test]

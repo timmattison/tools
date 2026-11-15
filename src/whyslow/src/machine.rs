@@ -20,7 +20,7 @@ use std::time::Duration;
 use faulte::duration::Span;
 use faulte::machine::MachineError;
 use faulte::pid::Pid;
-use faulte::vm::{SwapUsage, VmCounters};
+use faulte::vm::{SwapUsage, VmCounters, VmDelta};
 
 use crate::sample::{ProcessRow, SampleParseError};
 use crate::verdict::{CpuTicks, Facts, Pressure};
@@ -238,29 +238,33 @@ pub trait Machine {
 pub fn observe(machine: &dyn Machine, interval: Span) -> Result<Facts, SourceError> {
     let vm_before = machine.vm_counters()?;
     let _before = machine.process_table()?;
-    let _started = machine.clock();
-    let _ticks_before = machine.cpu_ticks()?;
+    let started = machine.clock();
+    let ticks_before = machine.cpu_ticks()?;
     machine.sleep(Duration::from(interval));
     let _after = machine.process_table()?;
-    let _finished = machine.clock();
-    let _ticks_after = machine.cpu_ticks()?;
-    let _vm_after = machine.vm_counters()?;
-    let _ = vm_before;
-    let _pressure = machine.pressure()?;
-    let _swap = machine.swap_usage()?;
-    let _load = machine.load()?;
-    let _processors = machine.processors()?;
+    let finished = machine.clock();
+    let ticks_after = machine.cpu_ticks()?;
+    let vm_after = machine.vm_counters()?;
+    let pressure = machine.pressure()?;
+    let swap = machine.swap_usage()?;
+    let load = machine.load()?;
+    let processors = machine.processors()?;
     let _claude = machine.claude_pids();
     let _arguments = machine.arguments()?;
+
+    let ticks = CpuTicks::between(ticks_before, ticks_after);
+    if ticks.total() == 0 {
+        return Err(SourceError::CpuTicksDidNotMove);
+    }
     Ok(Facts {
-        ticks: CpuTicks::default(),
-        processors: 0,
-        load: 0.0,
-        window: Duration::ZERO,
-        pressure: Pressure::Normal,
-        swapouts: 0,
-        compressor_bytes: 0,
-        swap: SwapUsage::default(),
+        ticks,
+        processors,
+        load,
+        window: finished.saturating_sub(started),
+        pressure,
+        swapouts: VmDelta::between(vm_before, vm_after).swapouts,
+        compressor_bytes: vm_after.compressor_bytes(machine.page_size()),
+        swap,
         groups: Vec::new(),
     })
 }
