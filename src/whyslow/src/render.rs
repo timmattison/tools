@@ -60,8 +60,10 @@ const COUNT_WIDTH: usize = 5;
 const NOUN_WIDTH: usize = 9;
 
 /// The width of the value at the end of a line. Each value ends in the same
-/// column: 2 + 26 + 5 + 1 + 9 + 10 = 4 + 39 + 10 = 2 + 41 + 10 = 53.
-const VALUE_WIDTH: usize = 10;
+/// column: 2 + 26 + 5 + 1 + 9 + 11 = 4 + 39 + 11 = 2 + 41 + 11 = 54. The
+/// widest value, such as `≥100.0 GiB`, is 10 columns, so each value keeps
+/// one space before it.
+const VALUE_WIDTH: usize = 11;
 
 /// The indent of a group line.
 const GROUP_INDENT: &str = "  ";
@@ -476,11 +478,11 @@ mod tests {
         let lines = render(&full);
         assert_eq!(
             lines.get(2).map(String::as_str),
-            Some("  Claude Code                 176 processes      290%   2 accounts")
+            Some("  Claude Code                 176 processes       290%   2 accounts")
         );
         assert_eq!(
             lines.get(3).map(String::as_str),
-            Some("  WindowServer                  1 process         75%")
+            Some("  WindowServer                  1 process          75%")
         );
     }
 
@@ -498,11 +500,11 @@ mod tests {
         assert_eq!(
             lines.iter().skip(2).map(String::as_str).collect::<Vec<_>>(),
             vec![
-                "  Compilers and linkers        68 processes      322%",
-                "    w/issue-17                                   166%",
-                "    w/issue-36                                   118%",
-                "    1 more worktree                               38%",
-                "  Claude Code                   2 processes       10%",
+                "  Compilers and linkers        68 processes       322%",
+                "    w/issue-17                                    166%",
+                "    w/issue-36                                    118%",
+                "    1 more worktree                                38%",
+                "  Claude Code                   2 processes        10%",
             ]
         );
         let mut many = summary(CpuState::Full, false);
@@ -525,7 +527,7 @@ mod tests {
         let lines = render(&full);
         assert_eq!(
             lines.last().map(String::as_str),
-            Some("  Kernel and short-lived processes               688%")
+            Some("  Kernel and short-lived processes                688%")
         );
     }
 
@@ -567,8 +569,8 @@ mod tests {
         assert_eq!(
             lines.iter().skip(2).map(String::as_str).collect::<Vec<_>>(),
             vec![
-                "  Claude Code                   1 process   ≥24.2 GiB",
-                "  wezterm-gui                   1 process     0.9 GiB",
+                "  Claude Code                   1 process    ≥24.2 GiB",
+                "  wezterm-gui                   1 process      0.9 GiB",
                 "≥ counts the RSS of other accounts. Run with sudo for the footprint.",
             ]
         );
@@ -614,7 +616,7 @@ mod tests {
     }
 
     /// The column where each value ends.
-    const VALUE_END: usize = 53;
+    const VALUE_END: usize = 54;
 
     /// Every value ends at the same display column, with labels that are
     /// ASCII, Japanese, emoji, or accented, and with labels that are too
