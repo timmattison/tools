@@ -852,6 +852,7 @@ impl Scratch {
         let git = self.git();
         let worktree = self.path();
 
+        self.report(ReplayProgress::Phase(Phase::Replay));
         // `--no-ff`, because git takes a merge whose branch is strictly ahead
         // as a fast-forward, and a fast-forward merges no trees at all: it
         // moves HEAD to the other tip and stops. The verdict is the same
@@ -884,7 +885,6 @@ impl Scratch {
         // `refuses_a_branch_that_starts_with_a_dash_by_name_rather_than_blaming_the_worktree`
         // in `tests/merges.rs`. Every other caller-supplied revision in this
         // file carries the separator for the same reason.
-        self.report(ReplayProgress::Phase(Phase::Replay));
         let outcome = git.try_run(
             "merge",
             &["--no-commit", "--no-ff", "--end-of-options", branch],
