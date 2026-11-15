@@ -14,7 +14,11 @@ path = "src/lib.rs"
 faulte.workspace = true
 proctree.workspace = true
 termbar.workspace = true
+occ.workspace = true
 thiserror.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc.workspace = true
 
 [lints]
 workspace = true
