@@ -191,8 +191,9 @@ pub trait Machine {
     /// Gives the size of a page of memory in bytes.
     fn page_size(&self) -> u64;
 
-    /// Gives `ri_phys_footprint` of a process in bytes, or `None` when the
-    /// kernel refuses the read.
+    /// Gives `ri_phys_footprint` of a process in bytes. A process that
+    /// exited before the read holds no memory, so it gives `Some(0)`. Gives
+    /// `None` when the kernel refuses the read.
     fn footprint(&self, pid: Pid) -> Option<u64>;
 
     /// Gives each PID that `occ` classifies as a session, an unreadable
@@ -226,14 +227,19 @@ pub trait Machine {
 /// 2. the first process table, the clock, and the CPU ticks;
 /// 3. the sleep of `interval`;
 /// 4. the second process table, the clock, and the CPU ticks;
-/// 5. the counters of the virtual memory system again;
-/// 6. the pressure, the swap file, the load, and the processors;
-/// 7. the Claude Code processes and the arguments.
+/// 5. the footprint of each process of the second table, in table order, and
+///    then the arguments;
+/// 6. the counters of the virtual memory system again;
+/// 7. the pressure, the swap file, the load, and the processors;
+/// 8. the Claude Code processes.
 ///
 /// The clock sits beside each process table, so the window is the time
-/// between the two tables. The counters of the virtual memory system bracket
-/// the window, so the swap-outs are the change over the window and a little
-/// more.
+/// between the two tables. The footprints and the arguments follow the second
+/// table at once, because a process of that table can exit during any later
+/// read. The footprints come first, because each one is one call and the
+/// arguments are one `ps` run. The counters of the virtual memory system
+/// bracket the window, so the swap-outs are the change over the window and a
+/// little more.
 ///
 /// # Errors
 ///
@@ -250,19 +256,20 @@ pub fn observe(machine: &dyn Machine, interval: Span) -> Result<Facts, SourceErr
     let after = machine.process_table()?;
     let finished = machine.clock();
     let ticks_after = machine.cpu_ticks()?;
+    let footprints: Vec<Option<u64>> = after.iter().map(|row| machine.footprint(row.pid)).collect();
+    let arguments = machine.arguments()?;
     let vm_after = machine.vm_counters()?;
     let pressure = machine.pressure()?;
     let swap = machine.swap_usage()?;
     let load = machine.load()?;
     let processors = machine.processors()?;
     let claude = machine.claude_pids();
-    let arguments = machine.arguments()?;
 
     let ticks = CpuTicks::between(ticks_before, ticks_after);
     if ticks.total() == 0 {
         return Err(SourceError::CpuTicksDidNotMove);
     }
-    let samples = samples(machine, &before, &after, &claude, &arguments);
+    let samples = samples(machine, &before, &after, &footprints, &claude, &arguments);
     Ok(Facts {
         ticks,
         processors,
@@ -283,18 +290,22 @@ pub fn observe(machine: &dyn Machine, interval: Span) -> Result<Facts, SourceErr
 /// table only has ended, and it has no sample. A process of the compilers
 /// takes its worktree from its arguments, and any other process takes none.
 /// The memory is the footprint when the kernel gives one, and the resident
-/// size otherwise.
+/// size otherwise. `footprints` holds one answer for each row of `after`, in
+/// the same order. A process that exited after the second table gives a
+/// footprint of zero, and its group gets no lower-bound mark.
 fn samples(
     machine: &dyn Machine,
     before: &[ProcessRow],
     after: &[ProcessRow],
+    footprints: &[Option<u64>],
     claude: &HashSet<Pid>,
     arguments: &HashMap<Pid, String>,
 ) -> Vec<ProcessSample> {
     after
         .iter()
+        .zip(footprints)
         .zip(cpu_used(before, after))
-        .map(|(row, cpu)| {
+        .map(|((row, footprint), cpu)| {
             let group = group_of(row.name(), claude.contains(&row.pid));
             let worktree = if group == Group::Compilers {
                 arguments
@@ -303,7 +314,7 @@ fn samples(
             } else {
                 None
             };
-            let memory = machine.footprint(row.pid).map_or_else(
+            let memory = footprint.map_or_else(
                 || Memory::Resident(row.rss_kib.saturating_mul(BYTES_PER_KIB)),
                 Memory::Footprint,
             );

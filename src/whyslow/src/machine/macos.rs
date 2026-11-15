@@ -16,7 +16,9 @@
 //!   Monitor` shows. It counts compressed memory, and `rss` does not. Without
 //!   root, the kernel refuses each process of another account, and PID 0.
 //!   Measured on 2026-11-15. [`Machine::footprint`] then gives `None`, and
-//!   the caller falls back to the resident size.
+//!   the caller falls back to the resident size. The kernel tells a refusal
+//!   (`EPERM`) apart from a process that exited (`ESRCH`), also measured on
+//!   2026-11-15. A process that exited holds no memory, so it gives `Some(0)`.
 //! - `occ` classifies the Claude Code processes, and `proctree` reads the
 //!   arguments of each process.
 //!
@@ -213,7 +215,9 @@ impl Machine for Mac {
             libc::proc_pid_rusage(target, libc::RUSAGE_INFO_V4, usage.as_mut_ptr().cast())
         };
         if answer != 0 {
-            return None;
+            // Read the error number at once, before any other call changes it.
+            let exited = std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+            return exited.then_some(0);
         }
         // SAFETY: the call answered with success, and every field that it did
         // not write holds the zero that this function wrote first.
