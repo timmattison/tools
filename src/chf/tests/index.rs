@@ -504,6 +504,77 @@ fn mode_zero_stays_listable(path: &Path) -> bool {
     listable
 }
 
+/// Whether a directory of mode 0444 still lets the caller look up its entries.
+/// A root user can, and a test of the missing search permission cannot run.
+#[cfg(unix)]
+fn mode_0444_stays_searchable(path: &Path, entry: &str) -> bool {
+    set_mode(path, 0o444);
+    let searchable = fs::symlink_metadata(path.join(entry)).is_ok();
+    set_mode(path, 0o755);
+    searchable
+}
+
+#[cfg(unix)]
+#[test]
+fn a_store_that_cannot_be_searched_gives_unreadable_and_keeps_the_cache() {
+    let store = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    write_session(store.path(), FOLDER, UUID_A, "alpha");
+    collect(store.path(), cache.path());
+    let files = json_files(cache.path());
+    assert_eq!(files.len(), 1);
+    let before = fs::read(&files[0]).unwrap();
+    if mode_0444_stays_searchable(store.path(), FOLDER) {
+        eprintln!("note: running as root, a mode 444 directory stays searchable, test skipped");
+        return;
+    }
+
+    set_mode(store.path(), 0o444);
+    let events = collect(store.path(), cache.path());
+    set_mode(store.path(), 0o755);
+
+    assert_eq!(json_files(cache.path()), files);
+    assert_eq!(fs::read(&files[0]).unwrap(), before);
+    assert_eq!(unreadable(&events), vec![store.path()]);
+    assert_eq!(total(&events), Some(0));
+    assert_framed(&events);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_folder_that_cannot_be_searched_keeps_its_cache_entries() {
+    let store = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let transcript = write_session(store.path(), FOLDER, UUID_A, "alpha");
+    collect(store.path(), cache.path());
+    let files = json_files(cache.path());
+    assert_eq!(files.len(), 1);
+    let before = fs::read(&files[0]).unwrap();
+    let folder = store.path().join(FOLDER);
+    let file_name = transcript
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    if mode_0444_stays_searchable(&folder, &file_name) {
+        eprintln!("note: running as root, a mode 444 directory stays searchable, test skipped");
+        return;
+    }
+
+    set_mode(&folder, 0o444);
+    let events = collect(store.path(), cache.path());
+    set_mode(&folder, 0o755);
+
+    assert_eq!(fs::read(&files[0]).unwrap(), before);
+    assert_eq!(unreadable(&events), vec![transcript.as_path()]);
+    assert!(sessions(&events).is_empty());
+    assert_eq!(total(&events), Some(1));
+    assert_framed(&events);
+
+    let again = collect(store.path(), cache.path());
+    assert!(has_word(&again, "alpha"));
+}
+
 #[cfg(unix)]
 #[test]
 fn a_store_that_cannot_be_listed_gives_unreadable_and_keeps_the_cache() {
