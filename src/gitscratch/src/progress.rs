@@ -13,8 +13,9 @@
 //! A report never changes the answer of a replay. The observer only listens.
 //! It cannot stop a replay and it cannot change what a replay returns.
 //!
-//! This crate sends one [`ReplayProgress::Phase`] report at the start of each
-//! phase of a merge replay and of the creation of the scratch worktree.
+//! The creation of the scratch worktree sends [`Phase::CreateScratch`]. Each
+//! replay, a rebase or a merge, sends [`Phase::Replay`] when it starts. Only a
+//! merge that halts sends [`Phase::CountHunks`].
 //!
 //! A rebase replay also sends [`ReplayProgress::Commit`] reports. Git keeps two
 //! state files in the `rebase-merge` directory of the scratch worktree. The
