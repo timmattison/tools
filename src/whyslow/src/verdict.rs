@@ -8,7 +8,9 @@ use std::time::Duration;
 
 use faulte::vm::SwapUsage;
 
-use crate::tally::GroupTotal;
+use crate::sample::CpuTime;
+use crate::tally::{GroupTotal, WorktreeTotal};
+use crate::worktree::{self, NO_WORKTREE};
 
 /// The CPU is full when the idle part is below this percent.
 pub const FULL_IDLE_PERCENT: u64 = 10;
@@ -339,17 +341,83 @@ fn lines(facts: &Facts, resource: Resource) -> Vec<GroupLine> {
     ranked
         .into_iter()
         .take(GROUP_LIMIT)
-        .map(|total| GroupLine {
-            label: total.group.label().to_owned(),
-            processes: total.processes,
-            accounts: total.accounts,
-            cpu_percent: total.cpu.percent_of(facts.window),
-            memory_bytes: total.memory_bytes,
-            at_least: total.at_least,
-            worktrees: Vec::new(),
-            more: None,
+        .map(|total| {
+            let (worktrees, more) = worktree_shares(total, facts.window, resource);
+            GroupLine {
+                label: total.group.label().to_owned(),
+                processes: total.processes,
+                accounts: total.accounts,
+                cpu_percent: total.cpu.percent_of(facts.window),
+                memory_bytes: total.memory_bytes,
+                at_least: total.at_least,
+                worktrees,
+                more,
+            }
         })
         .collect()
+}
+
+/// Gives the number that ranks one worktree by `resource`.
+fn worktree_weight(total: &WorktreeTotal, resource: Resource) -> u64 {
+    match resource {
+        Resource::Cpu => total.cpu.centiseconds(),
+        Resource::Memory => total.memory_bytes,
+    }
+}
+
+/// Gives the label of one worktree: its last two parts, or [`NO_WORKTREE`].
+fn worktree_label(total: &WorktreeTotal) -> String {
+    total
+        .worktree
+        .as_deref()
+        .map_or_else(|| NO_WORKTREE.to_owned(), worktree::label)
+}
+
+/// Makes the share of the worktrees in `totals`, under `label`.
+fn share(label: String, totals: &[&WorktreeTotal], window: Duration) -> Share {
+    let cpu: CpuTime = totals.iter().map(|total| total.cpu).sum();
+    Share {
+        label,
+        cpu_percent: cpu.percent_of(window),
+        memory_bytes: totals
+            .iter()
+            .fold(0, |sum, total| u64::saturating_add(sum, total.memory_bytes)),
+        at_least: totals.iter().any(|total| total.at_least),
+    }
+}
+
+/// Gives the [`WORKTREE_LIMIT`] largest worktrees of a group by `resource`,
+/// and the count and the sum of the rest. A worktree with none of the
+/// resource is in neither. A group with no worktrees gives an empty list and
+/// no rest.
+fn worktree_shares(
+    total: &GroupTotal,
+    window: Duration,
+    resource: Resource,
+) -> (Vec<Share>, Option<(usize, Share)>) {
+    let mut ranked: Vec<(String, &WorktreeTotal)> = total
+        .worktrees
+        .iter()
+        .filter(|worktree| worktree_weight(worktree, resource) > 0)
+        .map(|worktree| (worktree_label(worktree), worktree))
+        .collect();
+    ranked.sort_by(|(left_label, left), (right_label, right)| {
+        worktree_weight(right, resource)
+            .cmp(&worktree_weight(left, resource))
+            .then_with(|| left_label.cmp(right_label))
+    });
+    let rest: Vec<&WorktreeTotal> = ranked
+        .iter()
+        .skip(WORKTREE_LIMIT)
+        .map(|(_, worktree)| *worktree)
+        .collect();
+    let more = (!rest.is_empty()).then(|| (rest.len(), share(String::new(), &rest, window)));
+    let shown = ranked
+        .into_iter()
+        .take(WORKTREE_LIMIT)
+        .map(|(label, worktree)| share(label, &[worktree], window))
+        .collect();
+    (shown, more)
 }
 
 #[cfg(test)]
