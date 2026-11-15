@@ -5621,3 +5621,84 @@ All thresholds are named constants in `src/whyslow/src/verdict.rs`, and a test h
 ```bash
 cargo install --git https://github.com/timmattison/tools whyslow
 ```
+
+## glance (CPU and memory at a glance)
+
+Show two small charts in the macOS menu bar: the share of the CPU time that the system processes and the user processes use, and the memory pressure. `glance` reads each value from the kernel in one call, starts no child process, and draws its charts into a pixel buffer itself. Thus the monitor adds almost nothing to the load that it shows.
+
+### What it shows
+
+- **The left chart is the CPU.** Each column is one sample. The red part at the bottom is the system share, and the blue part above it is the user share. A nice process counts as a user process. These are the colors of the CPU chart in Activity Monitor.
+- **The right chart is the memory pressure.** The height of each column is the memory in use as a percentage, and its color is the pressure level of that sample: green for normal, orange for warn, and red for critical. A level that `glance` does not know is gray, never green.
+- **The charts show the last 30 samples.** At the default interval, that is the last 30 seconds. The newest column is at the right edge, so a short spike stays visible after it ends.
+- **A click on the charts opens a menu** with the current values (user %, system %, idle %, the pressure level, and the percentage in use) and a **Quit glance** item.
+- `glance` has no Dock icon and no window.
+
+### Basic Usage
+
+```bash
+glance                  # start the status item
+glance --interval 2     # one sample every 2 seconds
+glance --sample         # print one reading as JSON, then stop
+```
+
+### Options
+
+- `--interval <SECONDS>`: The time between two samples, in seconds. A decimal number is permitted. Defaults to `1`. A value below `0.25` is a usage error. A longer interval uses less CPU time and shows a longer history.
+- `--sample`: Take two readings one interval apart, print one JSON object, and stop. This mode needs no window server.
+- `-V`, `--version`: Print the version, the git hash, and whether the build was clean.
+- `-h`, `--help`: Print the usage.
+
+### The `--sample` output
+
+The keys are `user`, `system`, and `idle` (fractions whose sum is 1), `pressure_level` (`normal`, `warn`, `critical`, or `unknown`), `pressure_level_raw` (the value of the kernel), and `pressure_percent` (the memory in use).
+
+### Start at login
+
+`glance` has no "start at login" item. A LaunchAgent starts it instead. Write this file to `~/Library/LaunchAgents/com.timmattison.glance.plist`, and replace `YOU` with your account name. launchd does not expand `~`, thus the path must be complete.
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.timmattison.glance</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/YOU/.cargo/bin/glance</string>
+    </array>
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+</dict>
+</plist>
+```
+
+Then load it:
+
+```bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.timmattison.glance.plist
+```
+
+`RunAtLoad` starts `glance` at each login. `KeepAlive` with `SuccessfulExit` set to `false` starts it again after a crash, but not after **Quit glance**, which exits with status 0. To stop it and keep it stopped until the next login, run `launchctl bootout gui/$(id -u)/com.timmattison.glance`.
+
+### Notes
+
+- **The sources.** The CPU ticks come from `host_statistics(HOST_CPU_LOAD_INFO)`. The pressure level is `kern.memorystatus_vm_pressure_level` (1 is normal, 2 is warn, 4 is critical). The percentage in use is `100 - kern.memorystatus_level`, and `kern.memorystatus_level` is the free percentage that `memory_pressure` prints.
+- **The height of the memory chart can be different from Activity Monitor.** Activity Monitor computes its graph with a formula that Apple does not document. The color is the level of the kernel, which is the same value that Activity Monitor uses.
+- **Activity Monitor calls the warn level yellow.** `glance` shows it orange.
+- **Weeks of uptime are safe.** The tick counters are 32 bits wide and wrap after about 31 days on a Mac with 16 cores. `glance` subtracts them with wrapping arithmetic, so a wrap does not show a false spike.
+- **macOS only.** On a different platform, `glance` prints `glance supports macOS only.` and exits with status 1.
+
+### Install
+
+```bash
+cargo install --git https://github.com/timmattison/tools glance
+```

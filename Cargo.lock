@@ -3898,6 +3898,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "glance"
+version = "0.1.0"
+dependencies = [
+ "buildinfo",
+ "clap",
+]
+
+[[package]]
 name = "glo"
 version = "0.1.0"
 dependencies = [

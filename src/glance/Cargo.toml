@@ -1,0 +1,22 @@
+[package]
+name = "glance"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "A light macOS menu bar monitor of the CPU share and the memory pressure"
+
+[lib]
+name = "glance"
+path = "src/lib.rs"
+
+[[bin]]
+name = "glance"
+path = "src/main.rs"
+
+[dependencies]
+buildinfo.workspace = true
+clap.workspace = true
+
+[lints]
+workspace = true
