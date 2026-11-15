@@ -5,7 +5,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use gitscratch::testing::{conflicting_repo, independent_branches_repo};
+use gitscratch::testing::conflicting_repo;
 use gitscratch::{Phase, ReplayObserver, ReplayProgress, Repo};
 
 /// An observer that keeps each report, in the order it arrived.

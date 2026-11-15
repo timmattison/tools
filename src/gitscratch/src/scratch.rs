@@ -161,6 +161,17 @@ pub struct Scratch {
 }
 
 impl Scratch {
+    /// Send a report to the observer, when the caller gave one.
+    ///
+    /// A scratch worktree built by [`Repo::scratch`](crate::Repo::scratch) has
+    /// no observer, and then this method does nothing. A report never changes
+    /// the answer of a replay.
+    fn report(&self, progress: ReplayProgress) {
+        if let Some(observer) = &self.observer {
+            observer.report(progress);
+        }
+    }
+
     /// Add a detached worktree at `at` in a private temporary directory.
     ///
     /// Crate-private on purpose, and for the same reason [`Git::new`] is:
@@ -198,6 +209,10 @@ impl Scratch {
             hooks,
             observer,
         };
+
+        // The report comes before the call, so a caller sees the phase while
+        // git works and not after it ends.
+        scratch.report(ReplayProgress::Phase(Phase::CreateScratch));
 
         // `--end-of-options` ahead of both positionals, because `at` arrives
         // from a caller and a caller can spell a revision that starts with a
@@ -842,6 +857,7 @@ impl Scratch {
         // `refuses_a_branch_that_starts_with_a_dash_by_name_rather_than_blaming_the_worktree`
         // in `tests/merges.rs`. Every other caller-supplied revision in this
         // file carries the separator for the same reason.
+        self.report(ReplayProgress::Phase(Phase::Replay));
         let outcome = git.try_run(
             "merge",
             &["--no-commit", "--no-ff", "--end-of-options", branch],
@@ -852,6 +868,10 @@ impl Scratch {
         if outcome.success {
             return Ok((cost, halt_diffs));
         }
+
+        // A clean merge returned above, so only a halted merge reports this
+        // phase. The read of the conflicted files is what it names.
+        self.report(ReplayProgress::Phase(Phase::CountHunks));
 
         // The same two readers the rebase replay takes, because a conflicted
         // path costs the same to mis-read whichever operation produced it.
