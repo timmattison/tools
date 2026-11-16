@@ -556,10 +556,11 @@ mod tests {
         (SIDE - 2 * FRAME_POINTS) * scale
     }
 
-    /// The x pixel of the left edge of a slot, from the layout rules.
+    /// The x pixel of the left edge of a slot, from the layout rules. The
+    /// memory square starts on the right border of the CPU square.
     fn slot_x(chart: u32, slot: usize, scale: u32) -> u32 {
         let slot = u32::try_from(slot).unwrap();
-        (chart * (SIDE + GAP_POINTS) + FRAME_POINTS + slot) * scale
+        (chart * (SIDE - FRAME_POINTS) + FRAME_POINTS + slot) * scale
     }
 
     /// The colors of one column, from the bottom row of the interior up.
@@ -597,38 +598,40 @@ mod tests {
     }
 
     #[test]
-    fn the_image_is_two_squares_and_a_gap() {
+    fn the_image_is_two_squares_that_share_one_border() {
         for scale in SCALES {
             let geometry = Geometry::from_status_bar(22.0, f64::from(scale), Some(LINE_HEIGHT));
             assert_eq!(geometry.height_points(), 22);
             assert_eq!(geometry.image_height_points(), 22);
-            assert_eq!(geometry.image_width_points(), 2 * 22 + GAP_POINTS);
+            assert_eq!(geometry.image_width_points(), 2 * 22 - FRAME_POINTS);
             assert_eq!(geometry.columns().get(), 20);
 
             let pixmap = render(&history_of(COLUMNS, &[]), geometry, Appearance::Light);
-            assert_eq!(pixmap.width_points(), 48);
+            assert_eq!(pixmap.width_points(), 43);
             assert_eq!(pixmap.height_points(), 22);
-            assert_eq!(pixmap.width(), 48 * scale);
+            assert_eq!(pixmap.width(), 43 * scale);
             assert_eq!(pixmap.height(), 22 * scale);
             let expected = usize::try_from(pixmap.width() * pixmap.height() * 4).unwrap();
             assert_eq!(pixmap.bytes().len(), expected);
         }
     }
 
+    /// The two squares overlap on one column of the frame. Thus the border
+    /// between the two interiors is one frame wide, and there is no gap.
     #[test]
-    fn each_chart_is_a_framed_square_with_no_margin() {
+    fn each_chart_is_a_framed_square_with_no_margin_and_one_shared_border() {
         assert_ne!(Appearance::Light.frame(), Appearance::Dark.frame());
         let history = history_of(COLUMNS, &[]);
         for scale in SCALES {
             let geometry = Geometry::from_status_bar(22.0, f64::from(scale), Some(LINE_HEIGHT));
             for appearance in [Appearance::Light, Appearance::Dark] {
                 let pixmap = render(&history, geometry, appearance);
-                assert_eq!(pixmap.width_points(), 48);
+                assert_eq!(pixmap.width_points(), 43);
                 assert_eq!(pixmap.height_points(), 22);
                 let side = 22 * scale;
                 let frame = FRAME_POINTS * scale;
                 for chart in [CPU_CHART, MEMORY_CHART] {
-                    let left = chart * (22 + GAP_POINTS) * scale;
+                    let left = chart * (side - frame);
                     for y in 0..side {
                         for x in left..left + side {
                             let on_edge = x < left + frame
@@ -642,11 +645,6 @@ mod tests {
                             };
                             assert_eq!(pixmap.pixel(x, y), expected, "chart {chart} ({x}, {y})");
                         }
-                    }
-                }
-                for y in 0..pixmap.height() {
-                    for x in side..side + GAP_POINTS * scale {
-                        assert_eq!(pixmap.pixel(x, y), TRANSPARENT, "gap ({x}, {y})");
                     }
                 }
             }
