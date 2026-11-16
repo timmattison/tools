@@ -260,4 +260,19 @@ mod tests {
         assert_eq!(board.get(Pid::new(7)).cloned(), before);
         assert_eq!(board.changes().count(), 0);
     }
+
+    #[test]
+    fn apply_replaces_a_session_when_the_pid_is_reused() {
+        let mut board = Board::new();
+        board.load(file(7, PaneState::Idle, 100, 500), None);
+        let change = board
+            .apply(file(7, PaneState::Idle, 200, 300), None)
+            .expect("a new session is a change");
+        assert_eq!(change.old, None);
+        assert_eq!(change.new, Some(PaneState::Idle));
+        assert_eq!(change.at, EpochMillis::new(300));
+        let session = board.get(Pid::new(7)).expect("the session is on the board");
+        assert_eq!(session.file.started_at, EpochMillis::new(200));
+        assert_eq!(session.since, EpochMillis::new(300));
+    }
 }
