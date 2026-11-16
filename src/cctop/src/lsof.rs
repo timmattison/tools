@@ -111,6 +111,14 @@ pub fn client_pids(server: Pid, sockets: &[UnixSocket]) -> Vec<Pid> {
     clients
 }
 
+/// Reads the tty from the output of `lsof -a -p <pid> -d 0 -F n`.
+///
+/// The tty is the first `n` line whose value starts with `/dev/`.
+#[must_use]
+pub fn parse_tty(_text: &str) -> Option<String> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,5 +203,17 @@ mod tests {
             tty_argv(Pid::new(19800)),
             argv(&["lsof", "-a", "-p", "19800", "-d", "0", "-F", "n"])
         );
+    }
+
+    #[test]
+    fn the_tty_of_the_fixture_is_found() {
+        let text = include_str!("../fixtures/lsof-tty.txt");
+        assert_eq!(parse_tty(text), Some("/dev/ttys231".to_string()));
+    }
+
+    #[test]
+    fn output_with_no_device_line_has_no_tty() {
+        assert_eq!(parse_tty(""), None);
+        assert_eq!(parse_tty("p1\nf0\nn/tmp/file\nn->0xabc\n"), None);
     }
 }
