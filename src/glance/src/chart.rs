@@ -350,10 +350,33 @@ impl Pixmap {
     }
 
     /// The bytes of the image with each color channel multiplied by its alpha.
+    ///
+    /// Each product rounds to the nearest whole value. AppKit draws into a
+    /// bitmap only when its alpha is premultiplied.
     #[must_use]
     pub fn premultiplied_bytes(&self) -> Vec<u8> {
-        self.bytes.clone()
+        self.bytes
+            .chunks_exact(BYTES_PER_PIXEL)
+            .flat_map(|pixel| {
+                let alpha = pixel[ALPHA_INDEX];
+                let mut product = [alpha; BYTES_PER_PIXEL];
+                for (channel, value) in product.iter_mut().zip(&pixel[..ALPHA_INDEX]) {
+                    *channel = premultiply(*value, alpha);
+                }
+                product
+            })
+            .collect()
     }
+}
+
+/// The index of the alpha channel in one pixel.
+const ALPHA_INDEX: usize = 3;
+
+/// One color channel multiplied by its alpha, rounded to the nearest value.
+fn premultiply(channel: u8, alpha: u8) -> u8 {
+    let full = u16::from(u8::MAX);
+    let product = (u16::from(channel) * u16::from(alpha) + full / 2) / full;
+    u8::try_from(product).unwrap_or(u8::MAX)
 }
 
 /// The color of the memory column at a pressure level.
