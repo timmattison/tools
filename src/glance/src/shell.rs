@@ -30,10 +30,11 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{
     ns_string, NSArray, NSDistributedNotificationCenter, NSNotification, NSNotificationCenter,
-    NSNotificationName, NSObject, NSRunLoop, NSRunLoopCommonModes, NSSize, NSString, NSTimer,
+    NSNotificationName, NSObject, NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize, NSString,
+    NSTimer,
 };
 
-use crate::chart::{render, Appearance, Geometry, Pixmap};
+use crate::chart::{render, Appearance, Geometry, Pixmap, Rgba};
 use crate::connection::{Event, Feed, Remote, SSH_PROGRAM};
 use crate::history::{History, DEFAULT_CAPACITY};
 use crate::host::HostName;
@@ -434,6 +435,23 @@ fn bitmap_representation(pixmap: &Pixmap, points: NSSize) -> Option<Retained<NSB
     Some(tagged)
 }
 
+/// The line height of the font of the label, in points.
+fn label_line_height() -> f64 {
+    0.0
+}
+
+/// Draws `text` into `band` of `representation`, in `color`.
+///
+/// Returns `false` when AppKit refuses to make a graphics context.
+fn draw_label(
+    _representation: &NSBitmapImageRep,
+    _text: &str,
+    _band: NSRect,
+    _color: Rgba,
+) -> bool {
+    false
+}
+
 /// Makes the menu and gives it to the status item. Returns the info items.
 ///
 /// The first info line shows the host of `origin`.
@@ -553,11 +571,98 @@ mod tests {
     use std::time::Duration;
 
     use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass};
-    use objc2_app_kit::NSEventTrackingRunLoopMode;
+    use objc2_app_kit::{NSBitmapImageRep, NSEventTrackingRunLoopMode};
     use objc2_core_foundation::{CFRunLoop, CFString};
-    use objc2_foundation::{NSDate, NSObject, NSRunLoop, NSTimer};
+    use objc2_foundation::{NSDate, NSObject, NSPoint, NSRect, NSRunLoop, NSSize, NSTimer};
 
-    use super::{start_repeating_timer, TIMER_TOLERANCE};
+    use super::{
+        bitmap_representation, draw_label, label_line_height, start_repeating_timer,
+        BYTES_PER_PIXEL, TIMER_TOLERANCE,
+    };
+    use crate::chart::{render, Appearance, Geometry};
+    use crate::history::{History, DEFAULT_CAPACITY};
+
+    /// The thickness of the status bar in the label test, in points.
+    const THICKNESS: f64 = 22.0;
+
+    /// The scale of the label test. Each point is 2 pixels high.
+    const LABEL_SCALE: u32 = 2;
+
+    /// The index of the alpha channel in one pixel.
+    const ALPHA: usize = 3;
+
+    /// A host name for the label test.
+    const LABEL: &str = "M4-Pro-Mac-Mini";
+
+    /// The bytes of each row of a representation, from the top row down.
+    fn rows_of(representation: &NSBitmapImageRep) -> Vec<Vec<u8>> {
+        let stride = usize::try_from(representation.bytesPerRow()).unwrap();
+        let height = usize::try_from(representation.pixelsHigh()).unwrap();
+        let width = usize::try_from(representation.pixelsWide()).unwrap() * BYTES_PER_PIXEL;
+        assert!(
+            width <= stride,
+            "a row of {width} bytes in a stride of {stride}"
+        );
+        let data = representation.bitmapData();
+        assert!(!data.is_null(), "the representation has no buffer");
+        (0..height)
+            .map(|row| {
+                // SAFETY: AppKit holds `stride * height` bytes at `data`. The
+                // row index is below `height`, and the row reads `width`
+                // bytes, which is not more than `stride`.
+                unsafe { std::slice::from_raw_parts(data.add(row * stride), width) }.to_vec()
+            })
+            .collect()
+    }
+
+    /// Tells if a pixel of the rows is not transparent.
+    fn inked(rows: &[Vec<u8>]) -> bool {
+        rows.iter().any(|row| {
+            row.chunks_exact(BYTES_PER_PIXEL)
+                .any(|pixel| pixel[ALPHA] > 0)
+        })
+    }
+
+    #[test]
+    fn the_label_paints_the_band_in_points_and_nothing_above_it() {
+        let geometry =
+            Geometry::from_status_bar(THICKNESS, f64::from(LABEL_SCALE), Some(label_line_height()));
+        let band = geometry
+            .band_rows_points()
+            .expect("the status bar holds a band");
+        let pixmap = render(&History::new(DEFAULT_CAPACITY), geometry, Appearance::Light);
+        let points = NSSize::new(
+            f64::from(pixmap.width_points()),
+            f64::from(pixmap.height_points()),
+        );
+        let representation = bitmap_representation(&pixmap, points).expect("a representation");
+        let before = rows_of(&representation);
+        let rect = NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(points.width, f64::from(band.end - band.start)),
+        );
+        assert!(draw_label(
+            &representation,
+            LABEL,
+            rect,
+            Appearance::Light.label()
+        ));
+        let after = rows_of(&representation);
+
+        let scale = usize::try_from(LABEL_SCALE).unwrap();
+        let band_top = usize::try_from(band.start).unwrap() * scale;
+        let band_middle = band_top + usize::try_from(band.end - band.start).unwrap() * scale / 2;
+        assert_eq!(after.len(), before.len());
+        for (row, (old, new)) in before.iter().zip(&after).enumerate().take(band_top) {
+            assert_eq!(old, new, "the label changed row {row}, above the band");
+        }
+        // A drawing in pixels, not in points, fills only the lower half.
+        assert!(
+            inked(&after[band_top..band_middle]),
+            "the upper half is empty"
+        );
+        assert!(inked(&after[band_middle..]), "the lower half is empty");
+    }
 
     /// The interval of the probe timer, in seconds.
     const PROBE_INTERVAL: f64 = 0.02;
