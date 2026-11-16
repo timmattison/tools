@@ -744,6 +744,27 @@ mod tests {
     }
 
     #[test]
+    fn the_host_line_names_the_destination_once_when_it_is_the_name() {
+        let origin = Origin {
+            host: "m1-ts",
+            destination: Some("m1-ts"),
+        };
+        assert_eq!(host_line(&origin), "Host: m1-ts (ssh)");
+    }
+
+    #[test]
+    fn the_host_line_names_both_when_the_name_is_not_the_destination() {
+        let origin = Origin {
+            host: "studio",
+            destination: Some("me@studio.example.com"),
+        };
+        assert_eq!(
+            host_line(&origin),
+            "Host: studio (ssh me@studio.example.com)"
+        );
+    }
+
+    #[test]
     fn the_host_line_in_remote_mode_names_the_destination() {
         assert_eq!(
             host_line(&remote(DESTINATION)),
