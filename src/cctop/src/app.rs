@@ -257,4 +257,34 @@ mod tests {
         assert_eq!(app.handle_key(release), Action::Nothing);
         assert_eq!(app.selected_index(), Some(0));
     }
+
+    #[test]
+    fn enter_focuses_the_selected_session() {
+        let mut app = three_rows();
+        app.handle_key(press(KeyCode::Char('j')));
+        let expected = FocusTarget::of(app.board().get(Pid::new(11)).expect("session 11 exists"));
+        assert_eq!(
+            app.handle_key(press(KeyCode::Enter)),
+            Action::Focus(expected)
+        );
+        assert_eq!(app.status(), Some("Focusing dir11"));
+    }
+
+    #[test]
+    fn enter_names_the_session_by_its_registry_name() {
+        let mut app = App::new();
+        app.board_mut().load(
+            file(10, "dir10", PaneState::Idle, 10),
+            Some("my-name".to_string()),
+        );
+        app.handle_key(press(KeyCode::Enter));
+        assert_eq!(app.status(), Some("Focusing my-name"));
+    }
+
+    #[test]
+    fn enter_on_an_empty_board_has_nothing_to_focus() {
+        let mut app = App::new();
+        assert_eq!(app.handle_key(press(KeyCode::Enter)), Action::Nothing);
+        assert_eq!(app.status(), Some("No session to focus"));
+    }
 }
