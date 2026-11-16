@@ -115,8 +115,11 @@ pub fn client_pids(server: Pid, sockets: &[UnixSocket]) -> Vec<Pid> {
 ///
 /// The tty is the first `n` line whose value starts with `/dev/`.
 #[must_use]
-pub fn parse_tty(_text: &str) -> Option<String> {
-    None
+pub fn parse_tty(text: &str) -> Option<String> {
+    text.lines()
+        .filter_map(|line| line.strip_prefix('n'))
+        .find(|value| value.starts_with("/dev/"))
+        .map(ToString::to_string)
 }
 
 #[cfg(test)]
