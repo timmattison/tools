@@ -3,9 +3,10 @@
 
 use crossterm::event::Event;
 
-use crate::app::App;
+use crate::app::{Action, App};
 use crate::focus::{FocusReport, FocusTarget};
 use crate::liveness::ProcessClock;
+use crate::notification::needs_you_message;
 use crate::state::EpochMillis;
 use crate::store::DirEvent;
 use crate::sync::Sync;
@@ -63,8 +64,7 @@ impl Controller {
     ///
     /// Returns the error of the read of the state directory.
     pub fn start(&mut self) -> std::io::Result<()> {
-        let _ = (&self.sync, &mut self.clock);
-        Ok(())
+        self.sync.initial(self.app.board_mut(), self.clock.as_mut())
     }
 
     /// The app, for the draw.
@@ -75,8 +75,42 @@ impl Controller {
 
     /// Handle one event at the time `now`. Return the effects to run.
     pub fn handle(&mut self, event: AppEvent, now: EpochMillis) -> Vec<Effect> {
-        let _ = (event, now, self.notify);
-        Vec::new()
+        match event {
+            AppEvent::Terminal(Event::Key(key)) => match self.app.handle_key(key) {
+                Action::Nothing => Vec::new(),
+                Action::Quit => vec![Effect::Quit],
+                Action::Focus(target) => vec![Effect::Focus(target)],
+            },
+            AppEvent::Terminal(_) => Vec::new(),
+            AppEvent::Dir(event) => {
+                let changes =
+                    self.sync
+                        .on_dir_event(self.app.board_mut(), event, self.clock.as_mut(), now);
+                if !self.notify {
+                    return Vec::new();
+                }
+                changes
+                    .iter()
+                    .filter(|change| change.is_needs_you())
+                    .map(|change| Effect::Notify(needs_you_message(change)))
+                    .collect()
+            }
+            AppEvent::Tick => {
+                let _ended = self
+                    .sync
+                    .on_tick(self.app.board_mut(), self.clock.as_mut(), now);
+                Vec::new()
+            }
+            AppEvent::FocusDone(report) => {
+                self.app.set_status(report.status_line());
+                Vec::new()
+            }
+            AppEvent::NotifyFailed(text) => {
+                self.app
+                    .set_status(format!("The notification failed: {text}"));
+                Vec::new()
+            }
+        }
     }
 }
 
