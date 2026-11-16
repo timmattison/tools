@@ -20,5 +20,6 @@ pub mod runner;
 pub mod state;
 pub mod store;
 pub mod sync;
+pub mod ui;
 pub mod wezterm;
 pub mod zellij;
