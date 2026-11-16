@@ -44,6 +44,10 @@ pub const FRAME_POINTS: u32 = 1;
 pub const GAP_POINTS: u32 = 4;
 /// The space above and below the charts in the status bar, in points.
 pub const VERTICAL_INSET_POINTS: u32 = 3;
+/// The space above the charts when the label is on, in points.
+pub const LABEL_TOP_INSET_POINTS: u32 = 1;
+/// The gap between the charts and the label band, in points.
+pub const LABEL_GAP_POINTS: u32 = 1;
 
 /// The number of bytes of one pixel.
 const BYTES_PER_PIXEL: usize = 4;
@@ -71,6 +75,12 @@ impl Appearance {
             Appearance::Light => FRAME_LIGHT,
             Appearance::Dark => FRAME_DARK,
         }
+    }
+
+    /// The color of the label text.
+    #[must_use]
+    pub fn label(self) -> Rgba {
+        TRANSPARENT
     }
 }
 
@@ -106,6 +116,7 @@ impl std::error::Error for GeometryError {}
 pub struct Geometry {
     height_points: u32,
     scale: u32,
+    band_points: Option<u32>,
 }
 
 impl Geometry {
@@ -127,17 +138,22 @@ impl Geometry {
         Ok(Geometry {
             height_points,
             scale,
+            band_points: None,
         })
     }
 
     /// Makes the geometry of the status bar of the screen.
     ///
-    /// The inputs are `NSStatusBar.thickness` and `NSScreen.backingScaleFactor`.
-    /// The height is the whole points of the thickness less the inset above and
-    /// below, and at least `MIN_HEIGHT_POINTS`. The scale is the backing scale
-    /// rounded, and at least 1. An input that is not finite gives the minimum.
+    /// The inputs are `NSStatusBar.thickness`, `NSScreen.backingScaleFactor`,
+    /// and the line height of the label text. The line height is `None` when
+    /// there is no label.
     #[must_use]
-    pub fn from_status_bar(thickness_points: f64, backing_scale: f64) -> Geometry {
+    pub fn from_status_bar(
+        thickness_points: f64,
+        backing_scale: f64,
+        label_line_height_points: Option<f64>,
+    ) -> Geometry {
+        let _ = label_line_height_points;
         let thickness = whole_number(thickness_points.floor());
         let height_points = thickness
             .saturating_sub(2 * VERTICAL_INSET_POINTS)
@@ -146,7 +162,26 @@ impl Geometry {
         Geometry {
             height_points,
             scale,
+            band_points: None,
         }
+    }
+
+    /// The height of the whole image in points.
+    #[must_use]
+    pub fn image_height_points(self) -> u32 {
+        self.height_points
+    }
+
+    /// The rows of the charts, in points from the top of the image.
+    #[must_use]
+    pub fn chart_rows_points(self) -> std::ops::Range<u32> {
+        0..0
+    }
+
+    /// The rows of the label band, in points from the top of the image.
+    #[must_use]
+    pub fn band_rows_points(self) -> Option<std::ops::Range<u32>> {
+        None
     }
 
     /// The height of the charts in points.
@@ -708,12 +743,69 @@ mod tests {
             ((f64::INFINITY, 0.0), (3, 1)),
         ];
         for ((thickness, backing), (height, scale)) in cases {
-            let geometry = Geometry::from_status_bar(thickness, backing);
+            let geometry = Geometry::from_status_bar(thickness, backing, None);
             assert_eq!(
                 (geometry.height_points(), geometry.scale()),
                 (height, scale),
                 "thickness {thickness}, backing {backing}"
             );
         }
+    }
+
+    /// The line height of the label text in the tests. The band is 9 points.
+    const LINE_HEIGHT: f64 = 8.35;
+    /// The band that `LINE_HEIGHT` gives.
+    const BAND_POINTS: u32 = 9;
+    /// The thicknesses of the status bar in the label tests.
+    const THICKNESSES: [f64; 2] = [22.0, 24.0];
+
+    #[test]
+    fn a_label_band_takes_the_rows_below_the_charts() {
+        let cases = [(22.0, 11, 22, 1..12, 13..22), (24.0, 13, 24, 1..14, 15..24)];
+        for (thickness, height, image, charts, band) in cases {
+            for scale in [1.0, 2.0] {
+                let geometry = Geometry::from_status_bar(thickness, scale, Some(LINE_HEIGHT));
+                assert_eq!(geometry.height_points(), height, "thickness {thickness}");
+                assert_eq!(geometry.image_height_points(), image);
+                assert_eq!(geometry.chart_rows_points(), charts.clone());
+                assert_eq!(geometry.band_rows_points(), Some(band.clone()));
+            }
+        }
+    }
+
+    #[test]
+    fn the_band_is_the_line_height_rounded_up() {
+        let band = |line_height| {
+            let geometry = Geometry::from_status_bar(22.0, 2.0, Some(line_height));
+            geometry.band_rows_points().map(|rows| rows.len())
+        };
+        assert_eq!(band(8.0), Some(8));
+        assert_eq!(band(8.01), Some(9));
+    }
+
+    #[test]
+    fn a_line_height_that_is_not_usable_gives_no_band() {
+        for line_height in [f64::NAN, f64::INFINITY, 0.0, -1.0] {
+            for thickness in THICKNESSES {
+                let geometry = Geometry::from_status_bar(thickness, 2.0, Some(line_height));
+                assert_eq!(geometry, Geometry::from_status_bar(thickness, 2.0, None));
+                assert_eq!(geometry.band_rows_points(), None);
+            }
+        }
+    }
+
+    #[test]
+    fn a_thickness_that_cannot_hold_the_band_drops_the_label() {
+        let geometry = Geometry::from_status_bar(12.0, 2.0, Some(LINE_HEIGHT));
+        assert_eq!(geometry, Geometry::from_status_bar(12.0, 2.0, None));
+        assert_eq!(geometry.band_rows_points(), None);
+    }
+
+    #[test]
+    fn a_geometry_without_a_band_keeps_the_layout_of_the_charts_only() {
+        let geometry = geometry(2);
+        assert_eq!(geometry.image_height_points(), HEIGHT_POINTS);
+        assert_eq!(geometry.chart_rows_points(), 0..HEIGHT_POINTS);
+        assert_eq!(geometry.band_rows_points(), None);
     }
 }

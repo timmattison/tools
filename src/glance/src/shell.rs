@@ -243,7 +243,9 @@ impl Monitor {
         let thickness = NSStatusBar::systemStatusBar().thickness();
         let mut scales: Vec<u32> = NSScreen::screens(mtm)
             .iter()
-            .map(|screen| Geometry::from_status_bar(thickness, screen.backingScaleFactor()).scale())
+            .map(|screen| {
+                Geometry::from_status_bar(thickness, screen.backingScaleFactor(), None).scale()
+            })
             .collect();
         if scales.is_empty() {
             scales.push(FALLBACK_SCALE);
@@ -255,7 +257,7 @@ impl Monitor {
         let pixmaps: Vec<Pixmap> = scales
             .iter()
             .map(|&scale| {
-                let geometry = Geometry::from_status_bar(thickness, f64::from(scale));
+                let geometry = Geometry::from_status_bar(thickness, f64::from(scale), None);
                 render(&state.history, geometry, appearance)
             })
             .collect();
