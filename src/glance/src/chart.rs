@@ -7,8 +7,10 @@
 //!
 //! Each sample is one point wide. Each chart has 32 columns inside its frame,
 //! and it shows that number of the newest samples, with the newest at the right
-//! edge. The label rows lie at the top of the interior. The shell draws the
-//! name of the host there, so this module only reports the rows.
+//! edge. The label rows lie at the top of the interior. The shell gets the
+//! glyphs of the name of the host from AppKit, and [`Pixmap::paint_label`]
+//! paints them. Where the name crosses a column or a frame, its ink is black
+//! or white, whichever contrasts more with the pixel behind it.
 //!
 //! The drawing is pure arithmetic on a plain buffer, so a test reads each
 //! pixel and AppKit only has to show the bytes.
@@ -44,6 +46,12 @@ pub const UNKNOWN: Rgba = [142, 142, 147, 255];
 const LABEL_LIGHT: Rgba = [0, 0, 0, 217];
 /// The label color in the dark appearance. It is white at 85%.
 const LABEL_DARK: Rgba = [255, 255, 255, 217];
+/// The menu bar in the light appearance, for the choice of the ink of the
+/// label. It is white.
+const BAR_LIGHT: Rgba = [255, 255, 255, 255];
+/// The menu bar in the dark appearance, for the choice of the ink of the
+/// label. It is black.
+const BAR_DARK: Rgba = [0, 0, 0, 255];
 
 /// The width of the frame of each chart, in points.
 pub const FRAME_POINTS: u32 = 1;
@@ -73,7 +81,8 @@ pub enum Appearance {
 }
 
 impl Appearance {
-    /// The color of the label text. It is the label color of the appearance.
+    /// The label color of the appearance. The label takes it over an empty
+    /// pixel, and the frame takes it everywhere.
     #[must_use]
     pub fn label(self) -> Rgba {
         match self {
@@ -87,6 +96,19 @@ impl Appearance {
     #[must_use]
     pub fn frame(self) -> Rgba {
         self.label()
+    }
+
+    /// The color of the menu bar behind the image, as far as the choice of
+    /// the ink of the label needs it.
+    ///
+    /// The real bar is translucent. But a light bar is nearer to white than
+    /// to black, and a dark bar is nearer to black than to white, so white
+    /// and black give the same choice.
+    fn bar(self) -> Rgba {
+        match self {
+            Appearance::Light => BAR_LIGHT,
+            Appearance::Dark => BAR_DARK,
+        }
     }
 }
 
@@ -376,11 +398,16 @@ impl Pixmap {
             .collect()
     }
 
-    /// Paints the glyphs of the label in the label color of `appearance`.
+    /// Paints the glyphs of the label on the bar of `appearance`.
     ///
-    /// Each pixel takes the label color at the share of its alpha that the
-    /// coverage of the glyphs in that color gives, over the color that the
-    /// pixel had. A pixel with a coverage of 0 keeps its color.
+    /// The ink of each pixel is black or white, whichever has the larger WCAG
+    /// contrast with the pixel as it shows on the bar. Over an empty pixel,
+    /// that is the label color of `appearance`. Over a column, it is black in
+    /// both appearances.
+    ///
+    /// Each pixel takes its ink at the share of its alpha that the coverage of
+    /// the glyphs in that ink gives, over the color that the pixel had. A
+    /// pixel with a coverage of 0 keeps its color.
     ///
     /// # Errors
     ///
@@ -397,11 +424,17 @@ impl Pixmap {
                 glyphs: glyphs.size(),
             });
         }
-        let ink = appearance.label();
         let pixels = self.bytes.as_chunks_mut::<BYTES_PER_PIXEL>().0;
-        for (pixel, &amount) in pixels.iter_mut().zip(&glyphs.coverage(appearance).values) {
+        for (index, pixel) in pixels.iter_mut().enumerate() {
+            let covered =
+                |ink: Appearance| glyphs.coverage(ink).values.get(index).copied().unwrap_or(0);
+            if covered(Appearance::Light) == 0 && covered(Appearance::Dark) == 0 {
+                continue;
+            }
+            let ink = ink_over(*pixel, appearance);
+            let amount = covered(ink);
             if amount > 0 {
-                *pixel = blend(ink, amount, *pixel);
+                *pixel = blend(ink.label(), amount, *pixel);
             }
         }
         Ok(())
@@ -526,6 +559,53 @@ fn blend(ink: Rgba, coverage: u8, behind: Rgba) -> Rgba {
 /// A channel value from 0 to 255, rounded to the nearest whole value.
 fn to_channel(value: f64) -> u8 {
     u8::try_from(whole_number(value.round())).unwrap_or(u8::MAX)
+}
+
+/// The weights of the red, green, and blue channels in the relative
+/// luminance of WCAG 2.
+const LUMINANCE_WEIGHTS: [f64; 3] = [0.2126, 0.7152, 0.0722];
+/// The flare that WCAG 2 adds to each luminance in a contrast ratio.
+const CONTRAST_FLARE: f64 = 0.05;
+/// The largest sRGB value, from 0 to 1, on the linear part of the sRGB curve.
+const SRGB_LINEAR_LIMIT: f64 = 0.040_45;
+/// The slope of the linear part of the sRGB curve.
+const SRGB_LINEAR_SLOPE: f64 = 12.92;
+/// The offset of the power part of the sRGB curve.
+const SRGB_OFFSET: f64 = 0.055;
+/// The exponent of the power part of the sRGB curve.
+const SRGB_EXPONENT: f64 = 2.4;
+
+/// The relative luminance of the color of an opaque pixel, from 0 for black
+/// to 1 for white, as WCAG 2 gives it. The alpha is not used.
+fn relative_luminance([red, green, blue, _]: Rgba) -> f64 {
+    let linear = |channel: u8| {
+        let value = f64::from(channel) / f64::from(u8::MAX);
+        if value <= SRGB_LINEAR_LIMIT {
+            value / SRGB_LINEAR_SLOPE
+        } else {
+            ((value + SRGB_OFFSET) / (1.0 + SRGB_OFFSET)).powf(SRGB_EXPONENT)
+        }
+    };
+    let [red_weight, green_weight, blue_weight] = LUMINANCE_WEIGHTS;
+    red_weight * linear(red) + green_weight * linear(green) + blue_weight * linear(blue)
+}
+
+/// The ink of the label over `behind`: the appearance whose label color
+/// contrasts more with `behind` as it shows on the bar of `appearance`.
+///
+/// The label color of the light appearance is black, and the label color of
+/// the dark appearance is white. The contrast is the ratio of WCAG 2. Over an
+/// empty pixel, the bar itself is behind the label, so the ink is the label
+/// color of `appearance`.
+fn ink_over(behind: Rgba, appearance: Appearance) -> Appearance {
+    let shown = relative_luminance(blend(behind, u8::MAX, appearance.bar())) + CONTRAST_FLARE;
+    let white = 1.0 + CONTRAST_FLARE;
+    let black = CONTRAST_FLARE;
+    if white / shown > shown / black {
+        Appearance::Dark
+    } else {
+        Appearance::Light
+    }
 }
 
 /// One color channel multiplied by its alpha, rounded to the nearest value.
