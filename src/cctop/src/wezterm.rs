@@ -1,6 +1,9 @@
 //! Focus step 2: finds the WezTerm pane of a terminal, and asks WezTerm to
 //! focus it.
 
+use std::io;
+use std::path::Path;
+
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 
@@ -16,6 +19,30 @@ pub const FOCUS_USER_VAR: &str = "claude-focus-pane";
 pub fn focus_request(pane_id: u64) -> String {
     let value = STANDARD.encode(pane_id.to_string());
     format!("\x1b]1337;SetUserVar={FOCUS_USER_VAR}={value}\x07")
+}
+
+/// Writes bytes to a terminal device.
+pub trait TtyWriter: Send + Sync {
+    /// Writes `bytes` to the device at `tty`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of the write, or of the refusal of the path.
+    fn write(&self, tty: &Path, bytes: &[u8]) -> io::Result<()>;
+}
+
+/// The writer of the real system. It writes to a device under `/dev/` and
+/// refuses each other path.
+///
+/// The writer opens the device for writing only. It never creates a file and
+/// never truncates one.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DeviceWriter;
+
+impl TtyWriter for DeviceWriter {
+    fn write(&self, _tty: &Path, _bytes: &[u8]) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Makes the argv that lists the WezTerm panes as JSON.
@@ -135,5 +162,33 @@ mod tests {
             .unwrap();
         assert_eq!(decoded, b"378");
         assert_eq!(FOCUS_USER_VAR, "claude-focus-pane");
+    }
+
+    #[test]
+    fn a_path_outside_dev_is_refused_and_the_file_stays_as_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join("existing");
+        std::fs::write(&existing, "old").unwrap();
+        let error = DeviceWriter.write(&existing, b"new").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(std::fs::read_to_string(&existing).unwrap(), "old");
+
+        let missing = dir.path().join("missing");
+        let error = DeviceWriter.write(&missing, b"new").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(!missing.exists());
+    }
+
+    #[test]
+    fn a_write_to_dev_null_succeeds() {
+        assert!(DeviceWriter.write(Path::new("/dev/null"), b"x").is_ok());
+    }
+
+    #[test]
+    fn a_device_that_does_not_exist_is_an_error_and_is_not_created() {
+        let path = format!("/dev/cctop-no-such-device-{}", std::process::id());
+        let path = Path::new(&path);
+        assert!(DeviceWriter.write(path, b"x").is_err());
+        assert!(!path.exists());
     }
 }
