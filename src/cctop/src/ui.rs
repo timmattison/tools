@@ -5,7 +5,7 @@ use chrono::TimeZone;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, HighlightSpacing, Paragraph, Row, Table, TableState};
+use ratatui::widgets::{Block, Paragraph, Row, Table, TableState};
 use ratatui::Frame;
 
 use crate::app::App;
@@ -74,9 +74,6 @@ fn state_span(state: Option<PaneState>) -> Span<'static> {
         None => Span::raw(NONE_TEXT),
     }
 }
-
-/// The text of the marker in front of the selected row.
-const HIGHLIGHT_SYMBOL: &str = "› ";
 
 /// The text of the color block in the first column.
 const STATE_BLOCK: &str = "██";
@@ -156,9 +153,7 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App, now: EpochMillis) {
     let table = Table::new(rows, widths)
         .header(header)
         .block(block)
-        .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED))
-        .highlight_symbol(HIGHLIGHT_SYMBOL)
-        .highlight_spacing(HighlightSpacing::Always);
+        .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED));
     let mut state = TableState::default().with_selected(app.selected_index());
     frame.render_stateful_widget(table, area, &mut state);
 }
