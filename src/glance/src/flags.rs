@@ -20,7 +20,7 @@ pub const RESOLVE: &str = "resolve";
 pub const EXIT_AFTER: &str = "exit-after";
 
 /// The mark of the copy that a background start makes. Hidden.
-pub const BACKGROUND_CHILD: &str = "background-child";
+pub const SPAWNED_COPY: &str = "spawned-copy";
 
 /// Gives the flag `--name`.
 #[must_use]
@@ -43,7 +43,7 @@ mod tests {
 
     #[test]
     fn a_flag_has_two_dashes() {
-        assert_eq!(flag(BACKGROUND_CHILD), "--background-child");
+        assert_eq!(flag(SPAWNED_COPY), "--spawned-copy");
     }
 
     #[test]

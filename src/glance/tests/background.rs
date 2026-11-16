@@ -416,7 +416,7 @@ fn foreground_with_sample_or_stream_is_a_usage_error() {
 #[test]
 fn the_removed_background_flags_are_usage_errors() {
     let home = Home::new();
-    let hidden = glance::flags::flag(glance::flags::BACKGROUND_CHILD);
+    let hidden = glance::flags::flag(glance::flags::SPAWNED_COPY);
     for flag in REMOVED_BACKGROUND_FLAGS
         .into_iter()
         .chain(NEAR_MISSES_OF_BACKGROUND)
@@ -558,7 +558,7 @@ fn the_background_status_item_writes_its_output_nowhere() {
 fn a_copy_that_finds_the_lock_held_says_who_holds_it_and_starts_nothing() {
     let mut home = Home::new();
     let pid = home.start(Target::Local);
-    let output = home.run(&["--background-child"]);
+    let output = home.run(&["--spawned-copy"]);
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     assert!(output.stdout.is_empty(), "{output:?}");
     assert_eq!(

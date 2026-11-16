@@ -8,7 +8,7 @@
 //! leaves that status item alone.
 //!
 //! A background start makes a copy of `glance` with the hidden flag
-//! `--background-child`. It does not `fork` without `exec`: macOS refuses
+//! `--spawned-copy`. It does not `fork` without `exec`: macOS refuses
 //! AppKit in a forked child. The copy starts a new session, so the terminal
 //! of the start cannot stop it, and it takes the lock itself. Thus two starts
 //! at the same moment can never give two status items for one target.
@@ -33,7 +33,7 @@ use std::thread;
 
 use crate::connection::{HostNaming, Remote};
 use crate::flags::{
-    flag, flag_with_value, BACKGROUND_CHILD, EXIT_AFTER, HOST, INTERVAL, REMOTE_BINARY, RESOLVE,
+    flag, flag_with_value, EXIT_AFTER, HOST, INTERVAL, REMOTE_BINARY, RESOLVE, SPAWNED_COPY,
 };
 use crate::instance::{self, ClaimError, LockFile, Pid, Target};
 use crate::interval::Interval;
@@ -59,7 +59,7 @@ pub enum Mode {
     /// run with no `--foreground` takes this mode.
     Background,
     /// This process is the copy that a background start made.
-    BackgroundChild,
+    SpawnedCopy,
 }
 
 /// The settings of the status item.
@@ -91,7 +91,7 @@ impl Settings {
 #[must_use]
 pub fn child_arguments(settings: &Settings) -> Vec<String> {
     let mut arguments = vec![
-        flag(BACKGROUND_CHILD),
+        flag(SPAWNED_COPY),
         flag_with_value(INTERVAL, &settings.interval.to_string()),
     ];
     if let Some(remote) = &settings.remote {
@@ -122,7 +122,7 @@ pub fn run(mode: Mode, settings: Settings) -> ExitCode {
         Ok(lock) => lock,
         Err(error) => return fail(&format!("cannot find the lock file: {error}")),
     };
-    if mode != Mode::BackgroundChild {
+    if mode != Mode::SpawnedCopy {
         match instance::holder(&lock) {
             Err(error) => return fail(&lock_problem(&lock, &error)),
             Ok(Some(pid)) => return stop(&lock, &target, pid),
@@ -132,7 +132,7 @@ pub fn run(mode: Mode, settings: Settings) -> ExitCode {
     match mode {
         Mode::Foreground => run_here(&lock, settings, false),
         Mode::Background => start_in_background(&lock, &settings),
-        Mode::BackgroundChild => match instance::start_a_session() {
+        Mode::SpawnedCopy => match instance::start_a_session() {
             Ok(()) => run_here(&lock, settings, true),
             Err(error) => fail(&format!("cannot start a new session: {error}")),
         },
@@ -406,7 +406,7 @@ mod tests {
         assert_eq!(settings.target(), Target::Local);
         assert_eq!(
             child_arguments(&settings),
-            ["--background-child", "--interval=1"]
+            ["--spawned-copy", "--interval=1"]
         );
     }
 
@@ -415,7 +415,7 @@ mod tests {
         assert_eq!(
             child_arguments(&host_settings("m1-ts", "-odd/glance", HostNaming::Reported)),
             [
-                "--background-child",
+                "--spawned-copy",
                 "--interval=1",
                 "--host=m1-ts",
                 "--remote-binary=-odd/glance",
@@ -434,7 +434,7 @@ mod tests {
                 HostNaming::Destination
             )),
             [
-                "--background-child",
+                "--spawned-copy",
                 "--interval=1",
                 "--host=m1-ts",
                 "--remote-binary=-odd/glance",

@@ -107,11 +107,11 @@ struct Cli {
     /// The mark of the copy that a background start makes. A person never
     /// gives it.
     #[arg(
-        long = flags::BACKGROUND_CHILD,
+        long = flags::SPAWNED_COPY,
         hide = true,
         conflicts_with_all = ["stream", "sample", "foreground"]
     )]
-    background_child: bool,
+    spawned_copy: bool,
 
     /// End the status item this many seconds after it is up. The tests give
     /// it to each status item that they start, so that a status item that a
@@ -150,8 +150,8 @@ fn run(cli: Cli) -> ExitCode {
         return stream(cli.interval, cli.count);
     }
     let remote = cli.remote();
-    let mode = if cli.background_child {
-        Mode::BackgroundChild
+    let mode = if cli.spawned_copy {
+        Mode::SpawnedCopy
     } else if cli.foreground {
         Mode::Foreground
     } else {
@@ -314,7 +314,7 @@ mod tests {
             remote: None,
             exit_after: None,
         });
-        assert!(cli.background_child);
+        assert!(cli.spawned_copy);
         assert!(!cli.foreground);
         assert_eq!(cli.interval, interval);
         assert_eq!(cli.host, None);
@@ -335,7 +335,7 @@ mod tests {
             remote: Some(remote.clone()),
             exit_after: NonZeroU32::new(7),
         });
-        assert!(cli.background_child);
+        assert!(cli.spawned_copy);
         assert_eq!(cli.host.as_ref(), Some(&remote.destination));
         assert_eq!(cli.remote_binary, remote.remote_binary);
         assert_eq!(cli.exit_after, NonZeroU32::new(7));
@@ -366,10 +366,10 @@ mod tests {
 
     #[test]
     fn foreground_with_the_mark_of_the_copy_is_a_usage_error() {
-        let refused = Cli::try_parse_from(["glance", "--foreground", "--background-child"]);
+        let refused = Cli::try_parse_from(["glance", "--foreground", "--spawned-copy"]);
         assert!(
             refused.is_err(),
-            "the parse took --foreground --background-child"
+            "the parse took --foreground --spawned-copy"
         );
     }
 }
