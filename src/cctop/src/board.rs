@@ -93,10 +93,11 @@ impl Board {
         let stamp = file.stamp;
         let new_state = file.state;
         let known = self.sessions.get(&pid);
-        if known.is_some_and(|known| stamp <= known.file.stamp) {
+        let same_process = known.filter(|known| known.file.started_at == file.started_at);
+        if same_process.is_some_and(|known| stamp <= known.file.stamp) {
             return None;
         }
-        let old = known.map(|known| known.file.state);
+        let old = same_process.map(|known| known.file.state);
         let session = Session {
             file,
             name,
