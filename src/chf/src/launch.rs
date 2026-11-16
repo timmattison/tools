@@ -75,6 +75,10 @@ pub fn paste_command(id: &SessionId, version: Version) -> String {
 }
 
 /// Replace this process with `<shell_path> -ic <script>`. Gives back only the error of a failed exec.
+///
+/// The shell gets the environment of chf without the `GIT_` variables that a
+/// hook exports, through `childenv::command`. It keeps the `GIT_` variables
+/// that a person states, for example `GIT_SSH_COMMAND`.
 #[must_use]
 pub fn exec(shell_path: &Path, script: &str) -> std::io::Error {
     exec_on_platform(shell_path, script)
@@ -83,10 +87,7 @@ pub fn exec(shell_path: &Path, script: &str) -> std::io::Error {
 #[cfg(unix)]
 fn exec_on_platform(shell_path: &Path, script: &str) -> std::io::Error {
     use std::os::unix::process::CommandExt;
-    std::process::Command::new(shell_path)
-        .arg("-ic")
-        .arg(script)
-        .exec()
+    childenv::command(shell_path).arg("-ic").arg(script).exec()
 }
 
 #[cfg(not(unix))]
