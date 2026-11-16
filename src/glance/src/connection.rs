@@ -471,10 +471,15 @@ pub struct Remote {
     pub remote_binary: RemoteBinary,
 }
 
+/// The start of the reason when the program of a connection does not start.
+const START_FAILED: &str = "cannot start";
+
 /// A connection to a second Mac that starts again after each end.
 ///
-/// The caller gives the time to each poll, so a test can step the time of
-/// the backoff without a wait.
+/// The first poll starts the first connection. After each end, the next
+/// connection starts when the delay of a [`Backoff`] is over, and a sample
+/// sets that delay back. The caller gives the time to each poll, so a test
+/// can step the time of the backoff without a wait.
 #[derive(Debug)]
 pub struct Feed {
     /// The program that starts each connection.
@@ -483,6 +488,12 @@ pub struct Feed {
     remote: Remote,
     /// The time between two samples.
     interval: Interval,
+    /// The connection that runs, or `None` between two connections.
+    connection: Option<Connection>,
+    /// The delay before the next connection.
+    backoff: Backoff,
+    /// The time of the next connection, or `None` when it is due at once.
+    retry_at: Option<Instant>,
 }
 
 impl Feed {
@@ -493,18 +504,60 @@ impl Feed {
             program: program.into(),
             remote,
             interval,
+            connection: None,
+            backoff: Backoff::new(),
+            retry_at: None,
         }
     }
 
-    /// Gives the events since the last poll.
+    /// Gives the events since the last poll, and starts a connection when one
+    /// is due at the time `now`.
+    ///
+    /// A program that does not start gives one [`Event::Ended`] at once, and
+    /// the next try waits for the backoff as after any other end.
     #[must_use]
-    pub fn poll(&mut self, _now: Instant) -> Vec<Event> {
-        let _ = (&self.program, &self.remote, self.interval);
-        Vec::new()
+    pub fn poll(&mut self, now: Instant) -> Vec<Event> {
+        if self.connection.is_none() && self.retry_at.is_none_or(|due| now >= due) {
+            self.retry_at = None;
+            match Connection::start(
+                &self.program,
+                &self.remote.destination,
+                self.interval,
+                &self.remote.remote_binary,
+            ) {
+                Ok(connection) => self.connection = Some(connection),
+                Err(error) => {
+                    self.retry_at = Some(now + self.backoff.after_end());
+                    return vec![Event::Ended {
+                        reason: format!("{START_FAILED} {}: {error}", self.program.display()),
+                    }];
+                }
+            }
+        }
+        let events: Vec<Event> = self
+            .connection
+            .as_ref()
+            .map(|connection| connection.receiver().try_iter().collect())
+            .unwrap_or_default();
+        for event in &events {
+            match event {
+                Event::Sample { .. } => self.backoff.after_sample(),
+                Event::Ended { .. } => {
+                    self.connection = None;
+                    self.retry_at = Some(now + self.backoff.after_end());
+                }
+                Event::ReadError { .. } => {}
+            }
+        }
+        events
     }
 
-    /// Stops the connection, if one runs.
-    pub fn stop(&mut self) {}
+    /// Stops the connection, if one runs, and reaps its child.
+    ///
+    /// A later poll starts a new connection.
+    pub fn stop(&mut self) {
+        self.connection = None;
+    }
 }
 
 #[cfg(test)]
