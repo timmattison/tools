@@ -460,4 +460,59 @@ mod tests {
             "docs: Zellij failed: the Zellij session tools is gone · WezTerm focused pane 239"
         );
     }
+
+    fn wezterm_error(target: &FocusTarget, runner: FakeRunner) -> (String, Vec<(PathBuf, Vec<u8>)>) {
+        let runner = Arc::new(runner);
+        let writer = Arc::new(RecordingWriter::default());
+        let report = focus(target, &tools(&runner, &writer));
+        (report.wezterm.unwrap_err(), writer.writes())
+    }
+
+    #[test]
+    fn a_failed_ps_is_a_step_2_error() {
+        let ps_missing = FakeRunner::new()
+            .answer(&words(&list_sessions_argv()), ok(SESSIONS))
+            .answer(
+                &words(&focus_argv(&zellij_target().zellij.unwrap())),
+                ok(""),
+            )
+            .answer(
+                &words(&ps_argv()),
+                Err(crate::runner::RunError::NotInstalled {
+                    program: "ps".to_string(),
+                }),
+            );
+        let (error, writes) = wezterm_error(&zellij_target(), ps_missing);
+        assert_eq!(error, "ps failed: ps is not installed");
+        assert!(writes.is_empty());
+    }
+
+    #[test]
+    fn a_server_with_no_client_is_a_step_2_error() {
+        let runner = FakeRunner::new()
+            .answer(&words(&list_sessions_argv()), ok(SESSIONS))
+            .answer(
+                &words(&focus_argv(&zellij_target().zellij.unwrap())),
+                ok(""),
+            )
+            .answer(&words(&ps_argv()), ok(PS))
+            .answer(
+                &words(&unix_sockets_argv()),
+                ok("p42617\nf5\nd0x1\nn/path\n"),
+            );
+        let (error, writes) = wezterm_error(&zellij_target(), runner);
+        assert_eq!(error, "no Zellij client shows the session");
+        assert!(writes.is_empty());
+    }
+
+    #[test]
+    fn a_target_with_no_tty_outside_zellij_is_a_step_2_error() {
+        let target = FocusTarget::of(&session(51234, Some("docs"), None));
+        let runner = FakeRunner::new()
+            .answer(&words(&ps_argv()), ok(PS))
+            .answer(&words(&tty_argv(Pid::new(51234))), ok("p51234\nf0\n"));
+        let (error, writes) = wezterm_error(&target, runner);
+        assert_eq!(error, "cannot find the terminal of pid 51234");
+        assert!(writes.is_empty());
+    }
 }
