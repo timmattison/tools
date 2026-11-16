@@ -24,7 +24,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `gitdiggin` | Recursively searches git repos for commits containing a string (messages and diffs). |
 | `gitnuke` | Removes a git worktree and deletes its branch; `--force` is required for worktrees with submodules checked out (which `git worktree remove` refuses outright) or uncommitted changes. |
 | `gitrdun` | Shows your recent git commits across multiple repositories. |
-| `glance` | A light macOS menu bar monitor — two small charts of the last 30 samples: the CPU time split into system (red) and user (blue), and the memory in use in the color of the pressure level (green, orange, red). It reads the kernel directly and starts no child process. `--sample` prints one reading as JSON. macOS only. |
+| `glance` | A light macOS menu bar monitor — two small charts of the last 30 samples: the CPU time split into system (red) and user (blue), and the memory in use in the color of the pressure level (green, orange, red), with the short host name under them. In local mode, it reads the kernel directly and starts no child process. `--host <destination>` shows a second Mac through one SSH connection that stays open. `--sample` prints one reading as JSON, and `--stream` prints one line for each interval. macOS only. |
 | `glo` | Finds and displays large objects in git repositories. |
 | `goup` | Updates Go dependencies across all `go.mod` files in a repo. |
 | `gr8` | Displays GitHub API rate limit info, color-coded, via the GitHub CLI. |

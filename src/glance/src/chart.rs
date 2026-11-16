@@ -33,10 +33,10 @@ pub const CRITICAL: Rgba = [255, 59, 48, 255];
 /// The color of the memory column at a level that this tool does not know. It is gray.
 pub const UNKNOWN: Rgba = [142, 142, 147, 255];
 
-/// The frame color in the light appearance. It is the label color at 85%.
-const FRAME_LIGHT: Rgba = [0, 0, 0, 217];
-/// The frame color in the dark appearance. It is the label color at 85%.
-const FRAME_DARK: Rgba = [255, 255, 255, 217];
+/// The label color in the light appearance. It is black at 85%.
+const LABEL_LIGHT: Rgba = [0, 0, 0, 217];
+/// The label color in the dark appearance. It is white at 85%.
+const LABEL_DARK: Rgba = [255, 255, 255, 217];
 
 /// The width of the frame of each chart, in points.
 pub const FRAME_POINTS: u32 = 1;
@@ -44,6 +44,10 @@ pub const FRAME_POINTS: u32 = 1;
 pub const GAP_POINTS: u32 = 4;
 /// The space above and below the charts in the status bar, in points.
 pub const VERTICAL_INSET_POINTS: u32 = 3;
+/// The space above the charts when the label is on, in points.
+pub const LABEL_TOP_INSET_POINTS: u32 = 1;
+/// The gap between the charts and the label band, in points.
+pub const LABEL_GAP_POINTS: u32 = 1;
 
 /// The number of bytes of one pixel.
 const BYTES_PER_PIXEL: usize = 4;
@@ -64,13 +68,20 @@ pub enum Appearance {
 }
 
 impl Appearance {
-    /// The color of the frame. It is the label color of the appearance.
+    /// The color of the label text. It is the label color of the appearance.
+    #[must_use]
+    pub fn label(self) -> Rgba {
+        match self {
+            Appearance::Light => LABEL_LIGHT,
+            Appearance::Dark => LABEL_DARK,
+        }
+    }
+
+    /// The color of the frame. The frame and the label text both take the
+    /// label color of the appearance.
     #[must_use]
     pub fn frame(self) -> Rgba {
-        match self {
-            Appearance::Light => FRAME_LIGHT,
-            Appearance::Dark => FRAME_DARK,
-        }
+        self.label()
     }
 }
 
@@ -106,6 +117,7 @@ impl std::error::Error for GeometryError {}
 pub struct Geometry {
     height_points: u32,
     scale: u32,
+    band_points: Option<u32>,
 }
 
 impl Geometry {
@@ -127,26 +139,79 @@ impl Geometry {
         Ok(Geometry {
             height_points,
             scale,
+            band_points: None,
         })
     }
 
     /// Makes the geometry of the status bar of the screen.
     ///
-    /// The inputs are `NSStatusBar.thickness` and `NSScreen.backingScaleFactor`.
-    /// The height is the whole points of the thickness less the inset above and
-    /// below, and at least `MIN_HEIGHT_POINTS`. The scale is the backing scale
-    /// rounded, and at least 1. An input that is not finite gives the minimum.
+    /// The inputs are `NSStatusBar.thickness`, `NSScreen.backingScaleFactor`,
+    /// and the line height of the label text. The line height is `None` when
+    /// there is no label. The scale is the backing scale rounded, and at least 1.
+    ///
+    /// The band is the line height rounded up to whole points. A line height
+    /// that is not finite or not above 0 gives no band. With a band, the charts
+    /// take the whole points of the thickness less the inset above, the gap,
+    /// and the band. If that height is below `MIN_HEIGHT_POINTS`, the label goes
+    /// away. Without a band, the height is the whole points of the thickness
+    /// less the inset above and below, and at least `MIN_HEIGHT_POINTS`. An
+    /// input that is not finite gives the minimum.
     #[must_use]
-    pub fn from_status_bar(thickness_points: f64, backing_scale: f64) -> Geometry {
+    pub fn from_status_bar(
+        thickness_points: f64,
+        backing_scale: f64,
+        label_line_height_points: Option<f64>,
+    ) -> Geometry {
         let thickness = whole_number(thickness_points.floor());
-        let height_points = thickness
-            .saturating_sub(2 * VERTICAL_INSET_POINTS)
-            .max(Self::MIN_HEIGHT_POINTS);
         let scale = whole_number(backing_scale.round()).max(1);
-        Geometry {
-            height_points,
+        let labeled = label_line_height_points
+            .filter(|line_height| line_height.is_finite() && *line_height > 0.0)
+            .map(|line_height| whole_number(line_height.ceil()))
+            .and_then(|band| {
+                let height_points = thickness
+                    .saturating_sub(LABEL_TOP_INSET_POINTS + LABEL_GAP_POINTS)
+                    .saturating_sub(band);
+                (height_points >= Self::MIN_HEIGHT_POINTS).then_some(Geometry {
+                    height_points,
+                    scale,
+                    band_points: Some(band),
+                })
+            });
+        labeled.unwrap_or_else(|| Geometry {
+            height_points: thickness
+                .saturating_sub(2 * VERTICAL_INSET_POINTS)
+                .max(Self::MIN_HEIGHT_POINTS),
             scale,
+            band_points: None,
+        })
+    }
+
+    /// The height of the whole image in points. It holds the charts and the label band.
+    #[must_use]
+    pub fn image_height_points(self) -> u32 {
+        match self.band_points {
+            Some(band) => LABEL_TOP_INSET_POINTS + self.height_points + LABEL_GAP_POINTS + band,
+            None => self.height_points,
         }
+    }
+
+    /// The rows of the charts, in points from the top of the image.
+    #[must_use]
+    pub fn chart_rows_points(self) -> std::ops::Range<u32> {
+        let top = if self.band_points.is_some() {
+            LABEL_TOP_INSET_POINTS
+        } else {
+            0
+        };
+        top..top + self.height_points
+    }
+
+    /// The rows of the label band, in points from the top of the image.
+    /// It is `None` when there is no label. The band touches the bottom edge.
+    #[must_use]
+    pub fn band_rows_points(self) -> Option<std::ops::Range<u32>> {
+        self.band_points
+            .map(|band| self.image_height_points() - band..self.image_height_points())
     }
 
     /// The height of the charts in points.
@@ -283,6 +348,34 @@ impl Pixmap {
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
+
+    /// The bytes of the image with each color channel multiplied by its alpha.
+    ///
+    /// Each product rounds to the nearest whole value. AppKit draws into a
+    /// bitmap only when its alpha is premultiplied.
+    #[must_use]
+    pub fn premultiplied_bytes(&self) -> Vec<u8> {
+        self.bytes
+            .as_chunks::<BYTES_PER_PIXEL>()
+            .0
+            .iter()
+            .flat_map(|&[red, green, blue, alpha]| {
+                [
+                    premultiply(red, alpha),
+                    premultiply(green, alpha),
+                    premultiply(blue, alpha),
+                    alpha,
+                ]
+            })
+            .collect()
+    }
+}
+
+/// One color channel multiplied by its alpha, rounded to the nearest value.
+fn premultiply(channel: u8, alpha: u8) -> u8 {
+    let full = u16::from(u8::MAX);
+    let product = (u16::from(channel) * u16::from(alpha) + full / 2) / full;
+    u8::try_from(product).unwrap_or(u8::MAX)
 }
 
 /// The color of the memory column at a pressure level.
@@ -302,6 +395,10 @@ fn memory_rows(percent_in_use: u8, rows: u32) -> u32 {
 
 /// Draws the two charts of the history.
 ///
+/// The image is `Geometry::image_height_points` high. The charts start at the
+/// top of `Geometry::chart_rows_points`. The rows of the label band, and the
+/// rows above and below the charts, stay transparent.
+///
 /// Each chart has `history.capacity()` columns inside of a frame. The CPU chart
 /// is on the left, then a transparent gap, then the memory chart. The newest
 /// sample sits in the rightmost column of each chart. A column that has no
@@ -317,19 +414,20 @@ pub fn render(history: &History<Sample>, geometry: Geometry, appearance: Appeara
     let chart_width = capacity + 2 * FRAME_POINTS;
     let mut pixmap = Pixmap::empty(
         CHART_COUNT * chart_width + GAP_POINTS,
-        geometry.height_points,
+        geometry.image_height_points(),
         scale,
     );
 
     let rows = (geometry.height_points - 2 * FRAME_POINTS) * scale;
-    let interior_top = FRAME_POINTS * scale;
+    let chart_top = geometry.chart_rows_points().start * scale;
+    let interior_top = chart_top + FRAME_POINTS * scale;
     let interior_bottom = interior_top + rows;
     let chart_origins = [0, chart_width + GAP_POINTS];
 
     for origin in chart_origins {
         pixmap.fill(
             origin * scale,
-            0,
+            chart_top,
             chart_width * scale,
             geometry.height_points * scale,
             appearance.frame(),
@@ -403,6 +501,26 @@ mod tests {
     const LEVEL_CRITICAL: i32 = 4;
     /// A free percentage of 0 means that all of the memory is in use.
     const ALL_IN_USE: i32 = 0;
+
+    #[test]
+    fn the_premultiplied_bytes_scale_each_channel_by_its_alpha() {
+        let colors: [(Rgba, Rgba); 5] = [
+            (TRANSPARENT, TRANSPARENT),
+            (USER, USER),
+            (Appearance::Light.frame(), [0, 0, 0, 217]),
+            (Appearance::Dark.frame(), [217, 217, 217, 217]),
+            // 1 * 128 / 255 is 0.502, which rounds to 1 and truncates to 0.
+            ([255, 1, 128, 128], [128, 1, 64, 128]),
+        ];
+        let width = u32::try_from(colors.len()).unwrap();
+        let mut pixmap = Pixmap::empty(width, 1, 1);
+        for (x, (color, _)) in (0..width).zip(colors) {
+            pixmap.fill(x, 0, 1, 1, color);
+        }
+        let expected: Vec<u8> = colors.iter().flat_map(|(_, product)| *product).collect();
+        assert_eq!(pixmap.premultiplied_bytes(), expected);
+        assert_eq!(pixmap.bytes().len(), expected.len());
+    }
 
     fn capacity(columns: usize) -> NonZeroUsize {
         NonZeroUsize::new(columns).unwrap()
@@ -708,12 +826,124 @@ mod tests {
             ((f64::INFINITY, 0.0), (3, 1)),
         ];
         for ((thickness, backing), (height, scale)) in cases {
-            let geometry = Geometry::from_status_bar(thickness, backing);
+            let geometry = Geometry::from_status_bar(thickness, backing, None);
             assert_eq!(
                 (geometry.height_points(), geometry.scale()),
                 (height, scale),
                 "thickness {thickness}, backing {backing}"
             );
+        }
+    }
+
+    /// The line height of the label text in the tests. The band is 9 points.
+    const LINE_HEIGHT: f64 = 8.35;
+    /// The band that `LINE_HEIGHT` gives.
+    const BAND_POINTS: u32 = 9;
+    /// The thicknesses of the status bar in the label tests.
+    const THICKNESSES: [f64; 2] = [22.0, 24.0];
+
+    #[test]
+    fn a_label_band_takes_the_rows_below_the_charts() {
+        let cases = [(22.0, 11, 22, 1..12, 13..22), (24.0, 13, 24, 1..14, 15..24)];
+        for (thickness, height, image, charts, band) in cases {
+            for scale in [1.0, 2.0] {
+                let geometry = Geometry::from_status_bar(thickness, scale, Some(LINE_HEIGHT));
+                assert_eq!(geometry.height_points(), height, "thickness {thickness}");
+                assert_eq!(geometry.image_height_points(), image);
+                assert_eq!(geometry.chart_rows_points(), charts.clone());
+                assert_eq!(band.len(), usize::try_from(BAND_POINTS).unwrap());
+                assert_eq!(geometry.band_rows_points(), Some(band.clone()));
+            }
+        }
+    }
+
+    #[test]
+    fn the_band_is_the_line_height_rounded_up() {
+        let band = |line_height| {
+            let geometry = Geometry::from_status_bar(22.0, 2.0, Some(line_height));
+            geometry.band_rows_points().map(|rows| rows.len())
+        };
+        assert_eq!(band(8.0), Some(8));
+        assert_eq!(band(8.01), Some(9));
+    }
+
+    #[test]
+    fn a_line_height_that_is_not_usable_gives_no_band() {
+        for line_height in [f64::NAN, f64::INFINITY, 0.0, -1.0] {
+            for thickness in THICKNESSES {
+                let geometry = Geometry::from_status_bar(thickness, 2.0, Some(line_height));
+                assert_eq!(geometry, Geometry::from_status_bar(thickness, 2.0, None));
+                assert_eq!(geometry.band_rows_points(), None);
+            }
+        }
+    }
+
+    #[test]
+    fn a_thickness_that_cannot_hold_the_band_drops_the_label() {
+        let geometry = Geometry::from_status_bar(12.0, 2.0, Some(LINE_HEIGHT));
+        assert_eq!(geometry, Geometry::from_status_bar(12.0, 2.0, None));
+        assert_eq!(geometry.band_rows_points(), None);
+    }
+
+    #[test]
+    fn a_geometry_without_a_band_keeps_the_layout_of_the_charts_only() {
+        let geometry = geometry(2);
+        assert_eq!(geometry.image_height_points(), HEIGHT_POINTS);
+        assert_eq!(geometry.chart_rows_points(), 0..HEIGHT_POINTS);
+        assert_eq!(geometry.band_rows_points(), None);
+    }
+
+    #[test]
+    fn a_label_band_keeps_its_rows_transparent_and_moves_the_charts_down() {
+        let samples = vec![sample(100, 0, 0, LEVEL_NORMAL, ALL_IN_USE); CAPACITY];
+        let history = history_of(CAPACITY, &samples);
+        for thickness in THICKNESSES {
+            for scale in SCALES {
+                let geometry =
+                    Geometry::from_status_bar(thickness, f64::from(scale), Some(LINE_HEIGHT));
+                let pixmap = render(&history, geometry, Appearance::Light);
+                let thickness_points = whole_number(thickness);
+                assert_eq!(pixmap.width(), 68 * scale);
+                assert_eq!(pixmap.height(), thickness_points * scale);
+
+                let band = geometry.band_rows_points().unwrap();
+                let gap_row = geometry.chart_rows_points().end;
+                let transparent_rows = (0..LABEL_TOP_INSET_POINTS)
+                    .chain(gap_row..gap_row + LABEL_GAP_POINTS)
+                    .chain(band);
+                for point_row in transparent_rows {
+                    for y in point_row * scale..(point_row + 1) * scale {
+                        for x in 0..pixmap.width() {
+                            assert_eq!(pixmap.pixel(x, y), TRANSPARENT, "({x}, {y})");
+                        }
+                    }
+                }
+
+                let x = slot_x(CAPACITY, CPU_CHART, CAPACITY - 1, scale);
+                let chart_top = LABEL_TOP_INSET_POINTS * scale;
+                let chart_bottom = (LABEL_TOP_INSET_POINTS + geometry.height_points()) * scale;
+                let system: Vec<u32> = (0..pixmap.height())
+                    .filter(|&y| pixmap.pixel(x, y) == SYSTEM)
+                    .collect();
+                let expected = (thickness_points - 1 - 1 - BAND_POINTS - 2 * FRAME_POINTS) * scale;
+                assert_eq!(u32::try_from(system.len()).unwrap(), expected);
+                assert_eq!(system.first(), Some(&(chart_top + FRAME_POINTS * scale)));
+                assert_eq!(
+                    system.last(),
+                    Some(&(chart_bottom - FRAME_POINTS * scale - 1))
+                );
+                let frame = Appearance::Light.frame();
+                assert_eq!(pixmap.pixel(x, chart_top), frame);
+                assert_eq!(pixmap.pixel(x, chart_bottom - 1), frame);
+            }
+        }
+    }
+
+    #[test]
+    fn the_label_color_is_the_frame_color_of_each_appearance() {
+        assert_ne!(Appearance::Light.label(), Appearance::Dark.label());
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            assert_eq!(appearance.label(), appearance.frame());
         }
     }
 }

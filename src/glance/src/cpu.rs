@@ -3,6 +3,11 @@
 //! The kernel gives four counters of CPU ticks. A share needs two readings,
 //! because the counters grow from the boot of the host.
 
+/// The smallest share.
+const SHARE_MIN: f64 = 0.0;
+/// The largest share.
+const SHARE_MAX: f64 = 1.0;
+
 /// The CPU tick counters of the host, as the kernel gives them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Ticks {
@@ -50,6 +55,28 @@ impl CpuShare {
         }
     }
 
+    /// Tells if `value` is a share, that is a finite value from 0 to 1.
+    ///
+    /// The range of a share lives here. `RangeInclusive::contains` already
+    /// refuses NaN and both infinities.
+    #[must_use]
+    pub fn is_share(value: f64) -> bool {
+        (SHARE_MIN..=SHARE_MAX).contains(&value)
+    }
+
+    /// Builds the shares from three values that a line gave.
+    ///
+    /// The result is `None` if a share is not finite or is outside 0 to 1.
+    /// This function does not check the sum.
+    #[must_use]
+    pub fn from_shares(user: f64, system: f64, idle: f64) -> Option<CpuShare> {
+        if CpuShare::is_share(user) && CpuShare::is_share(system) && CpuShare::is_share(idle) {
+            Some(CpuShare { user, system, idle })
+        } else {
+            None
+        }
+    }
+
     /// The share of the user processes, nice processes included.
     #[must_use]
     pub fn user(self) -> f64 {
@@ -94,6 +121,35 @@ mod tests {
         );
         let sum = share.user() + share.system() + share.idle();
         assert!((sum - 1.0).abs() < TOLERANCE, "sum {sum}");
+    }
+
+    #[test]
+    fn from_shares_accepts_the_shares_from_0_to_1() {
+        let share = CpuShare::from_shares(0.0, 0.0, 1.0).unwrap();
+        assert_share(share, 0.0, 0.0, 1.0);
+        let share = CpuShare::from_shares(1.0, 0.0, 0.0).unwrap();
+        assert_share(share, 1.0, 0.0, 0.0);
+        let share = CpuShare::from_shares(0.5, 0.25, 0.25).unwrap();
+        assert_share(share, 0.5, 0.25, 0.25);
+    }
+
+    #[test]
+    fn is_share_refuses_a_value_outside_0_to_1() {
+        for good in [0.0, -0.0, 0.5, 1.0] {
+            assert!(CpuShare::is_share(good), "{good}");
+        }
+        for bad in [-0.1, 1.1, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(!CpuShare::is_share(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn from_shares_refuses_a_share_that_is_out_of_range_or_not_finite() {
+        for bad in [-0.1, 1.1, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(CpuShare::from_shares(bad, 0.0, 0.5), None, "user {bad}");
+            assert_eq!(CpuShare::from_shares(0.0, bad, 0.5), None, "system {bad}");
+            assert_eq!(CpuShare::from_shares(0.0, 0.5, bad), None, "idle {bad}");
+        }
     }
 
     #[test]

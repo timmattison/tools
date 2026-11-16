@@ -4,12 +4,19 @@
 //! One status item in the menu bar shows two small charts. The left chart
 //! shows the share of the CPU time that the system and the user processes
 //! use. The right chart shows the memory in use, in the color of the pressure
-//! level of the kernel.
+//! level of the kernel. The short name of the Mac is in small text under the
+//! charts.
 //!
 //! The monitors that this tool replaces use much memory and much CPU time. The
 //! kernel gives each value in one cheap call, and two charts of 30 columns need
-//! very little drawing. So `glance` reads the kernel directly, starts no child
-//! process, and draws its charts into a pixel buffer itself.
+//! very little drawing. So `glance` reads the kernel directly and draws its
+//! charts into a pixel buffer itself. In local mode, it starts no child process
+//! and no thread.
+//!
+//! In remote mode (`--host`), the values come from a second Mac. `glance`
+//! keeps one `ssh` child open, which runs `glance --stream` on the second Mac,
+//! and two threads read the pipes of that child. Each sample then costs one
+//! line of text, not one SSH handshake.
 //!
 //! # The modules
 //!
@@ -25,8 +32,14 @@
 //! - [`history`] — the ring buffer of the last samples. It allocates once.
 //! - [`chart`] — the layout and the colors of the two charts, drawn into an
 //!   RGBA pixel buffer.
+//! - [`connection`] — the `ssh` connection to a second Mac, which runs
+//!   `glance --stream` there and sends one event for each line.
+//! - [`host`] — the short name of this host, as `hostname -s` gives it.
 //! - [`interval`] — the time between two samples, from the command line.
-//! - [`text`] — the lines of the menu, and the JSON line of `--sample`.
+//! - [`text`] — the lines of the menu, and the JSON line of `--sample` and
+//!   `--stream`, with its parse.
+//! - [`view`] — the samples and the last error that the status item shows, and
+//!   the rules of each mode that change them.
 //! - `reader` (macOS only) — the one module that calls the kernel.
 //! - `shell` (macOS only) — the status item, its menu, and its timer, through
 //!   AppKit.
@@ -39,8 +52,10 @@
 #![deny(unsafe_code)]
 
 pub mod chart;
+pub mod connection;
 pub mod cpu;
 pub mod history;
+pub mod host;
 pub mod interval;
 pub mod pressure;
 #[cfg(target_os = "macos")]
@@ -57,3 +72,4 @@ pub mod sample;
 )]
 pub mod shell;
 pub mod text;
+pub mod view;

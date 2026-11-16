@@ -7,6 +7,7 @@ use std::mem::{size_of, MaybeUninit};
 use std::ptr;
 
 use crate::cpu::Ticks;
+use crate::host::HostName;
 use crate::sample::Reading;
 
 /// The name of the call that reads the CPU tick counters.
@@ -52,6 +53,8 @@ impl std::error::Error for ReadError {}
 pub struct Reader {
     /// The port of this host. `new` asks for it once.
     host: libc::mach_port_t,
+    /// The short name of this host. `new` reads it once.
+    host_name: HostName,
 }
 
 impl Reader {
@@ -70,7 +73,18 @@ impl Reader {
         // SAFETY: `mach_host_self` takes no argument and gives the port of
         // this host.
         let host = unsafe { libc::mach_host_self() };
-        Reader { host }
+        Reader {
+            host,
+            host_name: read_host_name(),
+        }
+    }
+
+    /// The short name of this host, as `hostname -s` gives it.
+    ///
+    /// `new` reads the name once, so this call reads nothing.
+    #[must_use]
+    pub fn host_name(&self) -> &HostName {
+        &self.host_name
     }
 
     /// Reads the CPU tick counters and the memory pressure.
@@ -121,6 +135,28 @@ impl Reader {
     }
 }
 
+/// The size of the buffer that receives the name of the host.
+const HOST_NAME_BUFFER: usize = 256;
+
+/// Reads the short name of this host through `gethostname`.
+///
+/// If the call fails, the name is empty, and the result is `unknown`.
+fn read_host_name() -> HostName {
+    let mut buffer = [0_u8; HOST_NAME_BUFFER];
+    // SAFETY: the pointer names a buffer of this function, and the length
+    // states its size in bytes. The call writes no more than that.
+    let answer =
+        unsafe { libc::gethostname(buffer.as_mut_ptr().cast::<libc::c_char>(), buffer.len()) };
+    if answer != 0 {
+        return HostName::from_raw(b"");
+    }
+    let end = buffer
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(buffer.len());
+    HostName::from_raw(buffer.get(..end).unwrap_or_default())
+}
+
 /// Reads the `i32` value of the `sysctl` `name`.
 fn read_i32_sysctl(name: &'static CStr) -> Result<i32, ReadError> {
     let call = name.to_str().unwrap_or("sysctl");
@@ -168,6 +204,16 @@ mod tests {
 
     /// The raw pressure levels of the kernel.
     const LEVELS: [i32; 3] = [1, 2, 4];
+
+    #[test]
+    fn the_host_name_is_the_answer_of_hostname_s() {
+        let output = childenv::fixture_command("hostname")
+            .arg("-s")
+            .output()
+            .expect("hostname runs");
+        let expected = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        assert_eq!(Reader::new().host_name().as_str(), expected);
+    }
 
     #[test]
     fn two_reads_of_this_mac_give_levels_and_percentages_in_range() {

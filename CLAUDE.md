@@ -227,6 +227,7 @@ allowlist.
   of the binary
 - `faulte` - the help and usage-error tests of the binary
 - `gitscratch` - render and paint tests of the halt diffs
+- `glance` - the usage-error tests of the binary
 - `grime` - `--diff` paint tests, through a pipe and on a terminal
 - `grind` - `--diff` paint tests, through a pipe and on a terminal
 - `gsw` - render, watch, push, and update run tests
@@ -277,6 +278,8 @@ full path, `shellquote::shell_quote(...)`, where the call site sits behind a
   scripts
 - `gitscratch` - the log path, the path of the real git, and the subcommand
   names that the `git` shim of `testing::git_shim` puts into its script
+- `glance` - the remote binary in the command that `ssh` sends to the second
+  Mac. A leading `~/` stays outside the quotes, so the remote shell expands it
 - `gsw` - the command it asks an interactive shell to run
 - `ha` - the paths of the scripts that the browser tests put into `BROWSER`
 - `nwt` - the worktree path and the branch in the cleanup commands it prints

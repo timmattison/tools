@@ -1,16 +1,20 @@
 //! The AppKit shell: one status item in the menu bar that shows the two
 //! charts.
 //!
-//! The shell is thin. Each rule of layout, color, text, and arithmetic lives
-//! in a pure module. This module only reads the kernel on a timer, gives the
-//! values to the pure modules, and hands the answers to AppKit.
+//! The shell is thin. Each rule of layout, color, text, arithmetic,
+//! connection, and update lives in a module that has no AppKit. This module
+//! only gets the samples on a timer, gives the values to those modules, and
+//! hands the answers to AppKit.
 //!
-//! The shell starts no thread and no async runtime. One repeating timer on the
-//! main run loop does all of the work, and the system merges its wakeups with
-//! the wakeups of other programs.
+//! One repeating timer on the main run loop does all of the work, and the
+//! system merges its wakeups with the wakeups of other programs. In local mode,
+//! each tick reads the kernel, and the shell starts no thread, no child
+//! process, and no async runtime. In remote mode, each tick reads the events of
+//! a [`Feed`], which runs one `ssh` child and its two reader threads.
 
 use std::cell::RefCell;
 use std::process::ExitCode;
+use std::time::Instant;
 
 use objc2::rc::{autoreleasepool, Retained};
 use objc2::runtime::{AnyObject, Sel};
@@ -20,20 +24,24 @@ use objc2::{
 use objc2_app_kit::{
     NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
     NSApplicationActivationPolicy, NSApplicationDidChangeScreenParametersNotification,
-    NSBitmapFormat, NSBitmapImageRep, NSColorSpace, NSDeviceRGBColorSpace, NSImage, NSMenu,
-    NSMenuItem, NSScreen, NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
+    NSApplicationWillTerminateNotification, NSBitmapFormat, NSBitmapImageRep, NSColor,
+    NSColorSpace, NSDeviceRGBColorSpace, NSFont, NSFontAttributeName,
+    NSForegroundColorAttributeName, NSGraphicsContext, NSImage, NSLineBreakMode, NSMenu,
+    NSMenuItem, NSMutableParagraphStyle, NSParagraphStyleAttributeName, NSScreen, NSStatusBar,
+    NSStatusItem, NSStringDrawing, NSTextAlignment, NSVariableStatusItemLength,
 };
 use objc2_foundation::{
-    ns_string, NSArray, NSDistributedNotificationCenter, NSNotification, NSNotificationCenter,
-    NSNotificationName, NSObject, NSRunLoop, NSRunLoopCommonModes, NSSize, NSString, NSTimer,
+    ns_string, NSArray, NSDictionary, NSDistributedNotificationCenter, NSNotification,
+    NSNotificationCenter, NSNotificationName, NSObject, NSPoint, NSRect, NSRunLoop,
+    NSRunLoopCommonModes, NSSize, NSString, NSTimer,
 };
 
-use crate::chart::{render, Appearance, Geometry, Pixmap};
-use crate::history::{History, DEFAULT_CAPACITY};
+use crate::chart::{render, Appearance, Geometry, Pixmap, Rgba};
+use crate::connection::{Feed, Remote, SSH_PROGRAM};
 use crate::interval::Interval;
 use crate::reader::Reader;
-use crate::sample::{Reading, Sample};
-use crate::text::{menu_titles, MENU_LINES, QUIT_TITLE};
+use crate::text::{menu_titles, Origin, MENU_LINES, QUIT_TITLE};
+use crate::view::{KernelInput, RemoteInput, View};
 
 /// The exit status of a start off the main thread.
 const EXIT_NOT_MAIN_THREAD: u8 = 1;
@@ -99,27 +107,86 @@ const BYTES_PER_PIXEL: usize = 4;
 /// The bits in one pixel.
 const BITS_PER_PIXEL: isize = 32;
 
+/// The size of the system font of the label under the charts, in points.
+const LABEL_FONT_POINTS: f64 = 7.0;
+
+/// Where the samples come from.
+#[derive(Debug)]
+enum Source {
+    /// The kernel of this Mac.
+    Kernel {
+        /// The reader of the kernel.
+        reader: Reader,
+        /// The rules that turn each reading into a sample.
+        input: KernelInput,
+    },
+    /// A second Mac, through one `ssh` connection at a time.
+    Remote {
+        /// The connection that starts again after each end.
+        feed: Feed,
+        /// The rules that apply each event, and name the host.
+        input: RemoteInput,
+    },
+}
+
 /// What changes from one sample to the next.
 #[derive(Debug)]
 struct State {
-    /// The last good reading, or `None` before the first one.
-    previous: Option<Reading>,
-    /// The samples that the charts show.
-    history: History<Sample>,
-    /// The text of the last read error, or `None` when the last read worked.
-    error: Option<String>,
+    /// Where the samples come from.
+    source: Source,
+    /// The samples that the charts show, and the last error. The samples stay
+    /// across a new connection.
+    view: View,
+}
+
+impl State {
+    /// A state with an empty view.
+    fn new(source: Source) -> State {
+        State {
+            source,
+            view: View::new(),
+        }
+    }
+
+    /// Gets the samples since the last tick, and gives them to the rules.
+    fn update(&mut self) {
+        match &mut self.source {
+            Source::Kernel { reader, input } => input.apply(reader.read(), &mut self.view),
+            Source::Remote { feed, input } => {
+                for event in feed.poll(Instant::now()) {
+                    input.apply(event, &mut self.view);
+                }
+            }
+        }
+    }
+
+    /// The Mac that the values come from, for the menu and the label.
+    fn origin(&self) -> Origin<'_> {
+        match &self.source {
+            Source::Kernel { reader, .. } => Origin {
+                host: reader.host_name().as_str(),
+                destination: None,
+            },
+            Source::Remote { input, .. } => input.origin(),
+        }
+    }
+
+    /// Stops the `ssh` child of remote mode. Local mode has nothing to stop.
+    fn stop(&mut self) {
+        if let Source::Remote { feed, .. } = &mut self.source {
+            feed.stop();
+        }
+    }
 }
 
 /// The values that a `Monitor` holds.
 #[derive(Debug)]
 struct Ivars {
-    /// The reader of the kernel.
-    reader: Reader,
     /// The time between two samples.
     interval: Interval,
     /// The status item in the menu bar.
     status_item: Retained<NSStatusItem>,
-    /// The four disabled info items of the menu.
+    /// The five disabled info items of the menu.
     info_items: [Retained<NSMenuItem>; MENU_LINES],
     /// The values that change.
     state: RefCell<State>,
@@ -136,7 +203,7 @@ define_class!(
     struct Monitor;
 
     impl Monitor {
-        /// Reads the kernel, updates the history, and redraws.
+        /// Gets the new samples, updates the history, and redraws.
         #[unsafe(method(tick:))]
         fn tick(&self, _timer: &NSTimer) {
             autoreleasepool(|_| self.sample_and_redraw());
@@ -147,48 +214,37 @@ define_class!(
         fn redraw_on_notification(&self, _notification: &NSNotification) {
             autoreleasepool(|_| self.redraw());
         }
+
+        /// Stops the `ssh` child before the application stops.
+        #[unsafe(method(stop:))]
+        fn stop_on_notification(&self, _notification: &NSNotification) {
+            self.ivars().state.borrow_mut().stop();
+        }
     }
 );
 
 impl Monitor {
-    /// Makes a monitor with an empty history.
+    /// Makes a monitor that holds `state`.
     fn new(
         mtm: MainThreadMarker,
         interval: Interval,
+        state: State,
         status_item: Retained<NSStatusItem>,
         info_items: [Retained<NSMenuItem>; MENU_LINES],
     ) -> Retained<Monitor> {
         let this = Monitor::alloc(mtm).set_ivars(Ivars {
-            reader: Reader::new(),
             interval,
             status_item,
             info_items,
-            state: RefCell::new(State {
-                previous: None,
-                history: History::new(DEFAULT_CAPACITY),
-                error: None,
-            }),
+            state: RefCell::new(state),
         });
         // SAFETY: The signature of the `init` method of `NSObject` is correct.
         unsafe { msg_send![super(this), init] }
     }
 
-    /// Reads the kernel once, keeps the result, and redraws.
+    /// Gets the new samples once, keeps them, and redraws.
     fn sample_and_redraw(&self) {
-        let outcome = self.ivars().reader.read();
-        {
-            let mut state = self.ivars().state.borrow_mut();
-            match outcome {
-                Ok(reading) => {
-                    if let Some(previous) = state.previous {
-                        state.history.push(Sample::between(&previous, &reading));
-                    }
-                    state.previous = Some(reading);
-                    state.error = None;
-                }
-                Err(error) => state.error = Some(error.to_string()),
-            }
-        }
+        self.ivars().state.borrow_mut().update();
         self.redraw();
     }
 
@@ -242,7 +298,9 @@ impl Monitor {
         let thickness = NSStatusBar::systemStatusBar().thickness();
         let mut scales: Vec<u32> = NSScreen::screens(mtm)
             .iter()
-            .map(|screen| Geometry::from_status_bar(thickness, screen.backingScaleFactor()).scale())
+            .map(|screen| {
+                Geometry::from_status_bar(thickness, screen.backingScaleFactor(), None).scale()
+            })
             .collect();
         if scales.is_empty() {
             scales.push(FALLBACK_SCALE);
@@ -250,37 +308,52 @@ impl Monitor {
         scales.sort_unstable();
         scales.dedup();
 
+        let line_height = label_line_height();
         let state = self.ivars().state.borrow();
-        let pixmaps: Vec<Pixmap> = scales
+        let drawings: Vec<(Geometry, Pixmap)> = scales
             .iter()
             .map(|&scale| {
-                let geometry = Geometry::from_status_bar(thickness, f64::from(scale));
-                render(&state.history, geometry, appearance)
+                let geometry =
+                    Geometry::from_status_bar(thickness, f64::from(scale), Some(line_height));
+                (geometry, render(state.view.history(), geometry, appearance))
             })
             .collect();
-        let Some(first) = pixmaps.first() else {
+        let Some((_, first)) = drawings.first() else {
             return;
         };
         let points = NSSize::new(
             f64::from(first.width_points()),
             f64::from(first.height_points()),
         );
+        let label = state.origin().host;
         let image = NSImage::initWithSize(NSImage::alloc(), points);
-        for pixmap in &pixmaps {
+        for (geometry, pixmap) in &drawings {
             let Some(representation) = bitmap_representation(pixmap, points) else {
                 return;
             };
+            if let Some(band) = geometry.band_rows_points() {
+                let rect = NSRect::new(
+                    NSPoint::new(0.0, 0.0),
+                    NSSize::new(points.width, f64::from(band.end - band.start)),
+                );
+                // A refused context leaves the charts of this scale with no label.
+                draw_label(&representation, label, rect, appearance.label());
+            }
             image.addRepresentation(&representation);
         }
         image.setTemplate(false);
         button.setImage(Some(&image));
     }
 
-    /// Sets the four info lines of the menu to the titles of `menu_titles`.
+    /// Sets the five info lines of the menu to the titles of `menu_titles`.
     fn update_menu(&self) {
         let state = self.ivars().state.borrow();
         let items = &self.ivars().info_items;
-        let titles = menu_titles(state.error.as_deref(), state.history.newest().as_ref());
+        let titles = menu_titles(
+            &state.origin(),
+            state.view.error(),
+            state.view.history().newest().as_ref(),
+        );
         for (item, title) in items.iter().zip(titles) {
             item.setTitle(&NSString::from_str(&title));
         }
@@ -289,7 +362,9 @@ impl Monitor {
 
 /// Makes one bitmap representation of a pixmap, tagged as sRGB.
 ///
-/// Returns `None` when AppKit refuses to make or to retag the image.
+/// The bitmap holds premultiplied alpha, because AppKit makes a graphics
+/// context for the label only for such a bitmap. Returns `None` when AppKit
+/// refuses to make or to retag the image.
 fn bitmap_representation(pixmap: &Pixmap, points: NSSize) -> Option<Retained<NSBitmapImageRep>> {
     let width = isize::try_from(pixmap.width()).ok()?;
     let height = isize::try_from(pixmap.height()).ok()?;
@@ -309,7 +384,7 @@ fn bitmap_representation(pixmap: &Pixmap, points: NSSize) -> Option<Retained<NSB
             true,
             false,
             NSDeviceRGBColorSpace,
-            NSBitmapFormat::AlphaNonpremultiplied,
+            NSBitmapFormat::empty(),
             isize::try_from(source_stride).ok()?,
             BITS_PER_PIXEL,
         )
@@ -320,7 +395,7 @@ fn bitmap_representation(pixmap: &Pixmap, points: NSSize) -> Option<Retained<NSB
         return None;
     }
     for (row, source) in pixmap
-        .bytes()
+        .premultiplied_bytes()
         .chunks_exact(source_stride)
         .take(rows)
         .enumerate()
@@ -343,14 +418,71 @@ fn bitmap_representation(pixmap: &Pixmap, points: NSSize) -> Option<Retained<NSB
     Some(tagged)
 }
 
+/// The line height of the font of the label, in points.
+///
+/// The chart module rounds it up to whole points for the band.
+fn label_line_height() -> f64 {
+    let font = NSFont::systemFontOfSize(LABEL_FONT_POINTS);
+    font.ascender() - font.descender() + font.leading()
+}
+
+/// Converts one channel of a color from 0 to 255 into the range 0 to 1.
+fn unit_channel(value: u8) -> f64 {
+    f64::from(value) / f64::from(u8::MAX)
+}
+
+/// Draws `text` into `band` of `representation`, in `color`.
+///
+/// `band` is in points, with its origin at the bottom left of the image. The
+/// text is in the system font at [`LABEL_FONT_POINTS`], centered, and
+/// truncated at its end with an ellipsis, so it never makes the image wider.
+/// Returns `false` when AppKit refuses to make a graphics context.
+fn draw_label(representation: &NSBitmapImageRep, text: &str, band: NSRect, color: Rgba) -> bool {
+    let Some(context) = NSGraphicsContext::graphicsContextWithBitmapImageRep(representation) else {
+        return false;
+    };
+    let font = NSFont::systemFontOfSize(LABEL_FONT_POINTS);
+    let [red, green, blue, alpha] = color;
+    let text_color = NSColor::colorWithSRGBRed_green_blue_alpha(
+        unit_channel(red),
+        unit_channel(green),
+        unit_channel(blue),
+        unit_channel(alpha),
+    );
+    let paragraph = NSMutableParagraphStyle::new();
+    paragraph.setAlignment(NSTextAlignment::Center);
+    paragraph.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+    // SAFETY: These are constants of AppKit that exist at run time.
+    let keys = unsafe {
+        [
+            NSFontAttributeName,
+            NSForegroundColorAttributeName,
+            NSParagraphStyleAttributeName,
+        ]
+    };
+    let values: [&AnyObject; 3] = [&font, &text_color, &paragraph];
+    let attributes = NSDictionary::from_slices(&keys, &values);
+    NSGraphicsContext::saveGraphicsState_class();
+    NSGraphicsContext::setCurrentContext(Some(&context));
+    // SAFETY: Each key of `attributes` holds an object of the class that
+    // AppKit expects for it: a font, a color, and a paragraph style.
+    unsafe { NSString::from_str(text).drawInRect_withAttributes(band, Some(&attributes)) };
+    context.flushGraphics();
+    NSGraphicsContext::restoreGraphicsState_class();
+    true
+}
+
 /// Makes the menu and gives it to the status item. Returns the info items.
+///
+/// The first info line shows the host of `origin`.
 fn build_menu(
     mtm: MainThreadMarker,
     status_item: &NSStatusItem,
+    origin: &Origin<'_>,
 ) -> [Retained<NSMenuItem>; MENU_LINES] {
     let menu = NSMenu::new(mtm);
     menu.setAutoenablesItems(false);
-    let titles = menu_titles(None, None);
+    let titles = menu_titles(origin, None, None);
     let info_items: [Retained<NSMenuItem>; MENU_LINES] = titles.map(|title| {
         // SAFETY: The selector is absent, which AppKit allows for an item
         // that does nothing.
@@ -382,13 +514,23 @@ fn build_menu(
     info_items
 }
 
-/// Asks for a redraw when the appearance or the displays change.
+/// Asks for a redraw when the appearance or the displays change, and for a
+/// stop of the connection when the application stops.
+///
+/// **Quit glance** sends `terminate:`, which posts the notification of the
+/// stop and then ends the process. No destructor runs after that.
 fn register_observers(monitor: &Monitor) {
     let observer: &AnyObject = monitor;
     let theme = NSNotificationName::from_str(THEME_CHANGED_NOTIFICATION);
-    // SAFETY: `redraw:` takes one notification, and the observer is alive for
-    // the whole run. No object filter is given.
+    // SAFETY: `redraw:` and `stop:` each take one notification, and the
+    // observer is alive for the whole run. No object filter is given.
     unsafe {
+        NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
+            observer,
+            sel!(stop:),
+            Some(NSApplicationWillTerminateNotification),
+            None,
+        );
         NSDistributedNotificationCenter::defaultCenter().addObserver_selector_name_object(
             observer,
             sel!(redraw:),
@@ -406,10 +548,14 @@ fn register_observers(monitor: &Monitor) {
 
 /// Starts the status item and runs until the user quits.
 ///
-/// The function takes the first reading before the run loop starts, so the
-/// status item has its frames and its width from the start.
+/// With no `remote`, the status item shows the kernel of this Mac. With a
+/// `remote`, it shows the second Mac through `ssh`.
+///
+/// The function does the first update before the run loop starts, so the
+/// status item has its frames and its width from the start. In remote mode,
+/// that update starts the first connection.
 #[must_use]
-pub fn run(interval: Interval) -> ExitCode {
+pub fn run(interval: Interval, remote: Option<Remote>) -> ExitCode {
     let Some(mtm) = MainThreadMarker::new() else {
         eprintln!("{NOT_MAIN_THREAD}");
         return ExitCode::from(EXIT_NOT_MAIN_THREAD);
@@ -418,8 +564,19 @@ pub fn run(interval: Interval) -> ExitCode {
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
     let status_item =
         NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
-    let info_items = build_menu(mtm, &status_item);
-    let monitor = Monitor::new(mtm, interval, status_item, info_items);
+    let source = match remote {
+        None => Source::Kernel {
+            reader: Reader::new(),
+            input: KernelInput::new(),
+        },
+        Some(remote) => Source::Remote {
+            input: RemoteInput::new(remote.destination.as_str().to_owned()),
+            feed: Feed::new(SSH_PROGRAM, remote, interval),
+        },
+    };
+    let state = State::new(source);
+    let info_items = build_menu(mtm, &status_item, &state.origin());
+    let monitor = Monitor::new(mtm, interval, state, status_item, info_items);
     monitor.sample_and_redraw();
     monitor.start_timer();
     register_observers(&monitor);
@@ -433,11 +590,100 @@ mod tests {
     use std::time::Duration;
 
     use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass};
-    use objc2_app_kit::NSEventTrackingRunLoopMode;
+    use objc2_app_kit::{NSBitmapImageRep, NSEventTrackingRunLoopMode};
     use objc2_core_foundation::{CFRunLoop, CFString};
-    use objc2_foundation::{NSDate, NSObject, NSRunLoop, NSTimer};
+    use objc2_foundation::{NSDate, NSObject, NSPoint, NSRect, NSRunLoop, NSSize, NSTimer};
 
-    use super::{start_repeating_timer, TIMER_TOLERANCE};
+    use super::{
+        bitmap_representation, draw_label, label_line_height, start_repeating_timer,
+        BYTES_PER_PIXEL, TIMER_TOLERANCE,
+    };
+    use crate::chart::{render, Appearance, Geometry};
+    use crate::history::{History, DEFAULT_CAPACITY};
+
+    /// The thickness of the status bar in the label test, in points.
+    const THICKNESS: f64 = 22.0;
+
+    /// The scale of the label test. Each point is 2 pixels high.
+    const LABEL_SCALE: u32 = 2;
+
+    /// The index of the alpha channel in one pixel.
+    const ALPHA: usize = 3;
+
+    /// A host name for the label test.
+    const LABEL: &str = "M4-Pro-Mac-Mini";
+
+    /// The bytes of each row of a representation, from the top row down.
+    fn rows_of(representation: &NSBitmapImageRep) -> Vec<Vec<u8>> {
+        let stride = usize::try_from(representation.bytesPerRow()).unwrap();
+        let height = usize::try_from(representation.pixelsHigh()).unwrap();
+        let width = usize::try_from(representation.pixelsWide()).unwrap() * BYTES_PER_PIXEL;
+        assert!(
+            width <= stride,
+            "a row of {width} bytes in a stride of {stride}"
+        );
+        let data = representation.bitmapData();
+        assert!(!data.is_null(), "the representation has no buffer");
+        (0..height)
+            .map(|row| {
+                // SAFETY: AppKit holds `stride * height` bytes at `data`. The
+                // row index is below `height`, and the row reads `width`
+                // bytes, which is not more than `stride`.
+                unsafe { std::slice::from_raw_parts(data.add(row * stride), width) }.to_vec()
+            })
+            .collect()
+    }
+
+    /// Tells if a pixel of the rows is not transparent.
+    fn inked(rows: &[Vec<u8>]) -> bool {
+        rows.iter().any(|row| {
+            row.as_chunks::<BYTES_PER_PIXEL>()
+                .0
+                .iter()
+                .any(|pixel| pixel[ALPHA] > 0)
+        })
+    }
+
+    #[test]
+    fn the_label_paints_the_band_in_points_and_nothing_above_it() {
+        let geometry =
+            Geometry::from_status_bar(THICKNESS, f64::from(LABEL_SCALE), Some(label_line_height()));
+        let band = geometry
+            .band_rows_points()
+            .expect("the status bar holds a band");
+        let pixmap = render(&History::new(DEFAULT_CAPACITY), geometry, Appearance::Light);
+        let points = NSSize::new(
+            f64::from(pixmap.width_points()),
+            f64::from(pixmap.height_points()),
+        );
+        let representation = bitmap_representation(&pixmap, points).expect("a representation");
+        let before = rows_of(&representation);
+        let rect = NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(points.width, f64::from(band.end - band.start)),
+        );
+        assert!(draw_label(
+            &representation,
+            LABEL,
+            rect,
+            Appearance::Light.label()
+        ));
+        let after = rows_of(&representation);
+
+        let scale = usize::try_from(LABEL_SCALE).unwrap();
+        let band_top = usize::try_from(band.start).unwrap() * scale;
+        let band_middle = band_top + usize::try_from(band.end - band.start).unwrap() * scale / 2;
+        assert_eq!(after.len(), before.len());
+        for (row, (old, new)) in before.iter().zip(&after).enumerate().take(band_top) {
+            assert_eq!(old, new, "the label changed row {row}, above the band");
+        }
+        // A drawing in pixels, not in points, fills only the lower half.
+        assert!(
+            inked(&after[band_top..band_middle]),
+            "the upper half is empty"
+        );
+        assert!(inked(&after[band_middle..]), "the lower half is empty");
+    }
 
     /// The interval of the probe timer, in seconds.
     const PROBE_INTERVAL: f64 = 0.02;
