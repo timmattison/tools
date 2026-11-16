@@ -746,9 +746,8 @@ mod tests {
             });
         }
         let scale = usize::try_from(LABEL_SCALE).unwrap();
-        let side = usize::try_from(geometry.height_points()).unwrap();
         let frame = usize::try_from(FRAME_POINTS).unwrap();
-        let columns = frame * scale..(side - frame) * scale;
+        let columns = frame * scale..(frame + geometry.columns().get()) * scale;
         let lines = usize::try_from(rows.start).unwrap() * scale
             ..usize::try_from(rows.end).unwrap() * scale;
         let rgb = |pixel: &[u8]| [pixel[0], pixel[1], pixel[2]];

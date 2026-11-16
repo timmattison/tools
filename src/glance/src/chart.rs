@@ -482,10 +482,12 @@ mod tests {
 
     /// The scales that each pixel test runs at.
     const SCALES: [u32; 2] = [1, 2];
-    /// The side of each chart in the tests, in points. The interior is 20 points high.
-    const SIDE: u32 = 22;
-    /// The number of columns inside each frame at that side.
-    const COLUMNS: usize = 20;
+    /// The height of the charts in the tests, in points. The interior is 20 points high.
+    const HEIGHT: u32 = 22;
+    /// The number of columns inside each frame. It does not depend on the height.
+    const COLUMNS: usize = 32;
+    /// The width of the image in points: two charts of 34 points that share one border.
+    const IMAGE_WIDTH: u32 = 67;
     /// The line height of the 7-point system font on the Mac of the author.
     /// The label is 9 points high.
     const LINE_HEIGHT: f64 = 8.24;
@@ -526,7 +528,7 @@ mod tests {
     }
 
     fn geometry(scale: u32) -> Geometry {
-        Geometry::new(SIDE, scale).unwrap()
+        Geometry::new(HEIGHT, scale).unwrap()
     }
 
     /// Builds a sample from the ticks of one interval and the raw pressure.
@@ -553,21 +555,22 @@ mod tests {
 
     /// The number of rows of the interior at the scale.
     fn rows(scale: u32) -> u32 {
-        (SIDE - 2 * FRAME_POINTS) * scale
+        (HEIGHT - 2 * FRAME_POINTS) * scale
     }
 
     /// The x pixel of the left edge of a slot, from the layout rules. The
-    /// memory square starts on the right border of the CPU square.
+    /// memory chart starts on the right border of the CPU chart.
     fn slot_x(chart: u32, slot: usize, scale: u32) -> u32 {
         let slot = u32::try_from(slot).unwrap();
-        (chart * (SIDE - FRAME_POINTS) + FRAME_POINTS + slot) * scale
+        let columns = u32::try_from(COLUMNS).unwrap();
+        (chart * (columns + FRAME_POINTS) + FRAME_POINTS + slot) * scale
     }
 
     /// The colors of one column, from the bottom row of the interior up.
     /// Each of the `scale` pixels of a row must have the same color.
     fn column(pixmap: &Pixmap, chart: u32, slot: usize, scale: u32) -> Vec<Rgba> {
         let x0 = slot_x(chart, slot, scale);
-        let bottom = (SIDE - FRAME_POINTS) * scale;
+        let bottom = (HEIGHT - FRAME_POINTS) * scale;
         (0..rows(scale))
             .map(|row| {
                 let y = bottom - 1 - row;
@@ -598,46 +601,47 @@ mod tests {
     }
 
     #[test]
-    fn the_image_is_two_squares_that_share_one_border() {
+    fn the_image_is_two_charts_that_share_one_border() {
         for scale in SCALES {
             let geometry = Geometry::from_status_bar(22.0, f64::from(scale), Some(LINE_HEIGHT));
             assert_eq!(geometry.height_points(), 22);
             assert_eq!(geometry.image_height_points(), 22);
-            assert_eq!(geometry.image_width_points(), 2 * 22 - FRAME_POINTS);
-            assert_eq!(geometry.columns().get(), 20);
+            assert_eq!(geometry.image_width_points(), IMAGE_WIDTH);
+            assert_eq!(geometry.columns().get(), COLUMNS);
 
             let pixmap = render(&history_of(COLUMNS, &[]), geometry, Appearance::Light);
-            assert_eq!(pixmap.width_points(), 43);
+            assert_eq!(pixmap.width_points(), IMAGE_WIDTH);
             assert_eq!(pixmap.height_points(), 22);
-            assert_eq!(pixmap.width(), 43 * scale);
+            assert_eq!(pixmap.width(), IMAGE_WIDTH * scale);
             assert_eq!(pixmap.height(), 22 * scale);
             let expected = usize::try_from(pixmap.width() * pixmap.height() * 4).unwrap();
             assert_eq!(pixmap.bytes().len(), expected);
         }
     }
 
-    /// The two squares overlap on one column of the frame. Thus the border
+    /// The two charts overlap on one column of the frame. Thus the border
     /// between the two interiors is one frame wide, and there is no gap.
     #[test]
-    fn each_chart_is_a_framed_square_with_no_margin_and_one_shared_border() {
+    fn each_chart_is_framed_with_no_margin_and_one_shared_border() {
         assert_ne!(Appearance::Light.frame(), Appearance::Dark.frame());
         let history = history_of(COLUMNS, &[]);
         for scale in SCALES {
             let geometry = Geometry::from_status_bar(22.0, f64::from(scale), Some(LINE_HEIGHT));
             for appearance in [Appearance::Light, Appearance::Dark] {
                 let pixmap = render(&history, geometry, appearance);
-                assert_eq!(pixmap.width_points(), 43);
+                assert_eq!(pixmap.width_points(), IMAGE_WIDTH);
                 assert_eq!(pixmap.height_points(), 22);
-                let side = 22 * scale;
+                let height = 22 * scale;
+                let width = 34 * scale;
                 let frame = FRAME_POINTS * scale;
                 for chart in [CPU_CHART, MEMORY_CHART] {
-                    let left = chart * (side - frame);
-                    for y in 0..side {
-                        for x in left..left + side {
+                    let left = chart * (width - frame);
+                    for y in 0..height {
+                        for x in left..left + width {
                             let on_edge = x < left + frame
-                                || x >= left + side - frame
+                                || x >= left + width - frame
                                 || y < frame
-                                || y >= side - frame;
+                                || y >= height - frame;
                             let expected = if on_edge {
                                 appearance.frame()
                             } else {
@@ -753,14 +757,14 @@ mod tests {
             let pixmap = render(&history, geometry(scale), Appearance::Light);
             let cpu = |slot| column(&pixmap, CPU_CHART, slot, scale);
             let memory = |slot| column(&pixmap, MEMORY_CHART, slot, scale);
-            assert_eq!(cpu(17), full_column(SYSTEM, scale));
-            assert_eq!(cpu(18), full_column(USER, scale));
-            assert_eq!(cpu(19), empty_column(scale));
-            assert_eq!(cpu(16), empty_column(scale));
-            assert_eq!(memory(17), full_column(NORMAL, scale));
-            assert_eq!(memory(18), full_column(WARN, scale));
-            assert_eq!(memory(19), full_column(CRITICAL, scale));
-            assert_eq!(memory(16), empty_column(scale));
+            assert_eq!(cpu(29), full_column(SYSTEM, scale));
+            assert_eq!(cpu(30), full_column(USER, scale));
+            assert_eq!(cpu(31), empty_column(scale));
+            assert_eq!(cpu(28), empty_column(scale));
+            assert_eq!(memory(29), full_column(NORMAL, scale));
+            assert_eq!(memory(30), full_column(WARN, scale));
+            assert_eq!(memory(31), full_column(CRITICAL, scale));
+            assert_eq!(memory(28), empty_column(scale));
         }
     }
 
@@ -778,37 +782,37 @@ mod tests {
             let pixmap = render(&history, geometry(scale), Appearance::Light);
             assert_eq!(
                 pixmap.width_points(),
-                48,
+                IMAGE_WIDTH,
                 "the columns come from the geometry"
             );
             let cpu = |slot| column(&pixmap, CPU_CHART, slot, scale);
             let memory = |slot| column(&pixmap, MEMORY_CHART, slot, scale);
-            assert_eq!(cpu(16), empty_column(scale));
-            assert_eq!(cpu(17), full_column(USER, scale));
-            assert_eq!(cpu(18), empty_column(scale));
-            assert_eq!(cpu(19), full_column(SYSTEM, scale));
-            assert_eq!(memory(16), empty_column(scale));
-            assert_eq!(memory(17), full_column(WARN, scale));
-            assert_eq!(memory(18), full_column(CRITICAL, scale));
-            assert_eq!(memory(19), full_column(UNKNOWN, scale));
+            assert_eq!(cpu(28), empty_column(scale));
+            assert_eq!(cpu(29), full_column(USER, scale));
+            assert_eq!(cpu(30), empty_column(scale));
+            assert_eq!(cpu(31), full_column(SYSTEM, scale));
+            assert_eq!(memory(28), empty_column(scale));
+            assert_eq!(memory(29), full_column(WARN, scale));
+            assert_eq!(memory(30), full_column(CRITICAL, scale));
+            assert_eq!(memory(31), full_column(UNKNOWN, scale));
         }
     }
 
     #[test]
     fn a_history_longer_than_the_columns_shows_only_the_newest_samples() {
-        const LONG: usize = 30;
+        const LONG: usize = 40;
         for scale in SCALES {
             let idle = sample(0, 0, 100, LEVEL_NORMAL, 100);
-            let mut samples = vec![sample(0, 100, 0, LEVEL_NORMAL, 100); 10];
+            let mut samples = vec![sample(0, 100, 0, LEVEL_NORMAL, 100); 8];
             samples.push(sample(100, 0, 0, LEVEL_NORMAL, 100));
-            samples.extend(std::iter::repeat_n(idle, 18));
+            samples.extend(std::iter::repeat_n(idle, 30));
             samples.push(sample(100, 0, 0, LEVEL_NORMAL, 100));
             assert_eq!(samples.len(), LONG);
             let history = history_of(LONG, &samples);
             let pixmap = render(&history, geometry(scale), Appearance::Light);
             assert_eq!(
                 pixmap.width_points(),
-                48,
+                IMAGE_WIDTH,
                 "the columns come from the geometry"
             );
             let cpu = |slot| column(&pixmap, CPU_CHART, slot, scale);
@@ -858,7 +862,7 @@ mod tests {
     }
 
     #[test]
-    fn the_side_is_the_thickness_floored() {
+    fn the_height_is_the_thickness_floored() {
         let cases = [
             ((22.0, 2.0), (22, 2)),
             ((24.0, 1.0), (24, 1)),
@@ -927,10 +931,15 @@ mod tests {
     }
 
     #[test]
-    fn the_columns_are_the_width_of_the_interior() {
-        for (side, columns) in [(22, 20), (24, 22), (3, 1)] {
-            assert_eq!(Geometry::new(side, 1).unwrap().columns().get(), columns);
+    fn the_columns_and_the_width_do_not_depend_on_the_height() {
+        for height in [3, 22, 24, 37] {
+            let geometry = Geometry::new(height, 1).unwrap();
+            assert_eq!(geometry.columns().get(), COLUMNS, "height {height}");
+            assert_eq!(geometry.image_width_points(), IMAGE_WIDTH, "height {height}");
         }
+        let tall = Geometry::from_status_bar(37.0, 2.0, Some(LINE_HEIGHT));
+        assert_eq!(tall.columns().get(), COLUMNS);
+        assert_eq!(tall.image_width_points(), IMAGE_WIDTH);
     }
 
     #[test]
