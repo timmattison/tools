@@ -137,8 +137,12 @@ pub fn watch(
     dir: &Path,
     on_event: impl Fn(DirEvent) + Send + 'static,
 ) -> notify::Result<notify::RecommendedWatcher> {
-    let _ = on_event;
-    let mut watcher = notify::recommended_watcher(|_result: notify::Result<notify::Event>| {})?;
+    let mut watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
+        match result {
+            Ok(event) => dir_events(&event).into_iter().for_each(&on_event),
+            Err(_) => on_event(DirEvent::Rescan),
+        }
+    })?;
     notify::Watcher::watch(&mut watcher, dir, notify::RecursiveMode::NonRecursive)?;
     Ok(watcher)
 }
