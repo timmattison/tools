@@ -27,7 +27,7 @@ pub fn draw(frame: &mut Frame, app: &App, now: EpochMillis) {
 }
 
 /// The text of the bottom line when there is no status.
-const KEY_HELP: &str = "j/k move · enter focus · n next needs-you · q quit";
+const KEY_HELP: &str = "j/k move · enter focus · n next needs-you · h handled · q quit";
 
 /// Draw the status text, or the help for the keys, in `area`.
 fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
@@ -87,6 +87,18 @@ const EMPTY_HINT: &str = "No Claude Code session wrote a state file.";
 /// The text that stands for a missing value.
 const NONE_TEXT: &str = "—";
 
+/// The narrowest width of the state column. It fits each state that has no
+/// handled mark.
+const MIN_STATE_WIDTH: u16 = 10;
+
+/// The width of the state column: the longest state text of `labels`, and at
+/// least [`MIN_STATE_WIDTH`].
+fn state_width<'a>(labels: impl Iterator<Item = &'a str>) -> u16 {
+    labels
+        .map(|label| u16::try_from(label.chars().count()).unwrap_or(u16::MAX))
+        .fold(MIN_STATE_WIDTH, u16::max)
+}
+
 /// The color of a state, as a color of the terminal.
 fn state_color(state: PaneState) -> Color {
     let rgb = state.color();
@@ -105,14 +117,19 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App, now: EpochMillis) {
         frame.render_widget(Paragraph::new(EMPTY_HINT), inner);
         return;
     }
-    let rows: Vec<Row> = board
+    let sessions: Vec<_> = board
         .rows()
         .into_iter()
-        .map(|session| {
+        .map(|session| (session, session.state_label()))
+        .collect();
+    let state_width = state_width(sessions.iter().map(|(_, label)| label.as_str()));
+    let rows: Vec<Row> = sessions
+        .into_iter()
+        .map(|(session, state_label)| {
             let state = session.file.state;
             Row::new([
                 Span::styled(STATE_BLOCK, Style::new().fg(state_color(state))).into(),
-                Text::from(state.label()),
+                Text::from(state_label),
                 Text::from(format_elapsed(now.saturating_since(session.since))),
                 Text::from(
                     session
@@ -128,7 +145,7 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App, now: EpochMillis) {
         .collect();
     let widths = [
         Constraint::Length(2),
-        Constraint::Length(10),
+        Constraint::Length(state_width),
         Constraint::Length(8),
         Constraint::Length(14),
         Constraint::Length(24),
