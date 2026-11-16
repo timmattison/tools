@@ -25,6 +25,7 @@
 //! - [`history`] — the ring buffer of the last samples. It allocates once.
 //! - [`chart`] — the layout and the colors of the two charts, drawn into an
 //!   RGBA pixel buffer.
+//! - [`host`] — the short name of this host, as `hostname -s` gives it.
 //! - [`interval`] — the time between two samples, from the command line.
 //! - [`text`] — the lines of the menu, and the JSON line of `--sample`.
 //! - `reader` (macOS only) — the one module that calls the kernel.
@@ -41,6 +42,7 @@
 pub mod chart;
 pub mod cpu;
 pub mod history;
+pub mod host;
 pub mod interval;
 pub mod pressure;
 #[cfg(target_os = "macos")]
