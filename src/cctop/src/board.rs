@@ -98,13 +98,17 @@ impl Board {
             return None;
         }
         let old = same_process.map(|known| known.file.state);
-        let session = Session {
-            file,
-            name,
-            since: stamp,
+        let same_state = same_process.is_some_and(|known| known.file.state == new_state);
+        let since = match same_process {
+            Some(known) if same_state => known.since,
+            _ => stamp,
         };
+        let session = Session { file, name, since };
         let label = session.label();
         self.sessions.insert(pid, session);
+        if same_state {
+            return None;
+        }
         let change = Change {
             at: stamp,
             pid,
