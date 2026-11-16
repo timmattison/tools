@@ -582,4 +582,40 @@ mod tests {
         );
         assert!(writes.is_empty());
     }
+
+    #[test]
+    fn a_tty_that_no_pane_shows_is_a_step_2_error_that_names_the_tty() {
+        let runner = FakeRunner::new()
+            .answer(&words(&list_sessions_argv()), ok(SESSIONS))
+            .answer(
+                &words(&focus_argv(&zellij_target().zellij.unwrap())),
+                ok(""),
+            )
+            .answer(&words(&ps_argv()), ok(PS))
+            .answer(&words(&unix_sockets_argv()), ok(SOCKETS))
+            .answer(
+                &words(&tty_argv(Pid::new(19800))),
+                ok("p19800\nf0\nn/dev/ttys999\n"),
+            )
+            .answer(&words(&list_argv()), ok(PANES));
+        let (error, writes) = wezterm_error(&zellij_target(), runner);
+        assert_eq!(error, "no WezTerm pane shows /dev/ttys999");
+        assert!(writes.is_empty());
+    }
+
+    #[test]
+    fn a_failed_write_is_a_step_2_error_that_names_the_tty() {
+        let runner = Arc::new(zellij_runner());
+        let writer = Arc::new(RecordingWriter {
+            fail: true,
+            ..RecordingWriter::default()
+        });
+        let report = focus(&zellij_target(), &tools(&runner, &writer));
+        assert_eq!(
+            report.wezterm,
+            Err("cannot write to /dev/ttys231: device is busy".to_string())
+        );
+        assert_eq!(writer.writes().len(), 1);
+        assert!(!report.succeeded());
+    }
 }
