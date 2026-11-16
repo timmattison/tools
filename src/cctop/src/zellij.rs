@@ -1,6 +1,6 @@
 //! Focus step 1: asks Zellij to focus the pane of a session.
 
-use crate::runner::{COMMAND_LIMIT, CommandOutput, RunError, Runner};
+use crate::runner::{CommandOutput, RunError, Runner, COMMAND_LIMIT};
 use crate::state::ZellijLocation;
 
 /// Makes the argv that lists the Zellij sessions.
@@ -33,11 +33,17 @@ pub fn parse_live_sessions(stdout: &str) -> Vec<String> {
 /// Makes the argv that focuses the pane at `location`.
 #[must_use]
 pub fn focus_argv(location: &ZellijLocation) -> Vec<String> {
-    ["zellij", "--session", &location.session, "action", "focus-pane-id"]
-        .iter()
-        .map(ToString::to_string)
-        .chain(std::iter::once(location.pane.terminal_target()))
-        .collect()
+    [
+        "zellij",
+        "--session",
+        &location.session,
+        "action",
+        "focus-pane-id",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .chain(std::iter::once(location.pane.terminal_target()))
+    .collect()
 }
 
 /// Why the focus request of step 1 failed.
@@ -127,10 +133,7 @@ mod tests {
 
     /// A runner that lists the fixture sessions and answers the focus
     /// command of `target` with `focus`.
-    fn runner_for(
-        target: &ZellijLocation,
-        focus: Result<CommandOutput, RunError>,
-    ) -> FakeRunner {
+    fn runner_for(target: &ZellijLocation, focus: Result<CommandOutput, RunError>) -> FakeRunner {
         let list = include_str!("../fixtures/zellij-list-sessions.txt");
         FakeRunner::new()
             .answer(&words(&list_sessions_argv()), Ok(CommandOutput::ok(list)))
@@ -188,7 +191,10 @@ mod tests {
         let target = location("tools");
         let runner = runner_for(&target, Ok(CommandOutput::ok("")));
         assert_eq!(focus_pane(&runner, &target), Ok(()));
-        assert_eq!(runner.calls(), vec![list_sessions_argv(), focus_argv(&target)]);
+        assert_eq!(
+            runner.calls(),
+            vec![list_sessions_argv(), focus_argv(&target)]
+        );
     }
 
     #[test]
@@ -222,8 +228,7 @@ mod tests {
         let error = RunError::NotInstalled {
             program: "zellij".to_string(),
         };
-        let runner =
-            FakeRunner::new().answer(&words(&list_sessions_argv()), Err(error.clone()));
+        let runner = FakeRunner::new().answer(&words(&list_sessions_argv()), Err(error.clone()));
         assert_eq!(
             focus_pane(&runner, &location("tools")),
             Err(ZellijFocusError::List(error))

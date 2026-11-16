@@ -10,11 +10,11 @@
 
 pub mod board;
 pub mod liveness;
+pub mod notification;
 pub mod paths;
 pub mod registry;
+pub mod runner;
 pub mod state;
 pub mod store;
 pub mod sync;
-pub mod runner;
-pub mod notification;
 pub mod zellij;

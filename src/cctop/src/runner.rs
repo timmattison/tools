@@ -89,14 +89,14 @@ pub struct SystemRunner;
 
 impl Runner for SystemRunner {
     fn run(&self, argv: &[String], limit: Duration) -> Result<CommandOutput, RunError> {
-        let Some((program, args)) = argv.split_first() else {
+        let Some((program, arguments)) = argv.split_first() else {
             return Err(RunError::Start {
                 program: String::new(),
                 message: "the command is empty".to_string(),
             });
         };
         let mut command = childenv::command(program);
-        command.args(args);
+        command.args(arguments);
         match runlimit::run_with_limit(&mut command, limit) {
             Ok(output) => Ok(CommandOutput {
                 code: output.status.code(),
@@ -110,12 +110,12 @@ impl Runner for SystemRunner {
                 program: program.clone(),
                 seconds: waited.as_secs(),
             }),
-            Err(
-                runlimit::RunFailure::Spawn(error) | runlimit::RunFailure::Wait(error),
-            ) => Err(RunError::Start {
-                program: program.clone(),
-                message: error.to_string(),
-            }),
+            Err(runlimit::RunFailure::Spawn(error) | runlimit::RunFailure::Wait(error)) => {
+                Err(RunError::Start {
+                    program: program.clone(),
+                    message: error.to_string(),
+                })
+            }
         }
     }
 }

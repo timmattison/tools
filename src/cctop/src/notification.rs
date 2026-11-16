@@ -1,14 +1,14 @@
 //! Sends a macOS notification through `osascript`.
 
 use crate::board::Change;
-use crate::runner::{COMMAND_LIMIT, Runner};
+use crate::runner::{Runner, COMMAND_LIMIT};
 
 /// The title of each notification.
 pub const NOTIFICATION_TITLE: &str = "cctop";
 
 /// Makes the argv that shows a notification.
 ///
-/// The text goes in as arguments after `--`, never inside the AppleScript
+/// The text goes in as arguments after `--`, never inside the `AppleScript`
 /// source. Thus no value needs quotes.
 #[must_use]
 pub fn notification_argv(title: &str, message: &str) -> Vec<String> {
@@ -123,7 +123,8 @@ mod tests {
     fn send_reports_the_stderr_of_a_failed_command() {
         let words = expected_argv("m");
         let words: Vec<&str> = words.iter().map(String::as_str).collect();
-        let runner = FakeRunner::new().answer(&words, Ok(CommandOutput::failed(1, "  no permission \n")));
+        let runner =
+            FakeRunner::new().answer(&words, Ok(CommandOutput::failed(1, "  no permission \n")));
         assert_eq!(
             send(&runner, "m"),
             Err("osascript failed: no permission".to_string())

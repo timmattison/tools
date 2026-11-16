@@ -66,7 +66,10 @@ mod tests {
             program: "a".to_string(),
         };
         let runner = FakeRunner::new().answer(&["a"], Err(error.clone()));
-        assert_eq!(runner.run(&argv(&["a"]), Duration::from_secs(1)), Err(error));
+        assert_eq!(
+            runner.run(&argv(&["a"]), Duration::from_secs(1)),
+            Err(error)
+        );
     }
 
     #[test]
