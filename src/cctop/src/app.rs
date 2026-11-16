@@ -84,6 +84,7 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1),
             KeyCode::Enter => return self.focus_selected(),
             KeyCode::Char('n') => return self.focus_next_needs_you(),
+            KeyCode::Char('h' | 'H') => self.toggle_handled_selected(),
             KeyCode::Char('q') => return Action::Quit,
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 return Action::Quit;
@@ -93,16 +94,44 @@ impl App {
         Action::Nothing
     }
 
-    /// Select the next session in the state `needs-you`, and ask the main
-    /// loop to focus it. The search starts after the selected row and wraps
-    /// around, so the selected row counts last.
+    /// Put a handled mark on the selected session, or remove its mark. A new
+    /// mark moves the session to the bottom of its state. The cursor stays on
+    /// its row, thus it selects the next session. A removed mark moves the
+    /// session up, and the cursor goes with the session.
+    fn toggle_handled_selected(&mut self) {
+        let selected = self.selected_index().and_then(|index| {
+            let session = self.board.rows().get(index).copied()?;
+            Some((index, session.file.pid, session.label()))
+        });
+        let Some((index, pid, label)) = selected else {
+            self.status = Some("No session to mark".to_string());
+            return;
+        };
+        match self.board.toggle_handled(pid) {
+            Some(true) => {
+                self.select(index);
+                self.status = Some(format!("Marked {label} as handled"));
+            }
+            Some(false) => {
+                self.sync_selection();
+                self.status = Some(format!("Removed the handled mark from {label}"));
+            }
+            None => {}
+        }
+    }
+
+    /// Select the next session in the state `needs-you` that has no handled
+    /// mark, and ask the main loop to focus it. The search starts after the
+    /// selected row and wraps around, so the selected row counts last.
     fn focus_next_needs_you(&mut self) -> Action {
         let rows = self.board.rows();
         let count = rows.len();
         let current = self.selected_index().unwrap_or(0);
         let found = (1..=count)
             .map(|offset| (current + offset) % count)
-            .find(|&index| rows[index].file.state == PaneState::NeedsYou);
+            .find(|&index| {
+                rows[index].file.state == PaneState::NeedsYou && !rows[index].is_handled()
+            });
         let Some(index) = found else {
             self.status = Some("No session needs you".to_string());
             return Action::Nothing;
