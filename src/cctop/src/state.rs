@@ -216,8 +216,14 @@ struct RawStateFile {
 /// `<pid>.json`.
 #[must_use]
 pub fn pid_of_file_name(name: &OsStr) -> Option<Pid> {
-    let _ = name;
-    None
+    let digits = name.to_str()?.strip_suffix(".json")?;
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    match digits.parse::<u32>() {
+        Ok(0) | Err(_) => None,
+        Ok(pid) => Some(Pid::new(pid)),
+    }
 }
 
 #[cfg(test)]
