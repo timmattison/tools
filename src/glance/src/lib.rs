@@ -25,6 +25,8 @@
 //! - [`history`] — the ring buffer of the last samples. It allocates once.
 //! - [`chart`] — the layout and the colors of the two charts, drawn into an
 //!   RGBA pixel buffer.
+//! - [`connection`] — the `ssh` connection to a second Mac, which runs
+//!   `glance --stream` there and sends one event for each line.
 //! - [`host`] — the short name of this host, as `hostname -s` gives it.
 //! - [`interval`] — the time between two samples, from the command line.
 //! - [`text`] — the lines of the menu, and the JSON line of `--sample`.
@@ -40,6 +42,7 @@
 #![deny(unsafe_code)]
 
 pub mod chart;
+pub mod connection;
 pub mod cpu;
 pub mod history;
 pub mod host;
