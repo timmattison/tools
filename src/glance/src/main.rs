@@ -48,11 +48,11 @@ struct Cli {
     sample: bool,
 
     /// Print one JSON line for each interval until the standard output closes.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "sample")]
     stream: bool,
 
     /// Stop the stream after N lines.
-    #[arg(long, value_name = "N")]
+    #[arg(long, value_name = "N", requires = "stream")]
     count: Option<u64>,
 }
 

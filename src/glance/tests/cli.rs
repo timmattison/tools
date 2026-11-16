@@ -123,6 +123,12 @@ fn stream_and_sample_together_are_a_usage_error() {
     assert_eq!(output.status.code(), Some(USAGE_ERROR), "{output:?}");
 }
 
+#[test]
+fn count_without_stream_is_a_usage_error() {
+    let output = run(&["--count", "3"]);
+    assert_eq!(output.status.code(), Some(USAGE_ERROR), "{output:?}");
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn an_interval_below_the_minimum_is_a_usage_error() {
