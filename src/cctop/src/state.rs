@@ -185,7 +185,11 @@ impl StateFile {
     /// part, the whole directory.
     #[must_use]
     pub fn directory_name(&self) -> String {
-        String::new()
+        self.cwd
+            .file_name()
+            .unwrap_or(self.cwd.as_os_str())
+            .to_string_lossy()
+            .into_owned()
     }
 }
 
