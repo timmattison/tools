@@ -21,8 +21,41 @@ pub struct UnixSocket {
 /// the path of the socket or `->` and the address of the peer. A socket with
 /// no `d` line is skipped. The function ignores other field letters.
 #[must_use]
-pub fn parse_unix_sockets(_text: &str) -> Vec<UnixSocket> {
-    Vec::new()
+pub fn parse_unix_sockets(text: &str) -> Vec<UnixSocket> {
+    let mut sockets: Vec<UnixSocket> = Vec::new();
+    let mut pid: Option<Pid> = None;
+    // True while the current file has a socket in `sockets`.
+    let mut file_has_socket = false;
+    for line in text.lines() {
+        let Some(letter) = line.chars().next() else {
+            continue;
+        };
+        let value = &line[letter.len_utf8()..];
+        match letter {
+            'p' => {
+                pid = value.parse().ok().map(Pid::new);
+                file_has_socket = false;
+            }
+            'f' => file_has_socket = false,
+            'd' => {
+                file_has_socket = pid.is_some();
+                if let Some(pid) = pid {
+                    sockets.push(UnixSocket {
+                        pid,
+                        address: value.to_string(),
+                        peer: None,
+                    });
+                }
+            }
+            'n' if file_has_socket => {
+                if let (Some(peer), Some(socket)) = (value.strip_prefix("->"), sockets.last_mut()) {
+                    socket.peer = Some(peer.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    sockets
 }
 
 #[cfg(test)]
