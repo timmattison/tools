@@ -8,6 +8,7 @@
 #![deny(unsafe_code)]
 #![warn(clippy::pedantic)]
 
+pub mod ancestry;
 pub mod board;
 pub mod liveness;
 pub mod lsof;
