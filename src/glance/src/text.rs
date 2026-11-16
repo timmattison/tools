@@ -70,11 +70,17 @@ pub fn menu_lines(sample: &Sample) -> [String; MENU_LINES] {
 #[must_use]
 pub fn menu_titles(error: Option<&str>, newest: Option<&Sample>) -> [String; MENU_LINES] {
     match (error, newest) {
-        (Some(reason), _) => lines_under(read_error_line(reason)),
+        (Some(reason), _) => lines_under(read_error_line(&LOCAL_PLACEHOLDER, reason)),
         (None, Some(sample)) => menu_lines(sample),
         (None, None) => lines_under(WAITING_LINE.to_owned()),
     }
 }
+
+/// The origin that `menu_titles` uses until it takes an origin as a parameter.
+const LOCAL_PLACEHOLDER: Origin<'static> = Origin {
+    host: "",
+    destination: None,
+};
 
 /// The first menu line, with three empty lines under it.
 fn lines_under(first: String) -> [String; MENU_LINES] {
@@ -299,9 +305,27 @@ fn sample_of(object: &Map<String, Value>) -> Result<Sample, LineError> {
     Ok(Sample { cpu, pressure })
 }
 
+/// Where the values of the menu come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Origin<'a> {
+    /// The name of the Mac whose kernel gave the values.
+    pub host: &'a str,
+    /// The SSH destination in remote mode, as the user typed it. `None` in local mode.
+    pub destination: Option<&'a str>,
+}
+
+/// The first info line of the menu. It names the Mac and, in remote mode, the SSH destination.
+///
+/// The line is never truncated.
+#[must_use]
+pub fn host_line(origin: &Origin<'_>) -> String {
+    String::new()
+}
+
 /// The first menu line after a failed read.
 #[must_use]
-pub fn read_error_line(reason: &str) -> String {
+pub fn read_error_line(origin: &Origin<'_>, reason: &str) -> String {
+    let _ = origin;
     format!("{READ_ERROR_PREFIX}{reason}")
 }
 
@@ -366,7 +390,7 @@ mod tests {
     fn an_error_with_a_sample_clears_the_three_lower_lines() {
         assert_eq!(
             menu_titles(Some("cannot read x: y"), Some(&warn_sample())),
-            empty_lines(&read_error_line("cannot read x: y"))
+            empty_lines(&read_error_line(&LOCAL_PLACEHOLDER, "cannot read x: y"))
         );
     }
 
@@ -374,7 +398,7 @@ mod tests {
     fn an_error_with_no_sample_clears_the_three_lower_lines() {
         assert_eq!(
             menu_titles(Some("cannot read x: y"), None),
-            empty_lines(&read_error_line("cannot read x: y"))
+            empty_lines(&read_error_line(&LOCAL_PLACEHOLDER, "cannot read x: y"))
         );
     }
 
@@ -637,8 +661,65 @@ mod tests {
     #[test]
     fn a_failed_read_names_the_reason() {
         assert_eq!(
-            read_error_line("cannot read x: y"),
+            read_error_line(&LOCAL_PLACEHOLDER, "cannot read x: y"),
             "Cannot read the kernel: cannot read x: y"
+        );
+    }
+
+    /// The name of the Mac in the host line tests.
+    const REMOTE_HOST: &str = "m1-ts";
+    /// The SSH destination in the remote tests.
+    const DESTINATION: &str = "tim@m1.local";
+
+    fn local(host: &str) -> Origin<'_> {
+        Origin {
+            host,
+            destination: None,
+        }
+    }
+
+    fn remote(destination: &str) -> Origin<'_> {
+        Origin {
+            host: REMOTE_HOST,
+            destination: Some(destination),
+        }
+    }
+
+    #[test]
+    fn the_host_line_in_local_mode_names_the_mac() {
+        assert_eq!(
+            host_line(&local("M4-Pro-Mac-Mini")),
+            "Host: M4-Pro-Mac-Mini"
+        );
+    }
+
+    #[test]
+    fn the_host_line_in_remote_mode_names_the_destination() {
+        assert_eq!(
+            host_line(&remote(DESTINATION)),
+            "Host: m1-ts (ssh tim@m1.local)"
+        );
+    }
+
+    #[test]
+    fn the_host_line_keeps_a_long_host_name_whole() {
+        let name = "h".repeat(80);
+        assert_eq!(host_line(&local(&name)), format!("Host: {name}"));
+    }
+
+    #[test]
+    fn the_error_line_in_local_mode_names_the_kernel() {
+        assert_eq!(
+            read_error_line(&local("m"), "cannot read x: y"),
+            "Cannot read the kernel: cannot read x: y"
+        );
+    }
+
+    #[test]
+    fn the_error_line_in_remote_mode_names_the_destination() {
+        assert_eq!(
+            read_error_line(&remote(DESTINATION), "Connection refused"),
+            "Cannot read tim@m1.local: Connection refused"
         );
     }
 
