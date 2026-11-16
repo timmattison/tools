@@ -42,8 +42,24 @@ impl SystemClock {
 
 impl ProcessClock for SystemClock {
     fn start_times(&mut self, pids: &[Pid]) -> HashMap<Pid, u64> {
-        let _ = (&mut self.system, pids);
-        HashMap::new()
+        let wanted: Vec<sysinfo::Pid> = pids
+            .iter()
+            .map(|pid| sysinfo::Pid::from_u32(pid.as_u32()))
+            .collect();
+        self.system.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::Some(&wanted),
+            true,
+            sysinfo::ProcessRefreshKind::nothing(),
+        );
+        pids.iter()
+            .filter_map(|pid| {
+                let process = self.system.process(sysinfo::Pid::from_u32(pid.as_u32()))?;
+                if process.status() == sysinfo::ProcessStatus::Zombie {
+                    return None;
+                }
+                Some((*pid, process.start_time()))
+            })
+            .collect()
     }
 }
 
