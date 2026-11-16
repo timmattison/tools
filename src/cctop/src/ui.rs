@@ -5,17 +5,61 @@ use chrono::TimeZone;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, HighlightSpacing, Paragraph, Row, Table, TableState};
-use ratatui::text::{Span, Text};
+use ratatui::text::{Line, Span, Text};
 use ratatui::Frame;
 
 use crate::app::App;
+use crate::board::Change;
 use crate::state::{EpochMillis, PaneState};
 
 /// Draw the screen: the table of sessions, the change log, and the status
 /// line. `now` gives the time that the elapsed times count to.
 pub fn draw(frame: &mut Frame, app: &App, now: EpochMillis) {
-    let [table_area] = Layout::vertical([Constraint::Min(3)]).areas(frame.area());
+    let [table_area, log_area] =
+        Layout::vertical([Constraint::Min(3), Constraint::Length(LOG_HEIGHT)]).areas(frame.area());
     draw_table(frame, table_area, app, now);
+    draw_log(frame, log_area, app);
+}
+
+/// The number of changes that the log shows.
+const LOG_LINES: usize = 8;
+
+/// The height of the log block: its lines and its two borders.
+#[allow(clippy::cast_possible_truncation, reason = "LOG_LINES is a small constant")]
+const LOG_HEIGHT: u16 = LOG_LINES as u16 + 2;
+
+/// Draw the newest changes in `area`, the newest first.
+fn draw_log(frame: &mut Frame, area: Rect, app: &App) {
+    let lines: Vec<Line> = app
+        .board()
+        .changes()
+        .take(LOG_LINES)
+        .map(|change| change_line(change, &chrono::Local))
+        .collect();
+    let block = Block::bordered().title(" Changes ");
+    frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// The line of the log for one change: `HH:MM:SS  <label>  <old> → <new>`.
+fn change_line<Tz: TimeZone>(change: &Change, zone: &Tz) -> Line<'static>
+where
+    Tz::Offset: std::fmt::Display,
+{
+    Line::from(vec![
+        Span::raw(clock_time(change.at, zone)),
+        Span::raw(format!("  {}  ", change.label)),
+        state_span(change.old),
+        Span::raw(" → "),
+        state_span(change.new),
+    ])
+}
+
+/// The label of a state in its color, or a dash when there is no state.
+fn state_span(state: Option<PaneState>) -> Span<'static> {
+    match state {
+        Some(state) => Span::styled(state.label(), Style::new().fg(state_color(state))),
+        None => Span::raw(NONE_TEXT),
+    }
 }
 
 /// The text of the marker in front of the selected row.
