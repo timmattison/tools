@@ -13,6 +13,7 @@ path = "src/lib.rs"
 base64.workspace = true
 chrono.workspace = true
 childenv.workspace = true
+crossterm.workspace = true
 notify.workspace = true
 proctree.workspace = true
 runlimit.workspace = true
