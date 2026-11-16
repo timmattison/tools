@@ -8,13 +8,20 @@ use crate::state::ZellijLocation;
 /// session.
 #[must_use]
 pub fn list_sessions_argv() -> Vec<String> {
-    Vec::new()
+    ["zellij", "list-sessions", "--no-formatting"]
+        .iter()
+        .map(ToString::to_string)
+        .collect()
 }
 
 /// Makes the argv that focuses the pane at `location`.
 #[must_use]
-pub fn focus_argv(_location: &ZellijLocation) -> Vec<String> {
-    Vec::new()
+pub fn focus_argv(location: &ZellijLocation) -> Vec<String> {
+    ["zellij", "--session", &location.session, "action", "focus-pane-id"]
+        .iter()
+        .map(ToString::to_string)
+        .chain(std::iter::once(location.pane.terminal_target()))
+        .collect()
 }
 
 #[cfg(test)]
