@@ -216,10 +216,10 @@ impl Home {
 
     /// Starts the status item of `target` in the background with the
     /// arguments `extra` and a life bound of `seconds`, and returns its PID.
+    /// A run with no `--foreground` starts the status item in the background.
     fn start_bounded(&mut self, target: Target, extra: &[&str], seconds: &str) -> u32 {
         let mut args = target.args();
         args.extend_from_slice(extra);
-        args.push("--background");
         // `output` waits until the start closes its stdout and its stderr.
         // A status item that kept them open would keep the test here until
         // its bound, and the test would then find it gone.
@@ -363,7 +363,7 @@ fn a_foreground_run_stops_the_background_status_item() {
 }
 
 #[test]
-fn a_plain_start_stops_the_background_status_item() {
+fn a_second_plain_run_stops_the_status_item() {
     let mut home = Home::new();
     let pid = home.start(Target::Local);
     home.assert_stops(Target::Local, &[], pid);
@@ -373,7 +373,7 @@ fn a_plain_start_stops_the_background_status_item() {
 fn a_start_after_a_stop_starts_a_new_status_item() {
     let mut home = Home::new();
     let first = home.start(Target::Local);
-    home.assert_stops(Target::Local, &["--background"], first);
+    home.assert_stops(Target::Local, &[], first);
     let second = home.start(Target::Local);
     assert_ne!(first, second);
     assert!(alive(second), "the status item {second} does not run");
@@ -485,7 +485,7 @@ fn a_second_start_of_a_host_stops_only_the_status_item_of_that_host() {
     let local = home.start(Target::Local);
     let alpha = home.start(Target::Host(ALPHA));
     let beta = home.start(Target::Host(BETA));
-    home.assert_stops(Target::Host(ALPHA), &["--background"], alpha);
+    home.assert_stops(Target::Host(ALPHA), &[], alpha);
     assert!(
         alive(local),
         "the stop of {ALPHA} stopped the local status item"
@@ -519,7 +519,7 @@ fn a_local_start_stops_only_the_local_status_item() {
     let mut home = Home::new();
     let alpha = home.start(Target::Host(ALPHA));
     let local = home.start(Target::Local);
-    home.assert_stops(Target::Local, &["--background"], local);
+    home.assert_stops(Target::Local, &[], local);
     assert!(
         alive(alpha),
         "the local stop stopped the status item of {ALPHA}"
@@ -591,7 +591,8 @@ impl Start {
     }
 }
 
-/// Two `glance --background` of one target at the same moment.
+/// Two plain runs of `glance` for one target at the same moment. Each one
+/// starts the status item in the background.
 ///
 /// The race has several valid orders. One start can win the claim, and the
 /// other copy can lose it and exit 1 with the another-started line. One start
@@ -599,7 +600,7 @@ impl Start {
 /// with a stopped line and the other with a ready line or a stopped line. The
 /// test accepts each order and asserts the rules that hold in all of them.
 #[test]
-fn two_background_starts_at_the_same_moment_give_at_most_one_status_item() {
+fn two_plain_starts_at_the_same_moment_give_at_most_one_status_item() {
     let mut home = Home::new();
     let target = Target::Local;
     let barrier = Barrier::new(2);
@@ -608,7 +609,7 @@ fn two_background_starts_at_the_same_moment_give_at_most_one_status_item() {
             .map(|_| {
                 scope.spawn(|| {
                     barrier.wait();
-                    home.run(&["--background"])
+                    home.run(&[])
                 })
             })
             .collect();

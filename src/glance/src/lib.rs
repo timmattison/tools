@@ -60,8 +60,9 @@
 //! first looks for the status item of its target. When one runs, the run
 //! stops it and starts nothing. Thus a second run of the same command closes
 //! the status item, and a run for a different target leaves it alone.
-//! `--background` starts the status item in a detached copy of `glance` and
-//! returns to the shell.
+//! A run starts a new status item in a detached copy of `glance` and returns
+//! to the shell. `--foreground` keeps the status item in the process of the
+//! run, which holds the terminal.
 //!
 //! # Unsafe code
 //!

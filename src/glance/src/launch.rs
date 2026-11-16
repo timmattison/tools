@@ -52,9 +52,11 @@ const CHILD_DIRECTORY: &str = "/";
 /// How a run starts the status item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
-    /// The status item runs in this process, which holds the terminal.
+    /// The status item runs in this process, which holds the terminal. A run
+    /// with `--foreground` takes this mode.
     Foreground,
-    /// This process starts a copy that runs the status item, and returns.
+    /// This process starts a copy that runs the status item, and returns. A
+    /// run with no `--foreground` takes this mode.
     Background,
     /// This process is the copy that a background start made.
     BackgroundChild,

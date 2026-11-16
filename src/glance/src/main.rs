@@ -32,6 +32,8 @@ const AFTER_HELP: &str = "\
 Each target has one status item: this Mac, and each destination of --host.
 When the status item of the target runs already, glance stops it and starts
 no new one. Thus a second run of the same command closes the status item.
+A new status item runs in the background, and glance returns to the shell
+when it is up. -f keeps the status item in the foreground.
 --sample and --stream never stop a status item.";
 
 /// The text that `glance` gives on a platform other than macOS.
@@ -96,16 +98,18 @@ struct Cli {
     #[arg(long = flags::RESOLVE, requires = "host")]
     resolve: bool,
 
-    /// Start the status item in the background and return to the shell.
+    /// Run the status item in this process, which keeps the terminal until
+    /// the status item stops. Give it to a LaunchAgent. With no -f, glance
+    /// starts the status item in the background and returns to the shell.
     #[arg(short, long, conflicts_with_all = ["stream", "sample"])]
-    background: bool,
+    foreground: bool,
 
     /// The mark of the copy that a background start makes. A person never
     /// gives it.
     #[arg(
         long = flags::BACKGROUND_CHILD,
         hide = true,
-        conflicts_with_all = ["stream", "sample", "background"]
+        conflicts_with_all = ["stream", "sample", "foreground"]
     )]
     background_child: bool,
 
@@ -148,10 +152,10 @@ fn run(cli: Cli) -> ExitCode {
     let remote = cli.remote();
     let mode = if cli.background_child {
         Mode::BackgroundChild
-    } else if cli.background {
-        Mode::Background
-    } else {
+    } else if cli.foreground {
         Mode::Foreground
+    } else {
+        Mode::Background
     };
     launch::run(
         mode,
@@ -311,7 +315,7 @@ mod tests {
             exit_after: None,
         });
         assert!(cli.background_child);
-        assert!(!cli.background);
+        assert!(!cli.foreground);
         assert_eq!(cli.interval, interval);
         assert_eq!(cli.host, None);
         assert_eq!(cli.exit_after, None);
@@ -355,8 +359,17 @@ mod tests {
     }
 
     #[test]
-    fn background_with_stream_is_a_usage_error() {
-        let refused = Cli::try_parse_from(["glance", "--background", "--stream"]);
-        assert!(refused.is_err(), "the parse took --background --stream");
+    fn foreground_with_stream_is_a_usage_error() {
+        let refused = Cli::try_parse_from(["glance", "--foreground", "--stream"]);
+        assert!(refused.is_err(), "the parse took --foreground --stream");
+    }
+
+    #[test]
+    fn foreground_with_the_mark_of_the_copy_is_a_usage_error() {
+        let refused = Cli::try_parse_from(["glance", "--foreground", "--background-child"]);
+        assert!(
+            refused.is_err(),
+            "the parse took --foreground --background-child"
+        );
     }
 }
