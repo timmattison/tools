@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use proctree::Pid;
 
-use crate::state::StateFile;
+use crate::state::{StateFile, parse_state_file, pid_of_file_name};
 
 /// The result of the read of one state file.
 #[derive(Debug)]
@@ -30,8 +30,24 @@ pub fn state_file_path(dir: &Path, pid: Pid) -> PathBuf {
 /// state file of the contract, is `Unreadable`. A file whose pid is not the
 /// pid in its name is `Unreadable` too.
 #[must_use]
-pub fn read_state_file(_path: &Path) -> ReadOutcome {
-    ReadOutcome::Gone
+pub fn read_state_file(path: &Path) -> ReadOutcome {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return ReadOutcome::Gone,
+        Err(error) => return ReadOutcome::Unreadable(format!("cannot read the file: {error}")),
+    };
+    let file = match parse_state_file(&text) {
+        Ok(file) => file,
+        Err(error) => return ReadOutcome::Unreadable(error.to_string()),
+    };
+    let name_pid = path.file_name().and_then(pid_of_file_name);
+    if name_pid != Some(file.pid) {
+        return ReadOutcome::Unreadable(format!(
+            "the file names pid {}, and its name does not",
+            file.pid.as_u32()
+        ));
+    }
+    ReadOutcome::Present(file)
 }
 
 #[cfg(test)]
