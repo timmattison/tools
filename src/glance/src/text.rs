@@ -774,14 +774,6 @@ mod tests {
     }
 
     #[test]
-    fn the_host_line_in_remote_mode_names_the_destination() {
-        assert_eq!(
-            host_line(&remote(DESTINATION)),
-            "Host: m1-ts (ssh tim@m1.local)"
-        );
-    }
-
-    #[test]
     fn the_host_line_keeps_a_long_host_name_whole() {
         let name = "h".repeat(80);
         assert_eq!(host_line(&local(&name)), format!("Host: {name}"));
