@@ -60,13 +60,26 @@ impl FocusReport {
     /// Tells if each step that ran did succeed.
     #[must_use]
     pub fn succeeded(&self) -> bool {
-        false
+        self.zellij.as_ref().is_none_or(Result::is_ok) && self.wezterm.is_ok()
     }
 
     /// Makes the status line. Its parts are separated by ` · `.
     #[must_use]
     pub fn status_line(&self) -> String {
-        String::new()
+        let mut parts = Vec::new();
+        match &self.zellij {
+            None => {}
+            Some(Ok(pane)) => parts.push(format!(
+                "Zellij focused pane {}",
+                pane.terminal_target()
+            )),
+            Some(Err(error)) => parts.push(format!("Zellij failed: {error}")),
+        }
+        match &self.wezterm {
+            Ok(pane) => parts.push(format!("WezTerm focused pane {pane}")),
+            Err(error) => parts.push(format!("WezTerm failed: {error}")),
+        }
+        format!("{}: {}", self.label, parts.join(" · "))
     }
 }
 
