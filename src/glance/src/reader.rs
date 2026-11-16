@@ -75,7 +75,7 @@ impl Reader {
         let host = unsafe { libc::mach_host_self() };
         Reader {
             host,
-            host_name: HostName::from_raw(b""),
+            host_name: read_host_name(),
         }
     }
 
@@ -133,6 +133,28 @@ impl Reader {
             nice: info.cpu_ticks[NICE_INDEX],
         })
     }
+}
+
+/// The size of the buffer that receives the name of the host.
+const HOST_NAME_BUFFER: usize = 256;
+
+/// Reads the short name of this host through `gethostname`.
+///
+/// If the call fails, the name is empty, and the result is `unknown`.
+fn read_host_name() -> HostName {
+    let mut buffer = [0_u8; HOST_NAME_BUFFER];
+    // SAFETY: the pointer names a buffer of this function, and the length
+    // states its size in bytes. The call writes no more than that.
+    let answer =
+        unsafe { libc::gethostname(buffer.as_mut_ptr().cast::<libc::c_char>(), buffer.len()) };
+    if answer != 0 {
+        return HostName::from_raw(b"");
+    }
+    let end = buffer
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(buffer.len());
+    HostName::from_raw(buffer.get(..end).unwrap_or_default())
 }
 
 /// Reads the `i32` value of the `sysctl` `name`.
