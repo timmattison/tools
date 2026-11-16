@@ -16,3 +16,4 @@ pub mod state;
 pub mod store;
 pub mod sync;
 pub mod runner;
+pub mod notification;
