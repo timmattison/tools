@@ -276,4 +276,61 @@ mod tests {
         let (_, line) = line_with(&buffer, "No Claude Code session wrote a state file.");
         assert!(!line.contains("STATE"));
     }
+
+    #[test]
+    fn the_log_shows_a_change_of_state() {
+        let mut app = App::new();
+        app.board_mut()
+            .load(file(11, "dir11", PaneState::Idle, 100), None);
+        app.board_mut()
+            .apply(file(11, "dir11", PaneState::NeedsYou, 200), None);
+        let buffer = render(&app, 1_000);
+        assert!(lines(&buffer)
+            .iter()
+            .any(|line| line.contains("dir11  idle → needs-you")));
+        assert!(lines(&buffer).iter().any(|line| line.contains("Changes")));
+    }
+
+    #[test]
+    fn the_log_shows_a_new_session_with_a_dash() {
+        let mut app = App::new();
+        app.board_mut()
+            .apply(file(12, "dir12", PaneState::Working, 300), Some("beta".to_string()));
+        let buffer = render(&app, 1_000);
+        assert!(lines(&buffer)
+            .iter()
+            .any(|line| line.contains("beta  — → working")));
+    }
+
+    #[test]
+    fn the_log_shows_an_ended_session_with_a_dash() {
+        let mut app = App::new();
+        app.board_mut()
+            .load(file(13, "dir13", PaneState::Idle, 100), None);
+        app.board_mut().remove(Pid::new(13), EpochMillis::new(400));
+        let buffer = render(&app, 1_000);
+        assert!(lines(&buffer)
+            .iter()
+            .any(|line| line.contains("dir13  idle → —")));
+    }
+
+    #[test]
+    fn the_log_shows_at_most_eight_lines_with_the_newest_first() {
+        let mut app = App::new();
+        for number in 0..10_u32 {
+            let pid = 20 + number;
+            app.board_mut().apply(
+                file(pid, &format!("d{pid}"), PaneState::Working, u64::from(pid)),
+                None,
+            );
+        }
+        let buffer = render(&app, 1_000);
+        let log_lines: Vec<String> = lines(&buffer)
+            .into_iter()
+            .filter(|line| line.contains("— → working"))
+            .collect();
+        assert_eq!(log_lines.len(), 8);
+        assert!(log_lines[0].contains("d29  — → working"));
+        assert!(log_lines[7].contains("d22  — → working"));
+    }
 }
