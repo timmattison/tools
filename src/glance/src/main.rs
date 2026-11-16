@@ -5,6 +5,7 @@
 
 #[cfg(target_os = "macos")]
 use std::io::{self, Write};
+use std::num::NonZeroU32;
 use std::process::ExitCode;
 
 use buildinfo::version_string;
@@ -12,7 +13,10 @@ use clap::Parser;
 #[cfg(target_os = "macos")]
 use glance::connection::Remote;
 use glance::connection::{Destination, RemoteBinary, DEFAULT_REMOTE_BINARY};
+use glance::flags;
 use glance::interval::Interval;
+#[cfg(target_os = "macos")]
+use glance::launch::{self, Mode, Settings};
 #[cfg(target_os = "macos")]
 use glance::reader::Reader;
 #[cfg(target_os = "macos")]
@@ -22,6 +26,13 @@ use glance::text::{error_json, sample_json};
 
 /// The one-line description that `--help` shows.
 const ABOUT: &str = "A light menu bar monitor of the CPU share and the memory pressure";
+
+/// The text that `--help` shows after the options.
+const AFTER_HELP: &str = "\
+Each target has one status item: this Mac, and each destination of --host.
+When the status item of the target runs already, glance stops it and starts
+no new one. Thus a second run of the same command closes the status item.
+--sample and --stream never stop a status item.";
 
 /// The text that `glance` gives on a platform other than macOS.
 #[cfg(not(target_os = "macos"))]
@@ -41,10 +52,10 @@ const EXIT_WRITE_FAILED: u8 = 1;
 
 /// The command line of `glance`.
 #[derive(Parser)]
-#[command(name = "glance", version = version_string!(), about = ABOUT)]
+#[command(name = "glance", version = version_string!(), about = ABOUT, after_help = AFTER_HELP)]
 struct Cli {
     /// The time between two samples, in seconds, at least 0.25.
-    #[arg(long, value_name = "SECONDS", default_value_t = Interval::DEFAULT)]
+    #[arg(long = flags::INTERVAL, value_name = "SECONDS", default_value_t = Interval::DEFAULT)]
     interval: Interval,
 
     /// Take two readings one interval apart, print one JSON object, and stop.
@@ -61,18 +72,41 @@ struct Cli {
 
     /// Show the charts of a second Mac. glance opens one ssh connection to
     /// DESTINATION and runs `glance --stream` there.
-    #[arg(long, value_name = "DESTINATION", conflicts_with_all = ["stream", "sample"])]
+    #[arg(
+        long = flags::HOST,
+        value_name = "DESTINATION",
+        conflicts_with_all = ["stream", "sample"]
+    )]
     host: Option<Destination>,
 
     /// The path of glance on the second Mac. A leading ~/ names the home
     /// directory of the remote user, so put quotes around it.
     #[arg(
-        long,
+        long = flags::REMOTE_BINARY,
         value_name = "PATH",
         requires = "host",
         default_value = DEFAULT_REMOTE_BINARY
     )]
     remote_binary: RemoteBinary,
+
+    /// Start the status item in the background and return to the shell.
+    #[arg(short, long, conflicts_with_all = ["stream", "sample"])]
+    background: bool,
+
+    /// The mark of the copy that a background start makes. A person never
+    /// gives it.
+    #[arg(
+        long = flags::BACKGROUND_CHILD,
+        hide = true,
+        conflicts_with_all = ["stream", "sample", "background"]
+    )]
+    background_child: bool,
+
+    /// End the status item this many seconds after it is up. The tests give
+    /// it to each status item that they start, so that a status item that a
+    /// failed test leaves behind ends by itself.
+    #[arg(long = flags::EXIT_AFTER, hide = true, value_name = "SECONDS")]
+    exit_after: Option<NonZeroU32>,
 }
 
 fn main() -> ExitCode {
@@ -92,7 +126,21 @@ fn run(cli: Cli) -> ExitCode {
         destination,
         remote_binary: cli.remote_binary,
     });
-    glance::shell::run(cli.interval, remote)
+    let mode = if cli.background_child {
+        Mode::BackgroundChild
+    } else if cli.background {
+        Mode::Background
+    } else {
+        Mode::Foreground
+    };
+    launch::run(
+        mode,
+        Settings {
+            interval: cli.interval,
+            remote,
+            exit_after: cli.exit_after,
+        },
+    )
 }
 
 /// Takes two readings one interval apart and prints the sample as JSON.
@@ -222,5 +270,54 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(cli.remote_binary.as_str(), "~/bin/glance");
+    }
+
+    /// Parses the arguments that a background start gives to its copy of
+    /// `settings`, as the copy parses them.
+    #[cfg(target_os = "macos")]
+    fn parse_child(settings: &Settings) -> Cli {
+        let arguments = launch::child_arguments(settings);
+        Cli::try_parse_from(std::iter::once("glance".to_owned()).chain(arguments))
+            .expect("the copy parses its arguments")
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_copy_of_a_local_start_gets_the_same_settings() {
+        let interval: Interval = "0.25".parse().unwrap();
+        let cli = parse_child(&Settings {
+            interval,
+            remote: None,
+            exit_after: None,
+        });
+        assert!(cli.background_child);
+        assert!(!cli.background);
+        assert_eq!(cli.interval, interval);
+        assert_eq!(cli.host, None);
+        assert_eq!(cli.exit_after, None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_copy_of_a_host_start_gets_the_same_settings() {
+        let remote = Remote {
+            destination: "tim@m1-ts".parse().unwrap(),
+            remote_binary: "-odd bin/glance".parse().unwrap(),
+        };
+        let cli = parse_child(&Settings {
+            interval: Interval::DEFAULT,
+            remote: Some(remote.clone()),
+            exit_after: NonZeroU32::new(7),
+        });
+        assert!(cli.background_child);
+        assert_eq!(cli.host, Some(remote.destination));
+        assert_eq!(cli.remote_binary, remote.remote_binary);
+        assert_eq!(cli.exit_after, NonZeroU32::new(7));
+    }
+
+    #[test]
+    fn background_with_stream_is_a_usage_error() {
+        let refused = Cli::try_parse_from(["glance", "--background", "--stream"]);
+        assert!(refused.is_err(), "the parse took --background --stream");
     }
 }

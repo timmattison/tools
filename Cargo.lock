@@ -3904,6 +3904,7 @@ dependencies = [
  "buildinfo",
  "childenv",
  "clap",
+ "dirs",
  "libc",
  "objc2",
  "objc2-app-kit",
@@ -3911,6 +3912,7 @@ dependencies = [
  "objc2-foundation",
  "serde_json",
  "shellquote",
+ "tempfile",
  "testcolor",
 ]
 
