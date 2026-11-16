@@ -5624,7 +5624,7 @@ cargo install --git https://github.com/timmattison/tools whyslow
 
 ## glance (CPU and memory at a glance)
 
-Show two small charts in the macOS menu bar: the share of the CPU time that the system processes and the user processes use, and the memory pressure. In local mode, `glance` reads each value from the kernel in one call, starts no child process, and draws its charts into a pixel buffer itself. Thus the monitor adds almost nothing to the load that it shows.
+Show two small charts in the macOS menu bar: the share of the CPU time that the system processes and the user processes use, and the memory pressure. In local mode, the status item reads each value from the kernel in one call, starts no child process, and draws its charts into a pixel buffer itself. Thus the monitor adds almost nothing to the load that it shows.
 
 `glance --host <destination>` shows the same charts for a second Mac, through one SSH connection that stays open. See [Show a second Mac](#show-a-second-mac).
 
