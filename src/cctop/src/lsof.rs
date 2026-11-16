@@ -1,6 +1,8 @@
 //! Reads the output of `lsof`: the Unix sockets of Zellij and the tty of a
 //! process.
 
+use std::collections::HashSet;
+
 use proctree::Pid;
 
 /// One Unix socket of a process.
@@ -64,8 +66,26 @@ pub fn parse_unix_sockets(text: &str) -> Vec<UnixSocket> {
 /// socket of the server. The sockets that a server holds with itself do not
 /// count. The result is sorted and has no duplicate.
 #[must_use]
-pub fn client_pids(_server: Pid, _sockets: &[UnixSocket]) -> Vec<Pid> {
-    Vec::new()
+pub fn client_pids(server: Pid, sockets: &[UnixSocket]) -> Vec<Pid> {
+    let addresses: HashSet<&str> = sockets
+        .iter()
+        .filter(|socket| socket.pid == server)
+        .map(|socket| socket.address.as_str())
+        .collect();
+    let mut clients: Vec<Pid> = sockets
+        .iter()
+        .filter(|socket| socket.pid != server)
+        .filter(|socket| {
+            socket
+                .peer
+                .as_deref()
+                .is_some_and(|peer| addresses.contains(peer))
+        })
+        .map(|socket| socket.pid)
+        .collect();
+    clients.sort_by_key(|pid| pid.as_u32());
+    clients.dedup();
+    clients
 }
 
 #[cfg(test)]
