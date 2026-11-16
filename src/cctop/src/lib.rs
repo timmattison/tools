@@ -13,3 +13,4 @@ pub mod liveness;
 pub mod paths;
 pub mod registry;
 pub mod state;
+pub mod store;
