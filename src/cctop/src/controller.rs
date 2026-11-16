@@ -224,8 +224,7 @@ mod tests {
         write(dir.path(), 100, "needs-you", 10);
         // The process started after the session claims: the pid was reused.
         let sync = Sync::with_dirs(dir.path().to_path_buf(), dir.path().join("sessions"));
-        let mut controller =
-            Controller::new(sync.clone(), Box::new(clock_with(100, START_SECS)), true);
+        let mut controller = Controller::new(sync, Box::new(clock_with(100, START_SECS)), true);
         controller.start().unwrap();
         assert_eq!(controller.app().board().len(), 1);
         controller.clock = Box::new(clock_with(100, STARTED_MS / 1000 + 50));
