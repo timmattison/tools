@@ -1,15 +1,15 @@
 //! `glance` — a light macOS menu bar monitor of the CPU share and the memory
 //! pressure.
 //!
-//! One status item in the menu bar shows two small charts. The left chart
-//! shows the share of the CPU time that the system and the user processes
-//! use. The right chart shows the memory in use, in the color of the pressure
-//! level of the kernel. The short name of the Mac is in small text under the
-//! charts.
+//! One status item in the menu bar shows two small charts, each as high as the
+//! menu bar. The left chart shows the share of the CPU time that the
+//! system and the user processes use. The right chart shows the memory in use,
+//! in the color of the pressure level of the kernel. The short name of the Mac
+//! is in small text at the top of the charts.
 //!
 //! The monitors that this tool replaces use much memory and much CPU time. The
-//! kernel gives each value in one cheap call, and two charts of 30 columns need
-//! very little drawing. So `glance` reads the kernel directly and draws its
+//! kernel gives each value in one cheap call, and two charts of 32 columns
+//! need very little drawing. So `glance` reads the kernel directly and draws its
 //! charts into a pixel buffer itself. In local mode, the status item starts no
 //! child process and no thread.
 //!

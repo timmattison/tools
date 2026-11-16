@@ -1,8 +1,17 @@
 //! The two charts of the status item, drawn into a pixel buffer.
 //!
-//! The left chart shows the CPU share. The right chart shows the memory in use,
-//! in the color of the pressure level. Each chart has one column for each
-//! sample that the history holds, and the newest sample sits at the right edge.
+//! Each chart has a frame and is as high as the status bar, in whole points.
+//! The two charts sit side by side and share one border, with no gap. The left
+//! chart shows the CPU share. The right chart shows the memory in use, in the
+//! color of the pressure level.
+//!
+//! Each sample is one point wide. Each chart has 32 columns inside its frame,
+//! and it shows that number of the newest samples, with the newest at the right
+//! edge. The label rows lie at the top of the interior. The shell gets the
+//! glyphs of the name of the host from AppKit, and [`Pixmap::paint_label`]
+//! paints them. Where the name crosses a column or a frame, its ink is black
+//! or white, whichever contrasts more with the pixel behind it.
+//!
 //! The drawing is pure arithmetic on a plain buffer, so a test reads each
 //! pixel and AppKit only has to show the bytes.
 //!
@@ -37,17 +46,21 @@ pub const UNKNOWN: Rgba = [142, 142, 147, 255];
 const LABEL_LIGHT: Rgba = [0, 0, 0, 217];
 /// The label color in the dark appearance. It is white at 85%.
 const LABEL_DARK: Rgba = [255, 255, 255, 217];
+/// The menu bar in the light appearance, for the choice of the ink of the
+/// label. It is white.
+const BAR_LIGHT: Rgba = [255, 255, 255, 255];
+/// The menu bar in the dark appearance, for the choice of the ink of the
+/// label. It is black.
+const BAR_DARK: Rgba = [0, 0, 0, 255];
 
 /// The width of the frame of each chart, in points.
 pub const FRAME_POINTS: u32 = 1;
-/// The width of the gap between the two charts, in points.
-pub const GAP_POINTS: u32 = 4;
-/// The space above and below the charts in the status bar, in points.
-pub const VERTICAL_INSET_POINTS: u32 = 3;
-/// The space above the charts when the label is on, in points.
-pub const LABEL_TOP_INSET_POINTS: u32 = 1;
-/// The gap between the charts and the label band, in points.
-pub const LABEL_GAP_POINTS: u32 = 1;
+/// The number of columns inside the frame of each chart, thus the number of
+/// samples that each chart shows. With one shared border, the image is
+/// 67 points wide, and the label gets 65 points between the two outer frames.
+/// That holds a host name such as `M4-Pro-Mac-Mini` (62.7 points in the label
+/// font) with no ellipsis.
+const CHART_COLUMNS: u32 = 32;
 
 /// The number of bytes of one pixel.
 const BYTES_PER_PIXEL: usize = 4;
@@ -68,7 +81,8 @@ pub enum Appearance {
 }
 
 impl Appearance {
-    /// The color of the label text. It is the label color of the appearance.
+    /// The label color of the appearance. The label takes it over an empty
+    /// pixel, and the frame takes it everywhere.
     #[must_use]
     pub fn label(self) -> Rgba {
         match self {
@@ -82,6 +96,19 @@ impl Appearance {
     #[must_use]
     pub fn frame(self) -> Rgba {
         self.label()
+    }
+
+    /// The color of the menu bar behind the image, as far as the choice of
+    /// the ink of the label needs it.
+    ///
+    /// The real bar is translucent. But a light bar is nearer to white than
+    /// to black, and a dark bar is nearer to black than to white, so white
+    /// and black give the same choice.
+    fn bar(self) -> Rgba {
+        match self {
+            Appearance::Light => BAR_LIGHT,
+            Appearance::Dark => BAR_DARK,
+        }
     }
 }
 
@@ -112,19 +139,24 @@ impl fmt::Display for GeometryError {
 
 impl std::error::Error for GeometryError {}
 
-/// The height of the charts in points, and the pixels per point.
+/// The height of the charts in points, the pixels per point, and the label.
+///
+/// The height of the image is the height of each chart. The width of the image
+/// does not depend on the height.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Geometry {
     height_points: u32,
     scale: u32,
-    band_points: Option<u32>,
+    label_points: Option<u32>,
 }
 
 impl Geometry {
     /// The smallest height. A frame, one row, and a frame.
     pub const MIN_HEIGHT_POINTS: u32 = 3;
 
-    /// Makes a geometry.
+    /// Makes a geometry without a label.
+    ///
+    /// The height is the height of the image and of each chart.
     ///
     /// # Errors
     ///
@@ -139,7 +171,7 @@ impl Geometry {
         Ok(Geometry {
             height_points,
             scale,
-            band_points: None,
+            label_points: None,
         })
     }
 
@@ -149,72 +181,63 @@ impl Geometry {
     /// and the line height of the label text. The line height is `None` when
     /// there is no label. The scale is the backing scale rounded, and at least 1.
     ///
-    /// The band is the line height rounded up to whole points. A line height
-    /// that is not finite or not above 0 gives no band. With a band, the charts
-    /// take the whole points of the thickness less the inset above, the gap,
-    /// and the band. If that height is below `MIN_HEIGHT_POINTS`, the label goes
-    /// away. Without a band, the height is the whole points of the thickness
-    /// less the inset above and below, and at least `MIN_HEIGHT_POINTS`. An
-    /// input that is not finite gives the minimum.
+    /// The height of the charts is the whole points of the thickness, and at
+    /// least `MIN_HEIGHT_POINTS`. An input that is not finite gives the
+    /// minimum. The label does not change the height.
+    ///
+    /// The label height is the line height rounded up to whole points. A line
+    /// height that is not finite or not above 0 gives no label. If the interior
+    /// of a chart is lower than the label height, there is no label too.
     #[must_use]
     pub fn from_status_bar(
         thickness_points: f64,
         backing_scale: f64,
         label_line_height_points: Option<f64>,
     ) -> Geometry {
-        let thickness = whole_number(thickness_points.floor());
+        let height_points = whole_number(thickness_points.floor()).max(Self::MIN_HEIGHT_POINTS);
         let scale = whole_number(backing_scale.round()).max(1);
-        let labeled = label_line_height_points
+        let interior = height_points - 2 * FRAME_POINTS;
+        let label_points = label_line_height_points
             .filter(|line_height| line_height.is_finite() && *line_height > 0.0)
             .map(|line_height| whole_number(line_height.ceil()))
-            .and_then(|band| {
-                let height_points = thickness
-                    .saturating_sub(LABEL_TOP_INSET_POINTS + LABEL_GAP_POINTS)
-                    .saturating_sub(band);
-                (height_points >= Self::MIN_HEIGHT_POINTS).then_some(Geometry {
-                    height_points,
-                    scale,
-                    band_points: Some(band),
-                })
-            });
-        labeled.unwrap_or_else(|| Geometry {
-            height_points: thickness
-                .saturating_sub(2 * VERTICAL_INSET_POINTS)
-                .max(Self::MIN_HEIGHT_POINTS),
+            .filter(|label| *label <= interior);
+        Geometry {
+            height_points,
             scale,
-            band_points: None,
-        })
-    }
-
-    /// The height of the whole image in points. It holds the charts and the label band.
-    #[must_use]
-    pub fn image_height_points(self) -> u32 {
-        match self.band_points {
-            Some(band) => LABEL_TOP_INSET_POINTS + self.height_points + LABEL_GAP_POINTS + band,
-            None => self.height_points,
+            label_points,
         }
     }
 
-    /// The rows of the charts, in points from the top of the image.
+    /// The width of the whole image in points. It holds the two charts, which
+    /// share the border between them.
     #[must_use]
-    pub fn chart_rows_points(self) -> std::ops::Range<u32> {
-        let top = if self.band_points.is_some() {
-            LABEL_TOP_INSET_POINTS
-        } else {
-            0
-        };
-        top..top + self.height_points
+    pub fn image_width_points(self) -> u32 {
+        CHART_COUNT * chart_width_points() - FRAME_POINTS
     }
 
-    /// The rows of the label band, in points from the top of the image.
-    /// It is `None` when there is no label. The band touches the bottom edge.
+    /// The height of the whole image in points. It is the height of each chart.
     #[must_use]
-    pub fn band_rows_points(self) -> Option<std::ops::Range<u32>> {
-        self.band_points
-            .map(|band| self.image_height_points() - band..self.image_height_points())
+    pub fn image_height_points(self) -> u32 {
+        self.height_points
     }
 
-    /// The height of the charts in points.
+    /// The number of columns inside each frame, thus the number of samples
+    /// that each chart shows. It does not depend on the height.
+    #[must_use]
+    pub fn columns(self) -> std::num::NonZeroUsize {
+        let columns = usize::try_from(CHART_COLUMNS).unwrap_or(usize::MAX);
+        std::num::NonZeroUsize::new(columns).unwrap_or(std::num::NonZeroUsize::MIN)
+    }
+
+    /// The rows of the label, in points from the top of the image.
+    /// It is `None` when there is no label. The rows start inside the frame.
+    #[must_use]
+    pub fn label_rows_points(self) -> Option<std::ops::Range<u32>> {
+        self.label_points
+            .map(|label| FRAME_POINTS..FRAME_POINTS + label)
+    }
+
+    /// The height of each chart in points. It is also the height of the image.
     #[must_use]
     pub fn height_points(self) -> u32 {
         self.height_points
@@ -225,6 +248,11 @@ impl Geometry {
     pub fn scale(self) -> u32 {
         self.scale
     }
+}
+
+/// The width of one chart in points: its columns and the frame on each side.
+fn chart_width_points() -> u32 {
+    CHART_COLUMNS + 2 * FRAME_POINTS
 }
 
 /// Converts a number that is already whole into a `u32`.
@@ -369,6 +397,215 @@ impl Pixmap {
             })
             .collect()
     }
+
+    /// Paints the glyphs of the label on the bar of `appearance`.
+    ///
+    /// The ink of each pixel is black or white, whichever has the larger WCAG
+    /// contrast with the pixel as it shows on the bar. Over an empty pixel,
+    /// that is the label color of `appearance`. Over a column, it is black in
+    /// both appearances.
+    ///
+    /// Each pixel takes its ink at the share of its alpha that the coverage of
+    /// the glyphs in that ink gives, over the color that the pixel had. A
+    /// pixel with a coverage of 0 keeps its color.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SizeMismatch`] when the glyphs are not the size of the image
+    /// in pixels. The image then stays as it was.
+    pub fn paint_label(
+        &mut self,
+        glyphs: &Glyphs,
+        appearance: Appearance,
+    ) -> Result<(), SizeMismatch> {
+        if glyphs.size() != (self.width, self.height) {
+            return Err(SizeMismatch {
+                image: (self.width, self.height),
+                glyphs: glyphs.size(),
+            });
+        }
+        let pixels = self.bytes.as_chunks_mut::<BYTES_PER_PIXEL>().0;
+        for (index, pixel) in pixels.iter_mut().enumerate() {
+            let covered =
+                |ink: Appearance| glyphs.coverage(ink).values.get(index).copied().unwrap_or(0);
+            if covered(Appearance::Light) == 0 && covered(Appearance::Dark) == 0 {
+                continue;
+            }
+            let ink = ink_over(*pixel, appearance);
+            let amount = covered(ink);
+            if amount > 0 {
+                *pixel = blend(ink.label(), amount, *pixel);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// How much the glyphs of the label cover each pixel of an image, from 0 for
+/// none to 255 for all. Row 0 is at the top. Rows have no padding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Coverage {
+    width: u32,
+    height: u32,
+    values: Vec<u8>,
+}
+
+impl Coverage {
+    /// Makes the coverage of an image of `width` by `height` pixels.
+    ///
+    /// Returns `None` when `values` does not hold exactly one value for each
+    /// pixel.
+    #[must_use]
+    pub fn new(width: u32, height: u32, values: Vec<u8>) -> Option<Coverage> {
+        let pixels = usize::try_from(u64::from(width) * u64::from(height)).ok()?;
+        (values.len() == pixels).then_some(Coverage {
+            width,
+            height,
+            values,
+        })
+    }
+}
+
+/// The glyphs of the label: how much they cover each pixel when AppKit draws
+/// them in the label color of each appearance.
+///
+/// AppKit draws white text a little bolder than black text, so the same text
+/// covers more of each pixel in white, the label color of the dark
+/// appearance. [`Pixmap::paint_label`] takes the coverage of the ink that it
+/// paints, so each ink looks as AppKit draws it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Glyphs {
+    /// The coverage in the label color of the light appearance.
+    light: Coverage,
+    /// The coverage in the label color of the dark appearance.
+    dark: Coverage,
+}
+
+impl Glyphs {
+    /// Pairs the coverage in the label color of the light appearance with the
+    /// coverage in the label color of the dark appearance.
+    ///
+    /// Returns `None` when the two coverages are not the same size.
+    #[must_use]
+    pub fn new(light: Coverage, dark: Coverage) -> Option<Glyphs> {
+        ((light.width, light.height) == (dark.width, dark.height)).then_some(Glyphs { light, dark })
+    }
+
+    /// The width and the height of the glyphs, in pixels.
+    fn size(&self) -> (u32, u32) {
+        (self.light.width, self.light.height)
+    }
+
+    /// The coverage of the glyphs in the label color of `appearance`.
+    fn coverage(&self, appearance: Appearance) -> &Coverage {
+        match appearance {
+            Appearance::Light => &self.light,
+            Appearance::Dark => &self.dark,
+        }
+    }
+}
+
+/// The reason that [`Pixmap::paint_label`] refuses the glyphs: they are not
+/// the size of the image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SizeMismatch {
+    /// The width and the height of the image, in pixels.
+    pub image: (u32, u32),
+    /// The width and the height of the glyphs, in pixels.
+    pub glyphs: (u32, u32),
+}
+
+impl fmt::Display for SizeMismatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (image_width, image_height) = self.image;
+        let (glyphs_width, glyphs_height) = self.glyphs;
+        write!(
+            f,
+            "the glyphs are {glyphs_width}x{glyphs_height} pixels, \
+             but the image is {image_width}x{image_height} pixels"
+        )
+    }
+}
+
+impl std::error::Error for SizeMismatch {}
+
+/// The color of a pixel after `ink` covers the share `coverage` of it, over
+/// the color `behind`.
+///
+/// This is the "source over" rule on colors whose alpha is not premultiplied.
+/// The coverage scales the alpha of the ink. Each channel rounds to the
+/// nearest whole value.
+fn blend(ink: Rgba, coverage: u8, behind: Rgba) -> Rgba {
+    let unit = f64::from(u8::MAX);
+    let [ink_red, ink_green, ink_blue, ink_alpha] = ink;
+    let [behind_red, behind_green, behind_blue, behind_alpha] = behind;
+    let ink_weight = f64::from(ink_alpha) / unit * f64::from(coverage) / unit;
+    let behind_weight = f64::from(behind_alpha) / unit * (1.0 - ink_weight);
+    let alpha = ink_weight + behind_weight;
+    if alpha <= 0.0 {
+        return TRANSPARENT;
+    }
+    let mix = |ink: u8, behind: u8| {
+        to_channel((f64::from(ink) * ink_weight + f64::from(behind) * behind_weight) / alpha)
+    };
+    [
+        mix(ink_red, behind_red),
+        mix(ink_green, behind_green),
+        mix(ink_blue, behind_blue),
+        to_channel(alpha * unit),
+    ]
+}
+
+/// A channel value from 0 to 255, rounded to the nearest whole value.
+fn to_channel(value: f64) -> u8 {
+    u8::try_from(whole_number(value.round())).unwrap_or(u8::MAX)
+}
+
+/// The weights of the red, green, and blue channels in the relative
+/// luminance of WCAG 2.
+const LUMINANCE_WEIGHTS: [f64; 3] = [0.2126, 0.7152, 0.0722];
+/// The flare that WCAG 2 adds to each luminance in a contrast ratio.
+const CONTRAST_FLARE: f64 = 0.05;
+/// The largest sRGB value, from 0 to 1, on the linear part of the sRGB curve.
+const SRGB_LINEAR_LIMIT: f64 = 0.040_45;
+/// The slope of the linear part of the sRGB curve.
+const SRGB_LINEAR_SLOPE: f64 = 12.92;
+/// The offset of the power part of the sRGB curve.
+const SRGB_OFFSET: f64 = 0.055;
+/// The exponent of the power part of the sRGB curve.
+const SRGB_EXPONENT: f64 = 2.4;
+
+/// The relative luminance of the color of an opaque pixel, from 0 for black
+/// to 1 for white, as WCAG 2 gives it. The alpha is not used.
+fn relative_luminance([red, green, blue, _]: Rgba) -> f64 {
+    let linear = |channel: u8| {
+        let value = f64::from(channel) / f64::from(u8::MAX);
+        if value <= SRGB_LINEAR_LIMIT {
+            value / SRGB_LINEAR_SLOPE
+        } else {
+            ((value + SRGB_OFFSET) / (1.0 + SRGB_OFFSET)).powf(SRGB_EXPONENT)
+        }
+    };
+    let [red_weight, green_weight, blue_weight] = LUMINANCE_WEIGHTS;
+    red_weight * linear(red) + green_weight * linear(green) + blue_weight * linear(blue)
+}
+
+/// The ink of the label over `behind`: the appearance whose label color
+/// contrasts more with `behind` as it shows on the bar of `appearance`.
+///
+/// The label color of the light appearance is black, and the label color of
+/// the dark appearance is white. The contrast is the ratio of WCAG 2. Over an
+/// empty pixel, the bar itself is behind the label, so the ink is the label
+/// color of `appearance`.
+fn ink_over(behind: Rgba, appearance: Appearance) -> Appearance {
+    let shown = relative_luminance(blend(behind, u8::MAX, appearance.bar())) + CONTRAST_FLARE;
+    let white = 1.0 + CONTRAST_FLARE;
+    let black = CONTRAST_FLARE;
+    if white / shown > shown / black {
+        Appearance::Dark
+    } else {
+        Appearance::Light
+    }
 }
 
 /// One color channel multiplied by its alpha, rounded to the nearest value.
@@ -395,55 +632,57 @@ fn memory_rows(percent_in_use: u8, rows: u32) -> u32 {
 
 /// Draws the two charts of the history.
 ///
-/// The image is `Geometry::image_height_points` high. The charts start at the
-/// top of `Geometry::chart_rows_points`. The rows of the label band, and the
-/// rows above and below the charts, stay transparent.
+/// The image is `Geometry::image_width_points` wide and
+/// `Geometry::image_height_points` high. The CPU chart is on the left, and the
+/// memory chart is on the right. Each chart has a frame on its outer rows and
+/// columns, and the two charts share the border between them.
 ///
-/// Each chart has `history.capacity()` columns inside of a frame. The CPU chart
-/// is on the left, then a transparent gap, then the memory chart. The newest
-/// sample sits in the rightmost column of each chart. A column that has no
-/// sample yet stays empty.
+/// Each chart has `Geometry::columns` columns inside of its frame, and it shows
+/// that number of the newest samples. The newest sample sits in the rightmost
+/// column. A column that has no sample yet stays empty. The capacity of the
+/// history does not change the width of the image.
 ///
-/// # Panics
-///
-/// Panics if the capacity of the history does not fit in a `u32`.
+/// The function draws no text. The label rows stay empty for the shell.
 #[must_use]
 pub fn render(history: &History<Sample>, geometry: Geometry, appearance: Appearance) -> Pixmap {
     let scale = geometry.scale;
-    let capacity = u32::try_from(history.capacity()).expect("the capacity fits in a u32");
-    let chart_width = capacity + 2 * FRAME_POINTS;
+    let height = geometry.height_points;
+    let width = chart_width_points();
+    let columns = CHART_COLUMNS;
     let mut pixmap = Pixmap::empty(
-        CHART_COUNT * chart_width + GAP_POINTS,
+        geometry.image_width_points(),
         geometry.image_height_points(),
         scale,
     );
 
-    let rows = (geometry.height_points - 2 * FRAME_POINTS) * scale;
-    let chart_top = geometry.chart_rows_points().start * scale;
-    let interior_top = chart_top + FRAME_POINTS * scale;
+    let rows = (height - 2 * FRAME_POINTS) * scale;
+    let interior_top = FRAME_POINTS * scale;
     let interior_bottom = interior_top + rows;
-    let chart_origins = [0, chart_width + GAP_POINTS];
+    // The memory chart starts on the right border of the CPU chart.
+    let chart_origins = [0, width - FRAME_POINTS];
 
     for origin in chart_origins {
         pixmap.fill(
             origin * scale,
-            chart_top,
-            chart_width * scale,
-            geometry.height_points * scale,
+            0,
+            width * scale,
+            height * scale,
             appearance.frame(),
         );
         pixmap.fill(
             (origin + FRAME_POINTS) * scale,
             interior_top,
-            capacity * scale,
+            columns * scale,
             rows,
             TRANSPARENT,
         );
     }
 
-    let count = u32::try_from(history.len()).unwrap_or(capacity);
-    for (position, item) in (0..count).zip(history.iter()) {
-        let slot = capacity - count + position;
+    let shown = history.len().min(geometry.columns().get());
+    let skipped = history.len() - shown;
+    let count = u32::try_from(shown).unwrap_or(columns);
+    for (position, item) in (0..count).zip(history.iter().skip(skipped)) {
+        let slot = columns - count + position;
         let [cpu_origin, memory_origin] = chart_origins;
         let cpu_x = (cpu_origin + FRAME_POINTS + slot) * scale;
         let memory_x = (memory_origin + FRAME_POINTS + slot) * scale;
@@ -486,10 +725,15 @@ mod tests {
 
     /// The scales that each pixel test runs at.
     const SCALES: [u32; 2] = [1, 2];
-    /// The height of the charts in the tests. The interior is 16 points high.
-    const HEIGHT_POINTS: u32 = 18;
-    /// The number of columns of the charts in most tests.
-    const CAPACITY: usize = 30;
+    /// The height of the charts in the tests, in points. The interior is 20 points high.
+    const HEIGHT: u32 = 22;
+    /// The number of columns inside each frame. It does not depend on the height.
+    const COLUMNS: usize = 32;
+    /// The width of the image in points: two charts of 34 points that share one border.
+    const IMAGE_WIDTH: u32 = 67;
+    /// The line height of the 7-point system font on the Mac of the author.
+    /// The label is 9 points high.
+    const LINE_HEIGHT: f64 = 8.24;
     /// The index of the CPU chart.
     const CPU_CHART: u32 = 0;
     /// The index of the memory chart.
@@ -527,7 +771,7 @@ mod tests {
     }
 
     fn geometry(scale: u32) -> Geometry {
-        Geometry::new(HEIGHT_POINTS, scale).unwrap()
+        Geometry::new(HEIGHT, scale).unwrap()
     }
 
     /// Builds a sample from the ticks of one interval and the raw pressure.
@@ -554,22 +798,22 @@ mod tests {
 
     /// The number of rows of the interior at the scale.
     fn rows(scale: u32) -> u32 {
-        (HEIGHT_POINTS - 2 * FRAME_POINTS) * scale
+        (HEIGHT - 2 * FRAME_POINTS) * scale
     }
 
-    /// The x pixel of the left edge of a slot, from the layout rules.
-    fn slot_x(columns: usize, chart: u32, slot: usize, scale: u32) -> u32 {
-        let columns = u32::try_from(columns).unwrap();
+    /// The x pixel of the left edge of a slot, from the layout rules. The
+    /// memory chart starts on the right border of the CPU chart.
+    fn slot_x(chart: u32, slot: usize, scale: u32) -> u32 {
         let slot = u32::try_from(slot).unwrap();
-        let chart_origin = chart * (columns + 2 * FRAME_POINTS + GAP_POINTS);
-        (chart_origin + FRAME_POINTS + slot) * scale
+        let columns = u32::try_from(COLUMNS).unwrap();
+        (chart * (columns + FRAME_POINTS) + FRAME_POINTS + slot) * scale
     }
 
     /// The colors of one column, from the bottom row of the interior up.
     /// Each of the `scale` pixels of a row must have the same color.
-    fn column(pixmap: &Pixmap, columns: usize, chart: u32, slot: usize, scale: u32) -> Vec<Rgba> {
-        let x0 = slot_x(columns, chart, slot, scale);
-        let bottom = (HEIGHT_POINTS - FRAME_POINTS) * scale;
+    fn column(pixmap: &Pixmap, chart: u32, slot: usize, scale: u32) -> Vec<Rgba> {
+        let x0 = slot_x(chart, slot, scale);
+        let bottom = (HEIGHT - FRAME_POINTS) * scale;
         (0..rows(scale))
             .map(|row| {
                 let y = bottom - 1 - row;
@@ -600,35 +844,47 @@ mod tests {
     }
 
     #[test]
-    fn the_pixmap_has_the_size_of_the_layout() {
-        let history = history_of(CAPACITY, &[]);
+    fn the_image_is_two_charts_that_share_one_border() {
         for scale in SCALES {
-            let pixmap = render(&history, geometry(scale), Appearance::Light);
-            assert_eq!(pixmap.width(), 68 * scale);
-            assert_eq!(pixmap.height(), 18 * scale);
-            assert_eq!(pixmap.width_points(), 68);
-            assert_eq!(pixmap.height_points(), 18);
+            let geometry = Geometry::from_status_bar(22.0, f64::from(scale), Some(LINE_HEIGHT));
+            assert_eq!(geometry.height_points(), 22);
+            assert_eq!(geometry.image_height_points(), 22);
+            assert_eq!(geometry.image_width_points(), IMAGE_WIDTH);
+            assert_eq!(geometry.columns().get(), COLUMNS);
+
+            let pixmap = render(&history_of(COLUMNS, &[]), geometry, Appearance::Light);
+            assert_eq!(pixmap.width_points(), IMAGE_WIDTH);
+            assert_eq!(pixmap.height_points(), 22);
+            assert_eq!(pixmap.width(), IMAGE_WIDTH * scale);
+            assert_eq!(pixmap.height(), 22 * scale);
             let expected = usize::try_from(pixmap.width() * pixmap.height() * 4).unwrap();
             assert_eq!(pixmap.bytes().len(), expected);
         }
     }
 
+    /// The two charts overlap on one column of the frame. Thus the border
+    /// between the two interiors is one frame wide, and there is no gap.
     #[test]
-    fn the_frame_has_the_color_of_the_appearance_and_the_gap_is_transparent() {
+    fn each_chart_is_framed_with_no_margin_and_one_shared_border() {
         assert_ne!(Appearance::Light.frame(), Appearance::Dark.frame());
-        let history = history_of(CAPACITY, &[]);
+        let history = history_of(COLUMNS, &[]);
         for scale in SCALES {
+            let geometry = Geometry::from_status_bar(22.0, f64::from(scale), Some(LINE_HEIGHT));
             for appearance in [Appearance::Light, Appearance::Dark] {
-                let pixmap = render(&history, geometry(scale), appearance);
+                let pixmap = render(&history, geometry, appearance);
+                assert_eq!(pixmap.width_points(), IMAGE_WIDTH);
+                assert_eq!(pixmap.height_points(), 22);
+                let height = 22 * scale;
+                let width = 34 * scale;
+                let frame = FRAME_POINTS * scale;
                 for chart in [CPU_CHART, MEMORY_CHART] {
-                    let left = slot_x(CAPACITY, chart, 0, scale) - FRAME_POINTS * scale;
-                    let width = (u32::try_from(CAPACITY).unwrap() + 2 * FRAME_POINTS) * scale;
-                    for y in 0..pixmap.height() {
+                    let left = chart * (width - frame);
+                    for y in 0..height {
                         for x in left..left + width {
-                            let on_edge = x < left + FRAME_POINTS * scale
-                                || x >= left + width - FRAME_POINTS * scale
-                                || y < FRAME_POINTS * scale
-                                || y >= pixmap.height() - FRAME_POINTS * scale;
+                            let on_edge = x < left + frame
+                                || x >= left + width - frame
+                                || y < frame
+                                || y >= height - frame;
                             let expected = if on_edge {
                                 appearance.frame()
                             } else {
@@ -638,28 +894,22 @@ mod tests {
                         }
                     }
                 }
-                let gap_left = (u32::try_from(CAPACITY).unwrap() + 2 * FRAME_POINTS) * scale;
-                for y in 0..pixmap.height() {
-                    for x in gap_left..gap_left + GAP_POINTS * scale {
-                        assert_eq!(pixmap.pixel(x, y), TRANSPARENT, "gap ({x}, {y})");
-                    }
-                }
             }
         }
     }
 
     /// Renders one sample in the newest slot and gives the CPU column.
     fn cpu_column_of(item: Sample, scale: u32) -> Vec<Rgba> {
-        let history = history_of(CAPACITY, &[item]);
+        let history = history_of(COLUMNS, &[item]);
         let pixmap = render(&history, geometry(scale), Appearance::Light);
-        column(&pixmap, CAPACITY, CPU_CHART, CAPACITY - 1, scale)
+        column(&pixmap, CPU_CHART, COLUMNS - 1, scale)
     }
 
     /// Renders one sample in the newest slot and gives the memory column.
     fn memory_column_of(item: Sample, scale: u32) -> Vec<Rgba> {
-        let history = history_of(CAPACITY, &[item]);
+        let history = history_of(COLUMNS, &[item]);
         let pixmap = render(&history, geometry(scale), Appearance::Light);
-        column(&pixmap, CAPACITY, MEMORY_CHART, CAPACITY - 1, scale)
+        column(&pixmap, MEMORY_CHART, COLUMNS - 1, scale)
     }
 
     #[test]
@@ -691,6 +941,7 @@ mod tests {
         for scale in SCALES {
             let column = cpu_column_of(sample(25, 50, 25, LEVEL_NORMAL, 100), scale);
             let quarter = rows(scale) / 4;
+            assert_eq!(quarter, 5 * scale);
             let expected = stack(&[
                 (SYSTEM, quarter),
                 (USER, 2 * quarter),
@@ -745,18 +996,18 @@ mod tests {
     #[test]
     fn a_partial_history_fills_the_slots_from_the_right_edge() {
         for scale in SCALES {
-            let history = history_of(CAPACITY, &three_samples());
+            let history = history_of(COLUMNS, &three_samples());
             let pixmap = render(&history, geometry(scale), Appearance::Light);
-            let cpu = |slot| column(&pixmap, CAPACITY, CPU_CHART, slot, scale);
-            let memory = |slot| column(&pixmap, CAPACITY, MEMORY_CHART, slot, scale);
-            assert_eq!(cpu(27), full_column(SYSTEM, scale));
-            assert_eq!(cpu(28), full_column(USER, scale));
-            assert_eq!(cpu(29), empty_column(scale));
-            assert_eq!(cpu(26), empty_column(scale));
-            assert_eq!(memory(27), full_column(NORMAL, scale));
-            assert_eq!(memory(28), full_column(WARN, scale));
-            assert_eq!(memory(29), full_column(CRITICAL, scale));
-            assert_eq!(memory(26), empty_column(scale));
+            let cpu = |slot| column(&pixmap, CPU_CHART, slot, scale);
+            let memory = |slot| column(&pixmap, MEMORY_CHART, slot, scale);
+            assert_eq!(cpu(29), full_column(SYSTEM, scale));
+            assert_eq!(cpu(30), full_column(USER, scale));
+            assert_eq!(cpu(31), empty_column(scale));
+            assert_eq!(cpu(28), empty_column(scale));
+            assert_eq!(memory(29), full_column(NORMAL, scale));
+            assert_eq!(memory(30), full_column(WARN, scale));
+            assert_eq!(memory(31), full_column(CRITICAL, scale));
+            assert_eq!(memory(28), empty_column(scale));
         }
     }
 
@@ -772,14 +1023,52 @@ mod tests {
             ];
             let history = history_of(SMALL, &samples);
             let pixmap = render(&history, geometry(scale), Appearance::Light);
-            let cpu = |slot| column(&pixmap, SMALL, CPU_CHART, slot, scale);
-            let memory = |slot| column(&pixmap, SMALL, MEMORY_CHART, slot, scale);
-            assert_eq!(cpu(0), full_column(USER, scale));
-            assert_eq!(cpu(1), empty_column(scale));
-            assert_eq!(cpu(2), full_column(SYSTEM, scale));
-            assert_eq!(memory(0), full_column(WARN, scale));
-            assert_eq!(memory(1), full_column(CRITICAL, scale));
-            assert_eq!(memory(2), full_column(UNKNOWN, scale));
+            assert_eq!(
+                pixmap.width_points(),
+                IMAGE_WIDTH,
+                "the columns come from the geometry"
+            );
+            let cpu = |slot| column(&pixmap, CPU_CHART, slot, scale);
+            let memory = |slot| column(&pixmap, MEMORY_CHART, slot, scale);
+            assert_eq!(cpu(28), empty_column(scale));
+            assert_eq!(cpu(29), full_column(USER, scale));
+            assert_eq!(cpu(30), empty_column(scale));
+            assert_eq!(cpu(31), full_column(SYSTEM, scale));
+            assert_eq!(memory(28), empty_column(scale));
+            assert_eq!(memory(29), full_column(WARN, scale));
+            assert_eq!(memory(30), full_column(CRITICAL, scale));
+            assert_eq!(memory(31), full_column(UNKNOWN, scale));
+        }
+    }
+
+    #[test]
+    fn a_history_longer_than_the_columns_shows_only_the_newest_samples() {
+        const LONG: usize = 40;
+        for scale in SCALES {
+            let idle = sample(0, 0, 100, LEVEL_NORMAL, 100);
+            let mut samples = vec![sample(0, 100, 0, LEVEL_NORMAL, 100); 8];
+            samples.push(sample(100, 0, 0, LEVEL_NORMAL, 100));
+            samples.extend(std::iter::repeat_n(idle, 30));
+            samples.push(sample(100, 0, 0, LEVEL_NORMAL, 100));
+            assert_eq!(samples.len(), LONG);
+            let history = history_of(LONG, &samples);
+            let pixmap = render(&history, geometry(scale), Appearance::Light);
+            assert_eq!(
+                pixmap.width_points(),
+                IMAGE_WIDTH,
+                "the columns come from the geometry"
+            );
+            let cpu = |slot| column(&pixmap, CPU_CHART, slot, scale);
+            assert_eq!(cpu(0), full_column(SYSTEM, scale));
+            assert_eq!(cpu(COLUMNS - 1), full_column(SYSTEM, scale));
+            for slot in 1..COLUMNS - 1 {
+                assert_eq!(cpu(slot), empty_column(scale), "slot {slot}");
+            }
+            for y in 0..pixmap.height() {
+                for x in 0..pixmap.width() {
+                    assert_ne!(pixmap.pixel(x, y), USER, "({x}, {y})");
+                }
+            }
         }
     }
 
@@ -790,10 +1079,10 @@ mod tests {
                 sample(0, 0, 100, LEVEL_NORMAL, ALL_IN_USE),
                 sample(0, 0, 100, LEVEL_CRITICAL, ALL_IN_USE),
             ];
-            let history = history_of(CAPACITY, &samples);
+            let history = history_of(COLUMNS, &samples);
             let pixmap = render(&history, geometry(scale), Appearance::Light);
-            let older = column(&pixmap, CAPACITY, MEMORY_CHART, CAPACITY - 2, scale);
-            let newer = column(&pixmap, CAPACITY, MEMORY_CHART, CAPACITY - 1, scale);
+            let older = column(&pixmap, MEMORY_CHART, COLUMNS - 2, scale);
+            let newer = column(&pixmap, MEMORY_CHART, COLUMNS - 1, scale);
             assert_eq!(older, full_column(NORMAL, scale));
             assert_eq!(newer, full_column(CRITICAL, scale));
         }
@@ -816,12 +1105,13 @@ mod tests {
     }
 
     #[test]
-    fn the_geometry_of_the_status_bar_follows_the_thickness_and_the_scale() {
+    fn the_height_is_the_thickness_floored() {
         let cases = [
-            ((22.0, 2.0), (16, 2)),
-            ((24.0, 1.0), (18, 1)),
-            ((22.0, 1.5), (16, 2)),
-            ((4.0, 2.0), (3, 2)),
+            ((22.0, 2.0), (22, 2)),
+            ((24.0, 1.0), (24, 1)),
+            ((22.0, 1.5), (22, 2)),
+            ((22.9, 2.0), (22, 2)),
+            ((2.0, 2.0), (3, 2)),
             ((f64::NAN, f64::NAN), (3, 1)),
             ((f64::INFINITY, 0.0), (3, 1)),
         ];
@@ -833,110 +1123,75 @@ mod tests {
                 "thickness {thickness}, backing {backing}"
             );
         }
+        let labeled = Geometry::from_status_bar(22.0, 2.0, Some(LINE_HEIGHT));
+        assert_eq!(labeled.height_points(), 22);
     }
 
-    /// The line height of the label text in the tests. The band is 9 points.
-    const LINE_HEIGHT: f64 = 8.35;
-    /// The band that `LINE_HEIGHT` gives.
-    const BAND_POINTS: u32 = 9;
     /// The thicknesses of the status bar in the label tests.
     const THICKNESSES: [f64; 2] = [22.0, 24.0];
 
     #[test]
-    fn a_label_band_takes_the_rows_below_the_charts() {
-        let cases = [(22.0, 11, 22, 1..12, 13..22), (24.0, 13, 24, 1..14, 15..24)];
-        for (thickness, height, image, charts, band) in cases {
+    fn the_label_takes_the_top_rows_of_the_interior() {
+        for thickness in THICKNESSES {
             for scale in [1.0, 2.0] {
                 let geometry = Geometry::from_status_bar(thickness, scale, Some(LINE_HEIGHT));
-                assert_eq!(geometry.height_points(), height, "thickness {thickness}");
-                assert_eq!(geometry.image_height_points(), image);
-                assert_eq!(geometry.chart_rows_points(), charts.clone());
-                assert_eq!(band.len(), usize::try_from(BAND_POINTS).unwrap());
-                assert_eq!(geometry.band_rows_points(), Some(band.clone()));
+                assert_eq!(
+                    geometry.label_rows_points(),
+                    Some(1..10),
+                    "thickness {thickness}"
+                );
             }
         }
     }
 
     #[test]
-    fn the_band_is_the_line_height_rounded_up() {
-        let band = |line_height| {
+    fn the_label_rows_are_the_line_height_rounded_up() {
+        let label = |line_height| {
             let geometry = Geometry::from_status_bar(22.0, 2.0, Some(line_height));
-            geometry.band_rows_points().map(|rows| rows.len())
+            geometry.label_rows_points().map(|rows| rows.len())
         };
-        assert_eq!(band(8.0), Some(8));
-        assert_eq!(band(8.01), Some(9));
+        assert_eq!(label(8.0), Some(8));
+        assert_eq!(label(8.01), Some(9));
     }
 
     #[test]
-    fn a_line_height_that_is_not_usable_gives_no_band() {
+    fn a_line_height_that_is_not_usable_gives_no_label() {
         for line_height in [f64::NAN, f64::INFINITY, 0.0, -1.0] {
             for thickness in THICKNESSES {
                 let geometry = Geometry::from_status_bar(thickness, 2.0, Some(line_height));
                 assert_eq!(geometry, Geometry::from_status_bar(thickness, 2.0, None));
-                assert_eq!(geometry.band_rows_points(), None);
+                assert_eq!(geometry.label_rows_points(), None);
             }
         }
     }
 
     #[test]
-    fn a_thickness_that_cannot_hold_the_band_drops_the_label() {
-        let geometry = Geometry::from_status_bar(12.0, 2.0, Some(LINE_HEIGHT));
-        assert_eq!(geometry, Geometry::from_status_bar(12.0, 2.0, None));
-        assert_eq!(geometry.band_rows_points(), None);
+    fn an_interior_lower_than_the_line_height_gives_no_label() {
+        let thin = Geometry::from_status_bar(10.0, 2.0, Some(LINE_HEIGHT));
+        assert_eq!(thin.label_rows_points(), None);
+        let enough = Geometry::from_status_bar(11.0, 2.0, Some(LINE_HEIGHT));
+        assert_eq!(enough.label_rows_points(), Some(1..10));
     }
 
     #[test]
-    fn a_geometry_without_a_band_keeps_the_layout_of_the_charts_only() {
-        let geometry = geometry(2);
-        assert_eq!(geometry.image_height_points(), HEIGHT_POINTS);
-        assert_eq!(geometry.chart_rows_points(), 0..HEIGHT_POINTS);
-        assert_eq!(geometry.band_rows_points(), None);
-    }
-
-    #[test]
-    fn a_label_band_keeps_its_rows_transparent_and_moves_the_charts_down() {
-        let samples = vec![sample(100, 0, 0, LEVEL_NORMAL, ALL_IN_USE); CAPACITY];
-        let history = history_of(CAPACITY, &samples);
-        for thickness in THICKNESSES {
-            for scale in SCALES {
-                let geometry =
-                    Geometry::from_status_bar(thickness, f64::from(scale), Some(LINE_HEIGHT));
-                let pixmap = render(&history, geometry, Appearance::Light);
-                let thickness_points = whole_number(thickness);
-                assert_eq!(pixmap.width(), 68 * scale);
-                assert_eq!(pixmap.height(), thickness_points * scale);
-
-                let band = geometry.band_rows_points().unwrap();
-                let gap_row = geometry.chart_rows_points().end;
-                let transparent_rows = (0..LABEL_TOP_INSET_POINTS)
-                    .chain(gap_row..gap_row + LABEL_GAP_POINTS)
-                    .chain(band);
-                for point_row in transparent_rows {
-                    for y in point_row * scale..(point_row + 1) * scale {
-                        for x in 0..pixmap.width() {
-                            assert_eq!(pixmap.pixel(x, y), TRANSPARENT, "({x}, {y})");
-                        }
-                    }
-                }
-
-                let x = slot_x(CAPACITY, CPU_CHART, CAPACITY - 1, scale);
-                let chart_top = LABEL_TOP_INSET_POINTS * scale;
-                let chart_bottom = (LABEL_TOP_INSET_POINTS + geometry.height_points()) * scale;
-                let system: Vec<u32> = (0..pixmap.height())
-                    .filter(|&y| pixmap.pixel(x, y) == SYSTEM)
-                    .collect();
-                let expected = (thickness_points - 1 - 1 - BAND_POINTS - 2 * FRAME_POINTS) * scale;
-                assert_eq!(u32::try_from(system.len()).unwrap(), expected);
-                assert_eq!(system.first(), Some(&(chart_top + FRAME_POINTS * scale)));
-                assert_eq!(
-                    system.last(),
-                    Some(&(chart_bottom - FRAME_POINTS * scale - 1))
-                );
-                let frame = Appearance::Light.frame();
-                assert_eq!(pixmap.pixel(x, chart_top), frame);
-                assert_eq!(pixmap.pixel(x, chart_bottom - 1), frame);
-            }
+    fn the_columns_and_the_width_do_not_depend_on_the_height() {
+        for height in [3, 22, 24, 37] {
+            let geometry = Geometry::new(height, 1).unwrap();
+            assert_eq!(geometry.columns().get(), COLUMNS, "height {height}");
+            assert_eq!(
+                geometry.image_width_points(),
+                IMAGE_WIDTH,
+                "height {height}"
+            );
         }
+        let tall = Geometry::from_status_bar(37.0, 2.0, Some(LINE_HEIGHT));
+        assert_eq!(tall.columns().get(), COLUMNS);
+        assert_eq!(tall.image_width_points(), IMAGE_WIDTH);
+    }
+
+    #[test]
+    fn geometry_new_has_no_label() {
+        assert_eq!(Geometry::new(22, 2).unwrap().label_rows_points(), None);
     }
 
     #[test]
@@ -944,6 +1199,277 @@ mod tests {
         assert_ne!(Appearance::Light.label(), Appearance::Dark.label());
         for appearance in [Appearance::Light, Appearance::Dark] {
             assert_eq!(appearance.label(), appearance.frame());
+        }
+    }
+
+    /// The two appearances of the menu bar.
+    const APPEARANCES: [Appearance; 2] = [Appearance::Light, Appearance::Dark];
+    /// A pixel that the glyphs cover completely.
+    const FULL: u8 = 255;
+    /// A pixel that the glyphs cover by half.
+    const HALF: u8 = 128;
+    /// A pixel that the glyphs do not touch.
+    const NONE: u8 = 0;
+
+    /// An image of one row of pixels, in the given colors, at a scale of 1.
+    fn row_of(colors: &[Rgba]) -> Pixmap {
+        let width = u32::try_from(colors.len()).unwrap();
+        let mut pixmap = Pixmap::empty(width, 1, 1);
+        for (x, color) in (0..width).zip(colors) {
+            pixmap.fill(x, 0, 1, 1, *color);
+        }
+        pixmap
+    }
+
+    /// The coverage of an image of one row of pixels.
+    fn row_coverage(values: &[u8]) -> Coverage {
+        let width = u32::try_from(values.len()).unwrap();
+        Coverage::new(width, 1, values.to_vec()).expect("one value for each pixel")
+    }
+
+    /// Glyphs that cover each pixel by the same share in both inks.
+    fn same_in_both_inks(coverage: Coverage) -> Glyphs {
+        Glyphs::new(coverage.clone(), coverage).expect("two coverages of one size")
+    }
+
+    /// The glyphs of an image of one row of pixels, the same in both inks.
+    fn row_glyphs(values: &[u8]) -> Glyphs {
+        same_in_both_inks(row_coverage(values))
+    }
+
+    /// The colors of an image of one row of pixels.
+    fn row_pixels(pixmap: &Pixmap) -> Vec<Rgba> {
+        (0..pixmap.width()).map(|x| pixmap.pixel(x, 0)).collect()
+    }
+
+    #[test]
+    fn a_coverage_needs_exactly_one_value_for_each_pixel() {
+        assert!(Coverage::new(2, 2, vec![NONE; 3]).is_none());
+        assert!(Coverage::new(2, 2, vec![NONE; 5]).is_none());
+        assert!(Coverage::new(2, 2, vec![NONE; 4]).is_some());
+        assert!(Coverage::new(0, 0, Vec::new()).is_some());
+    }
+
+    #[test]
+    fn a_fully_covered_empty_pixel_takes_the_label_color_of_the_appearance() {
+        for appearance in APPEARANCES {
+            let mut pixmap = row_of(&[TRANSPARENT]);
+            pixmap
+                .paint_label(&row_glyphs(&[FULL]), appearance)
+                .unwrap();
+            assert_eq!(pixmap.pixel(0, 0), appearance.label(), "{appearance:?}");
+        }
+    }
+
+    /// Half of the coverage gives half of the alpha of the label color.
+    /// 217 * 128 / 255 is 108.9, which rounds to 109.
+    #[test]
+    fn a_partly_covered_empty_pixel_takes_part_of_the_alpha_of_the_label_color() {
+        let cases = [
+            (Appearance::Light, [0, 0, 0, 109]),
+            (Appearance::Dark, [255, 255, 255, 109]),
+        ];
+        for (appearance, expected) in cases {
+            let mut pixmap = row_of(&[TRANSPARENT]);
+            pixmap
+                .paint_label(&row_glyphs(&[HALF]), appearance)
+                .unwrap();
+            assert_eq!(pixmap.pixel(0, 0), expected, "{appearance:?}");
+        }
+    }
+
+    #[test]
+    fn a_pixel_that_the_glyphs_do_not_cover_keeps_its_color() {
+        let colors = [
+            TRANSPARENT,
+            SYSTEM,
+            USER,
+            NORMAL,
+            WARN,
+            UNKNOWN,
+            Appearance::Light.frame(),
+            Appearance::Dark.frame(),
+        ];
+        for appearance in APPEARANCES {
+            let mut pixmap = row_of(&colors);
+            pixmap
+                .paint_label(&row_glyphs(&[NONE; 8]), appearance)
+                .unwrap();
+            assert_eq!(row_pixels(&pixmap), colors, "{appearance:?}");
+        }
+    }
+
+    /// The coverage goes row by row from the top left, like the image.
+    #[test]
+    fn the_coverage_lies_on_the_image_row_by_row_from_the_top_left() {
+        let mut pixmap = Pixmap::empty(2, 2, 1);
+        let coverage = Coverage::new(2, 2, vec![FULL, NONE, NONE, FULL]).unwrap();
+        pixmap
+            .paint_label(&same_in_both_inks(coverage), Appearance::Dark)
+            .unwrap();
+        let label = Appearance::Dark.label();
+        assert_eq!(pixmap.pixel(0, 0), label);
+        assert_eq!(pixmap.pixel(1, 0), TRANSPARENT);
+        assert_eq!(pixmap.pixel(0, 1), TRANSPARENT);
+        assert_eq!(pixmap.pixel(1, 1), label);
+    }
+
+    #[test]
+    fn the_label_refuses_glyphs_of_another_size_and_keeps_the_image() {
+        let mut pixmap = row_of(&[TRANSPARENT; 2]);
+        let wide = row_glyphs(&[FULL; 3]);
+        assert_eq!(
+            pixmap.paint_label(&wide, Appearance::Dark),
+            Err(SizeMismatch {
+                image: (2, 1),
+                glyphs: (3, 1),
+            })
+        );
+        // The same number of pixels in a different shape is a different size.
+        let tall = same_in_both_inks(Coverage::new(1, 2, vec![FULL; 2]).unwrap());
+        assert_eq!(
+            pixmap.paint_label(&tall, Appearance::Dark),
+            Err(SizeMismatch {
+                image: (2, 1),
+                glyphs: (1, 2),
+            })
+        );
+        assert_eq!(row_pixels(&pixmap), [TRANSPARENT; 2]);
+    }
+
+    #[test]
+    fn the_glyphs_need_two_coverages_of_one_size() {
+        let two = || row_coverage(&[FULL; 2]);
+        assert!(Glyphs::new(two(), row_coverage(&[FULL; 3])).is_none());
+        assert!(Glyphs::new(row_coverage(&[FULL; 3]), two()).is_none());
+        let tall = Coverage::new(1, 2, vec![FULL; 2]).unwrap();
+        assert!(Glyphs::new(two(), tall).is_none());
+        assert!(Glyphs::new(two(), two()).is_some());
+    }
+
+    /// AppKit draws white text bolder than black text, so the label takes the
+    /// coverage of the ink that it paints. Here black covers half of the pixel
+    /// and white covers all of it.
+    #[test]
+    fn the_label_takes_the_coverage_of_the_ink_that_it_paints() {
+        let glyphs = Glyphs::new(row_coverage(&[HALF]), row_coverage(&[FULL])).unwrap();
+        let cases = [
+            (Appearance::Light, [0, 0, 0, 109]),
+            (Appearance::Dark, Appearance::Dark.label()),
+        ];
+        for (appearance, expected) in cases {
+            let mut pixmap = row_of(&[TRANSPARENT]);
+            pixmap.paint_label(&glyphs, appearance).unwrap();
+            assert_eq!(pixmap.pixel(0, 0), expected, "{appearance:?}");
+        }
+    }
+
+    /// The colors of the columns of the two charts.
+    const COLUMN_COLORS: [Rgba; 6] = [SYSTEM, USER, NORMAL, WARN, CRITICAL, UNKNOWN];
+    /// The smallest contrast ratio that WCAG 2 accepts for normal text.
+    const MIN_CONTRAST: f64 = 4.5;
+
+    /// The color of the menu bar behind the image, as the tests take it: white
+    /// in the light appearance, and black in the dark appearance.
+    fn bar(appearance: Appearance) -> f64 {
+        match appearance {
+            Appearance::Light => 1.0,
+            Appearance::Dark => 0.0,
+        }
+    }
+
+    /// The color that a pixel shows over the bar, with each channel from 0 to 1.
+    fn shown([red, green, blue, alpha]: Rgba, appearance: Appearance) -> [f64; 3] {
+        let unit = f64::from(u8::MAX);
+        let alpha = f64::from(alpha) / unit;
+        let over =
+            |channel: u8| f64::from(channel) / unit * alpha + bar(appearance) * (1.0 - alpha);
+        [over(red), over(green), over(blue)]
+    }
+
+    /// The relative luminance of a color, as WCAG 2 gives it.
+    fn luminance(color: [f64; 3]) -> f64 {
+        let linear = |channel: f64| {
+            if channel <= 0.04045 {
+                channel / 12.92
+            } else {
+                ((channel + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let [red, green, blue] = color.map(linear);
+        0.2126 * red + 0.7152 * green + 0.0722 * blue
+    }
+
+    /// The contrast ratio of two colors, as WCAG 2 gives it.
+    fn contrast(left: [f64; 3], right: [f64; 3]) -> f64 {
+        let (left, right) = (luminance(left), luminance(right));
+        (left.max(right) + 0.05) / (left.min(right) + 0.05)
+    }
+
+    /// Where the label crosses a column or a frame, its ink is black or white,
+    /// whichever contrasts more with the pixel behind it.
+    #[test]
+    fn the_label_over_each_column_and_frame_has_a_contrast_of_at_least_4_5_to_1() {
+        for appearance in APPEARANCES {
+            let mut behind = COLUMN_COLORS.to_vec();
+            behind.push(appearance.frame());
+            let mut pixmap = row_of(&behind);
+            pixmap
+                .paint_label(&row_glyphs(&vec![FULL; behind.len()]), appearance)
+                .unwrap();
+            for (x, color) in (0..).zip(&behind) {
+                let ratio = contrast(
+                    shown(pixmap.pixel(x, 0), appearance),
+                    shown(*color, appearance),
+                );
+                assert!(
+                    ratio >= MIN_CONTRAST,
+                    "{appearance:?}: the label over {color:?} has a contrast of {ratio:.2} to 1"
+                );
+            }
+        }
+    }
+
+    /// Black contrasts more than white with each color of a column, so the
+    /// label over a column takes the label color of the light appearance in
+    /// both appearances. Black at 85% over an opaque color keeps 38 / 255 of
+    /// each channel, and the pixel stays opaque.
+    #[test]
+    fn the_label_over_a_column_is_black_at_85_percent_in_each_appearance() {
+        let [.., label_alpha] = Appearance::Light.label();
+        let rest = u32::from(u8::MAX - label_alpha);
+        let kept = |channel: u8| {
+            let rounded = (u32::from(channel) * rest + u32::from(u8::MAX) / 2) / u32::from(u8::MAX);
+            u8::try_from(rounded).unwrap()
+        };
+        let expected: Vec<Rgba> = COLUMN_COLORS
+            .iter()
+            .map(|&[red, green, blue, _]| [kept(red), kept(green), kept(blue), u8::MAX])
+            .collect();
+        for appearance in APPEARANCES {
+            let mut pixmap = row_of(&COLUMN_COLORS);
+            pixmap
+                .paint_label(&row_glyphs(&[FULL; 6]), appearance)
+                .unwrap();
+            assert_eq!(row_pixels(&pixmap), expected, "{appearance:?}");
+        }
+    }
+
+    /// Over a column, the ink is black in both appearances, so the label
+    /// takes the coverage of the glyphs in black: the label color of the
+    /// light appearance.
+    #[test]
+    fn the_label_over_a_column_takes_the_coverage_of_the_glyphs_in_black() {
+        let black_only = Glyphs::new(row_coverage(&[FULL]), row_coverage(&[NONE])).unwrap();
+        let white_only = Glyphs::new(row_coverage(&[NONE]), row_coverage(&[FULL])).unwrap();
+        for appearance in APPEARANCES {
+            let mut pixmap = row_of(&[USER]);
+            pixmap.paint_label(&white_only, appearance).unwrap();
+            assert_eq!(pixmap.pixel(0, 0), USER, "{appearance:?}: white only");
+
+            let mut pixmap = row_of(&[USER]);
+            pixmap.paint_label(&black_only, appearance).unwrap();
+            assert_ne!(pixmap.pixel(0, 0), USER, "{appearance:?}: black only");
         }
     }
 }
