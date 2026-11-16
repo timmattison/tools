@@ -32,9 +32,12 @@ pub const QUIT_TITLE: &str = "Quit glance";
 /// The first menu line before the first sample arrives.
 pub const WAITING_LINE: &str = "Waiting for the first sample";
 
+/// The number of info lines in the menu.
+pub const MENU_LINES: usize = 4;
+
 /// The four info lines of the menu.
 #[must_use]
-pub fn menu_lines(sample: &Sample) -> [String; 4] {
+pub fn menu_lines(sample: &Sample) -> [String; MENU_LINES] {
     let cpu = sample.cpu;
     let pressure = sample.pressure;
     let level = pressure.level();
@@ -59,7 +62,7 @@ pub fn menu_lines(sample: &Sample) -> [String; 4] {
 /// empty, so the values of an older sample do not look current. With no error
 /// and no sample, the first line is [`WAITING_LINE`].
 #[must_use]
-pub fn menu_titles(error: Option<&str>, newest: Option<&Sample>) -> [String; 4] {
+pub fn menu_titles(error: Option<&str>, newest: Option<&Sample>) -> [String; MENU_LINES] {
     match (error, newest) {
         (Some(reason), _) => lines_under(read_error_line(reason)),
         (None, Some(sample)) => menu_lines(sample),
@@ -68,7 +71,7 @@ pub fn menu_titles(error: Option<&str>, newest: Option<&Sample>) -> [String; 4] 
 }
 
 /// The first menu line, with three empty lines under it.
-fn lines_under(first: String) -> [String; 4] {
+fn lines_under(first: String) -> [String; MENU_LINES] {
     [first, String::new(), String::new(), String::new()]
 }
 
@@ -149,7 +152,7 @@ mod tests {
         sample(50, 25, 25, 2, 47)
     }
 
-    fn empty_lines(first: &str) -> [String; 4] {
+    fn empty_lines(first: &str) -> [String; MENU_LINES] {
         [
             first.to_owned(),
             String::new(),

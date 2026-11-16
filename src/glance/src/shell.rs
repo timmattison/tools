@@ -33,7 +33,7 @@ use crate::history::{History, DEFAULT_CAPACITY};
 use crate::interval::Interval;
 use crate::reader::Reader;
 use crate::sample::{Reading, Sample};
-use crate::text::{menu_titles, QUIT_TITLE};
+use crate::text::{menu_titles, MENU_LINES, QUIT_TITLE};
 
 /// The exit status of a start off the main thread.
 const EXIT_NOT_MAIN_THREAD: u8 = 1;
@@ -87,9 +87,6 @@ const QUIT_KEY: &str = "q";
 /// The scale that the chart takes when the system lists no screen.
 const FALLBACK_SCALE: u32 = 2;
 
-/// The number of info lines in the menu.
-const INFO_LINES: usize = 4;
-
 /// The bits in one sample of one color channel.
 const BITS_PER_SAMPLE: isize = 8;
 
@@ -123,7 +120,7 @@ struct Ivars {
     /// The status item in the menu bar.
     status_item: Retained<NSStatusItem>,
     /// The four disabled info items of the menu.
-    info_items: [Retained<NSMenuItem>; INFO_LINES],
+    info_items: [Retained<NSMenuItem>; MENU_LINES],
     /// The values that change.
     state: RefCell<State>,
 }
@@ -159,7 +156,7 @@ impl Monitor {
         mtm: MainThreadMarker,
         interval: Interval,
         status_item: Retained<NSStatusItem>,
-        info_items: [Retained<NSMenuItem>; INFO_LINES],
+        info_items: [Retained<NSMenuItem>; MENU_LINES],
     ) -> Retained<Monitor> {
         let this = Monitor::alloc(mtm).set_ivars(Ivars {
             reader: Reader::new(),
@@ -350,18 +347,17 @@ fn bitmap_representation(pixmap: &Pixmap, points: NSSize) -> Option<Retained<NSB
 fn build_menu(
     mtm: MainThreadMarker,
     status_item: &NSStatusItem,
-) -> [Retained<NSMenuItem>; INFO_LINES] {
+) -> [Retained<NSMenuItem>; MENU_LINES] {
     let menu = NSMenu::new(mtm);
     menu.setAutoenablesItems(false);
     let titles = menu_titles(None, None);
-    let info_items: [Retained<NSMenuItem>; INFO_LINES] = std::array::from_fn(|index| {
-        let title = titles[index].as_str();
+    let info_items: [Retained<NSMenuItem>; MENU_LINES] = titles.map(|title| {
         // SAFETY: The selector is absent, which AppKit allows for an item
         // that does nothing.
         let item = unsafe {
             NSMenuItem::initWithTitle_action_keyEquivalent(
                 NSMenuItem::alloc(mtm),
-                &NSString::from_str(title),
+                &NSString::from_str(&title),
                 None,
                 ns_string!(""),
             )
