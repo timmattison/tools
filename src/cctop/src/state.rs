@@ -111,7 +111,7 @@ impl EpochMillis {
     /// `earlier` is later than this time.
     #[must_use]
     pub fn saturating_since(self, earlier: EpochMillis) -> u64 {
-        self.0.abs_diff(earlier.0)
+        self.0.saturating_sub(earlier.0)
     }
 }
 
@@ -123,19 +123,22 @@ impl ZellijPaneId {
     /// The pane that `text` names, or `None` when `text` is not a number.
     #[must_use]
     pub fn parse(text: &str) -> Option<Self> {
+        if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
         text.parse::<u32>().ok().map(Self)
     }
 
     /// The name that `zellij action focus-pane-id` takes for this pane.
     #[must_use]
     pub fn terminal_target(self) -> String {
-        String::new()
+        format!("terminal_{}", self.0)
     }
 }
 
 impl std::fmt::Display for ZellijPaneId {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "?")
+        write!(formatter, "{}", self.0)
     }
 }
 
