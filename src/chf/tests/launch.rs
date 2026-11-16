@@ -6,7 +6,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io::Read;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 use chf::app::Version;
@@ -33,7 +33,7 @@ fn run_shell(
     script_text: &str,
     extra_env: &[(&str, &str)],
 ) -> (Option<i32>, String) {
-    let mut command = Command::new(shell_name);
+    let mut command = childenv::fixture_command(shell_name);
     command
         .arg("-ic")
         .arg(script_text)

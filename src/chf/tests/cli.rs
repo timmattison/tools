@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 /// The command for the `chf` binary, with an environment that holds only a
 /// home directory and a plain path.
 fn chf(home: &tempfile::TempDir) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_chf"));
+    let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_chf"));
     command
         .env_clear()
         .env("HOME", home.path())

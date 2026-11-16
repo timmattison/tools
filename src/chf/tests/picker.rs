@@ -112,6 +112,10 @@ impl Picker {
                 pixel_height: 0,
             })
             .expect("the pseudo-terminal opens");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "portable-pty has no entrance in childenv, and the env_clear below removes the whole environment, the GIT_ prefix with it"
+        )]
         let mut command = CommandBuilder::new("perl");
         command.args([
             "-e",
