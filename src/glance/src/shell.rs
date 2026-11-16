@@ -36,7 +36,7 @@ use objc2_foundation::{
     NSRunLoopCommonModes, NSSize, NSString, NSTimer,
 };
 
-use crate::chart::{render, Appearance, Geometry, Pixmap, Rgba};
+use crate::chart::{render, Appearance, Geometry, Pixmap, Rgba, FRAME_POINTS};
 use crate::connection::{Feed, Remote, SSH_PROGRAM};
 use crate::interval::Interval;
 use crate::reader::Reader;
@@ -107,7 +107,7 @@ const BYTES_PER_PIXEL: usize = 4;
 /// The bits in one pixel.
 const BITS_PER_PIXEL: isize = 32;
 
-/// The size of the system font of the label under the charts, in points.
+/// The size of the system font of the label at the top of the charts, in points.
 const LABEL_FONT_POINTS: f64 = 7.0;
 
 /// Where the samples come from.
@@ -331,11 +331,7 @@ impl Monitor {
             let Some(representation) = bitmap_representation(pixmap, points) else {
                 return;
             };
-            if let Some(band) = geometry.band_rows_points() {
-                let rect = NSRect::new(
-                    NSPoint::new(0.0, 0.0),
-                    NSSize::new(points.width, f64::from(band.end - band.start)),
-                );
+            if let Some(rect) = label_rect(*geometry) {
                 // A refused context leaves the charts of this scale with no label.
                 draw_label(&representation, label, rect, appearance.label());
             }
@@ -420,7 +416,7 @@ fn bitmap_representation(pixmap: &Pixmap, points: NSSize) -> Option<Retained<NSB
 
 /// The line height of the font of the label, in points.
 ///
-/// The chart module rounds it up to whole points for the band.
+/// The chart module rounds it up to whole points for the label rows.
 fn label_line_height() -> f64 {
     let font = NSFont::systemFontOfSize(LABEL_FONT_POINTS);
     font.ascender() - font.descender() + font.leading()
@@ -431,23 +427,32 @@ fn unit_channel(value: u8) -> f64 {
     f64::from(value) / f64::from(u8::MAX)
 }
 
-/// RED STUB: the old band rectangle.
+/// The rectangle of the label, in points, with its origin at the bottom left
+/// of the image. It is `None` when the geometry has no label.
+///
+/// The rectangle spans the image between the two outer frames, so the text
+/// centers across the whole image and never paints over a frame.
 fn label_rect(geometry: Geometry) -> Option<NSRect> {
-    geometry.band_rows_points().map(|band| {
-        NSRect::new(
-            NSPoint::new(0.0, 0.0),
-            NSSize::new(68.0, f64::from(band.end - band.start)),
-        )
-    })
+    let rows = geometry.label_rows_points()?;
+    Some(NSRect::new(
+        NSPoint::new(
+            f64::from(FRAME_POINTS),
+            f64::from(geometry.image_height_points() - rows.end),
+        ),
+        NSSize::new(
+            f64::from(geometry.image_width_points() - 2 * FRAME_POINTS),
+            f64::from(rows.end - rows.start),
+        ),
+    ))
 }
 
-/// Draws `text` into `band` of `representation`, in `color`.
+/// Draws `text` into `rect` of `representation`, in `color`.
 ///
-/// `band` is in points, with its origin at the bottom left of the image. The
+/// `rect` is in points, with its origin at the bottom left of the image. The
 /// text is in the system font at [`LABEL_FONT_POINTS`], centered, and
 /// truncated at its end with an ellipsis, so it never makes the image wider.
 /// Returns `false` when AppKit refuses to make a graphics context.
-fn draw_label(representation: &NSBitmapImageRep, text: &str, band: NSRect, color: Rgba) -> bool {
+fn draw_label(representation: &NSBitmapImageRep, text: &str, rect: NSRect, color: Rgba) -> bool {
     let Some(context) = NSGraphicsContext::graphicsContextWithBitmapImageRep(representation) else {
         return false;
     };
@@ -476,7 +481,7 @@ fn draw_label(representation: &NSBitmapImageRep, text: &str, band: NSRect, color
     NSGraphicsContext::setCurrentContext(Some(&context));
     // SAFETY: Each key of `attributes` holds an object of the class that
     // AppKit expects for it: a font, a color, and a paragraph style.
-    unsafe { NSString::from_str(text).drawInRect_withAttributes(band, Some(&attributes)) };
+    unsafe { NSString::from_str(text).drawInRect_withAttributes(rect, Some(&attributes)) };
     context.flushGraphics();
     NSGraphicsContext::restoreGraphicsState_class();
     true

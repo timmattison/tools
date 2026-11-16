@@ -1,8 +1,16 @@
 //! The two charts of the status item, drawn into a pixel buffer.
 //!
-//! The left chart shows the CPU share. The right chart shows the memory in use,
-//! in the color of the pressure level. Each chart has one column for each
-//! sample that the history holds, and the newest sample sits at the right edge.
+//! Each chart is a square with a frame. Its side is the height of the status
+//! bar in whole points, and the two squares sit side by side with a gap
+//! between them. The left chart shows the CPU share. The right chart shows the
+//! memory in use, in the color of the pressure level.
+//!
+//! Each sample is one point wide. Each chart has as many columns inside its
+//! frame as the geometry gives, and it shows that number of the newest samples,
+//! with the newest at the right edge. The label rows lie at the top of the
+//! interior. The shell draws the name of the host there, so this module only
+//! reports the rows.
+//!
 //! The drawing is pure arithmetic on a plain buffer, so a test reads each
 //! pixel and AppKit only has to show the bytes.
 //!
@@ -42,12 +50,6 @@ const LABEL_DARK: Rgba = [255, 255, 255, 217];
 pub const FRAME_POINTS: u32 = 1;
 /// The width of the gap between the two charts, in points.
 pub const GAP_POINTS: u32 = 4;
-/// The space above and below the charts in the status bar, in points.
-pub const VERTICAL_INSET_POINTS: u32 = 3;
-/// The space above the charts when the label is on, in points.
-pub const LABEL_TOP_INSET_POINTS: u32 = 1;
-/// The gap between the charts and the label band, in points.
-pub const LABEL_GAP_POINTS: u32 = 1;
 
 /// The number of bytes of one pixel.
 const BYTES_PER_PIXEL: usize = 4;
@@ -112,19 +114,23 @@ impl fmt::Display for GeometryError {
 
 impl std::error::Error for GeometryError {}
 
-/// The height of the charts in points, and the pixels per point.
+/// The side of each square chart in points, and the pixels per point.
+///
+/// The height of the image is the side of each square.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Geometry {
     height_points: u32,
     scale: u32,
-    band_points: Option<u32>,
+    label_points: Option<u32>,
 }
 
 impl Geometry {
     /// The smallest height. A frame, one row, and a frame.
     pub const MIN_HEIGHT_POINTS: u32 = 3;
 
-    /// Makes a geometry.
+    /// Makes a geometry without a label.
+    ///
+    /// The height is the height of the image and the side of each square chart.
     ///
     /// # Errors
     ///
@@ -139,7 +145,7 @@ impl Geometry {
         Ok(Geometry {
             height_points,
             scale,
-            band_points: None,
+            label_points: None,
         })
     }
 
@@ -149,90 +155,62 @@ impl Geometry {
     /// and the line height of the label text. The line height is `None` when
     /// there is no label. The scale is the backing scale rounded, and at least 1.
     ///
-    /// The band is the line height rounded up to whole points. A line height
-    /// that is not finite or not above 0 gives no band. With a band, the charts
-    /// take the whole points of the thickness less the inset above, the gap,
-    /// and the band. If that height is below `MIN_HEIGHT_POINTS`, the label goes
-    /// away. Without a band, the height is the whole points of the thickness
-    /// less the inset above and below, and at least `MIN_HEIGHT_POINTS`. An
-    /// input that is not finite gives the minimum.
+    /// The side of each square chart is the whole points of the thickness, and
+    /// at least `MIN_HEIGHT_POINTS`. An input that is not finite gives the
+    /// minimum. The label does not change the side.
+    ///
+    /// The label height is the line height rounded up to whole points. A line
+    /// height that is not finite or not above 0 gives no label. If the interior
+    /// of a chart is lower than the label height, there is no label too.
     #[must_use]
     pub fn from_status_bar(
         thickness_points: f64,
         backing_scale: f64,
         label_line_height_points: Option<f64>,
     ) -> Geometry {
-        let thickness = whole_number(thickness_points.floor());
+        let height_points = whole_number(thickness_points.floor()).max(Self::MIN_HEIGHT_POINTS);
         let scale = whole_number(backing_scale.round()).max(1);
-        let labeled = label_line_height_points
+        let interior = height_points - 2 * FRAME_POINTS;
+        let label_points = label_line_height_points
             .filter(|line_height| line_height.is_finite() && *line_height > 0.0)
             .map(|line_height| whole_number(line_height.ceil()))
-            .and_then(|band| {
-                let height_points = thickness
-                    .saturating_sub(LABEL_TOP_INSET_POINTS + LABEL_GAP_POINTS)
-                    .saturating_sub(band);
-                (height_points >= Self::MIN_HEIGHT_POINTS).then_some(Geometry {
-                    height_points,
-                    scale,
-                    band_points: Some(band),
-                })
-            });
-        labeled.unwrap_or_else(|| Geometry {
-            height_points: thickness
-                .saturating_sub(2 * VERTICAL_INSET_POINTS)
-                .max(Self::MIN_HEIGHT_POINTS),
+            .filter(|label| *label <= interior);
+        Geometry {
+            height_points,
             scale,
-            band_points: None,
-        })
-    }
-
-    /// The height of the whole image in points. It holds the charts and the label band.
-    #[must_use]
-    pub fn image_height_points(self) -> u32 {
-        match self.band_points {
-            Some(band) => LABEL_TOP_INSET_POINTS + self.height_points + LABEL_GAP_POINTS + band,
-            None => self.height_points,
+            label_points,
         }
     }
 
-    /// The rows of the charts, in points from the top of the image.
-    #[must_use]
-    pub fn chart_rows_points(self) -> std::ops::Range<u32> {
-        let top = if self.band_points.is_some() {
-            LABEL_TOP_INSET_POINTS
-        } else {
-            0
-        };
-        top..top + self.height_points
-    }
-
-    /// The rows of the label band, in points from the top of the image.
-    /// It is `None` when there is no label. The band touches the bottom edge.
-    #[must_use]
-    pub fn band_rows_points(self) -> Option<std::ops::Range<u32>> {
-        self.band_points
-            .map(|band| self.image_height_points() - band..self.image_height_points())
-    }
-
-    /// RED STUB: the width of the whole image in points.
+    /// The width of the whole image in points. It holds two squares and the gap.
     #[must_use]
     pub fn image_width_points(self) -> u32 {
-        0
+        CHART_COUNT * self.height_points + GAP_POINTS
     }
 
-    /// RED STUB: the number of columns inside each frame.
+    /// The height of the whole image in points. It is the side of each square.
+    #[must_use]
+    pub fn image_height_points(self) -> u32 {
+        self.height_points
+    }
+
+    /// The number of columns inside each frame, thus the number of samples
+    /// that each chart shows.
     #[must_use]
     pub fn columns(self) -> std::num::NonZeroUsize {
-        crate::history::DEFAULT_CAPACITY
+        let columns = usize::try_from(self.height_points - 2 * FRAME_POINTS).unwrap_or(usize::MAX);
+        std::num::NonZeroUsize::new(columns).unwrap_or(std::num::NonZeroUsize::MIN)
     }
 
-    /// RED STUB: the rows of the label.
+    /// The rows of the label, in points from the top of the image.
+    /// It is `None` when there is no label. The rows start inside the frame.
     #[must_use]
     pub fn label_rows_points(self) -> Option<std::ops::Range<u32>> {
-        self.band_rows_points()
+        self.label_points
+            .map(|label| FRAME_POINTS..FRAME_POINTS + label)
     }
 
-    /// The height of the charts in points.
+    /// The side of each square chart in points. It is also the height of the image.
     #[must_use]
     pub fn height_points(self) -> u32 {
         self.height_points
@@ -413,55 +391,55 @@ fn memory_rows(percent_in_use: u8, rows: u32) -> u32 {
 
 /// Draws the two charts of the history.
 ///
-/// The image is `Geometry::image_height_points` high. The charts start at the
-/// top of `Geometry::chart_rows_points`. The rows of the label band, and the
-/// rows above and below the charts, stay transparent.
+/// The image is `Geometry::image_width_points` wide and
+/// `Geometry::image_height_points` high. The CPU chart is the square on the
+/// left, then comes a transparent gap, then the memory chart. Each square has a
+/// frame on its outer rows and columns.
 ///
-/// Each chart has `history.capacity()` columns inside of a frame. The CPU chart
-/// is on the left, then a transparent gap, then the memory chart. The newest
-/// sample sits in the rightmost column of each chart. A column that has no
-/// sample yet stays empty.
+/// Each chart has `Geometry::columns` columns inside of its frame, and it shows
+/// that number of the newest samples. The newest sample sits in the rightmost
+/// column. A column that has no sample yet stays empty. The capacity of the
+/// history does not change the width of the image.
 ///
-/// # Panics
-///
-/// Panics if the capacity of the history does not fit in a `u32`.
+/// The function draws no text. The label rows stay empty for the shell.
 #[must_use]
 pub fn render(history: &History<Sample>, geometry: Geometry, appearance: Appearance) -> Pixmap {
     let scale = geometry.scale;
-    let capacity = u32::try_from(history.capacity()).expect("the capacity fits in a u32");
-    let chart_width = capacity + 2 * FRAME_POINTS;
+    let side = geometry.height_points;
+    let columns = u32::try_from(geometry.columns().get()).unwrap_or(side);
     let mut pixmap = Pixmap::empty(
-        CHART_COUNT * chart_width + GAP_POINTS,
+        geometry.image_width_points(),
         geometry.image_height_points(),
         scale,
     );
 
-    let rows = (geometry.height_points - 2 * FRAME_POINTS) * scale;
-    let chart_top = geometry.chart_rows_points().start * scale;
-    let interior_top = chart_top + FRAME_POINTS * scale;
+    let rows = columns * scale;
+    let interior_top = FRAME_POINTS * scale;
     let interior_bottom = interior_top + rows;
-    let chart_origins = [0, chart_width + GAP_POINTS];
+    let chart_origins = [0, side + GAP_POINTS];
 
     for origin in chart_origins {
         pixmap.fill(
             origin * scale,
-            chart_top,
-            chart_width * scale,
-            geometry.height_points * scale,
+            0,
+            side * scale,
+            side * scale,
             appearance.frame(),
         );
         pixmap.fill(
             (origin + FRAME_POINTS) * scale,
             interior_top,
-            capacity * scale,
+            columns * scale,
             rows,
             TRANSPARENT,
         );
     }
 
-    let count = u32::try_from(history.len()).unwrap_or(capacity);
-    for (position, item) in (0..count).zip(history.iter()) {
-        let slot = capacity - count + position;
+    let shown = history.len().min(geometry.columns().get());
+    let skipped = history.len() - shown;
+    let count = u32::try_from(shown).unwrap_or(columns);
+    for (position, item) in (0..count).zip(history.iter().skip(skipped)) {
+        let slot = columns - count + position;
         let [cpu_origin, memory_origin] = chart_origins;
         let cpu_x = (cpu_origin + FRAME_POINTS + slot) * scale;
         let memory_x = (memory_origin + FRAME_POINTS + slot) * scale;
