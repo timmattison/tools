@@ -9,10 +9,16 @@ license = "MIT"
 name = "cctop"
 path = "src/lib.rs"
 
+[[bin]]
+name = "cctop"
+path = "src/main.rs"
+
 [dependencies]
 base64.workspace = true
+buildinfo.workspace = true
 chrono.workspace = true
 childenv.workspace = true
+clap.workspace = true
 crossterm.workspace = true
 notify.workspace = true
 proctree.workspace = true
