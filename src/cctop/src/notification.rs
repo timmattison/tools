@@ -8,8 +8,22 @@ pub const NOTIFICATION_TITLE: &str = "cctop";
 /// The text goes in as arguments after `--`, never inside the AppleScript
 /// source. Thus no value needs quotes.
 #[must_use]
-pub fn notification_argv(_title: &str, _message: &str) -> Vec<String> {
-    Vec::new()
+pub fn notification_argv(title: &str, message: &str) -> Vec<String> {
+    [
+        "osascript",
+        "-e",
+        "on run argv",
+        "-e",
+        "display notification (item 2 of argv) with title (item 1 of argv)",
+        "-e",
+        "end run",
+        "--",
+        title,
+        message,
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect()
 }
 
 #[cfg(test)]
