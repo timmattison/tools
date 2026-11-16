@@ -33,10 +33,10 @@ pub const CRITICAL: Rgba = [255, 59, 48, 255];
 /// The color of the memory column at a level that this tool does not know. It is gray.
 pub const UNKNOWN: Rgba = [142, 142, 147, 255];
 
-/// The frame color in the light appearance. It is the label color at 85%.
-const FRAME_LIGHT: Rgba = [0, 0, 0, 217];
-/// The frame color in the dark appearance. It is the label color at 85%.
-const FRAME_DARK: Rgba = [255, 255, 255, 217];
+/// The label color in the light appearance. It is black at 85%.
+const LABEL_LIGHT: Rgba = [0, 0, 0, 217];
+/// The label color in the dark appearance. It is white at 85%.
+const LABEL_DARK: Rgba = [255, 255, 255, 217];
 
 /// The width of the frame of each chart, in points.
 pub const FRAME_POINTS: u32 = 1;
@@ -68,19 +68,20 @@ pub enum Appearance {
 }
 
 impl Appearance {
-    /// The color of the frame. It is the label color of the appearance.
+    /// The color of the label text. It is the label color of the appearance.
     #[must_use]
-    pub fn frame(self) -> Rgba {
+    pub fn label(self) -> Rgba {
         match self {
-            Appearance::Light => FRAME_LIGHT,
-            Appearance::Dark => FRAME_DARK,
+            Appearance::Light => LABEL_LIGHT,
+            Appearance::Dark => LABEL_DARK,
         }
     }
 
-    /// The color of the label text.
+    /// The color of the frame. The frame and the label text both take the
+    /// label color of the appearance.
     #[must_use]
-    pub fn label(self) -> Rgba {
-        TRANSPARENT
+    pub fn frame(self) -> Rgba {
+        self.label()
     }
 }
 
