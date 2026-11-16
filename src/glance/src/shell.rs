@@ -119,7 +119,7 @@ struct Ivars {
     interval: Interval,
     /// The status item in the menu bar.
     status_item: Retained<NSStatusItem>,
-    /// The four disabled info items of the menu.
+    /// The five disabled info items of the menu.
     info_items: [Retained<NSMenuItem>; MENU_LINES],
     /// The values that change.
     state: RefCell<State>,
@@ -155,11 +155,12 @@ impl Monitor {
     fn new(
         mtm: MainThreadMarker,
         interval: Interval,
+        reader: Reader,
         status_item: Retained<NSStatusItem>,
         info_items: [Retained<NSMenuItem>; MENU_LINES],
     ) -> Retained<Monitor> {
         let this = Monitor::alloc(mtm).set_ivars(Ivars {
-            reader: Reader::new(),
+            reader,
             interval,
             status_item,
             info_items,
@@ -276,15 +277,16 @@ impl Monitor {
         button.setImage(Some(&image));
     }
 
-    /// Sets the four info lines of the menu to the titles of `menu_titles`.
+    /// Sets the five info lines of the menu to the titles of `menu_titles`.
     fn update_menu(&self) {
         let state = self.ivars().state.borrow();
         let items = &self.ivars().info_items;
+        let origin = Origin {
+            host: self.ivars().reader.host_name().as_str(),
+            destination: None,
+        };
         let titles = menu_titles(
-            &Origin {
-                host: "",
-                destination: None,
-            },
+            &origin,
             state.error.as_deref(),
             state.history.newest().as_ref(),
         );
@@ -351,20 +353,20 @@ fn bitmap_representation(pixmap: &Pixmap, points: NSSize) -> Option<Retained<NSB
 }
 
 /// Makes the menu and gives it to the status item. Returns the info items.
+///
+/// The first info line shows `host`.
 fn build_menu(
     mtm: MainThreadMarker,
     status_item: &NSStatusItem,
+    host: &str,
 ) -> [Retained<NSMenuItem>; MENU_LINES] {
     let menu = NSMenu::new(mtm);
     menu.setAutoenablesItems(false);
-    let titles = menu_titles(
-        &Origin {
-            host: "",
-            destination: None,
-        },
-        None,
-        None,
-    );
+    let origin = Origin {
+        host,
+        destination: None,
+    };
+    let titles = menu_titles(&origin, None, None);
     let info_items: [Retained<NSMenuItem>; MENU_LINES] = titles.map(|title| {
         // SAFETY: The selector is absent, which AppKit allows for an item
         // that does nothing.
@@ -432,8 +434,9 @@ pub fn run(interval: Interval) -> ExitCode {
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
     let status_item =
         NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
-    let info_items = build_menu(mtm, &status_item);
-    let monitor = Monitor::new(mtm, interval, status_item, info_items);
+    let reader = Reader::new();
+    let info_items = build_menu(mtm, &status_item, reader.host_name().as_str());
+    let monitor = Monitor::new(mtm, interval, reader, status_item, info_items);
     monitor.sample_and_redraw();
     monitor.start_timer();
     register_observers(&monitor);

@@ -88,7 +88,7 @@ pub fn menu_titles(
         (None, Some(sample)) => menu_lines(sample),
         (None, None) => lines_under(WAITING_LINE.to_owned()),
     };
-    [String::new(), first, second, third, fourth]
+    [host_line(origin), first, second, third, fourth]
 }
 
 /// The first sample line, with three empty lines under it.
