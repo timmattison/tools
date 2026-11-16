@@ -98,7 +98,7 @@ pub fn focus(target: &FocusTarget, tools: &FocusTools) -> FocusReport {
     let zellij = target.zellij.as_ref().map(|location| {
         zellij::focus_pane(&*tools.runner, location)
             .map(|()| location.pane)
-            .map_err(|_| STEP_FAILED.to_string())
+            .map_err(|error| error.to_string())
     });
     FocusReport {
         label: target.label.clone(),
