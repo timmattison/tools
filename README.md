@@ -5634,8 +5634,9 @@ Show two small charts in the macOS menu bar: the share of the CPU time that the 
 
 - **The left chart is the CPU.** Each column is one sample. The red part at the bottom is the system share, and the blue part above it is the user share. A nice process counts as a user process. These are the colors of the CPU chart in Activity Monitor.
 - **The right chart is the memory pressure.** The height of each column is the memory in use as a percentage, and its color is the pressure level of that sample: green for normal, orange for warn, and red for critical. A level that `glance` does not know is gray, never green.
-- **The charts show the last 30 samples.** At the default interval, that is the last 30 seconds. The newest column is at the right edge, so a short spike stays visible after it ends.
-- **The short name of the Mac is in small text under the charts.** It is the name before the first `.`, as `hostname -s` gives it (`M4-Pro-Mac-Mini`, not `M4-Pro-Mac-Mini.local`). A name that is too wide ends in an ellipsis, and the status item does not grow. If the menu bar is too thin for the label and the charts, the label goes away.
+- **Each chart is as high as the menu bar**, inside a thin frame, and the two charts share one border. Thus a low load is easy to see: on a menu bar of 22 points, each chart has 20 rows, and a CPU share of 10% fills 2 of them.
+- **The charts show the last 32 samples.** At the default interval, that is the last 32 seconds. The newest column is at the right edge, so a short spike stays visible after it ends.
+- **The short name of the Mac is in small text at the top of the charts.** It is the name before the first `.`, as `hostname -s` gives it (`M4-Pro-Mac-Mini`, not `M4-Pro-Mac-Mini.local`). The name goes across both charts, over the columns. A column that reaches the top goes under the name, and a full chart is easy to read without it. The charts are wide enough for a name such as `M4-Pro-Mac-Mini`. A longer name ends in an ellipsis, and the status item does not grow. If the menu bar is too thin for the name, the name goes away.
 - **A click on the charts opens a menu** with the host (`Host: <name>`, the full name), the current values (user %, system %, idle %, the pressure level, and the percentage in use), and a **Quit glance** item.
 - `glance` has no Dock icon and no window.
 
