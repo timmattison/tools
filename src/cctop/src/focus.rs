@@ -83,10 +83,33 @@ impl FocusReport {
     }
 }
 
+/// Focuses the session of `target`. Both steps always run.
+///
+/// Step 1 runs only when the target has a Zellij session and pane. Step 2
+/// finds the WezTerm pane of the terminal and sends the focus request to the
+/// terminal device of that pane.
+#[must_use]
+pub fn focus(target: &FocusTarget, _tools: &FocusTools) -> FocusReport {
+    FocusReport {
+        label: target.label.clone(),
+        zellij: None,
+        wezterm: Err(String::new()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    use crate::ancestry::ps_argv;
+    use crate::lsof::{tty_argv, unix_sockets_argv};
+    use crate::runner::fake::FakeRunner;
+    use crate::runner::CommandOutput;
     use crate::state::parse_state_file;
+    use crate::wezterm::{focus_request, list_argv};
+    use crate::zellij::{focus_argv, list_sessions_argv};
 
     pub(super) fn session(pid: u32, name: Option<&str>, zellij: Option<(&str, &str)>) -> Session {
         let (zellij_session, zellij_pane) = zellij.map_or(
@@ -182,5 +205,104 @@ mod tests {
         assert!(!report(Some(Err("x".to_string())), Ok(239)).succeeded());
         assert!(!report(Some(Ok(pane("310"))), Err("x".to_string())).succeeded());
         assert!(!report(None, Err("x".to_string())).succeeded());
+    }
+
+    const PS: &str = include_str!("../fixtures/ps-tree.txt");
+    const SOCKETS: &str = include_str!("../fixtures/lsof-unix-sockets.txt");
+    const TTY: &str = include_str!("../fixtures/lsof-tty.txt");
+    const PANES: &str = include_str!("../fixtures/wezterm-list.json");
+    const SESSIONS: &str = include_str!("../fixtures/zellij-list-sessions.txt");
+
+    /// A writer that records each write. It fails when `fail` is set.
+    #[derive(Default)]
+    struct RecordingWriter {
+        writes: Mutex<Vec<(PathBuf, Vec<u8>)>>,
+        fail: bool,
+    }
+
+    impl RecordingWriter {
+        fn writes(&self) -> Vec<(PathBuf, Vec<u8>)> {
+            self.writes.lock().unwrap().clone()
+        }
+    }
+
+    impl TtyWriter for RecordingWriter {
+        fn write(&self, tty: &Path, bytes: &[u8]) -> std::io::Result<()> {
+            self.writes
+                .lock()
+                .unwrap()
+                .push((tty.to_path_buf(), bytes.to_vec()));
+            if self.fail {
+                Err(std::io::Error::other("device is busy"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn words(argv: &[String]) -> Vec<&str> {
+        argv.iter().map(String::as_str).collect()
+    }
+
+    fn ok(stdout: &str) -> Result<CommandOutput, crate::runner::RunError> {
+        Ok(CommandOutput::ok(stdout))
+    }
+
+    fn zellij_target() -> FocusTarget {
+        FocusTarget::of(&session(29130, Some("docs"), Some(("tools", "310"))))
+    }
+
+    /// A runner that answers each command of a focus in Zellij.
+    fn zellij_runner() -> FakeRunner {
+        FakeRunner::new()
+            .answer(&words(&list_sessions_argv()), ok(SESSIONS))
+            .answer(
+                &words(&focus_argv(&zellij_target().zellij.unwrap())),
+                ok(""),
+            )
+            .answer(&words(&ps_argv()), ok(PS))
+            .answer(&words(&unix_sockets_argv()), ok(SOCKETS))
+            .answer(&words(&tty_argv(Pid::new(19800))), ok(TTY))
+            .answer(&words(&list_argv()), ok(PANES))
+    }
+
+    fn tools(runner: &Arc<FakeRunner>, writer: &Arc<RecordingWriter>) -> FocusTools {
+        FocusTools {
+            runner: runner.clone(),
+            writer: writer.clone(),
+        }
+    }
+
+    #[test]
+    fn a_focus_in_zellij_runs_both_steps_in_order_and_writes_the_request() {
+        let runner = Arc::new(zellij_runner());
+        let writer = Arc::new(RecordingWriter::default());
+        let target = zellij_target();
+        let report = focus(&target, &tools(&runner, &writer));
+        assert_eq!(
+            runner.calls(),
+            vec![
+                list_sessions_argv(),
+                focus_argv(&target.zellij.clone().unwrap()),
+                ps_argv(),
+                unix_sockets_argv(),
+                tty_argv(Pid::new(19800)),
+                list_argv(),
+            ]
+        );
+        assert_eq!(
+            writer.writes(),
+            vec![(
+                PathBuf::from("/dev/ttys231"),
+                focus_request(239).into_bytes()
+            )]
+        );
+        assert_eq!(report.zellij, Some(Ok(pane("310"))));
+        assert_eq!(report.wezterm, Ok(239));
+        assert!(report.succeeded());
+        assert_eq!(
+            report.status_line(),
+            "docs: Zellij focused pane terminal_310 · WezTerm focused pane 239"
+        );
     }
 }
