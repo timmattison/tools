@@ -226,4 +226,31 @@ mod tests {
             Err(StateFileError::Json(_))
         ));
     }
+
+    #[test]
+    fn a_version_other_than_one_is_refused() {
+        let json = ZELLIJ.replace("\"version\":1", "\"version\":2");
+        assert!(matches!(
+            parse_state_file(&json),
+            Err(StateFileError::Version(2))
+        ));
+    }
+
+    #[test]
+    fn a_pane_that_is_not_digits_is_refused() {
+        let json = ZELLIJ.replace("\"310\"", "\"terminal_3\"");
+        match parse_state_file(&json) {
+            Err(StateFileError::Pane(text)) => assert_eq!(text, "terminal_3"),
+            other => panic!("expected a pane error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pid_zero_is_refused() {
+        let json = ZELLIJ.replace("\"pid\":80033", "\"pid\":0");
+        assert!(matches!(
+            parse_state_file(&json),
+            Err(StateFileError::ZeroPid)
+        ));
+    }
 }
