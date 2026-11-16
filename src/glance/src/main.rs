@@ -3,6 +3,7 @@
 
 #![deny(unsafe_code)]
 
+#[cfg(target_os = "macos")]
 use std::io::{self, Write};
 use std::process::ExitCode;
 
