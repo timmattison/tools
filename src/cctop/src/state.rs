@@ -1,6 +1,7 @@
 //! The state file that Claude Code writes for each session, and the types
 //! that describe its content.
 
+use std::ffi::OsStr;
 use std::path::PathBuf;
 
 use proctree::Pid;
@@ -211,6 +212,14 @@ struct RawStateFile {
     zellij_pane: Option<String>,
 }
 
+/// The pid that a state file name holds, or `None` when the name is not
+/// `<pid>.json`.
+#[must_use]
+pub fn pid_of_file_name(name: &OsStr) -> Option<Pid> {
+    let _ = name;
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,5 +363,33 @@ mod tests {
         assert_eq!(PaneState::Idle.color(), rgb(0xe0, 0x31, 0x31));
         assert_eq!(PaneState::Agents.color(), rgb(0xff, 0xff, 0xff));
         assert_eq!(PaneState::Shells.color(), rgb(0x00, 0xcc, 0xcc));
+    }
+
+    #[test]
+    fn pid_of_file_name_accepts_a_pid_and_json() {
+        assert_eq!(
+            pid_of_file_name(OsStr::new("80033.json")),
+            Some(Pid::new(80033))
+        );
+        assert_eq!(pid_of_file_name(OsStr::new("1.json")), Some(Pid::new(1)));
+    }
+
+    #[test]
+    fn pid_of_file_name_refuses_other_names() {
+        for name in [
+            "80033.json.tmp",
+            "abc.json",
+            ".json",
+            "0.json",
+            "80033.JSON",
+            "80033",
+            "-5.json",
+            "+5.json",
+            "99999999999.json",
+            "80033.json.json",
+            "日本語.json",
+        ] {
+            assert_eq!(pid_of_file_name(OsStr::new(name)), None, "{name}");
+        }
     }
 }
