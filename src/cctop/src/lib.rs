@@ -11,6 +11,7 @@
 pub mod ancestry;
 pub mod app;
 pub mod board;
+pub mod controller;
 pub mod focus;
 pub mod liveness;
 pub mod lsof;
