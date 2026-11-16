@@ -9,8 +9,10 @@ use crate::state::EpochMillis;
 /// whole seconds since the epoch. It is `None` when no such process runs.
 #[must_use]
 pub fn is_stale(started_at: EpochMillis, process_start_secs: Option<u64>) -> bool {
-    let _ = (started_at, process_start_secs);
-    false
+    match process_start_secs {
+        None => true,
+        Some(secs) => secs.saturating_mul(1000) > started_at.as_u64(),
+    }
 }
 
 #[cfg(test)]
