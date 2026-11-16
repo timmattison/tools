@@ -81,10 +81,12 @@ impl Target {
     /// Gives the name of the lock file of this target.
     ///
     /// The local target gives `local.lock`. A host gives `host-`, the
-    /// destination, and `.lock`. Each byte of the destination that is not an
-    /// ASCII letter, a digit, `.`, `-`, `_`, or `@` becomes `%` and two
-    /// uppercase hex digits. Thus the name holds no `/`, and two different
-    /// destinations never give the same name.
+    /// destination, and `.lock`. Each byte of the destination that is not a
+    /// lowercase ASCII letter, a digit, `.`, `-`, `_`, or `@` becomes `%` and
+    /// two uppercase hex digits. Thus the name holds no `/`, and two different
+    /// destinations never give the same name. The default file system of macOS
+    /// folds case, so a raw uppercase letter could name the same file as its
+    /// lowercase form.
     #[must_use]
     pub fn file_name(&self) -> String {
         match self {
@@ -92,7 +94,8 @@ impl Target {
             Target::Host(destination) => {
                 let mut name = HOST_FILE_PREFIX.to_owned();
                 for byte in destination.as_str().bytes() {
-                    if byte.is_ascii_alphanumeric() || b".-_@".contains(&byte) {
+                    if byte.is_ascii_lowercase() || byte.is_ascii_digit() || b".-_@".contains(&byte)
+                    {
                         name.push(char::from(byte));
                     } else {
                         name.push_str(&format!("%{byte:02X}"));
@@ -480,10 +483,14 @@ mod tests {
     }
 
     #[test]
-    fn a_host_name_keeps_letters_digits_and_the_marks_of_a_host() {
+    fn a_host_name_keeps_lowercase_letters_digits_and_the_marks_of_a_host() {
+        assert_eq!(
+            host("tim@m4-pro_mac.local").file_name(),
+            "host-tim@m4-pro_mac.local.lock"
+        );
         assert_eq!(
             host("tim@M4-Pro_Mac.local").file_name(),
-            "host-tim@M4-Pro_Mac.local.lock"
+            "host-tim@%4D4-%50ro_%4Dac.local.lock"
         );
     }
 
