@@ -202,4 +202,15 @@ mod tests {
         assert!(DeviceWriter.write(path, b"x").is_err());
         assert!(!path.exists());
     }
+
+    #[test]
+    fn a_path_that_leaves_dev_with_a_parent_step_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        std::fs::write(&target, "old").unwrap();
+        let sneaky = Path::new("/dev/..").join(target.strip_prefix("/").unwrap());
+        let error = DeviceWriter.write(&sneaky, b"new").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "old");
+    }
 }
