@@ -6,6 +6,7 @@ use proctree::Pid;
 
 use crate::board::Board;
 use crate::focus::FocusTarget;
+use crate::state::PaneState;
 
 /// What the main loop does after a key.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,9 +83,28 @@ impl App {
             KeyCode::Char('j') | KeyCode::Down => self.move_selection(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1),
             KeyCode::Enter => return self.focus_selected(),
+            KeyCode::Char('n') => return self.focus_next_needs_you(),
             _ => {}
         }
         Action::Nothing
+    }
+
+    /// Select the next session in the state `needs-you`, and ask the main
+    /// loop to focus it. The search starts after the selected row and wraps
+    /// around, so the selected row counts last.
+    fn focus_next_needs_you(&mut self) -> Action {
+        let rows = self.board.rows();
+        let count = rows.len();
+        let current = self.selected_index().unwrap_or(0);
+        let found = (1..=count)
+            .map(|offset| (current + offset) % count)
+            .find(|&index| rows[index].file.state == PaneState::NeedsYou);
+        let Some(index) = found else {
+            self.status = Some("No session needs you".to_string());
+            return Action::Nothing;
+        };
+        self.select(index);
+        self.focus_selected()
     }
 
     /// Ask the main loop to focus the selected session.
