@@ -838,4 +838,50 @@ mod tests {
         assert_eq!(geometry.chart_rows_points(), 0..HEIGHT_POINTS);
         assert_eq!(geometry.band_rows_points(), None);
     }
+
+    #[test]
+    fn a_label_band_keeps_its_rows_transparent_and_moves_the_charts_down() {
+        let samples = vec![sample(100, 0, 0, LEVEL_NORMAL, ALL_IN_USE); CAPACITY];
+        let history = history_of(CAPACITY, &samples);
+        for thickness in THICKNESSES {
+            for scale in SCALES {
+                let geometry =
+                    Geometry::from_status_bar(thickness, f64::from(scale), Some(LINE_HEIGHT));
+                let pixmap = render(&history, geometry, Appearance::Light);
+                let thickness_points = whole_number(thickness);
+                assert_eq!(pixmap.width(), 68 * scale);
+                assert_eq!(pixmap.height(), thickness_points * scale);
+
+                let band = geometry.band_rows_points().unwrap();
+                let gap_row = geometry.chart_rows_points().end;
+                let transparent_rows = (0..LABEL_TOP_INSET_POINTS)
+                    .chain(gap_row..gap_row + LABEL_GAP_POINTS)
+                    .chain(band);
+                for point_row in transparent_rows {
+                    for y in point_row * scale..(point_row + 1) * scale {
+                        for x in 0..pixmap.width() {
+                            assert_eq!(pixmap.pixel(x, y), TRANSPARENT, "({x}, {y})");
+                        }
+                    }
+                }
+
+                let x = slot_x(CAPACITY, CPU_CHART, CAPACITY - 1, scale);
+                let chart_top = LABEL_TOP_INSET_POINTS * scale;
+                let chart_bottom = (LABEL_TOP_INSET_POINTS + geometry.height_points()) * scale;
+                let system: Vec<u32> = (0..pixmap.height())
+                    .filter(|&y| pixmap.pixel(x, y) == SYSTEM)
+                    .collect();
+                let expected = (thickness_points - 1 - 1 - BAND_POINTS - 2 * FRAME_POINTS) * scale;
+                assert_eq!(u32::try_from(system.len()).unwrap(), expected);
+                assert_eq!(system.first(), Some(&(chart_top + FRAME_POINTS * scale)));
+                assert_eq!(
+                    system.last(),
+                    Some(&(chart_bottom - FRAME_POINTS * scale - 1))
+                );
+                let frame = Appearance::Light.frame();
+                assert_eq!(pixmap.pixel(x, chart_top), frame);
+                assert_eq!(pixmap.pixel(x, chart_bottom - 1), frame);
+            }
+        }
+    }
 }
