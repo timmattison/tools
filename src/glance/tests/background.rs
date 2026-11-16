@@ -18,6 +18,7 @@ use std::io::{BufRead, BufReader};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
+use std::sync::Barrier;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -55,6 +56,16 @@ const SYSTEM_PATH: &str = "/usr/bin:/bin";
 
 /// The text before the PID in each line that names a status item.
 const PID_MARK: &str = " as PID ";
+
+/// The first part of the line that a copy writes when another status item
+/// of its target holds the lock.
+const ANOTHER_STARTED_MARK: &str =
+    "glance: another glance started the same status item at the same time, as PID ";
+
+/// The first part of the last line that a start writes when its copy ends
+/// before the status item is up.
+const COPY_STOPPED_MARK: &str =
+    "glance: the background copy stopped before its status item was up (";
 
 /// The exit code that clap gives for a usage error.
 const USAGE_ERROR: i32 = 2;
@@ -404,4 +415,128 @@ fn the_background_status_item_writes_its_output_nowhere() {
     let text = String::from_utf8_lossy(&output.stdout);
     let names: Vec<&str> = text.lines().filter(|line| line.starts_with('n')).collect();
     assert_eq!(names, ["n/dev/null", "n/dev/null"], "{output:?}");
+}
+
+#[test]
+fn a_copy_that_finds_the_lock_held_says_who_holds_it_and_starts_nothing() {
+    let mut home = Home::new();
+    let pid = home.start(Target::Local);
+    let output = home.run(&["--background-child"]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        format!("{ANOTHER_STARTED_MARK}{pid}\n")
+    );
+    assert!(alive(pid), "the copy stopped the status item {pid}");
+}
+
+/// What one start of the race printed, and how it ended.
+#[derive(Debug)]
+struct Start {
+    code: Option<i32>,
+    stdout: String,
+    stderr: String,
+}
+
+impl Start {
+    fn new(output: &Output) -> Self {
+        Self {
+            code: output.status.code(),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        }
+    }
+
+    /// The PID of the ready line of this start, if it printed one.
+    fn ready_pid(&self, target: Target) -> Option<u32> {
+        self.line_pid(|pid| target.ready_line(pid))
+    }
+
+    /// The PID of the stopped line of this start, if it printed one.
+    fn stopped_pid(&self, target: Target) -> Option<u32> {
+        self.line_pid(|pid| target.stopped_line(pid))
+    }
+
+    /// The PID that `stdout` names, when `stdout` is exactly the line that
+    /// `line` builds for that PID.
+    fn line_pid(&self, line: impl Fn(u32) -> String) -> Option<u32> {
+        let pid = self
+            .stdout
+            .contains(PID_MARK)
+            .then(|| named_pid(&self.stdout))?;
+        (self.stdout == line(pid)).then_some(pid)
+    }
+}
+
+/// Two `glance --background` of one target at the same moment.
+///
+/// The race has several valid orders. One start can win the claim, and the
+/// other copy can lose it and exit 1 with the another-started line. One start
+/// can also find the other status item and stop it, so the first start ends
+/// with a stopped line and the other with a ready line or a stopped line. The
+/// test accepts each order and asserts the rules that hold in all of them.
+#[test]
+fn two_background_starts_at_the_same_moment_give_at_most_one_status_item() {
+    let mut home = Home::new();
+    let target = Target::Local;
+    let barrier = Barrier::new(2);
+    let outputs: Vec<Output> = thread::scope(|scope| {
+        let workers: Vec<_> = (0..2)
+            .map(|_| {
+                scope.spawn(|| {
+                    barrier.wait();
+                    home.run(&["--background"])
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .map(|worker| worker.join().expect("a start does not panic"))
+            .collect()
+    });
+    let starts: Vec<Start> = outputs.iter().map(Start::new).collect();
+    let report = format!("{starts:#?}");
+    let ready: Vec<u32> = starts.iter().filter_map(|s| s.ready_pid(target)).collect();
+    home.started.extend(&ready);
+
+    for (index, start) in starts.iter().enumerate() {
+        let other = &starts[1 - index];
+        match start.code {
+            Some(0) => assert!(
+                start.ready_pid(target).is_some() || start.stopped_pid(target).is_some(),
+                "a start that exits 0 prints one ready line or one stopped line: {report}"
+            ),
+            Some(1) => {
+                assert!(
+                    start.stdout.is_empty(),
+                    "a failed start prints to stdout: {report}"
+                );
+                let last = start.stderr.lines().last().unwrap_or_default();
+                assert!(
+                    last.starts_with(COPY_STOPPED_MARK),
+                    "a failed start ends with the copy-stopped line: {report}"
+                );
+                let first = start.stderr.lines().next().unwrap_or_default();
+                let explained_by_race = first
+                    .strip_prefix(ANOTHER_STARTED_MARK)
+                    .and_then(|pid| pid.parse::<u32>().ok())
+                    .is_some_and(|holder| other.ready_pid(target) == Some(holder) && alive(holder));
+                assert!(
+                    explained_by_race || other.stopped_pid(target).is_some(),
+                    "a failed start has no explanation: {report}"
+                );
+            }
+            code => panic!("a start exits 0 or 1, not {code:?}: {report}"),
+        }
+        if let Some(pid) = start.stopped_pid(target) {
+            assert!(!alive(pid), "the status item {pid} still runs: {report}");
+        }
+    }
+    assert!(
+        ready.len() <= 1,
+        "two starts printed a ready line: {report}"
+    );
+    let running = ready.iter().filter(|pid| alive(**pid)).count();
+    assert!(running <= 1, "two status items run: {report}");
 }
