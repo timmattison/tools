@@ -5,12 +5,12 @@ use std::path::{Path, PathBuf};
 
 use proctree::Pid;
 
-use crate::board::Board;
+use crate::board::{Board, Change};
 use crate::liveness::{ProcessClock, stale_pids};
 use crate::paths::ClaudeDirs;
 use crate::registry;
 use crate::state::{EpochMillis, StateFile};
-use crate::store::{self, ReadOutcome};
+use crate::store::{self, DirEvent, ReadOutcome};
 
 /// The reader that keeps a board in step with the state directory.
 #[derive(Debug, Clone)]
@@ -76,6 +76,23 @@ impl Sync {
             board.load(file, name);
         }
         Ok(())
+    }
+
+    /// Apply one directory event to `board`. Return the changes that it made.
+    ///
+    /// `File(pid)` reads the file of that pid. A good file of a live process
+    /// goes to the board. A good file of a stale process goes away, with its
+    /// session. A missing file removes the session. A file that cannot be read
+    /// changes nothing. `Rescan` does this for each file in the directory, and
+    /// it removes each session whose file is gone.
+    pub fn on_dir_event(
+        &self,
+        _board: &mut Board,
+        _event: DirEvent,
+        _clock: &mut dyn ProcessClock,
+        _now: EpochMillis,
+    ) -> Vec<Change> {
+        Vec::new()
     }
 }
 
@@ -179,5 +196,90 @@ mod tests {
         let mut board = Board::new();
         let mut clock = FakeClock(HashMap::new());
         assert!(sync.initial(&mut board, &mut clock).is_err());
+    }
+
+    const NOW: EpochMillis = EpochMillis::new(9_000_000);
+
+    fn file_event(env: &Env, pid: u32, clock: &mut FakeClock, board: &mut Board) -> Vec<Change> {
+        env.sync
+            .on_dir_event(board, DirEvent::File(Pid::new(pid)), clock, NOW)
+    }
+
+    #[test]
+    fn a_new_file_gives_one_change_with_no_old_state() {
+        let env = Env::new();
+        env.write(10, "needs-you", 2_000_000);
+        env.name(10);
+        let mut board = Board::new();
+        let changes = file_event(&env, 10, &mut live(&[10]), &mut board);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].old, None);
+        assert_eq!(changes[0].new, Some(PaneState::NeedsYou));
+        assert_eq!(changes[0].label, "issue-697-d1");
+        assert_eq!(board.pids(), vec![Pid::new(10)]);
+    }
+
+    #[test]
+    fn a_changed_state_gives_one_change() {
+        let env = Env::new();
+        env.write(10, "idle", 2_000_000);
+        let mut board = Board::new();
+        env.sync.initial(&mut board, &mut live(&[10])).unwrap();
+        env.write(10, "working", 2_000_500);
+        let changes = file_event(&env, 10, &mut live(&[10]), &mut board);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].old, Some(PaneState::Idle));
+        assert_eq!(changes[0].new, Some(PaneState::Working));
+    }
+
+    #[test]
+    fn a_removed_file_gives_a_change_with_no_new_state() {
+        let env = Env::new();
+        env.write(10, "idle", 2_000_000);
+        let mut board = Board::new();
+        env.sync.initial(&mut board, &mut live(&[10])).unwrap();
+        std::fs::remove_file(env.state.path().join("10.json")).unwrap();
+        let changes = file_event(&env, 10, &mut live(&[10]), &mut board);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].old, Some(PaneState::Idle));
+        assert_eq!(changes[0].new, None);
+        assert_eq!(changes[0].at, NOW);
+        assert!(board.is_empty());
+    }
+
+    #[test]
+    fn an_unreadable_file_changes_nothing() {
+        let env = Env::new();
+        env.write(10, "idle", 2_000_000);
+        let mut board = Board::new();
+        env.sync.initial(&mut board, &mut live(&[10])).unwrap();
+        std::fs::write(env.state.path().join("10.json"), "{\"version\":").unwrap();
+        let changes = file_event(&env, 10, &mut live(&[10]), &mut board);
+        assert!(changes.is_empty());
+        assert_eq!(board.get(Pid::new(10)).unwrap().file.state, PaneState::Idle);
+    }
+
+    #[test]
+    fn a_file_of_a_stale_process_is_removed_with_its_session() {
+        let env = Env::new();
+        env.write(10, "idle", 2_000_000);
+        let mut board = Board::new();
+        env.sync.initial(&mut board, &mut live(&[10])).unwrap();
+        env.write(10, "working", 2_000_500);
+        let changes = file_event(&env, 10, &mut FakeClock(HashMap::new()), &mut board);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].new, None);
+        assert!(board.is_empty());
+        assert!(!env.exists(10));
+    }
+
+    #[test]
+    fn a_new_file_of_a_stale_process_gives_no_change() {
+        let env = Env::new();
+        env.write(10, "idle", 2_000_000);
+        let mut board = Board::new();
+        let changes = file_event(&env, 10, &mut FakeClock(HashMap::new()), &mut board);
+        assert!(changes.is_empty());
+        assert!(!env.exists(10));
     }
 }
