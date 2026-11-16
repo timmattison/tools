@@ -10,6 +10,7 @@
 
 pub mod ancestry;
 pub mod board;
+pub mod focus;
 pub mod liveness;
 pub mod lsof;
 pub mod notification;
