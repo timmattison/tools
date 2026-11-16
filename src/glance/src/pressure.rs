@@ -99,8 +99,13 @@ impl Pressure {
     /// The result is `None` if the percentage is above 100.
     #[must_use]
     pub fn from_level_and_percent(level_raw: i32, percent_in_use: u8) -> Option<Pressure> {
-        let _ = (level_raw, percent_in_use);
-        None
+        if i32::from(percent_in_use) > PERCENT_MAX {
+            return None;
+        }
+        Some(Pressure {
+            level: Level::from_raw(level_raw),
+            percent_in_use,
+        })
     }
 
     /// The pressure level.
