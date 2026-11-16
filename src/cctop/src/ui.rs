@@ -259,4 +259,12 @@ mod tests {
         assert!(needs_line.trim_start_matches('│').starts_with("› "));
         assert!(!working_line.trim_start_matches('│').starts_with("› "));
     }
+
+    #[test]
+    fn an_empty_board_shows_a_hint() {
+        let buffer = render(&App::new(), 1_000);
+        assert!(row_text(&buffer, 0).contains("cctop · 0 sessions"));
+        let (_, line) = line_with(&buffer, "No Claude Code session wrote a state file.");
+        assert!(!line.contains("STATE"));
+    }
 }
