@@ -50,6 +50,36 @@ fn sample_prints_one_json_line() {
     assert!(percent <= 100, "{percent}");
 }
 
+/// The number of lines that the stream test asks for.
+#[cfg(target_os = "macos")]
+const STREAM_LINES: usize = 3;
+
+#[cfg(target_os = "macos")]
+#[test]
+fn stream_prints_one_sample_line_for_each_interval() {
+    let hostname = childenv::fixture_command("hostname")
+        .arg("-s")
+        .output()
+        .expect("hostname starts");
+    let expected = String::from_utf8(hostname.stdout).expect("hostname is UTF-8");
+    let count = STREAM_LINES.to_string();
+    let output = run(&["--stream", "--count", &count, "--interval", "0.25"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).expect("stdout is UTF-8");
+    assert_eq!(stdout.lines().count(), STREAM_LINES, "{stdout:?}");
+    for line in stdout.lines() {
+        match glance::text::parse_line(line).expect("a stream line") {
+            glance::text::StreamLine::Sample { host, .. } => {
+                assert_eq!(host.as_str(), expected.trim());
+            }
+            other => panic!("not a sample: {other:?}"),
+        }
+    }
+    let first = stdout.lines().next().expect("a first line");
+    let value: serde_json::Value = serde_json::from_str(first).expect("JSON");
+    assert_eq!(value.as_object().expect("an object").len(), KEY_COUNT);
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn an_interval_below_the_minimum_is_a_usage_error() {

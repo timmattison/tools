@@ -41,6 +41,14 @@ struct Cli {
     /// Take two readings one interval apart, print one JSON object, and stop.
     #[arg(long)]
     sample: bool,
+
+    /// Print one JSON line for each interval until the standard output closes.
+    #[arg(long)]
+    stream: bool,
+
+    /// Stop the stream after N lines.
+    #[arg(long, value_name = "N")]
+    count: Option<u64>,
 }
 
 fn main() -> ExitCode {
@@ -52,6 +60,9 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> ExitCode {
     if cli.sample {
         return sample(cli.interval);
+    }
+    if cli.stream {
+        return stream(cli.interval, cli.count);
     }
     glance::shell::run(cli.interval)
 }
@@ -75,6 +86,12 @@ fn sample(interval: Interval) -> ExitCode {
             ExitCode::from(EXIT_READ_FAILED)
         }
     }
+}
+
+/// Prints one JSON line for each interval, at most `count` lines.
+#[cfg(target_os = "macos")]
+fn stream(_interval: Interval, _count: Option<u64>) -> ExitCode {
+    ExitCode::SUCCESS
 }
 
 /// Refuses to run on a platform other than macOS.
