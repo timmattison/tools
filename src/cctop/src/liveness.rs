@@ -84,6 +84,12 @@ mod tests {
 
     const STARTED_AT: EpochMillis = EpochMillis::new(1_794_823_262_488);
 
+    /// 2020-01-01T00:00:00Z in seconds. A real start time is later than this.
+    const YEAR_2020_SECS: u64 = 1_577_836_800;
+
+    /// The seconds in one day. A test binary never runs for this long.
+    const ONE_DAY_SECS: u64 = 86_400;
+
     #[test]
     fn no_process_is_stale() {
         assert!(is_stale(STARTED_AT, None));
@@ -123,14 +129,22 @@ mod tests {
     }
 
     #[test]
-    fn the_system_clock_knows_this_process_and_not_an_absent_one() {
+    fn the_system_clock_gives_the_real_start_time_of_this_process_and_none_for_an_absent_one() {
         let own = Pid::current();
         let absent = Pid::new(99_999_999);
         let mut clock = SystemClock::new();
         let times = clock.start_times(&[own, absent]);
         let now_secs = EpochMillis::now().as_u64() / 1000;
         let start = times.get(&own).copied().expect("this process is live");
-        assert!(start <= now_secs);
+        assert!(start <= now_secs, "start {start} is after now {now_secs}");
+        assert!(
+            start > YEAR_2020_SECS,
+            "start {start} is not after 2020 (now {now_secs})"
+        );
+        assert!(
+            start + ONE_DAY_SECS >= now_secs,
+            "start {start} is more than one day before now {now_secs}"
+        );
         assert!(!times.contains_key(&absent));
     }
 
