@@ -406,6 +406,14 @@ mod tests {
     }
 
     #[test]
+    fn a_handled_needs_you_row_shows_the_whole_state_at_70_columns() {
+        let app = board_with_a_handled_needs_you_row();
+        let buffer = render_at(&app, 10_000, 70);
+        let (_, line) = line_with(&buffer, "dir10");
+        assert!(line.contains("needs-you - handled"), "{line}");
+    }
+
+    #[test]
     fn the_state_column_takes_no_spare_width_at_100_columns() {
         let app = board_with_a_handled_needs_you_row();
         let buffer = render(&app, 10_000);
