@@ -1,6 +1,10 @@
 //! The screen of cctop: the table of sessions, the change log, and the
 //! status line.
 
+use chrono::TimeZone;
+
+use crate::state::EpochMillis;
+
 /// Format a time span for the screen. A span under one minute shows seconds,
 /// under one hour shows minutes and seconds, under one day shows hours and
 /// minutes, and a longer span shows days and hours.
@@ -17,6 +21,16 @@ pub fn format_elapsed(ms: u64) -> String {
     } else {
         format!("{days}d {:02}h", hours % 24)
     }
+}
+
+/// Format a time of day as `HH:MM:SS` in the time zone `zone`.
+#[must_use]
+pub fn clock_time<Tz: TimeZone>(at: EpochMillis, zone: &Tz) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let _ = (at, zone);
+    String::new()
 }
 
 #[cfg(test)]
@@ -38,5 +52,16 @@ mod tests {
         assert_eq!(format_elapsed(86_399_000), "23h 59m");
         assert_eq!(format_elapsed(DAY), "1d 00h");
         assert_eq!(format_elapsed(2 * DAY + 4 * HOUR), "2d 04h");
+    }
+
+    #[test]
+    fn clock_time_shows_the_time_of_day_in_the_zone() {
+        let at = EpochMillis::new(1_794_824_265_058);
+        let expected = chrono::DateTime::from_timestamp_millis(1_794_824_265_058)
+            .expect("the instant is valid")
+            .format("%H:%M:%S")
+            .to_string();
+        assert_eq!(clock_time(at, &chrono::Utc), expected);
+        assert_eq!(expected.len(), 8);
     }
 }
