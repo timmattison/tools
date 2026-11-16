@@ -37,7 +37,7 @@ use objc2_foundation::{
     NSRunLoopCommonModes, NSSize, NSString, NSTimer,
 };
 
-use crate::chart::{render, Appearance, Geometry, Pixmap, Rgba, FRAME_POINTS};
+use crate::chart::{render, Appearance, Coverage, Geometry, Glyphs, Pixmap, Rgba, FRAME_POINTS};
 use crate::connection::{Feed, Remote, SSH_PROGRAM};
 use crate::interval::Interval;
 use crate::reader::Reader;
@@ -311,7 +311,7 @@ impl Monitor {
 
         let line_height = label_line_height();
         let state = self.ivars().state.borrow();
-        let drawings: Vec<(Geometry, Pixmap)> = scales
+        let mut drawings: Vec<(Geometry, Pixmap)> = scales
             .iter()
             .map(|&scale| {
                 let geometry =
@@ -322,20 +322,22 @@ impl Monitor {
         let Some((_, first)) = drawings.first() else {
             return;
         };
-        let points = NSSize::new(
-            f64::from(first.width_points()),
-            f64::from(first.height_points()),
-        );
+        let points = points_of(first);
         let label = state.origin().host;
         let image = NSImage::initWithSize(NSImage::alloc(), points);
-        for (geometry, pixmap) in &drawings {
-            let Some(representation) = bitmap_representation(pixmap, points) else {
+        for (geometry, pixmap) in &mut drawings {
+            if let Some(rect) = label_rect(*geometry) {
+                // A refused step leaves the charts of this scale with no label.
+                draw_label(pixmap, label, rect, appearance);
+            }
+            let Some(representation) = bitmap_representation(
+                pixmap.width(),
+                pixmap.height(),
+                &pixmap.premultiplied_bytes(),
+                points,
+            ) else {
                 return;
             };
-            if let Some(rect) = label_rect(*geometry) {
-                // A refused context leaves the charts of this scale with no label.
-                draw_label(&representation, label, rect, appearance.label());
-            }
             image.addRepresentation(&representation);
         }
         image.setTemplate(false);
@@ -357,16 +359,23 @@ impl Monitor {
     }
 }
 
-/// Makes one bitmap representation of a pixmap, tagged as sRGB.
+/// Makes one bitmap representation of `width` by `height` pixels, tagged as
+/// sRGB, that holds the bytes `premultiplied`.
 ///
-/// The bitmap holds premultiplied alpha, because AppKit makes a graphics
-/// context for the label only for such a bitmap. Returns `None` when AppKit
-/// refuses to make or to retag the image.
-fn bitmap_representation(pixmap: &Pixmap, points: NSSize) -> Option<Retained<NSBitmapImageRep>> {
-    let width = isize::try_from(pixmap.width()).ok()?;
-    let height = isize::try_from(pixmap.height()).ok()?;
-    let source_stride = usize::try_from(pixmap.width()).ok()? * BYTES_PER_PIXEL;
-    let rows = usize::try_from(pixmap.height()).ok()?;
+/// The bytes are RGBA with the alpha premultiplied, row by row from the top
+/// left, with no padding. AppKit makes a graphics context for text only for
+/// such a bitmap. Returns `None` when AppKit refuses to make or to retag the
+/// image.
+fn bitmap_representation(
+    width_pixels: u32,
+    height_pixels: u32,
+    premultiplied: &[u8],
+    points: NSSize,
+) -> Option<Retained<NSBitmapImageRep>> {
+    let width = isize::try_from(width_pixels).ok()?;
+    let height = isize::try_from(height_pixels).ok()?;
+    let source_stride = usize::try_from(width_pixels).ok()? * BYTES_PER_PIXEL;
+    let rows = usize::try_from(height_pixels).ok()?;
     // SAFETY: The planes pointer is null, so AppKit allocates the buffer. The
     // color space name is a constant of AppKit. The sizes describe one
     // non-planar buffer of 8-bit RGBA pixels.
@@ -391,8 +400,7 @@ fn bitmap_representation(pixmap: &Pixmap, points: NSSize) -> Option<Retained<NSB
     if data.is_null() || destination_stride < source_stride {
         return None;
     }
-    for (row, source) in pixmap
-        .premultiplied_bytes()
+    for (row, source) in premultiplied
         .chunks_exact(source_stride)
         .take(rows)
         .enumerate()
@@ -413,6 +421,104 @@ fn bitmap_representation(pixmap: &Pixmap, points: NSSize) -> Option<Retained<NSB
         representation.bitmapImageRepByRetaggingWithColorSpace(&NSColorSpace::sRGBColorSpace())?;
     tagged.setSize(points);
     Some(tagged)
+}
+
+/// The alpha of each pixel of `representation`, row by row from the top left.
+///
+/// Returns `None` when the representation has no buffer, or when its layout
+/// is not the layout that [`bitmap_representation`] makes: one plane of four
+/// 8-bit samples for each pixel, with the alpha last.
+fn alpha_channel(representation: &NSBitmapImageRep) -> Option<Vec<u8>> {
+    if representation.isPlanar()
+        || representation.samplesPerPixel() != SAMPLES_PER_PIXEL
+        || representation.bitsPerPixel() != BITS_PER_PIXEL
+        || representation
+            .bitmapFormat()
+            .contains(NSBitmapFormat::AlphaFirst)
+    {
+        return None;
+    }
+    let stride = usize::try_from(representation.bytesPerRow()).ok()?;
+    let width = usize::try_from(representation.pixelsWide()).ok()?;
+    let height = usize::try_from(representation.pixelsHigh()).ok()?;
+    let row_bytes = width.checked_mul(BYTES_PER_PIXEL)?;
+    let data = representation.bitmapData();
+    if data.is_null() || row_bytes > stride {
+        return None;
+    }
+    let mut alpha = Vec::with_capacity(width.checked_mul(height)?);
+    for row in 0..height {
+        // SAFETY: AppKit holds `stride * height` bytes at `data`. The row
+        // index is below `height`, and the row reads `row_bytes` bytes, which
+        // is not more than `stride`.
+        let bytes = unsafe { std::slice::from_raw_parts(data.add(row * stride), row_bytes) };
+        alpha.extend(
+            bytes
+                .as_chunks::<BYTES_PER_PIXEL>()
+                .0
+                .iter()
+                .map(|&[_, _, _, value]| value),
+        );
+    }
+    Some(alpha)
+}
+
+/// The size of `pixmap` in points.
+fn points_of(pixmap: &Pixmap) -> NSSize {
+    NSSize::new(
+        f64::from(pixmap.width_points()),
+        f64::from(pixmap.height_points()),
+    )
+}
+
+/// `color` with its alpha at the maximum.
+fn opaque([red, green, blue, _]: Rgba) -> Rgba {
+    [red, green, blue, u8::MAX]
+}
+
+/// The share of each pixel of `pixmap` that the glyphs of `text` cover when
+/// AppKit draws them into `rect` in `ink`.
+///
+/// AppKit draws the glyphs alone into a transparent bitmap of the size of
+/// `pixmap`. The ink must be opaque, so the alpha of each pixel is the
+/// coverage. Returns `None` when AppKit refuses a step.
+fn coverage_in(pixmap: &Pixmap, text: &str, rect: NSRect, ink: Rgba) -> Option<Coverage> {
+    let transparent = vec![0; pixmap.bytes().len()];
+    let representation = bitmap_representation(
+        pixmap.width(),
+        pixmap.height(),
+        &transparent,
+        points_of(pixmap),
+    )?;
+    if !draw_text(&representation, text, rect, ink) {
+        return None;
+    }
+    Coverage::new(
+        pixmap.width(),
+        pixmap.height(),
+        alpha_channel(&representation)?,
+    )
+}
+
+/// The glyphs of `text` in `rect` of `pixmap`, in the label color of each
+/// appearance. Returns `None` when AppKit refuses a step.
+fn label_glyphs(pixmap: &Pixmap, text: &str, rect: NSRect) -> Option<Glyphs> {
+    let ink = |appearance: Appearance| opaque(appearance.label());
+    Glyphs::new(
+        coverage_in(pixmap, text, rect, ink(Appearance::Light))?,
+        coverage_in(pixmap, text, rect, ink(Appearance::Dark))?,
+    )
+}
+
+/// Paints the label `text` into `rect` of `pixmap`, in the colors of
+/// `appearance`.
+///
+/// `rect` is in points, with its origin at the bottom left of the image. The
+/// glyphs come from AppKit, and [`Pixmap::paint_label`] paints them. Returns
+/// `false` when AppKit refuses a step. The pixmap then stays as it was.
+fn draw_label(pixmap: &mut Pixmap, text: &str, rect: NSRect, appearance: Appearance) -> bool {
+    label_glyphs(pixmap, text, rect)
+        .is_some_and(|glyphs| pixmap.paint_label(&glyphs, appearance).is_ok())
 }
 
 /// The line height of the font of the label, in points.
@@ -453,7 +559,7 @@ fn label_rect(geometry: Geometry) -> Option<NSRect> {
 /// text is in the system font at [`LABEL_FONT_POINTS`], centered, and
 /// truncated at its end with an ellipsis, so it never makes the image wider.
 /// Returns `false` when AppKit refuses to make a graphics context.
-fn draw_label(representation: &NSBitmapImageRep, text: &str, rect: NSRect, color: Rgba) -> bool {
+fn draw_text(representation: &NSBitmapImageRep, text: &str, rect: NSRect, color: Rgba) -> bool {
     let Some(context) = NSGraphicsContext::graphicsContextWithBitmapImageRep(representation) else {
         return false;
     };
@@ -614,15 +720,13 @@ mod tests {
 
     use objc2::runtime::AnyObject;
     use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass};
-    use objc2_app_kit::{
-        NSBitmapImageRep, NSEventTrackingRunLoopMode, NSFont, NSFontAttributeName, NSStringDrawing,
-    };
+    use objc2_app_kit::{NSEventTrackingRunLoopMode, NSFont, NSFontAttributeName, NSStringDrawing};
     use objc2_core_foundation::{CFRunLoop, CFString};
-    use objc2_foundation::{NSDate, NSDictionary, NSObject, NSRunLoop, NSSize, NSString, NSTimer};
+    use objc2_foundation::{NSDate, NSDictionary, NSObject, NSRunLoop, NSString, NSTimer};
 
     use super::{
-        bitmap_representation, draw_label, label_line_height, label_rect, start_repeating_timer,
-        BYTES_PER_PIXEL, LABEL_FONT_POINTS, TIMER_TOLERANCE,
+        draw_label, label_line_height, label_rect, start_repeating_timer, LABEL_FONT_POINTS,
+        TIMER_TOLERANCE,
     };
     use crate::chart::{render, Appearance, Geometry, Pixmap, Rgba, FRAME_POINTS, SYSTEM};
     use crate::cpu::{CpuShare, Ticks};
@@ -640,39 +744,9 @@ mod tests {
     /// the author, and it must fit the label with no ellipsis.
     const LABEL: &str = "M4-Pro-Mac-Mini";
 
-    /// The bytes of each row of a representation, from the top row down.
-    fn rows_of(representation: &NSBitmapImageRep) -> Vec<Vec<u8>> {
-        let stride = usize::try_from(representation.bytesPerRow()).unwrap();
-        let height = usize::try_from(representation.pixelsHigh()).unwrap();
-        let width = usize::try_from(representation.pixelsWide()).unwrap() * BYTES_PER_PIXEL;
-        assert!(
-            width <= stride,
-            "a row of {width} bytes in a stride of {stride}"
-        );
-        let data = representation.bitmapData();
-        assert!(!data.is_null(), "the representation has no buffer");
-        (0..height)
-            .map(|row| {
-                // SAFETY: AppKit holds `stride * height` bytes at `data`. The
-                // row index is below `height`, and the row reads `width`
-                // bytes, which is not more than `stride`.
-                unsafe { std::slice::from_raw_parts(data.add(row * stride), width) }.to_vec()
-            })
-            .collect()
-    }
-
-    /// Tells if any row of `after` differs from the same row of `before`.
-    fn changed(before: &[Vec<u8>], after: &[Vec<u8>]) -> bool {
-        before.iter().zip(after).any(|(old, new)| old != new)
-    }
-
-    /// The image of the label test, as a bitmap representation.
-    fn representation_of(pixmap: &Pixmap) -> objc2::rc::Retained<NSBitmapImageRep> {
-        let points = NSSize::new(
-            f64::from(pixmap.width_points()),
-            f64::from(pixmap.height_points()),
-        );
-        bitmap_representation(pixmap, points).expect("a representation")
+    /// Tells if any pixel of row `y` differs between the two images.
+    fn row_changed(before: &Pixmap, after: &Pixmap, y: u32) -> bool {
+        (0..after.width()).any(|x| before.pixel(x, y) != after.pixel(x, y))
     }
 
     #[test]
@@ -682,37 +756,35 @@ mod tests {
         let rows = geometry
             .label_rows_points()
             .expect("the status bar holds a label");
-        let pixmap = render(
+        let mut pixmap = render(
             &History::new(geometry.columns()),
             geometry,
             Appearance::Light,
         );
-        let representation = representation_of(&pixmap);
-        let before = rows_of(&representation);
+        let before = pixmap.clone();
         assert!(draw_label(
-            &representation,
+            &mut pixmap,
             LABEL,
             label_rect(geometry).expect("the status bar holds a label"),
-            Appearance::Light.label()
+            Appearance::Light
         ));
-        let after = rows_of(&representation);
-        assert_eq!(after.len(), before.len());
 
-        let scale = usize::try_from(LABEL_SCALE).unwrap();
-        let top = usize::try_from(rows.start).unwrap() * scale;
-        let bottom = usize::try_from(rows.end).unwrap() * scale;
+        let top = rows.start * LABEL_SCALE;
+        let bottom = rows.end * LABEL_SCALE;
         let middle = (top + bottom) / 2;
-        let half = usize::try_from(pixmap.height()).unwrap() / 2;
-        for (row, (old, new)) in before.iter().zip(&after).enumerate().skip(half) {
-            assert_eq!(old, new, "the label changed row {row}, in the bottom half");
+        for y in pixmap.height() / 2..pixmap.height() {
+            assert!(
+                !row_changed(&before, &pixmap, y),
+                "the label changed row {y}, in the bottom half"
+            );
         }
         // A drawing in pixels, not in points, fills only one half of the rows.
         assert!(
-            changed(&before[top..middle], &after[top..middle]),
+            (top..middle).any(|y| row_changed(&before, &pixmap, y)),
             "the upper half of the label rows did not change"
         );
         assert!(
-            changed(&before[middle..bottom], &after[middle..bottom]),
+            (middle..bottom).any(|y| row_changed(&before, &pixmap, y)),
             "the lower half of the label rows did not change"
         );
     }
@@ -748,34 +820,28 @@ mod tests {
                 pressure: Pressure::from_raw(1, 0),
             });
         }
-        let scale = usize::try_from(LABEL_SCALE).unwrap();
-        let frame = usize::try_from(FRAME_POINTS).unwrap();
-        let columns = frame * scale..(frame + geometry.columns().get()) * scale;
-        let lines = usize::try_from(rows.start).unwrap() * scale
-            ..usize::try_from(rows.end).unwrap() * scale;
-        let rgb = |pixel: &[u8]| [pixel[0], pixel[1], pixel[2]];
+        let columns = u32::try_from(geometry.columns().get()).unwrap();
+        let columns = FRAME_POINTS * LABEL_SCALE..(FRAME_POINTS + columns) * LABEL_SCALE;
+        let lines = rows.start * LABEL_SCALE..rows.end * LABEL_SCALE;
+        let rgb = |[red, green, blue, _]: Rgba| [red, green, blue];
 
         for appearance in [Appearance::Light, Appearance::Dark] {
-            let pixmap = render(&history, geometry, appearance);
-            let representation = representation_of(&pixmap);
-            let before = rows_of(&representation);
+            let mut pixmap = render(&history, geometry, appearance);
+            let before = pixmap.clone();
             assert!(draw_label(
-                &representation,
+                &mut pixmap,
                 LABEL,
                 label_rect(geometry).expect("the status bar holds a label"),
-                appearance.label()
+                appearance
             ));
-            let after = rows_of(&representation);
 
-            let [red, green, blue, _] = appearance.label();
-            let target = [red, green, blue];
-            let [system_red, system_green, system_blue, _]: Rgba = SYSTEM;
-            let system = [system_red, system_green, system_blue];
+            let target = rgb(appearance.label());
+            let system = rgb(SYSTEM);
             let painted = lines.clone().any(|y| {
                 columns.clone().any(|x| {
-                    let old = &before[y][x * BYTES_PER_PIXEL..(x + 1) * BYTES_PER_PIXEL];
-                    let new = &after[y][x * BYTES_PER_PIXEL..(x + 1) * BYTES_PER_PIXEL];
-                    rgb(old) == system && distance(rgb(new), target) < distance(rgb(old), target)
+                    let old = rgb(before.pixel(x, y));
+                    let new = rgb(pixmap.pixel(x, y));
+                    old == system && distance(new, target) < distance(old, target)
                 })
             });
             assert!(
