@@ -110,11 +110,21 @@ impl Sync {
     /// session stays.
     pub fn on_tick(
         &self,
-        _board: &mut Board,
-        _clock: &mut dyn ProcessClock,
-        _now: EpochMillis,
+        board: &mut Board,
+        clock: &mut dyn ProcessClock,
+        now: EpochMillis,
     ) -> Vec<Change> {
-        Vec::new()
+        let sessions: Vec<(Pid, EpochMillis)> = board
+            .pids()
+            .into_iter()
+            .filter_map(|pid| Some((pid, board.get(pid)?.file.started_at)))
+            .collect();
+        let mut changes = Vec::new();
+        for pid in stale_pids(&sessions, clock) {
+            let _removed = store::remove_if_stale(&self.state_dir, pid, clock);
+            changes.extend(board.remove(pid, now));
+        }
+        changes
     }
 
     /// Read each file in the state directory, and drop each session whose file
