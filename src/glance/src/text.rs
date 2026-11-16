@@ -10,8 +10,14 @@ use crate::sample::Sample;
 use serde_json::{json, Map, Value};
 use std::fmt;
 
-/// The start of the first menu line after a failed read.
-const READ_ERROR_PREFIX: &str = "Cannot read the kernel: ";
+/// The start of the first menu line after a failed read in local mode.
+const READ_ERROR_LOCAL_PREFIX: &str = "Cannot read the kernel: ";
+/// The start of the first menu line after a failed read in remote mode.
+const READ_ERROR_REMOTE_PREFIX: &str = "Cannot read ";
+/// The start of the host line.
+const HOST_LINE_PREFIX: &str = "Host: ";
+/// The word before the SSH destination in the host line.
+const SSH_WORD: &str = "ssh ";
 /// The key of the short host name in the JSON line.
 const KEY_HOST: &str = "host";
 /// The key of the reason in the JSON line of a failed read.
@@ -319,14 +325,24 @@ pub struct Origin<'a> {
 /// The line is never truncated.
 #[must_use]
 pub fn host_line(origin: &Origin<'_>) -> String {
-    String::new()
+    match origin.destination {
+        Some(destination) => format!(
+            "{HOST_LINE_PREFIX}{} ({SSH_WORD}{destination})",
+            origin.host
+        ),
+        None => format!("{HOST_LINE_PREFIX}{}", origin.host),
+    }
 }
 
 /// The first menu line after a failed read.
+///
+/// In remote mode, the line names the SSH destination. In local mode, it names the kernel.
 #[must_use]
 pub fn read_error_line(origin: &Origin<'_>, reason: &str) -> String {
-    let _ = origin;
-    format!("{READ_ERROR_PREFIX}{reason}")
+    match origin.destination {
+        Some(destination) => format!("{READ_ERROR_REMOTE_PREFIX}{destination}: {reason}"),
+        None => format!("{READ_ERROR_LOCAL_PREFIX}{reason}"),
+    }
 }
 
 #[cfg(test)]
