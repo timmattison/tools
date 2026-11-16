@@ -207,4 +207,77 @@ mod tests {
             Err(ZellijFocusError::List(error))
         );
     }
+
+    fn output(code: Option<i32>, stdout: &str, stderr: &str) -> CommandOutput {
+        CommandOutput {
+            code,
+            stdout: stdout.to_string(),
+            stderr: stderr.to_string(),
+        }
+    }
+
+    #[test]
+    fn exit_1_with_already_focused_text_is_success() {
+        let target = location("tools");
+        for answer in [
+            output(Some(1), "", "Error: pane is already focused\n"),
+            output(Some(1), "Already Focused\n", ""),
+        ] {
+            let runner = runner_for(&target, Ok(answer));
+            assert_eq!(focus_pane(&runner, &target), Ok(()));
+        }
+    }
+
+    #[test]
+    fn exit_1_with_other_text_is_refused() {
+        let target = location("tools");
+        let runner = runner_for(&target, Ok(output(Some(1), "", " no such pane \n")));
+        assert_eq!(
+            focus_pane(&runner, &target),
+            Err(ZellijFocusError::Refused {
+                code: "1".to_string(),
+                message: "no such pane".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn only_exit_1_counts_as_already_focused() {
+        let target = location("tools");
+        let runner = runner_for(&target, Ok(output(Some(2), "", "already focused")));
+        assert_eq!(
+            focus_pane(&runner, &target),
+            Err(ZellijFocusError::Refused {
+                code: "2".to_string(),
+                message: "already focused".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn a_refusal_without_stderr_gives_stdout_and_a_signal_has_no_code() {
+        let target = location("tools");
+        let runner = runner_for(&target, Ok(output(None, " from stdout \n", "")));
+        assert_eq!(
+            focus_pane(&runner, &target),
+            Err(ZellijFocusError::Refused {
+                code: "a signal".to_string(),
+                message: "from stdout".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn a_focus_command_that_does_not_run_is_a_focus_error() {
+        let target = location("tools");
+        let error = RunError::TimedOut {
+            program: "zellij".to_string(),
+            seconds: 5,
+        };
+        let runner = runner_for(&target, Err(error.clone()));
+        assert_eq!(
+            focus_pane(&runner, &target),
+            Err(ZellijFocusError::Focus(error))
+        );
+    }
 }
