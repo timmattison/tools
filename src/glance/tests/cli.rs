@@ -170,6 +170,11 @@ fn host_with_stream_or_sample_is_a_usage_error() {
 }
 
 #[test]
+fn resolve_without_host_is_a_usage_error() {
+    assert_usage_error(&["--resolve"], "--host <DESTINATION>");
+}
+
+#[test]
 fn a_destination_that_starts_with_a_dash_is_a_usage_error() {
     // Apart from its flag, the value reaches clap as a flag of its own.
     assert_usage_error(&["--host", DASH_DESTINATION], "unexpected argument '-o'");

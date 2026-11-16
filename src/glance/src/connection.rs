@@ -462,6 +462,19 @@ impl Drop for Connection {
 /// The program that starts each connection in production.
 pub const SSH_PROGRAM: &str = "ssh";
 
+/// The name that the status item shows for a second Mac.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum HostNaming {
+    /// The SSH destination, as the user typed it. The name stays the same
+    /// for the full life of the status item.
+    #[default]
+    Destination,
+    /// The name that the newest line of the second Mac reports, as
+    /// `hostname -s` gives it there. Before the first line, the name is the
+    /// destination. The flag `--resolve` selects this name.
+    Reported,
+}
+
 /// The second Mac that a feed shows, and the path of `glance` there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Remote {
@@ -469,6 +482,8 @@ pub struct Remote {
     pub destination: Destination,
     /// The path of `glance` on the second Mac.
     pub remote_binary: RemoteBinary,
+    /// The name that the status item shows for the second Mac.
+    pub naming: HostNaming,
 }
 
 /// The start of the reason when the program of a connection does not start.

@@ -8,7 +8,7 @@
 //! leaves that status item alone.
 //!
 //! A background start makes a copy of `glance` with the hidden flag
-//! `--background-child`. It does not `fork` without `exec`: macOS refuses
+//! `--spawned-copy`. It does not `fork` without `exec`: macOS refuses
 //! AppKit in a forked child. The copy starts a new session, so the terminal
 //! of the start cannot stop it, and it takes the lock itself. Thus two starts
 //! at the same moment can never give two status items for one target.
@@ -31,9 +31,9 @@ use std::num::NonZeroU32;
 use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
 use std::thread;
 
-use crate::connection::Remote;
+use crate::connection::{HostNaming, Remote};
 use crate::flags::{
-    flag, flag_with_value, BACKGROUND_CHILD, EXIT_AFTER, HOST, INTERVAL, REMOTE_BINARY,
+    flag, flag_with_value, EXIT_AFTER, HOST, INTERVAL, REMOTE_BINARY, RESOLVE, SPAWNED_COPY,
 };
 use crate::instance::{self, ClaimError, LockFile, Pid, Target};
 use crate::interval::Interval;
@@ -52,12 +52,14 @@ const CHILD_DIRECTORY: &str = "/";
 /// How a run starts the status item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
-    /// The status item runs in this process, which holds the terminal.
+    /// The status item runs in this process, which holds the terminal. A run
+    /// with `--foreground` takes this mode.
     Foreground,
-    /// This process starts a copy that runs the status item, and returns.
+    /// This process starts a copy that runs the status item, and returns. A
+    /// run with no `--foreground` takes this mode.
     Background,
     /// This process is the copy that a background start made.
-    BackgroundChild,
+    SpawnedCopy,
 }
 
 /// The settings of the status item.
@@ -72,7 +74,8 @@ pub struct Settings {
 }
 
 impl Settings {
-    /// Gives the target of these settings.
+    /// Gives the target of these settings. The naming of the second Mac does
+    /// not change the target.
     #[must_use]
     pub fn target(&self) -> Target {
         self.remote.as_ref().map_or(Target::Local, |remote| {
@@ -88,7 +91,7 @@ impl Settings {
 #[must_use]
 pub fn child_arguments(settings: &Settings) -> Vec<String> {
     let mut arguments = vec![
-        flag(BACKGROUND_CHILD),
+        flag(SPAWNED_COPY),
         flag_with_value(INTERVAL, &settings.interval.to_string()),
     ];
     if let Some(remote) = &settings.remote {
@@ -97,6 +100,9 @@ pub fn child_arguments(settings: &Settings) -> Vec<String> {
             REMOTE_BINARY,
             remote.remote_binary.as_str(),
         ));
+        if remote.naming == HostNaming::Reported {
+            arguments.push(flag(RESOLVE));
+        }
     }
     if let Some(seconds) = settings.exit_after {
         arguments.push(flag_with_value(EXIT_AFTER, &seconds.to_string()));
@@ -116,7 +122,7 @@ pub fn run(mode: Mode, settings: Settings) -> ExitCode {
         Ok(lock) => lock,
         Err(error) => return fail(&format!("cannot find the lock file: {error}")),
     };
-    if mode != Mode::BackgroundChild {
+    if mode != Mode::SpawnedCopy {
         match instance::holder(&lock) {
             Err(error) => return fail(&lock_problem(&lock, &error)),
             Ok(Some(pid)) => return stop(&lock, &target, pid),
@@ -126,7 +132,7 @@ pub fn run(mode: Mode, settings: Settings) -> ExitCode {
     match mode {
         Mode::Foreground => run_here(&lock, settings, false),
         Mode::Background => start_in_background(&lock, &settings),
-        Mode::BackgroundChild => match instance::start_a_session() {
+        Mode::SpawnedCopy => match instance::start_a_session() {
             Ok(()) => run_here(&lock, settings, true),
             Err(error) => fail(&format!("cannot start a new session: {error}")),
         },
@@ -343,7 +349,7 @@ impl fmt::Display for Shown<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::connection::RemoteBinary;
+    use crate::connection::{HostNaming, RemoteBinary};
     use std::time::Duration;
 
     /// The PID of the lines in these tests.
@@ -352,12 +358,13 @@ mod tests {
     }
 
     /// The settings of the host `destination` with the remote binary `binary`.
-    fn host_settings(destination: &str, binary: &str) -> Settings {
+    fn host_settings(destination: &str, binary: &str, naming: HostNaming) -> Settings {
         Settings {
             interval: Interval::DEFAULT,
             remote: Some(Remote {
                 destination: destination.parse().expect("a destination"),
                 remote_binary: binary.parse::<RemoteBinary>().expect("a remote binary"),
+                naming,
             }),
             exit_after: NonZeroU32::new(30),
         }
@@ -377,7 +384,7 @@ mod tests {
 
     #[test]
     fn the_host_lines_name_the_destination() {
-        let target = host_settings("tim@m1-ts", "glance").target();
+        let target = host_settings("tim@m1-ts", "glance", HostNaming::Destination).target();
         assert_eq!(
             ready_line(&target, pid()),
             "glance: the status item of the host tim@m1-ts runs as PID 4242. \
@@ -399,16 +406,35 @@ mod tests {
         assert_eq!(settings.target(), Target::Local);
         assert_eq!(
             child_arguments(&settings),
-            ["--background-child", "--interval=1"]
+            ["--spawned-copy", "--interval=1"]
+        );
+    }
+
+    #[test]
+    fn the_copy_of_a_resolve_start_gets_the_resolve_flag() {
+        assert_eq!(
+            child_arguments(&host_settings("m1-ts", "-odd/glance", HostNaming::Reported)),
+            [
+                "--spawned-copy",
+                "--interval=1",
+                "--host=m1-ts",
+                "--remote-binary=-odd/glance",
+                "--resolve",
+                "--exit-after=30",
+            ]
         );
     }
 
     #[test]
     fn the_copy_of_a_host_gets_the_destination_the_binary_and_the_bound() {
         assert_eq!(
-            child_arguments(&host_settings("m1-ts", "-odd/glance")),
+            child_arguments(&host_settings(
+                "m1-ts",
+                "-odd/glance",
+                HostNaming::Destination
+            )),
             [
-                "--background-child",
+                "--spawned-copy",
                 "--interval=1",
                 "--host=m1-ts",
                 "--remote-binary=-odd/glance",

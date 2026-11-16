@@ -4,8 +4,9 @@
 //! One status item in the menu bar shows two small charts, each as high as the
 //! menu bar. The left chart shows the share of the CPU time that the
 //! system and the user processes use. The right chart shows the memory in use,
-//! in the color of the pressure level of the kernel. The short name of the Mac
-//! is in small text at the top of the charts.
+//! in the color of the pressure level of the kernel. The name of the Mac is in
+//! small text at the top of the charts. In local mode, it is the short name of
+//! the Mac, as `hostname -s` gives it.
 //!
 //! The monitors that this tool replaces use much memory and much CPU time. The
 //! kernel gives each value in one cheap call, and two charts of 32 columns
@@ -16,7 +17,9 @@
 //! In remote mode (`--host`), the values come from a second Mac. `glance`
 //! keeps one `ssh` child open, which runs `glance --stream` on the second Mac,
 //! and two threads read the pipes of that child. Each sample then costs one
-//! line of text, not one SSH handshake.
+//! line of text, not one SSH handshake. The name at the top of the charts is
+//! the destination of `--host` as the user typed it. With `--resolve`, it is
+//! the name that the second Mac reports.
 //!
 //! # The modules
 //!
@@ -57,8 +60,9 @@
 //! first looks for the status item of its target. When one runs, the run
 //! stops it and starts nothing. Thus a second run of the same command closes
 //! the status item, and a run for a different target leaves it alone.
-//! `--background` starts the status item in a detached copy of `glance` and
-//! returns to the shell.
+//! A run starts a new status item in a detached copy of `glance` and returns
+//! to the shell. `--foreground` keeps the status item in the process of the
+//! run, which holds the terminal.
 //!
 //! # Unsafe code
 //!
