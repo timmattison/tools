@@ -151,6 +151,31 @@ impl Board {
         self.sessions.get(&pid)
     }
 
+    /// The pids of all sessions, sorted.
+    #[must_use]
+    pub fn pids(&self) -> Vec<Pid> {
+        Vec::new()
+    }
+
+    /// The number of sessions on the board.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        0
+    }
+
+    /// Tell if the board holds no session.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        true
+    }
+
+    /// The sessions in the order of the screen: by the rank of the state, then
+    /// the oldest `since` first, then the pid.
+    #[must_use]
+    pub fn rows(&self) -> Vec<&Session> {
+        Vec::new()
+    }
+
     /// The changes in the log, newest first.
     pub fn changes(&self) -> impl Iterator<Item = &Change> {
         self.log.iter().rev()
@@ -333,5 +358,36 @@ mod tests {
         );
         assert!(board.get(Pid::new(7)).is_none());
         assert_eq!(board.changes().cloned().collect::<Vec<_>>(), vec![change]);
+    }
+
+    #[test]
+    fn rows_sort_by_state_then_oldest_since_then_pid() {
+        use PaneState::{Agents, Idle, NeedsYou, Shells, Working};
+        let mut board = Board::new();
+        board.load(file(1, Working, 1, 100), None);
+        board.load(file(2, Shells, 1, 100), None);
+        board.load(file(3, Agents, 1, 100), None);
+        board.load(file(4, Idle, 1, 300), None);
+        board.load(file(5, Idle, 1, 200), None);
+        board.load(file(6, NeedsYou, 1, 100), None);
+        board.load(file(8, Idle, 1, 200), None);
+        let order: Vec<u32> = board
+            .rows()
+            .iter()
+            .map(|session| session.file.pid.as_u32())
+            .collect();
+        assert_eq!(order, vec![6, 5, 8, 4, 3, 2, 1]);
+    }
+
+    #[test]
+    fn pids_len_and_is_empty_describe_the_board() {
+        let mut board = Board::new();
+        assert!(board.is_empty());
+        assert_eq!(board.len(), 0);
+        board.load(file(9, PaneState::Idle, 1, 1), None);
+        board.load(file(3, PaneState::Idle, 1, 1), None);
+        assert!(!board.is_empty());
+        assert_eq!(board.len(), 2);
+        assert_eq!(board.pids(), vec![Pid::new(3), Pid::new(9)]);
     }
 }
