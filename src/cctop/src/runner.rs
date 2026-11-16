@@ -121,6 +121,9 @@ impl Runner for SystemRunner {
 }
 
 #[cfg(test)]
+pub(crate) mod fake;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
