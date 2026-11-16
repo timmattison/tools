@@ -10,9 +10,9 @@ name = "cctop"
 path = "src/lib.rs"
 
 [dependencies]
+notify.workspace = true
 proctree.workspace = true
 serde.workspace = true
-notify.workspace = true
 serde_json.workspace = true
 sysinfo.workspace = true
 thiserror.workspace = true

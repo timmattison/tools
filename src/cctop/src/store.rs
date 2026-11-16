@@ -106,8 +106,21 @@ pub enum DirEvent {
 /// `File` for each path that has the name `<pid>.json`. A path that appears
 /// twice gives one `File`. The order of the paths stays.
 #[must_use]
-pub fn dir_events(_event: &notify::Event) -> Vec<DirEvent> {
-    Vec::new()
+pub fn dir_events(event: &notify::Event) -> Vec<DirEvent> {
+    if event.need_rescan() {
+        return vec![DirEvent::Rescan];
+    }
+    let mut events = Vec::new();
+    for path in &event.paths {
+        let Some(pid) = path.file_name().and_then(pid_of_file_name) else {
+            continue;
+        };
+        let found = DirEvent::File(pid);
+        if !events.contains(&found) {
+            events.push(found);
+        }
+    }
+    events
 }
 
 #[cfg(test)]
