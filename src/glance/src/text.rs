@@ -44,12 +44,15 @@ pub const QUIT_TITLE: &str = "Quit glance";
 /// The first menu line before the first sample arrives.
 pub const WAITING_LINE: &str = "Waiting for the first sample";
 
-/// The number of info lines in the menu.
-pub const MENU_LINES: usize = 4;
+/// The number of lines that a sample fills in the menu.
+const SAMPLE_LINES: usize = 4;
 
-/// The four info lines of the menu.
+/// The number of info lines in the menu.
+pub const MENU_LINES: usize = SAMPLE_LINES + 1;
+
+/// The four info lines of the menu that a sample fills.
 #[must_use]
-pub fn menu_lines(sample: &Sample) -> [String; MENU_LINES] {
+pub fn menu_lines(sample: &Sample) -> [String; SAMPLE_LINES] {
     let cpu = sample.cpu;
     let pressure = sample.pressure;
     let level = pressure.level();
@@ -68,28 +71,28 @@ pub fn menu_lines(sample: &Sample) -> [String; MENU_LINES] {
     ]
 }
 
-/// The four info lines of the menu, from the last read error and the newest sample.
+/// The five info lines of the menu, from the origin, the last read error, and the newest sample.
 ///
-/// An error wins over a sample. After an error, the three lower lines are
-/// empty, so the values of an older sample do not look current. With no error
-/// and no sample, the first line is [`WAITING_LINE`].
+/// The first line is always the host line. An error wins over a sample. After
+/// an error, the three lower lines are empty, so the values of an older sample
+/// do not look current. With no error and no sample, the second line is
+/// [`WAITING_LINE`].
 #[must_use]
-pub fn menu_titles(error: Option<&str>, newest: Option<&Sample>) -> [String; MENU_LINES] {
-    match (error, newest) {
-        (Some(reason), _) => lines_under(read_error_line(&LOCAL_PLACEHOLDER, reason)),
+pub fn menu_titles(
+    origin: &Origin<'_>,
+    error: Option<&str>,
+    newest: Option<&Sample>,
+) -> [String; MENU_LINES] {
+    let [first, second, third, fourth] = match (error, newest) {
+        (Some(reason), _) => lines_under(read_error_line(origin, reason)),
         (None, Some(sample)) => menu_lines(sample),
         (None, None) => lines_under(WAITING_LINE.to_owned()),
-    }
+    };
+    [String::new(), first, second, third, fourth]
 }
 
-/// The origin that `menu_titles` uses until it takes an origin as a parameter.
-const LOCAL_PLACEHOLDER: Origin<'static> = Origin {
-    host: "",
-    destination: None,
-};
-
-/// The first menu line, with three empty lines under it.
-fn lines_under(first: String) -> [String; MENU_LINES] {
+/// The first sample line, with three empty lines under it.
+fn lines_under(first: String) -> [String; SAMPLE_LINES] {
     [first, String::new(), String::new(), String::new()]
 }
 
@@ -393,8 +396,10 @@ mod tests {
         sample(50, 25, 25, 2, 47)
     }
 
-    fn empty_lines(first: &str) -> [String; MENU_LINES] {
+    /// The five lines of the menu when no sample fills the lower lines.
+    fn empty_lines(origin: &Origin<'_>, first: &str) -> [String; MENU_LINES] {
         [
+            host_line(origin),
             first.to_owned(),
             String::new(),
             String::new(),
@@ -402,33 +407,62 @@ mod tests {
         ]
     }
 
+    /// The five lines of the menu that a sample fills.
+    fn sample_lines(origin: &Origin<'_>, sample: &Sample) -> [String; MENU_LINES] {
+        let [first, second, third, fourth] = menu_lines(sample);
+        [host_line(origin), first, second, third, fourth]
+    }
+
     #[test]
     fn an_error_with_a_sample_clears_the_three_lower_lines() {
-        assert_eq!(
-            menu_titles(Some("cannot read x: y"), Some(&warn_sample())),
-            empty_lines(&read_error_line(&LOCAL_PLACEHOLDER, "cannot read x: y"))
-        );
+        for origin in [local("m"), remote(DESTINATION)] {
+            assert_eq!(
+                menu_titles(&origin, Some("cannot read x: y"), Some(&warn_sample())),
+                empty_lines(&origin, &read_error_line(&origin, "cannot read x: y"))
+            );
+        }
     }
 
     #[test]
     fn an_error_with_no_sample_clears_the_three_lower_lines() {
-        assert_eq!(
-            menu_titles(Some("cannot read x: y"), None),
-            empty_lines(&read_error_line(&LOCAL_PLACEHOLDER, "cannot read x: y"))
-        );
+        for origin in [local("m"), remote(DESTINATION)] {
+            assert_eq!(
+                menu_titles(&origin, Some("cannot read x: y"), None),
+                empty_lines(&origin, &read_error_line(&origin, "cannot read x: y"))
+            );
+        }
     }
 
     #[test]
-    fn a_sample_with_no_error_gives_the_menu_lines() {
-        assert_eq!(
-            menu_titles(None, Some(&warn_sample())),
-            menu_lines(&warn_sample())
-        );
+    fn a_sample_with_no_error_gives_the_host_line_and_the_menu_lines() {
+        for origin in [local("m"), remote(DESTINATION)] {
+            assert_eq!(
+                menu_titles(&origin, None, Some(&warn_sample())),
+                sample_lines(&origin, &warn_sample())
+            );
+        }
     }
 
     #[test]
-    fn no_error_and_no_sample_gives_the_waiting_line() {
-        assert_eq!(menu_titles(None, None), empty_lines(WAITING_LINE));
+    fn no_error_and_no_sample_gives_the_host_line_and_the_waiting_line() {
+        for origin in [local("m"), remote(DESTINATION)] {
+            assert_eq!(
+                menu_titles(&origin, None, None),
+                empty_lines(&origin, WAITING_LINE)
+            );
+        }
+    }
+
+    #[test]
+    fn the_first_menu_line_is_the_host_line_in_each_state() {
+        let origin = remote(DESTINATION);
+        let expected = "Host: m1-ts (ssh tim@m1.local)";
+        assert_eq!(menu_titles(&origin, Some("x"), None)[0], expected);
+        assert_eq!(
+            menu_titles(&origin, None, Some(&warn_sample()))[0],
+            expected
+        );
+        assert_eq!(menu_titles(&origin, None, None)[0], expected);
     }
 
     #[test]
@@ -677,7 +711,7 @@ mod tests {
     #[test]
     fn a_failed_read_names_the_reason() {
         assert_eq!(
-            read_error_line(&LOCAL_PLACEHOLDER, "cannot read x: y"),
+            read_error_line(&local("m"), "cannot read x: y"),
             "Cannot read the kernel: cannot read x: y"
         );
     }

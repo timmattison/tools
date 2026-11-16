@@ -33,7 +33,7 @@ use crate::history::{History, DEFAULT_CAPACITY};
 use crate::interval::Interval;
 use crate::reader::Reader;
 use crate::sample::{Reading, Sample};
-use crate::text::{menu_titles, MENU_LINES, QUIT_TITLE};
+use crate::text::{menu_titles, Origin, MENU_LINES, QUIT_TITLE};
 
 /// The exit status of a start off the main thread.
 const EXIT_NOT_MAIN_THREAD: u8 = 1;
@@ -280,7 +280,14 @@ impl Monitor {
     fn update_menu(&self) {
         let state = self.ivars().state.borrow();
         let items = &self.ivars().info_items;
-        let titles = menu_titles(state.error.as_deref(), state.history.newest().as_ref());
+        let titles = menu_titles(
+            &Origin {
+                host: "",
+                destination: None,
+            },
+            state.error.as_deref(),
+            state.history.newest().as_ref(),
+        );
         for (item, title) in items.iter().zip(titles) {
             item.setTitle(&NSString::from_str(&title));
         }
@@ -350,7 +357,14 @@ fn build_menu(
 ) -> [Retained<NSMenuItem>; MENU_LINES] {
     let menu = NSMenu::new(mtm);
     menu.setAutoenablesItems(false);
-    let titles = menu_titles(None, None);
+    let titles = menu_titles(
+        &Origin {
+            host: "",
+            destination: None,
+        },
+        None,
+        None,
+    );
     let info_items: [Retained<NSMenuItem>; MENU_LINES] = titles.map(|title| {
         // SAFETY: The selector is absent, which AppKit allows for an item
         // that does nothing.
