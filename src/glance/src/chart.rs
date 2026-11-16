@@ -366,6 +366,10 @@ fn memory_rows(percent_in_use: u8, rows: u32) -> u32 {
 
 /// Draws the two charts of the history.
 ///
+/// The image is `Geometry::image_height_points` high. The charts start at the
+/// top of `Geometry::chart_rows_points`. The rows of the label band, and the
+/// rows above and below the charts, stay transparent.
+///
 /// Each chart has `history.capacity()` columns inside of a frame. The CPU chart
 /// is on the left, then a transparent gap, then the memory chart. The newest
 /// sample sits in the rightmost column of each chart. A column that has no
@@ -381,19 +385,20 @@ pub fn render(history: &History<Sample>, geometry: Geometry, appearance: Appeara
     let chart_width = capacity + 2 * FRAME_POINTS;
     let mut pixmap = Pixmap::empty(
         CHART_COUNT * chart_width + GAP_POINTS,
-        geometry.height_points,
+        geometry.image_height_points(),
         scale,
     );
 
     let rows = (geometry.height_points - 2 * FRAME_POINTS) * scale;
-    let interior_top = FRAME_POINTS * scale;
+    let chart_top = geometry.chart_rows_points().start * scale;
+    let interior_top = chart_top + FRAME_POINTS * scale;
     let interior_bottom = interior_top + rows;
     let chart_origins = [0, chart_width + GAP_POINTS];
 
     for origin in chart_origins {
         pixmap.fill(
             origin * scale,
-            0,
+            chart_top,
             chart_width * scale,
             geometry.height_points * scale,
             appearance.frame(),
