@@ -48,7 +48,12 @@ impl Session {
     /// [`HANDLED_SUFFIX`], for example `idle - handled`.
     #[must_use]
     pub fn state_label(&self) -> String {
-        self.file.state.label().to_string()
+        let state = self.file.state.label();
+        if self.is_handled() {
+            format!("{state}{HANDLED_SUFFIX}")
+        } else {
+            state.to_string()
+        }
     }
 }
 
@@ -85,6 +90,7 @@ pub const LOG_CAPACITY: usize = 500;
 pub struct Board {
     sessions: HashMap<Pid, Session>,
     log: VecDeque<Change>,
+    next_mark: u64,
 }
 
 impl Board {
@@ -112,7 +118,8 @@ impl Board {
 
     /// Apply a state file that was read after the start. The function gives
     /// the change that the file makes, or `None` when the board shows no
-    /// change of state. The change goes into the log.
+    /// change of state. The change goes into the log. A session in the same
+    /// state keeps its handled mark, and a change of state removes it.
     pub fn apply(&mut self, file: StateFile, name: Option<String>) -> Option<Change> {
         let pid = file.pid;
         let stamp = file.stamp;
@@ -124,15 +131,15 @@ impl Board {
         }
         let old = same_process.map(|known| known.file.state);
         let same_state = same_process.is_some_and(|known| known.file.state == new_state);
-        let since = match same_process {
-            Some(known) if same_state => known.since,
-            _ => stamp,
+        let (since, handled) = match same_process {
+            Some(known) if same_state => (known.since, known.handled),
+            _ => (stamp, None),
         };
         let session = Session {
             file,
             name,
             since,
-            handled: None,
+            handled,
         };
         let label = session.label();
         self.sessions.insert(pid, session);
@@ -180,8 +187,13 @@ impl Board {
     /// `Some(false)` when it has none, and `None` when the board does not hold
     /// the pid. A new mark sorts the row below each other row in its state.
     pub fn toggle_handled(&mut self, pid: Pid) -> Option<bool> {
-        let _ = pid;
-        None
+        let session = self.sessions.get_mut(&pid)?;
+        if session.handled.take().is_some() {
+            return Some(false);
+        }
+        session.handled = Some(HandledMark(self.next_mark));
+        self.next_mark += 1;
+        Some(true)
     }
 
     /// The session with the pid, when the board holds it.
@@ -211,13 +223,15 @@ impl Board {
     }
 
     /// The sessions in the order of the screen: by the rank of the state, then
-    /// the oldest `since` first, then the pid.
+    /// the sessions with no handled mark, then the handled sessions in the
+    /// order of their marks, then the oldest `since` first, then the pid.
     #[must_use]
     pub fn rows(&self) -> Vec<&Session> {
         let mut rows: Vec<&Session> = self.sessions.values().collect();
         rows.sort_by_key(|session| {
             (
                 session.file.state.rank(),
+                session.handled,
                 session.since,
                 session.file.pid.as_u32(),
             )
