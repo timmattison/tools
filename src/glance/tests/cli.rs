@@ -129,6 +129,59 @@ fn count_without_stream_is_a_usage_error() {
     assert_eq!(output.status.code(), Some(USAGE_ERROR), "{output:?}");
 }
 
+/// An SSH destination that the tests give.
+const DESTINATION: &str = "m1-ts";
+
+/// A destination that `ssh` reads as an option.
+const DASH_DESTINATION: &str = "-oProxyCommand=x";
+
+/// Asserts that `args` is a usage error whose text holds `words`.
+fn assert_usage_error(args: &[&str], words: &str) {
+    let output = run(args);
+    assert_eq!(
+        output.status.code(),
+        Some(USAGE_ERROR),
+        "{args:?} {output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(words), "{args:?} {stderr}");
+}
+
+#[test]
+fn host_with_stream_or_sample_is_a_usage_error() {
+    assert_usage_error(&["--host", DESTINATION, "--stream"], "--stream");
+    assert_usage_error(&["--host", DESTINATION, "--sample"], "--sample");
+}
+
+#[test]
+fn a_destination_that_starts_with_a_dash_is_a_usage_error() {
+    // Apart from its flag, the value reaches clap as a flag of its own.
+    assert_usage_error(&["--host", DASH_DESTINATION], "unexpected argument '-o'");
+    let joined = format!("--host={DASH_DESTINATION}");
+    assert_usage_error(
+        &[joined.as_str()],
+        &format!("must not start with \"-\", and \"{DASH_DESTINATION}\" does"),
+    );
+}
+
+#[test]
+fn an_empty_destination_is_a_usage_error() {
+    assert_usage_error(&["--host", ""], "the destination must not be empty");
+}
+
+#[test]
+fn remote_binary_without_host_is_a_usage_error() {
+    assert_usage_error(&["--remote-binary", "glance"], "--host");
+}
+
+#[test]
+fn an_empty_remote_binary_is_a_usage_error() {
+    assert_usage_error(
+        &["--host", DESTINATION, "--remote-binary", ""],
+        "the remote binary must not be empty",
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn an_interval_below_the_minimum_is_a_usage_error() {

@@ -54,6 +54,14 @@ struct Cli {
     /// Stop the stream after N lines.
     #[arg(long, value_name = "N", requires = "stream")]
     count: Option<u64>,
+
+    /// Show the charts of a second Mac through one ssh connection.
+    #[arg(long, value_name = "DESTINATION")]
+    host: Option<String>,
+
+    /// The path of glance on the second Mac.
+    #[arg(long, value_name = "PATH")]
+    remote_binary: Option<String>,
 }
 
 fn main() -> ExitCode {
@@ -63,6 +71,9 @@ fn main() -> ExitCode {
 /// Runs `glance` on macOS.
 #[cfg(target_os = "macos")]
 fn run(cli: Cli) -> ExitCode {
+    if cli.host.is_some() || cli.remote_binary.is_some() {
+        return ExitCode::SUCCESS;
+    }
     if cli.sample {
         return sample(cli.interval);
     }
