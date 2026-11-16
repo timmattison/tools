@@ -160,9 +160,9 @@ fn candidate_ttys(target: &FocusTarget, runner: &dyn Runner) -> Result<Vec<Strin
 /// shows.
 fn focus_wezterm(target: &FocusTarget, tools: &FocusTools) -> Result<u64, String> {
     let ttys = candidate_ttys(target, &*tools.runner)?;
-    let listing = run_ok(&*tools.runner, &wezterm::list_argv(), "wezterm cli list")
-        .map_err(|_| STEP_FAILED.to_string())?;
-    let panes = wezterm::parse_panes(&listing).map_err(|_| STEP_FAILED.to_string())?;
+    let listing = run_ok(&*tools.runner, &wezterm::list_argv(), "wezterm cli list")?;
+    let panes = wezterm::parse_panes(&listing)
+        .map_err(|error| format!("wezterm cli list gave bad JSON: {error}"))?;
     ttys.iter()
         .find_map(|tty| {
             let pane = wezterm::pane_for_tty(&panes, tty)?;
