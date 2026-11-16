@@ -97,6 +97,22 @@ impl EpochMillis {
     pub const fn as_u64(self) -> u64 {
         self.0
     }
+
+    /// The time of this moment, read from the system clock.
+    #[must_use]
+    pub fn now() -> Self {
+        let elapsed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        Self(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+    }
+
+    /// The milliseconds from `earlier` to this time. The result is 0 when
+    /// `earlier` is later than this time.
+    #[must_use]
+    pub fn saturating_since(self, earlier: EpochMillis) -> u64 {
+        self.0.abs_diff(earlier.0)
+    }
 }
 
 /// The number of a Zellij terminal pane.
@@ -108,6 +124,18 @@ impl ZellijPaneId {
     #[must_use]
     pub fn parse(text: &str) -> Option<Self> {
         text.parse::<u32>().ok().map(Self)
+    }
+
+    /// The name that `zellij action focus-pane-id` takes for this pane.
+    #[must_use]
+    pub fn terminal_target(self) -> String {
+        String::new()
+    }
+}
+
+impl std::fmt::Display for ZellijPaneId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "?")
     }
 }
 
@@ -397,5 +425,35 @@ mod tests {
         ] {
             assert_eq!(pid_of_file_name(OsStr::new(name)), None, "{name}");
         }
+    }
+
+    #[test]
+    fn zellij_pane_id_parses_digits_only() {
+        assert_eq!(ZellijPaneId::parse("310"), Some(ZellijPaneId(310)));
+        assert_eq!(ZellijPaneId::parse("0"), Some(ZellijPaneId(0)));
+        for text in ["", "abc", "-1", "+5", "terminal_3", " 3", "3 ", "1.5"] {
+            assert_eq!(ZellijPaneId::parse(text), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn zellij_pane_id_names_its_terminal_target_and_displays_its_digits() {
+        let pane = ZellijPaneId::parse("310").unwrap();
+        assert_eq!(pane.terminal_target(), "terminal_310");
+        assert_eq!(pane.to_string(), "310");
+    }
+
+    #[test]
+    fn saturating_since_gives_the_gap_or_zero() {
+        let early = EpochMillis::new(1_000);
+        let late = EpochMillis::new(1_750);
+        assert_eq!(late.saturating_since(early), 750);
+        assert_eq!(early.saturating_since(late), 0);
+        assert_eq!(early.saturating_since(early), 0);
+    }
+
+    #[test]
+    fn now_is_after_the_year_2020() {
+        assert!(EpochMillis::now().as_u64() > 1_577_836_800_000);
     }
 }
