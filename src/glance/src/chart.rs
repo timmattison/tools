@@ -375,6 +375,60 @@ impl Pixmap {
             })
             .collect()
     }
+
+    /// Paints the label through `coverage`, in the label color of
+    /// `appearance`.
+    ///
+    /// Each pixel takes the label color at the share of its alpha that the
+    /// coverage gives, over the color that the pixel had. A pixel with a
+    /// coverage of 0 keeps its color.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SizeMismatch`] when the coverage is not the size of the image
+    /// in pixels. The image then stays as it was.
+    pub fn paint_label(
+        &mut self,
+        coverage: &Coverage,
+        appearance: Appearance,
+    ) -> Result<(), SizeMismatch> {
+        let _ = (coverage, appearance);
+        Ok(())
+    }
+}
+
+/// How much the glyphs of the label cover each pixel of an image, from 0 for
+/// none to 255 for all. Row 0 is at the top. Rows have no padding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Coverage {
+    width: u32,
+    height: u32,
+    values: Vec<u8>,
+}
+
+impl Coverage {
+    /// Makes the coverage of an image of `width` by `height` pixels.
+    ///
+    /// Returns `None` when `values` does not hold exactly one value for each
+    /// pixel.
+    #[must_use]
+    pub fn new(width: u32, height: u32, values: Vec<u8>) -> Option<Coverage> {
+        Some(Coverage {
+            width,
+            height,
+            values,
+        })
+    }
+}
+
+/// The reason that [`Pixmap::paint_label`] refuses a coverage: the coverage is
+/// not the size of the image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SizeMismatch {
+    /// The width and the height of the image, in pixels.
+    pub image: (u32, u32),
+    /// The width and the height of the coverage, in pixels.
+    pub coverage: (u32, u32),
 }
 
 /// One color channel multiplied by its alpha, rounded to the nearest value.
@@ -969,5 +1023,128 @@ mod tests {
         for appearance in [Appearance::Light, Appearance::Dark] {
             assert_eq!(appearance.label(), appearance.frame());
         }
+    }
+
+    /// The two appearances of the menu bar.
+    const APPEARANCES: [Appearance; 2] = [Appearance::Light, Appearance::Dark];
+    /// A pixel that the glyphs cover completely.
+    const FULL: u8 = 255;
+    /// A pixel that the glyphs cover by half.
+    const HALF: u8 = 128;
+    /// A pixel that the glyphs do not touch.
+    const NONE: u8 = 0;
+
+    /// An image of one row of pixels, in the given colors, at a scale of 1.
+    fn row_of(colors: &[Rgba]) -> Pixmap {
+        let width = u32::try_from(colors.len()).unwrap();
+        let mut pixmap = Pixmap::empty(width, 1, 1);
+        for (x, color) in (0..width).zip(colors) {
+            pixmap.fill(x, 0, 1, 1, *color);
+        }
+        pixmap
+    }
+
+    /// The coverage of an image of one row of pixels.
+    fn row_coverage(values: &[u8]) -> Coverage {
+        let width = u32::try_from(values.len()).unwrap();
+        Coverage::new(width, 1, values.to_vec()).expect("one value for each pixel")
+    }
+
+    /// The colors of an image of one row of pixels.
+    fn row_pixels(pixmap: &Pixmap) -> Vec<Rgba> {
+        (0..pixmap.width()).map(|x| pixmap.pixel(x, 0)).collect()
+    }
+
+    #[test]
+    fn a_coverage_needs_exactly_one_value_for_each_pixel() {
+        assert!(Coverage::new(2, 2, vec![NONE; 3]).is_none());
+        assert!(Coverage::new(2, 2, vec![NONE; 5]).is_none());
+        assert!(Coverage::new(2, 2, vec![NONE; 4]).is_some());
+        assert!(Coverage::new(0, 0, Vec::new()).is_some());
+    }
+
+    #[test]
+    fn a_fully_covered_empty_pixel_takes_the_label_color_of_the_appearance() {
+        for appearance in APPEARANCES {
+            let mut pixmap = row_of(&[TRANSPARENT]);
+            pixmap
+                .paint_label(&row_coverage(&[FULL]), appearance)
+                .unwrap();
+            assert_eq!(pixmap.pixel(0, 0), appearance.label(), "{appearance:?}");
+        }
+    }
+
+    /// Half of the coverage gives half of the alpha of the label color.
+    /// 217 * 128 / 255 is 108.9, which rounds to 109.
+    #[test]
+    fn a_partly_covered_empty_pixel_takes_part_of_the_alpha_of_the_label_color() {
+        let cases = [
+            (Appearance::Light, [0, 0, 0, 109]),
+            (Appearance::Dark, [255, 255, 255, 109]),
+        ];
+        for (appearance, expected) in cases {
+            let mut pixmap = row_of(&[TRANSPARENT]);
+            pixmap
+                .paint_label(&row_coverage(&[HALF]), appearance)
+                .unwrap();
+            assert_eq!(pixmap.pixel(0, 0), expected, "{appearance:?}");
+        }
+    }
+
+    #[test]
+    fn a_pixel_that_the_glyphs_do_not_cover_keeps_its_color() {
+        let colors = [
+            TRANSPARENT,
+            SYSTEM,
+            USER,
+            NORMAL,
+            WARN,
+            UNKNOWN,
+            Appearance::Light.frame(),
+            Appearance::Dark.frame(),
+        ];
+        for appearance in APPEARANCES {
+            let mut pixmap = row_of(&colors);
+            pixmap
+                .paint_label(&row_coverage(&[NONE; 8]), appearance)
+                .unwrap();
+            assert_eq!(row_pixels(&pixmap), colors, "{appearance:?}");
+        }
+    }
+
+    /// The coverage goes row by row from the top left, like the image.
+    #[test]
+    fn the_coverage_lies_on_the_image_row_by_row_from_the_top_left() {
+        let mut pixmap = Pixmap::empty(2, 2, 1);
+        let coverage = Coverage::new(2, 2, vec![FULL, NONE, NONE, FULL]).unwrap();
+        pixmap.paint_label(&coverage, Appearance::Dark).unwrap();
+        let label = Appearance::Dark.label();
+        assert_eq!(pixmap.pixel(0, 0), label);
+        assert_eq!(pixmap.pixel(1, 0), TRANSPARENT);
+        assert_eq!(pixmap.pixel(0, 1), TRANSPARENT);
+        assert_eq!(pixmap.pixel(1, 1), label);
+    }
+
+    #[test]
+    fn the_label_refuses_a_coverage_of_another_size_and_keeps_the_image() {
+        let mut pixmap = row_of(&[TRANSPARENT; 2]);
+        let wide = row_coverage(&[FULL; 3]);
+        assert_eq!(
+            pixmap.paint_label(&wide, Appearance::Dark),
+            Err(SizeMismatch {
+                image: (2, 1),
+                coverage: (3, 1),
+            })
+        );
+        // The same number of pixels in a different shape is a different size.
+        let tall = Coverage::new(1, 2, vec![FULL; 2]).unwrap();
+        assert_eq!(
+            pixmap.paint_label(&tall, Appearance::Dark),
+            Err(SizeMismatch {
+                image: (2, 1),
+                coverage: (1, 2),
+            })
+        );
+        assert_eq!(row_pixels(&pixmap), [TRANSPARENT; 2]);
     }
 }
