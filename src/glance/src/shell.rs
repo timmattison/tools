@@ -612,14 +612,17 @@ mod tests {
     use std::cell::Cell;
     use std::time::Duration;
 
+    use objc2::runtime::AnyObject;
     use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass};
-    use objc2_app_kit::{NSBitmapImageRep, NSEventTrackingRunLoopMode};
+    use objc2_app_kit::{
+        NSBitmapImageRep, NSEventTrackingRunLoopMode, NSFont, NSFontAttributeName, NSStringDrawing,
+    };
     use objc2_core_foundation::{CFRunLoop, CFString};
-    use objc2_foundation::{NSDate, NSObject, NSRunLoop, NSSize, NSTimer};
+    use objc2_foundation::{NSDate, NSDictionary, NSObject, NSRunLoop, NSSize, NSString, NSTimer};
 
     use super::{
         bitmap_representation, draw_label, label_line_height, label_rect, start_repeating_timer,
-        BYTES_PER_PIXEL, TIMER_TOLERANCE,
+        BYTES_PER_PIXEL, LABEL_FONT_POINTS, TIMER_TOLERANCE,
     };
     use crate::chart::{render, Appearance, Geometry, Pixmap, Rgba, FRAME_POINTS, SYSTEM};
     use crate::cpu::{CpuShare, Ticks};
@@ -633,7 +636,8 @@ mod tests {
     /// The scale of the label test. Each point is 2 pixels high.
     const LABEL_SCALE: u32 = 2;
 
-    /// A host name for the label test.
+    /// A host name for the label test. It is the longest name of the Macs of
+    /// the author, and it must fit the label with no ellipsis.
     const LABEL: &str = "M4-Pro-Mac-Mini";
 
     /// The bytes of each row of a representation, from the top row down.
@@ -785,6 +789,27 @@ mod tests {
     fn a_thin_bar_has_no_label_rect() {
         let geometry = Geometry::from_status_bar(10.0, 2.0, Some(label_line_height()));
         assert!(label_rect(geometry).is_none());
+    }
+
+    #[test]
+    fn the_name_of_a_mac_fits_the_label_with_no_ellipsis() {
+        let geometry =
+            Geometry::from_status_bar(THICKNESS, f64::from(LABEL_SCALE), Some(label_line_height()));
+        let rect = label_rect(geometry).expect("the status bar holds a label");
+        let font = NSFont::systemFontOfSize(LABEL_FONT_POINTS);
+        // SAFETY: This is a constant of AppKit that exists at run time.
+        let key = unsafe { NSFontAttributeName };
+        let value: &AnyObject = &font;
+        let attributes = NSDictionary::from_slices(&[key], &[value]);
+        // SAFETY: The font key holds a font, which is the class that AppKit
+        // expects for it.
+        let size = unsafe { NSString::from_str(LABEL).sizeWithAttributes(Some(&attributes)) };
+        assert!(
+            size.width <= rect.size.width,
+            "{LABEL} is {} points wide, and the label is {} points wide",
+            size.width,
+            rect.size.width
+        );
     }
 
     /// The interval of the probe timer, in seconds.
