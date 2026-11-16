@@ -27,14 +27,17 @@ pub struct WeztermPane {
 /// # Errors
 ///
 /// Returns an error when the text is not a JSON list of panes.
-pub fn parse_panes(_json: &str) -> Result<Vec<WeztermPane>, serde_json::Error> {
-    Ok(Vec::new())
+pub fn parse_panes(json: &str) -> Result<Vec<WeztermPane>, serde_json::Error> {
+    serde_json::from_str(json)
 }
 
 /// Finds the pane that shows the terminal device `tty`.
 #[must_use]
-pub fn pane_for_tty(_panes: &[WeztermPane], _tty: &str) -> Option<u64> {
-    None
+pub fn pane_for_tty(panes: &[WeztermPane], tty: &str) -> Option<u64> {
+    panes
+        .iter()
+        .find(|pane| pane.tty_name.as_deref() == Some(tty))
+        .map(|pane| pane.pane_id)
 }
 
 #[cfg(test)]
