@@ -115,6 +115,16 @@ pub enum StateFileError {
 /// Returns a [`StateFileError`] when the text does not follow the contract.
 pub fn parse_state_file(text: &str) -> Result<StateFile, StateFileError> {
     let raw: RawStateFile = serde_json::from_str(text)?;
+    if raw.version != 1 {
+        return Err(StateFileError::Version(raw.version));
+    }
+    if raw.pid == 0 {
+        return Err(StateFileError::ZeroPid);
+    }
+    let zellij_pane = match raw.zellij_pane {
+        None => None,
+        Some(text) => Some(ZellijPaneId::parse(&text).ok_or(StateFileError::Pane(text))?),
+    };
     Ok(StateFile {
         pid: Pid::new(raw.pid),
         session_id: raw.session_id,
@@ -123,7 +133,7 @@ pub fn parse_state_file(text: &str) -> Result<StateFile, StateFileError> {
         stamp: EpochMillis::new(raw.stamp),
         cwd: raw.cwd,
         zellij_session: raw.zellij_session,
-        zellij_pane: raw.zellij_pane.as_deref().and_then(ZellijPaneId::parse),
+        zellij_pane,
     })
 }
 
@@ -131,7 +141,6 @@ pub fn parse_state_file(text: &str) -> Result<StateFile, StateFileError> {
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RawStateFile {
-    #[allow(dead_code, reason = "the version check comes in a later step")]
     version: u64,
     pid: u32,
     session_id: String,
