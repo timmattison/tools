@@ -46,7 +46,7 @@ impl Change {
     /// must be `needs-you`, and the old state must be another one.
     #[must_use]
     pub fn is_needs_you(&self) -> bool {
-        false
+        self.new == Some(PaneState::NeedsYou) && self.old != Some(PaneState::NeedsYou)
     }
 }
 
