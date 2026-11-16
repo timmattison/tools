@@ -114,6 +114,16 @@ pub fn sample_json(host: &HostName, sample: &Sample) -> String {
     format!("{{{}}}", body.join(","))
 }
 
+/// The line of a failed read as one JSON object on one line, with no trailing newline.
+///
+/// The keys are `host` and `error`, in this order. The reason is escaped, so a
+/// quote or a newline in it keeps the line on one line.
+#[must_use]
+pub fn error_json(host: &HostName, reason: &str) -> String {
+    let _ = reason;
+    format!("{{\"host\":{}}}", json!(host.as_str()))
+}
+
 /// The first menu line after a failed read.
 #[must_use]
 pub fn read_error_line(reason: &str) -> String {
@@ -259,6 +269,23 @@ mod tests {
             serde_json::from_str(&sample_json(&host(), &sample(1, 1, 1, 7, 40))).unwrap();
         assert_eq!(value["pressure_level"], "unknown");
         assert_eq!(value["pressure_level_raw"], 7);
+    }
+
+    #[test]
+    fn the_error_line_holds_the_host_and_the_reason_in_this_order() {
+        let line = error_json(&host(), "cannot read x: y");
+        assert_eq!(line, r#"{"host":"m1-ts","error":"cannot read x: y"}"#);
+    }
+
+    #[test]
+    fn a_reason_with_a_quote_and_a_newline_stays_one_line_of_json() {
+        let reason = "bad \"key\"\nnext line";
+        let line = error_json(&host(), reason);
+        assert!(!line.contains('\n'), "{line}");
+        let value = value_of(&line);
+        assert_eq!(value["error"], reason);
+        assert_eq!(value["host"], HOST);
+        assert_eq!(value.as_object().unwrap().len(), 2);
     }
 
     #[test]
