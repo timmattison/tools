@@ -29,8 +29,10 @@ pub fn clock_time<Tz: TimeZone>(at: EpochMillis, zone: &Tz) -> String
 where
     Tz::Offset: std::fmt::Display,
 {
-    let _ = (at, zone);
-    String::new()
+    let millis = i64::try_from(at.as_u64()).unwrap_or(i64::MAX);
+    zone.timestamp_millis_opt(millis)
+        .single()
+        .map_or_else(String::new, |time| time.format("%H:%M:%S").to_string())
 }
 
 #[cfg(test)]
