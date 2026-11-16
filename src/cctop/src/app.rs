@@ -1,7 +1,7 @@
 //! The state of the screen: the board, the selected row, and the status text.
 //! The module turns a key into an [`Action`] for the main loop.
 
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 use proctree::Pid;
 
 use crate::board::Board;
@@ -74,8 +74,42 @@ impl App {
     /// text, and tells the main loop what to do next. A key release does
     /// nothing.
     pub fn handle_key(&mut self, key: KeyEvent) -> Action {
-        let _ = key;
+        if key.kind == KeyEventKind::Release {
+            return Action::Nothing;
+        }
+        self.sync_selection();
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => self.move_selection(1),
+            KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1),
+            _ => {}
+        }
         Action::Nothing
+    }
+
+    /// Store the row that [`App::selected_index`] gives, so a later change of
+    /// the board does not move the selection.
+    fn sync_selection(&mut self) {
+        let Some(index) = self.selected_index() else {
+            return;
+        };
+        self.last_index = index;
+        self.selected = self.board.rows().get(index).map(|session| session.file.pid);
+    }
+
+    /// Select the row `step` rows away, and stay inside the board.
+    fn move_selection(&mut self, step: isize) {
+        let Some(index) = self.selected_index() else {
+            return;
+        };
+        let last = self.board.len().saturating_sub(1);
+        let target = index.saturating_add_signed(step).min(last);
+        self.select(target);
+    }
+
+    /// Select the row at `index`.
+    fn select(&mut self, index: usize) {
+        self.last_index = index;
+        self.selected = self.board.rows().get(index).map(|session| session.file.pid);
     }
 }
 
