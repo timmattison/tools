@@ -92,6 +92,7 @@ impl Board {
         let pid = file.pid;
         let stamp = file.stamp;
         let new_state = file.state;
+        let old = self.sessions.get(&pid).map(|known| known.file.state);
         let session = Session {
             file,
             name,
@@ -103,7 +104,7 @@ impl Board {
             at: stamp,
             pid,
             label,
-            old: None,
+            old,
             new: Some(new_state),
         };
         self.record(change.clone());
