@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use proctree::Pid;
 
+use crate::liveness::ProcessClock;
 use crate::state::{StateFile, parse_state_file, pid_of_file_name};
 
 /// The result of the read of one state file.
@@ -74,6 +75,17 @@ pub fn read_dir(dir: &Path) -> std::io::Result<Vec<(Pid, ReadOutcome)>> {
     Ok(entries)
 }
 
+/// Remove the state file of `pid` when its session is stale.
+///
+/// The function reads the file again and checks the stale rule on the new
+/// content. A new process can reuse the pid and write a new file before the
+/// removal. The function keeps such a file. It also keeps a file that is
+/// missing or unreadable. The result is `true` only when it removed the file.
+#[must_use]
+pub fn remove_if_stale(_dir: &Path, _pid: Pid, _clock: &mut dyn ProcessClock) -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,6 +122,69 @@ mod tests {
     fn a_missing_directory_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
         assert!(read_dir(&dir.path().join("none")).is_err());
+    }
+
+    /// A process table that the test fills by hand.
+    struct FakeClock(std::collections::HashMap<Pid, u64>);
+
+    impl ProcessClock for FakeClock {
+        fn start_times(&mut self, pids: &[Pid]) -> std::collections::HashMap<Pid, u64> {
+            pids.iter()
+                .filter_map(|pid| self.0.get(pid).map(|secs| (*pid, *secs)))
+                .collect()
+        }
+    }
+
+    fn clock_with(pid: u32, start_secs: u64) -> FakeClock {
+        FakeClock(std::collections::HashMap::from([(Pid::new(pid), start_secs)]))
+    }
+
+    #[test]
+    fn the_file_of_a_gone_process_is_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = state_file_path(dir.path(), Pid::new(77));
+        std::fs::write(&path, state_json(77, "idle", 1_000_000, 2_000_000)).unwrap();
+        let mut clock = FakeClock(std::collections::HashMap::new());
+        assert!(remove_if_stale(dir.path(), Pid::new(77), &mut clock));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn the_file_of_a_process_that_started_after_the_session_is_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = state_file_path(dir.path(), Pid::new(77));
+        std::fs::write(&path, state_json(77, "idle", 1_000_000, 2_000_000)).unwrap();
+        let mut clock = clock_with(77, 5_000);
+        assert!(remove_if_stale(dir.path(), Pid::new(77), &mut clock));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_file_that_is_not_stale_on_a_second_read_stays() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = state_file_path(dir.path(), Pid::new(77));
+        // A new process reused the pid and wrote a newer startedAt.
+        std::fs::write(&path, state_json(77, "idle", 9_000_000, 9_100_000)).unwrap();
+        let mut clock = clock_with(77, 5_000);
+        assert!(!remove_if_stale(dir.path(), Pid::new(77), &mut clock));
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn a_missing_file_gives_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut clock = FakeClock(std::collections::HashMap::new());
+        assert!(!remove_if_stale(dir.path(), Pid::new(77), &mut clock));
+    }
+
+    #[test]
+    fn an_unreadable_file_stays() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = state_file_path(dir.path(), Pid::new(77));
+        std::fs::write(&path, "not json").unwrap();
+        let mut clock = FakeClock(std::collections::HashMap::new());
+        assert!(!remove_if_stale(dir.path(), Pid::new(77), &mut clock));
+        assert!(path.exists());
     }
 
     #[test]
