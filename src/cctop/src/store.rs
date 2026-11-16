@@ -50,11 +50,55 @@ pub fn read_state_file(path: &Path) -> ReadOutcome {
     ReadOutcome::Present(file)
 }
 
+/// Read each `<pid>.json` file in `dir`, sorted by pid.
+///
+/// Other names are not state files, so the function skips them. This covers
+/// `<pid>.json.tmp`, text files, and sub-directories.
+///
+/// # Errors
+///
+/// Returns the error of the read of the directory itself.
+pub fn read_dir(_dir: &Path) -> std::io::Result<Vec<(Pid, ReadOutcome)>> {
+    Ok(Vec::new())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const FIXTURE: &str = include_str!("../fixtures/state-file-outside.json");
+
+    /// The JSON of a state file of the contract, outside Zellij.
+    fn state_json(pid: u32, state: &str, started_at: u64, stamp: u64) -> String {
+        format!(
+            r#"{{"version":1,"pid":{pid},"sessionId":"s-{pid}","startedAt":{started_at},"state":"{state}","stamp":{stamp},"cwd":"/path/to/worktree","zellijSession":null,"zellijPane":null}}"#
+        )
+    }
+
+    #[test]
+    fn the_directory_read_takes_only_pid_json_names_sorted_by_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path();
+        std::fs::write(path.join("300.json"), state_json(300, "idle", 1, 2)).unwrap();
+        std::fs::write(path.join("20.json"), state_json(20, "working", 1, 2)).unwrap();
+        std::fs::write(path.join("100.json"), "not json").unwrap();
+        std::fs::write(path.join("400.json.tmp"), state_json(400, "idle", 1, 2)).unwrap();
+        std::fs::write(path.join("notes.txt"), "notes").unwrap();
+        std::fs::write(path.join("abc.json"), "{}").unwrap();
+        std::fs::create_dir(path.join("500.json")).unwrap();
+        let entries = read_dir(path).unwrap();
+        let pids: Vec<u32> = entries.iter().map(|(pid, _)| pid.as_u32()).collect();
+        assert_eq!(pids, vec![20, 100, 300]);
+        assert!(matches!(entries[0].1, ReadOutcome::Present(_)));
+        assert!(matches!(entries[1].1, ReadOutcome::Unreadable(_)));
+        assert!(matches!(entries[2].1, ReadOutcome::Present(_)));
+    }
+
+    #[test]
+    fn a_missing_directory_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(read_dir(&dir.path().join("none")).is_err());
+    }
 
     #[test]
     fn a_good_file_is_present() {
