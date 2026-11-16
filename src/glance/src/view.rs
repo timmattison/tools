@@ -85,6 +85,10 @@ impl KernelInput {
 }
 
 /// The rules of remote mode.
+///
+/// The [`HostNaming`] of the input decides the name that [`origin`] gives.
+///
+/// [`origin`]: RemoteInput::origin
 #[derive(Debug)]
 pub struct RemoteInput {
     destination: String,
@@ -94,6 +98,10 @@ pub struct RemoteInput {
 
 impl RemoteInput {
     /// An input for the SSH `destination`, as the user typed it.
+    ///
+    /// With [`HostNaming::Destination`], the name is the destination for the
+    /// full life of the input. With [`HostNaming::Reported`], the name is the
+    /// host that the newest line reports.
     #[must_use]
     pub fn new(destination: String, naming: HostNaming) -> RemoteInput {
         RemoteInput {
@@ -104,14 +112,21 @@ impl RemoteInput {
     }
 
     /// Applies one event of the connection to `view`.
+    ///
+    /// A sample is pushed and clears the error. A read error and an end set
+    /// the error. With [`HostNaming::Reported`], a sample and a read error
+    /// that has a host also keep that host as the name. With
+    /// [`HostNaming::Destination`], no event changes the name.
     pub fn apply(&mut self, event: Event, view: &mut View) {
         match event {
             Event::Sample { host, sample } => {
-                self.host = Some(host);
+                if self.naming == HostNaming::Reported {
+                    self.host = Some(host);
+                }
                 view.push_sample(sample);
             }
             Event::ReadError { host, reason } => {
-                if let Some(name) = host {
+                if let (HostNaming::Reported, Some(name)) = (self.naming, host) {
                     self.host = Some(name);
                 }
                 view.fail(reason);
@@ -122,8 +137,10 @@ impl RemoteInput {
 
     /// The Mac that the values come from.
     ///
-    /// The host is the host of the newest line, or the destination before the
-    /// first line.
+    /// With [`HostNaming::Destination`], the host is the destination. With
+    /// [`HostNaming::Reported`], the host is the host of the newest line, or
+    /// the destination before the first line. The destination is always
+    /// present.
     #[must_use]
     pub fn origin(&self) -> Origin<'_> {
         Origin {
