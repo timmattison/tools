@@ -377,4 +377,21 @@ mod tests {
         assert!(log_lines[0].contains("d29  — → working"));
         assert!(log_lines[7].contains("d22  — → working"));
     }
+
+    #[test]
+    fn the_bottom_line_shows_the_keys_when_there_is_no_status() {
+        let buffer = render(&two_session_app(), 127_000);
+        assert_eq!(
+            row_text(&buffer, HEIGHT - 1).trim_end(),
+            "j/k move · enter focus · n next needs-you · q quit"
+        );
+    }
+
+    #[test]
+    fn the_bottom_line_shows_the_status_when_there_is_one() {
+        let mut app = two_session_app();
+        app.set_status("No session needs you");
+        let buffer = render(&app, 127_000);
+        assert_eq!(row_text(&buffer, HEIGHT - 1).trim_end(), "No session needs you");
+    }
 }
