@@ -482,6 +482,8 @@ pub struct Remote {
     pub destination: Destination,
     /// The path of `glance` on the second Mac.
     pub remote_binary: RemoteBinary,
+    /// The name that the status item shows for the second Mac.
+    pub naming: HostNaming,
 }
 
 /// The start of the reason when the program of a connection does not start.

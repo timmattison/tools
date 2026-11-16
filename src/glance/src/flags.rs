@@ -13,6 +13,9 @@ pub const HOST: &str = "host";
 /// The path of `glance` on the second Mac.
 pub const REMOTE_BINARY: &str = "remote-binary";
 
+/// Show the name that the second Mac reports, not the destination.
+pub const RESOLVE: &str = "resolve";
+
 /// The life of the status item after it is up, in seconds. Hidden.
 pub const EXIT_AFTER: &str = "exit-after";
 

@@ -343,7 +343,7 @@ impl fmt::Display for Shown<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::connection::RemoteBinary;
+    use crate::connection::{HostNaming, RemoteBinary};
     use std::time::Duration;
 
     /// The PID of the lines in these tests.
@@ -352,12 +352,13 @@ mod tests {
     }
 
     /// The settings of the host `destination` with the remote binary `binary`.
-    fn host_settings(destination: &str, binary: &str) -> Settings {
+    fn host_settings(destination: &str, binary: &str, naming: HostNaming) -> Settings {
         Settings {
             interval: Interval::DEFAULT,
             remote: Some(Remote {
                 destination: destination.parse().expect("a destination"),
                 remote_binary: binary.parse::<RemoteBinary>().expect("a remote binary"),
+                naming,
             }),
             exit_after: NonZeroU32::new(30),
         }
@@ -377,7 +378,7 @@ mod tests {
 
     #[test]
     fn the_host_lines_name_the_destination() {
-        let target = host_settings("tim@m1-ts", "glance").target();
+        let target = host_settings("tim@m1-ts", "glance", HostNaming::Destination).target();
         assert_eq!(
             ready_line(&target, pid()),
             "glance: the status item of the host tim@m1-ts runs as PID 4242. \
@@ -404,9 +405,28 @@ mod tests {
     }
 
     #[test]
+    fn the_copy_of_a_resolve_start_gets_the_resolve_flag() {
+        assert_eq!(
+            child_arguments(&host_settings("m1-ts", "-odd/glance", HostNaming::Reported)),
+            [
+                "--background-child",
+                "--interval=1",
+                "--host=m1-ts",
+                "--remote-binary=-odd/glance",
+                "--resolve",
+                "--exit-after=30",
+            ]
+        );
+    }
+
+    #[test]
     fn the_copy_of_a_host_gets_the_destination_the_binary_and_the_bound() {
         assert_eq!(
-            child_arguments(&host_settings("m1-ts", "-odd/glance")),
+            child_arguments(&host_settings(
+                "m1-ts",
+                "-odd/glance",
+                HostNaming::Destination
+            )),
             [
                 "--background-child",
                 "--interval=1",

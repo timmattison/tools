@@ -10,9 +10,9 @@ use std::process::ExitCode;
 
 use buildinfo::version_string;
 use clap::Parser;
-#[cfg(target_os = "macos")]
-use glance::connection::Remote;
 use glance::connection::{Destination, RemoteBinary, DEFAULT_REMOTE_BINARY};
+#[cfg(target_os = "macos")]
+use glance::connection::{HostNaming, Remote};
 use glance::flags;
 use glance::interval::Interval;
 #[cfg(target_os = "macos")]
@@ -109,6 +109,18 @@ struct Cli {
     exit_after: Option<NonZeroU32>,
 }
 
+#[cfg(target_os = "macos")]
+impl Cli {
+    /// The second Mac of this command line, or `None` for this Mac.
+    fn remote(&self) -> Option<Remote> {
+        self.host.clone().map(|destination| Remote {
+            destination,
+            remote_binary: self.remote_binary.clone(),
+            naming: HostNaming::Destination,
+        })
+    }
+}
+
 fn main() -> ExitCode {
     run(Cli::parse())
 }
@@ -122,10 +134,7 @@ fn run(cli: Cli) -> ExitCode {
     if cli.stream {
         return stream(cli.interval, cli.count);
     }
-    let remote = cli.host.map(|destination| Remote {
-        destination,
-        remote_binary: cli.remote_binary,
-    });
+    let remote = cli.remote();
     let mode = if cli.background_child {
         Mode::BackgroundChild
     } else if cli.background {
@@ -295,6 +304,7 @@ mod tests {
         assert_eq!(cli.interval, interval);
         assert_eq!(cli.host, None);
         assert_eq!(cli.exit_after, None);
+        assert_eq!(cli.remote(), None);
     }
 
     #[cfg(target_os = "macos")]
@@ -303,6 +313,7 @@ mod tests {
         let remote = Remote {
             destination: "tim@m1-ts".parse().unwrap(),
             remote_binary: "-odd bin/glance".parse().unwrap(),
+            naming: HostNaming::Destination,
         };
         let cli = parse_child(&Settings {
             interval: Interval::DEFAULT,
@@ -310,9 +321,26 @@ mod tests {
             exit_after: NonZeroU32::new(7),
         });
         assert!(cli.background_child);
-        assert_eq!(cli.host, Some(remote.destination));
+        assert_eq!(cli.host.as_ref(), Some(&remote.destination));
         assert_eq!(cli.remote_binary, remote.remote_binary);
         assert_eq!(cli.exit_after, NonZeroU32::new(7));
+        assert_eq!(cli.remote(), Some(remote));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_copy_of_a_resolve_start_gets_the_same_settings() {
+        let remote = Remote {
+            destination: "tim@m1-ts".parse().unwrap(),
+            remote_binary: "-odd bin/glance".parse().unwrap(),
+            naming: HostNaming::Reported,
+        };
+        let cli = parse_child(&Settings {
+            interval: Interval::DEFAULT,
+            remote: Some(remote.clone()),
+            exit_after: NonZeroU32::new(7),
+        });
+        assert_eq!(cli.remote(), Some(remote));
     }
 
     #[test]

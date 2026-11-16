@@ -74,6 +74,9 @@ const USAGE_ERROR: i32 = 2;
 const ALPHA: &str = "alpha";
 const BETA: &str = "tim@beta";
 
+/// The flag that shows the name that the second Mac reports.
+const RESOLVE: &str = "--resolve";
+
 /// The status item that a run starts or stops.
 #[derive(Debug, Clone, Copy)]
 enum Target {
@@ -175,10 +178,11 @@ impl Home {
         self.run(&args)
     }
 
-    /// Starts the status item of `target` in the background with a life
-    /// bound of `seconds`, and returns its PID.
-    fn start_bounded(&mut self, target: Target, seconds: &str) -> u32 {
+    /// Starts the status item of `target` in the background with the
+    /// arguments `extra` and a life bound of `seconds`, and returns its PID.
+    fn start_bounded(&mut self, target: Target, extra: &[&str], seconds: &str) -> u32 {
         let mut args = target.args();
+        args.extend_from_slice(extra);
         args.push("--background");
         // `output` waits until the start closes its stdout and its stderr.
         // A status item that kept them open would keep the test here until
@@ -195,7 +199,13 @@ impl Home {
     /// Starts the status item of `target` in the background and returns its
     /// PID.
     fn start(&mut self, target: Target) -> u32 {
-        self.start_bounded(target, LIFE_BOUND)
+        self.start_bounded(target, &[], LIFE_BOUND)
+    }
+
+    /// Starts the status item of `target` in the background with the
+    /// arguments `extra` after the target, and returns its PID.
+    fn start_with(&mut self, target: Target, extra: &[&str]) -> u32 {
+        self.start_bounded(target, extra, LIFE_BOUND)
     }
 
     /// Runs `glance` for `target` with `extra` arguments, and asserts that
@@ -347,7 +357,7 @@ fn a_stop_ends_a_foreground_status_item_with_status_zero() {
 #[test]
 fn the_life_bound_ends_a_background_status_item() {
     let mut home = Home::new();
-    let pid = home.start_bounded(Target::Local, SHORT_LIFE);
+    let pid = home.start_bounded(Target::Local, &[], SHORT_LIFE);
     let deadline = Instant::now() + SHORT_LIFE_DEADLINE;
     while alive(pid) && Instant::now() < deadline {
         thread::sleep(POLL);
@@ -390,6 +400,17 @@ fn a_plain_start_of_a_host_stops_the_status_item_of_that_host() {
     let mut home = Home::new();
     let beta = home.start(Target::Host(BETA));
     home.assert_stops(Target::Host(BETA), &[], beta);
+}
+
+/// The flag `--resolve` changes the name on the status item, not the target.
+/// A run with it and a run without it stop the same status item.
+#[test]
+fn resolve_does_not_change_which_status_item_a_run_stops() {
+    let mut home = Home::new();
+    let resolved = home.start_with(Target::Host(ALPHA), &[RESOLVE]);
+    home.assert_stops(Target::Host(ALPHA), &[], resolved);
+    let plain = home.start(Target::Host(ALPHA));
+    home.assert_stops(Target::Host(ALPHA), &[RESOLVE], plain);
 }
 
 #[test]
