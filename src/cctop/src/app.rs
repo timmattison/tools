@@ -471,6 +471,39 @@ mod tests {
     }
 
     #[test]
+    fn h_selects_the_first_unmarked_row_at_or_below_the_old_index() {
+        let mut app = app_with(&[(10, PaneState::NeedsYou), (20, PaneState::Idle)]);
+        app.handle_key(press(KeyCode::Char('h')));
+        assert!(is_handled(&app, 10));
+        assert_eq!(selected_pid(&app), Some(Pid::new(20)));
+    }
+
+    #[test]
+    fn h_skips_a_row_that_has_a_mark_already() {
+        let mut app = app_with(&[
+            (10, PaneState::NeedsYou),
+            (11, PaneState::NeedsYou),
+            (20, PaneState::Idle),
+        ]);
+        app.board_mut().toggle_handled(Pid::new(11));
+        assert_eq!(row_order(&app), vec![10, 11, 20]);
+        app.handle_key(press(KeyCode::Char('h')));
+        assert_eq!(row_order(&app), vec![11, 10, 20]);
+        assert_eq!(selected_pid(&app), Some(Pid::new(20)));
+    }
+
+    #[test]
+    fn h_stays_on_the_marked_row_when_no_unmarked_row_is_below() {
+        let mut app = app_with(&[(10, PaneState::NeedsYou), (11, PaneState::NeedsYou)]);
+        app.board_mut().toggle_handled(Pid::new(11));
+        app.handle_key(press(KeyCode::Char('h')));
+        assert_eq!(row_order(&app), vec![11, 10]);
+        assert!(is_handled(&app, 10));
+        assert!(is_handled(&app, 11));
+        assert_eq!(selected_pid(&app), Some(Pid::new(10)));
+    }
+
+    #[test]
     fn a_second_h_marks_the_next_session() {
         let mut app = three_rows();
         app.handle_key(press(KeyCode::Char('h')));
