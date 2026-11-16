@@ -1,4 +1,4 @@
-//! Focus step 2: finds the WezTerm pane of a terminal, and asks WezTerm to
+//! Focus step 2: finds the `WezTerm` pane of a terminal, and asks `WezTerm` to
 //! focus it.
 
 use std::fs::OpenOptions;
@@ -11,13 +11,13 @@ use base64::Engine as _;
 /// The directory that holds the terminal devices.
 const DEVICE_DIRECTORY: &str = "/dev/";
 
-/// The name of the user variable that the WezTerm handler reads.
+/// The name of the user variable that the `WezTerm` handler reads.
 pub const FOCUS_USER_VAR: &str = "claude-focus-pane";
 
-/// Makes the escape sequence that asks WezTerm to focus the pane `pane_id`.
+/// Makes the escape sequence that asks `WezTerm` to focus the pane `pane_id`.
 ///
 /// The sequence sets the user variable [`FOCUS_USER_VAR`] to the Base64 text of
-/// the decimal pane number. The handler of WezTerm reads only the value, so
+/// the decimal pane number. The handler of `WezTerm` reads only the value, so
 /// any pane can send the sequence.
 #[must_use]
 pub fn focus_request(pane_id: u64) -> String {
@@ -59,7 +59,7 @@ impl TtyWriter for DeviceWriter {
     }
 }
 
-/// Makes the argv that lists the WezTerm panes as JSON.
+/// Makes the argv that lists the `WezTerm` panes as JSON.
 #[must_use]
 pub fn list_argv() -> Vec<String> {
     ["wezterm", "cli", "list", "--format", "json"]
@@ -68,7 +68,7 @@ pub fn list_argv() -> Vec<String> {
         .collect()
 }
 
-/// One pane in the list of WezTerm.
+/// One pane in the list of `WezTerm`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 pub struct WeztermPane {
     /// The number of the pane.
@@ -113,7 +113,10 @@ mod tests {
 
     #[test]
     fn the_list_argv_asks_for_json() {
-        assert_eq!(list_argv(), vec!["wezterm", "cli", "list", "--format", "json"]);
+        assert_eq!(
+            list_argv(),
+            vec!["wezterm", "cli", "list", "--format", "json"]
+        );
     }
 
     #[test]

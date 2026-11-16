@@ -42,7 +42,10 @@ mod tests {
 
     #[test]
     fn claude_in_zellij_has_the_server_above_it() {
-        assert_eq!(zellij_server_of(&tree(), Pid::new(29130)), Some(Pid::new(42617)));
+        assert_eq!(
+            zellij_server_of(&tree(), Pid::new(29130)),
+            Some(Pid::new(42617))
+        );
     }
 
     #[test]

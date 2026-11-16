@@ -52,10 +52,11 @@ pub fn parse_unix_sockets(text: &str) -> Vec<UnixSocket> {
     // True while the current file has a socket in `sockets`.
     let mut file_has_socket = false;
     for line in text.lines() {
-        let Some(letter) = line.chars().next() else {
+        let mut chars = line.chars();
+        let Some(letter) = chars.next() else {
             continue;
         };
-        let value = &line[letter.len_utf8()..];
+        let value = chars.as_str();
         match letter {
             'p' => {
                 pid = value.parse().ok().map(Pid::new);

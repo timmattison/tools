@@ -1,5 +1,5 @@
 //! Focus of a session in two steps. Step 1 asks Zellij to focus the pane.
-//! Step 2 asks WezTerm to focus the window and the pane of the terminal.
+//! Step 2 asks `WezTerm` to focus the window and the pane of the terminal.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -53,7 +53,7 @@ pub struct FocusReport {
     /// The result of step 1. `None` when step 1 did not run. `Ok` holds the
     /// pane that Zellij focused.
     pub zellij: Option<Result<ZellijPaneId, String>>,
-    /// The result of step 2. `Ok` holds the WezTerm pane that got the focus
+    /// The result of step 2. `Ok` holds the `WezTerm` pane that got the focus
     /// request.
     pub wezterm: Result<u64, String>,
 }
@@ -71,10 +71,7 @@ impl FocusReport {
         let mut parts = Vec::new();
         match &self.zellij {
             None => {}
-            Some(Ok(pane)) => parts.push(format!(
-                "Zellij focused pane {}",
-                pane.terminal_target()
-            )),
+            Some(Ok(pane)) => parts.push(format!("Zellij focused pane {}", pane.terminal_target())),
             Some(Err(error)) => parts.push(format!("Zellij failed: {error}")),
         }
         match &self.wezterm {
@@ -88,7 +85,7 @@ impl FocusReport {
 /// Focuses the session of `target`. Both steps always run.
 ///
 /// Step 1 runs only when the target has a Zellij session and pane. Step 2
-/// finds the WezTerm pane of the terminal and sends the focus request to the
+/// finds the `WezTerm` pane of the terminal and sends the focus request to the
 /// terminal device of that pane.
 #[must_use]
 pub fn focus(target: &FocusTarget, tools: &FocusTools) -> FocusReport {
@@ -137,7 +134,8 @@ fn tty_of(runner: &dyn Runner, pid: Pid) -> Option<String> {
 fn candidate_ttys(target: &FocusTarget, runner: &dyn Runner) -> Result<Vec<String>, String> {
     let tree = ProcessTree::parse(&run_ok(runner, &ancestry::ps_argv(), "ps")?);
     if let Some(server) = ancestry::zellij_server_of(&tree, target.pid) {
-        let sockets = lsof::parse_unix_sockets(&run_ok(runner, &lsof::unix_sockets_argv(), "lsof")?);
+        let sockets =
+            lsof::parse_unix_sockets(&run_ok(runner, &lsof::unix_sockets_argv(), "lsof")?);
         let ttys: Vec<String> = lsof::client_pids(server, &sockets)
             .into_iter()
             .filter_map(|client| tty_of(runner, client))
@@ -147,13 +145,13 @@ fn candidate_ttys(target: &FocusTarget, runner: &dyn Runner) -> Result<Vec<Strin
         }
         Ok(ttys)
     } else {
-        tty_of(runner, target.pid).map(|tty| vec![tty]).ok_or_else(|| {
-            format!("cannot find the terminal of pid {}", target.pid.as_u32())
-        })
+        tty_of(runner, target.pid)
+            .map(|tty| vec![tty])
+            .ok_or_else(|| format!("cannot find the terminal of pid {}", target.pid.as_u32()))
     }
 }
 
-/// Step 2: sends the focus request to the first terminal that a WezTerm pane
+/// Step 2: sends the focus request to the first terminal that a `WezTerm` pane
 /// shows.
 fn focus_wezterm(target: &FocusTarget, tools: &FocusTools) -> Result<u64, String> {
     let ttys = candidate_ttys(target, &*tools.runner)?;
@@ -262,7 +260,11 @@ mod tests {
     #[test]
     fn the_status_line_names_each_failed_step_with_its_error() {
         assert_eq!(
-            report(Some(Err("the Zellij session tools is gone".to_string())), Ok(239)).status_line(),
+            report(
+                Some(Err("the Zellij session tools is gone".to_string())),
+                Ok(239)
+            )
+            .status_line(),
             "docs: Zellij failed: the Zellij session tools is gone · WezTerm focused pane 239"
         );
         assert_eq!(
@@ -321,6 +323,10 @@ mod tests {
         argv.iter().map(String::as_str).collect()
     }
 
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "the fake runner answers with a Result"
+    )]
     fn ok(stdout: &str) -> Result<CommandOutput, crate::runner::RunError> {
         Ok(CommandOutput::ok(stdout))
     }
@@ -360,7 +366,7 @@ mod tests {
             runner.calls(),
             vec![
                 list_sessions_argv(),
-                focus_argv(&target.zellij.clone().unwrap()),
+                focus_argv(&target.zellij.unwrap()),
                 ps_argv(),
                 unix_sockets_argv(),
                 tty_argv(Pid::new(19800)),
@@ -430,10 +436,7 @@ mod tests {
                 .answer(&words(&ps_argv()), ok(PS))
                 .answer(&words(&unix_sockets_argv()), ok(&sockets))
                 .answer(&words(&tty_argv(Pid::new(19800))), ok(TTY))
-                .answer(
-                    &words(&tty_argv(Pid::new(1000))),
-                    ok("p1000\nf0\n"),
-                )
+                .answer(&words(&tty_argv(Pid::new(1000))), ok("p1000\nf0\n"))
                 .answer(
                     &words(&tty_argv(Pid::new(2000))),
                     ok("p2000\nf0\nn/dev/ttys999\n"),
@@ -480,7 +483,10 @@ mod tests {
         );
     }
 
-    fn wezterm_error(target: &FocusTarget, runner: FakeRunner) -> (String, Vec<(PathBuf, Vec<u8>)>) {
+    fn wezterm_error(
+        target: &FocusTarget,
+        runner: FakeRunner,
+    ) -> (String, Vec<(PathBuf, Vec<u8>)>) {
         let runner = Arc::new(runner);
         let writer = Arc::new(RecordingWriter::default());
         let report = focus(target, &tools(&runner, &writer));
