@@ -1,5 +1,9 @@
 //! The check that tells if the process of a session still runs.
 
+use std::collections::HashMap;
+
+use proctree::Pid;
+
 use crate::state::EpochMillis;
 
 /// Tell if a session is stale: its process is gone, or a new process reused
@@ -13,6 +17,21 @@ pub fn is_stale(started_at: EpochMillis, process_start_secs: Option<u64>) -> boo
         None => true,
         Some(secs) => secs.saturating_mul(1000) > started_at.as_u64(),
     }
+}
+
+/// A source for the start time of processes.
+pub trait ProcessClock {
+    /// The start time of each live, non-zombie process in `pids`, in whole
+    /// seconds since the epoch. A pid with no such process is not in the map.
+    fn start_times(&mut self, pids: &[Pid]) -> HashMap<Pid, u64>;
+}
+
+/// The pids of the stale sessions, sorted. The function asks `clock` once for
+/// all pids.
+#[must_use]
+pub fn stale_pids(sessions: &[(Pid, EpochMillis)], clock: &mut dyn ProcessClock) -> Vec<Pid> {
+    let _ = (sessions, clock);
+    Vec::new()
 }
 
 #[cfg(test)]
@@ -44,5 +63,44 @@ mod tests {
     #[test]
     fn the_comparison_does_not_overflow() {
         assert!(is_stale(STARTED_AT, Some(u64::MAX)));
+    }
+
+    /// A clock that answers from a map and counts its calls.
+    struct FakeClock {
+        times: HashMap<Pid, u64>,
+        calls: Vec<Vec<Pid>>,
+    }
+
+    impl ProcessClock for FakeClock {
+        fn start_times(&mut self, pids: &[Pid]) -> HashMap<Pid, u64> {
+            self.calls.push(pids.to_vec());
+            self.times.clone()
+        }
+    }
+
+    #[test]
+    fn stale_pids_gives_the_gone_and_the_reused_pid_sorted() {
+        let sessions = [
+            (Pid::new(40), STARTED_AT),
+            (Pid::new(30), STARTED_AT),
+            (Pid::new(20), STARTED_AT),
+            (Pid::new(10), STARTED_AT),
+        ];
+        let mut clock = FakeClock {
+            times: HashMap::from([
+                (Pid::new(10), 1_794_823_262),
+                (Pid::new(30), 1_794_823_999),
+                (Pid::new(40), 1_794_823_000),
+            ]),
+            calls: Vec::new(),
+        };
+        assert_eq!(
+            stale_pids(&sessions, &mut clock),
+            vec![Pid::new(20), Pid::new(30)]
+        );
+        assert_eq!(
+            clock.calls,
+            vec![vec![Pid::new(40), Pid::new(30), Pid::new(20), Pid::new(10)]]
+        );
     }
 }
