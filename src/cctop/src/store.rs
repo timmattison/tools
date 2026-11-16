@@ -91,6 +91,25 @@ pub fn remove_if_stale(dir: &Path, pid: Pid, clock: &mut dyn ProcessClock) -> bo
     is_stale(file.started_at, start_secs) && std::fs::remove_file(&path).is_ok()
 }
 
+/// A change in the state directory that the board must read again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirEvent {
+    /// The state file of this pid changed.
+    File(Pid),
+    /// The watcher lost events, so every file needs a new read.
+    Rescan,
+}
+
+/// The directory events that one event of the file watcher means.
+///
+/// An event that asks for a rescan gives `[Rescan]`. Any other event gives a
+/// `File` for each path that has the name `<pid>.json`. A path that appears
+/// twice gives one `File`. The order of the paths stays.
+#[must_use]
+pub fn dir_events(_event: &notify::Event) -> Vec<DirEvent> {
+    Vec::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,6 +209,52 @@ mod tests {
         let mut clock = FakeClock(std::collections::HashMap::new());
         assert!(!remove_if_stale(dir.path(), Pid::new(77), &mut clock));
         assert!(path.exists());
+    }
+
+    use notify::event::{CreateKind, Flag, ModifyKind, RemoveKind, RenameMode};
+    use notify::{Event, EventKind};
+
+    fn event_at(kind: EventKind, name: &str) -> Event {
+        Event::new(kind).add_path(PathBuf::from("/state").join(name))
+    }
+
+    #[test]
+    fn a_create_modify_rename_or_remove_names_the_file() {
+        for kind in [
+            EventKind::Create(CreateKind::File),
+            EventKind::Modify(ModifyKind::Data(notify::event::DataChange::Any)),
+            EventKind::Modify(ModifyKind::Name(RenameMode::To)),
+            EventKind::Remove(RemoveKind::File),
+        ] {
+            assert_eq!(
+                dir_events(&event_at(kind, "80033.json")),
+                vec![DirEvent::File(Pid::new(80033))],
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tmp_path_gives_nothing() {
+        let event = event_at(EventKind::Create(CreateKind::File), "80033.json.tmp");
+        assert_eq!(dir_events(&event), Vec::new());
+    }
+
+    #[test]
+    fn the_same_path_twice_gives_one_event() {
+        let event = event_at(EventKind::Create(CreateKind::File), "80033.json")
+            .add_path(PathBuf::from("/state/80033.json"))
+            .add_path(PathBuf::from("/state/5.json"));
+        assert_eq!(
+            dir_events(&event),
+            vec![DirEvent::File(Pid::new(80033)), DirEvent::File(Pid::new(5))]
+        );
+    }
+
+    #[test]
+    fn a_rescan_flag_gives_a_rescan() {
+        let event = event_at(EventKind::Other, "80033.json").set_flag(Flag::Rescan);
+        assert_eq!(dir_events(&event), vec![DirEvent::Rescan]);
     }
 
     #[test]
