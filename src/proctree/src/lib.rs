@@ -255,6 +255,29 @@ pub fn ps_arguments() -> Option<String> {
     run_ps(&["-eo", "pid=,args="])
 }
 
+/// The argument text of each process, from the output of [`ps_arguments`].
+///
+/// Each line is a pid, then the arguments of that process, joined by spaces as
+/// `ps` prints them. The text keeps the spaces inside it and loses the white
+/// space before and after it. A process with no arguments gets an empty text.
+/// A line that does not start with a pid is skipped.
+///
+/// `whyslow` reads the output path of each compiler from this text.
+#[must_use]
+pub fn parse_arguments(ps_args_output: &str) -> HashMap<Pid, String> {
+    ps_args_output
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            // The pid ends at the first white space. `split_once` cuts only at
+            // a character it found, so it never cuts a multi-byte character.
+            let (pid, rest) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+            let pid = pid.parse::<u32>().ok()?;
+            Some((Pid(pid), rest.trim().to_owned()))
+        })
+        .collect()
+}
+
 /// Run `ps` with `args` and give back what it wrote to standard output.
 ///
 /// The answer is `None` when the machine cannot run `ps` at all.
@@ -498,8 +521,8 @@ impl Ancestry {
 #[cfg(test)]
 mod tests {
     use super::{
-        comm_basename, zellij_client_pids, ClientPids, Pid, ProcessTree, ZellijScan,
-        MAX_ANCESTOR_DEPTH,
+        comm_basename, parse_arguments, zellij_client_pids, ClientPids, Pid, ProcessTree,
+        ZellijScan, MAX_ANCESTOR_DEPTH,
     };
 
     /// Turn the older `in_zellij` flag into a scan. A session whose clients
@@ -1072,5 +1095,32 @@ not_a_number zellij a work
             ZellijScan::for_session(PS_ARGS_TWO_SESSIONS, Some("")),
             ZellijScan::EveryClient
         );
+    }
+
+    // =========================================================================
+    // Tests for parse_arguments
+    // =========================================================================
+
+    /// Each line gives its pid the rest of the line. `ps` pads a pid to the
+    /// right, so a line can start with spaces. The arguments keep their inner
+    /// spaces, a process with no arguments gets an empty text, and a line with
+    /// no pid adds nothing.
+    #[test]
+    fn parse_arguments_gives_each_pid_the_rest_of_its_line() {
+        let output = "    1 /sbin/launchd\n\
+                      52886 clang -cc1 -o /wt/issue-17/target/x.o -x c++  /r/a b.cpp \n\
+                      \x20 404 \n\
+                      not-a-pid /bin/zsh\n\
+                      \n";
+
+        let arguments = parse_arguments(output);
+
+        assert_eq!(arguments.len(), 3, "{arguments:?}");
+        assert_eq!(arguments[&Pid::new(1)], "/sbin/launchd");
+        assert_eq!(
+            arguments[&Pid::new(52886)],
+            "clang -cc1 -o /wt/issue-17/target/x.o -x c++  /r/a b.cpp"
+        );
+        assert_eq!(arguments[&Pid::new(404)], "");
     }
 }

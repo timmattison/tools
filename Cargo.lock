@@ -9668,6 +9668,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "whyslow"
+version = "0.1.0"
+dependencies = [
+ "buildinfo",
+ "childenv",
+ "clap",
+ "faulte",
+ "libc",
+ "occ",
+ "proctree",
+ "termbar",
+ "testcolor",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "wide"
 version = "0.7.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
