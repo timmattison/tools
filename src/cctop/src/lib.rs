@@ -8,7 +8,8 @@
 #![deny(unsafe_code)]
 #![warn(clippy::pedantic)]
 
+pub mod board;
+pub mod liveness;
 pub mod paths;
 pub mod registry;
 pub mod state;
-pub mod liveness;
