@@ -276,4 +276,20 @@ mod tests {
         assert_eq!(session.file.started_at, EpochMillis::new(200));
         assert_eq!(session.since, EpochMillis::new(300));
     }
+
+    #[test]
+    fn apply_updates_the_file_and_keeps_since_when_the_state_is_the_same() {
+        let mut board = Board::new();
+        board.load(file(7, PaneState::Idle, 100, 500), Some("old".into()));
+        let mut newer = file(7, PaneState::Idle, 100, 900);
+        newer.cwd = std::path::PathBuf::from("/elsewhere/project");
+        newer.session_id = "new-id".to_string();
+        assert_eq!(board.apply(newer, Some("renamed".into())), None);
+        let session = board.get(Pid::new(7)).expect("the session is on the board");
+        assert_eq!(session.since, EpochMillis::new(500));
+        assert_eq!(session.file.stamp, EpochMillis::new(900));
+        assert_eq!(session.file.session_id, "new-id");
+        assert_eq!(session.label(), "renamed");
+        assert_eq!(board.changes().count(), 0);
+    }
 }
