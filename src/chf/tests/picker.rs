@@ -10,6 +10,7 @@
 #![deny(unsafe_code)]
 #![warn(clippy::pedantic)]
 
+use std::ffi::OsStr;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,6 +37,16 @@ const FAKE_RAN: &str = "FAKE-CRAP-RAN";
 const ID: &str = "11111111-2222-4333-8444-555555555555";
 /// The exit status of the fake `crap`.
 const FAKE_STATUS: u32 = 7;
+/// The file in which the fake `crap` of the environment test writes what it got.
+const CRAP_ENV_FILE: &str = "crap-env";
+/// What the fake `crap` writes for a variable that its environment does not hold.
+const UNSET: &str = "unset";
+/// A variable that git exports into each hook. It carries the intent of the hook.
+const HOOK_VARIABLE: &str = "GIT_DIR";
+/// A variable that a person exports. It carries the intent of the user.
+const USER_VARIABLE: &str = "GIT_TERMINAL_PROMPT";
+/// The value that the test gives to [`USER_VARIABLE`].
+const USER_VALUE: &str = "0";
 
 /// Writes one session into `home`. A compacted session adds a boundary.
 fn write_session(home: &Path, title: &str, compacted: bool) {
@@ -87,6 +98,12 @@ struct Picker {
 impl Picker {
     /// Starts `chf` with `shell` as `$SHELL` and `home` as the home directory.
     fn open(home: &Path, shell: &str) -> Self {
+        Self::open_with(home, shell, &[])
+    }
+
+    /// Starts `chf` as [`Picker::open`] does, with each pair of `extra_env`
+    /// added to the environment of `chf`.
+    fn open_with(home: &Path, shell: &str, extra_env: &[(&str, &OsStr)]) -> Self {
         let pair = native_pty_system()
             .openpty(PtySize {
                 rows: 24,
@@ -109,6 +126,9 @@ impl Picker {
         command.env("SHELL", shell);
         command.env("XDG_CACHE_HOME", home.join("cache"));
         command.env("BASH_SILENCE_DEPRECATION_WARNING", "1");
+        for (key, value) in extra_env {
+            command.env(key, value);
+        }
         command.cwd(home);
         let child = pair
             .slave
@@ -284,6 +304,38 @@ fn a_word_that_matches_nothing_empties_the_list_and_ctrl_u_restores_it() {
     picker.press(b"\r");
     assert_eq!(picker.wait_for_exit(), FAKE_STATUS);
     assert_eq!(crap_args(home.path()), ["--here", ID]);
+}
+
+#[test]
+fn the_shell_sheds_the_git_variables_of_a_hook_and_keeps_those_of_the_user() {
+    let home = tempfile::tempdir().expect("a temporary directory");
+    write_session(home.path(), "Zanzibar-trip-notes", false);
+    std::fs::write(
+        home.path().join(".bashrc"),
+        format!(
+            "crap() {{ printf '%s\\n' \"${{{HOOK_VARIABLE}-{UNSET}}}\" \"${{{USER_VARIABLE}-{UNSET}}}\" > \"$HOME/{CRAP_ENV_FILE}\"; return {FAKE_STATUS}; }}\n"
+        ),
+    )
+    .expect("the bashrc is written");
+    let decoy = home.path().join("decoy.git");
+    let mut picker = Picker::open_with(
+        home.path(),
+        "/bin/bash",
+        &[
+            (HOOK_VARIABLE, decoy.as_os_str()),
+            (USER_VARIABLE, OsStr::new(USER_VALUE)),
+        ],
+    );
+    picker.wait_for("Zanzibar-trip-notes");
+    picker.press(b"\r");
+    assert_eq!(picker.wait_for_exit(), FAKE_STATUS);
+    let seen = std::fs::read_to_string(home.path().join(CRAP_ENV_FILE))
+        .expect("the fake crap wrote its environment");
+    assert_eq!(
+        seen.lines().collect::<Vec<_>>(),
+        [UNSET, USER_VALUE],
+        "crap must not get {HOOK_VARIABLE}, and must get {USER_VARIABLE}"
+    );
 }
 
 #[test]
