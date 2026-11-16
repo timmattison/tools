@@ -1,14 +1,19 @@
 //! Focus of a session in two steps. Step 1 asks Zellij to focus the pane.
 //! Step 2 asks WezTerm to focus the window and the pane of the terminal.
 
+use std::path::Path;
 use std::sync::Arc;
 
-use proctree::Pid;
+use proctree::{Pid, ProcessTree};
 
 use crate::board::Session;
-use crate::runner::Runner;
+use crate::runner::{CommandOutput, Runner, COMMAND_LIMIT};
 use crate::state::{ZellijLocation, ZellijPaneId};
 use crate::wezterm::TtyWriter;
+use crate::{ancestry, lsof, wezterm, zellij};
+
+/// The text of a step that failed, until the step names its error.
+const STEP_FAILED: &str = "the step failed";
 
 /// The session to focus.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,12 +94,65 @@ impl FocusReport {
 /// finds the WezTerm pane of the terminal and sends the focus request to the
 /// terminal device of that pane.
 #[must_use]
-pub fn focus(target: &FocusTarget, _tools: &FocusTools) -> FocusReport {
+pub fn focus(target: &FocusTarget, tools: &FocusTools) -> FocusReport {
+    let zellij = target.zellij.as_ref().map(|location| {
+        zellij::focus_pane(&*tools.runner, location)
+            .map(|()| location.pane)
+            .map_err(|_| STEP_FAILED.to_string())
+    });
     FocusReport {
         label: target.label.clone(),
-        zellij: None,
-        wezterm: Err(String::new()),
+        zellij,
+        wezterm: focus_wezterm(target, tools).ok_or_else(|| STEP_FAILED.to_string()),
     }
+}
+
+/// Runs `argv` and gives its output when the command ran and exited with 0.
+fn run_ok(runner: &dyn Runner, argv: &[String]) -> Option<String> {
+    runner
+        .run(argv, COMMAND_LIMIT)
+        .ok()
+        .filter(CommandOutput::succeeded)
+        .map(|output| output.stdout)
+}
+
+/// Gives the tty of the process `pid`.
+fn tty_of(runner: &dyn Runner, pid: Pid) -> Option<String> {
+    run_ok(runner, &lsof::tty_argv(pid)).and_then(|text| lsof::parse_tty(&text))
+}
+
+/// Gives the terminal devices where the focus request can go, in the order
+/// of use.
+fn candidate_ttys(target: &FocusTarget, runner: &dyn Runner) -> Option<Vec<String>> {
+    let tree = ProcessTree::parse(&run_ok(runner, &ancestry::ps_argv())?);
+    match ancestry::zellij_server_of(&tree, target.pid) {
+        Some(server) => {
+            let sockets = lsof::parse_unix_sockets(&run_ok(runner, &lsof::unix_sockets_argv())?);
+            Some(
+                lsof::client_pids(server, &sockets)
+                    .into_iter()
+                    .filter_map(|client| tty_of(runner, client))
+                    .collect(),
+            )
+        }
+        None => tty_of(runner, target.pid).map(|tty| vec![tty]),
+    }
+}
+
+/// Step 2: sends the focus request to the first terminal that a WezTerm pane
+/// shows.
+fn focus_wezterm(target: &FocusTarget, tools: &FocusTools) -> Option<u64> {
+    let ttys = candidate_ttys(target, &*tools.runner)?;
+    let panes = wezterm::parse_panes(&run_ok(&*tools.runner, &wezterm::list_argv())?).ok()?;
+    ttys.iter().find_map(|tty| {
+        let pane = wezterm::pane_for_tty(&panes, tty)?;
+        let request = wezterm::focus_request(pane);
+        tools
+            .writer
+            .write(Path::new(tty), request.as_bytes())
+            .ok()
+            .map(|()| pane)
+    })
 }
 
 #[cfg(test)]
