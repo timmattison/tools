@@ -45,7 +45,12 @@ impl App {
     /// shorter. It gives `None` when the board is empty.
     #[must_use]
     pub fn selected_index(&self) -> Option<usize> {
-        None
+        let rows = self.board.rows();
+        let last = rows.len().checked_sub(1)?;
+        let by_pid = self
+            .selected
+            .and_then(|pid| rows.iter().position(|session| session.file.pid == pid));
+        Some(by_pid.unwrap_or_else(|| self.last_index.min(last)))
     }
 
     /// The status text, when there is one.
