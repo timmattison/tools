@@ -8,4 +8,5 @@
 #![deny(unsafe_code)]
 #![warn(clippy::pedantic)]
 
+pub mod paths;
 pub mod state;
