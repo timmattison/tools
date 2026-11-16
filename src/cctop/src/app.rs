@@ -305,4 +305,57 @@ mod tests {
         assert_eq!(app.handle_key(press(KeyCode::Enter)), Action::Nothing);
         assert_eq!(app.status(), Some("No session to focus"));
     }
+
+    fn focus_pid(action: &Action) -> Pid {
+        match action {
+            Action::Focus(target) => target.pid,
+            other => panic!("expected a focus action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn n_selects_the_next_needs_you_row_and_wraps() {
+        let mut app = app_with(&[
+            (10, PaneState::NeedsYou),
+            (11, PaneState::NeedsYou),
+            (12, PaneState::Working),
+        ]);
+        let first = app.handle_key(press(KeyCode::Char('n')));
+        assert_eq!(focus_pid(&first), Pid::new(11));
+        assert_eq!(app.selected_index(), Some(1));
+        assert_eq!(app.status(), Some("Focusing dir11"));
+        let second = app.handle_key(press(KeyCode::Char('n')));
+        assert_eq!(focus_pid(&second), Pid::new(10));
+        assert_eq!(app.selected_index(), Some(0));
+    }
+
+    #[test]
+    fn n_skips_rows_that_do_not_need_you() {
+        let mut app = app_with(&[
+            (10, PaneState::NeedsYou),
+            (11, PaneState::Working),
+            (12, PaneState::Working),
+        ]);
+        app.handle_key(press(KeyCode::Char('j')));
+        app.handle_key(press(KeyCode::Char('j')));
+        let action = app.handle_key(press(KeyCode::Char('n')));
+        assert_eq!(focus_pid(&action), Pid::new(10));
+        assert_eq!(app.selected_index(), Some(0));
+    }
+
+    #[test]
+    fn n_on_the_only_needs_you_row_gives_that_row_again() {
+        let mut app = app_with(&[(10, PaneState::NeedsYou), (11, PaneState::Idle)]);
+        let action = app.handle_key(press(KeyCode::Char('n')));
+        assert_eq!(focus_pid(&action), Pid::new(10));
+        assert_eq!(app.selected_index(), Some(0));
+    }
+
+    #[test]
+    fn n_with_no_needs_you_session_does_nothing() {
+        let mut app = three_rows();
+        assert_eq!(app.handle_key(press(KeyCode::Char('n'))), Action::Nothing);
+        assert_eq!(app.status(), Some("No session needs you"));
+        assert_eq!(app.selected_index(), Some(0));
+    }
 }
