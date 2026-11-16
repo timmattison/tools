@@ -11,8 +11,11 @@ use proctree::Pid;
 /// object, or when its `name` is not a string with text in it.
 #[must_use]
 pub fn session_name(sessions_dir: &Path, pid: Pid) -> Option<String> {
-    let _ = (sessions_dir, pid);
-    None
+    let path = sessions_dir.join(format!("{}.json", pid.as_u32()));
+    let text = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let name = value.get("name")?.as_str()?.trim();
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 #[cfg(test)]
