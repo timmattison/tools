@@ -348,6 +348,12 @@ impl Pixmap {
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
+
+    /// The bytes of the image with each color channel multiplied by its alpha.
+    #[must_use]
+    pub fn premultiplied_bytes(&self) -> Vec<u8> {
+        self.bytes.clone()
+    }
 }
 
 /// The color of the memory column at a pressure level.
@@ -473,6 +479,26 @@ mod tests {
     const LEVEL_CRITICAL: i32 = 4;
     /// A free percentage of 0 means that all of the memory is in use.
     const ALL_IN_USE: i32 = 0;
+
+    #[test]
+    fn the_premultiplied_bytes_scale_each_channel_by_its_alpha() {
+        let colors: [(Rgba, Rgba); 5] = [
+            (TRANSPARENT, TRANSPARENT),
+            (USER, USER),
+            (Appearance::Light.frame(), [0, 0, 0, 217]),
+            (Appearance::Dark.frame(), [217, 217, 217, 217]),
+            // 1 * 128 / 255 is 0.502, which rounds to 1 and truncates to 0.
+            ([255, 1, 128, 128], [128, 1, 64, 128]),
+        ];
+        let width = u32::try_from(colors.len()).unwrap();
+        let mut pixmap = Pixmap::empty(width, 1, 1);
+        for (x, (color, _)) in (0..width).zip(colors) {
+            pixmap.fill(x, 0, 1, 1, color);
+        }
+        let expected: Vec<u8> = colors.iter().flat_map(|(_, product)| *product).collect();
+        assert_eq!(pixmap.premultiplied_bytes(), expected);
+        assert_eq!(pixmap.bytes().len(), expected.len());
+    }
 
     fn capacity(columns: usize) -> NonZeroUsize {
         NonZeroUsize::new(columns).unwrap()
