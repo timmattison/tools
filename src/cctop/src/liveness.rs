@@ -26,6 +26,27 @@ pub trait ProcessClock {
     fn start_times(&mut self, pids: &[Pid]) -> HashMap<Pid, u64>;
 }
 
+/// The process table of the system, read with `sysinfo`.
+#[derive(Debug, Default)]
+pub struct SystemClock {
+    system: sysinfo::System,
+}
+
+impl SystemClock {
+    /// A clock that has read no process yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl ProcessClock for SystemClock {
+    fn start_times(&mut self, pids: &[Pid]) -> HashMap<Pid, u64> {
+        let _ = (&mut self.system, pids);
+        HashMap::new()
+    }
+}
+
 /// The pids of the stale sessions, sorted. The function asks `clock` once for
 /// all pids.
 #[must_use]
@@ -83,6 +104,18 @@ mod tests {
             self.calls.push(pids.to_vec());
             self.times.clone()
         }
+    }
+
+    #[test]
+    fn the_system_clock_knows_this_process_and_not_an_absent_one() {
+        let own = Pid::current();
+        let absent = Pid::new(99_999_999);
+        let mut clock = SystemClock::new();
+        let times = clock.start_times(&[own, absent]);
+        let now_secs = EpochMillis::now().as_u64() / 1000;
+        let start = times.get(&own).copied().expect("this process is live");
+        assert!(start <= now_secs);
+        assert!(!times.contains_key(&absent));
     }
 
     #[test]
