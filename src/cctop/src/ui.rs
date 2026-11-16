@@ -140,13 +140,15 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App, now: EpochMillis) {
             ])
         })
         .collect();
+    // The name column takes the spare width, so the solver does not cut the
+    // state column when the terminal is narrow.
     let widths = [
         Constraint::Length(2),
         Constraint::Length(state_width),
         Constraint::Length(8),
         Constraint::Length(14),
         Constraint::Length(24),
-        Constraint::Min(8),
+        Constraint::Fill(1),
     ];
     let header = Row::new(["", "STATE", "TIME", "ZELLIJ", "DIRECTORY", "NAME"])
         .style(Style::new().add_modifier(Modifier::BOLD));
@@ -408,8 +410,11 @@ mod tests {
         let app = board_with_a_handled_needs_you_row();
         let buffer = render(&app, 10_000);
         let header = row_text(&buffer, 1);
-        let time_byte = header.find("TIME").expect("the header names TIME");
-        let time_x = header[..time_byte].chars().count();
+        let symbols: Vec<char> = header.chars().collect();
+        let time_x = symbols
+            .windows(4)
+            .position(|window| window.iter().collect::<String>() == "TIME")
+            .expect("the header names TIME");
         // 1 border, 2 for the block, 1 gap, 19 for the label, 1 gap.
         assert_eq!(time_x, 5 + 19, "{header}");
         let (_, line) = line_with(&buffer, "dir-with-a-long");
