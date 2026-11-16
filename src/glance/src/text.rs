@@ -513,6 +513,127 @@ mod tests {
         );
     }
 
+    /// The printed sample line with the value of `key` replaced.
+    fn line_with(key: &str, replacement: Value) -> String {
+        let mut value = value_of(&sample_json(&host(), &warn_sample()));
+        value[key] = replacement;
+        value.to_string()
+    }
+
+    #[test]
+    fn the_parse_refuses_text_that_is_not_json() {
+        assert!(matches!(
+            parse_line("not json"),
+            Err(LineError::NotJson { .. })
+        ));
+        assert!(matches!(parse_line(""), Err(LineError::NotJson { .. })));
+    }
+
+    #[test]
+    fn the_parse_refuses_json_that_is_not_an_object() {
+        assert_eq!(parse_line("[1,2]"), Err(LineError::NotAnObject));
+        assert_eq!(parse_line("\"text\""), Err(LineError::NotAnObject));
+    }
+
+    #[test]
+    fn the_parse_refuses_a_line_with_an_absent_key() {
+        let printed = value_of(&sample_json(&host(), &warn_sample()));
+        let keys: Vec<String> = printed.as_object().unwrap().keys().cloned().collect();
+        assert_eq!(keys.len(), KEY_ORDER.len());
+        for key in keys {
+            let mut cut = printed.clone();
+            cut.as_object_mut().unwrap().remove(&key);
+            let error = parse_line(&cut.to_string()).unwrap_err();
+            assert!(
+                matches!(&error, LineError::MissingKey { key: absent } if *absent == key),
+                "{key}: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_parse_refuses_a_share_outside_0_to_1() {
+        for (key, bad) in [("user", 1.5), ("system", -0.5), ("idle", 2.0)] {
+            let error = parse_line(&line_with(key, json!(bad))).unwrap_err();
+            assert!(
+                matches!(&error, LineError::ShareOutOfRange { key: named, value }
+                    if *named == key && (*value - bad).abs() < TOLERANCE),
+                "{key}: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_parse_refuses_a_percentage_above_100() {
+        assert_eq!(
+            parse_line(&line_with("pressure_percent", json!(101))),
+            Err(LineError::PercentAboveMaximum { value: 101 })
+        );
+    }
+
+    #[test]
+    fn the_parse_refuses_a_raw_level_that_does_not_fit_its_name() {
+        assert_eq!(
+            parse_line(&line_with("pressure_level_raw", json!(4))),
+            Err(LineError::LevelMismatch {
+                name: "warn".to_owned(),
+                raw: 4
+            })
+        );
+    }
+
+    #[test]
+    fn the_parse_refuses_a_value_of_the_wrong_type() {
+        assert_eq!(
+            parse_line(&line_with("host", json!(7))),
+            Err(LineError::WrongType { key: "host" })
+        );
+        assert_eq!(
+            parse_line(&line_with("user", json!("half"))),
+            Err(LineError::WrongType { key: "user" })
+        );
+        assert_eq!(
+            parse_line(&line_with("pressure_level_raw", json!(2_i64.pow(40)))),
+            Err(LineError::WrongType {
+                key: "pressure_level_raw"
+            })
+        );
+        assert_eq!(
+            parse_line(&line_with("pressure_percent", json!(-1))),
+            Err(LineError::WrongType {
+                key: "pressure_percent"
+            })
+        );
+    }
+
+    #[test]
+    fn an_error_line_needs_a_host_and_a_text_reason() {
+        assert_eq!(
+            parse_line(r#"{"error":"x"}"#),
+            Err(LineError::MissingKey { key: "host" })
+        );
+        assert_eq!(
+            parse_line(r#"{"host":"a","error":3}"#),
+            Err(LineError::WrongType { key: "error" })
+        );
+    }
+
+    #[test]
+    fn the_messages_of_the_refusals_are_short_words() {
+        assert_eq!(
+            LineError::MissingKey { key: "user" }.to_string(),
+            "the line has no key \"user\""
+        );
+        assert_eq!(
+            LineError::ShareOutOfRange {
+                key: "user",
+                value: 1.5
+            }
+            .to_string(),
+            "the key \"user\" holds 1.5, outside 0 to 1"
+        );
+    }
+
     #[test]
     fn a_failed_read_names_the_reason() {
         assert_eq!(
