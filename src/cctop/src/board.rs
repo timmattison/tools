@@ -400,4 +400,37 @@ mod tests {
         assert_eq!(board.len(), 2);
         assert_eq!(board.pids(), vec![Pid::new(3), Pid::new(9)]);
     }
+
+    #[test]
+    fn changes_give_the_newest_first() {
+        let mut board = Board::new();
+        board.apply(file(1, PaneState::Working, 1, 10), None);
+        board.apply(file(1, PaneState::Idle, 1, 20), None);
+        board.remove(Pid::new(1), EpochMillis::new(30));
+        let times: Vec<u64> = board.changes().map(|change| change.at.as_u64()).collect();
+        assert_eq!(times, vec![30, 20, 10]);
+    }
+
+    #[test]
+    fn the_log_keeps_at_most_log_capacity_changes_and_drops_the_oldest() {
+        let mut board = Board::new();
+        for index in 0..=LOG_CAPACITY {
+            let stamp = 10 + index as u64;
+            let state = if index % 2 == 0 {
+                PaneState::Working
+            } else {
+                PaneState::Idle
+            };
+            board.apply(file(1, state, 1, stamp), None);
+        }
+        assert_eq!(board.changes().count(), LOG_CAPACITY);
+        assert_eq!(
+            board.changes().next().map(|change| change.at.as_u64()),
+            Some(10 + LOG_CAPACITY as u64)
+        );
+        assert_eq!(
+            board.changes().last().map(|change| change.at.as_u64()),
+            Some(11)
+        );
+    }
 }
