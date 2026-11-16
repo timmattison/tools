@@ -365,6 +365,30 @@ mod tests {
     }
 
     #[test]
+    fn a_move_key_clears_the_status() {
+        for code in [
+            KeyCode::Char('j'),
+            KeyCode::Char('k'),
+            KeyCode::Down,
+            KeyCode::Up,
+        ] {
+            let mut app = three_rows();
+            app.handle_key(press(KeyCode::Enter));
+            assert_eq!(app.status(), Some("Focusing dir10"));
+            app.handle_key(press(code));
+            assert_eq!(app.status(), None, "key {code:?} must clear the status");
+        }
+    }
+
+    #[test]
+    fn a_move_key_on_an_empty_board_clears_the_status() {
+        let mut app = App::new();
+        app.set_status("No session needs you");
+        app.handle_key(press(KeyCode::Char('j')));
+        assert_eq!(app.status(), None);
+    }
+
+    #[test]
     fn enter_on_an_empty_board_has_nothing_to_focus() {
         let mut app = App::new();
         assert_eq!(app.handle_key(press(KeyCode::Enter)), Action::Nothing);
