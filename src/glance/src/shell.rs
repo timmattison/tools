@@ -593,8 +593,7 @@ pub fn run(interval: Interval, remote: Option<Remote>, on_ready: impl FnOnce()) 
             feed: Feed::new(SSH_PROGRAM, remote, interval),
         },
     };
-    // The history holds one sample for each column of a chart on the status
-    // bar. The thickness of the status bar does not change while glance runs.
+    // The history holds one sample for each column of a chart.
     let capacity =
         Geometry::from_status_bar(NSStatusBar::systemStatusBar().thickness(), 1.0, None).columns();
     let state = State::new(source, capacity);

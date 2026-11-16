@@ -1,15 +1,14 @@
 //! The two charts of the status item, drawn into a pixel buffer.
 //!
-//! Each chart is a square with a frame. Its side is the height of the status
-//! bar in whole points, and the two squares sit side by side with a gap
-//! between them. The left chart shows the CPU share. The right chart shows the
-//! memory in use, in the color of the pressure level.
+//! Each chart has a frame and is as high as the status bar, in whole points.
+//! The two charts sit side by side and share one border, with no gap. The left
+//! chart shows the CPU share. The right chart shows the memory in use, in the
+//! color of the pressure level.
 //!
-//! Each sample is one point wide. Each chart has as many columns inside its
-//! frame as the geometry gives, and it shows that number of the newest samples,
-//! with the newest at the right edge. The label rows lie at the top of the
-//! interior. The shell draws the name of the host there, so this module only
-//! reports the rows.
+//! Each sample is one point wide. Each chart has 32 columns inside its frame,
+//! and it shows that number of the newest samples, with the newest at the right
+//! edge. The label rows lie at the top of the interior. The shell draws the
+//! name of the host there, so this module only reports the rows.
 //!
 //! The drawing is pure arithmetic on a plain buffer, so a test reads each
 //! pixel and AppKit only has to show the bytes.
@@ -48,8 +47,12 @@ const LABEL_DARK: Rgba = [255, 255, 255, 217];
 
 /// The width of the frame of each chart, in points.
 pub const FRAME_POINTS: u32 = 1;
-/// The width of the gap between the two charts, in points.
-pub const GAP_POINTS: u32 = 4;
+/// The number of columns inside the frame of each chart, thus the number of
+/// samples that each chart shows. With one shared border, the image is
+/// 67 points wide, and the label gets 65 points between the two outer frames.
+/// That holds a host name such as `M4-Pro-Mac-Mini` (62.7 points in the label
+/// font) with no ellipsis.
+const CHART_COLUMNS: u32 = 32;
 
 /// The number of bytes of one pixel.
 const BYTES_PER_PIXEL: usize = 4;
@@ -114,9 +117,10 @@ impl fmt::Display for GeometryError {
 
 impl std::error::Error for GeometryError {}
 
-/// The side of each square chart in points, and the pixels per point.
+/// The height of the charts in points, the pixels per point, and the label.
 ///
-/// The height of the image is the side of each square.
+/// The height of the image is the height of each chart. The width of the image
+/// does not depend on the height.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Geometry {
     height_points: u32,
@@ -130,7 +134,7 @@ impl Geometry {
 
     /// Makes a geometry without a label.
     ///
-    /// The height is the height of the image and the side of each square chart.
+    /// The height is the height of the image and of each chart.
     ///
     /// # Errors
     ///
@@ -155,9 +159,9 @@ impl Geometry {
     /// and the line height of the label text. The line height is `None` when
     /// there is no label. The scale is the backing scale rounded, and at least 1.
     ///
-    /// The side of each square chart is the whole points of the thickness, and
-    /// at least `MIN_HEIGHT_POINTS`. An input that is not finite gives the
-    /// minimum. The label does not change the side.
+    /// The height of the charts is the whole points of the thickness, and at
+    /// least `MIN_HEIGHT_POINTS`. An input that is not finite gives the
+    /// minimum. The label does not change the height.
     ///
     /// The label height is the line height rounded up to whole points. A line
     /// height that is not finite or not above 0 gives no label. If the interior
@@ -182,23 +186,24 @@ impl Geometry {
         }
     }
 
-    /// The width of the whole image in points. It holds two squares and the gap.
+    /// The width of the whole image in points. It holds the two charts, which
+    /// share the border between them.
     #[must_use]
     pub fn image_width_points(self) -> u32 {
-        CHART_COUNT * self.height_points + GAP_POINTS
+        CHART_COUNT * chart_width_points() - FRAME_POINTS
     }
 
-    /// The height of the whole image in points. It is the side of each square.
+    /// The height of the whole image in points. It is the height of each chart.
     #[must_use]
     pub fn image_height_points(self) -> u32 {
         self.height_points
     }
 
     /// The number of columns inside each frame, thus the number of samples
-    /// that each chart shows.
+    /// that each chart shows. It does not depend on the height.
     #[must_use]
     pub fn columns(self) -> std::num::NonZeroUsize {
-        let columns = usize::try_from(self.height_points - 2 * FRAME_POINTS).unwrap_or(usize::MAX);
+        let columns = usize::try_from(CHART_COLUMNS).unwrap_or(usize::MAX);
         std::num::NonZeroUsize::new(columns).unwrap_or(std::num::NonZeroUsize::MIN)
     }
 
@@ -210,7 +215,7 @@ impl Geometry {
             .map(|label| FRAME_POINTS..FRAME_POINTS + label)
     }
 
-    /// The side of each square chart in points. It is also the height of the image.
+    /// The height of each chart in points. It is also the height of the image.
     #[must_use]
     pub fn height_points(self) -> u32 {
         self.height_points
@@ -221,6 +226,11 @@ impl Geometry {
     pub fn scale(self) -> u32 {
         self.scale
     }
+}
+
+/// The width of one chart in points: its columns and the frame on each side.
+fn chart_width_points() -> u32 {
+    CHART_COLUMNS + 2 * FRAME_POINTS
 }
 
 /// Converts a number that is already whole into a `u32`.
@@ -392,9 +402,9 @@ fn memory_rows(percent_in_use: u8, rows: u32) -> u32 {
 /// Draws the two charts of the history.
 ///
 /// The image is `Geometry::image_width_points` wide and
-/// `Geometry::image_height_points` high. The CPU chart is the square on the
-/// left, then comes a transparent gap, then the memory chart. Each square has a
-/// frame on its outer rows and columns.
+/// `Geometry::image_height_points` high. The CPU chart is on the left, and the
+/// memory chart is on the right. Each chart has a frame on its outer rows and
+/// columns, and the two charts share the border between them.
 ///
 /// Each chart has `Geometry::columns` columns inside of its frame, and it shows
 /// that number of the newest samples. The newest sample sits in the rightmost
@@ -405,25 +415,27 @@ fn memory_rows(percent_in_use: u8, rows: u32) -> u32 {
 #[must_use]
 pub fn render(history: &History<Sample>, geometry: Geometry, appearance: Appearance) -> Pixmap {
     let scale = geometry.scale;
-    let side = geometry.height_points;
-    let columns = u32::try_from(geometry.columns().get()).unwrap_or(side);
+    let height = geometry.height_points;
+    let width = chart_width_points();
+    let columns = CHART_COLUMNS;
     let mut pixmap = Pixmap::empty(
         geometry.image_width_points(),
         geometry.image_height_points(),
         scale,
     );
 
-    let rows = columns * scale;
+    let rows = (height - 2 * FRAME_POINTS) * scale;
     let interior_top = FRAME_POINTS * scale;
     let interior_bottom = interior_top + rows;
-    let chart_origins = [0, side + GAP_POINTS];
+    // The memory chart starts on the right border of the CPU chart.
+    let chart_origins = [0, width - FRAME_POINTS];
 
     for origin in chart_origins {
         pixmap.fill(
             origin * scale,
             0,
-            side * scale,
-            side * scale,
+            width * scale,
+            height * scale,
             appearance.frame(),
         );
         pixmap.fill(
@@ -935,7 +947,11 @@ mod tests {
         for height in [3, 22, 24, 37] {
             let geometry = Geometry::new(height, 1).unwrap();
             assert_eq!(geometry.columns().get(), COLUMNS, "height {height}");
-            assert_eq!(geometry.image_width_points(), IMAGE_WIDTH, "height {height}");
+            assert_eq!(
+                geometry.image_width_points(),
+                IMAGE_WIDTH,
+                "height {height}"
+            );
         }
         let tall = Geometry::from_status_bar(37.0, 2.0, Some(LINE_HEIGHT));
         assert_eq!(tall.columns().get(), COLUMNS);
