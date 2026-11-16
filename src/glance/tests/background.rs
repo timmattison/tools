@@ -86,6 +86,11 @@ const FOREGROUND_SHORT: &str = "-f";
 /// The flags that asked for a background start before it was the default.
 const REMOVED_BACKGROUND_FLAGS: [&str; 2] = ["-b", "--background"];
 
+/// Near misses of [`REMOVED_BACKGROUND_FLAGS`]. Clap suggests a flag for a
+/// typo that is close to it, so a refusal of such a typo must not name the
+/// hidden flag of the copy either.
+const NEAR_MISSES_OF_BACKGROUND: [&str; 1] = ["--backgroun"];
+
 /// The variable that makes clap paint its usage errors.
 const FORCE_PAINT_VARIABLE: &str = "CLICOLOR_FORCE";
 
@@ -406,14 +411,24 @@ fn foreground_with_sample_or_stream_is_a_usage_error() {
 
 /// `-b` and `--background` asked for what is now the default. They are gone,
 /// so a script that still gives one of them learns of the change at once.
+/// The refusal of each of them, and of a near miss, names no hidden flag, so
+/// a person does not follow a tip to the flag of the internal copy.
 #[test]
 fn the_removed_background_flags_are_usage_errors() {
     let home = Home::new();
-    for flag in REMOVED_BACKGROUND_FLAGS {
+    let hidden = glance::flags::flag(glance::flags::BACKGROUND_CHILD);
+    for flag in REMOVED_BACKGROUND_FLAGS
+        .into_iter()
+        .chain(NEAR_MISSES_OF_BACKGROUND)
+    {
         let stderr = home.usage_error(&[flag]);
         assert!(
             stderr.contains(&format!("unexpected argument '{flag}'")),
             "{flag}: {stderr}"
+        );
+        assert!(
+            !stderr.contains(&hidden),
+            "the refusal of {flag} names the hidden flag: {stderr}"
         );
     }
 }
