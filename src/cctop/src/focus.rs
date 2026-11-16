@@ -432,4 +432,32 @@ mod tests {
             )]
         );
     }
+
+    #[test]
+    fn a_failed_step_1_does_not_stop_step_2() {
+        let runner = Arc::new(
+            FakeRunner::new()
+                .answer(
+                    &words(&list_sessions_argv()),
+                    ok("other [Created 1h ago]\n"),
+                )
+                .answer(&words(&ps_argv()), ok(PS))
+                .answer(&words(&unix_sockets_argv()), ok(SOCKETS))
+                .answer(&words(&tty_argv(Pid::new(19800))), ok(TTY))
+                .answer(&words(&list_argv()), ok(PANES)),
+        );
+        let writer = Arc::new(RecordingWriter::default());
+        let report = focus(&zellij_target(), &tools(&runner, &writer));
+        assert_eq!(
+            report.zellij,
+            Some(Err("the Zellij session tools is gone".to_string()))
+        );
+        assert_eq!(report.wezterm, Ok(239));
+        assert_eq!(writer.writes().len(), 1);
+        assert!(!report.succeeded());
+        assert_eq!(
+            report.status_line(),
+            "docs: Zellij failed: the Zellij session tools is gone · WezTerm focused pane 239"
+        );
+    }
 }
