@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use proctree::Pid;
 
-use crate::liveness::ProcessClock;
+use crate::liveness::{ProcessClock, is_stale};
 use crate::state::{StateFile, parse_state_file, pid_of_file_name};
 
 /// The result of the read of one state file.
@@ -82,8 +82,13 @@ pub fn read_dir(dir: &Path) -> std::io::Result<Vec<(Pid, ReadOutcome)>> {
 /// removal. The function keeps such a file. It also keeps a file that is
 /// missing or unreadable. The result is `true` only when it removed the file.
 #[must_use]
-pub fn remove_if_stale(_dir: &Path, _pid: Pid, _clock: &mut dyn ProcessClock) -> bool {
-    false
+pub fn remove_if_stale(dir: &Path, pid: Pid, clock: &mut dyn ProcessClock) -> bool {
+    let path = state_file_path(dir, pid);
+    let ReadOutcome::Present(file) = read_state_file(&path) else {
+        return false;
+    };
+    let start_secs = clock.start_times(&[pid]).get(&pid).copied();
+    is_stale(file.started_at, start_secs) && std::fs::remove_file(&path).is_ok()
 }
 
 #[cfg(test)]
