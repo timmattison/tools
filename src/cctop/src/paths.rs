@@ -28,8 +28,12 @@ impl ClaudeDirs {
         claude_config_dir: Option<&OsStr>,
         home: Option<&OsStr>,
     ) -> Result<Self, PathsError> {
-        let _ = (claude_config_dir, home);
-        Err(PathsError::NoConfigDir)
+        let config = match (claude_config_dir, home) {
+            (Some(dir), _) if !dir.is_empty() => PathBuf::from(dir),
+            (_, Some(home)) if !home.is_empty() => Path::new(home).join(".claude"),
+            _ => return Err(PathsError::NoConfigDir),
+        };
+        Ok(Self { config })
     }
 
     /// Find the config directory from the environment of this process.
@@ -53,13 +57,13 @@ impl ClaudeDirs {
     /// The directory of the state files.
     #[must_use]
     pub fn state_dir(&self) -> PathBuf {
-        PathBuf::new()
+        self.config.join("state").join("pane-state")
     }
 
     /// The directory of the session registry of Claude Code.
     #[must_use]
     pub fn sessions_dir(&self) -> PathBuf {
-        PathBuf::new()
+        self.config.join("sessions")
     }
 }
 
