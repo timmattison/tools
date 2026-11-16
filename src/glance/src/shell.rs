@@ -538,7 +538,8 @@ fn unit_channel(value: u8) -> f64 {
 /// of the image. It is `None` when the geometry has no label.
 ///
 /// The rectangle spans the image between the two outer frames, so the text
-/// centers across the whole image and never paints over a frame.
+/// centers across the whole image and never paints over an outer frame. A
+/// centered name crosses the shared border between the two charts.
 fn label_rect(geometry: Geometry) -> Option<NSRect> {
     let rows = geometry.label_rows_points()?;
     Some(NSRect::new(
