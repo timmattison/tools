@@ -103,6 +103,20 @@ impl Sync {
         }
     }
 
+    /// Remove each stale session from the board and from the directory.
+    ///
+    /// A process that ends can leave its file behind. This check finds such
+    /// sessions. It returns the changes, one for each removed session. A live
+    /// session stays.
+    pub fn on_tick(
+        &self,
+        _board: &mut Board,
+        _clock: &mut dyn ProcessClock,
+        _now: EpochMillis,
+    ) -> Vec<Change> {
+        Vec::new()
+    }
+
     /// Read each file in the state directory, and drop each session whose file
     /// is gone. When the directory cannot be read, nothing changes.
     fn rescan(
@@ -387,6 +401,34 @@ mod tests {
             .sync
             .on_dir_event(&mut board, DirEvent::Rescan, &mut live(&[10]), NOW);
         assert!(changes.is_empty());
+        assert_eq!(board.pids(), vec![Pid::new(10)]);
+    }
+
+    #[test]
+    fn a_tick_removes_the_stale_sessions_and_keeps_the_live_ones() {
+        let env = Env::new();
+        env.write(10, "idle", 2_000_000);
+        env.write(20, "working", 2_000_000);
+        let mut board = Board::new();
+        env.sync.initial(&mut board, &mut live(&[10, 20])).unwrap();
+        let changes = env.sync.on_tick(&mut board, &mut live(&[10]), NOW);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].pid, Pid::new(20));
+        assert_eq!(changes[0].old, Some(PaneState::Working));
+        assert_eq!(changes[0].new, None);
+        assert_eq!(changes[0].at, NOW);
+        assert_eq!(board.pids(), vec![Pid::new(10)]);
+        assert!(env.exists(10));
+        assert!(!env.exists(20));
+    }
+
+    #[test]
+    fn a_tick_with_only_live_sessions_changes_nothing() {
+        let env = Env::new();
+        env.write(10, "idle", 2_000_000);
+        let mut board = Board::new();
+        env.sync.initial(&mut board, &mut live(&[10])).unwrap();
+        assert!(env.sync.on_tick(&mut board, &mut live(&[10]), NOW).is_empty());
         assert_eq!(board.pids(), vec![Pid::new(10)]);
     }
 }
