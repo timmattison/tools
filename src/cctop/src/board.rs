@@ -154,26 +154,36 @@ impl Board {
     /// The pids of all sessions, sorted.
     #[must_use]
     pub fn pids(&self) -> Vec<Pid> {
-        Vec::new()
+        let mut pids: Vec<Pid> = self.sessions.keys().copied().collect();
+        pids.sort_by_key(|pid| pid.as_u32());
+        pids
     }
 
     /// The number of sessions on the board.
     #[must_use]
     pub fn len(&self) -> usize {
-        0
+        self.sessions.len()
     }
 
     /// Tell if the board holds no session.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        true
+        self.sessions.is_empty()
     }
 
     /// The sessions in the order of the screen: by the rank of the state, then
     /// the oldest `since` first, then the pid.
     #[must_use]
     pub fn rows(&self) -> Vec<&Session> {
-        Vec::new()
+        let mut rows: Vec<&Session> = self.sessions.values().collect();
+        rows.sort_by_key(|session| {
+            (
+                session.file.state.rank(),
+                session.since,
+                session.file.pid.as_u32(),
+            )
+        });
+        rows
     }
 
     /// The changes in the log, newest first.
