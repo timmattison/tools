@@ -94,6 +94,15 @@ impl Pressure {
         }
     }
 
+    /// Builds the pressure from a raw level and a percentage in use.
+    ///
+    /// The result is `None` if the percentage is above 100.
+    #[must_use]
+    pub fn from_level_and_percent(level_raw: i32, percent_in_use: u8) -> Option<Pressure> {
+        let _ = (level_raw, percent_in_use);
+        None
+    }
+
     /// The pressure level.
     #[must_use]
     pub fn level(self) -> Level {
@@ -160,6 +169,31 @@ mod tests {
     fn a_free_percentage_below_0_gives_100_in_use() {
         assert_eq!(Pressure::from_raw(1, -1).percent_in_use(), 100);
         assert_eq!(Pressure::from_raw(1, i32::MIN).percent_in_use(), 100);
+    }
+
+    #[test]
+    fn a_level_and_a_percentage_in_use_give_the_pressure() {
+        let pressure = Pressure::from_level_and_percent(2, 53).unwrap();
+        assert_eq!(pressure.level(), Level::Warn);
+        assert_eq!(pressure.percent_in_use(), 53);
+    }
+
+    #[test]
+    fn a_percentage_in_use_from_0_to_100_is_accepted() {
+        assert_eq!(
+            Pressure::from_level_and_percent(1, 0).map(Pressure::percent_in_use),
+            Some(0)
+        );
+        assert_eq!(
+            Pressure::from_level_and_percent(1, 100).map(Pressure::percent_in_use),
+            Some(100)
+        );
+    }
+
+    #[test]
+    fn a_percentage_in_use_above_100_is_refused() {
+        assert_eq!(Pressure::from_level_and_percent(1, 101), None);
+        assert_eq!(Pressure::from_level_and_percent(1, u8::MAX), None);
     }
 
     #[test]
