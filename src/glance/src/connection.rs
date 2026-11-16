@@ -2,17 +2,55 @@
 //!
 //! The local `glance` opens one `ssh` connection. The remote Mac runs
 //! `glance --stream`, and this module reads one JSON line for each sample.
+//!
+//! # The two threads
+//!
+//! A connection starts two threads, and neither one blocks the caller.
+//!
+//! - The standard error thread reads the standard error of the child to its
+//!   end and keeps the last line that is not blank. A pipe that nobody reads
+//!   fills up, and then `ssh` stops, so this thread always reads.
+//! - The standard output thread reads one line at a time and sends one
+//!   [`Event`] for each line. At the end of the output, it waits for the child
+//!   to exit and then sends [`Event::Ended`].
+//!
+//! # The grace bounds
+//!
+//! The end of the output does not always mean that the child exits. So the
+//! output thread waits at most [`EXIT_GRACE`] for the exit, and then it kills
+//! the child. After that it waits at most [`STDERR_GRACE`] for the last line of
+//! the standard error. A grandchild can keep a pipe open, and these bounds make
+//! sure that [`Event::Ended`] always arrives.
+//!
+//! # Why the program is a parameter
+//!
+//! Production gives `ssh`. A test gives a fake script. So no test changes
+//! `PATH`, which is global to the process.
 
 use crate::host::HostName;
 use crate::interval::Interval;
 use crate::sample::Sample;
+use crate::text::{parse_line, StreamLine};
 use std::fmt;
-use std::io;
+use std::io::{self, BufRead, BufReader, Read};
 use std::path::Path;
-use std::process::{Child, Stdio};
+use std::process::{Child, ExitStatus, Stdio};
 use std::str::FromStr;
 use std::sync::{mpsc, Arc, Mutex, PoisonError};
+use std::thread;
 use std::time::Duration;
+
+/// The time between two checks for the exit of the child.
+const EXIT_POLL: Duration = Duration::from_millis(20);
+
+/// The longest wait for the exit of the child after the end of its output.
+pub const EXIT_GRACE: Duration = Duration::from_secs(2);
+
+/// The longest wait for the last line of the standard error after the exit.
+pub const STDERR_GRACE: Duration = Duration::from_secs(1);
+
+/// The start of the reason when the standard error was empty.
+const ENDED_PREFIX: &str = "the connection ended with";
 
 /// The first delay before a new connection attempt.
 pub const FIRST_RETRY_DELAY: Duration = Duration::from_secs(5);
@@ -258,6 +296,102 @@ pub enum Event {
     },
 }
 
+/// The last line of `pipe` that is not blank, with no trailing white space.
+///
+/// Reads to the end of the pipe, so a full pipe never blocks the child.
+fn last_line_of<R: Read>(pipe: R) -> Option<String> {
+    let mut last = None;
+    let mut reader = BufReader::new(pipe);
+    let mut buffer = Vec::new();
+    loop {
+        buffer.clear();
+        match reader.read_until(b'\n', &mut buffer) {
+            Ok(0) | Err(_) => return last,
+            Ok(_) => {
+                let line = String::from_utf8_lossy(&buffer);
+                let trimmed = line.trim_end();
+                if !trimmed.is_empty() {
+                    last = Some(trimmed.to_owned());
+                }
+            }
+        }
+    }
+}
+
+/// Sends one event for each line of `pipe` that is not blank.
+///
+/// A byte that is not UTF-8 makes a line that does not parse. It does not stop
+/// the loop. A read error ends the loop like the end of the file. A closed
+/// receiver ends it too.
+fn send_lines<R: Read>(pipe: R, sender: &mpsc::Sender<Event>) {
+    let mut reader = BufReader::new(pipe);
+    let mut buffer = Vec::new();
+    loop {
+        buffer.clear();
+        match reader.read_until(b'\n', &mut buffer) {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {}
+        }
+        let line = String::from_utf8_lossy(&buffer);
+        if line.trim().is_empty() {
+            continue;
+        }
+        if sender.send(event_of(&line)).is_err() {
+            return;
+        }
+    }
+}
+
+/// The event that one line of the stream gives.
+fn event_of(line: &str) -> Event {
+    match parse_line(line) {
+        Ok(StreamLine::Sample { host, sample }) => Event::Sample { host, sample },
+        Ok(StreamLine::Error { host, reason }) => Event::ReadError {
+            host: Some(host),
+            reason,
+        },
+        Err(error) => Event::ReadError {
+            host: None,
+            reason: error.to_string(),
+        },
+    }
+}
+
+/// Waits for the exit of the child, and kills it after [`EXIT_GRACE`].
+///
+/// Gives the exit status, or the error of the wait.
+fn wait_for_exit(child: &Mutex<Child>) -> io::Result<ExitStatus> {
+    let mut waited = Duration::ZERO;
+    while waited < EXIT_GRACE {
+        let status = child
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .try_wait()?;
+        if let Some(status) = status {
+            return Ok(status);
+        }
+        thread::sleep(EXIT_POLL);
+        waited += EXIT_POLL;
+    }
+    let mut child = child.lock().unwrap_or_else(PoisonError::into_inner);
+    let _ = child.kill();
+    child.wait()
+}
+
+/// The reason that the child stopped.
+///
+/// This is the last line of its standard error. When there is none, it is the
+/// exit status, or the error of the wait.
+fn ending_reason(child: &Mutex<Child>, last_line: &mpsc::Receiver<Option<String>>) -> String {
+    let status = wait_for_exit(child);
+    let line = last_line.recv_timeout(STDERR_GRACE).ok().flatten();
+    match (line, status) {
+        (Some(line), _) => line,
+        (None, Ok(status)) => format!("{ENDED_PREFIX} {status}"),
+        (None, Err(error)) => error.to_string(),
+    }
+}
+
 /// One running `ssh` child and the events that it sends.
 #[derive(Debug)]
 pub struct Connection {
@@ -279,20 +413,30 @@ impl Connection {
         interval: Interval,
         remote_binary: &RemoteBinary,
     ) -> io::Result<Connection> {
-        let child = childenv::command(program)
+        let mut child = childenv::command(program)
             .args(ssh_arguments(destination, interval, remote_binary))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let child = Arc::new(Mutex::new(child));
         let (sender, events) = mpsc::channel();
-        let _ = sender.send(Event::Ended {
-            reason: String::new(),
+        let (last_line_sender, last_line) = mpsc::channel();
+        thread::spawn(move || {
+            let last = stderr.and_then(last_line_of);
+            let _ = last_line_sender.send(last);
         });
-        Ok(Connection {
-            child: Arc::new(Mutex::new(child)),
-            events,
-        })
+        let watched = Arc::clone(&child);
+        thread::spawn(move || {
+            if let Some(pipe) = stdout {
+                send_lines(pipe, &sender);
+            }
+            let reason = ending_reason(&watched, &last_line);
+            let _ = sender.send(Event::Ended { reason });
+        });
+        Ok(Connection { child, events })
     }
 
     /// The events of the connection.
