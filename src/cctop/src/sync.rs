@@ -3,9 +3,14 @@
 
 use std::path::{Path, PathBuf};
 
+use proctree::Pid;
+
 use crate::board::Board;
-use crate::liveness::ProcessClock;
+use crate::liveness::{ProcessClock, stale_pids};
 use crate::paths::ClaudeDirs;
+use crate::registry;
+use crate::state::{EpochMillis, StateFile};
+use crate::store::{self, ReadOutcome};
 
 /// The reader that keeps a board in step with the state directory.
 #[derive(Debug, Clone)]
@@ -47,9 +52,29 @@ impl Sync {
     /// Returns the error of the read of the state directory.
     pub fn initial(
         &self,
-        _board: &mut Board,
-        _clock: &mut dyn ProcessClock,
+        board: &mut Board,
+        clock: &mut dyn ProcessClock,
     ) -> std::io::Result<()> {
+        let files: Vec<StateFile> = store::read_dir(&self.state_dir)?
+            .into_iter()
+            .filter_map(|(_, outcome)| match outcome {
+                ReadOutcome::Present(file) => Some(file),
+                ReadOutcome::Gone | ReadOutcome::Unreadable(_) => None,
+            })
+            .collect();
+        let sessions: Vec<(Pid, EpochMillis)> =
+            files.iter().map(|file| (file.pid, file.started_at)).collect();
+        let stale = stale_pids(&sessions, clock);
+        for file in files {
+            if stale.contains(&file.pid) {
+                // A new process can have reused the pid since the first read. Its
+                // file stays, and its own write event loads it.
+                let _removed = store::remove_if_stale(&self.state_dir, file.pid, clock);
+                continue;
+            }
+            let name = registry::session_name(&self.sessions_dir, file.pid);
+            board.load(file, name);
+        }
         Ok(())
     }
 }
