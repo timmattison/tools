@@ -92,7 +92,11 @@ impl Board {
         let pid = file.pid;
         let stamp = file.stamp;
         let new_state = file.state;
-        let old = self.sessions.get(&pid).map(|known| known.file.state);
+        let known = self.sessions.get(&pid);
+        if known.is_some_and(|known| stamp <= known.file.stamp) {
+            return None;
+        }
+        let old = known.map(|known| known.file.state);
         let session = Session {
             file,
             name,
