@@ -81,9 +81,27 @@ impl App {
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => self.move_selection(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1),
+            KeyCode::Enter => return self.focus_selected(),
             _ => {}
         }
         Action::Nothing
+    }
+
+    /// Ask the main loop to focus the selected session.
+    fn focus_selected(&mut self) -> Action {
+        let target = self
+            .selected_index()
+            .and_then(|index| self.board.rows().get(index).map(|session| FocusTarget::of(session)));
+        match target {
+            Some(target) => {
+                self.status = Some(format!("Focusing {}", target.label));
+                Action::Focus(target)
+            }
+            None => {
+                self.status = Some("No session to focus".to_string());
+                Action::Nothing
+            }
+        }
     }
 
     /// Store the row that [`App::selected_index`] gives, so a later change of
