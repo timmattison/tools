@@ -246,8 +246,13 @@ mod tests {
 
     /// Draw `app` on a terminal of the fixed test size.
     fn render(app: &App, now: u64) -> Buffer {
+        render_at(app, now, WIDTH)
+    }
+
+    /// Draw `app` on a terminal that is `width` columns wide.
+    fn render_at(app: &App, now: u64, width: u16) -> Buffer {
         let mut terminal =
-            Terminal::new(TestBackend::new(WIDTH, HEIGHT)).expect("a test terminal opens");
+            Terminal::new(TestBackend::new(width, HEIGHT)).expect("a test terminal opens");
         terminal
             .draw(|frame| draw(frame, app, EpochMillis::new(now)))
             .expect("the test terminal draws");
@@ -371,6 +376,44 @@ mod tests {
         assert!(!plain_line.contains("handled"), "{plain_line}");
         assert!(needs_line.contains("needs-you - handled"), "{needs_line}");
         assert!(plain_y < handled_y, "the handled idle row comes last");
+    }
+
+    const LONG_DIRECTORY: &str = "dir-with-a-long-name-for-the-cut";
+    const LONG_NAME: &str = "a-registry-name-25-chars";
+
+    /// A board with a handled needs-you row and an idle row that has a long
+    /// directory name and a long registry name.
+    fn board_with_a_handled_needs_you_row() -> App {
+        let mut app = App::new();
+        app.board_mut()
+            .load(file(10, "dir10", PaneState::NeedsYou, 3_000), None);
+        app.board_mut().load(
+            file(11, LONG_DIRECTORY, PaneState::Idle, 2_000),
+            Some(LONG_NAME.to_string()),
+        );
+        app.board_mut().toggle_handled(Pid::new(10));
+        app
+    }
+
+    #[test]
+    fn a_handled_needs_you_row_shows_the_whole_state_at_80_columns() {
+        let app = board_with_a_handled_needs_you_row();
+        let buffer = render_at(&app, 10_000, 80);
+        let (_, line) = line_with(&buffer, "dir10");
+        assert!(line.contains("needs-you - handled"), "{line}");
+    }
+
+    #[test]
+    fn the_state_column_takes_no_spare_width_at_100_columns() {
+        let app = board_with_a_handled_needs_you_row();
+        let buffer = render(&app, 10_000);
+        let header = row_text(&buffer, 1);
+        let time_byte = header.find("TIME").expect("the header names TIME");
+        let time_x = header[..time_byte].chars().count();
+        // 1 border, 2 for the block, 1 gap, 19 for the label, 1 gap.
+        assert_eq!(time_x, 5 + 19, "{header}");
+        let (_, line) = line_with(&buffer, "dir-with-a-long");
+        assert!(line.contains(LONG_NAME), "{line}");
     }
 
     #[test]
