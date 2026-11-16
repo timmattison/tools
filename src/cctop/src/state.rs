@@ -85,7 +85,9 @@ impl StateFile {
     /// The place in Zellij, when the file names both a session and a pane.
     #[must_use]
     pub fn zellij_location(&self) -> Option<ZellijLocation> {
-        None
+        let session = self.zellij_session.clone()?;
+        let pane = self.zellij_pane?;
+        Some(ZellijLocation { session, pane })
     }
 }
 
@@ -112,17 +114,33 @@ pub enum StateFileError {
 ///
 /// Returns a [`StateFileError`] when the text does not follow the contract.
 pub fn parse_state_file(text: &str) -> Result<StateFile, StateFileError> {
-    let _ = text;
+    let raw: RawStateFile = serde_json::from_str(text)?;
     Ok(StateFile {
-        pid: Pid::new(0),
-        session_id: String::new(),
-        started_at: EpochMillis::new(0),
-        state: PaneState::Working,
-        stamp: EpochMillis::new(0),
-        cwd: PathBuf::new(),
-        zellij_session: None,
-        zellij_pane: None,
+        pid: Pid::new(raw.pid),
+        session_id: raw.session_id,
+        started_at: EpochMillis::new(raw.started_at),
+        state: raw.state,
+        stamp: EpochMillis::new(raw.stamp),
+        cwd: raw.cwd,
+        zellij_session: raw.zellij_session,
+        zellij_pane: raw.zellij_pane.as_deref().and_then(ZellijPaneId::parse),
     })
+}
+
+/// The JSON shape of a state file, before the checks.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawStateFile {
+    #[allow(dead_code, reason = "the version check comes in a later step")]
+    version: u64,
+    pid: u32,
+    session_id: String,
+    started_at: u64,
+    state: PaneState,
+    stamp: u64,
+    cwd: PathBuf,
+    zellij_session: Option<String>,
+    zellij_pane: Option<String>,
 }
 
 #[cfg(test)]
