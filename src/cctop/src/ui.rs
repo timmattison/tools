@@ -336,12 +336,25 @@ mod tests {
     }
 
     #[test]
-    fn only_the_selected_row_starts_with_the_marker() {
+    fn only_the_highlight_shows_the_selected_row() {
         let buffer = render(&two_session_app(), 127_000);
-        let (_, needs_line) = line_with(&buffer, "needs-you");
-        let (_, working_line) = line_with(&buffer, "working");
-        assert!(needs_line.trim_start_matches('│').starts_with("› "));
-        assert!(!working_line.trim_start_matches('│').starts_with("› "));
+        let (needs_y, needs_line) = line_with(&buffer, "needs-you");
+        let (working_y, working_line) = line_with(&buffer, "working");
+        assert!(
+            needs_line.trim_start_matches('│').starts_with("██"),
+            "the selected row starts with its block: {needs_line}"
+        );
+        assert!(
+            working_line.trim_start_matches('│').starts_with("██"),
+            "the other row starts with its block: {working_line}"
+        );
+        let first_column = 1;
+        assert!(buffer[(first_column, needs_y)]
+            .modifier
+            .contains(Modifier::REVERSED));
+        assert!(!buffer[(first_column, working_y)]
+            .modifier
+            .contains(Modifier::REVERSED));
     }
 
     #[test]
