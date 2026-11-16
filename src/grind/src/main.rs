@@ -204,7 +204,11 @@ fn run(args: &Args, console: &Console) -> Result<Conflicts> {
     // already words as no note at all.
     let dirty_note = unworded.dirty_note(repo.uncommitted_files().unwrap_or_default());
 
-    let scratch = repo.scratch("HEAD")?;
+    // The display reports the scratch phase, and then commit N of M.
+    // `Console` decides whether it shows (a terminal, no `-q`, the delay) and
+    // clears it before the note and the verdict, so this call site decides
+    // nothing.
+    let scratch = repo.scratch_with_progress("HEAD", console.progress(&action))?;
     // `--diff` asks for the capture. Without it, the replay captures nothing
     // and costs what it cost before the flag existed. `--onto` picks the
     // two-revision form in both cases, so the diffs come from the replay that

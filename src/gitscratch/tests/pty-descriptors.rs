@@ -16,7 +16,7 @@
 
 #![cfg(unix)]
 
-use std::process::Command;
+use std::process::{Command, Output};
 
 use gitscratch::testing::pty::Pty;
 
@@ -46,7 +46,8 @@ fn listing() -> Command {
     command
 }
 
-/// The terminal reaches the child on its standard streams alone.
+/// The terminal reaches the child on its standard streams alone, in each run
+/// shape that puts standard output on it.
 ///
 /// The control runs the same listing in a plain child first, while this
 /// process holds no pseudo-terminal. A terminal that the environment of the run
@@ -62,18 +63,31 @@ fn the_terminal_reaches_the_child_on_its_standard_streams_alone() {
         String::from_utf8_lossy(&control.stderr)
     );
 
-    let output = Pty::open(COLUMNS).run_with_stdout_on_terminal(listing());
+    // One test runs each shape one after the other, so the target still holds
+    // one test, and no second pseudo-terminal opens beside a run.
+    let runs: [(&str, Output); 2] = [
+        (
+            "standard output on the terminal",
+            Pty::open(COLUMNS).run_with_stdout_on_terminal(listing()),
+        ),
+        (
+            "standard output and standard error on the terminal",
+            Pty::open(COLUMNS).run_with_output_on_terminal(listing()),
+        ),
+    ];
 
-    assert!(
-        output.status.success(),
-        "the listing must run on the terminal: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&control.stdout),
-        "a child of the terminal must hold no terminal above its standard \
-         streams that a plain child does not hold. Each extra number is a copy \
-         of an end of the terminal that reached the child"
-    );
+    for (shape, output) in runs {
+        assert!(
+            output.status.success(),
+            "the listing must run on the terminal with {shape}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&control.stdout),
+            "with {shape}, a child of the terminal must hold no terminal above \
+             its standard streams that a plain child does not hold. Each extra \
+             number is a copy of an end of the terminal that reached the child"
+        );
+    }
 }

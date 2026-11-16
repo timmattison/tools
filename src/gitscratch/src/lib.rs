@@ -87,6 +87,10 @@
 //! which stays with the tool because measuring one is a decision about a single
 //! program's output.
 //!
+//! A replay can also report its progress. [`Repo::scratch_with_progress`] makes
+//! the replays report to a [`ReplayObserver`], and `Console::progress`, behind
+//! the `progress` feature, draws those reports. [`Repo::scratch`] sends none.
+//!
 //! Not every question needs a worktree, though. [`Repo`] answers the cheap ones
 //! a caller should ask first — does this directory contain a repository, does
 //! that revision resolve, is the tree dirty — so a typo'd branch name fails in
@@ -118,6 +122,7 @@ pub mod diffs;
 /// this module are the two that can do no harm.
 mod git;
 pub mod metrics;
+pub mod progress;
 pub mod repo;
 pub mod report;
 pub mod scratch;
@@ -135,8 +140,11 @@ pub mod testing;
 pub use git::Git;
 
 pub use console::Console;
+#[cfg(feature = "progress")]
+pub use console::Progress;
 pub use diffs::{HaltDiff, HaltDiffs};
 pub use metrics::{BranchName, Files, Hunks, Stops, Uncommitted};
+pub use progress::{Phase, ReplayObserver, ReplayProgress};
 pub use repo::{Repo, DEFAULT_BRANCHES};
 pub use report::{Report, UnwordedReport};
 pub use scratch::{Conflicts, Scratch};

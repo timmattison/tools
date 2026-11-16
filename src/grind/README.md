@@ -400,6 +400,27 @@ $ CLICOLOR_FORCE=1 grind --diff main | less -R
 
 There is no flag for color. The variables above are the interface.
 
+## Progress on stderr
+
+A run that takes more than 500 ms shows a bar on stderr. First a spinner shows
+the creation of the scratch worktree. Then the bar shows the commit that git
+replays now, and the elapsed time:
+
+```console
+grind: replaying HEAD onto main  ██████▌   87/200 commits  0:05
+```
+
+The position comes from the state files of git, `rebase-merge/msgnum` and
+`rebase-merge/end`. These are the files that `git-prompt.sh` reads. The tool
+does not parse the text that git writes for a person, because git can change
+that text.
+
+The display clears itself before the note, the verdict, or an error. It goes to
+stderr only, so stdout stays the verdict that a script reads. It shows only when
+stderr is a terminal, and `-q` hides it. A run with `-q`, or with stderr on a
+pipe or a file, writes the same bytes as before. There is no flag for the
+display.
+
 ## Uncommitted work
 
 ```console

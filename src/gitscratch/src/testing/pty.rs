@@ -6,7 +6,7 @@
 //! in a wide window and another answer in a narrow one. A test therefore opens
 //! a pseudo-terminal of a size it chose, and gives it to the child.
 //!
-//! A test gives the terminal to the child in one of three shapes.
+//! A test gives the terminal to the child in one of four shapes.
 //!
 //! - [`Pty::give_as_controlling_terminal`] makes the pseudo-terminal the
 //!   controlling terminal of the child. `/dev/tty` in the child then resolves
@@ -16,6 +16,10 @@
 //!   standard output of the child on the pseudo-terminal and reads back what
 //!   the child wrote there. A test of a tool that decides color by whether
 //!   standard output is a terminal needs this shape.
+//! - [`Pty::run_with_output_on_terminal`] does the same as the second shape,
+//!   and also puts standard error of the child on the pseudo-terminal. A test
+//!   of a tool that draws a display on standard error only when that stream is
+//!   a terminal needs this shape.
 //! - [`Pty::run_with_stdin_on_terminal`] does the same as the first shape, and
 //!   also puts standard input of the child on the pseudo-terminal and types an
 //!   answer into it. A test of a tool that asks a question only when a person
@@ -277,23 +281,40 @@ impl Pty {
     /// Panics when the system gives no copy of the slave end, when the child
     /// does not start, when a read of the master end fails for a reason other
     /// than the end of the output, or when the wait for the child fails.
-    pub fn run_with_stdout_on_terminal(self, mut command: Command) -> Output {
+    pub fn run_with_stdout_on_terminal(self, command: Command) -> Output {
+        self.run_on_terminal(command, false)
+    }
+
+    /// The one body of the two runs that put standard output on the terminal.
+    ///
+    /// `stderr_on_terminal` picks where standard error goes: to the terminal
+    /// when it is true, and to a pipe that the method reads when it is false.
+    /// One body keeps the spawn, the reader thread, and the close order the
+    /// same in both runs.
+    fn run_on_terminal(self, mut command: Command, stderr_on_terminal: bool) -> Output {
         self.give_as_controlling_terminal(&mut command);
         let stdout = self
             .slave
             .try_clone()
             .expect("the system must give a copy of the slave end for standard output");
-        command
-            .stdin(Stdio::null())
-            .stdout(stdout)
-            .stderr(Stdio::piped());
+        let stderr = if stderr_on_terminal {
+            Stdio::from(
+                self.slave
+                    .try_clone()
+                    .expect("the system must give a copy of the slave end for standard error"),
+            )
+        } else {
+            Stdio::piped()
+        };
+        command.stdin(Stdio::null()).stdout(stdout).stderr(stderr);
 
         let Pty { master, slave } = self;
         let reader = std::thread::spawn(move || read_until_hangup(master));
         let child = command.spawn();
 
         // Every copy of the slave end that this process holds closes here: the
-        // copy that the command holds for standard output, and the copy that
+        // copies that the command holds for standard output and, when
+        // `stderr_on_terminal` is true, for standard error, and the copy that
         // the terminal opened with. The child holds the rest. They close before
         // the result of the spawn is read, so a child that did not start still
         // ends the read, and the reader ends with it.
@@ -312,6 +333,29 @@ impl Pty {
             });
 
         Output { stdout, ..finished }
+    }
+
+    /// Run `command` with its standard output and its standard error on this
+    /// terminal, and give back what the child wrote there.
+    ///
+    /// A tool that draws a display on standard error only when that stream is a
+    /// terminal needs this shape. A person at a terminal sees both streams in
+    /// one place, in the order that the child wrote them. So the bytes of both
+    /// streams come back together from the master end, and the `stderr` of the
+    /// result is empty.
+    ///
+    /// # Arguments
+    /// * `command` - The command to start the child from. This method sets its
+    ///   three standard streams, and the caller sets every other part of it.
+    ///
+    /// # Returns
+    /// The exit status of the child, and every byte it wrote to the terminal
+    /// in `stdout`, in the shape that [`Command::output`] gives.
+    ///
+    /// # Panics
+    /// Panics in the same cases as [`Pty::run_with_stdout_on_terminal`].
+    pub fn run_with_output_on_terminal(self, command: Command) -> Output {
+        self.run_on_terminal(command, true)
     }
 
     /// Run `command` with its standard input on this terminal, and type

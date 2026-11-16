@@ -2360,6 +2360,84 @@ fn diff_on_a_terminal_is_painted_with_no_color_variable_set() {
     );
 }
 
+/// A run on a terminal draws the progress bar, with its count of commits.
+///
+/// This holds the wiring of the display in the binary: issue #682, criterion 1.
+/// A `grind` that replays with `scratch` in place of `scratch_with_progress`,
+/// or a crate that drops the `progress` feature, draws nothing, and no run
+/// through a pipe can show it. The shim pauses for 1 s before each `rebase`
+/// call, because the display waits for `PROGRESS_DELAY` (500 ms) before it
+/// shows. The pause only lengthens the run, so the test has no upper time bound.
+#[cfg(unix)]
+#[test]
+fn progress_bar_shows_its_count_on_a_terminal() {
+    use gitscratch::testing::git_shim::GitShim;
+    use gitscratch::testing::pty::Pty;
+
+    /// The width of the terminal. Any width serves, because the width that
+    /// the builder states wins.
+    const TERMINAL_COLUMNS: u16 = 80;
+    /// The text that only the display writes: the prefix, then the two spaces
+    /// that part the action from the bar.
+    const DISPLAY_PREFIX: &str = "grind: replaying HEAD onto two  ";
+
+    let repo = equal_hunks_unequal_stops_repo();
+    repo.checkout("one");
+    let plain = String::from_utf8_lossy(&grind(repo.path(), &["two"]).stdout).into_owned();
+    assert!(
+        !plain.contains(DISPLAY_PREFIX) && !plain.contains(" commits"),
+        "the verdict through a pipe must not hold the display:\n{plain}"
+    );
+
+    let shim = GitShim::new(&["rebase"]);
+    let mut command = grind_command(repo.path(), &["two"]);
+    command.env("PATH", shim.path_variable());
+    let output = Pty::open(TERMINAL_COLUMNS).run_with_output_on_terminal(command);
+    let bytes = testcolor::strip_ansi(&String::from_utf8_lossy(&output.stdout));
+
+    assert_eq!(
+        output.status.code(),
+        Some(CONFLICTS),
+        "bytes:\n{bytes}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        bytes.contains(DISPLAY_PREFIX),
+        "the bar names the tool and the action:\n{bytes}"
+    );
+    assert!(
+        holds_a_commit_count(&bytes),
+        "the bar draws a count of the form N/M commits:\n{bytes}"
+    );
+}
+
+/// Whether `text` holds a count of the form `<digits>/<digits> commits`.
+fn holds_a_commit_count(text: &str) -> bool {
+    // Every piece but the last ends where " commits" began.
+    let mut pieces: Vec<&str> = text.split(" commits").collect();
+    pieces.pop();
+    pieces.iter().any(|before| {
+        let chars: Vec<char> = before.chars().collect();
+        let total = chars
+            .iter()
+            .rev()
+            .take_while(|c| c.is_ascii_digit())
+            .count();
+        let position = chars
+            .len()
+            .checked_sub(total + 1)
+            .filter(|slash| chars[*slash] == '/')
+            .map_or(0, |slash| {
+                chars[..slash]
+                    .iter()
+                    .rev()
+                    .take_while(|c| c.is_ascii_digit())
+                    .count()
+            });
+        total > 0 && position > 0
+    })
+}
+
 /// Which of `grind`'s streams is handed a pipe nobody is reading.
 #[derive(Debug, Clone, Copy)]
 enum Unread {

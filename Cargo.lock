@@ -2966,9 +2966,12 @@ dependencies = [
  "childenv",
  "colored",
  "gitscratch",
+ "indicatif",
  "libc",
  "pulldown-cmark",
+ "shellquote",
  "tempfile",
+ "termbar",
  "testcolor",
  "unicode-width",
 ]
