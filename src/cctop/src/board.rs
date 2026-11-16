@@ -129,6 +129,14 @@ impl Board {
         }
     }
 
+    /// Take a session off the board, because its process ended. The function
+    /// gives the change that the end makes, or `None` when the board does not
+    /// hold the pid. The change goes into the log.
+    pub fn remove(&mut self, pid: Pid, now: EpochMillis) -> Option<Change> {
+        let _ = (pid, now);
+        None
+    }
+
     /// The session with the pid, when the board holds it.
     #[must_use]
     pub fn get(&self, pid: Pid) -> Option<&Session> {
@@ -295,5 +303,27 @@ mod tests {
         assert_eq!(session.file.session_id, "new-id");
         assert_eq!(session.label(), "renamed");
         assert_eq!(board.changes().count(), 0);
+    }
+
+    #[test]
+    fn remove_logs_the_end_of_a_known_session_and_ignores_an_unknown_pid() {
+        let mut board = Board::new();
+        board.load(file(7, PaneState::Idle, 100, 500), None);
+        assert_eq!(board.remove(Pid::new(8), EpochMillis::new(1000)), None);
+        let change = board
+            .remove(Pid::new(7), EpochMillis::new(1000))
+            .expect("the end of a known session is a change");
+        assert_eq!(
+            change,
+            Change {
+                at: EpochMillis::new(1000),
+                pid: Pid::new(7),
+                label: "worktree".to_string(),
+                old: Some(PaneState::Idle),
+                new: None,
+            }
+        );
+        assert!(board.get(Pid::new(7)).is_none());
+        assert_eq!(board.changes().cloned().collect::<Vec<_>>(), vec![change]);
     }
 }
