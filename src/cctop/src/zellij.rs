@@ -68,7 +68,21 @@ pub enum ZellijFocusError {
 ///
 /// Returns a [`ZellijFocusError`] when the list of sessions fails, when the
 /// session is not live, or when the focus command fails or refuses.
-pub fn focus_pane(_runner: &dyn Runner, _location: &ZellijLocation) -> Result<(), ZellijFocusError> {
+pub fn focus_pane(runner: &dyn Runner, location: &ZellijLocation) -> Result<(), ZellijFocusError> {
+    let listing = runner
+        .run(&list_sessions_argv(), COMMAND_LIMIT)
+        .map_err(ZellijFocusError::List)?;
+    let live = if listing.succeeded() {
+        parse_live_sessions(&listing.stdout)
+    } else {
+        Vec::new()
+    };
+    if !live.contains(&location.session) {
+        return Err(ZellijFocusError::SessionGone(location.session.clone()));
+    }
+    runner
+        .run(&focus_argv(location), COMMAND_LIMIT)
+        .map_err(ZellijFocusError::Focus)?;
     Ok(())
 }
 
