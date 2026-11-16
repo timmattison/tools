@@ -69,6 +69,7 @@ objc2-foundation = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+tempfile.workspace = true
 testcolor.workspace = true
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
