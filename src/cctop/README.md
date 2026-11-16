@@ -17,7 +17,7 @@ The rows are in this order: `needs-you`, `idle`, `agents`, `shells`, `working`. 
 
 ### The handled mark
 
-Press `h` to mark the selected session as handled. The row goes to the bottom of the rows in its state, and its state shows ` - handled`. The latest mark goes to the very bottom. The cursor stays on its row, thus it selects the next session, and you can press `h` again to mark that session.
+Press `h` to mark the selected session as handled. The row goes to the bottom of the rows in its state, and its state shows ` - handled`. The latest mark goes to the very bottom. The cursor then selects the next row that has no mark, thus you can press `h` again to mark that session. When no such row is below it, the cursor stays on the marked row.
 
 The mark stays until the session changes state. A new write of the same state keeps the mark. When the state changes, the mark goes away, and it does not come back when the session returns to the old state.
 

@@ -95,9 +95,11 @@ impl App {
     }
 
     /// Put a handled mark on the selected session, or remove its mark. A new
-    /// mark moves the session to the bottom of its state. The cursor stays on
-    /// its row, thus it selects the next session. A removed mark moves the
-    /// session up, and the cursor goes with the session.
+    /// mark moves the session to the bottom of its state. The cursor then
+    /// selects the first row with no mark at or below the old index of the
+    /// marked row. If no such row exists, the cursor stays on the marked
+    /// session. A removed mark moves the session up, and the cursor goes with
+    /// the session.
     fn toggle_handled_selected(&mut self) {
         let selected = self.selected_index().and_then(|index| {
             let session = self.board.rows().get(index).copied()?;
@@ -109,7 +111,17 @@ impl App {
         };
         match self.board.toggle_handled(pid) {
             Some(true) => {
-                self.select(index);
+                let next = self
+                    .board
+                    .rows()
+                    .iter()
+                    .skip(index)
+                    .position(|session| !session.is_handled())
+                    .map(|offset| index + offset);
+                match next {
+                    Some(next) => self.select(next),
+                    None => self.sync_selection(),
+                }
                 self.status = Some(format!("Marked {label} as handled"));
             }
             Some(false) => {
@@ -460,7 +472,7 @@ mod tests {
     }
 
     #[test]
-    fn h_marks_the_selected_session_and_the_cursor_stays_on_its_row() {
+    fn h_marks_the_selected_session_and_selects_the_next_unmarked_row() {
         let mut app = three_rows();
         assert_eq!(app.handle_key(press(KeyCode::Char('h'))), Action::Nothing);
         assert!(is_handled(&app, 10));
