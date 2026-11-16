@@ -9,6 +9,7 @@
 #![warn(clippy::pedantic)]
 
 pub mod ancestry;
+pub mod app;
 pub mod board;
 pub mod focus;
 pub mod liveness;
