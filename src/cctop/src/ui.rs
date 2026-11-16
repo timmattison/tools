@@ -328,6 +328,27 @@ mod tests {
     }
 
     #[test]
+    fn a_handled_row_shows_the_whole_state_with_the_suffix_and_sorts_last() {
+        let mut app = App::new();
+        app.board_mut()
+            .load(file(10, "dir10", PaneState::Idle, 1_000), None);
+        app.board_mut()
+            .load(file(11, "dir11", PaneState::Idle, 2_000), None);
+        app.board_mut()
+            .load(file(12, "dir12", PaneState::NeedsYou, 3_000), None);
+        app.board_mut().toggle_handled(Pid::new(10));
+        app.board_mut().toggle_handled(Pid::new(12));
+        let buffer = render(&app, 10_000);
+        let (handled_y, handled_line) = line_with(&buffer, "dir10");
+        let (plain_y, plain_line) = line_with(&buffer, "dir11");
+        let (_, needs_line) = line_with(&buffer, "dir12");
+        assert!(handled_line.contains("idle - handled"), "{handled_line}");
+        assert!(!plain_line.contains("handled"), "{plain_line}");
+        assert!(needs_line.contains("needs-you - handled"), "{needs_line}");
+        assert!(plain_y < handled_y, "the handled idle row comes last");
+    }
+
+    #[test]
     fn an_empty_board_shows_a_hint() {
         let buffer = render(&App::new(), 1_000);
         assert!(row_text(&buffer, 0).contains("cctop · 0 sessions"));
@@ -399,7 +420,7 @@ mod tests {
         let buffer = render(&two_session_app(), 127_000);
         assert_eq!(
             row_text(&buffer, HEIGHT - 1).trim_end(),
-            "j/k move · enter focus · n next needs-you · q quit"
+            "j/k move · enter focus · n next needs-you · h handled · q quit"
         );
     }
 
