@@ -1,5 +1,7 @@
 //! Sends a macOS notification through `osascript`.
 
+use crate::board::Change;
+
 /// The title of each notification.
 pub const NOTIFICATION_TITLE: &str = "cctop";
 
@@ -26,9 +28,18 @@ pub fn notification_argv(title: &str, message: &str) -> Vec<String> {
     .collect()
 }
 
+/// Makes the text of the notification for a session that needs the user.
+#[must_use]
+pub fn needs_you_message(_change: &Change) -> String {
+    String::new()
+}
+
 #[cfg(test)]
 mod tests {
+    use proctree::Pid;
+
     use super::*;
+    use crate::state::{EpochMillis, PaneState};
 
     fn argv(items: &[&str]) -> Vec<String> {
         items.iter().map(ToString::to_string).collect()
@@ -61,5 +72,17 @@ mod tests {
             assert_eq!(result[8], value);
             assert_eq!(result[9], value);
         }
+    }
+
+    #[test]
+    fn the_message_names_the_session() {
+        let change = Change {
+            at: EpochMillis::new(1),
+            pid: Pid::new(7),
+            label: "日本語 tools".to_string(),
+            old: Some(PaneState::Working),
+            new: Some(PaneState::NeedsYou),
+        };
+        assert_eq!(needs_you_message(&change), "日本語 tools needs you");
     }
 }
