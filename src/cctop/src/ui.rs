@@ -6,7 +6,17 @@
 /// minutes, and a longer span shows days and hours.
 #[must_use]
 pub fn format_elapsed(ms: u64) -> String {
-    format!("{ms}")
+    let seconds = ms / 1000;
+    let (minutes, hours, days) = (seconds / 60, seconds / 3600, seconds / 86_400);
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if minutes < 60 {
+        format!("{minutes}m {:02}s", seconds % 60)
+    } else if hours < 24 {
+        format!("{hours}h {:02}m", minutes % 60)
+    } else {
+        format!("{days}d {:02}h", hours % 24)
+    }
 }
 
 #[cfg(test)]
