@@ -33,12 +33,12 @@ use crate::sample::Sample;
 use crate::text::{parse_line, StreamLine};
 use std::fmt;
 use std::io::{self, BufRead, BufReader, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ExitStatus, Stdio};
 use std::str::FromStr;
 use std::sync::{mpsc, Arc, Mutex, PoisonError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The time between two checks for the exit of the child.
 const EXIT_POLL: Duration = Duration::from_millis(20);
@@ -457,6 +457,54 @@ impl Drop for Connection {
         let _ = child.kill();
         let _ = child.wait();
     }
+}
+
+/// The program that starts each connection in production.
+pub const SSH_PROGRAM: &str = "ssh";
+
+/// The second Mac that a feed shows, and the path of `glance` there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Remote {
+    /// The SSH destination, as the user typed it.
+    pub destination: Destination,
+    /// The path of `glance` on the second Mac.
+    pub remote_binary: RemoteBinary,
+}
+
+/// A connection to a second Mac that starts again after each end.
+///
+/// The caller gives the time to each poll, so a test can step the time of
+/// the backoff without a wait.
+#[derive(Debug)]
+pub struct Feed {
+    /// The program that starts each connection.
+    program: PathBuf,
+    /// The second Mac.
+    remote: Remote,
+    /// The time between two samples.
+    interval: Interval,
+}
+
+impl Feed {
+    /// Makes a feed. The first poll starts the first connection.
+    #[must_use]
+    pub fn new(program: impl Into<PathBuf>, remote: Remote, interval: Interval) -> Feed {
+        Feed {
+            program: program.into(),
+            remote,
+            interval,
+        }
+    }
+
+    /// Gives the events since the last poll.
+    #[must_use]
+    pub fn poll(&mut self, _now: Instant) -> Vec<Event> {
+        let _ = (&self.program, &self.remote, self.interval);
+        Vec::new()
+    }
+
+    /// Stops the connection, if one runs.
+    pub fn stop(&mut self) {}
 }
 
 #[cfg(test)]

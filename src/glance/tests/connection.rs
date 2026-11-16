@@ -3,7 +3,9 @@
 //! Tests of the connection to a second Mac. A fake script stands in for `ssh`
 //! and runs the built `glance --stream`, so no test changes `PATH`.
 
-use glance::connection::{Connection, Destination, Event, RemoteBinary};
+use glance::connection::{
+    Connection, Destination, Event, Feed, Remote, RemoteBinary, FIRST_RETRY_DELAY,
+};
 use glance::host::HostName;
 use glance::interval::Interval;
 use std::fs;
@@ -11,7 +13,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Once;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The time that a test waits for one event.
 const EVENT_WAIT: Duration = Duration::from_secs(60);
@@ -100,8 +102,8 @@ fn interval() -> Interval {
     INTERVAL.parse().expect("an interval")
 }
 
-/// Starts a connection through `program` after the binary is warm.
-fn start(program: &Path, remote_binary: &RemoteBinary) -> Connection {
+/// Starts the binary once in this process, so no test measures its first load.
+fn warm() {
     WARM.call_once(|| {
         let status = childenv::fixture_command(GLANCE)
             .arg("--version")
@@ -110,6 +112,11 @@ fn start(program: &Path, remote_binary: &RemoteBinary) -> Connection {
             .status;
         assert!(status.success(), "{status}");
     });
+}
+
+/// Starts a connection through `program` after the binary is warm.
+fn start(program: &Path, remote_binary: &RemoteBinary) -> Connection {
+    warm();
     let destination: Destination = DESTINATION.parse().expect("a destination");
     Connection::start(program, &destination, interval(), remote_binary).expect("the child starts")
 }
@@ -317,6 +324,168 @@ fn a_stop_kills_and_reaps_the_child() {
     assert!(matches!(first, Event::Sample { .. }), "{first:?}");
     let pid = fs::read_to_string(&pid_file).expect("the pid file");
     connection.stop();
+    let output = childenv::fixture_command("ps")
+        .args(["-p", pid.trim(), "-o", "pid="])
+        .output()
+        .expect("ps starts");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "",
+        "the child {pid} still exists"
+    );
+}
+
+/// The pause between two polls of a feed while a test waits for an event.
+const POLL_PAUSE: Duration = Duration::from_millis(20);
+
+/// One step of time just before a connection is due.
+const JUST_BEFORE: Duration = Duration::from_millis(1);
+
+/// The reason of the end of the fake that exits with status 3.
+const EXIT_3: &str = "the connection ended with exit status: 3";
+
+/// The second Mac of the feed tests, with the default remote binary.
+fn remote() -> Remote {
+    Remote {
+        destination: DESTINATION.parse().expect("a destination"),
+        remote_binary: RemoteBinary::default(),
+    }
+}
+
+/// Polls `feed` at the time `now` until an `Ended` event arrives.
+///
+/// Gives all of the events, and panics with them after `EVENT_WAIT`.
+fn poll_until_end(feed: &mut Feed, now: Instant) -> Vec<Event> {
+    let deadline = Instant::now() + EVENT_WAIT;
+    let mut events = Vec::new();
+    while Instant::now() < deadline {
+        let batch = feed.poll(now);
+        let ended = batch
+            .iter()
+            .any(|event| matches!(event, Event::Ended { .. }));
+        events.extend(batch);
+        if ended {
+            return events;
+        }
+        std::thread::sleep(POLL_PAUSE);
+    }
+    panic!("no end within {EVENT_WAIT:?}: {events:?}");
+}
+
+/// The number of starts that a fake wrote into `starts`.
+fn start_count(starts: &Path) -> usize {
+    fs::read_to_string(starts).map_or(0, |text| text.lines().count())
+}
+
+/// The script line that adds one start to the file `starts`.
+fn count_start(starts: &Path) -> String {
+    format!("printf 'x\\n' >> {}", quoted(starts))
+}
+
+#[test]
+fn a_feed_waits_the_delay_of_the_backoff_after_each_end() {
+    let scratch = Scratch::new();
+    let starts = scratch.path("starts");
+    let fake = scratch.script("ssh", &format!("{}\nexit 3", count_start(&starts)));
+    warm();
+    let mut feed = Feed::new(&fake, remote(), interval());
+    let first_end = Instant::now();
+
+    let events = poll_until_end(&mut feed, first_end);
+    assert_eq!(
+        events,
+        [Event::Ended {
+            reason: EXIT_3.to_owned()
+        }]
+    );
+    assert_eq!(start_count(&starts), 1);
+
+    assert!(feed
+        .poll(first_end + FIRST_RETRY_DELAY - JUST_BEFORE)
+        .is_empty());
+    assert_eq!(start_count(&starts), 1);
+    let second_end = first_end + FIRST_RETRY_DELAY;
+    poll_until_end(&mut feed, second_end);
+    assert_eq!(start_count(&starts), 2);
+
+    let doubled = FIRST_RETRY_DELAY * 2;
+    assert!(feed.poll(second_end + doubled - JUST_BEFORE).is_empty());
+    assert_eq!(start_count(&starts), 2);
+    poll_until_end(&mut feed, second_end + doubled);
+    assert_eq!(start_count(&starts), 3);
+}
+
+#[test]
+fn a_sample_sets_the_delay_of_the_feed_back() {
+    let scratch = Scratch::new();
+    let starts = scratch.path("starts");
+    let fake = scratch.script(
+        "ssh",
+        &format!(
+            "{}\nif [ $(( $(wc -l < {}) )) -ge 2 ]; then\n  exec {} --stream --count 1 --interval {INTERVAL}\nfi\nexit 3",
+            count_start(&starts),
+            quoted(&starts),
+            glance()
+        ),
+    );
+    warm();
+    let mut feed = Feed::new(&fake, remote(), interval());
+    let first_end = Instant::now();
+    poll_until_end(&mut feed, first_end);
+
+    let second_end = first_end + FIRST_RETRY_DELAY;
+    let events = poll_until_end(&mut feed, second_end);
+    assert_eq!(sample_count(&events), 1, "{events:?}");
+
+    // Without the reset, the delay after the second end is 10 seconds.
+    assert!(feed
+        .poll(second_end + FIRST_RETRY_DELAY - JUST_BEFORE)
+        .is_empty());
+    poll_until_end(&mut feed, second_end + FIRST_RETRY_DELAY);
+    assert_eq!(start_count(&starts), 3);
+}
+
+#[test]
+fn a_program_that_does_not_start_ends_at_once_and_waits_the_backoff() {
+    let scratch = Scratch::new();
+    let missing = scratch.path("no-such-ssh");
+    let mut feed = Feed::new(&missing, remote(), interval());
+    let now = Instant::now();
+    let events = feed.poll(now);
+    assert_eq!(events.len(), 1, "{events:?}");
+    let Event::Ended { reason } = &events[0] else {
+        panic!("{events:?}");
+    };
+    assert!(
+        reason.starts_with(&format!("cannot start {}: ", missing.display())),
+        "{reason}"
+    );
+    assert!(feed.poll(now + FIRST_RETRY_DELAY - JUST_BEFORE).is_empty());
+    assert_eq!(feed.poll(now + FIRST_RETRY_DELAY).len(), 1);
+}
+
+#[test]
+fn a_stop_of_the_feed_kills_and_reaps_the_child() {
+    let scratch = Scratch::new();
+    let pid_file = scratch.path("pid.txt");
+    let fake = scratch.script(
+        "ssh",
+        &format!(
+            "echo $$ > {}\nexec {} --stream --count 240 --interval {INTERVAL}",
+            quoted(&pid_file),
+            glance()
+        ),
+    );
+    warm();
+    let mut feed = Feed::new(&fake, remote(), interval());
+    let now = Instant::now();
+    let deadline = now + EVENT_WAIT;
+    while sample_count(&feed.poll(now)) == 0 {
+        assert!(Instant::now() < deadline, "no sample within {EVENT_WAIT:?}");
+        std::thread::sleep(POLL_PAUSE);
+    }
+    let pid = fs::read_to_string(&pid_file).expect("the pid file");
+    feed.stop();
     let output = childenv::fixture_command("ps")
         .args(["-p", pid.trim(), "-o", "pid="])
         .output()
