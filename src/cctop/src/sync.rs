@@ -99,8 +99,32 @@ impl Sync {
                     .into_iter()
                     .collect()
             }
-            DirEvent::Rescan => Vec::new(),
+            DirEvent::Rescan => self.rescan(board, clock, now),
         }
+    }
+
+    /// Read each file in the state directory, and drop each session whose file
+    /// is gone. When the directory cannot be read, nothing changes.
+    fn rescan(
+        &self,
+        board: &mut Board,
+        clock: &mut dyn ProcessClock,
+        now: EpochMillis,
+    ) -> Vec<Change> {
+        let Ok(entries) = store::read_dir(&self.state_dir) else {
+            return Vec::new();
+        };
+        let in_directory: Vec<Pid> = entries.iter().map(|(pid, _)| *pid).collect();
+        let mut changes = Vec::new();
+        for (pid, outcome) in entries {
+            changes.extend(self.apply_outcome(board, pid, outcome, clock, now));
+        }
+        for pid in board.pids() {
+            if !in_directory.contains(&pid) {
+                changes.extend(board.remove(pid, now));
+            }
+        }
+        changes
     }
 
     /// Apply the read of one file to the board.
