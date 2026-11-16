@@ -1,7 +1,7 @@
 //! Sends a macOS notification through `osascript`.
 
 use crate::board::Change;
-use crate::runner::Runner;
+use crate::runner::{COMMAND_LIMIT, Runner};
 
 /// The title of each notification.
 pub const NOTIFICATION_TITLE: &str = "cctop";
@@ -40,8 +40,16 @@ pub fn needs_you_message(change: &Change) -> String {
 /// # Errors
 ///
 /// Returns the reason as text when `osascript` fails or does not run.
-pub fn send(_runner: &dyn Runner, _message: &str) -> Result<(), String> {
-    Ok(())
+pub fn send(runner: &dyn Runner, message: &str) -> Result<(), String> {
+    let argv = notification_argv(NOTIFICATION_TITLE, message);
+    let output = runner
+        .run(&argv, COMMAND_LIMIT)
+        .map_err(|error| error.to_string())?;
+    if output.succeeded() {
+        Ok(())
+    } else {
+        Err(format!("osascript failed: {}", output.stderr.trim()))
+    }
 }
 
 #[cfg(test)]
