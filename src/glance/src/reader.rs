@@ -7,6 +7,7 @@ use std::mem::{size_of, MaybeUninit};
 use std::ptr;
 
 use crate::cpu::Ticks;
+use crate::host::HostName;
 use crate::sample::Reading;
 
 /// The name of the call that reads the CPU tick counters.
@@ -52,6 +53,8 @@ impl std::error::Error for ReadError {}
 pub struct Reader {
     /// The port of this host. `new` asks for it once.
     host: libc::mach_port_t,
+    /// The short name of this host. `new` reads it once.
+    host_name: HostName,
 }
 
 impl Reader {
@@ -70,7 +73,18 @@ impl Reader {
         // SAFETY: `mach_host_self` takes no argument and gives the port of
         // this host.
         let host = unsafe { libc::mach_host_self() };
-        Reader { host }
+        Reader {
+            host,
+            host_name: HostName::from_raw(b""),
+        }
+    }
+
+    /// The short name of this host, as `hostname -s` gives it.
+    ///
+    /// `new` reads the name once, so this call reads nothing.
+    #[must_use]
+    pub fn host_name(&self) -> &HostName {
+        &self.host_name
     }
 
     /// Reads the CPU tick counters and the memory pressure.
@@ -168,6 +182,16 @@ mod tests {
 
     /// The raw pressure levels of the kernel.
     const LEVELS: [i32; 3] = [1, 2, 4];
+
+    #[test]
+    fn the_host_name_is_the_answer_of_hostname_s() {
+        let output = childenv::fixture_command("hostname")
+            .arg("-s")
+            .output()
+            .expect("hostname runs");
+        let expected = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        assert_eq!(Reader::new().host_name().as_str(), expected);
+    }
 
     #[test]
     fn two_reads_of_this_mac_give_levels_and_percentages_in_range() {
