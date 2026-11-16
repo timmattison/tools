@@ -199,6 +199,7 @@ mod tests {
             file,
             name: name.map(ToString::to_string),
             since: crate::state::EpochMillis::new(2),
+            handled: None,
         }
     }
 

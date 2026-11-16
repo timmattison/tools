@@ -15,7 +15,18 @@ pub struct Session {
     pub name: Option<String>,
     /// The time when the session entered its current state.
     pub since: EpochMillis,
+    /// The handled mark of the session, when the person gave it one. A change
+    /// of state removes the mark.
+    pub handled: Option<HandledMark>,
 }
+
+/// The place of one handled mark in the order of the marks. A later mark has
+/// a higher place, thus its row sorts lower.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct HandledMark(u64);
+
+/// The text that follows the state of a handled session on the screen.
+pub const HANDLED_SUFFIX: &str = " - handled";
 
 impl Session {
     /// The text that names the session on the screen: its name, else the name
@@ -25,6 +36,19 @@ impl Session {
         self.name
             .clone()
             .unwrap_or_else(|| self.file.directory_name())
+    }
+
+    /// Tell if the session has a handled mark.
+    #[must_use]
+    pub fn is_handled(&self) -> bool {
+        self.handled.is_some()
+    }
+
+    /// The state of the session for the screen. A handled session adds
+    /// [`HANDLED_SUFFIX`], for example `idle - handled`.
+    #[must_use]
+    pub fn state_label(&self) -> String {
+        self.file.state.label().to_string()
     }
 }
 
@@ -75,8 +99,15 @@ impl Board {
     /// the stamp of the file. The log gets no entry.
     pub fn load(&mut self, file: StateFile, name: Option<String>) {
         let since = file.stamp;
-        self.sessions
-            .insert(file.pid, Session { file, name, since });
+        self.sessions.insert(
+            file.pid,
+            Session {
+                file,
+                name,
+                since,
+                handled: None,
+            },
+        );
     }
 
     /// Apply a state file that was read after the start. The function gives
@@ -97,7 +128,12 @@ impl Board {
             Some(known) if same_state => known.since,
             _ => stamp,
         };
-        let session = Session { file, name, since };
+        let session = Session {
+            file,
+            name,
+            since,
+            handled: None,
+        };
         let label = session.label();
         self.sessions.insert(pid, session);
         if same_state {
@@ -137,6 +173,15 @@ impl Board {
         };
         self.record(change.clone());
         Some(change)
+    }
+
+    /// Put a handled mark on the session with the pid, or remove its mark.
+    /// The function gives `Some(true)` when the session now has a mark,
+    /// `Some(false)` when it has none, and `None` when the board does not hold
+    /// the pid. A new mark sorts the row below each other row in its state.
+    pub fn toggle_handled(&mut self, pid: Pid) -> Option<bool> {
+        let _ = pid;
+        None
     }
 
     /// The session with the pid, when the board holds it.
@@ -210,6 +255,7 @@ mod tests {
             file: file(1, PaneState::Idle, 100, 200),
             name: None,
             since: EpochMillis::new(200),
+            handled: None,
         };
         assert_eq!(session.label(), "worktree");
         session.name = Some("fix the bug".to_string());
@@ -381,6 +427,103 @@ mod tests {
             .map(|session| session.file.pid.as_u32())
             .collect();
         assert_eq!(order, vec![6, 5, 8, 4, 3, 2, 1]);
+    }
+
+    /// The pids of the rows, in the order of the screen.
+    fn row_order(board: &Board) -> Vec<u32> {
+        board
+            .rows()
+            .iter()
+            .map(|session| session.file.pid.as_u32())
+            .collect()
+    }
+
+    /// A board with one `needs-you` row, three idle rows, and one `agents`
+    /// row. The idle rows sort 5, 8, 4.
+    fn board_with_three_idle_rows() -> Board {
+        use PaneState::{Agents, Idle, NeedsYou};
+        let mut board = Board::new();
+        board.load(file(3, Agents, 1, 100), None);
+        board.load(file(4, Idle, 1, 300), None);
+        board.load(file(5, Idle, 1, 200), None);
+        board.load(file(6, NeedsYou, 1, 100), None);
+        board.load(file(8, Idle, 1, 200), None);
+        board
+    }
+
+    #[test]
+    fn a_handled_row_sorts_below_each_other_row_in_its_state() {
+        let mut board = board_with_three_idle_rows();
+        assert_eq!(row_order(&board), vec![6, 5, 8, 4, 3]);
+        assert_eq!(board.toggle_handled(Pid::new(5)), Some(true));
+        assert_eq!(row_order(&board), vec![6, 8, 4, 5, 3]);
+    }
+
+    #[test]
+    fn the_latest_handled_row_sorts_last_in_its_state() {
+        let mut board = board_with_three_idle_rows();
+        board.toggle_handled(Pid::new(5));
+        board.toggle_handled(Pid::new(8));
+        assert_eq!(row_order(&board), vec![6, 4, 5, 8, 3]);
+    }
+
+    #[test]
+    fn a_second_toggle_removes_the_mark_and_restores_the_order() {
+        let mut board = board_with_three_idle_rows();
+        assert_eq!(board.toggle_handled(Pid::new(5)), Some(true));
+        assert_eq!(board.toggle_handled(Pid::new(5)), Some(false));
+        let session = board.get(Pid::new(5)).expect("the session is on the board");
+        assert!(!session.is_handled());
+        assert_eq!(row_order(&board), vec![6, 5, 8, 4, 3]);
+    }
+
+    #[test]
+    fn toggle_handled_of_an_unknown_pid_changes_nothing() {
+        let mut board = board_with_three_idle_rows();
+        assert_eq!(board.toggle_handled(Pid::new(99)), None);
+        assert_eq!(row_order(&board), vec![6, 5, 8, 4, 3]);
+    }
+
+    #[test]
+    fn a_handled_session_shows_the_suffix_after_its_state() {
+        let mut board = Board::new();
+        board.load(file(7, PaneState::Idle, 100, 500), None);
+        let label = |board: &Board| board.get(Pid::new(7)).map(Session::state_label);
+        assert_eq!(label(&board).as_deref(), Some("idle"));
+        board.toggle_handled(Pid::new(7));
+        assert_eq!(label(&board).as_deref(), Some("idle - handled"));
+    }
+
+    #[test]
+    fn a_change_of_state_removes_the_mark() {
+        let mut board = Board::new();
+        board.load(file(7, PaneState::Idle, 100, 500), None);
+        assert_eq!(board.toggle_handled(Pid::new(7)), Some(true));
+        board.apply(file(7, PaneState::Working, 100, 600), None);
+        let is_handled = |board: &Board| board.get(Pid::new(7)).map(Session::is_handled);
+        assert_eq!(is_handled(&board), Some(false));
+        board.apply(file(7, PaneState::Idle, 100, 700), None);
+        assert_eq!(is_handled(&board), Some(false), "the mark does not return");
+    }
+
+    #[test]
+    fn a_new_write_in_the_same_state_keeps_the_mark() {
+        let mut board = Board::new();
+        board.load(file(7, PaneState::Idle, 100, 500), None);
+        board.toggle_handled(Pid::new(7));
+        assert_eq!(board.apply(file(7, PaneState::Idle, 100, 900), None), None);
+        let session = board.get(Pid::new(7)).expect("the session is on the board");
+        assert!(session.is_handled());
+    }
+
+    #[test]
+    fn a_reused_pid_has_no_mark() {
+        let mut board = Board::new();
+        board.load(file(7, PaneState::Idle, 100, 500), None);
+        assert_eq!(board.toggle_handled(Pid::new(7)), Some(true));
+        board.apply(file(7, PaneState::Idle, 200, 900), None);
+        let session = board.get(Pid::new(7)).expect("the session is on the board");
+        assert!(!session.is_handled());
     }
 
     #[test]
