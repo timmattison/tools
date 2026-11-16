@@ -239,4 +239,21 @@ mod tests {
         assert_eq!(session.file.state, PaneState::Working);
         assert_eq!(board.changes().cloned().collect::<Vec<_>>(), vec![change]);
     }
+
+    #[test]
+    fn apply_ignores_an_older_or_equal_stamp() {
+        let mut board = Board::new();
+        board.load(file(7, PaneState::Idle, 100, 500), None);
+        let before = board.get(Pid::new(7)).cloned();
+        assert_eq!(
+            board.apply(file(7, PaneState::Working, 100, 500), Some("a".into())),
+            None
+        );
+        assert_eq!(
+            board.apply(file(7, PaneState::Working, 100, 400), Some("b".into())),
+            None
+        );
+        assert_eq!(board.get(Pid::new(7)).cloned(), before);
+        assert_eq!(board.changes().count(), 0);
+    }
 }
