@@ -1,6 +1,9 @@
 //! Focus step 2: finds the WezTerm pane of a terminal, and asks WezTerm to
 //! focus it.
 
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine as _;
+
 /// The name of the user variable that the WezTerm handler reads.
 pub const FOCUS_USER_VAR: &str = "claude-focus-pane";
 
@@ -10,8 +13,9 @@ pub const FOCUS_USER_VAR: &str = "claude-focus-pane";
 /// the decimal pane number. The handler of WezTerm reads only the value, so
 /// any pane can send the sequence.
 #[must_use]
-pub fn focus_request(_pane_id: u64) -> String {
-    String::new()
+pub fn focus_request(pane_id: u64) -> String {
+    let value = STANDARD.encode(pane_id.to_string());
+    format!("\x1b]1337;SetUserVar={FOCUS_USER_VAR}={value}\x07")
 }
 
 /// Makes the argv that lists the WezTerm panes as JSON.
@@ -55,8 +59,6 @@ pub fn pane_for_tty(panes: &[WeztermPane], tty: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use base64::Engine as _;
-
     use super::*;
 
     const LIST: &str = include_str!("../fixtures/wezterm-list.json");
