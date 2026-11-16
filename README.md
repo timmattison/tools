@@ -5800,3 +5800,11 @@ Load it with `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.timmat
 ```bash
 cargo install --git https://github.com/timmattison/tools glance
 ```
+
+## cctop (Claude Code top)
+
+cctop shows one row for each live Claude Code session, with its state: working, needs-you, idle, agents, or shells. It keeps a log of the changes, and it sends a macOS notification when a session needs you. Enter brings the Zellij pane and the WezTerm window of the session to the front.
+
+To install: `cargo install --git https://github.com/timmattison/tools cctop`
+
+See [src/cctop/README.md](src/cctop/README.md) for the keys, the focus steps, and the limits.

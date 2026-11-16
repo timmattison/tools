@@ -9,6 +9,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `beta` | Records and replays terminal sessions; exports to HTML players or MP4/GIF. |
 | `bibibi` | Finds the commit that caused a regression, with a test from a later commit. |
 | `bm` | Bulk Move — recursively find and move files matching a pattern to a destination. |
+| `cctop` | Claude Code top — one row for each live Claude Code session with its state (working, needs-you, idle, agents, shells), a log of the changes, a macOS notification when a session needs you, and Enter to bring its Zellij pane and WezTerm window to the front. |
 | `cdknuke` | Removes `cdk.out` directories from AWS CDK projects throughout a repo. |
 | `cdva` | Count da various attributes — counts the lines of a tree the way `cloc` does, and reports the test code apart from the production code, including the test code inside a production file. |
 | `cf` | Count Files — recursively counts files, with optional suffix/prefix/substring filters. |

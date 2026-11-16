@@ -1300,6 +1300,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "cctop"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "buildinfo",
+ "childenv",
+ "chrono",
+ "clap",
+ "crossterm",
+ "notify",
+ "proctree",
+ "ratatui",
+ "runlimit",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "cdknuke"
 version = "0.1.0"
 dependencies = [
