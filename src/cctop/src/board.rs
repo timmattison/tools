@@ -70,6 +70,13 @@ impl Board {
         Self::default()
     }
 
+    /// Put a state file on the board at the first read. The function inserts
+    /// the session, or replaces the one with the same pid. The state time is
+    /// the stamp of the file. The log gets no entry.
+    pub fn load(&mut self, file: StateFile, name: Option<String>) {
+        let _ = (file, name);
+    }
+
     /// Apply a state file that was read after the start. The function gives
     /// the change that the file makes, or `None` when the board shows no
     /// change of state. The change goes into the log.
@@ -189,5 +196,15 @@ mod tests {
         assert_eq!(session.since, EpochMillis::new(500));
         assert_eq!(session.name.as_deref(), Some("named"));
         assert_eq!(board.changes().cloned().collect::<Vec<_>>(), vec![change]);
+    }
+
+    #[test]
+    fn load_inserts_a_session_and_logs_nothing() {
+        let mut board = Board::new();
+        board.load(file(7, PaneState::Idle, 100, 500), None);
+        let session = board.get(Pid::new(7)).expect("the session is on the board");
+        assert_eq!(session.since, EpochMillis::new(500));
+        assert_eq!(session.file.state, PaneState::Idle);
+        assert_eq!(board.changes().count(), 0);
     }
 }
