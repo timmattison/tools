@@ -75,14 +75,8 @@ impl Board {
     /// the stamp of the file. The log gets no entry.
     pub fn load(&mut self, file: StateFile, name: Option<String>) {
         let since = file.stamp;
-        self.sessions.insert(
-            file.pid,
-            Session {
-                file,
-                name,
-                since,
-            },
-        );
+        self.sessions
+            .insert(file.pid, Session { file, name, since });
     }
 
     /// Apply a state file that was read after the start. The function gives
