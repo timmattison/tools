@@ -87,12 +87,47 @@ impl Sync {
     /// it removes each session whose file is gone.
     pub fn on_dir_event(
         &self,
-        _board: &mut Board,
-        _event: DirEvent,
-        _clock: &mut dyn ProcessClock,
-        _now: EpochMillis,
+        board: &mut Board,
+        event: DirEvent,
+        clock: &mut dyn ProcessClock,
+        now: EpochMillis,
     ) -> Vec<Change> {
-        Vec::new()
+        match event {
+            DirEvent::File(pid) => {
+                let outcome = store::read_state_file(&store::state_file_path(&self.state_dir, pid));
+                self.apply_outcome(board, pid, outcome, clock, now)
+                    .into_iter()
+                    .collect()
+            }
+            DirEvent::Rescan => Vec::new(),
+        }
+    }
+
+    /// Apply the read of one file to the board.
+    fn apply_outcome(
+        &self,
+        board: &mut Board,
+        pid: Pid,
+        outcome: ReadOutcome,
+        clock: &mut dyn ProcessClock,
+        now: EpochMillis,
+    ) -> Option<Change> {
+        match outcome {
+            ReadOutcome::Present(file) => {
+                let stale = !stale_pids(&[(pid, file.started_at)], clock).is_empty();
+                if stale {
+                    // When the file stays, a new process owns the pid, and its
+                    // own write event loads the new file.
+                    return store::remove_if_stale(&self.state_dir, pid, clock)
+                        .then(|| board.remove(pid, now))
+                        .flatten();
+                }
+                let name = registry::session_name(&self.sessions_dir, pid);
+                board.apply(file, name)
+            }
+            ReadOutcome::Gone => board.remove(pid, now),
+            ReadOutcome::Unreadable(_) => None,
+        }
     }
 }
 
