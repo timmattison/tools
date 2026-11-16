@@ -416,6 +416,15 @@ mod tests {
     }
 
     #[test]
+    fn the_name_column_shows_at_70_columns() {
+        let app = board_with_a_handled_needs_you_row();
+        let buffer = render_at(&app, 10_000, 70);
+        let (_, line) = line_with(&buffer, "dir-with");
+        let name_start: String = LONG_NAME.chars().take(8).collect();
+        assert!(line.contains(&name_start), "{line}");
+    }
+
+    #[test]
     fn the_state_column_takes_no_spare_width_at_100_columns() {
         let app = board_with_a_handled_needs_you_row();
         let buffer = render(&app, 10_000);
