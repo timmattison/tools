@@ -1,7 +1,11 @@
 #![deny(unsafe_code)]
 //! Tests that run the built `glance` binary.
 
+#[cfg(target_os = "macos")]
+use std::io::{BufRead, BufReader, Read};
 use std::process::Output;
+#[cfg(target_os = "macos")]
+use std::process::Stdio;
 
 /// The exit code that clap gives for a usage error.
 #[cfg(target_os = "macos")]
@@ -78,6 +82,40 @@ fn stream_prints_one_sample_line_for_each_interval() {
     let first = stdout.lines().next().expect("a first line");
     let value: serde_json::Value = serde_json::from_str(first).expect("JSON");
     assert_eq!(value.as_object().expect("an object").len(), KEY_COUNT);
+}
+
+/// The number of lines that the closed pipe test asks for, as a bound.
+#[cfg(target_os = "macos")]
+const BOUND_LINES: &str = "40";
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_closed_pipe_ends_the_stream_with_status_0_and_no_text() {
+    // The first start of a fresh binary can be slow, so start it once here.
+    let _ = run(&["--version"]);
+    let mut child = childenv::fixture_command(env!("CARGO_BIN_EXE_glance"))
+        .args(["--stream", "--count", BOUND_LINES, "--interval", "0.25"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the glance binary starts");
+    let stdout = child.stdout.take().expect("a piped stdout");
+    let mut first = String::new();
+    BufReader::new(stdout)
+        .read_line(&mut first)
+        .expect("a first line");
+    assert!(first.ends_with('\n'), "{first:?}");
+    // The reader is gone at the end of the statement above, so the pipe is closed.
+    let mut stderr_text = String::new();
+    child
+        .stderr
+        .take()
+        .expect("a piped stderr")
+        .read_to_string(&mut stderr_text)
+        .expect("stderr is UTF-8");
+    let status = child.wait().expect("the child ends");
+    assert_eq!(status.code(), Some(0), "{status:?} {stderr_text:?}");
+    assert_eq!(stderr_text, "");
 }
 
 #[cfg(target_os = "macos")]
