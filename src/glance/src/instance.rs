@@ -507,6 +507,33 @@ mod tests {
     }
 
     #[test]
+    fn two_destinations_that_differ_only_in_case_give_names_that_differ_after_case_folding() {
+        for (a, b) in [("Alpha", "alpha"), ("Tim@m1", "tim@m1"), ("ALPHA", "alpha")] {
+            // A case-folding file system compares the names in lowercase.
+            assert_ne!(
+                host(a).file_name().to_ascii_lowercase(),
+                host(b).file_name().to_ascii_lowercase(),
+                "{a} and {b}"
+            );
+        }
+    }
+
+    #[test]
+    fn two_destinations_that_differ_only_in_case_make_two_lock_files() {
+        let data = data_directory();
+        for destination in ["Alpha", "alpha"] {
+            LockFile::in_data_directory(data.path(), &host(destination))
+                .prepare()
+                .expect("prepare the lock file");
+        }
+        // On a case-folding volume (the macOS default), the old names give one file.
+        let files = fs::read_dir(data.path().join(DIRECTORY_NAME))
+            .expect("read the glance directory")
+            .count();
+        assert_eq!(files, 2);
+    }
+
+    #[test]
     fn two_different_destinations_give_two_different_names() {
         assert_ne!(host("a/b").file_name(), host("a%2Fb").file_name());
         assert_ne!(host("local").file_name(), Target::Local.file_name());
