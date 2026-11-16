@@ -146,42 +146,71 @@ impl Geometry {
     ///
     /// The inputs are `NSStatusBar.thickness`, `NSScreen.backingScaleFactor`,
     /// and the line height of the label text. The line height is `None` when
-    /// there is no label.
+    /// there is no label. The scale is the backing scale rounded, and at least 1.
+    ///
+    /// The band is the line height rounded up to whole points. A line height
+    /// that is not finite or not above 0 gives no band. With a band, the charts
+    /// take the whole points of the thickness less the inset above, the gap,
+    /// and the band. If that height is below `MIN_HEIGHT_POINTS`, the label goes
+    /// away. Without a band, the height is the whole points of the thickness
+    /// less the inset above and below, and at least `MIN_HEIGHT_POINTS`. An
+    /// input that is not finite gives the minimum.
     #[must_use]
     pub fn from_status_bar(
         thickness_points: f64,
         backing_scale: f64,
         label_line_height_points: Option<f64>,
     ) -> Geometry {
-        let _ = label_line_height_points;
         let thickness = whole_number(thickness_points.floor());
-        let height_points = thickness
-            .saturating_sub(2 * VERTICAL_INSET_POINTS)
-            .max(Self::MIN_HEIGHT_POINTS);
         let scale = whole_number(backing_scale.round()).max(1);
-        Geometry {
-            height_points,
+        let labeled = label_line_height_points
+            .filter(|line_height| line_height.is_finite() && *line_height > 0.0)
+            .map(|line_height| whole_number(line_height.ceil()))
+            .and_then(|band| {
+                let height_points = thickness
+                    .saturating_sub(LABEL_TOP_INSET_POINTS + LABEL_GAP_POINTS)
+                    .saturating_sub(band);
+                (height_points >= Self::MIN_HEIGHT_POINTS).then_some(Geometry {
+                    height_points,
+                    scale,
+                    band_points: Some(band),
+                })
+            });
+        labeled.unwrap_or_else(|| Geometry {
+            height_points: thickness
+                .saturating_sub(2 * VERTICAL_INSET_POINTS)
+                .max(Self::MIN_HEIGHT_POINTS),
             scale,
             band_points: None,
-        }
+        })
     }
 
-    /// The height of the whole image in points.
+    /// The height of the whole image in points. It holds the charts and the label band.
     #[must_use]
     pub fn image_height_points(self) -> u32 {
-        self.height_points
+        match self.band_points {
+            Some(band) => LABEL_TOP_INSET_POINTS + self.height_points + LABEL_GAP_POINTS + band,
+            None => self.height_points,
+        }
     }
 
     /// The rows of the charts, in points from the top of the image.
     #[must_use]
     pub fn chart_rows_points(self) -> std::ops::Range<u32> {
-        0..0
+        let top = if self.band_points.is_some() {
+            LABEL_TOP_INSET_POINTS
+        } else {
+            0
+        };
+        top..top + self.height_points
     }
 
     /// The rows of the label band, in points from the top of the image.
+    /// It is `None` when there is no label. The band touches the bottom edge.
     #[must_use]
     pub fn band_rows_points(self) -> Option<std::ops::Range<u32>> {
-        None
+        self.band_points
+            .map(|band| self.image_height_points() - band..self.image_height_points())
     }
 
     /// The height of the charts in points.
@@ -768,6 +797,7 @@ mod tests {
                 assert_eq!(geometry.height_points(), height, "thickness {thickness}");
                 assert_eq!(geometry.image_height_points(), image);
                 assert_eq!(geometry.chart_rows_points(), charts.clone());
+                assert_eq!(band.len(), usize::try_from(BAND_POINTS).unwrap());
                 assert_eq!(geometry.band_rows_points(), Some(band.clone()));
             }
         }
