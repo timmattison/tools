@@ -376,26 +376,27 @@ impl Pixmap {
             .collect()
     }
 
-    /// Paints the label through `coverage`, in the label color of
-    /// `appearance`.
+    /// Paints the glyphs of the label in the label color of `appearance`.
     ///
     /// Each pixel takes the label color at the share of its alpha that the
-    /// coverage gives, over the color that the pixel had. A pixel with a
-    /// coverage of 0 keeps its color.
+    /// coverage of the glyphs in that color gives, over the color that the
+    /// pixel had. A pixel with a coverage of 0 keeps its color.
     ///
     /// # Errors
     ///
-    /// Returns [`SizeMismatch`] when the coverage is not the size of the image
+    /// Returns [`SizeMismatch`] when the glyphs are not the size of the image
     /// in pixels. The image then stays as it was.
     pub fn paint_label(
         &mut self,
-        coverage: &Coverage,
+        glyphs: &Glyphs,
         appearance: Appearance,
     ) -> Result<(), SizeMismatch> {
+        let coverage = &glyphs.dark;
+        let _ = &glyphs.light;
         if (coverage.width, coverage.height) != (self.width, self.height) {
             return Err(SizeMismatch {
                 image: (self.width, self.height),
-                coverage: (coverage.width, coverage.height),
+                glyphs: (coverage.width, coverage.height),
             });
         }
         let ink = appearance.label();
@@ -434,23 +435,49 @@ impl Coverage {
     }
 }
 
-/// The reason that [`Pixmap::paint_label`] refuses a coverage: the coverage is
-/// not the size of the image.
+/// The glyphs of the label: how much they cover each pixel when AppKit draws
+/// them in the label color of each appearance.
+///
+/// AppKit draws light text a little bolder than dark text, so the same text
+/// covers more of each pixel in the light ink. [`Pixmap::paint_label`] takes
+/// the coverage of the ink that it paints, so each ink looks as AppKit draws
+/// it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Glyphs {
+    /// The coverage in the label color of the light appearance.
+    light: Coverage,
+    /// The coverage in the label color of the dark appearance.
+    dark: Coverage,
+}
+
+impl Glyphs {
+    /// Pairs the coverage in the label color of the light appearance with the
+    /// coverage in the label color of the dark appearance.
+    ///
+    /// Returns `None` when the two coverages are not the same size.
+    #[must_use]
+    pub fn new(light: Coverage, dark: Coverage) -> Option<Glyphs> {
+        Some(Glyphs { light, dark })
+    }
+}
+
+/// The reason that [`Pixmap::paint_label`] refuses the glyphs: they are not
+/// the size of the image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SizeMismatch {
     /// The width and the height of the image, in pixels.
     pub image: (u32, u32),
-    /// The width and the height of the coverage, in pixels.
-    pub coverage: (u32, u32),
+    /// The width and the height of the glyphs, in pixels.
+    pub glyphs: (u32, u32),
 }
 
 impl fmt::Display for SizeMismatch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let (image_width, image_height) = self.image;
-        let (coverage_width, coverage_height) = self.coverage;
+        let (glyphs_width, glyphs_height) = self.glyphs;
         write!(
             f,
-            "the coverage is {coverage_width}x{coverage_height} pixels, \
+            "the glyphs are {glyphs_width}x{glyphs_height} pixels, \
              but the image is {image_width}x{image_height} pixels"
         )
     }
@@ -1109,6 +1136,16 @@ mod tests {
         Coverage::new(width, 1, values.to_vec()).expect("one value for each pixel")
     }
 
+    /// Glyphs that cover each pixel by the same share in both inks.
+    fn same_in_both_inks(coverage: Coverage) -> Glyphs {
+        Glyphs::new(coverage.clone(), coverage).expect("two coverages of one size")
+    }
+
+    /// The glyphs of an image of one row of pixels, the same in both inks.
+    fn row_glyphs(values: &[u8]) -> Glyphs {
+        same_in_both_inks(row_coverage(values))
+    }
+
     /// The colors of an image of one row of pixels.
     fn row_pixels(pixmap: &Pixmap) -> Vec<Rgba> {
         (0..pixmap.width()).map(|x| pixmap.pixel(x, 0)).collect()
@@ -1127,7 +1164,7 @@ mod tests {
         for appearance in APPEARANCES {
             let mut pixmap = row_of(&[TRANSPARENT]);
             pixmap
-                .paint_label(&row_coverage(&[FULL]), appearance)
+                .paint_label(&row_glyphs(&[FULL]), appearance)
                 .unwrap();
             assert_eq!(pixmap.pixel(0, 0), appearance.label(), "{appearance:?}");
         }
@@ -1144,7 +1181,7 @@ mod tests {
         for (appearance, expected) in cases {
             let mut pixmap = row_of(&[TRANSPARENT]);
             pixmap
-                .paint_label(&row_coverage(&[HALF]), appearance)
+                .paint_label(&row_glyphs(&[HALF]), appearance)
                 .unwrap();
             assert_eq!(pixmap.pixel(0, 0), expected, "{appearance:?}");
         }
@@ -1165,7 +1202,7 @@ mod tests {
         for appearance in APPEARANCES {
             let mut pixmap = row_of(&colors);
             pixmap
-                .paint_label(&row_coverage(&[NONE; 8]), appearance)
+                .paint_label(&row_glyphs(&[NONE; 8]), appearance)
                 .unwrap();
             assert_eq!(row_pixels(&pixmap), colors, "{appearance:?}");
         }
@@ -1176,7 +1213,9 @@ mod tests {
     fn the_coverage_lies_on_the_image_row_by_row_from_the_top_left() {
         let mut pixmap = Pixmap::empty(2, 2, 1);
         let coverage = Coverage::new(2, 2, vec![FULL, NONE, NONE, FULL]).unwrap();
-        pixmap.paint_label(&coverage, Appearance::Dark).unwrap();
+        pixmap
+            .paint_label(&same_in_both_inks(coverage), Appearance::Dark)
+            .unwrap();
         let label = Appearance::Dark.label();
         assert_eq!(pixmap.pixel(0, 0), label);
         assert_eq!(pixmap.pixel(1, 0), TRANSPARENT);
@@ -1185,25 +1224,52 @@ mod tests {
     }
 
     #[test]
-    fn the_label_refuses_a_coverage_of_another_size_and_keeps_the_image() {
+    fn the_label_refuses_glyphs_of_another_size_and_keeps_the_image() {
         let mut pixmap = row_of(&[TRANSPARENT; 2]);
-        let wide = row_coverage(&[FULL; 3]);
+        let wide = row_glyphs(&[FULL; 3]);
         assert_eq!(
             pixmap.paint_label(&wide, Appearance::Dark),
             Err(SizeMismatch {
                 image: (2, 1),
-                coverage: (3, 1),
+                glyphs: (3, 1),
             })
         );
         // The same number of pixels in a different shape is a different size.
-        let tall = Coverage::new(1, 2, vec![FULL; 2]).unwrap();
+        let tall = same_in_both_inks(Coverage::new(1, 2, vec![FULL; 2]).unwrap());
         assert_eq!(
             pixmap.paint_label(&tall, Appearance::Dark),
             Err(SizeMismatch {
                 image: (2, 1),
-                coverage: (1, 2),
+                glyphs: (1, 2),
             })
         );
         assert_eq!(row_pixels(&pixmap), [TRANSPARENT; 2]);
+    }
+
+    #[test]
+    fn the_glyphs_need_two_coverages_of_one_size() {
+        let two = || row_coverage(&[FULL; 2]);
+        assert!(Glyphs::new(two(), row_coverage(&[FULL; 3])).is_none());
+        assert!(Glyphs::new(row_coverage(&[FULL; 3]), two()).is_none());
+        let tall = Coverage::new(1, 2, vec![FULL; 2]).unwrap();
+        assert!(Glyphs::new(two(), tall).is_none());
+        assert!(Glyphs::new(two(), two()).is_some());
+    }
+
+    /// AppKit draws light text bolder than dark text, so the label takes the
+    /// coverage of the ink that it paints. Here the dark ink covers half of
+    /// the pixel and the light ink covers all of it.
+    #[test]
+    fn the_label_takes_the_coverage_of_the_ink_that_it_paints() {
+        let glyphs = Glyphs::new(row_coverage(&[HALF]), row_coverage(&[FULL])).unwrap();
+        let cases = [
+            (Appearance::Light, [0, 0, 0, 109]),
+            (Appearance::Dark, Appearance::Dark.label()),
+        ];
+        for (appearance, expected) in cases {
+            let mut pixmap = row_of(&[TRANSPARENT]);
+            pixmap.paint_label(&glyphs, appearance).unwrap();
+            assert_eq!(pixmap.pixel(0, 0), expected, "{appearance:?}");
+        }
     }
 }
