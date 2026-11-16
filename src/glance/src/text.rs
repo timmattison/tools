@@ -7,12 +7,14 @@ use crate::cpu::CpuShare;
 use crate::host::HostName;
 use crate::pressure::Level;
 use crate::sample::Sample;
-use serde_json::json;
+use serde_json::{json, Value};
 
 /// The start of the first menu line after a failed read.
 const READ_ERROR_PREFIX: &str = "Cannot read the kernel: ";
 /// The key of the short host name in the JSON line.
 const KEY_HOST: &str = "host";
+/// The key of the reason in the JSON line of a failed read.
+const KEY_ERROR: &str = "error";
 /// The key of the user share in the JSON line.
 const KEY_USER: &str = "user";
 /// The key of the system share in the JSON line.
@@ -107,6 +109,11 @@ pub fn sample_json(host: &HostName, sample: &Sample) -> String {
         (KEY_LEVEL_RAW, json!(level.raw())),
         (KEY_PERCENT, json!(sample.pressure.percent_in_use())),
     ];
+    object_line(&fields)
+}
+
+/// A JSON object on one line, with the keys in the order of `fields`.
+fn object_line(fields: &[(&str, Value)]) -> String {
     let body: Vec<String> = fields
         .iter()
         .map(|(key, value)| format!("{}:{value}", json!(key)))
@@ -120,8 +127,7 @@ pub fn sample_json(host: &HostName, sample: &Sample) -> String {
 /// quote or a newline in it keeps the line on one line.
 #[must_use]
 pub fn error_json(host: &HostName, reason: &str) -> String {
-    let _ = reason;
-    format!("{{\"host\":{}}}", json!(host.as_str()))
+    object_line(&[(KEY_HOST, json!(host.as_str())), (KEY_ERROR, json!(reason))])
 }
 
 /// The first menu line after a failed read.
