@@ -1,5 +1,7 @@
 //! The board: the live sessions, and the log of their changes.
 
+use std::collections::{HashMap, VecDeque};
+
 use proctree::Pid;
 
 use crate::state::{EpochMillis, PaneState, StateFile};
@@ -47,6 +49,44 @@ impl Change {
     #[must_use]
     pub fn is_needs_you(&self) -> bool {
         self.new == Some(PaneState::NeedsYou) && self.old != Some(PaneState::NeedsYou)
+    }
+}
+
+/// The number of changes that the log keeps. The log drops the oldest change
+/// when it is full.
+pub const LOG_CAPACITY: usize = 500;
+
+/// The live sessions, and the log of their changes.
+#[derive(Debug, Default)]
+pub struct Board {
+    sessions: HashMap<Pid, Session>,
+    log: VecDeque<Change>,
+}
+
+impl Board {
+    /// An empty board.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Apply a state file that was read after the start. The function gives
+    /// the change that the file makes, or `None` when the board shows no
+    /// change of state. The change goes into the log.
+    pub fn apply(&mut self, file: StateFile, name: Option<String>) -> Option<Change> {
+        let _ = (file, name);
+        None
+    }
+
+    /// The session with the pid, when the board holds it.
+    #[must_use]
+    pub fn get(&self, pid: Pid) -> Option<&Session> {
+        self.sessions.get(&pid)
+    }
+
+    /// The changes in the log, newest first.
+    pub fn changes(&self) -> impl Iterator<Item = &Change> {
+        self.log.iter().rev()
     }
 }
 
@@ -98,5 +138,30 @@ mod tests {
         assert!(!change(Some(NeedsYou), Some(NeedsYou)).is_needs_you());
         assert!(!change(Some(NeedsYou), Some(Idle)).is_needs_you());
         assert!(!change(Some(NeedsYou), None).is_needs_you());
+    }
+
+    #[test]
+    fn apply_inserts_an_unknown_pid_and_logs_a_new_session() {
+        let mut board = Board::new();
+        let change = board
+            .apply(
+                file(7, PaneState::Working, 100, 500),
+                Some("named".to_string()),
+            )
+            .expect("a new session is a change");
+        assert_eq!(
+            change,
+            Change {
+                at: EpochMillis::new(500),
+                pid: Pid::new(7),
+                label: "named".to_string(),
+                old: None,
+                new: Some(PaneState::Working),
+            }
+        );
+        let session = board.get(Pid::new(7)).expect("the session is on the board");
+        assert_eq!(session.since, EpochMillis::new(500));
+        assert_eq!(session.name.as_deref(), Some("named"));
+        assert_eq!(board.changes().cloned().collect::<Vec<_>>(), vec![change]);
     }
 }
