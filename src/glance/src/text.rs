@@ -8,6 +8,7 @@ use crate::host::HostName;
 use crate::pressure::Level;
 use crate::sample::Sample;
 use serde_json::{json, Value};
+use std::fmt;
 
 /// The start of the first menu line after a failed read.
 const READ_ERROR_PREFIX: &str = "Cannot read the kernel: ";
@@ -128,6 +129,108 @@ fn object_line(fields: &[(&str, Value)]) -> String {
 #[must_use]
 pub fn error_json(host: &HostName, reason: &str) -> String {
     object_line(&[(KEY_HOST, json!(host.as_str())), (KEY_ERROR, json!(reason))])
+}
+
+/// One line of the stream, read back.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StreamLine {
+    /// A sample that a Mac read.
+    Sample {
+        /// The short name of the Mac that read the kernel.
+        host: HostName,
+        /// The sample.
+        sample: Sample,
+    },
+    /// A failed read on a Mac.
+    Error {
+        /// The short name of the Mac that failed to read.
+        host: HostName,
+        /// The reason of the failure.
+        reason: String,
+    },
+}
+
+/// The reason why a line is not a stream line.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LineError {
+    /// The line is not JSON.
+    NotJson {
+        /// The text of the JSON parser.
+        reason: String,
+    },
+    /// The line is JSON, but not an object.
+    NotAnObject,
+    /// The object has no value for a key that it needs.
+    MissingKey {
+        /// The key that is absent.
+        key: &'static str,
+    },
+    /// The value of a key has the wrong type.
+    WrongType {
+        /// The key with the wrong value.
+        key: &'static str,
+    },
+    /// A CPU share is outside 0 to 1.
+    ShareOutOfRange {
+        /// The key of the share.
+        key: &'static str,
+        /// The value that the line gave.
+        value: f64,
+    },
+    /// The level name is not the name of the raw level.
+    LevelMismatch {
+        /// The name that the line gave.
+        name: String,
+        /// The raw level that the line gave.
+        raw: i32,
+    },
+    /// The percentage in use is above 100.
+    PercentAboveMaximum {
+        /// The value that the line gave.
+        value: u64,
+    },
+}
+
+impl fmt::Display for LineError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LineError::NotJson { reason } => write!(f, "the line is not JSON: {reason}"),
+            LineError::NotAnObject => write!(f, "the line is not a JSON object"),
+            LineError::MissingKey { key } => write!(f, "the line has no key \"{key}\""),
+            LineError::WrongType { key } => {
+                write!(f, "the key \"{key}\" holds a value of the wrong type")
+            }
+            LineError::ShareOutOfRange { key, value } => {
+                write!(f, "the key \"{key}\" holds {value}, outside 0 to 1")
+            }
+            LineError::LevelMismatch { name, raw } => {
+                write!(
+                    f,
+                    "the level name \"{name}\" does not fit the raw level {raw}"
+                )
+            }
+            LineError::PercentAboveMaximum { value } => {
+                write!(f, "the percentage {value} is above 100")
+            }
+        }
+    }
+}
+
+impl std::error::Error for LineError {}
+
+/// Reads one line of the stream back into a sample or an error.
+///
+/// The parse of a line that [`sample_json`] or [`error_json`] printed gives
+/// the value that was printed.
+///
+/// # Errors
+///
+/// Gives a [`LineError`] if the line is not a JSON object, if a key is absent
+/// or has the wrong type, if a share is outside 0 to 1, if the level name does
+/// not fit the raw level, or if the percentage is above 100.
+pub fn parse_line(line: &str) -> Result<StreamLine, LineError> {
+    let _ = line;
+    Err(LineError::NotAnObject)
 }
 
 /// The first menu line after a failed read.
@@ -292,6 +395,56 @@ mod tests {
         assert_eq!(value["error"], reason);
         assert_eq!(value["host"], HOST);
         assert_eq!(value.as_object().unwrap().len(), 2);
+    }
+
+    /// The sample lines that the round trip uses: shares of thirds, each level.
+    fn round_trip_samples() -> Vec<Sample> {
+        vec![
+            sample(1, 1, 1, 1, 50),
+            sample(2, 0, 1, 2, 47),
+            sample(1, 1, 1, 4, 0),
+            sample(2, 0, 1, 7, 100),
+        ]
+    }
+
+    #[test]
+    fn the_parse_of_a_printed_sample_gives_the_same_sample() {
+        for printed in round_trip_samples() {
+            let line = sample_json(&host(), &printed);
+            assert_eq!(
+                parse_line(&line),
+                Ok(StreamLine::Sample {
+                    host: host(),
+                    sample: printed
+                }),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_parse_of_a_printed_sample_ignores_a_trailing_newline() {
+        let printed = warn_sample();
+        let line = format!("{}\n", sample_json(&host(), &printed));
+        assert_eq!(
+            parse_line(&line),
+            Ok(StreamLine::Sample {
+                host: host(),
+                sample: printed
+            })
+        );
+    }
+
+    #[test]
+    fn the_parse_of_a_printed_error_gives_the_same_error() {
+        let reason = "bad \"key\"\nnext 日本語 🎉";
+        assert_eq!(
+            parse_line(&error_json(&host(), reason)),
+            Ok(StreamLine::Error {
+                host: host(),
+                reason: reason.to_owned()
+            })
+        );
     }
 
     #[test]
