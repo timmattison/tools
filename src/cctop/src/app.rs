@@ -378,4 +378,19 @@ mod tests {
         assert_eq!(app.status(), Some("No session needs you"));
         assert_eq!(app.selected_index(), Some(0));
     }
+
+    #[test]
+    fn q_and_control_c_quit() {
+        let mut app = three_rows();
+        assert_eq!(app.handle_key(press(KeyCode::Char('q'))), Action::Quit);
+        let control_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(app.handle_key(control_c), Action::Quit);
+    }
+
+    #[test]
+    fn a_plain_c_does_nothing() {
+        let mut app = three_rows();
+        assert_eq!(app.handle_key(press(KeyCode::Char('c'))), Action::Nothing);
+        assert_eq!(app.status(), None);
+    }
 }
