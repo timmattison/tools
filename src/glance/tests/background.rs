@@ -236,10 +236,15 @@ fn ps_field(pid: u32, keyword: &str) -> Option<String> {
     (output.status.success() && !text.is_empty()).then_some(text)
 }
 
-/// Whether the process `pid` runs. A zombie does not run: it ended, and its
-/// parent did not collect its status yet.
+/// Whether the process `pid` runs.
+///
+/// A process that exits does not run. The kernel marks it `E` before it
+/// closes its files, and a close of the lock file is what ends a stop. Thus
+/// `ps` can still find the process when the stop returns. A zombie (`Z`)
+/// does not run either: it ended, and its parent did not collect its status
+/// yet.
 fn alive(pid: u32) -> bool {
-    ps_field(pid, "stat").is_some_and(|state| !state.starts_with('Z'))
+    ps_field(pid, "stat").is_some_and(|state| !state.starts_with('Z') && !state.contains('E'))
 }
 
 #[test]
@@ -346,7 +351,10 @@ fn a_host_status_item_runs_beside_the_local_status_item() {
     let host = home.start(Target::Host(ALPHA));
     assert_ne!(local, host);
     assert!(alive(local), "the local status item {local} does not run");
-    assert!(alive(host), "the status item {host} of {ALPHA} does not run");
+    assert!(
+        alive(host),
+        "the status item {host} of {ALPHA} does not run"
+    );
 }
 
 #[test]
@@ -356,8 +364,14 @@ fn a_second_start_of_a_host_stops_only_the_status_item_of_that_host() {
     let alpha = home.start(Target::Host(ALPHA));
     let beta = home.start(Target::Host(BETA));
     home.assert_stops(Target::Host(ALPHA), &["--background"], alpha);
-    assert!(alive(local), "the stop of {ALPHA} stopped the local status item");
-    assert!(alive(beta), "the stop of {ALPHA} stopped the status item of {BETA}");
+    assert!(
+        alive(local),
+        "the stop of {ALPHA} stopped the local status item"
+    );
+    assert!(
+        alive(beta),
+        "the stop of {ALPHA} stopped the status item of {BETA}"
+    );
 }
 
 #[test]
@@ -373,5 +387,8 @@ fn a_local_start_stops_only_the_local_status_item() {
     let alpha = home.start(Target::Host(ALPHA));
     let local = home.start(Target::Local);
     home.assert_stops(Target::Local, &["--background"], local);
-    assert!(alive(alpha), "the local stop stopped the status item of {ALPHA}");
+    assert!(
+        alive(alpha),
+        "the local stop stopped the status item of {ALPHA}"
+    );
 }

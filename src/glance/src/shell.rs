@@ -554,8 +554,11 @@ fn register_observers(monitor: &Monitor) {
 /// The function does the first update before the run loop starts, so the
 /// status item has its frames and its width from the start. In remote mode,
 /// that update starts the first connection.
+///
+/// The function calls `on_ready` once, when the status item is up and just
+/// before the run loop starts.
 #[must_use]
-pub fn run(interval: Interval, remote: Option<Remote>) -> ExitCode {
+pub fn run(interval: Interval, remote: Option<Remote>, on_ready: impl FnOnce()) -> ExitCode {
     let Some(mtm) = MainThreadMarker::new() else {
         eprintln!("{NOT_MAIN_THREAD}");
         return ExitCode::from(EXIT_NOT_MAIN_THREAD);
@@ -580,6 +583,7 @@ pub fn run(interval: Interval, remote: Option<Remote>) -> ExitCode {
     monitor.sample_and_redraw();
     monitor.start_timer();
     register_observers(&monitor);
+    on_ready();
     app.run();
     ExitCode::SUCCESS
 }

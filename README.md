@@ -5628,6 +5628,8 @@ Show two small charts in the macOS menu bar: the share of the CPU time that the 
 
 `glance --host <destination>` shows the same charts for a second Mac, through one SSH connection that stays open. See [Show a second Mac](#show-a-second-mac).
 
+`glance --background` starts the status item and returns to the shell. A second run of the same command stops it. See [Start and stop](#start-and-stop).
+
 ### What it shows
 
 - **The left chart is the CPU.** Each column is one sample. The red part at the bottom is the system share, and the blue part above it is the user share. A nice process counts as a user process. These are the colors of the CPU chart in Activity Monitor.
@@ -5640,11 +5642,13 @@ Show two small charts in the macOS menu bar: the share of the CPU time that the 
 ### Basic Usage
 
 ```bash
-glance                         # start the status item
+glance                         # start the status item; a second run stops it
+glance -b                      # start it in the background and return to the shell
 glance --interval 2            # one sample every 2 seconds
 glance --sample                # print one reading as JSON, then stop
 glance --stream --count 3      # print 3 JSON lines, one each interval, then stop
 glance --host m1-ts            # show the charts of the Mac that ssh calls m1-ts
+glance --host m1-ts -b         # the same in the background; a second run stops only m1-ts
 ```
 
 ### Options
@@ -5655,8 +5659,29 @@ glance --host m1-ts            # show the charts of the Mac that ssh calls m1-ts
 - `--count <N>`: Stop the stream after `N` lines. It needs `--stream`. With no `--count`, the stream has no limit.
 - `--host <DESTINATION>`: Show the charts of a second Mac. `DESTINATION` is anything that `ssh` takes: an alias of `~/.ssh/config`, `user@host`, or an address. A destination that is empty or that starts with `-` is a usage error. It cannot go with `--stream` or `--sample`.
 - `--remote-binary <PATH>`: The path of `glance` on the second Mac. Defaults to `~/.cargo/bin/glance`. It needs `--host`.
+- `-b`, `--background`: Start the status item in a copy of `glance` that has no terminal, and return to the shell when the status item is up. It cannot go with `--stream` or `--sample`.
 - `-V`, `--version`: Print the version, the git hash, and whether the build was clean.
 - `-h`, `--help`: Print the usage.
+
+### Start and stop
+
+Each Mac that `glance` shows has one status item: this Mac, and each destination of `--host`. A run of `glance` first looks for the status item of its own Mac. When that status item runs, the run stops it, starts nothing, and exits with status 0. Thus a second run of the same command closes the status item that the first run opened.
+
+```bash
+glance -b                 # glance: the status item runs as PID 4242. Run glance again to stop it.
+glance --host m1-ts -b    # glance: the status item of the host m1-ts runs as PID 4250. Run glance again with the same --host to stop it.
+glance --host m1-ts       # glance: stopped the status item of the host m1-ts that ran as PID 4250.
+glance                    # glance: stopped the status item that ran as PID 4242.
+```
+
+- **A run stops only the status item of its own Mac.** A plain run stops the local status item, never a status item of `--host`. A run with `--host m1-ts` stops only the status item of `m1-ts`.
+- **The Mac is the destination as you typed it.** `m1-ts` and `tim@m1-ts` are two different status items, even when they log in to the same Mac.
+- **`--background` does not change which status item a run stops.** A run with or without `-b` stops the status item of its Mac. `-b` only decides where a new status item runs.
+- **A background status item has no terminal.** It runs in a new session, thus the close of the terminal or Control-C does not stop it. Its standard output and its standard error go nowhere. The start returns when the status item is up, or it prints why the status item did not start and exits with status 1.
+- **A foreground status item keeps the terminal** until **Quit glance**, Control-C, or a second run. It prints the same line as a background start when it is up.
+- **`--sample` and `--stream` never stop a status item.**
+- **A stop is a quit.** The run sends `SIGTERM`, and the status item exits with status 0 at once, as **Quit glance** does. Thus a LaunchAgent does not start it again (see [Start at login](#start-at-login)). In remote mode, the `ssh` child then stops on its next write, as after `kill -9` (see [Show a second Mac](#show-a-second-mac)).
+- **A lock file marks each status item** in `~/Library/Application Support/glance/`: `local.lock`, and `host-<destination>.lock` for each destination. The kernel releases the lock when its status item ends, also after a crash or `kill -9`. Thus a lock file that stays behind stops nothing and blocks nothing. The files are not in `$TMPDIR`, because macOS deletes old files there, and the lock of a status item that runs for days must stay.
 
 ### The `--sample` and `--stream` output
 
@@ -5728,7 +5753,7 @@ Then load it:
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.timmattison.glance.plist
 ```
 
-`RunAtLoad` starts `glance` at each login. `KeepAlive` with `SuccessfulExit` set to `false` starts it again after a crash, but not after **Quit glance**, which exits with status 0. To stop it and keep it stopped until the next login, run `launchctl bootout gui/$(id -u)/com.timmattison.glance`.
+`RunAtLoad` starts `glance` at each login. `KeepAlive` with `SuccessfulExit` set to `false` starts it again after a crash, but not after **Quit glance**, which exits with status 0. A run of `glance` in a terminal stops it the same way, with status 0. To stop it and keep it stopped until the next login, run `launchctl bootout gui/$(id -u)/com.timmattison.glance`.
 
 For the status item of a second Mac, write a second file with its own label, for example `~/Library/LaunchAgents/com.timmattison.glance.m1-ts.plist`. Replace `m1-ts` with your SSH destination:
 
@@ -5766,7 +5791,7 @@ Load it with `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.timmat
 - **The height of the memory chart can be different from Activity Monitor.** Activity Monitor computes its graph with a formula that Apple does not document. The color is the level of the kernel, which is the same value that Activity Monitor uses.
 - **Activity Monitor calls the warn level yellow.** `glance` shows it orange.
 - **Weeks of uptime are safe.** The tick counters are 32 bits wide and wrap after about 31 days on a Mac with 16 cores. `glance` subtracts them with wrapping arithmetic, so a wrap does not show a false spike.
-- **Child processes and threads.** In local mode, `glance` starts no child process and no thread. In remote mode, it starts one `ssh` child at a time and two threads that read its pipes. The remote Mac sends samples, not raw tick counters, thus one sample line is the same object that `--sample` prints.
+- **Child processes and threads.** In local mode, the status item starts no child process and no thread. A start with `--background` starts one copy of `glance`, which runs the status item, and the start then ends. In remote mode, it starts one `ssh` child at a time and two threads that read its pipes. The remote Mac sends samples, not raw tick counters, thus one sample line is the same object that `--sample` prints.
 - **macOS only.** On a different platform, `glance` prints `glance supports macOS only.` and exits with status 1. The second Mac of `--host` must be a Mac too.
 
 ### Install

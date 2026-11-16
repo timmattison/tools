@@ -3904,6 +3904,7 @@ dependencies = [
  "buildinfo",
  "childenv",
  "clap",
+ "dirs",
  "libc",
  "objc2",
  "objc2-app-kit",
