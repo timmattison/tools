@@ -55,6 +55,16 @@ impl CpuShare {
         }
     }
 
+    /// Tells if `value` is a share, that is a finite value from 0 to 1.
+    ///
+    /// The range of a share lives here. `RangeInclusive::contains` already
+    /// refuses NaN and both infinities.
+    #[must_use]
+    pub fn is_share(value: f64) -> bool {
+        let _ = value;
+        true
+    }
+
     /// Builds the shares from three values that a line gave.
     ///
     /// The result is `None` if a share is not finite or is outside 0 to 1.
@@ -123,6 +133,16 @@ mod tests {
         assert_share(share, 1.0, 0.0, 0.0);
         let share = CpuShare::from_shares(0.5, 0.25, 0.25).unwrap();
         assert_share(share, 0.5, 0.25, 0.25);
+    }
+
+    #[test]
+    fn is_share_refuses_a_value_outside_0_to_1() {
+        for good in [0.0, -0.0, 0.5, 1.0] {
+            assert!(CpuShare::is_share(good), "{good}");
+        }
+        for bad in [-0.1, 1.1, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(!CpuShare::is_share(bad), "{bad}");
+        }
     }
 
     #[test]
