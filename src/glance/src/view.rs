@@ -75,7 +75,16 @@ impl KernelInput {
     /// and clears the error. The first good reading pushes nothing. A failed
     /// read sets the error and changes nothing else.
     pub fn apply<E: std::fmt::Display>(&mut self, result: Result<Reading, E>, view: &mut View) {
-        let _ = (result, view, &self.previous);
+        match result {
+            Ok(reading) => {
+                if let Some(earlier) = &self.previous {
+                    view.history.push(Sample::between(earlier, &reading));
+                }
+                self.previous = Some(reading);
+                view.error = None;
+            }
+            Err(error) => view.fail(error.to_string()),
+        }
     }
 }
 
@@ -98,7 +107,19 @@ impl RemoteInput {
 
     /// Applies one event of the connection to `view`.
     pub fn apply(&mut self, event: Event, view: &mut View) {
-        let _ = (event, view, &self.host);
+        match event {
+            Event::Sample { host, sample } => {
+                self.host = Some(host);
+                view.push_sample(sample);
+            }
+            Event::ReadError { host, reason } => {
+                if let Some(name) = host {
+                    self.host = Some(name);
+                }
+                view.fail(reason);
+            }
+            Event::Ended { reason } => view.fail(reason),
+        }
     }
 
     /// The Mac that the values come from.
@@ -107,10 +128,12 @@ impl RemoteInput {
     /// first line.
     #[must_use]
     pub fn origin(&self) -> Origin<'_> {
-        let _ = &self.destination;
         Origin {
-            host: "",
-            destination: None,
+            host: self
+                .host
+                .as_ref()
+                .map_or(self.destination.as_str(), HostName::as_str),
+            destination: Some(self.destination.as_str()),
         }
     }
 }

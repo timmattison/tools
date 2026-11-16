@@ -1,10 +1,10 @@
 //! The AppKit shell: one status item in the menu bar that shows the two
 //! charts.
 //!
-//! The shell is thin. Each rule of layout, color, text, arithmetic, and
-//! connection lives in a module that has no AppKit. This module only gets the
-//! samples on a timer, gives the values to those modules, and hands the
-//! answers to AppKit.
+//! The shell is thin. Each rule of layout, color, text, arithmetic,
+//! connection, and update lives in a module that has no AppKit. This module
+//! only gets the samples on a timer, gives the values to those modules, and
+//! hands the answers to AppKit.
 //!
 //! One repeating timer on the main run loop does all of the work, and the
 //! system merges its wakeups with the wakeups of other programs. In local mode,
@@ -37,13 +37,11 @@ use objc2_foundation::{
 };
 
 use crate::chart::{render, Appearance, Geometry, Pixmap, Rgba};
-use crate::connection::{Event, Feed, Remote, SSH_PROGRAM};
-use crate::history::{History, DEFAULT_CAPACITY};
-use crate::host::HostName;
+use crate::connection::{Feed, Remote, SSH_PROGRAM};
 use crate::interval::Interval;
 use crate::reader::Reader;
-use crate::sample::{Reading, Sample};
 use crate::text::{menu_titles, Origin, MENU_LINES, QUIT_TITLE};
+use crate::view::{KernelInput, RemoteInput, View};
 
 /// The exit status of a start off the main thread.
 const EXIT_NOT_MAIN_THREAD: u8 = 1;
@@ -119,17 +117,15 @@ enum Source {
     Kernel {
         /// The reader of the kernel.
         reader: Reader,
-        /// The last good reading, or `None` before the first one.
-        previous: Option<Reading>,
+        /// The rules that turn each reading into a sample.
+        input: KernelInput,
     },
     /// A second Mac, through one `ssh` connection at a time.
     Remote {
         /// The connection that starts again after each end.
         feed: Feed,
-        /// The SSH destination, as the user typed it.
-        destination: String,
-        /// The host name of the newest line, or `None` before the first line.
-        host: Option<HostName>,
+        /// The rules that apply each event, and name the host.
+        input: RemoteInput,
     },
 }
 
@@ -138,71 +134,40 @@ enum Source {
 struct State {
     /// Where the samples come from.
     source: Source,
-    /// The samples that the charts show. They stay across a new connection.
-    history: History<Sample>,
-    /// The text of the last error, or `None` when the last sample arrived.
-    error: Option<String>,
+    /// The samples that the charts show, and the last error. The samples stay
+    /// across a new connection.
+    view: View,
 }
 
 impl State {
-    /// A state with an empty history and no error.
+    /// A state with an empty view.
     fn new(source: Source) -> State {
         State {
             source,
-            history: History::new(DEFAULT_CAPACITY),
-            error: None,
+            view: View::new(),
         }
     }
 
-    /// Gets the samples since the last tick, and keeps the errors.
+    /// Gets the samples since the last tick, and gives them to the rules.
     fn update(&mut self) {
         match &mut self.source {
-            Source::Kernel { reader, previous } => match reader.read() {
-                Ok(reading) => {
-                    if let Some(earlier) = previous {
-                        self.history.push(Sample::between(earlier, &reading));
-                    }
-                    *previous = Some(reading);
-                    self.error = None;
-                }
-                Err(error) => self.error = Some(error.to_string()),
-            },
-            Source::Remote { feed, host, .. } => {
+            Source::Kernel { reader, input } => input.apply(reader.read(), &mut self.view),
+            Source::Remote { feed, input } => {
                 for event in feed.poll(Instant::now()) {
-                    match event {
-                        Event::Sample { host: name, sample } => {
-                            *host = Some(name);
-                            self.history.push(sample);
-                            self.error = None;
-                        }
-                        Event::ReadError { host: name, reason } => {
-                            if let Some(name) = name {
-                                *host = Some(name);
-                            }
-                            self.error = Some(reason);
-                        }
-                        Event::Ended { reason } => self.error = Some(reason),
-                    }
+                    input.apply(event, &mut self.view);
                 }
             }
         }
     }
 
     /// The Mac that the values come from, for the menu and the label.
-    ///
-    /// In remote mode before the first line, the host is the destination.
     fn origin(&self) -> Origin<'_> {
         match &self.source {
             Source::Kernel { reader, .. } => Origin {
                 host: reader.host_name().as_str(),
                 destination: None,
             },
-            Source::Remote {
-                destination, host, ..
-            } => Origin {
-                host: host.as_ref().map_or(destination.as_str(), HostName::as_str),
-                destination: Some(destination.as_str()),
-            },
+            Source::Remote { input, .. } => input.origin(),
         }
     }
 
@@ -350,7 +315,7 @@ impl Monitor {
             .map(|&scale| {
                 let geometry =
                     Geometry::from_status_bar(thickness, f64::from(scale), Some(line_height));
-                (geometry, render(&state.history, geometry, appearance))
+                (geometry, render(state.view.history(), geometry, appearance))
             })
             .collect();
         let Some((_, first)) = drawings.first() else {
@@ -386,8 +351,8 @@ impl Monitor {
         let items = &self.ivars().info_items;
         let titles = menu_titles(
             &state.origin(),
-            state.error.as_deref(),
-            state.history.newest().as_ref(),
+            state.view.error(),
+            state.view.history().newest().as_ref(),
         );
         for (item, title) in items.iter().zip(titles) {
             item.setTitle(&NSString::from_str(&title));
@@ -602,12 +567,11 @@ pub fn run(interval: Interval, remote: Option<Remote>) -> ExitCode {
     let source = match remote {
         None => Source::Kernel {
             reader: Reader::new(),
-            previous: None,
+            input: KernelInput::new(),
         },
         Some(remote) => Source::Remote {
-            destination: remote.destination.as_str().to_owned(),
+            input: RemoteInput::new(remote.destination.as_str().to_owned()),
             feed: Feed::new(SSH_PROGRAM, remote, interval),
-            host: None,
         },
     };
     let state = State::new(source);
