@@ -391,17 +391,15 @@ impl Pixmap {
         glyphs: &Glyphs,
         appearance: Appearance,
     ) -> Result<(), SizeMismatch> {
-        let coverage = &glyphs.dark;
-        let _ = &glyphs.light;
-        if (coverage.width, coverage.height) != (self.width, self.height) {
+        if glyphs.size() != (self.width, self.height) {
             return Err(SizeMismatch {
                 image: (self.width, self.height),
-                glyphs: (coverage.width, coverage.height),
+                glyphs: glyphs.size(),
             });
         }
         let ink = appearance.label();
         let pixels = self.bytes.as_chunks_mut::<BYTES_PER_PIXEL>().0;
-        for (pixel, &amount) in pixels.iter_mut().zip(&coverage.values) {
+        for (pixel, &amount) in pixels.iter_mut().zip(&glyphs.coverage(appearance).values) {
             if amount > 0 {
                 *pixel = blend(ink, amount, *pixel);
             }
@@ -457,7 +455,20 @@ impl Glyphs {
     /// Returns `None` when the two coverages are not the same size.
     #[must_use]
     pub fn new(light: Coverage, dark: Coverage) -> Option<Glyphs> {
-        Some(Glyphs { light, dark })
+        ((light.width, light.height) == (dark.width, dark.height)).then_some(Glyphs { light, dark })
+    }
+
+    /// The width and the height of the glyphs, in pixels.
+    fn size(&self) -> (u32, u32) {
+        (self.light.width, self.light.height)
+    }
+
+    /// The coverage of the glyphs in the label color of `appearance`.
+    fn coverage(&self, appearance: Appearance) -> &Coverage {
+        match appearance {
+            Appearance::Light => &self.light,
+            Appearance::Dark => &self.dark,
+        }
     }
 }
 
