@@ -3,7 +3,7 @@
 
 use std::fs::OpenOptions;
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Component, Path};
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
@@ -45,7 +45,10 @@ pub struct DeviceWriter;
 
 impl TtyWriter for DeviceWriter {
     fn write(&self, tty: &Path, bytes: &[u8]) -> io::Result<()> {
-        if !tty.starts_with(DEVICE_DIRECTORY) {
+        let has_parent_step = tty
+            .components()
+            .any(|part| matches!(part, Component::ParentDir));
+        if !tty.starts_with(DEVICE_DIRECTORY) || has_parent_step {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("{} is not a device under /dev/", tty.display()),
