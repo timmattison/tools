@@ -10,6 +10,7 @@
 
 pub mod board;
 pub mod liveness;
+pub mod lsof;
 pub mod notification;
 pub mod paths;
 pub mod registry;
