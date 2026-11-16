@@ -72,7 +72,7 @@ impl App {
     }
 
     /// Handle one key. The function moves the selection, changes the status
-    /// text, and tells the main loop what to do next. A key release does
+    /// text (a move key clears it), and tells the main loop what to do next. A key release does
     /// nothing.
     pub fn handle_key(&mut self, key: KeyEvent) -> Action {
         if key.kind == KeyEventKind::Release {
@@ -179,8 +179,11 @@ impl App {
         self.selected = self.board.rows().get(index).map(|session| session.file.pid);
     }
 
-    /// Select the row `step` rows away, and stay inside the board.
+    /// Clear the status text, then select the row `step` rows away, and stay
+    /// inside the board. The status clears also when the selection cannot
+    /// move.
     fn move_selection(&mut self, step: isize) {
+        self.status = None;
         let Some(index) = self.selected_index() else {
             return;
         };

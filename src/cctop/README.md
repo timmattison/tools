@@ -35,7 +35,7 @@ The colors are the colors of the `claude-tab-bar` Zellij plugin (`Palette::DEFAU
 
 Under the rows, cctop shows the change log. It lists the changes since cctop started, newest first. A change is a new session, a new state, or the end of a session. The first read at start logs nothing.
 
-The last line is the status line. It shows the result of the last focus request or the last notification error. Without a message, it shows the keys.
+The last line is the status line. It shows the result of the last focus request or the last notification error. Without a message, it shows the keys. A move key (`j`, `k`, Up, or Down) clears the message.
 
 ## The state files
 
