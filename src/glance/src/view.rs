@@ -5,6 +5,8 @@
 //! what they get to a view. These rules need no AppKit, so a test can drive
 //! them on every platform.
 
+use std::num::NonZeroUsize;
+
 use crate::connection::Event;
 use crate::history::{History, DEFAULT_CAPACITY};
 use crate::host::HostName;
@@ -19,9 +21,9 @@ pub struct View {
 }
 
 impl View {
-    /// A view with an empty history and no error.
+    /// A view with an empty history of `capacity` samples, and no error.
     #[must_use]
-    pub fn new() -> View {
+    pub fn new(_capacity: NonZeroUsize) -> View {
         View {
             history: History::new(DEFAULT_CAPACITY),
             error: None,
@@ -47,12 +49,6 @@ impl View {
 
     fn fail(&mut self, reason: String) {
         self.error = Some(reason);
-    }
-}
-
-impl Default for View {
-    fn default() -> View {
-        View::new()
     }
 }
 
@@ -152,6 +148,8 @@ mod tests {
     const REASON_ONE: &str = "reason one";
     const REASON_TWO: &str = "reason two";
     const REASON_ENDED: &str = "ssh exited with status 255";
+    /// The number of samples that the views of the tests hold.
+    const CAPACITY: NonZeroUsize = NonZeroUsize::MIN.saturating_add(3);
 
     fn reading(user: u32, idle: u32) -> Reading {
         Reading {
@@ -192,13 +190,24 @@ mod tests {
     }
 
     fn remote() -> (RemoteInput, View) {
-        (RemoteInput::new(DESTINATION.to_owned()), View::new())
+        (RemoteInput::new(DESTINATION.to_owned()), View::new(CAPACITY))
+    }
+
+    #[test]
+    fn a_view_keeps_the_number_of_samples_that_it_gets() {
+        let (mut input, mut view) = remote();
+        for share in 0..10 {
+            input.apply(line(FULL_HOST, sample_of(share, 100 - share)), &mut view);
+        }
+        assert_eq!(view.history().capacity(), CAPACITY.get());
+        assert_eq!(view.history().len(), CAPACITY.get());
+        assert_eq!(view.history().newest(), Some(sample_of(9, 91)));
     }
 
     #[test]
     fn the_first_kernel_reading_pushes_nothing_and_clears_an_error() {
         let mut input = KernelInput::new();
-        let mut view = View::new();
+        let mut view = View::new(CAPACITY);
         input.apply(failed(), &mut view);
         input.apply(ok(reading(0, 0)), &mut view);
         assert!(view.history().is_empty());
@@ -208,7 +217,7 @@ mod tests {
     #[test]
     fn the_second_kernel_reading_pushes_the_sample_between_the_two() {
         let mut input = KernelInput::new();
-        let mut view = View::new();
+        let mut view = View::new(CAPACITY);
         input.apply(ok(reading(0, 0)), &mut view);
         input.apply(ok(reading(30, 70)), &mut view);
         assert_eq!(view.history().len(), 1);
@@ -218,7 +227,7 @@ mod tests {
     #[test]
     fn a_kernel_error_sets_the_text_and_keeps_the_history_and_the_previous_reading() {
         let mut input = KernelInput::new();
-        let mut view = View::new();
+        let mut view = View::new(CAPACITY);
         input.apply(ok(reading(0, 0)), &mut view);
         input.apply(failed(), &mut view);
         assert_eq!(view.error(), Some(READ_FAILED));

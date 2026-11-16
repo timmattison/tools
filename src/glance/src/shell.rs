@@ -38,6 +38,7 @@ use objc2_foundation::{
 
 use crate::chart::{render, Appearance, Geometry, Pixmap, Rgba, FRAME_POINTS};
 use crate::connection::{Feed, Remote, SSH_PROGRAM};
+use crate::history::DEFAULT_CAPACITY;
 use crate::interval::Interval;
 use crate::reader::Reader;
 use crate::text::{menu_titles, Origin, MENU_LINES, QUIT_TITLE};
@@ -144,7 +145,7 @@ impl State {
     fn new(source: Source) -> State {
         State {
             source,
-            view: View::new(),
+            view: View::new(DEFAULT_CAPACITY),
         }
     }
 
