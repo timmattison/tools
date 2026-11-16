@@ -30,8 +30,8 @@ pub fn notification_argv(title: &str, message: &str) -> Vec<String> {
 
 /// Makes the text of the notification for a session that needs the user.
 #[must_use]
-pub fn needs_you_message(_change: &Change) -> String {
-    String::new()
+pub fn needs_you_message(change: &Change) -> String {
+    format!("{} needs you", change.label)
 }
 
 #[cfg(test)]
