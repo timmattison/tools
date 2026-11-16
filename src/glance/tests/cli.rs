@@ -8,7 +8,6 @@ use std::process::Output;
 use std::process::Stdio;
 
 /// The exit code that clap gives for a usage error.
-#[cfg(target_os = "macos")]
 const USAGE_ERROR: i32 = 2;
 
 /// The tolerance of the sum of the three CPU shares.
@@ -116,6 +115,12 @@ fn a_closed_pipe_ends_the_stream_with_status_0_and_no_text() {
     let status = child.wait().expect("the child ends");
     assert_eq!(status.code(), Some(0), "{status:?} {stderr_text:?}");
     assert_eq!(stderr_text, "");
+}
+
+#[test]
+fn stream_and_sample_together_are_a_usage_error() {
+    let output = run(&["--stream", "--sample"]);
+    assert_eq!(output.status.code(), Some(USAGE_ERROR), "{output:?}");
 }
 
 #[cfg(target_os = "macos")]
