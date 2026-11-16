@@ -3,6 +3,11 @@
 //! The kernel gives four counters of CPU ticks. A share needs two readings,
 //! because the counters grow from the boot of the host.
 
+/// The smallest share.
+const SHARE_MIN: f64 = 0.0;
+/// The largest share.
+const SHARE_MAX: f64 = 1.0;
+
 /// The CPU tick counters of the host, as the kernel gives them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Ticks {
@@ -56,8 +61,12 @@ impl CpuShare {
     /// This function does not check the sum.
     #[must_use]
     pub fn from_shares(user: f64, system: f64, idle: f64) -> Option<CpuShare> {
-        let _ = (user, system, idle);
-        None
+        let in_range = |share: f64| (SHARE_MIN..=SHARE_MAX).contains(&share);
+        if in_range(user) && in_range(system) && in_range(idle) {
+            Some(CpuShare { user, system, idle })
+        } else {
+            None
+        }
     }
 
     /// The share of the user processes, nice processes included.
