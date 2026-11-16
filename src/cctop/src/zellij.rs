@@ -18,8 +18,15 @@ pub fn list_sessions_argv() -> Vec<String> {
 ///
 /// A live line has no `(EXITED`. The name is the text before ` [Created`.
 #[must_use]
-pub fn parse_live_sessions(_stdout: &str) -> Vec<String> {
-    Vec::new()
+pub fn parse_live_sessions(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty() && !line.contains("(EXITED"))
+        .map(|line| {
+            let name = line.split_once(" [Created").map_or(line, |(name, _)| name);
+            name.trim().to_string()
+        })
+        .collect()
 }
 
 /// Makes the argv that focuses the pane at `location`.
