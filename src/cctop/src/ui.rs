@@ -4,8 +4,8 @@
 use chrono::TimeZone;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::widgets::{Block, HighlightSpacing, Paragraph, Row, Table, TableState};
 use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{Block, HighlightSpacing, Paragraph, Row, Table, TableState};
 use ratatui::Frame;
 
 use crate::app::App;
@@ -36,18 +36,17 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 /// The number of changes that the log shows.
-const LOG_LINES: usize = 8;
+const LOG_LINES: u16 = 8;
 
 /// The height of the log block: its lines and its two borders.
-#[allow(clippy::cast_possible_truncation, reason = "LOG_LINES is a small constant")]
-const LOG_HEIGHT: u16 = LOG_LINES as u16 + 2;
+const LOG_HEIGHT: u16 = LOG_LINES + 2;
 
 /// Draw the newest changes in `area`, the newest first.
 fn draw_log(frame: &mut Frame, area: Rect, app: &App) {
     let lines: Vec<Line> = app
         .board()
         .changes()
-        .take(LOG_LINES)
+        .take(usize::from(LOG_LINES))
         .map(|change| change_line(change, &chrono::Local))
         .collect();
     let block = Block::bordered().title(" Changes ");
@@ -112,8 +111,7 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App, now: EpochMillis) {
         .map(|session| {
             let state = session.file.state;
             Row::new([
-                Span::styled(STATE_BLOCK, Style::new().fg(state_color(state)))
-                    .into(),
+                Span::styled(STATE_BLOCK, Style::new().fg(state_color(state))).into(),
                 Text::from(state.label()),
                 Text::from(format_elapsed(now.saturating_since(session.since))),
                 Text::from(
@@ -264,8 +262,10 @@ mod tests {
             .into_iter()
             .enumerate()
             .find(|(_, line)| line.contains(needle))
-            .map(|(y, line)| (u16::try_from(y).expect("the line number fits"), line))
-            .unwrap_or_else(|| panic!("no line holds {needle:?}"))
+            .map_or_else(
+                || panic!("no line holds {needle:?}"),
+                |(y, line)| (u16::try_from(y).expect("the line number fits"), line),
+            )
     }
 
     fn two_session_app() -> App {
@@ -352,8 +352,10 @@ mod tests {
     #[test]
     fn the_log_shows_a_new_session_with_a_dash() {
         let mut app = App::new();
-        app.board_mut()
-            .apply(file(12, "dir12", PaneState::Working, 300), Some("beta".to_string()));
+        app.board_mut().apply(
+            file(12, "dir12", PaneState::Working, 300),
+            Some("beta".to_string()),
+        );
         let buffer = render(&app, 1_000);
         assert!(lines(&buffer)
             .iter()
@@ -406,6 +408,9 @@ mod tests {
         let mut app = two_session_app();
         app.set_status("No session needs you");
         let buffer = render(&app, 127_000);
-        assert_eq!(row_text(&buffer, HEIGHT - 1).trim_end(), "No session needs you");
+        assert_eq!(
+            row_text(&buffer, HEIGHT - 1).trim_end(),
+            "No session needs you"
+        );
     }
 }

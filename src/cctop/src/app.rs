@@ -113,18 +113,18 @@ impl App {
 
     /// Ask the main loop to focus the selected session.
     fn focus_selected(&mut self) -> Action {
-        let target = self
-            .selected_index()
-            .and_then(|index| self.board.rows().get(index).map(|session| FocusTarget::of(session)));
-        match target {
-            Some(target) => {
-                self.status = Some(format!("Focusing {}", target.label));
-                Action::Focus(target)
-            }
-            None => {
-                self.status = Some("No session to focus".to_string());
-                Action::Nothing
-            }
+        let target = self.selected_index().and_then(|index| {
+            self.board
+                .rows()
+                .get(index)
+                .map(|session| FocusTarget::of(session))
+        });
+        if let Some(target) = target {
+            self.status = Some(format!("Focusing {}", target.label));
+            Action::Focus(target)
+        } else {
+            self.status = Some("No session to focus".to_string());
+            Action::Nothing
         }
     }
 
