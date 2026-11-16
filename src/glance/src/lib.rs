@@ -38,6 +38,8 @@
 //! - [`interval`] — the time between two samples, from the command line.
 //! - [`text`] — the lines of the menu, and the JSON line of `--sample` and
 //!   `--stream`, with its parse.
+//! - [`view`] — the samples and the last error that the status item shows, and
+//!   the rules of each mode that change them.
 //! - `reader` (macOS only) — the one module that calls the kernel.
 //! - `shell` (macOS only) — the status item, its menu, and its timer, through
 //!   AppKit.
@@ -70,3 +72,4 @@ pub mod sample;
 )]
 pub mod shell;
 pub mod text;
+pub mod view;
