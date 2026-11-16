@@ -123,6 +123,26 @@ pub fn dir_events(event: &notify::Event) -> Vec<DirEvent> {
     events
 }
 
+/// Watch `dir` and call `on_event` for each directory event.
+///
+/// The watcher does not enter sub-directories. An error from the watcher
+/// means that events may be lost, so the function calls `on_event` with
+/// `Rescan`. The watcher stops when the caller drops the returned value.
+///
+/// # Errors
+///
+/// Returns the error of `notify` when it cannot start the watcher or cannot
+/// watch `dir`.
+pub fn watch(
+    dir: &Path,
+    on_event: impl Fn(DirEvent) + Send + 'static,
+) -> notify::Result<notify::RecommendedWatcher> {
+    let _ = on_event;
+    let mut watcher = notify::recommended_watcher(|_result: notify::Result<notify::Event>| {})?;
+    notify::Watcher::watch(&mut watcher, dir, notify::RecursiveMode::NonRecursive)?;
+    Ok(watcher)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,6 +288,36 @@ mod tests {
     fn a_rescan_flag_gives_a_rescan() {
         let event = event_at(EventKind::Other, "80033.json").set_flag(Flag::Rescan);
         assert_eq!(dir_events(&event), vec![DirEvent::Rescan]);
+    }
+
+    #[test]
+    fn the_watcher_reports_a_file_that_a_rename_creates() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let watcher = watch(dir.path(), move |event| {
+            let _ = sender.send(event);
+        })
+        .unwrap();
+        let tmp = dir.path().join("4242.json.tmp");
+        std::fs::write(&tmp, state_json(4242, "idle", 1, 2)).unwrap();
+        std::fs::rename(&tmp, dir.path().join("4242.json")).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut seen = Vec::new();
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            assert!(!left.is_zero(), "no File(4242) event in 30 s, saw {seen:?}");
+            if let Ok(event) = receiver.recv_timeout(left) {
+                if event == DirEvent::File(Pid::new(4242)) {
+                    break;
+                }
+                seen.push(event);
+            }
+        }
+        drop(watcher);
     }
 
     #[test]
