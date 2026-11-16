@@ -4,7 +4,7 @@
 use chrono::TimeZone;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::widgets::{Block, HighlightSpacing, Row, Table, TableState};
+use ratatui::widgets::{Block, HighlightSpacing, Paragraph, Row, Table, TableState};
 use ratatui::text::{Span, Text};
 use ratatui::Frame;
 
@@ -24,6 +24,9 @@ const HIGHLIGHT_SYMBOL: &str = "› ";
 /// The text of the color block in the first column.
 const STATE_BLOCK: &str = "██";
 
+/// The text of the table when no session wrote a state file.
+const EMPTY_HINT: &str = "No Claude Code session wrote a state file.";
+
 /// The text that stands for a missing value.
 const NONE_TEXT: &str = "—";
 
@@ -39,6 +42,12 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App, now: EpochMillis) {
     let count = board.len();
     let noun = if count == 1 { "session" } else { "sessions" };
     let block = Block::bordered().title(format!(" cctop · {count} {noun} "));
+    if count == 0 {
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        frame.render_widget(Paragraph::new(EMPTY_HINT), inner);
+        return;
+    }
     let rows: Vec<Row> = board
         .rows()
         .into_iter()
