@@ -453,6 +453,9 @@ mod tests {
 
     define_class!(
         /// A timer target that counts its fires.
+        // SAFETY:
+        // - `NSObject` has no subclassing requirement.
+        // - `Probe` does not implement `Drop`.
         #[unsafe(super = NSObject)]
         #[name = "GlanceTimerProbe"]
         #[ivars = Cell<u32>]
