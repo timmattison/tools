@@ -356,21 +356,20 @@ impl Pixmap {
     #[must_use]
     pub fn premultiplied_bytes(&self) -> Vec<u8> {
         self.bytes
-            .chunks_exact(BYTES_PER_PIXEL)
-            .flat_map(|pixel| {
-                let alpha = pixel[ALPHA_INDEX];
-                let mut product = [alpha; BYTES_PER_PIXEL];
-                for (channel, value) in product.iter_mut().zip(&pixel[..ALPHA_INDEX]) {
-                    *channel = premultiply(*value, alpha);
-                }
-                product
+            .as_chunks::<BYTES_PER_PIXEL>()
+            .0
+            .iter()
+            .flat_map(|&[red, green, blue, alpha]| {
+                [
+                    premultiply(red, alpha),
+                    premultiply(green, alpha),
+                    premultiply(blue, alpha),
+                    alpha,
+                ]
             })
             .collect()
     }
 }
-
-/// The index of the alpha channel in one pixel.
-const ALPHA_INDEX: usize = 3;
 
 /// One color channel multiplied by its alpha, rounded to the nearest value.
 fn premultiply(channel: u8, alpha: u8) -> u8 {

@@ -24,14 +24,16 @@ use objc2::{
 use objc2_app_kit::{
     NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
     NSApplicationActivationPolicy, NSApplicationDidChangeScreenParametersNotification,
-    NSApplicationWillTerminateNotification, NSBitmapFormat, NSBitmapImageRep, NSColorSpace,
-    NSDeviceRGBColorSpace, NSImage, NSMenu, NSMenuItem, NSScreen, NSStatusBar, NSStatusItem,
-    NSVariableStatusItemLength,
+    NSApplicationWillTerminateNotification, NSBitmapFormat, NSBitmapImageRep, NSColor,
+    NSColorSpace, NSDeviceRGBColorSpace, NSFont, NSFontAttributeName,
+    NSForegroundColorAttributeName, NSGraphicsContext, NSImage, NSLineBreakMode, NSMenu,
+    NSMenuItem, NSMutableParagraphStyle, NSParagraphStyleAttributeName, NSScreen, NSStatusBar,
+    NSStatusItem, NSStringDrawing, NSTextAlignment, NSVariableStatusItemLength,
 };
 use objc2_foundation::{
-    ns_string, NSArray, NSDistributedNotificationCenter, NSNotification, NSNotificationCenter,
-    NSNotificationName, NSObject, NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize, NSString,
-    NSTimer,
+    ns_string, NSArray, NSDictionary, NSDistributedNotificationCenter, NSNotification,
+    NSNotificationCenter, NSNotificationName, NSObject, NSPoint, NSRect, NSRunLoop,
+    NSRunLoopCommonModes, NSSize, NSString, NSTimer,
 };
 
 use crate::chart::{render, Appearance, Geometry, Pixmap, Rgba};
@@ -106,6 +108,9 @@ const BYTES_PER_PIXEL: usize = 4;
 
 /// The bits in one pixel.
 const BITS_PER_PIXEL: isize = 32;
+
+/// The size of the system font of the label under the charts, in points.
+const LABEL_FONT_POINTS: f64 = 7.0;
 
 /// Where the samples come from.
 #[derive(Debug)]
@@ -338,26 +343,37 @@ impl Monitor {
         scales.sort_unstable();
         scales.dedup();
 
+        let line_height = label_line_height();
         let state = self.ivars().state.borrow();
-        let pixmaps: Vec<Pixmap> = scales
+        let drawings: Vec<(Geometry, Pixmap)> = scales
             .iter()
             .map(|&scale| {
-                let geometry = Geometry::from_status_bar(thickness, f64::from(scale), None);
-                render(&state.history, geometry, appearance)
+                let geometry =
+                    Geometry::from_status_bar(thickness, f64::from(scale), Some(line_height));
+                (geometry, render(&state.history, geometry, appearance))
             })
             .collect();
-        let Some(first) = pixmaps.first() else {
+        let Some((_, first)) = drawings.first() else {
             return;
         };
         let points = NSSize::new(
             f64::from(first.width_points()),
             f64::from(first.height_points()),
         );
+        let label = state.origin().host;
         let image = NSImage::initWithSize(NSImage::alloc(), points);
-        for pixmap in &pixmaps {
+        for (geometry, pixmap) in &drawings {
             let Some(representation) = bitmap_representation(pixmap, points) else {
                 return;
             };
+            if let Some(band) = geometry.band_rows_points() {
+                let rect = NSRect::new(
+                    NSPoint::new(0.0, 0.0),
+                    NSSize::new(points.width, f64::from(band.end - band.start)),
+                );
+                // A refused context leaves the charts of this scale with no label.
+                draw_label(&representation, label, rect, appearance.label());
+            }
             image.addRepresentation(&representation);
         }
         image.setTemplate(false);
@@ -381,7 +397,9 @@ impl Monitor {
 
 /// Makes one bitmap representation of a pixmap, tagged as sRGB.
 ///
-/// Returns `None` when AppKit refuses to make or to retag the image.
+/// The bitmap holds premultiplied alpha, because AppKit makes a graphics
+/// context for the label only for such a bitmap. Returns `None` when AppKit
+/// refuses to make or to retag the image.
 fn bitmap_representation(pixmap: &Pixmap, points: NSSize) -> Option<Retained<NSBitmapImageRep>> {
     let width = isize::try_from(pixmap.width()).ok()?;
     let height = isize::try_from(pixmap.height()).ok()?;
@@ -401,7 +419,7 @@ fn bitmap_representation(pixmap: &Pixmap, points: NSSize) -> Option<Retained<NSB
             true,
             false,
             NSDeviceRGBColorSpace,
-            NSBitmapFormat::AlphaNonpremultiplied,
+            NSBitmapFormat::empty(),
             isize::try_from(source_stride).ok()?,
             BITS_PER_PIXEL,
         )
@@ -412,7 +430,7 @@ fn bitmap_representation(pixmap: &Pixmap, points: NSSize) -> Option<Retained<NSB
         return None;
     }
     for (row, source) in pixmap
-        .bytes()
+        .premultiplied_bytes()
         .chunks_exact(source_stride)
         .take(rows)
         .enumerate()
@@ -436,20 +454,57 @@ fn bitmap_representation(pixmap: &Pixmap, points: NSSize) -> Option<Retained<NSB
 }
 
 /// The line height of the font of the label, in points.
+///
+/// The chart module rounds it up to whole points for the band.
 fn label_line_height() -> f64 {
-    0.0
+    let font = NSFont::systemFontOfSize(LABEL_FONT_POINTS);
+    font.ascender() - font.descender() + font.leading()
+}
+
+/// Converts one channel of a color from 0 to 255 into the range 0 to 1.
+fn unit_channel(value: u8) -> f64 {
+    f64::from(value) / f64::from(u8::MAX)
 }
 
 /// Draws `text` into `band` of `representation`, in `color`.
 ///
+/// `band` is in points, with its origin at the bottom left of the image. The
+/// text is in the system font at [`LABEL_FONT_POINTS`], centered, and
+/// truncated at its end with an ellipsis, so it never makes the image wider.
 /// Returns `false` when AppKit refuses to make a graphics context.
-fn draw_label(
-    _representation: &NSBitmapImageRep,
-    _text: &str,
-    _band: NSRect,
-    _color: Rgba,
-) -> bool {
-    false
+fn draw_label(representation: &NSBitmapImageRep, text: &str, band: NSRect, color: Rgba) -> bool {
+    let Some(context) = NSGraphicsContext::graphicsContextWithBitmapImageRep(representation) else {
+        return false;
+    };
+    let font = NSFont::systemFontOfSize(LABEL_FONT_POINTS);
+    let [red, green, blue, alpha] = color;
+    let text_color = NSColor::colorWithSRGBRed_green_blue_alpha(
+        unit_channel(red),
+        unit_channel(green),
+        unit_channel(blue),
+        unit_channel(alpha),
+    );
+    let paragraph = NSMutableParagraphStyle::new();
+    paragraph.setAlignment(NSTextAlignment::Center);
+    paragraph.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+    // SAFETY: These are constants of AppKit that exist at run time.
+    let keys = unsafe {
+        [
+            NSFontAttributeName,
+            NSForegroundColorAttributeName,
+            NSParagraphStyleAttributeName,
+        ]
+    };
+    let values: [&AnyObject; 3] = [&font, &text_color, &paragraph];
+    let attributes = NSDictionary::from_slices(&keys, &values);
+    NSGraphicsContext::saveGraphicsState_class();
+    NSGraphicsContext::setCurrentContext(Some(&context));
+    // SAFETY: Each key of `attributes` holds an object of the class that
+    // AppKit expects for it: a font, a color, and a paragraph style.
+    unsafe { NSString::from_str(text).drawInRect_withAttributes(band, Some(&attributes)) };
+    context.flushGraphics();
+    NSGraphicsContext::restoreGraphicsState_class();
+    true
 }
 
 /// Makes the menu and gives it to the status item. Returns the info items.
@@ -618,7 +673,9 @@ mod tests {
     /// Tells if a pixel of the rows is not transparent.
     fn inked(rows: &[Vec<u8>]) -> bool {
         rows.iter().any(|row| {
-            row.chunks_exact(BYTES_PER_PIXEL)
+            row.as_chunks::<BYTES_PER_PIXEL>()
+                .0
+                .iter()
                 .any(|pixel| pixel[ALPHA] > 0)
         })
     }
