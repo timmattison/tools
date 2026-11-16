@@ -61,8 +61,7 @@ impl CpuShare {
     /// refuses NaN and both infinities.
     #[must_use]
     pub fn is_share(value: f64) -> bool {
-        let _ = value;
-        true
+        (SHARE_MIN..=SHARE_MAX).contains(&value)
     }
 
     /// Builds the shares from three values that a line gave.
@@ -71,8 +70,7 @@ impl CpuShare {
     /// This function does not check the sum.
     #[must_use]
     pub fn from_shares(user: f64, system: f64, idle: f64) -> Option<CpuShare> {
-        let in_range = |share: f64| (SHARE_MIN..=SHARE_MAX).contains(&share);
-        if in_range(user) && in_range(system) && in_range(idle) {
+        if CpuShare::is_share(user) && CpuShare::is_share(system) && CpuShare::is_share(idle) {
             Some(CpuShare { user, system, idle })
         } else {
             None

@@ -277,7 +277,7 @@ fn share_of(object: &Map<String, Value>, key: &'static str) -> Result<f64, LineE
     let value = required(object, key)?
         .as_f64()
         .ok_or(LineError::WrongType { key })?;
-    if (0.0..=1.0).contains(&value) {
+    if CpuShare::is_share(value) {
         Ok(value)
     } else {
         Err(LineError::ShareOutOfRange { key, value })
