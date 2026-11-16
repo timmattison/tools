@@ -15,15 +15,15 @@ Each row has these parts:
 
 The rows are in this order: `needs-you`, `idle`, `agents`, `shells`, `working`. Rows in the same state show the oldest first.
 
-The colors are:
+The colors are the colors of the `claude-tab-bar` Zellij plugin (`Palette::DEFAULT` in its `src/paint.rs`), thus cctop and the tab bars agree:
 
 | State | Color |
 | --- | --- |
-| `working` | green |
-| `needs-you` | yellow |
-| `idle` | red |
-| `agents` | white |
-| `shells` | cyan |
+| `working` | green, `#2f9e44` |
+| `needs-you` | amber, `#fab005` |
+| `idle` | red, `#e03131` |
+| `agents` | white, `#ffffff` |
+| `shells` | cyan, `#00cccc` |
 
 Under the rows, cctop shows the change log. It lists the changes since cctop started, newest first. A change is a new session, a new state, or the end of a session. The first read at start logs nothing.
 
@@ -87,7 +87,7 @@ The answer "already focused" counts as success. Each command has a limit of 5 s.
    ESC ] 1337 ; SetUserVar=claude-focus-pane=<base64 pane id> BEL
    ```
 
-cctop writes to the tty of the target pane, not to its own terminal. Zellij keeps the OSC when cctop runs in a Zellij pane, and WezTerm would never see it.
+cctop writes to the tty of the target pane, not to its own terminal. When cctop runs in a Zellij pane, Zellij keeps the OSC, and WezTerm never gets it. The handler reads only the value, thus any WezTerm pane can send the request.
 
 The `user-var-changed` handler in `~/.wezterm.lua` reads the value and brings the window to the front.
 
