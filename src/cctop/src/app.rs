@@ -1,7 +1,7 @@
 //! The state of the screen: the board, the selected row, and the status text.
 //! The module turns a key into an [`Action`] for the main loop.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use proctree::Pid;
 
 use crate::board::Board;
@@ -84,6 +84,10 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1),
             KeyCode::Enter => return self.focus_selected(),
             KeyCode::Char('n') => return self.focus_next_needs_you(),
+            KeyCode::Char('q') => return Action::Quit,
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                return Action::Quit;
+            }
             _ => {}
         }
         Action::Nothing
