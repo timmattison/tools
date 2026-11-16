@@ -11,6 +11,8 @@ use serde_json::json;
 
 /// The start of the first menu line after a failed read.
 const READ_ERROR_PREFIX: &str = "Cannot read the kernel: ";
+/// The key of the short host name in the JSON line.
+const KEY_HOST: &str = "host";
 /// The key of the user share in the JSON line.
 const KEY_USER: &str = "user";
 /// The key of the system share in the JSON line.
@@ -88,16 +90,16 @@ fn percent(share: f64) -> u8 {
 
 /// The sample as one JSON object on one line, with no trailing newline.
 ///
-/// The keys are `user`, `system`, `idle`, `pressure_level`,
+/// The keys are `host`, `user`, `system`, `idle`, `pressure_level`,
 /// `pressure_level_raw`, and `pressure_percent`, in this order.
 #[must_use]
 pub fn sample_json(host: &HostName, sample: &Sample) -> String {
-    let _ = host;
     let cpu: &CpuShare = &sample.cpu;
     let level = sample.pressure.level();
     // The `json!` macro sorts the keys, so each value goes through serde_json
     // alone and the line keeps the order of the design.
     let fields = [
+        (KEY_HOST, json!(host.as_str())),
         (KEY_USER, json!(cpu.user())),
         (KEY_SYSTEM, json!(cpu.system())),
         (KEY_IDLE, json!(cpu.idle())),
