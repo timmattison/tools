@@ -17,3 +17,4 @@ pub mod store;
 pub mod sync;
 pub mod runner;
 pub mod notification;
+pub mod zellij;
