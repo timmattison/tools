@@ -18,7 +18,9 @@ impl Session {
     /// of its directory.
     #[must_use]
     pub fn label(&self) -> String {
-        String::new()
+        self.name
+            .clone()
+            .unwrap_or_else(|| self.file.directory_name())
     }
 }
 
