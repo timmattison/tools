@@ -317,4 +317,52 @@ mod tests {
         assert!(changes.is_empty());
         assert!(!env.exists(10));
     }
+
+    #[test]
+    fn a_rescan_applies_each_file_and_removes_each_session_whose_file_is_gone() {
+        let env = Env::new();
+        env.write(10, "idle", 2_000_000);
+        env.write(20, "idle", 2_000_000);
+        let mut board = Board::new();
+        env.sync.initial(&mut board, &mut live(&[10, 20, 30])).unwrap();
+        // 10 changes, 20 goes away, 30 is new, 40 holds a bad file.
+        env.write(10, "needs-you", 2_000_500);
+        std::fs::remove_file(env.state.path().join("20.json")).unwrap();
+        env.write(30, "working", 2_000_600);
+        std::fs::write(env.state.path().join("40.json"), "bad").unwrap();
+        let changes = env.sync.on_dir_event(
+            &mut board,
+            DirEvent::Rescan,
+            &mut live(&[10, 20, 30, 40]),
+            NOW,
+        );
+        let mut summary: Vec<(u32, Option<PaneState>, Option<PaneState>)> = changes
+            .iter()
+            .map(|change| (change.pid.as_u32(), change.old, change.new))
+            .collect();
+        summary.sort_by_key(|entry| entry.0);
+        assert_eq!(
+            summary,
+            vec![
+                (10, Some(PaneState::Idle), Some(PaneState::NeedsYou)),
+                (20, Some(PaneState::Idle), None),
+                (30, None, Some(PaneState::Working)),
+            ]
+        );
+        assert_eq!(board.pids(), vec![Pid::new(10), Pid::new(30)]);
+    }
+
+    #[test]
+    fn a_rescan_keeps_a_session_whose_file_is_unreadable() {
+        let env = Env::new();
+        env.write(10, "idle", 2_000_000);
+        let mut board = Board::new();
+        env.sync.initial(&mut board, &mut live(&[10])).unwrap();
+        std::fs::write(env.state.path().join("10.json"), "bad").unwrap();
+        let changes = env
+            .sync
+            .on_dir_event(&mut board, DirEvent::Rescan, &mut live(&[10]), NOW);
+        assert!(changes.is_empty());
+        assert_eq!(board.pids(), vec![Pid::new(10)]);
+    }
 }
