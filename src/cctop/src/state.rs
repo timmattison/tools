@@ -180,6 +180,13 @@ impl StateFile {
         let pane = self.zellij_pane?;
         Some(ZellijLocation { session, pane })
     }
+
+    /// The last part of the working directory. When the directory has no last
+    /// part, the whole directory.
+    #[must_use]
+    pub fn directory_name(&self) -> String {
+        String::new()
+    }
 }
 
 /// The reasons why a state file does not parse.
@@ -458,5 +465,27 @@ mod tests {
     #[test]
     fn now_is_after_the_year_2020() {
         assert!(EpochMillis::now().as_u64() > 1_577_836_800_000);
+    }
+
+    #[test]
+    fn directory_name_is_the_last_component() {
+        let file = parse_state_file(ZELLIJ).unwrap();
+        assert_eq!(file.directory_name(), "worktree");
+    }
+
+    #[test]
+    fn directory_name_keeps_multi_byte_characters() {
+        let mut file = parse_state_file(ZELLIJ).unwrap();
+        file.cwd = PathBuf::from("/tmp/日本語");
+        assert_eq!(file.directory_name(), "日本語");
+        file.cwd = PathBuf::from("/tmp/café 🎉");
+        assert_eq!(file.directory_name(), "café 🎉");
+    }
+
+    #[test]
+    fn directory_name_of_the_root_is_the_root() {
+        let mut file = parse_state_file(ZELLIJ).unwrap();
+        file.cwd = PathBuf::from("/");
+        assert_eq!(file.directory_name(), "/");
     }
 }
