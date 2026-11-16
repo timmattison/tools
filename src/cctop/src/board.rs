@@ -133,8 +133,16 @@ impl Board {
     /// gives the change that the end makes, or `None` when the board does not
     /// hold the pid. The change goes into the log.
     pub fn remove(&mut self, pid: Pid, now: EpochMillis) -> Option<Change> {
-        let _ = (pid, now);
-        None
+        let session = self.sessions.remove(&pid)?;
+        let change = Change {
+            at: now,
+            pid,
+            label: session.label(),
+            old: Some(session.file.state),
+            new: None,
+        };
+        self.record(change.clone());
+        Some(change)
     }
 
     /// The session with the pid, when the board holds it.
