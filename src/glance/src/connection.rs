@@ -72,6 +72,14 @@ impl FromStr for Destination {
     ///
     /// Returns an error if the text is empty or starts with `-`.
     fn from_str(text: &str) -> Result<Destination, DestinationError> {
+        if text.is_empty() {
+            return Err(DestinationError::Empty);
+        }
+        if text.starts_with('-') {
+            return Err(DestinationError::LeadingDash {
+                text: text.to_owned(),
+            });
+        }
         Ok(Destination(text.to_owned()))
     }
 }
@@ -120,6 +128,9 @@ impl FromStr for RemoteBinary {
     ///
     /// Returns an error if the text is empty.
     fn from_str(text: &str) -> Result<RemoteBinary, RemoteBinaryError> {
+        if text.is_empty() {
+            return Err(RemoteBinaryError::Empty);
+        }
         Ok(RemoteBinary(text.to_owned()))
     }
 }
@@ -145,11 +156,15 @@ impl Backoff {
 
     /// Gives the delay for the end of a connection, then doubles it.
     pub fn after_end(&mut self) -> Duration {
-        Duration::ZERO
+        let delay = self.next;
+        self.next = (self.next * 2).min(MAX_RETRY_DELAY);
+        delay
     }
 
     /// Sets the delay back to [`FIRST_RETRY_DELAY`].
-    pub fn after_sample(&mut self) {}
+    pub fn after_sample(&mut self) {
+        self.next = FIRST_RETRY_DELAY;
+    }
 }
 
 impl Default for Backoff {
@@ -158,28 +173,67 @@ impl Default for Backoff {
     }
 }
 
+/// The start of a path that the remote shell expands to the home directory.
+const HOME_PREFIX: &str = "~/";
+
+/// The words after the binary in the remote command.
+const STREAM_FLAGS: &str = "--stream --interval";
+
+/// The options that `ssh` gets before the destination. Each option has its own argument.
+const SSH_OPTIONS: [&str; 10] = [
+    "-T",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ConnectTimeout=10",
+    "-o",
+    "ServerAliveInterval=15",
+    "-o",
+    "ServerAliveCountMax=2",
+    // Ends the options, so a destination can never act as one.
+    "--",
+];
+
 /// The command that the remote shell runs.
-#[expect(
-    dead_code,
-    reason = "the connection that starts the child comes in the next commit"
+///
+/// A leading `~/` stays outside the quotes, so the remote shell expands it. The
+/// rest of the path is quoted, so a space or a quote in it stays one word.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the connection that starts the child comes in the next commit"
+    )
 )]
 fn remote_command(binary: &RemoteBinary, interval: Interval) -> String {
-    let _ = (binary, interval);
-    String::new()
+    let path = binary.as_str();
+    let quoted = match path.strip_prefix(HOME_PREFIX) {
+        Some(rest) => format!("{HOME_PREFIX}{}", shellquote::shell_quote(rest)),
+        None => shellquote::shell_quote(path),
+    };
+    format!("{quoted} {STREAM_FLAGS} {interval}")
 }
 
 /// The arguments of `ssh`.
-#[expect(
-    dead_code,
-    reason = "the connection that starts the child comes in the next commit"
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the connection that starts the child comes in the next commit"
+    )
 )]
 fn ssh_arguments(
     destination: &Destination,
     interval: Interval,
     binary: &RemoteBinary,
 ) -> Vec<String> {
-    let _ = (destination, interval, binary);
-    Vec::new()
+    let mut arguments: Vec<String> = SSH_OPTIONS
+        .iter()
+        .map(|&option| option.to_owned())
+        .collect();
+    arguments.push(destination.as_str().to_owned());
+    arguments.push(remote_command(binary, interval));
+    arguments
 }
 
 #[cfg(test)]
