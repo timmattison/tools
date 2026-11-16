@@ -8,6 +8,9 @@ use std::process::ExitCode;
 
 use buildinfo::version_string;
 use clap::Parser;
+#[cfg(target_os = "macos")]
+use glance::connection::Remote;
+use glance::connection::{Destination, RemoteBinary, DEFAULT_REMOTE_BINARY};
 use glance::interval::Interval;
 #[cfg(target_os = "macos")]
 use glance::reader::Reader;
@@ -55,13 +58,20 @@ struct Cli {
     #[arg(long, value_name = "N", requires = "stream")]
     count: Option<u64>,
 
-    /// Show the charts of a second Mac through one ssh connection.
-    #[arg(long, value_name = "DESTINATION")]
-    host: Option<String>,
+    /// Show the charts of a second Mac. glance opens one ssh connection to
+    /// DESTINATION and runs `glance --stream` there.
+    #[arg(long, value_name = "DESTINATION", conflicts_with_all = ["stream", "sample"])]
+    host: Option<Destination>,
 
-    /// The path of glance on the second Mac.
-    #[arg(long, value_name = "PATH")]
-    remote_binary: Option<String>,
+    /// The path of glance on the second Mac. A leading ~/ names the home
+    /// directory of the remote user, so put quotes around it.
+    #[arg(
+        long,
+        value_name = "PATH",
+        requires = "host",
+        default_value = DEFAULT_REMOTE_BINARY
+    )]
+    remote_binary: RemoteBinary,
 }
 
 fn main() -> ExitCode {
@@ -71,16 +81,17 @@ fn main() -> ExitCode {
 /// Runs `glance` on macOS.
 #[cfg(target_os = "macos")]
 fn run(cli: Cli) -> ExitCode {
-    if cli.host.is_some() || cli.remote_binary.is_some() {
-        return ExitCode::SUCCESS;
-    }
     if cli.sample {
         return sample(cli.interval);
     }
     if cli.stream {
         return stream(cli.interval, cli.count);
     }
-    glance::shell::run(cli.interval)
+    let remote = cli.host.map(|destination| Remote {
+        destination,
+        remote_binary: cli.remote_binary,
+    });
+    glance::shell::run(cli.interval, remote)
 }
 
 /// Takes two readings one interval apart and prints the sample as JSON.
@@ -190,5 +201,25 @@ mod tests {
     fn the_default_interval_is_the_constant_of_the_interval_module() {
         let cli = Cli::try_parse_from(["glance"]).unwrap();
         assert_eq!(cli.interval, Interval::DEFAULT);
+    }
+
+    #[test]
+    fn host_with_no_remote_binary_takes_the_default_of_the_connection_module() {
+        let cli = Cli::try_parse_from(["glance", "--host", "m1-ts"]).unwrap();
+        assert_eq!(cli.host.as_ref().map(Destination::as_str), Some("m1-ts"));
+        assert_eq!(cli.remote_binary, RemoteBinary::default());
+    }
+
+    #[test]
+    fn host_takes_the_remote_binary_that_the_user_gives() {
+        let cli = Cli::try_parse_from([
+            "glance",
+            "--host",
+            "m1-ts",
+            "--remote-binary",
+            "~/bin/glance",
+        ])
+        .unwrap();
+        assert_eq!(cli.remote_binary.as_str(), "~/bin/glance");
     }
 }

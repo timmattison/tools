@@ -1,16 +1,20 @@
 //! The AppKit shell: one status item in the menu bar that shows the two
 //! charts.
 //!
-//! The shell is thin. Each rule of layout, color, text, and arithmetic lives
-//! in a pure module. This module only reads the kernel on a timer, gives the
-//! values to the pure modules, and hands the answers to AppKit.
+//! The shell is thin. Each rule of layout, color, text, arithmetic, and
+//! connection lives in a module that has no AppKit. This module only gets the
+//! samples on a timer, gives the values to those modules, and hands the
+//! answers to AppKit.
 //!
-//! The shell starts no thread and no async runtime. One repeating timer on the
-//! main run loop does all of the work, and the system merges its wakeups with
-//! the wakeups of other programs.
+//! One repeating timer on the main run loop does all of the work, and the
+//! system merges its wakeups with the wakeups of other programs. In local mode,
+//! each tick reads the kernel, and the shell starts no thread, no child
+//! process, and no async runtime. In remote mode, each tick reads the events of
+//! a [`Feed`], which runs one `ssh` child and its two reader threads.
 
 use std::cell::RefCell;
 use std::process::ExitCode;
+use std::time::Instant;
 
 use objc2::rc::{autoreleasepool, Retained};
 use objc2::runtime::{AnyObject, Sel};
@@ -20,8 +24,9 @@ use objc2::{
 use objc2_app_kit::{
     NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
     NSApplicationActivationPolicy, NSApplicationDidChangeScreenParametersNotification,
-    NSBitmapFormat, NSBitmapImageRep, NSColorSpace, NSDeviceRGBColorSpace, NSImage, NSMenu,
-    NSMenuItem, NSScreen, NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
+    NSApplicationWillTerminateNotification, NSBitmapFormat, NSBitmapImageRep, NSColorSpace,
+    NSDeviceRGBColorSpace, NSImage, NSMenu, NSMenuItem, NSScreen, NSStatusBar, NSStatusItem,
+    NSVariableStatusItemLength,
 };
 use objc2_foundation::{
     ns_string, NSArray, NSDistributedNotificationCenter, NSNotification, NSNotificationCenter,
@@ -29,7 +34,9 @@ use objc2_foundation::{
 };
 
 use crate::chart::{render, Appearance, Geometry, Pixmap};
+use crate::connection::{Event, Feed, Remote, SSH_PROGRAM};
 use crate::history::{History, DEFAULT_CAPACITY};
+use crate::host::HostName;
 use crate::interval::Interval;
 use crate::reader::Reader;
 use crate::sample::{Reading, Sample};
@@ -99,22 +106,111 @@ const BYTES_PER_PIXEL: usize = 4;
 /// The bits in one pixel.
 const BITS_PER_PIXEL: isize = 32;
 
+/// Where the samples come from.
+#[derive(Debug)]
+enum Source {
+    /// The kernel of this Mac.
+    Kernel {
+        /// The reader of the kernel.
+        reader: Reader,
+        /// The last good reading, or `None` before the first one.
+        previous: Option<Reading>,
+    },
+    /// A second Mac, through one `ssh` connection at a time.
+    Remote {
+        /// The connection that starts again after each end.
+        feed: Feed,
+        /// The SSH destination, as the user typed it.
+        destination: String,
+        /// The host name of the newest line, or `None` before the first line.
+        host: Option<HostName>,
+    },
+}
+
 /// What changes from one sample to the next.
 #[derive(Debug)]
 struct State {
-    /// The last good reading, or `None` before the first one.
-    previous: Option<Reading>,
-    /// The samples that the charts show.
+    /// Where the samples come from.
+    source: Source,
+    /// The samples that the charts show. They stay across a new connection.
     history: History<Sample>,
-    /// The text of the last read error, or `None` when the last read worked.
+    /// The text of the last error, or `None` when the last sample arrived.
     error: Option<String>,
+}
+
+impl State {
+    /// A state with an empty history and no error.
+    fn new(source: Source) -> State {
+        State {
+            source,
+            history: History::new(DEFAULT_CAPACITY),
+            error: None,
+        }
+    }
+
+    /// Gets the samples since the last tick, and keeps the errors.
+    fn update(&mut self) {
+        match &mut self.source {
+            Source::Kernel { reader, previous } => match reader.read() {
+                Ok(reading) => {
+                    if let Some(earlier) = previous {
+                        self.history.push(Sample::between(earlier, &reading));
+                    }
+                    *previous = Some(reading);
+                    self.error = None;
+                }
+                Err(error) => self.error = Some(error.to_string()),
+            },
+            Source::Remote { feed, host, .. } => {
+                for event in feed.poll(Instant::now()) {
+                    match event {
+                        Event::Sample { host: name, sample } => {
+                            *host = Some(name);
+                            self.history.push(sample);
+                            self.error = None;
+                        }
+                        Event::ReadError { host: name, reason } => {
+                            if let Some(name) = name {
+                                *host = Some(name);
+                            }
+                            self.error = Some(reason);
+                        }
+                        Event::Ended { reason } => self.error = Some(reason),
+                    }
+                }
+            }
+        }
+    }
+
+    /// The Mac that the values come from, for the menu and the label.
+    ///
+    /// In remote mode before the first line, the host is the destination.
+    fn origin(&self) -> Origin<'_> {
+        match &self.source {
+            Source::Kernel { reader, .. } => Origin {
+                host: reader.host_name().as_str(),
+                destination: None,
+            },
+            Source::Remote {
+                destination, host, ..
+            } => Origin {
+                host: host.as_ref().map_or(destination.as_str(), HostName::as_str),
+                destination: Some(destination.as_str()),
+            },
+        }
+    }
+
+    /// Stops the `ssh` child of remote mode. Local mode has nothing to stop.
+    fn stop(&mut self) {
+        if let Source::Remote { feed, .. } = &mut self.source {
+            feed.stop();
+        }
+    }
 }
 
 /// The values that a `Monitor` holds.
 #[derive(Debug)]
 struct Ivars {
-    /// The reader of the kernel.
-    reader: Reader,
     /// The time between two samples.
     interval: Interval,
     /// The status item in the menu bar.
@@ -136,7 +232,7 @@ define_class!(
     struct Monitor;
 
     impl Monitor {
-        /// Reads the kernel, updates the history, and redraws.
+        /// Gets the new samples, updates the history, and redraws.
         #[unsafe(method(tick:))]
         fn tick(&self, _timer: &NSTimer) {
             autoreleasepool(|_| self.sample_and_redraw());
@@ -147,49 +243,37 @@ define_class!(
         fn redraw_on_notification(&self, _notification: &NSNotification) {
             autoreleasepool(|_| self.redraw());
         }
+
+        /// Stops the `ssh` child before the application stops.
+        #[unsafe(method(stop:))]
+        fn stop_on_notification(&self, _notification: &NSNotification) {
+            self.ivars().state.borrow_mut().stop();
+        }
     }
 );
 
 impl Monitor {
-    /// Makes a monitor with an empty history.
+    /// Makes a monitor that holds `state`.
     fn new(
         mtm: MainThreadMarker,
         interval: Interval,
-        reader: Reader,
+        state: State,
         status_item: Retained<NSStatusItem>,
         info_items: [Retained<NSMenuItem>; MENU_LINES],
     ) -> Retained<Monitor> {
         let this = Monitor::alloc(mtm).set_ivars(Ivars {
-            reader,
             interval,
             status_item,
             info_items,
-            state: RefCell::new(State {
-                previous: None,
-                history: History::new(DEFAULT_CAPACITY),
-                error: None,
-            }),
+            state: RefCell::new(state),
         });
         // SAFETY: The signature of the `init` method of `NSObject` is correct.
         unsafe { msg_send![super(this), init] }
     }
 
-    /// Reads the kernel once, keeps the result, and redraws.
+    /// Gets the new samples once, keeps them, and redraws.
     fn sample_and_redraw(&self) {
-        let outcome = self.ivars().reader.read();
-        {
-            let mut state = self.ivars().state.borrow_mut();
-            match outcome {
-                Ok(reading) => {
-                    if let Some(previous) = state.previous {
-                        state.history.push(Sample::between(&previous, &reading));
-                    }
-                    state.previous = Some(reading);
-                    state.error = None;
-                }
-                Err(error) => state.error = Some(error.to_string()),
-            }
-        }
+        self.ivars().state.borrow_mut().update();
         self.redraw();
     }
 
@@ -283,12 +367,8 @@ impl Monitor {
     fn update_menu(&self) {
         let state = self.ivars().state.borrow();
         let items = &self.ivars().info_items;
-        let origin = Origin {
-            host: self.ivars().reader.host_name().as_str(),
-            destination: None,
-        };
         let titles = menu_titles(
-            &origin,
+            &state.origin(),
             state.error.as_deref(),
             state.history.newest().as_ref(),
         );
@@ -356,19 +436,15 @@ fn bitmap_representation(pixmap: &Pixmap, points: NSSize) -> Option<Retained<NSB
 
 /// Makes the menu and gives it to the status item. Returns the info items.
 ///
-/// The first info line shows `host`.
+/// The first info line shows the host of `origin`.
 fn build_menu(
     mtm: MainThreadMarker,
     status_item: &NSStatusItem,
-    host: &str,
+    origin: &Origin<'_>,
 ) -> [Retained<NSMenuItem>; MENU_LINES] {
     let menu = NSMenu::new(mtm);
     menu.setAutoenablesItems(false);
-    let origin = Origin {
-        host,
-        destination: None,
-    };
-    let titles = menu_titles(&origin, None, None);
+    let titles = menu_titles(origin, None, None);
     let info_items: [Retained<NSMenuItem>; MENU_LINES] = titles.map(|title| {
         // SAFETY: The selector is absent, which AppKit allows for an item
         // that does nothing.
@@ -400,13 +476,23 @@ fn build_menu(
     info_items
 }
 
-/// Asks for a redraw when the appearance or the displays change.
+/// Asks for a redraw when the appearance or the displays change, and for a
+/// stop of the connection when the application stops.
+///
+/// **Quit glance** sends `terminate:`, which posts the notification of the
+/// stop and then ends the process. No destructor runs after that.
 fn register_observers(monitor: &Monitor) {
     let observer: &AnyObject = monitor;
     let theme = NSNotificationName::from_str(THEME_CHANGED_NOTIFICATION);
-    // SAFETY: `redraw:` takes one notification, and the observer is alive for
-    // the whole run. No object filter is given.
+    // SAFETY: `redraw:` and `stop:` each take one notification, and the
+    // observer is alive for the whole run. No object filter is given.
     unsafe {
+        NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
+            observer,
+            sel!(stop:),
+            Some(NSApplicationWillTerminateNotification),
+            None,
+        );
         NSDistributedNotificationCenter::defaultCenter().addObserver_selector_name_object(
             observer,
             sel!(redraw:),
@@ -424,10 +510,14 @@ fn register_observers(monitor: &Monitor) {
 
 /// Starts the status item and runs until the user quits.
 ///
-/// The function takes the first reading before the run loop starts, so the
-/// status item has its frames and its width from the start.
+/// With no `remote`, the status item shows the kernel of this Mac. With a
+/// `remote`, it shows the second Mac through `ssh`.
+///
+/// The function does the first update before the run loop starts, so the
+/// status item has its frames and its width from the start. In remote mode,
+/// that update starts the first connection.
 #[must_use]
-pub fn run(interval: Interval) -> ExitCode {
+pub fn run(interval: Interval, remote: Option<Remote>) -> ExitCode {
     let Some(mtm) = MainThreadMarker::new() else {
         eprintln!("{NOT_MAIN_THREAD}");
         return ExitCode::from(EXIT_NOT_MAIN_THREAD);
@@ -436,9 +526,20 @@ pub fn run(interval: Interval) -> ExitCode {
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
     let status_item =
         NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
-    let reader = Reader::new();
-    let info_items = build_menu(mtm, &status_item, reader.host_name().as_str());
-    let monitor = Monitor::new(mtm, interval, reader, status_item, info_items);
+    let source = match remote {
+        None => Source::Kernel {
+            reader: Reader::new(),
+            previous: None,
+        },
+        Some(remote) => Source::Remote {
+            destination: remote.destination.as_str().to_owned(),
+            feed: Feed::new(SSH_PROGRAM, remote, interval),
+            host: None,
+        },
+    };
+    let state = State::new(source);
+    let info_items = build_menu(mtm, &status_item, &state.origin());
+    let monitor = Monitor::new(mtm, interval, state, status_item, info_items);
     monitor.sample_and_redraw();
     monitor.start_timer();
     register_observers(&monitor);
