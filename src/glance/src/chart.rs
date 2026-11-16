@@ -392,7 +392,19 @@ impl Pixmap {
         coverage: &Coverage,
         appearance: Appearance,
     ) -> Result<(), SizeMismatch> {
-        let _ = (coverage, appearance);
+        if (coverage.width, coverage.height) != (self.width, self.height) {
+            return Err(SizeMismatch {
+                image: (self.width, self.height),
+                coverage: (coverage.width, coverage.height),
+            });
+        }
+        let ink = appearance.label();
+        let pixels = self.bytes.as_chunks_mut::<BYTES_PER_PIXEL>().0;
+        for (pixel, &amount) in pixels.iter_mut().zip(&coverage.values) {
+            if amount > 0 {
+                *pixel = blend(ink, amount, *pixel);
+            }
+        }
         Ok(())
     }
 }
@@ -413,7 +425,8 @@ impl Coverage {
     /// pixel.
     #[must_use]
     pub fn new(width: u32, height: u32, values: Vec<u8>) -> Option<Coverage> {
-        Some(Coverage {
+        let pixels = usize::try_from(u64::from(width) * u64::from(height)).ok()?;
+        (values.len() == pixels).then_some(Coverage {
             width,
             height,
             values,
@@ -429,6 +442,52 @@ pub struct SizeMismatch {
     pub image: (u32, u32),
     /// The width and the height of the coverage, in pixels.
     pub coverage: (u32, u32),
+}
+
+impl fmt::Display for SizeMismatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (image_width, image_height) = self.image;
+        let (coverage_width, coverage_height) = self.coverage;
+        write!(
+            f,
+            "the coverage is {coverage_width}x{coverage_height} pixels, \
+             but the image is {image_width}x{image_height} pixels"
+        )
+    }
+}
+
+impl std::error::Error for SizeMismatch {}
+
+/// The color of a pixel after `ink` covers the share `coverage` of it, over
+/// the color `behind`.
+///
+/// This is the "source over" rule on colors whose alpha is not premultiplied.
+/// The coverage scales the alpha of the ink. Each channel rounds to the
+/// nearest whole value.
+fn blend(ink: Rgba, coverage: u8, behind: Rgba) -> Rgba {
+    let unit = f64::from(u8::MAX);
+    let [ink_red, ink_green, ink_blue, ink_alpha] = ink;
+    let [behind_red, behind_green, behind_blue, behind_alpha] = behind;
+    let ink_weight = f64::from(ink_alpha) / unit * f64::from(coverage) / unit;
+    let behind_weight = f64::from(behind_alpha) / unit * (1.0 - ink_weight);
+    let alpha = ink_weight + behind_weight;
+    if alpha <= 0.0 {
+        return TRANSPARENT;
+    }
+    let mix = |ink: u8, behind: u8| {
+        to_channel((f64::from(ink) * ink_weight + f64::from(behind) * behind_weight) / alpha)
+    };
+    [
+        mix(ink_red, behind_red),
+        mix(ink_green, behind_green),
+        mix(ink_blue, behind_blue),
+        to_channel(alpha * unit),
+    ]
+}
+
+/// A channel value from 0 to 255, rounded to the nearest whole value.
+fn to_channel(value: f64) -> u8 {
+    u8::try_from(whole_number(value.round())).unwrap_or(u8::MAX)
 }
 
 /// One color channel multiplied by its alpha, rounded to the nearest value.
