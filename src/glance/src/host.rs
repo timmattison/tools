@@ -15,8 +15,14 @@ impl HostName {
     /// A byte that is not UTF-8 becomes the replacement character. The name
     /// ends before the first `.`. An empty name becomes [`UNKNOWN_HOST`].
     #[must_use]
-    pub fn from_raw(_bytes: &[u8]) -> HostName {
-        HostName(String::new())
+    pub fn from_raw(bytes: &[u8]) -> HostName {
+        let text = String::from_utf8_lossy(bytes);
+        let short = text.split('.').next().unwrap_or_default();
+        if short.is_empty() {
+            HostName(UNKNOWN_HOST.to_owned())
+        } else {
+            HostName(short.to_owned())
+        }
     }
 
     /// The short name as text.
