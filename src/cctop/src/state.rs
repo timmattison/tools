@@ -21,6 +21,50 @@ pub enum PaneState {
     Shells,
 }
 
+/// A color of the palette, in 8-bit channels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rgb {
+    /// The red channel.
+    pub red: u8,
+    /// The green channel.
+    pub green: u8,
+    /// The blue channel.
+    pub blue: u8,
+}
+
+impl PaneState {
+    /// Each state, in the order of the declaration.
+    pub const ALL: [PaneState; 5] = [
+        PaneState::Working,
+        PaneState::NeedsYou,
+        PaneState::Idle,
+        PaneState::Agents,
+        PaneState::Shells,
+    ];
+
+    /// The word that the state file and the screen use for the state.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        ""
+    }
+
+    /// The place of the state in the sort order. A low rank sorts first.
+    #[must_use]
+    pub fn rank(self) -> u8 {
+        0
+    }
+
+    /// The color of the state. It is the default palette of the tab bar.
+    #[must_use]
+    pub fn color(self) -> Rgb {
+        Rgb {
+            red: 0,
+            green: 0,
+            blue: 0,
+        }
+    }
+}
+
 /// A time in milliseconds since the Unix epoch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EpochMillis(u64);
@@ -261,5 +305,39 @@ mod tests {
             parse_state_file(&json),
             Err(StateFileError::ZeroPid)
         ));
+    }
+
+    #[test]
+    fn rank_gives_the_sort_order() {
+        let mut states = PaneState::ALL;
+        states.sort_by_key(|state| state.rank());
+        assert_eq!(
+            states,
+            [
+                PaneState::NeedsYou,
+                PaneState::Idle,
+                PaneState::Agents,
+                PaneState::Shells,
+                PaneState::Working,
+            ]
+        );
+        let ranks: Vec<u8> = states.iter().map(|state| state.rank()).collect();
+        assert_eq!(ranks, [0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn label_gives_the_contract_strings() {
+        let labels: Vec<&str> = PaneState::ALL.iter().map(|state| state.label()).collect();
+        assert_eq!(labels, ["working", "needs-you", "idle", "agents", "shells"]);
+    }
+
+    #[test]
+    fn color_gives_the_palette() {
+        let rgb = |red, green, blue| Rgb { red, green, blue };
+        assert_eq!(PaneState::Working.color(), rgb(0x2f, 0x9e, 0x44));
+        assert_eq!(PaneState::NeedsYou.color(), rgb(0xfa, 0xb0, 0x05));
+        assert_eq!(PaneState::Idle.color(), rgb(0xe0, 0x31, 0x31));
+        assert_eq!(PaneState::Agents.color(), rgb(0xff, 0xff, 0xff));
+        assert_eq!(PaneState::Shells.color(), rgb(0x00, 0xcc, 0xcc));
     }
 }
