@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 buildinfo.workspace = true
+childenv.workspace = true
 clap.workspace = true
 shellquote.workspace = true
 # The default parse of serde_json can be one unit in the last place off, and the parse of a printed sample must give the same sample.
@@ -59,9 +60,6 @@ objc2-foundation = { workspace = true, features = [
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 objc2-core-foundation = { workspace = true, features = ["CFRunLoop", "CFString"] }
-
-[dev-dependencies]
-childenv.workspace = true
 
 [lints]
 workspace = true

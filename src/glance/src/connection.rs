@@ -3,9 +3,15 @@
 //! The local `glance` opens one `ssh` connection. The remote Mac runs
 //! `glance --stream`, and this module reads one JSON line for each sample.
 
+use crate::host::HostName;
 use crate::interval::Interval;
+use crate::sample::Sample;
 use std::fmt;
+use std::io;
+use std::path::Path;
+use std::process::{Child, Stdio};
 use std::str::FromStr;
+use std::sync::{mpsc, Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 /// The first delay before a new connection attempt.
@@ -198,13 +204,6 @@ const SSH_OPTIONS: [&str; 10] = [
 ///
 /// A leading `~/` stays outside the quotes, so the remote shell expands it. The
 /// rest of the path is quoted, so a space or a quote in it stays one word.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the connection that starts the child comes in the next commit"
-    )
-)]
 fn remote_command(binary: &RemoteBinary, interval: Interval) -> String {
     let path = binary.as_str();
     let quoted = match path.strip_prefix(HOME_PREFIX) {
@@ -215,13 +214,6 @@ fn remote_command(binary: &RemoteBinary, interval: Interval) -> String {
 }
 
 /// The arguments of `ssh`.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the connection that starts the child comes in the next commit"
-    )
-)]
 fn ssh_arguments(
     destination: &Destination,
     interval: Interval,
@@ -234,6 +226,93 @@ fn ssh_arguments(
     arguments.push(destination.as_str().to_owned());
     arguments.push(remote_command(binary, interval));
     arguments
+}
+
+/// One thing that the connection reports.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Event {
+    /// One sample line.
+    Sample {
+        /// The short name of the remote Mac.
+        host: HostName,
+        /// The sample.
+        sample: Sample,
+    },
+    /// One error line of the remote Mac, or a line that does not parse.
+    ///
+    /// `host` is `Some` for an error line of the remote Mac. It is `None` for a
+    /// line that does not parse.
+    ReadError {
+        /// The remote Mac that reported the error, if there is one.
+        host: Option<HostName>,
+        /// The reason of the error.
+        reason: String,
+    },
+    /// The child stopped.
+    ///
+    /// The reason is the last line of its standard error. When the standard
+    /// error was empty, the reason is its exit status.
+    Ended {
+        /// Why the child stopped.
+        reason: String,
+    },
+}
+
+/// One running `ssh` child and the events that it sends.
+#[derive(Debug)]
+pub struct Connection {
+    /// The child. A drop kills and reaps it.
+    child: Arc<Mutex<Child>>,
+    /// The events of the reader threads.
+    events: mpsc::Receiver<Event>,
+}
+
+impl Connection {
+    /// Starts `program` with the arguments of `ssh`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of the operating system if the child does not start.
+    pub fn start(
+        program: &Path,
+        destination: &Destination,
+        interval: Interval,
+        remote_binary: &RemoteBinary,
+    ) -> io::Result<Connection> {
+        let child = childenv::command(program)
+            .args(ssh_arguments(destination, interval, remote_binary))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let (sender, events) = mpsc::channel();
+        let _ = sender.send(Event::Ended {
+            reason: String::new(),
+        });
+        Ok(Connection {
+            child: Arc::new(Mutex::new(child)),
+            events,
+        })
+    }
+
+    /// The events of the connection.
+    #[must_use]
+    pub fn receiver(&self) -> &mpsc::Receiver<Event> {
+        &self.events
+    }
+
+    /// Stops the child. A drop does the same.
+    pub fn stop(self) {
+        drop(self);
+    }
+}
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        let mut child = self.child.lock().unwrap_or_else(PoisonError::into_inner);
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 }
 
 #[cfg(test)]
