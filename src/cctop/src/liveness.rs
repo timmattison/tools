@@ -30,8 +30,15 @@ pub trait ProcessClock {
 /// all pids.
 #[must_use]
 pub fn stale_pids(sessions: &[(Pid, EpochMillis)], clock: &mut dyn ProcessClock) -> Vec<Pid> {
-    let _ = (sessions, clock);
-    Vec::new()
+    let pids: Vec<Pid> = sessions.iter().map(|(pid, _)| *pid).collect();
+    let times = clock.start_times(&pids);
+    let mut stale: Vec<Pid> = sessions
+        .iter()
+        .filter(|(pid, started_at)| is_stale(*started_at, times.get(pid).copied()))
+        .map(|(pid, _)| *pid)
+        .collect();
+    stale.sort_by_key(|pid| pid.as_u32());
+    stale
 }
 
 #[cfg(test)]
