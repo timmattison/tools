@@ -889,4 +889,12 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn the_label_color_is_the_frame_color_of_each_appearance() {
+        assert_ne!(Appearance::Light.label(), Appearance::Dark.label());
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            assert_eq!(appearance.label(), appearance.frame());
+        }
+    }
 }
