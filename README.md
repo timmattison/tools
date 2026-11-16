@@ -5636,8 +5636,8 @@ Show two small charts in the macOS menu bar: the share of the CPU time that the 
 - **The right chart is the memory pressure.** The height of each column is the memory in use as a percentage, and its color is the pressure level of that sample: green for normal, orange for warn, and red for critical. A level that `glance` does not know is gray, never green.
 - **Each chart is as high as the menu bar**, inside a thin frame, and the two charts share one border. Thus a low load is easy to see: on a menu bar of 22 points, each chart has 20 rows, and a CPU share of 10% fills 2 of them.
 - **The charts show the last 32 samples.** At the default interval, that is the last 32 seconds. The newest column is at the right edge, so a short spike stays visible after it ends.
-- **The short name of the Mac is in small text at the top of the charts.** It is the name before the first `.`, as `hostname -s` gives it (`M4-Pro-Mac-Mini`, not `M4-Pro-Mac-Mini.local`). The name goes across both charts, over the columns. Each pixel of the name is black or white, whichever contrasts more with the pixel behind it. Thus the name is black where it crosses a column, and it has the text color of the menu bar where the chart is empty. The charts are wide enough for a name such as `M4-Pro-Mac-Mini`. A longer name ends in an ellipsis, and the status item does not grow. If the menu bar is too thin for the name, the name goes away.
-- **A click on the charts opens a menu** with the host (`Host: <name>`, the full name), the current values (user %, system %, idle %, the pressure level, and the percentage in use), and a **Quit glance** item.
+- **The name of the Mac is in small text at the top of the charts.** In local mode, it is the short name of the Mac: the name before the first `.`, as `hostname -s` gives it (`M4-Pro-Mac-Mini`, not `M4-Pro-Mac-Mini.local`). In remote mode, it is the destination of `--host` as you typed it (see [Show a second Mac](#show-a-second-mac)). The name goes across both charts, over the columns. Each pixel of the name is black or white, whichever contrasts more with the pixel behind it. Thus the name is black where it crosses a column, and it has the text color of the menu bar where the chart is empty. The charts are wide enough for a name such as `M4-Pro-Mac-Mini`. A longer name ends in an ellipsis, and the status item does not grow. If the menu bar is too thin for the name, the name goes away.
+- **A click on the charts opens a menu** with the host (`Host: <name>`, the full name, or `Host: <destination> (ssh)` in remote mode), the current values (user %, system %, idle %, the pressure level, and the percentage in use), and a **Quit glance** item.
 - `glance` has no Dock icon and no window.
 
 ### Basic Usage
@@ -5650,6 +5650,7 @@ glance --sample                # print one reading as JSON, then stop
 glance --stream --count 3      # print 3 JSON lines, one each interval, then stop
 glance --host m1-ts            # show the charts of the Mac that ssh calls m1-ts
 glance --host m1-ts -b         # the same in the background; a second run stops only m1-ts
+glance --host m1-ts --resolve  # the same, with the name that the second Mac reports
 ```
 
 ### Options
@@ -5660,6 +5661,7 @@ glance --host m1-ts -b         # the same in the background; a second run stops 
 - `--count <N>`: Stop the stream after `N` lines. It needs `--stream`. With no `--count`, the stream has no limit.
 - `--host <DESTINATION>`: Show the charts of a second Mac. `DESTINATION` is anything that `ssh` takes: an alias of `~/.ssh/config`, `user@host`, or an address. A destination that is empty or that starts with `-` is a usage error. It cannot go with `--stream` or `--sample`.
 - `--remote-binary <PATH>`: The path of `glance` on the second Mac. Defaults to `~/.cargo/bin/glance`. It needs `--host`.
+- `--resolve`: Show the name that the second Mac reports (`hostname -s` on that Mac), not the destination as you typed it. Before the first line arrives, the status item shows the destination. It needs `--host`.
 - `-b`, `--background`: Start the status item in a copy of `glance` that has no terminal, and return to the shell when the status item is up. It cannot go with `--stream` or `--sample`.
 - `-V`, `--version`: Print the version, the git hash, and whether the build was clean.
 - `-h`, `--help`: Print the usage.
@@ -5678,6 +5680,7 @@ glance                    # glance: stopped the status item that ran as PID 4242
 - **A run stops only the status item of its own Mac.** A plain run stops the local status item, never a status item of `--host`. A run with `--host m1-ts` stops only the status item of `m1-ts`.
 - **The Mac is the destination as you typed it.** `m1-ts` and `tim@m1-ts` are two different status items, even when they log in to the same Mac.
 - **`--background` does not change which status item a run stops.** A run with or without `-b` stops the status item of its Mac. `-b` only decides where a new status item runs.
+- **`--resolve` does not change which status item a run stops.** `glance --host m1-ts` stops the status item that `glance --host m1-ts --resolve` started, and the reverse is also true.
 - **A background status item has no terminal.** It runs in a new session, thus the close of the terminal or Control-C does not stop it. Until the status item is up, the start shows what the copy writes to its standard error. After that, the standard output and the standard error of the status item go to `/dev/null`. The start returns when the status item is up, or it prints why the status item did not start and exits with status 1.
 - **A foreground status item keeps the terminal** until **Quit glance**, Control-C, or a second run. It prints the same line as a background start when it is up.
 - **`--sample` and `--stream` never stop a status item.**
@@ -5702,7 +5705,9 @@ In `--stream`, a failed read gives the line `{"host":"<name>","error":"<reason>"
 2. Make sure that `ssh <destination>` logs in with a key and asks for nothing. `glance` starts `ssh` with `BatchMode=yes`, thus a refused key gives an error line in the menu, never a password prompt.
 3. Start `glance --host <destination>` on the Mac at your desk. Run a second, local `glance` next to it to see both Macs.
 
-**The label shows the name that the second Mac reports**, not the SSH alias, thus a wrong alias cannot show a false name. Before the first line arrives, the label shows the destination as you typed it. The first line of the menu is `Host: <name> (ssh <destination>)`.
+**The label shows the destination as you typed it**, for the full life of the status item. That is the name that you know the Mac by. `tim@m1-ts` stays `tim@m1-ts`, and `studio.example.com` is not cut at the first `.`. A destination that is too wide for the label ends in an ellipsis. The first line of the menu is `Host: <destination> (ssh)`.
+
+**This default changed.** Before, the label showed the name that the second Mac reports. To get that label, add `--resolve`. A wrong alias then cannot show a false name. Before the first line arrives, the label shows the destination. After that, it shows the name that the newest line reports, which is `hostname -s` on the second Mac. When that name is different from the destination, the first line of the menu is `Host: <name> (ssh <destination>)`.
 
 **The default remote binary is the full path `~/.cargo/bin/glance`**, where `cargo install` puts it. `sshd` runs the command through the login shell of the remote user with `-c`. zsh then reads `~/.zshenv`, but not `~/.zprofile` or `~/.zshrc`, thus a bare `glance` is often not on `PATH` there. For a different place, give `--remote-binary`:
 
