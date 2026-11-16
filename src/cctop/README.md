@@ -13,11 +13,11 @@ Each row has these parts:
 - The name of the directory of the session.
 - The registry name of the session, if it has one.
 
-The rows are in this order: `needs-you`, `idle`, `agents`, `shells`, `working`. Rows in the same state show the oldest first.
+The rows are in this order: `needs-you`, `idle`, `agents`, `shells`, `working`. Rows in the same state show the oldest first, then the handled rows in the order of their marks.
 
 ### The handled mark
 
-Press `h` to mark the selected session as handled. The row goes to the bottom of the rows in its state, and its state shows ` - handled`. The latest mark goes to the very bottom. The cursor then selects the next row that has no mark, thus you can press `h` again to mark that session. When no such row is below it, the cursor stays on the marked row.
+Press `h` to mark the selected session as handled. The row goes to the bottom of the rows in its state, and its state shows ` - handled`. The latest mark goes to the bottom of its state. The cursor then selects the next row that has no mark, thus you can press `h` again to mark that session. When no such row is below it, the cursor stays on the marked row.
 
 The mark stays until the session changes state. A new write of the same state keeps the mark. When the state changes, the mark goes away, and it does not come back when the session returns to the old state.
 
