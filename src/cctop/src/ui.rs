@@ -2,15 +2,83 @@
 //! status line.
 
 use chrono::TimeZone;
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::widgets::{Block, HighlightSpacing, Row, Table, TableState};
+use ratatui::text::{Span, Text};
 use ratatui::Frame;
 
 use crate::app::App;
-use crate::state::EpochMillis;
+use crate::state::{EpochMillis, PaneState};
 
 /// Draw the screen: the table of sessions, the change log, and the status
 /// line. `now` gives the time that the elapsed times count to.
 pub fn draw(frame: &mut Frame, app: &App, now: EpochMillis) {
-    let _ = (frame, app, now);
+    let [table_area] = Layout::vertical([Constraint::Min(3)]).areas(frame.area());
+    draw_table(frame, table_area, app, now);
+}
+
+/// The text of the marker in front of the selected row.
+const HIGHLIGHT_SYMBOL: &str = "› ";
+
+/// The text of the color block in the first column.
+const STATE_BLOCK: &str = "██";
+
+/// The text that stands for a missing value.
+const NONE_TEXT: &str = "—";
+
+/// The color of a state, as a color of the terminal.
+fn state_color(state: PaneState) -> Color {
+    let rgb = state.color();
+    Color::Rgb(rgb.red, rgb.green, rgb.blue)
+}
+
+/// Draw the table of sessions in `area`.
+fn draw_table(frame: &mut Frame, area: Rect, app: &App, now: EpochMillis) {
+    let board = app.board();
+    let count = board.len();
+    let noun = if count == 1 { "session" } else { "sessions" };
+    let block = Block::bordered().title(format!(" cctop · {count} {noun} "));
+    let rows: Vec<Row> = board
+        .rows()
+        .into_iter()
+        .map(|session| {
+            let state = session.file.state;
+            Row::new([
+                Span::styled(STATE_BLOCK, Style::new().fg(state_color(state)))
+                    .into(),
+                Text::from(state.label()),
+                Text::from(format_elapsed(now.saturating_since(session.since))),
+                Text::from(
+                    session
+                        .file
+                        .zellij_session
+                        .clone()
+                        .unwrap_or_else(|| NONE_TEXT.to_string()),
+                ),
+                Text::from(session.file.directory_name()),
+                Text::from(session.name.clone().unwrap_or_default()),
+            ])
+        })
+        .collect();
+    let widths = [
+        Constraint::Length(2),
+        Constraint::Length(10),
+        Constraint::Length(8),
+        Constraint::Length(14),
+        Constraint::Length(24),
+        Constraint::Min(8),
+    ];
+    let header = Row::new(["", "STATE", "TIME", "ZELLIJ", "DIRECTORY", "NAME"])
+        .style(Style::new().add_modifier(Modifier::BOLD));
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(block)
+        .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED))
+        .highlight_symbol(HIGHLIGHT_SYMBOL)
+        .highlight_spacing(HighlightSpacing::Always);
+    let mut state = TableState::default().with_selected(app.selected_index());
+    frame.render_stateful_widget(table, area, &mut state);
 }
 
 /// Format a time span for the screen. A span under one minute shows seconds,
@@ -52,7 +120,7 @@ mod tests {
     use ratatui::style::Color;
     use ratatui::Terminal;
 
-    use crate::state::{PaneState, StateFile};
+    use crate::state::StateFile;
 
     const SECOND: u64 = 1000;
     const MINUTE: u64 = 60 * SECOND;
