@@ -17,7 +17,8 @@ path = "src/main.rs"
 [dependencies]
 buildinfo.workspace = true
 clap.workspace = true
-serde_json.workspace = true
+# The default parse of serde_json can be one unit in the last place off, and the parse of a printed sample must give the same sample.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc.workspace = true

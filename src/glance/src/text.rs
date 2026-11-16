@@ -5,9 +5,9 @@
 
 use crate::cpu::CpuShare;
 use crate::host::HostName;
-use crate::pressure::Level;
+use crate::pressure::{Level, Pressure};
 use crate::sample::Sample;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::fmt;
 
 /// The start of the first menu line after a failed read.
@@ -229,8 +229,74 @@ impl std::error::Error for LineError {}
 /// or has the wrong type, if a share is outside 0 to 1, if the level name does
 /// not fit the raw level, or if the percentage is above 100.
 pub fn parse_line(line: &str) -> Result<StreamLine, LineError> {
-    let _ = line;
-    Err(LineError::NotAnObject)
+    let value: Value =
+        serde_json::from_str(line.trim_end()).map_err(|error| LineError::NotJson {
+            reason: error.to_string(),
+        })?;
+    let Value::Object(object) = value else {
+        return Err(LineError::NotAnObject);
+    };
+    let host = HostName::from_raw(text_of(&object, KEY_HOST)?.as_bytes());
+    if object.contains_key(KEY_ERROR) {
+        let reason = text_of(&object, KEY_ERROR)?.to_owned();
+        return Ok(StreamLine::Error { host, reason });
+    }
+    let sample = sample_of(&object)?;
+    Ok(StreamLine::Sample { host, sample })
+}
+
+/// The value of a key that the object must hold.
+fn required<'a>(object: &'a Map<String, Value>, key: &'static str) -> Result<&'a Value, LineError> {
+    object.get(key).ok_or(LineError::MissingKey { key })
+}
+
+/// The text of a key that must hold a string.
+fn text_of<'a>(object: &'a Map<String, Value>, key: &'static str) -> Result<&'a str, LineError> {
+    required(object, key)?
+        .as_str()
+        .ok_or(LineError::WrongType { key })
+}
+
+/// A CPU share that the key holds, checked against 0 to 1.
+fn share_of(object: &Map<String, Value>, key: &'static str) -> Result<f64, LineError> {
+    let value = required(object, key)?
+        .as_f64()
+        .ok_or(LineError::WrongType { key })?;
+    if (0.0..=1.0).contains(&value) {
+        Ok(value)
+    } else {
+        Err(LineError::ShareOutOfRange { key, value })
+    }
+}
+
+/// The sample that the six sample keys of the object hold.
+fn sample_of(object: &Map<String, Value>) -> Result<Sample, LineError> {
+    let user = share_of(object, KEY_USER)?;
+    let system = share_of(object, KEY_SYSTEM)?;
+    let idle = share_of(object, KEY_IDLE)?;
+    let name = text_of(object, KEY_LEVEL)?;
+    let raw = required(object, KEY_LEVEL_RAW)?
+        .as_i64()
+        .and_then(|number| i32::try_from(number).ok())
+        .ok_or(LineError::WrongType { key: KEY_LEVEL_RAW })?;
+    if name != Level::from_raw(raw).name() {
+        return Err(LineError::LevelMismatch {
+            name: name.to_owned(),
+            raw,
+        });
+    }
+    let value = required(object, KEY_PERCENT)?
+        .as_u64()
+        .ok_or(LineError::WrongType { key: KEY_PERCENT })?;
+    let pressure = u8::try_from(value)
+        .ok()
+        .and_then(|percent| Pressure::from_level_and_percent(raw, percent))
+        .ok_or(LineError::PercentAboveMaximum { value })?;
+    let cpu = CpuShare::from_shares(user, system, idle).ok_or(LineError::ShareOutOfRange {
+        key: KEY_USER,
+        value: user,
+    })?;
+    Ok(Sample { cpu, pressure })
 }
 
 /// The first menu line after a failed read.
