@@ -7,13 +7,10 @@ use std::sync::Arc;
 use proctree::{Pid, ProcessTree};
 
 use crate::board::Session;
-use crate::runner::{CommandOutput, Runner, COMMAND_LIMIT};
+use crate::runner::{Runner, COMMAND_LIMIT};
 use crate::state::{ZellijLocation, ZellijPaneId};
 use crate::wezterm::TtyWriter;
 use crate::{ancestry, lsof, wezterm, zellij};
-
-/// The text of a step that failed, until the step names its error.
-const STEP_FAILED: &str = "the step failed";
 
 /// The session to focus.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -163,17 +160,18 @@ fn focus_wezterm(target: &FocusTarget, tools: &FocusTools) -> Result<u64, String
     let listing = run_ok(&*tools.runner, &wezterm::list_argv(), "wezterm cli list")?;
     let panes = wezterm::parse_panes(&listing)
         .map_err(|error| format!("wezterm cli list gave bad JSON: {error}"))?;
-    ttys.iter()
-        .find_map(|tty| {
-            let pane = wezterm::pane_for_tty(&panes, tty)?;
-            let request = wezterm::focus_request(pane);
-            tools
-                .writer
-                .write(Path::new(tty), request.as_bytes())
-                .ok()
-                .map(|()| pane)
-        })
-        .ok_or_else(|| STEP_FAILED.to_string())
+    for tty in &ttys {
+        let Some(pane) = wezterm::pane_for_tty(&panes, tty) else {
+            continue;
+        };
+        let request = wezterm::focus_request(pane);
+        return tools
+            .writer
+            .write(Path::new(tty), request.as_bytes())
+            .map(|()| pane)
+            .map_err(|error| format!("cannot write to {tty}: {error}"));
+    }
+    Err(format!("no WezTerm pane shows {}", ttys.join(", ")))
 }
 
 #[cfg(test)]
