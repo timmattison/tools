@@ -80,10 +80,32 @@ pub fn focus_pane(runner: &dyn Runner, location: &ZellijLocation) -> Result<(), 
     if !live.contains(&location.session) {
         return Err(ZellijFocusError::SessionGone(location.session.clone()));
     }
-    runner
+    let output = runner
         .run(&focus_argv(location), COMMAND_LIMIT)
         .map_err(ZellijFocusError::Focus)?;
-    Ok(())
+    if output.succeeded() || is_already_focused(&output) {
+        return Ok(());
+    }
+    let stderr = output.stderr.trim();
+    let message = if stderr.is_empty() {
+        output.stdout.trim()
+    } else {
+        stderr
+    };
+    Err(ZellijFocusError::Refused {
+        code: output
+            .code
+            .map_or_else(|| "a signal".to_string(), |code| code.to_string()),
+        message: message.to_string(),
+    })
+}
+
+/// Returns true when Zellij exited with 1 to say that the pane has the focus.
+fn is_already_focused(output: &CommandOutput) -> bool {
+    output.code == Some(1)
+        && [&output.stdout, &output.stderr]
+            .iter()
+            .any(|text| text.to_lowercase().contains("already focused"))
 }
 
 #[cfg(test)]
