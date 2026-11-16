@@ -1,5 +1,6 @@
 //! Focus step 1: asks Zellij to focus the pane of a session.
 
+use crate::runner::{COMMAND_LIMIT, CommandOutput, RunError, Runner};
 use crate::state::ZellijLocation;
 
 /// Makes the argv that lists the Zellij sessions.
@@ -39,10 +40,66 @@ pub fn focus_argv(location: &ZellijLocation) -> Vec<String> {
         .collect()
 }
 
+/// Why the focus request of step 1 failed.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ZellijFocusError {
+    /// The list of the sessions did not run.
+    #[error("zellij list-sessions failed: {0}")]
+    List(RunError),
+    /// The session is not in the list of live sessions.
+    #[error("the Zellij session {0} is gone")]
+    SessionGone(String),
+    /// The focus command did not run.
+    #[error("zellij action focus-pane-id failed: {0}")]
+    Focus(RunError),
+    /// The focus command ran and refused.
+    #[error("zellij action focus-pane-id exited with {code}: {message}")]
+    Refused {
+        /// The exit code as text, or `a signal`.
+        code: String,
+        /// The text that the command wrote.
+        message: String,
+    },
+}
+
+/// Asks Zellij to focus the pane at `location`.
+///
+/// # Errors
+///
+/// Returns a [`ZellijFocusError`] when the list of sessions fails, when the
+/// session is not live, or when the focus command fails or refuses.
+pub fn focus_pane(_runner: &dyn Runner, _location: &ZellijLocation) -> Result<(), ZellijFocusError> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runner::fake::FakeRunner;
     use crate::state::ZellijPaneId;
+
+    fn location(session: &str) -> ZellijLocation {
+        ZellijLocation {
+            session: session.to_string(),
+            pane: ZellijPaneId::parse("310").unwrap(),
+        }
+    }
+
+    fn words(argv: &[String]) -> Vec<&str> {
+        argv.iter().map(String::as_str).collect()
+    }
+
+    /// A runner that lists the fixture sessions and answers the focus
+    /// command of `target` with `focus`.
+    fn runner_for(
+        target: &ZellijLocation,
+        focus: Result<CommandOutput, RunError>,
+    ) -> FakeRunner {
+        let list = include_str!("../fixtures/zellij-list-sessions.txt");
+        FakeRunner::new()
+            .answer(&words(&list_sessions_argv()), Ok(CommandOutput::ok(list)))
+            .answer(&words(&focus_argv(target)), focus)
+    }
 
     fn argv(items: &[&str]) -> Vec<String> {
         items.iter().map(ToString::to_string).collect()
@@ -87,6 +144,53 @@ mod tests {
                 "focus-pane-id",
                 "terminal_310"
             ])
+        );
+    }
+
+    #[test]
+    fn a_live_session_is_listed_then_focused() {
+        let target = location("tools");
+        let runner = runner_for(&target, Ok(CommandOutput::ok("")));
+        assert_eq!(focus_pane(&runner, &target), Ok(()));
+        assert_eq!(runner.calls(), vec![list_sessions_argv(), focus_argv(&target)]);
+    }
+
+    #[test]
+    fn an_exited_or_absent_session_is_gone_and_the_focus_command_never_runs() {
+        for name in ["brainrot", "scraper", "no-such-session"] {
+            let target = location(name);
+            let runner = runner_for(&target, Ok(CommandOutput::ok("")));
+            assert_eq!(
+                focus_pane(&runner, &target),
+                Err(ZellijFocusError::SessionGone(name.to_string()))
+            );
+            assert_eq!(runner.calls(), vec![list_sessions_argv()], "{name}");
+        }
+    }
+
+    #[test]
+    fn a_failed_list_command_means_the_session_is_gone() {
+        let target = location("tools");
+        let runner = FakeRunner::new().answer(
+            &words(&list_sessions_argv()),
+            Ok(CommandOutput::failed(1, "no server")),
+        );
+        assert_eq!(
+            focus_pane(&runner, &target),
+            Err(ZellijFocusError::SessionGone("tools".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_list_command_that_does_not_run_is_a_list_error() {
+        let error = RunError::NotInstalled {
+            program: "zellij".to_string(),
+        };
+        let runner =
+            FakeRunner::new().answer(&words(&list_sessions_argv()), Err(error.clone()));
+        assert_eq!(
+            focus_pane(&runner, &location("tools")),
+            Err(ZellijFocusError::List(error))
         );
     }
 }
