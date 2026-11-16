@@ -58,6 +58,16 @@ pub fn parse_unix_sockets(text: &str) -> Vec<UnixSocket> {
     sockets
 }
 
+/// Finds the clients of the Zellij server `server`.
+///
+/// A client is another process with a socket whose peer is an address of a
+/// socket of the server. The sockets that a server holds with itself do not
+/// count. The result is sorted and has no duplicate.
+#[must_use]
+pub fn client_pids(_server: Pid, _sockets: &[UnixSocket]) -> Vec<Pid> {
+    Vec::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,5 +103,34 @@ mod tests {
     fn a_file_with_no_address_line_is_skipped_and_unknown_fields_are_ignored() {
         let text = "p10\nf3\nn/some/path\nf4\ndx1\ncname\nn->y1\np11\nf5\nn/p\n";
         assert_eq!(parse_unix_sockets(text), vec![socket(10, "x1", Some("y1"))]);
+    }
+
+    fn pids(numbers: &[u32]) -> Vec<Pid> {
+        numbers.iter().copied().map(Pid::new).collect()
+    }
+
+    #[test]
+    fn the_client_of_each_server_is_found_once() {
+        let sockets = parse_unix_sockets(SOCKETS);
+        assert_eq!(client_pids(Pid::new(42617), &sockets), pids(&[19800]));
+        assert_eq!(client_pids(Pid::new(70267), &sockets), pids(&[91105]));
+    }
+
+    #[test]
+    fn a_pid_with_no_client_gives_an_empty_list() {
+        let sockets = parse_unix_sockets(SOCKETS);
+        assert_eq!(client_pids(Pid::new(19800), &sockets), Vec::<Pid>::new());
+        assert_eq!(client_pids(Pid::new(1), &sockets), Vec::<Pid>::new());
+    }
+
+    #[test]
+    fn the_clients_are_sorted() {
+        let sockets = vec![
+            socket(1, "0xs", None),
+            socket(9, "0xa", Some("0xs")),
+            socket(5, "0xb", Some("0xs")),
+            socket(5, "0xc", Some("0xs")),
+        ];
+        assert_eq!(client_pids(Pid::new(1), &sockets), pids(&[5, 9]));
     }
 }
