@@ -74,8 +74,34 @@ impl Board {
     /// the change that the file makes, or `None` when the board shows no
     /// change of state. The change goes into the log.
     pub fn apply(&mut self, file: StateFile, name: Option<String>) -> Option<Change> {
-        let _ = (file, name);
-        None
+        let pid = file.pid;
+        let stamp = file.stamp;
+        let new_state = file.state;
+        let session = Session {
+            file,
+            name,
+            since: stamp,
+        };
+        let label = session.label();
+        self.sessions.insert(pid, session);
+        let change = Change {
+            at: stamp,
+            pid,
+            label,
+            old: None,
+            new: Some(new_state),
+        };
+        self.record(change.clone());
+        Some(change)
+    }
+
+    /// Put a change at the end of the log. The log drops the oldest change
+    /// when it holds more than [`LOG_CAPACITY`] changes.
+    fn record(&mut self, change: Change) {
+        self.log.push_back(change);
+        while self.log.len() > LOG_CAPACITY {
+            self.log.pop_front();
+        }
     }
 
     /// The session with the pid, when the board holds it.
