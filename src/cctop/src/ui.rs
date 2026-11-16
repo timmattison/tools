@@ -140,17 +140,17 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App, now: EpochMillis) {
             ])
         })
         .collect();
-    // The name column takes the spare width. The directory column keeps 24
-    // columns when the terminal has room, and it gives up width first when the
-    // terminal is narrow. The state column keeps its width until the other
-    // columns have no more width to give.
+    // The name column keeps at least 8 columns, and it takes the spare
+    // width. The directory column keeps at most 24 columns, and it gives up
+    // width first when the terminal is narrow. The state column keeps its
+    // width until the other columns have no more width to give.
     let widths = [
         Constraint::Length(2),
         Constraint::Length(state_width),
         Constraint::Length(8),
         Constraint::Length(14),
         Constraint::Max(24),
-        Constraint::Fill(1),
+        Constraint::Min(8),
     ];
     let header = Row::new(["", "STATE", "TIME", "ZELLIJ", "DIRECTORY", "NAME"])
         .style(Style::new().add_modifier(Modifier::BOLD));
