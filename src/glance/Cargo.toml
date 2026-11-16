@@ -68,6 +68,9 @@ objc2-foundation = { workspace = true, features = [
     "objc2-core-foundation",
 ] }
 
+[dev-dependencies]
+testcolor.workspace = true
+
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 objc2-core-foundation = { workspace = true, features = ["CFRunLoop", "CFString"] }
 

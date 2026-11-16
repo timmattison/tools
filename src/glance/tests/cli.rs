@@ -18,9 +18,25 @@ const SUM_TOLERANCE: f64 = 1e-9;
 #[cfg(target_os = "macos")]
 const KEY_COUNT: usize = 7;
 
+/// The variable that makes clap paint its usage errors.
+const FORCE_PAINT_VARIABLE: &str = "CLICOLOR_FORCE";
+
+/// The value that turns the paint on.
+const FORCE_PAINT_ON: &str = "1";
+
+/// The visible glyphs of `bytes`, with the paint removed. Each read of
+/// standard error in this file goes through here. See "Colored Output in
+/// Tests" in CLAUDE.md.
+fn glyphs(bytes: &[u8]) -> String {
+    testcolor::strip_ansi(&String::from_utf8_lossy(bytes))
+}
+
 /// Runs the binary with `args` and returns what it wrote and how it ended.
 fn run(args: &[&str]) -> Output {
     childenv::fixture_command(env!("CARGO_BIN_EXE_glance"))
+        // The paint is always on, so a read of stderr that skips `glyphs`
+        // fails in every run, not only under the hook.
+        .env(FORCE_PAINT_VARIABLE, FORCE_PAINT_ON)
         .args(args)
         .output()
         .expect("the glance binary starts")
@@ -143,7 +159,7 @@ fn assert_usage_error(args: &[&str], words: &str) {
         Some(USAGE_ERROR),
         "{args:?} {output:?}"
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = glyphs(&output.stderr);
     assert!(stderr.contains(words), "{args:?} {stderr}");
 }
 
@@ -187,7 +203,7 @@ fn an_empty_remote_binary_is_a_usage_error() {
 fn an_interval_below_the_minimum_is_a_usage_error() {
     let output = run(&["--sample", "--interval", "0.1"]);
     assert_eq!(output.status.code(), Some(USAGE_ERROR), "{output:?}");
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = glyphs(&output.stderr);
     assert!(stderr.contains("0.25"), "{stderr}");
 }
 
@@ -210,8 +226,5 @@ fn version_names_the_build() {
 fn another_platform_refuses_sample() {
     let output = run(&["--sample"]);
     assert_eq!(output.status.code(), Some(1), "{output:?}");
-    assert_eq!(
-        String::from_utf8_lossy(&output.stderr),
-        "glance supports macOS only.\n"
-    );
+    assert_eq!(glyphs(&output.stderr), "glance supports macOS only.\n");
 }

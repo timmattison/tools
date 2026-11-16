@@ -227,6 +227,7 @@ allowlist.
   of the binary
 - `faulte` - the help and usage-error tests of the binary
 - `gitscratch` - render and paint tests of the halt diffs
+- `glance` - the usage-error tests of the binary
 - `grime` - `--diff` paint tests, through a pipe and on a terminal
 - `grind` - `--diff` paint tests, through a pipe and on a terminal
 - `gsw` - render, watch, push, and update run tests
