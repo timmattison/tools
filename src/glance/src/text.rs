@@ -4,6 +4,7 @@
 //! each line without AppKit.
 
 use crate::cpu::CpuShare;
+use crate::host::HostName;
 use crate::pressure::Level;
 use crate::sample::Sample;
 use serde_json::json;
@@ -90,7 +91,8 @@ fn percent(share: f64) -> u8 {
 /// The keys are `user`, `system`, `idle`, `pressure_level`,
 /// `pressure_level_raw`, and `pressure_percent`, in this order.
 #[must_use]
-pub fn sample_json(sample: &Sample) -> String {
+pub fn sample_json(host: &HostName, sample: &Sample) -> String {
+    let _ = host;
     let cpu: &CpuShare = &sample.cpu;
     let level = sample.pressure.level();
     // The `json!` macro sorts the keys, so each value goes through serde_json
@@ -124,7 +126,8 @@ mod tests {
 
     const TOLERANCE: f64 = 1e-12;
     /// The key order of the JSON line, as the design file states it.
-    const KEY_ORDER: [&str; 6] = [
+    const KEY_ORDER: [&str; 7] = [
+        "\"host\"",
         "\"user\"",
         "\"system\"",
         "\"idle\"",
@@ -132,6 +135,17 @@ mod tests {
         "\"pressure_level_raw\"",
         "\"pressure_percent\"",
     ];
+
+    /// The host name that the tests print.
+    const HOST: &str = "m1-ts";
+
+    fn host() -> HostName {
+        HostName::from_raw(HOST.as_bytes())
+    }
+
+    fn value_of(line: &str) -> serde_json::Value {
+        serde_json::from_str(line).unwrap()
+    }
 
     fn sample(user: u32, system: u32, idle: u32, level: i32, free: i32) -> Sample {
         Sample {
@@ -219,9 +233,10 @@ mod tests {
 
     #[test]
     fn the_json_holds_the_values_in_the_design_order_on_one_line() {
-        let line = sample_json(&warn_sample());
+        let line = sample_json(&host(), &warn_sample());
+        assert_eq!(value_of(&line)["host"], HOST);
         assert!(!line.contains('\n'), "{line}");
-        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        let value = value_of(&line);
         assert!((value["user"].as_f64().unwrap() - 0.5).abs() < TOLERANCE);
         assert!((value["system"].as_f64().unwrap() - 0.25).abs() < TOLERANCE);
         assert!((value["idle"].as_f64().unwrap() - 0.25).abs() < TOLERANCE);
@@ -239,7 +254,7 @@ mod tests {
     #[test]
     fn the_json_of_an_unknown_level_keeps_the_raw_value() {
         let value: serde_json::Value =
-            serde_json::from_str(&sample_json(&sample(1, 1, 1, 7, 40))).unwrap();
+            serde_json::from_str(&sample_json(&host(), &sample(1, 1, 1, 7, 40))).unwrap();
         assert_eq!(value["pressure_level"], "unknown");
         assert_eq!(value["pressure_level_raw"], 7);
     }

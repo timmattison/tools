@@ -11,6 +11,10 @@ const USAGE_ERROR: i32 = 2;
 #[cfg(target_os = "macos")]
 const SUM_TOLERANCE: f64 = 1e-9;
 
+/// The number of keys in the JSON line of `--sample`.
+#[cfg(target_os = "macos")]
+const KEY_COUNT: usize = 7;
+
 /// Runs the binary with `args` and returns what it wrote and how it ended.
 fn run(args: &[&str]) -> Output {
     childenv::fixture_command(env!("CARGO_BIN_EXE_glance"))
@@ -28,6 +32,9 @@ fn sample_prints_one_json_line() {
     assert!(stdout.ends_with('\n'), "{stdout:?}");
     assert_eq!(stdout.lines().count(), 1, "{stdout:?}");
     let value: serde_json::Value = serde_json::from_str(&stdout).expect("stdout is JSON");
+    assert_eq!(value.as_object().expect("an object").len(), KEY_COUNT);
+    let host = value["host"].as_str().expect("host");
+    assert!(!host.is_empty() && !host.contains('.'), "{host}");
     let fraction = |key: &str| {
         let number = value[key].as_f64().expect(key);
         assert!((0.0..=1.0).contains(&number), "{key} {number}");

@@ -66,7 +66,8 @@ fn sample(interval: Interval) -> ExitCode {
     });
     match readings {
         Ok((first, second)) => {
-            println!("{}", sample_json(&Sample::between(&first, &second)));
+            let sample = Sample::between(&first, &second);
+            println!("{}", sample_json(reader.host_name(), &sample));
             ExitCode::SUCCESS
         }
         Err(error) => {
