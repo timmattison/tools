@@ -13,20 +13,23 @@
 //! of the start cannot stop it, and it takes the lock itself. Thus two starts
 //! at the same moment can never give two status items for one target.
 //!
-//! The stdout of the copy is a pipe to the start. The copy writes one line
-//! into it when its status item is up, as a foreground run writes that line
-//! to the terminal. The start copies that line to its own stdout and ends. A
-//! copy that ends before its status item is up closes the pipe with no line,
-//! and the start reports the failure. Thus the start needs no clock: the read
-//! ends with the line or with the end of the copy. The status item writes
-//! nothing more to its stdout, so the pipe that nobody reads after the start
-//! ended does no harm.
+//! The stdout and the stderr of the copy are pipes to the start. A thread of
+//! the start reads the stderr to its end, so a long text on it cannot block
+//! the copy. The copy writes one line into the stdout when its status item is
+//! up, as a foreground run writes that line to the terminal. Then the copy
+//! points its stdout and its stderr at `/dev/null`, because nobody reads the
+//! pipes after the start ends. The start copies the line to its own stdout
+//! and ends. A copy that ends before its status item is up closes the stdout
+//! with no line. The start then writes what the copy wrote to its stderr,
+//! and after that the exit status of the copy. Thus the start needs no
+//! clock: the read ends with the line or with the end of the copy.
 
 use std::env;
 use std::fmt;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::num::NonZeroU32;
 use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
+use std::thread;
 
 use crate::connection::Remote;
 use crate::flags::{
@@ -121,10 +124,10 @@ pub fn run(mode: Mode, settings: Settings) -> ExitCode {
         }
     }
     match mode {
-        Mode::Foreground => run_here(&lock, settings),
+        Mode::Foreground => run_here(&lock, settings, false),
         Mode::Background => start_in_background(&lock, &settings),
         Mode::BackgroundChild => match instance::start_a_session() {
-            Ok(()) => run_here(&lock, settings),
+            Ok(()) => run_here(&lock, settings, true),
             Err(error) => fail(&format!("cannot start a new session: {error}")),
         },
     }
@@ -143,8 +146,10 @@ fn stop(lock: &LockFile, target: &Target, pid: Pid) -> ExitCode {
 
 /// Takes the lock and runs the status item in this process. When the status
 /// item is up, writes the line that tells so to stdout: to the terminal of a
-/// foreground run, or to the pipe of a background start.
-fn run_here(lock: &LockFile, settings: Settings) -> ExitCode {
+/// foreground run, or to the pipe of a background start. When `is_copy` is
+/// true, this process is the background copy. It then points its stdout and
+/// its stderr at `/dev/null` after the line, because its start ends.
+fn run_here(lock: &LockFile, settings: Settings, is_copy: bool) -> ExitCode {
     // The claim must live until the process ends. The run loop of the shell
     // never returns while the status item runs.
     let _claim = match instance::claim(lock) {
@@ -162,6 +167,11 @@ fn run_here(lock: &LockFile, settings: Settings) -> ExitCode {
     let exit_after = settings.exit_after;
     shell::run(settings.interval, settings.remote, move || {
         say(&line);
+        if is_copy {
+            // The start has its line and nobody reads either pipe, so an
+            // error here has no channel to report on.
+            let _ = instance::send_output_nowhere();
+        }
         if let Some(seconds) = exit_after {
             instance::end_after(seconds);
         }
@@ -169,7 +179,8 @@ fn run_here(lock: &LockFile, settings: Settings) -> ExitCode {
 }
 
 /// Starts a copy that runs the status item, and waits until its status item
-/// is up.
+/// is up. When the copy ends first, writes what the copy wrote to its stderr
+/// and its exit status, and gives the exit code of a failure.
 fn start_in_background(lock: &LockFile, settings: &Settings) -> ExitCode {
     if let Err(error) = lock.prepare() {
         return fail(&lock_problem(lock, &error));
@@ -191,22 +202,19 @@ fn start_in_background(lock: &LockFile, settings: &Settings) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(failure) => {
-            if let Ok(Some(pid)) = instance::holder(lock) {
-                return fail(&another_started(pid));
-            }
             eprint!("{}", failure.report());
             ExitCode::from(EXIT_FAILURE)
         }
     }
 }
 
-/// Sets the pipes of the background copy: no stdin, a pipe for stdout, and
-/// the stderr of the copy.
+/// Sets the pipes of the background copy: no stdin, and a pipe to the start
+/// for each of stdout and stderr.
 fn copy_pipes(command: &mut Command) -> &mut Command {
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
 }
 
 /// How a background copy failed before its status item was up.
@@ -221,14 +229,30 @@ struct CopyFailure {
 impl CopyFailure {
     /// The whole text that the start writes to its stderr.
     fn report(&self) -> String {
-        format!("glance: {}\n", copy_stopped(&self.status))
+        let mut text = self.said.clone();
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        format!("{text}glance: {}\n", copy_stopped(&self.status))
     }
 }
 
 /// Waits for the ready line of `child`. Gives the line, which ends in a
 /// newline, or the failure of a child that closed its stdout before it
 /// wrote a whole line.
+///
+/// A thread reads the stderr of the child to its end. A child that writes
+/// more than a pipe holds to its stderr then never waits for the start. The
+/// thread stays unjoined when the line arrives, and it ends with the stderr
+/// of the child.
 fn await_ready(child: &mut Child) -> Result<String, CopyFailure> {
+    let drain = child.stderr.take().map(|mut stderr| {
+        thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = stderr.read_to_end(&mut bytes);
+            bytes
+        })
+    });
     let line = child.stdout.take().and_then(|stdout| {
         let mut line = String::new();
         match BufReader::new(stdout).read_line(&mut line) {
@@ -236,9 +260,15 @@ fn await_ready(child: &mut Child) -> Result<String, CopyFailure> {
             _ => None,
         }
     });
-    line.ok_or_else(|| CopyFailure {
-        said: String::new(),
-        status: child.wait(),
+    line.ok_or_else(|| {
+        let status = child.wait();
+        let bytes = drain
+            .and_then(|thread| thread.join().ok())
+            .unwrap_or_default();
+        CopyFailure {
+            said: String::from_utf8_lossy(&bytes).into_owned(),
+            status,
+        }
     })
 }
 
@@ -279,7 +309,8 @@ fn stopped_line(target: &Target, pid: Pid) -> String {
     }
 }
 
-/// The reason of a start that found the lock taken after its look.
+/// The reason of a run that found the lock taken when it claimed the lock.
+/// The background copy writes it, and its start relays it.
 fn another_started(pid: Pid) -> String {
     format!("another glance started the same status item at the same time, as PID {pid}")
 }

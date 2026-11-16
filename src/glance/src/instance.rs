@@ -411,6 +411,32 @@ pub fn start_a_session() -> io::Result<()> {
     Ok(())
 }
 
+/// Points the standard output and the standard error of this process at
+/// `/dev/null`.
+///
+/// The background copy calls this when its start has the ready line. The
+/// start ends after that, and nobody reads the two pipes of the copy any
+/// more. A write to a pipe with no reader fails, and Rust ignores `SIGPIPE`,
+/// so `println!` and `eprintln!` then panic. A write to `/dev/null` always
+/// works.
+///
+/// # Errors
+///
+/// Returns the error of the kernel when `/dev/null` cannot be opened or a
+/// descriptor cannot be replaced.
+pub fn send_output_nowhere() -> io::Result<()> {
+    let null = OpenOptions::new().write(true).open("/dev/null")?;
+    for target in [libc::STDOUT_FILENO, libc::STDERR_FILENO] {
+        // SAFETY: `dup2` takes two integers and touches no memory of this
+        // process. The first descriptor is open for the life of `null`, and
+        // the copy at `target` stays open after `null` drops.
+        if unsafe { libc::dup2(null.as_raw_fd(), target) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
 /// The handler of `SIGTERM`: ends the process with status 0 at once.
 extern "C" fn end_with_success(_signal: libc::c_int) {
     // SAFETY: `_exit` is async-signal-safe. It runs no destructor and no
