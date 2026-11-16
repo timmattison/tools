@@ -1,0 +1,65 @@
+[package]
+name = "glance"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "A light macOS menu bar monitor of the CPU share and the memory pressure"
+
+[lib]
+name = "glance"
+path = "src/lib.rs"
+
+[[bin]]
+name = "glance"
+path = "src/main.rs"
+
+[dependencies]
+buildinfo.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc.workspace = true
+objc2.workspace = true
+objc2-app-kit = { workspace = true, features = [
+    "std",
+    "NSAppearance",
+    "NSApplication",
+    "NSBitmapImageRep",
+    "NSColorSpace",
+    "NSGraphics",
+    "NSImage",
+    "NSImageRep",
+    "NSMenu",
+    "NSMenuItem",
+    "NSResponder",
+    "NSScreen",
+    "NSStatusBar",
+    "NSStatusBarButton",
+    "NSStatusItem",
+    "NSButton",
+    "NSRunningApplication",
+    "objc2-core-foundation",
+    "NSControl",
+    "NSView",
+] }
+objc2-foundation = { workspace = true, features = [
+    "std",
+    "NSDistributedNotificationCenter",
+    "NSTimer",
+    "NSRunLoop",
+    "NSDate",
+    "NSString",
+    "NSEnumerator",
+    "objc2-core-foundation",
+] }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2-core-foundation = { workspace = true, features = ["CFRunLoop", "CFString"] }
+
+[dev-dependencies]
+childenv.workspace = true
+
+[lints]
+workspace = true
