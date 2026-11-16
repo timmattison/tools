@@ -26,7 +26,7 @@ use std::env;
 use std::fmt;
 use std::io::{self, BufRead, BufReader, Write};
 use std::num::NonZeroU32;
-use std::process::{Child, ExitCode, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
 
 use crate::connection::Remote;
 use crate::flags::{
@@ -178,37 +178,68 @@ fn start_in_background(lock: &LockFile, settings: &Settings) -> ExitCode {
         Ok(program) => program,
         Err(error) => return fail(&format!("cannot find the path of glance: {error}")),
     };
-    let spawned = childenv::command(program)
-        .args(child_arguments(settings))
+    let spawned = copy_pipes(childenv::command(program).args(child_arguments(settings)))
         .current_dir(CHILD_DIRECTORY)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
         .spawn();
     let mut child = match spawned {
         Ok(child) => child,
         Err(error) => return fail(&format!("cannot start the background copy: {error}")),
     };
-    if let Some(line) = first_line(&mut child) {
-        say(&line);
-        return ExitCode::SUCCESS;
-    }
-    let status = child.wait();
-    match instance::holder(lock) {
-        Ok(Some(pid)) => fail(&another_started(pid)),
-        _ => fail(&copy_stopped(&status)),
+    match await_ready(&mut child) {
+        Ok(line) => {
+            say(&line);
+            ExitCode::SUCCESS
+        }
+        Err(failure) => {
+            if let Ok(Some(pid)) = instance::holder(lock) {
+                return fail(&another_started(pid));
+            }
+            eprint!("{}", failure.report());
+            ExitCode::from(EXIT_FAILURE)
+        }
     }
 }
 
-/// Reads the first line of the stdout of `child`. Gives `None` when the
-/// child closed its stdout before it wrote a whole line.
-fn first_line(child: &mut Child) -> Option<String> {
-    let stdout = child.stdout.take()?;
-    let mut line = String::new();
-    match BufReader::new(stdout).read_line(&mut line) {
-        Ok(_) if line.ends_with('\n') => Some(line),
-        _ => None,
+/// Sets the pipes of the background copy: no stdin, a pipe for stdout, and
+/// the stderr of the copy.
+fn copy_pipes(command: &mut Command) -> &mut Command {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+}
+
+/// How a background copy failed before its status item was up.
+#[derive(Debug)]
+struct CopyFailure {
+    /// What the copy wrote to its stderr.
+    said: String,
+    /// The result of the wait for the copy.
+    status: io::Result<ExitStatus>,
+}
+
+impl CopyFailure {
+    /// The whole text that the start writes to its stderr.
+    fn report(&self) -> String {
+        format!("glance: {}\n", copy_stopped(&self.status))
     }
+}
+
+/// Waits for the ready line of `child`. Gives the line, which ends in a
+/// newline, or the failure of a child that closed its stdout before it
+/// wrote a whole line.
+fn await_ready(child: &mut Child) -> Result<String, CopyFailure> {
+    let line = child.stdout.take().and_then(|stdout| {
+        let mut line = String::new();
+        match BufReader::new(stdout).read_line(&mut line) {
+            Ok(_) if line.ends_with('\n') => Some(line),
+            _ => None,
+        }
+    });
+    line.ok_or_else(|| CopyFailure {
+        said: String::new(),
+        status: child.wait(),
+    })
 }
 
 /// Writes `text` to stdout. A closed stdout is no reason to fail, because
@@ -282,6 +313,7 @@ impl fmt::Display for Shown<'_> {
 mod tests {
     use super::*;
     use crate::connection::RemoteBinary;
+    use std::time::Duration;
 
     /// The PID of the lines in these tests.
     fn pid() -> Pid {
@@ -361,5 +393,64 @@ mod tests {
             copy_stopped(&failed),
             "the background copy stopped before its status item was up (the wait failed: no child)"
         );
+    }
+
+    /// Starts `sh -c script` through the pipes of the background copy.
+    fn spawn_script(script: &str) -> Child {
+        let mut command = childenv::fixture_command("sh");
+        copy_pipes(command.args(["-c", script]))
+            .spawn()
+            .expect("sh starts")
+    }
+
+    #[test]
+    fn a_copy_that_writes_its_line_gives_the_line() {
+        let mut child = spawn_script("printf 'up\\n'");
+        assert_eq!(await_ready(&mut child).expect("a line"), "up\n");
+    }
+
+    #[test]
+    fn a_copy_that_stops_gives_what_it_wrote_to_stderr_and_its_status() {
+        let mut child = spawn_script("echo 'glance: boom' >&2; exit 3");
+        let failure = await_ready(&mut child).expect_err("no line");
+        assert_eq!(
+            failure.report(),
+            "glance: boom\nglance: the background copy stopped before its status item was up \
+             (exit status: 3)\n"
+        );
+    }
+
+    #[test]
+    fn a_stderr_text_with_no_newline_gets_one() {
+        let mut child = spawn_script("printf half >&2; exit 1");
+        let failure = await_ready(&mut child).expect_err("no line");
+        assert!(
+            failure.report().starts_with("half\nglance: "),
+            "{failure:?}"
+        );
+    }
+
+    #[test]
+    fn a_copy_that_says_nothing_gives_only_its_status() {
+        let mut child = spawn_script("exit 4");
+        let failure = await_ready(&mut child).expect_err("no line");
+        assert_eq!(
+            failure.report(),
+            "glance: the background copy stopped before its status item was up \
+             (exit status: 4)\n"
+        );
+    }
+
+    #[test]
+    fn a_copy_with_a_long_stderr_does_not_block_the_start() {
+        let mut child = spawn_script("head -c 200000 /dev/zero | tr '\\0' x >&2; printf 'up\\n'");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(await_ready(&mut child).ok());
+        });
+        let line = receiver
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the start blocked on a full stderr pipe");
+        assert_eq!(line.as_deref(), Some("up\n"));
     }
 }

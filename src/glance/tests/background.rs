@@ -392,3 +392,16 @@ fn a_local_start_stops_only_the_local_status_item() {
         "the local stop stopped the status item of {ALPHA}"
     );
 }
+
+#[test]
+fn the_background_status_item_writes_its_output_nowhere() {
+    let mut home = Home::new();
+    let pid = home.start(Target::Local);
+    let output = childenv::fixture_command("lsof")
+        .args(["-a", "-p", &pid.to_string(), "-d", "1,2", "-F", "n"])
+        .output()
+        .expect("lsof starts");
+    let text = String::from_utf8_lossy(&output.stdout);
+    let names: Vec<&str> = text.lines().filter(|line| line.starts_with('n')).collect();
+    assert_eq!(names, ["n/dev/null", "n/dev/null"], "{output:?}");
+}
