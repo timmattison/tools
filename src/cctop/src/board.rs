@@ -215,4 +215,27 @@ mod tests {
         assert_eq!(session.file.state, PaneState::Idle);
         assert_eq!(board.changes().count(), 0);
     }
+
+    #[test]
+    fn apply_logs_a_change_of_state_with_the_new_stamp() {
+        let mut board = Board::new();
+        board.load(file(7, PaneState::Idle, 100, 500), None);
+        let change = board
+            .apply(file(7, PaneState::Working, 100, 900), None)
+            .expect("a new state is a change");
+        assert_eq!(
+            change,
+            Change {
+                at: EpochMillis::new(900),
+                pid: Pid::new(7),
+                label: "worktree".to_string(),
+                old: Some(PaneState::Idle),
+                new: Some(PaneState::Working),
+            }
+        );
+        let session = board.get(Pid::new(7)).expect("the session is on the board");
+        assert_eq!(session.since, EpochMillis::new(900));
+        assert_eq!(session.file.state, PaneState::Working);
+        assert_eq!(board.changes().cloned().collect::<Vec<_>>(), vec![change]);
+    }
 }
