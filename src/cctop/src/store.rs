@@ -58,8 +58,20 @@ pub fn read_state_file(path: &Path) -> ReadOutcome {
 /// # Errors
 ///
 /// Returns the error of the read of the directory itself.
-pub fn read_dir(_dir: &Path) -> std::io::Result<Vec<(Pid, ReadOutcome)>> {
-    Ok(Vec::new())
+pub fn read_dir(dir: &Path) -> std::io::Result<Vec<(Pid, ReadOutcome)>> {
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        let Some(pid) = path.file_name().and_then(pid_of_file_name) else {
+            continue;
+        };
+        if path.is_dir() {
+            continue;
+        }
+        entries.push((pid, read_state_file(&path)));
+    }
+    entries.sort_by_key(|(pid, _)| pid.as_u32());
+    Ok(entries)
 }
 
 #[cfg(test)]
