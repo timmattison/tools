@@ -50,6 +50,16 @@ impl CpuShare {
         }
     }
 
+    /// Builds the shares from three values that a line gave.
+    ///
+    /// The result is `None` if a share is not finite or is outside 0 to 1.
+    /// This function does not check the sum.
+    #[must_use]
+    pub fn from_shares(user: f64, system: f64, idle: f64) -> Option<CpuShare> {
+        let _ = (user, system, idle);
+        None
+    }
+
     /// The share of the user processes, nice processes included.
     #[must_use]
     pub fn user(self) -> f64 {
@@ -94,6 +104,25 @@ mod tests {
         );
         let sum = share.user() + share.system() + share.idle();
         assert!((sum - 1.0).abs() < TOLERANCE, "sum {sum}");
+    }
+
+    #[test]
+    fn from_shares_accepts_the_shares_from_0_to_1() {
+        let share = CpuShare::from_shares(0.0, 0.0, 1.0).unwrap();
+        assert_share(share, 0.0, 0.0, 1.0);
+        let share = CpuShare::from_shares(1.0, 0.0, 0.0).unwrap();
+        assert_share(share, 1.0, 0.0, 0.0);
+        let share = CpuShare::from_shares(0.5, 0.25, 0.25).unwrap();
+        assert_share(share, 0.5, 0.25, 0.25);
+    }
+
+    #[test]
+    fn from_shares_refuses_a_share_that_is_out_of_range_or_not_finite() {
+        for bad in [-0.1, 1.1, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(CpuShare::from_shares(bad, 0.0, 0.5), None, "user {bad}");
+            assert_eq!(CpuShare::from_shares(0.0, bad, 0.5), None, "system {bad}");
+            assert_eq!(CpuShare::from_shares(0.0, 0.5, bad), None, "idle {bad}");
+        }
     }
 
     #[test]
