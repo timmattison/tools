@@ -20,19 +20,28 @@ impl FakeRunner {
 
     /// Adds the answer for `argv`.
     #[must_use]
-    pub fn answer(self, _argv: &[&str], _result: Result<CommandOutput, RunError>) -> Self {
+    pub fn answer(mut self, argv: &[&str], result: Result<CommandOutput, RunError>) -> Self {
+        let argv = argv.iter().map(ToString::to_string).collect();
+        self.answers.push((argv, result));
         self
     }
 
     /// Gives each argv that ran, in order.
     pub fn calls(&self) -> Vec<Vec<String>> {
-        Vec::new()
+        self.calls.lock().unwrap().clone()
     }
 }
 
 impl Runner for FakeRunner {
-    fn run(&self, _argv: &[String], _limit: Duration) -> Result<CommandOutput, RunError> {
-        Ok(CommandOutput::ok(""))
+    fn run(&self, argv: &[String], _limit: Duration) -> Result<CommandOutput, RunError> {
+        self.calls.lock().unwrap().push(argv.to_vec());
+        self.answers
+            .iter()
+            .find(|(known, _)| known.as_slice() == argv)
+            .map_or_else(
+                || panic!("unexpected command: {argv:?}"),
+                |(_, result)| result.clone(),
+            )
     }
 }
 
