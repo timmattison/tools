@@ -1,11 +1,15 @@
 //! Focus step 2: finds the WezTerm pane of a terminal, and asks WezTerm to
 //! focus it.
 
-use std::io;
+use std::fs::OpenOptions;
+use std::io::{self, Write};
 use std::path::Path;
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
+
+/// The directory that holds the terminal devices.
+const DEVICE_DIRECTORY: &str = "/dev/";
 
 /// The name of the user variable that the WezTerm handler reads.
 pub const FOCUS_USER_VAR: &str = "claude-focus-pane";
@@ -40,8 +44,15 @@ pub trait TtyWriter: Send + Sync {
 pub struct DeviceWriter;
 
 impl TtyWriter for DeviceWriter {
-    fn write(&self, _tty: &Path, _bytes: &[u8]) -> io::Result<()> {
-        Ok(())
+    fn write(&self, tty: &Path, bytes: &[u8]) -> io::Result<()> {
+        if !tty.starts_with(DEVICE_DIRECTORY) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{} is not a device under /dev/", tty.display()),
+            ));
+        }
+        let mut device = OpenOptions::new().write(true).open(tty)?;
+        device.write_all(bytes)
     }
 }
 
