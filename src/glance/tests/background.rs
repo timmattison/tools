@@ -14,7 +14,7 @@
 //! leaves behind ends by itself.
 
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
@@ -76,6 +76,21 @@ const BETA: &str = "tim@beta";
 
 /// The flag that shows the name that the second Mac reports.
 const RESOLVE: &str = "--resolve";
+
+/// The flag that keeps the status item in the process of the run.
+const FOREGROUND: &str = "--foreground";
+
+/// The short form of [`FOREGROUND`].
+const FOREGROUND_SHORT: &str = "-f";
+
+/// The flags that asked for a background start before it was the default.
+const REMOVED_BACKGROUND_FLAGS: [&str; 2] = ["-b", "--background"];
+
+/// The variable that makes clap paint its usage errors.
+const FORCE_PAINT_VARIABLE: &str = "CLICOLOR_FORCE";
+
+/// The value that turns the paint on.
+const FORCE_PAINT_ON: &str = "1";
 
 /// The status item that a run starts or stops.
 #[derive(Debug, Clone, Copy)]
@@ -169,6 +184,27 @@ impl Home {
             .args(["--exit-after", seconds])
             .output()
             .expect("the glance binary starts")
+    }
+
+    /// Runs `glance` with `args`, asserts that clap refuses them, and gives
+    /// the visible glyphs of the refusal.
+    ///
+    /// The paint is always on, so an assertion that skips the glyphs fails
+    /// in every run. The life bound is short, so a run that starts a status
+    /// item by mistake does not leave it in the menu bar for long.
+    fn usage_error(&self, args: &[&str]) -> String {
+        let output = self
+            .command(args)
+            .env(FORCE_PAINT_VARIABLE, FORCE_PAINT_ON)
+            .args(["--exit-after", SHORT_LIFE])
+            .output()
+            .expect("the glance binary starts");
+        assert_eq!(
+            output.status.code(),
+            Some(USAGE_ERROR),
+            "{args:?} {output:?}"
+        );
+        testcolor::strip_ansi(&String::from_utf8_lossy(&output.stderr))
     }
 
     /// Runs `glance` for `target` with `extra` arguments after the target.
@@ -268,10 +304,42 @@ fn alive(pid: u32) -> bool {
     ps_field(pid, "stat").is_some_and(|state| !state.starts_with('Z') && !state.contains('E'))
 }
 
+/// A run with no flag starts the status item in a copy, prints the ready line
+/// of the copy, and returns.
+///
+/// The test reads the ready line before it waits for the run. Thus a run that
+/// keeps the status item in its own process fails at once, and does not hold
+/// the test until its life bound.
 #[test]
-fn a_background_start_returns_and_leaves_the_status_item_running() {
+fn a_plain_start_returns_and_leaves_the_status_item_running_in_a_copy() {
     let mut home = Home::new();
-    let pid = home.start(Target::Local);
+    let mut run = home
+        .command(&["--exit-after", LIFE_BOUND])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("the glance binary starts");
+    let mut stdout = BufReader::new(run.stdout.take().expect("the stdout of the run"));
+    let mut line = String::new();
+    stdout
+        .read_line(&mut line)
+        .expect("read the stdout of the run");
+    // The named process is the status item, in the copy or in the run.
+    let pid = named_pid(&line);
+    home.started.push(pid);
+    assert_ne!(
+        pid,
+        run.id(),
+        "the run kept the status item in its own process"
+    );
+    assert_eq!(line, Target::Local.ready_line(pid));
+    let mut rest = String::new();
+    stdout
+        .read_to_string(&mut rest)
+        .expect("read the rest of the stdout of the run");
+    assert_eq!(rest, "", "the run wrote more than the ready line");
+    let status = run.wait().expect("wait for the run");
+    assert_eq!(status.code(), Some(0), "{status:?}");
     assert!(alive(pid), "the status item {pid} does not run");
     let lock = home.lock_file(LOCAL_LOCK_FILE);
     assert!(lock.is_file(), "no lock file at {}", lock.display());
@@ -285,11 +353,13 @@ fn the_background_status_item_leads_its_own_process_group() {
     assert_eq!(group, pid.to_string(), "the process group of {pid}");
 }
 
+/// The flag `--foreground` decides where a new status item runs, not which
+/// status item a run stops.
 #[test]
-fn a_second_background_start_stops_the_status_item() {
+fn a_foreground_run_stops_the_background_status_item() {
     let mut home = Home::new();
     let pid = home.start(Target::Local);
-    home.assert_stops(Target::Local, &["--background"], pid);
+    home.assert_stops(Target::Local, &[FOREGROUND], pid);
 }
 
 #[test]
@@ -320,20 +390,51 @@ fn a_sample_leaves_the_status_item_running() {
     assert!(alive(pid), "the sample stopped the status item {pid}");
 }
 
+/// `--sample` and `--stream` start no status item, so a flag that says where
+/// the status item runs has no meaning with them.
 #[test]
-fn background_and_sample_together_are_a_usage_error() {
+fn foreground_with_sample_or_stream_is_a_usage_error() {
     let home = Home::new();
-    let output = home.run(&["--background", "--sample"]);
-    assert_eq!(output.status.code(), Some(USAGE_ERROR), "{output:?}");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("cannot be used with"), "{stderr}");
+    for (flag, mode) in [(FOREGROUND, "--sample"), (FOREGROUND_SHORT, "--stream")] {
+        let stderr = home.usage_error(&[flag, mode]);
+        assert!(
+            stderr.contains("cannot be used with"),
+            "{flag} {mode}: {stderr}"
+        );
+    }
+}
+
+/// `-b` and `--background` asked for what is now the default. They are gone,
+/// so a script that still gives one of them learns of the change at once.
+#[test]
+fn the_removed_background_flags_are_usage_errors() {
+    let home = Home::new();
+    for flag in REMOVED_BACKGROUND_FLAGS {
+        let stderr = home.usage_error(&[flag]);
+        assert!(
+            stderr.contains(&format!("unexpected argument '{flag}'")),
+            "{flag}: {stderr}"
+        );
+    }
 }
 
 #[test]
 fn a_stop_ends_a_foreground_status_item_with_status_zero() {
+    assert_a_stop_ends_the_foreground_status_item(FOREGROUND);
+}
+
+#[test]
+fn the_short_flag_f_starts_a_foreground_status_item() {
+    assert_a_stop_ends_the_foreground_status_item(FOREGROUND_SHORT);
+}
+
+/// Starts the local status item with the flag `flag`, and asserts that the
+/// status item runs in the process of the run until a plain run stops it.
+/// The run then exits with status 0.
+fn assert_a_stop_ends_the_foreground_status_item(flag: &str) {
     let mut home = Home::new();
     let mut child = home
-        .command(&["--exit-after", LIFE_BOUND])
+        .command(&[flag, "--exit-after", LIFE_BOUND])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
@@ -396,10 +497,10 @@ fn a_second_start_of_a_host_stops_only_the_status_item_of_that_host() {
 }
 
 #[test]
-fn a_plain_start_of_a_host_stops_the_status_item_of_that_host() {
+fn a_foreground_run_of_a_host_stops_the_status_item_of_that_host() {
     let mut home = Home::new();
     let beta = home.start(Target::Host(BETA));
-    home.assert_stops(Target::Host(BETA), &[], beta);
+    home.assert_stops(Target::Host(BETA), &[FOREGROUND_SHORT], beta);
 }
 
 /// The flag `--resolve` changes the name on the status item, not the target.
