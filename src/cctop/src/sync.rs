@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use proctree::Pid;
 
 use crate::board::{Board, Change};
-use crate::liveness::{ProcessClock, stale_pids};
+use crate::liveness::{stale_pids, ProcessClock};
 use crate::paths::ClaudeDirs;
 use crate::registry;
 use crate::state::{EpochMillis, StateFile};
@@ -50,11 +50,7 @@ impl Sync {
     /// # Errors
     ///
     /// Returns the error of the read of the state directory.
-    pub fn initial(
-        &self,
-        board: &mut Board,
-        clock: &mut dyn ProcessClock,
-    ) -> std::io::Result<()> {
+    pub fn initial(&self, board: &mut Board, clock: &mut dyn ProcessClock) -> std::io::Result<()> {
         let files: Vec<StateFile> = store::read_dir(&self.state_dir)?
             .into_iter()
             .filter_map(|(_, outcome)| match outcome {
@@ -62,8 +58,10 @@ impl Sync {
                 ReadOutcome::Gone | ReadOutcome::Unreadable(_) => None,
             })
             .collect();
-        let sessions: Vec<(Pid, EpochMillis)> =
-            files.iter().map(|file| (file.pid, file.started_at)).collect();
+        let sessions: Vec<(Pid, EpochMillis)> = files
+            .iter()
+            .map(|file| (file.pid, file.started_at))
+            .collect();
         let stale = stale_pids(&sessions, clock);
         for file in files {
             if stale.contains(&file.pid) {
@@ -187,7 +185,7 @@ mod tests {
 
     use super::*;
     use crate::state::PaneState;
-    use crate::store::test_support::{FakeClock, state_json};
+    use crate::store::test_support::{state_json, FakeClock};
 
     const REGISTRY: &str = include_str!("../fixtures/registry-session.json");
     const STARTED: u64 = 1_000_000;
@@ -372,7 +370,9 @@ mod tests {
         env.write(10, "idle", 2_000_000);
         env.write(20, "idle", 2_000_000);
         let mut board = Board::new();
-        env.sync.initial(&mut board, &mut live(&[10, 20, 30])).unwrap();
+        env.sync
+            .initial(&mut board, &mut live(&[10, 20, 30]))
+            .unwrap();
         // 10 changes, 20 goes away, 30 is new, 40 holds a bad file.
         env.write(10, "needs-you", 2_000_500);
         std::fs::remove_file(env.state.path().join("20.json")).unwrap();
@@ -438,7 +438,10 @@ mod tests {
         env.write(10, "idle", 2_000_000);
         let mut board = Board::new();
         env.sync.initial(&mut board, &mut live(&[10])).unwrap();
-        assert!(env.sync.on_tick(&mut board, &mut live(&[10]), NOW).is_empty());
+        assert!(env
+            .sync
+            .on_tick(&mut board, &mut live(&[10]), NOW)
+            .is_empty());
         assert_eq!(board.pids(), vec![Pid::new(10)]);
     }
 }
