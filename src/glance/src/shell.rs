@@ -13,6 +13,7 @@
 //! a [`Feed`], which runs one `ssh` child and its two reader threads.
 
 use std::cell::RefCell;
+use std::num::NonZeroUsize;
 use std::process::ExitCode;
 use std::time::Instant;
 
@@ -38,7 +39,6 @@ use objc2_foundation::{
 
 use crate::chart::{render, Appearance, Geometry, Pixmap, Rgba, FRAME_POINTS};
 use crate::connection::{Feed, Remote, SSH_PROGRAM};
-use crate::history::DEFAULT_CAPACITY;
 use crate::interval::Interval;
 use crate::reader::Reader;
 use crate::text::{menu_titles, Origin, MENU_LINES, QUIT_TITLE};
@@ -141,11 +141,11 @@ struct State {
 }
 
 impl State {
-    /// A state with an empty view.
-    fn new(source: Source) -> State {
+    /// A state with an empty view that holds `capacity` samples.
+    fn new(source: Source, capacity: NonZeroUsize) -> State {
         State {
             source,
-            view: View::new(DEFAULT_CAPACITY),
+            view: View::new(capacity),
         }
     }
 
@@ -593,7 +593,11 @@ pub fn run(interval: Interval, remote: Option<Remote>, on_ready: impl FnOnce()) 
             feed: Feed::new(SSH_PROGRAM, remote, interval),
         },
     };
-    let state = State::new(source);
+    // The history holds one sample for each column of a chart on the status
+    // bar. The thickness of the status bar does not change while glance runs.
+    let capacity =
+        Geometry::from_status_bar(NSStatusBar::systemStatusBar().thickness(), 1.0, None).columns();
+    let state = State::new(source, capacity);
     let info_items = build_menu(mtm, &status_item, &state.origin());
     let monitor = Monitor::new(mtm, interval, state, status_item, info_items);
     monitor.sample_and_redraw();

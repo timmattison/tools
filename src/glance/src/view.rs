@@ -8,7 +8,7 @@
 use std::num::NonZeroUsize;
 
 use crate::connection::Event;
-use crate::history::{History, DEFAULT_CAPACITY};
+use crate::history::History;
 use crate::host::HostName;
 use crate::sample::{Reading, Sample};
 use crate::text::Origin;
@@ -23,9 +23,9 @@ pub struct View {
 impl View {
     /// A view with an empty history of `capacity` samples, and no error.
     #[must_use]
-    pub fn new(_capacity: NonZeroUsize) -> View {
+    pub fn new(capacity: NonZeroUsize) -> View {
         View {
-            history: History::new(DEFAULT_CAPACITY),
+            history: History::new(capacity),
             error: None,
         }
     }
@@ -190,7 +190,10 @@ mod tests {
     }
 
     fn remote() -> (RemoteInput, View) {
-        (RemoteInput::new(DESTINATION.to_owned()), View::new(CAPACITY))
+        (
+            RemoteInput::new(DESTINATION.to_owned()),
+            View::new(CAPACITY),
+        )
     }
 
     #[test]

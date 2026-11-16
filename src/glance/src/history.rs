@@ -5,13 +5,6 @@
 
 use std::num::NonZeroUsize;
 
-/// The number of columns of each chart, and so the number of samples kept.
-const DEFAULT_CAPACITY_COLUMNS: usize = 30;
-
-/// The default capacity of a history. It is 30 samples.
-pub const DEFAULT_CAPACITY: NonZeroUsize =
-    NonZeroUsize::MIN.saturating_add(DEFAULT_CAPACITY_COLUMNS - 1);
-
 /// A ring buffer of fixed capacity. It never allocates after `new`.
 ///
 /// It keeps the last `capacity` items. A push into a full buffer drops the
@@ -129,10 +122,5 @@ mod tests {
         assert_eq!(history.iter().collect::<Vec<_>>(), [997, 998, 999]);
         assert_eq!(history.len(), history.capacity());
         assert_eq!(history.newest(), Some(999));
-    }
-
-    #[test]
-    fn the_default_capacity_is_30() {
-        assert_eq!(DEFAULT_CAPACITY.get(), 30);
     }
 }
