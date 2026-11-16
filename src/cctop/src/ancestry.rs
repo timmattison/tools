@@ -1,6 +1,9 @@
 //! Finds the Zellij server above a process.
 
-use proctree::{Pid, ProcessTree};
+use proctree::{comm_basename, Pid, ProcessTree};
+
+/// The base name of the Zellij program.
+const ZELLIJ_PROGRAM: &str = "zellij";
 
 /// Makes the argv that lists each process with its parent and its command.
 #[must_use]
@@ -17,8 +20,11 @@ pub fn ps_argv() -> Vec<String> {
 /// The function never uses the name of the session, because `zellij a <prefix>`
 /// attaches to a session by a prefix of its name.
 #[must_use]
-pub fn zellij_server_of(_tree: &ProcessTree, _pid: Pid) -> Option<Pid> {
-    None
+pub fn zellij_server_of(tree: &ProcessTree, pid: Pid) -> Option<Pid> {
+    tree.ancestors(pid).into_iter().find(|ancestor| {
+        tree.comm(*ancestor)
+            .is_some_and(|comm| comm_basename(comm) == ZELLIJ_PROGRAM)
+    })
 }
 
 #[cfg(test)]
