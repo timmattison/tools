@@ -536,4 +536,50 @@ mod tests {
         assert_eq!(error, "cannot find the terminal of pid 51234");
         assert!(writes.is_empty());
     }
+
+    /// A runner for a focus in Zellij, with `list` as the answer of
+    /// `wezterm cli list`.
+    fn runner_with_list(list: Result<CommandOutput, crate::runner::RunError>) -> FakeRunner {
+        FakeRunner::new()
+            .answer(&words(&list_sessions_argv()), ok(SESSIONS))
+            .answer(
+                &words(&focus_argv(&zellij_target().zellij.unwrap())),
+                ok(""),
+            )
+            .answer(&words(&ps_argv()), ok(PS))
+            .answer(&words(&unix_sockets_argv()), ok(SOCKETS))
+            .answer(&words(&tty_argv(Pid::new(19800))), ok(TTY))
+            .answer(&words(&list_argv()), list)
+    }
+
+    #[test]
+    fn a_wezterm_that_is_not_installed_is_a_step_2_error() {
+        let runner = runner_with_list(Err(crate::runner::RunError::NotInstalled {
+            program: "wezterm".to_string(),
+        }));
+        let (error, writes) = wezterm_error(&zellij_target(), runner);
+        assert_eq!(error, "wezterm cli list failed: wezterm is not installed");
+        assert!(writes.is_empty());
+    }
+
+    #[test]
+    fn a_wezterm_that_exits_with_an_error_is_a_step_2_error() {
+        let runner = runner_with_list(Ok(CommandOutput::failed(1, "no mux running\n")));
+        let (error, writes) = wezterm_error(&zellij_target(), runner);
+        assert_eq!(
+            error,
+            "wezterm cli list failed: it exited with 1: no mux running"
+        );
+        assert!(writes.is_empty());
+    }
+
+    #[test]
+    fn a_wezterm_list_with_bad_json_is_a_step_2_error() {
+        let (error, writes) = wezterm_error(&zellij_target(), runner_with_list(ok("not json")));
+        assert!(
+            error.starts_with("wezterm cli list gave bad JSON: "),
+            "{error}"
+        );
+        assert!(writes.is_empty());
+    }
 }
