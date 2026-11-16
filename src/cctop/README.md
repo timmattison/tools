@@ -7,13 +7,21 @@ cctop is a full-screen terminal view of your Claude Code sessions. It shows one 
 Each row has these parts:
 
 - A color block with the state of the session.
-- The state: `working`, `needs-you`, `idle`, `agents`, or `shells`.
+- The state: `working`, `needs-you`, `idle`, `agents`, or `shells`. A handled session adds ` - handled`, for example `idle - handled`.
 - The time in that state.
 - The Zellij session, or `—` outside Zellij.
 - The name of the directory of the session.
 - The registry name of the session, if it has one.
 
 The rows are in this order: `needs-you`, `idle`, `agents`, `shells`, `working`. Rows in the same state show the oldest first.
+
+### The handled mark
+
+Press `h` to mark the selected session as handled. The row goes to the bottom of the rows in its state, and its state shows ` - handled`. The latest mark goes to the very bottom. The cursor stays on its row, thus it selects the next session, and you can press `h` again to mark that session.
+
+The mark stays until the session changes state. A new write of the same state keeps the mark. When the state changes, the mark goes away, and it does not come back when the session returns to the old state.
+
+Press `h` on a handled session to remove the mark. The row goes back to its place, and the cursor goes with it. `n` skips a handled session. The change log does not show a mark.
 
 The colors are the colors of the `claude-tab-bar` Zellij plugin (`Palette::DEFAULT` in its `src/paint.rs`), thus cctop and the tab bars agree:
 
@@ -60,7 +68,8 @@ Use `--no-notify` to turn the notification off.
 | `j`, Down | Select the next row. |
 | `k`, Up | Select the previous row. |
 | Enter | Focus the selected session. |
-| `n` | Select the next `needs-you` session and focus it. |
+| `n` | Select the next `needs-you` session that has no handled mark, and focus it. |
+| `h`, `H` | Mark the selected session as handled, or remove its mark. |
 | `q`, Ctrl-C | Quit. |
 
 ## The focus
