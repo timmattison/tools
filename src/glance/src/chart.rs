@@ -469,10 +469,10 @@ impl Coverage {
 /// The glyphs of the label: how much they cover each pixel when AppKit draws
 /// them in the label color of each appearance.
 ///
-/// AppKit draws light text a little bolder than dark text, so the same text
-/// covers more of each pixel in the light ink. [`Pixmap::paint_label`] takes
-/// the coverage of the ink that it paints, so each ink looks as AppKit draws
-/// it.
+/// AppKit draws white text a little bolder than black text, so the same text
+/// covers more of each pixel in white, the label color of the dark
+/// appearance. [`Pixmap::paint_label`] takes the coverage of the ink that it
+/// paints, so each ink looks as AppKit draws it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Glyphs {
     /// The coverage in the label color of the light appearance.
@@ -1347,9 +1347,9 @@ mod tests {
         assert!(Glyphs::new(two(), two()).is_some());
     }
 
-    /// AppKit draws light text bolder than dark text, so the label takes the
-    /// coverage of the ink that it paints. Here the dark ink covers half of
-    /// the pixel and the light ink covers all of it.
+    /// AppKit draws white text bolder than black text, so the label takes the
+    /// coverage of the ink that it paints. Here black covers half of the pixel
+    /// and white covers all of it.
     #[test]
     fn the_label_takes_the_coverage_of_the_ink_that_it_paints() {
         let glyphs = Glyphs::new(row_coverage(&[HALF]), row_coverage(&[FULL])).unwrap();
