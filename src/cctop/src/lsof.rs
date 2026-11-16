@@ -23,13 +23,21 @@ pub struct UnixSocket {
 /// lists far too many lines.
 #[must_use]
 pub fn unix_sockets_argv() -> Vec<String> {
-    Vec::new()
+    ["lsof", "-a", "-U", "-c", "zellij", "-F", "pdn"]
+        .iter()
+        .map(ToString::to_string)
+        .collect()
 }
 
 /// Makes the argv that gives the file of standard input of `pid`.
 #[must_use]
-pub fn tty_argv(_pid: Pid) -> Vec<String> {
-    Vec::new()
+pub fn tty_argv(pid: Pid) -> Vec<String> {
+    ["lsof", "-a", "-p"]
+        .iter()
+        .map(ToString::to_string)
+        .chain(std::iter::once(pid.as_u32().to_string()))
+        .chain(["-d", "0", "-F", "n"].iter().map(ToString::to_string))
+        .collect()
 }
 
 /// Reads the sockets from the output of `lsof -a -U -c zellij -F pdn`.
