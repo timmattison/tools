@@ -88,12 +88,35 @@ pub trait Runner: Send + Sync {
 pub struct SystemRunner;
 
 impl Runner for SystemRunner {
-    fn run(&self, _argv: &[String], _limit: Duration) -> Result<CommandOutput, RunError> {
-        Ok(CommandOutput {
-            code: None,
-            stdout: String::new(),
-            stderr: String::new(),
-        })
+    fn run(&self, argv: &[String], limit: Duration) -> Result<CommandOutput, RunError> {
+        let Some((program, args)) = argv.split_first() else {
+            return Err(RunError::Start {
+                program: String::new(),
+                message: "the command is empty".to_string(),
+            });
+        };
+        let mut command = childenv::command(program);
+        command.args(args);
+        match runlimit::run_with_limit(&mut command, limit) {
+            Ok(output) => Ok(CommandOutput {
+                code: output.status.code(),
+                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            }),
+            Err(runlimit::RunFailure::NotInstalled) => Err(RunError::NotInstalled {
+                program: program.clone(),
+            }),
+            Err(runlimit::RunFailure::TimedOut(waited)) => Err(RunError::TimedOut {
+                program: program.clone(),
+                seconds: waited.as_secs(),
+            }),
+            Err(
+                runlimit::RunFailure::Spawn(error) | runlimit::RunFailure::Wait(error),
+            ) => Err(RunError::Start {
+                program: program.clone(),
+                message: error.to_string(),
+            }),
+        }
     }
 }
 

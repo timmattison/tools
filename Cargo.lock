@@ -1303,8 +1303,10 @@ dependencies = [
 name = "cctop"
 version = "0.1.0"
 dependencies = [
+ "childenv",
  "notify",
  "proctree",
+ "runlimit",
  "serde",
  "serde_json",
  "sysinfo",
