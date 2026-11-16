@@ -1,6 +1,19 @@
 //! Focus step 2: finds the WezTerm pane of a terminal, and asks WezTerm to
 //! focus it.
 
+/// The name of the user variable that the WezTerm handler reads.
+pub const FOCUS_USER_VAR: &str = "claude-focus-pane";
+
+/// Makes the escape sequence that asks WezTerm to focus the pane `pane_id`.
+///
+/// The sequence sets the user variable [`FOCUS_USER_VAR`] to the Base64 text of
+/// the decimal pane number. The handler of WezTerm reads only the value, so
+/// any pane can send the sequence.
+#[must_use]
+pub fn focus_request(_pane_id: u64) -> String {
+    String::new()
+}
+
 /// Makes the argv that lists the WezTerm panes as JSON.
 #[must_use]
 pub fn list_argv() -> Vec<String> {
@@ -42,6 +55,8 @@ pub fn pane_for_tty(panes: &[WeztermPane], tty: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    use base64::Engine as _;
+
     use super::*;
 
     const LIST: &str = include_str!("../fixtures/wezterm-list.json");
@@ -96,5 +111,27 @@ mod tests {
         let panes = parse_panes(LIST).unwrap();
         assert_eq!(pane_for_tty(&panes, "/dev/ttys999"), None);
         assert_eq!(pane_for_tty(&[pane(7, None)], "/dev/ttys231"), None);
+    }
+
+    #[test]
+    fn the_focus_request_of_pane_239_is_exact() {
+        assert_eq!(
+            focus_request(239),
+            "\x1b]1337;SetUserVar=claude-focus-pane=MjM5\x07"
+        );
+    }
+
+    #[test]
+    fn the_value_of_the_focus_request_decodes_to_the_pane_number() {
+        let request = focus_request(378);
+        let value = request
+            .strip_prefix("\x1b]1337;SetUserVar=claude-focus-pane=")
+            .and_then(|rest| rest.strip_suffix('\x07'))
+            .unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(value)
+            .unwrap();
+        assert_eq!(decoded, b"378");
+        assert_eq!(FOCUS_USER_VAR, "claude-focus-pane");
     }
 }

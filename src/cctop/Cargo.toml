@@ -10,6 +10,7 @@ name = "cctop"
 path = "src/lib.rs"
 
 [dependencies]
+base64.workspace = true
 childenv.workspace = true
 notify.workspace = true
 proctree.workspace = true
