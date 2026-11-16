@@ -17,6 +17,21 @@ pub struct UnixSocket {
     pub peer: Option<String>,
 }
 
+/// Makes the argv that lists the Unix sockets of the Zellij processes.
+///
+/// The argv has `-a`. Without `-a`, `lsof` joins `-U` and `-c` with OR and
+/// lists far too many lines.
+#[must_use]
+pub fn unix_sockets_argv() -> Vec<String> {
+    Vec::new()
+}
+
+/// Makes the argv that gives the file of standard input of `pid`.
+#[must_use]
+pub fn tty_argv(_pid: Pid) -> Vec<String> {
+    Vec::new()
+}
+
 /// Reads the sockets from the output of `lsof -a -U -c zellij -F pdn`.
 ///
 /// A `p` line starts a process. A `d` line starts a socket. An `n` line gives
@@ -152,5 +167,25 @@ mod tests {
             socket(5, "0xc", Some("0xs")),
         ];
         assert_eq!(client_pids(Pid::new(1), &sockets), pids(&[5, 9]));
+    }
+
+    fn argv(items: &[&str]) -> Vec<String> {
+        items.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn the_socket_argv_has_the_and_flag() {
+        assert_eq!(
+            unix_sockets_argv(),
+            argv(&["lsof", "-a", "-U", "-c", "zellij", "-F", "pdn"])
+        );
+    }
+
+    #[test]
+    fn the_tty_argv_names_the_pid_and_descriptor_zero() {
+        assert_eq!(
+            tty_argv(Pid::new(19800)),
+            argv(&["lsof", "-a", "-p", "19800", "-d", "0", "-F", "n"])
+        );
     }
 }
