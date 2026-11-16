@@ -7,7 +7,7 @@ use proctree::Pid;
 
 use crate::board::Session;
 use crate::runner::Runner;
-use crate::state::ZellijLocation;
+use crate::state::{ZellijLocation, ZellijPaneId};
 use crate::wezterm::TtyWriter;
 
 /// The session to focus.
@@ -43,10 +43,37 @@ pub struct FocusTools {
     pub writer: Arc<dyn TtyWriter>,
 }
 
+/// The result of a focus. Each step has its own result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FocusReport {
+    /// The label of the session.
+    pub label: String,
+    /// The result of step 1. `None` when step 1 did not run. `Ok` holds the
+    /// pane that Zellij focused.
+    pub zellij: Option<Result<ZellijPaneId, String>>,
+    /// The result of step 2. `Ok` holds the WezTerm pane that got the focus
+    /// request.
+    pub wezterm: Result<u64, String>,
+}
+
+impl FocusReport {
+    /// Tells if each step that ran did succeed.
+    #[must_use]
+    pub fn succeeded(&self) -> bool {
+        false
+    }
+
+    /// Makes the status line. Its parts are separated by ` · `.
+    #[must_use]
+    pub fn status_line(&self) -> String {
+        String::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{parse_state_file, ZellijPaneId};
+    use crate::state::parse_state_file;
 
     pub(super) fn session(pid: u32, name: Option<&str>, zellij: Option<(&str, &str)>) -> Session {
         let (zellij_session, zellij_pane) = zellij.map_or(
@@ -86,5 +113,61 @@ mod tests {
         assert_eq!(target.pid, Pid::new(51234));
         assert_eq!(target.label, "tools");
         assert_eq!(target.zellij, None);
+    }
+
+    fn report(
+        zellij: Option<Result<ZellijPaneId, String>>,
+        wezterm: Result<u64, String>,
+    ) -> FocusReport {
+        FocusReport {
+            label: "docs".to_string(),
+            zellij,
+            wezterm,
+        }
+    }
+
+    fn pane(text: &str) -> ZellijPaneId {
+        ZellijPaneId::parse(text).unwrap()
+    }
+
+    #[test]
+    fn the_status_line_of_two_good_steps_names_both_panes() {
+        assert_eq!(
+            report(Some(Ok(pane("310"))), Ok(239)).status_line(),
+            "docs: Zellij focused pane terminal_310 · WezTerm focused pane 239"
+        );
+    }
+
+    #[test]
+    fn the_status_line_outside_zellij_has_only_the_wezterm_part() {
+        assert_eq!(
+            report(None, Ok(239)).status_line(),
+            "docs: WezTerm focused pane 239"
+        );
+    }
+
+    #[test]
+    fn the_status_line_names_each_failed_step_with_its_error() {
+        assert_eq!(
+            report(Some(Err("the Zellij session tools is gone".to_string())), Ok(239)).status_line(),
+            "docs: Zellij failed: the Zellij session tools is gone · WezTerm focused pane 239"
+        );
+        assert_eq!(
+            report(Some(Ok(pane("310"))), Err("no pane".to_string())).status_line(),
+            "docs: Zellij focused pane terminal_310 · WezTerm failed: no pane"
+        );
+        assert_eq!(
+            report(None, Err("no pane".to_string())).status_line(),
+            "docs: WezTerm failed: no pane"
+        );
+    }
+
+    #[test]
+    fn a_report_succeeds_only_when_each_step_that_ran_succeeded() {
+        assert!(report(Some(Ok(pane("310"))), Ok(239)).succeeded());
+        assert!(report(None, Ok(239)).succeeded());
+        assert!(!report(Some(Err("x".to_string())), Ok(239)).succeeded());
+        assert!(!report(Some(Ok(pane("310"))), Err("x".to_string())).succeeded());
+        assert!(!report(None, Err("x".to_string())).succeeded());
     }
 }
