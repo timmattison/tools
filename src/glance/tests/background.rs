@@ -3,12 +3,19 @@
 //! Tests of the status item that one run of `glance` starts and the next run
 //! stops.
 //!
-//! Each test gives `glance` its own home directory. Thus the lock file of a
-//! test is never the lock file of a `glance` that a person runs, and a test
-//! never stops that `glance`. Each start also gets `--exit-after`, so a status
-//! item that a failed test leaves behind ends by itself.
+//! Each target has its own status item: the local Mac, and each destination
+//! of `--host`. A run stops the status item of its own target only.
+//!
+//! Each test gives `glance` its own home directory. Thus the lock files of a
+//! test are never the lock files of a `glance` that a person runs, and a test
+//! never stops that `glance`. Each test also puts a fake `ssh` first on the
+//! `PATH` of `glance`, so a status item of a host never starts the real
+//! `ssh`. Each start gets `--exit-after`, so a status item that a failed test
+//! leaves behind ends by itself.
 
+use std::fs;
 use std::io::{BufRead, BufReader};
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::thread;
@@ -30,25 +37,73 @@ const SHORT_LIFE_DEADLINE: Duration = Duration::from_secs(60);
 /// The time between two looks at a process that must end.
 const POLL: Duration = Duration::from_millis(100);
 
-/// The path of the lock file below the home directory.
-const LOCK_FILE: &str = "Library/Application Support/glance/glance.lock";
+/// The directory of the lock files below the home directory.
+const LOCK_DIRECTORY: &str = "Library/Application Support/glance";
 
-/// The text before the PID in the line that a status item writes when it is
-/// up.
-const READY_PREFIX: &str = "glance: the status item runs as PID ";
+/// The name of the lock file of the local status item.
+const LOCAL_LOCK_FILE: &str = "local.lock";
 
-/// The text after the PID in the line that a status item writes when it is
-/// up.
-const READY_SUFFIX: &str = ". Run glance again to stop it.\n";
+/// The name of the directory of the fake `ssh` in the home directory.
+const FAKE_BIN: &str = "fake-bin";
 
-/// The text before the PID in the line that a stop writes.
-const STOPPED_PREFIX: &str = "glance: stopped the status item that ran as PID ";
+/// A fake `ssh` that fails at once. The status item then shows the error
+/// line, and it tries again after its backoff.
+const FAKE_SSH: &str = "#!/bin/sh\nexit 255\n";
 
-/// The text after the PID in the line that a stop writes.
-const STOPPED_SUFFIX: &str = ".\n";
+/// The directories after the fake `ssh` on the `PATH` of `glance`.
+const SYSTEM_PATH: &str = "/usr/bin:/bin";
+
+/// The text before the PID in each line that names a status item.
+const PID_MARK: &str = " as PID ";
 
 /// The exit code that clap gives for a usage error.
 const USAGE_ERROR: i32 = 2;
+
+/// The first two destinations of `--host` in these tests.
+const ALPHA: &str = "alpha";
+const BETA: &str = "tim@beta";
+
+/// The status item that a run starts or stops.
+#[derive(Debug, Clone, Copy)]
+enum Target {
+    /// The status item of this Mac.
+    Local,
+    /// The status item of the `--host` destination.
+    Host(&'static str),
+}
+
+impl Target {
+    /// The arguments that name this target.
+    fn args(self) -> Vec<&'static str> {
+        match self {
+            Target::Local => Vec::new(),
+            Target::Host(destination) => vec!["--host", destination],
+        }
+    }
+
+    /// The line that the status item of this target writes when it is up.
+    fn ready_line(self, pid: u32) -> String {
+        match self {
+            Target::Local => {
+                format!("glance: the status item runs as PID {pid}. Run glance again to stop it.\n")
+            }
+            Target::Host(destination) => format!(
+                "glance: the status item of the host {destination} runs as PID {pid}. \
+                 Run glance again with the same --host to stop it.\n"
+            ),
+        }
+    }
+
+    /// The line that a stop of the status item of this target writes.
+    fn stopped_line(self, pid: u32) -> String {
+        match self {
+            Target::Local => format!("glance: stopped the status item that ran as PID {pid}.\n"),
+            Target::Host(destination) => format!(
+                "glance: stopped the status item of the host {destination} that ran as PID {pid}.\n"
+            ),
+        }
+    }
+}
 
 /// A home directory for one test, and the status items that the test started.
 ///
@@ -65,6 +120,12 @@ impl Home {
             .prefix("glance-home-")
             .tempdir()
             .expect("make a home directory");
+        let bin = dir.path().join(FAKE_BIN);
+        fs::create_dir(&bin).expect("make the directory of the fake ssh");
+        let ssh = bin.join("ssh");
+        fs::write(&ssh, FAKE_SSH).expect("write the fake ssh");
+        fs::set_permissions(&ssh, fs::Permissions::from_mode(0o755))
+            .expect("make the fake ssh executable");
         Self {
             dir,
             started: Vec::new(),
@@ -73,9 +134,11 @@ impl Home {
 
     /// A command that runs `glance` with `args` in this home directory.
     fn command(&self, args: &[&str]) -> Command {
+        let path = format!("{}:{SYSTEM_PATH}", self.dir.path().join(FAKE_BIN).display());
         let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_glance"));
         command
             .env("HOME", self.dir.path())
+            .env("PATH", path)
             .args(args)
             .stdin(Stdio::null());
         command
@@ -94,28 +157,51 @@ impl Home {
             .expect("the glance binary starts")
     }
 
-    /// Starts a status item in the background with a life bound of
-    /// `seconds`, and returns its PID.
-    fn start_in_background_bounded(&mut self, seconds: &str) -> u32 {
+    /// Runs `glance` for `target` with `extra` arguments after the target.
+    fn run_target(&self, target: Target, extra: &[&str]) -> Output {
+        let mut args = target.args();
+        args.extend_from_slice(extra);
+        self.run(&args)
+    }
+
+    /// Starts the status item of `target` in the background with a life
+    /// bound of `seconds`, and returns its PID.
+    fn start_bounded(&mut self, target: Target, seconds: &str) -> u32 {
+        let mut args = target.args();
+        args.push("--background");
         // `output` waits until the start closes its stdout and its stderr.
         // A status item that kept them open would keep the test here until
         // its bound, and the test would then find it gone.
-        let output = self.run_bounded(&["--background"], seconds);
+        let output = self.run_bounded(&args, seconds);
         assert_eq!(output.status.code(), Some(0), "{output:?}");
         let stdout = String::from_utf8(output.stdout).expect("stdout is UTF-8");
-        let pid = ready_pid(&stdout);
+        let pid = named_pid(&stdout);
         self.started.push(pid);
+        assert_eq!(stdout, target.ready_line(pid));
         pid
     }
 
-    /// Starts a status item in the background and returns its PID.
-    fn start_in_background(&mut self) -> u32 {
-        self.start_in_background_bounded(LIFE_BOUND)
+    /// Starts the status item of `target` in the background and returns its
+    /// PID.
+    fn start(&mut self, target: Target) -> u32 {
+        self.start_bounded(target, LIFE_BOUND)
     }
 
-    /// The lock file of `glance` in this home directory.
-    fn lock_file(&self) -> PathBuf {
-        self.dir.path().join(LOCK_FILE)
+    /// Runs `glance` for `target` with `extra` arguments, and asserts that
+    /// the run stopped the status item `pid` of that target.
+    fn assert_stops(&self, target: Target, extra: &[&str], pid: u32) {
+        let output = self.run_target(target, extra);
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            target.stopped_line(pid)
+        );
+        assert!(!alive(pid), "the status item {pid} still runs");
+    }
+
+    /// The path of the lock file `name` in this home directory.
+    fn lock_file(&self, name: &str) -> PathBuf {
+        self.dir.path().join(LOCK_DIRECTORY).join(name)
     }
 }
 
@@ -131,20 +217,15 @@ impl Drop for Home {
     }
 }
 
-/// The PID in the line that a status item writes when it is up.
-fn ready_pid(line: &str) -> u32 {
-    line.strip_prefix(READY_PREFIX)
-        .and_then(|rest| rest.strip_suffix(READY_SUFFIX))
-        .and_then(|pid| pid.parse().ok())
-        .unwrap_or_else(|| panic!("not the line of a status item that is up: {line:?}"))
+/// The PID in a line that names a status item.
+fn named_pid(line: &str) -> u32 {
+    line.split_once(PID_MARK)
+        .and_then(|(_, rest)| rest.split_once('.'))
+        .and_then(|(pid, _)| pid.parse().ok())
+        .unwrap_or_else(|| panic!("the line names no status item: {line:?}"))
 }
 
-/// The line that a stop of the status item with `pid` writes.
-fn stopped_line(pid: u32) -> String {
-    format!("{STOPPED_PREFIX}{pid}{STOPPED_SUFFIX}")
-}
-
-/// The fields `keyword` of the process `pid`, or `None` when `ps` finds no
+/// The field `keyword` of the process `pid`, or `None` when `ps` finds no
 /// such process.
 fn ps_field(pid: u32, keyword: &str) -> Option<String> {
     let output = childenv::fixture_command("ps")
@@ -164,19 +245,16 @@ fn alive(pid: u32) -> bool {
 #[test]
 fn a_background_start_returns_and_leaves_the_status_item_running() {
     let mut home = Home::new();
-    let pid = home.start_in_background();
+    let pid = home.start(Target::Local);
     assert!(alive(pid), "the status item {pid} does not run");
-    assert!(
-        home.lock_file().is_file(),
-        "no lock file at {}",
-        home.lock_file().display()
-    );
+    let lock = home.lock_file(LOCAL_LOCK_FILE);
+    assert!(lock.is_file(), "no lock file at {}", lock.display());
 }
 
 #[test]
 fn the_background_status_item_leads_its_own_process_group() {
     let mut home = Home::new();
-    let pid = home.start_in_background();
+    let pid = home.start(Target::Local);
     let group = ps_field(pid, "pgid").expect("the status item runs");
     assert_eq!(group, pid.to_string(), "the process group of {pid}");
 }
@@ -184,30 +262,23 @@ fn the_background_status_item_leads_its_own_process_group() {
 #[test]
 fn a_second_background_start_stops_the_status_item() {
     let mut home = Home::new();
-    let pid = home.start_in_background();
-    let output = home.run(&["--background"]);
-    assert_eq!(output.status.code(), Some(0), "{output:?}");
-    assert_eq!(String::from_utf8_lossy(&output.stdout), stopped_line(pid));
-    assert!(!alive(pid), "the status item {pid} still runs");
+    let pid = home.start(Target::Local);
+    home.assert_stops(Target::Local, &["--background"], pid);
 }
 
 #[test]
 fn a_plain_start_stops_the_background_status_item() {
     let mut home = Home::new();
-    let pid = home.start_in_background();
-    let output = home.run(&[]);
-    assert_eq!(output.status.code(), Some(0), "{output:?}");
-    assert_eq!(String::from_utf8_lossy(&output.stdout), stopped_line(pid));
-    assert!(!alive(pid), "the status item {pid} still runs");
+    let pid = home.start(Target::Local);
+    home.assert_stops(Target::Local, &[], pid);
 }
 
 #[test]
 fn a_start_after_a_stop_starts_a_new_status_item() {
     let mut home = Home::new();
-    let first = home.start_in_background();
-    let stop = home.run(&["--background"]);
-    assert_eq!(String::from_utf8_lossy(&stop.stdout), stopped_line(first));
-    let second = home.start_in_background();
+    let first = home.start(Target::Local);
+    home.assert_stops(Target::Local, &["--background"], first);
+    let second = home.start(Target::Local);
     assert_ne!(first, second);
     assert!(alive(second), "the status item {second} does not run");
 }
@@ -215,7 +286,7 @@ fn a_start_after_a_stop_starts_a_new_status_item() {
 #[test]
 fn a_sample_leaves_the_status_item_running() {
     let mut home = Home::new();
-    let pid = home.start_in_background();
+    let pid = home.start(Target::Local);
     let output = home.run(&["--sample", "--interval", "0.25"]);
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     let stdout = String::from_utf8(output.stdout).expect("stdout is UTF-8");
@@ -246,10 +317,13 @@ fn a_stop_ends_a_foreground_status_item_with_status_zero() {
     BufReader::new(child.stdout.take().expect("the stdout of the status item"))
         .read_line(&mut line)
         .expect("read the stdout of the status item");
-    assert_eq!(ready_pid(&line), child.id());
+    assert_eq!(line, Target::Local.ready_line(child.id()));
 
     let output = home.run(&[]);
-    assert_eq!(String::from_utf8_lossy(&output.stdout), stopped_line(child.id()));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        Target::Local.stopped_line(child.id())
+    );
     let status = child.wait().expect("wait for the status item");
     assert_eq!(status.code(), Some(0), "{status:?}");
 }
@@ -257,10 +331,47 @@ fn a_stop_ends_a_foreground_status_item_with_status_zero() {
 #[test]
 fn the_life_bound_ends_a_background_status_item() {
     let mut home = Home::new();
-    let pid = home.start_in_background_bounded(SHORT_LIFE);
+    let pid = home.start_bounded(Target::Local, SHORT_LIFE);
     let deadline = Instant::now() + SHORT_LIFE_DEADLINE;
     while alive(pid) && Instant::now() < deadline {
         thread::sleep(POLL);
     }
     assert!(!alive(pid), "the status item {pid} outlived its bound");
+}
+
+#[test]
+fn a_host_status_item_runs_beside_the_local_status_item() {
+    let mut home = Home::new();
+    let local = home.start(Target::Local);
+    let host = home.start(Target::Host(ALPHA));
+    assert_ne!(local, host);
+    assert!(alive(local), "the local status item {local} does not run");
+    assert!(alive(host), "the status item {host} of {ALPHA} does not run");
+}
+
+#[test]
+fn a_second_start_of_a_host_stops_only_the_status_item_of_that_host() {
+    let mut home = Home::new();
+    let local = home.start(Target::Local);
+    let alpha = home.start(Target::Host(ALPHA));
+    let beta = home.start(Target::Host(BETA));
+    home.assert_stops(Target::Host(ALPHA), &["--background"], alpha);
+    assert!(alive(local), "the stop of {ALPHA} stopped the local status item");
+    assert!(alive(beta), "the stop of {ALPHA} stopped the status item of {BETA}");
+}
+
+#[test]
+fn a_plain_start_of_a_host_stops_the_status_item_of_that_host() {
+    let mut home = Home::new();
+    let beta = home.start(Target::Host(BETA));
+    home.assert_stops(Target::Host(BETA), &[], beta);
+}
+
+#[test]
+fn a_local_start_stops_only_the_local_status_item() {
+    let mut home = Home::new();
+    let alpha = home.start(Target::Host(ALPHA));
+    let local = home.start(Target::Local);
+    home.assert_stops(Target::Local, &["--background"], local);
+    assert!(alive(alpha), "the local stop stopped the status item of {ALPHA}");
 }
