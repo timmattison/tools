@@ -384,6 +384,104 @@ mod tests {
     }
 
     #[test]
+    fn n_skips_a_handled_needs_you_session() {
+        let mut app = app_with(&[
+            (10, PaneState::NeedsYou),
+            (11, PaneState::NeedsYou),
+            (12, PaneState::Working),
+        ]);
+        app.board_mut().toggle_handled(Pid::new(10));
+        // The rows are 11, 10 (handled), 12, and the cursor is on row 0.
+        let action = app.handle_key(press(KeyCode::Char('n')));
+        assert_eq!(focus_pid(&action), Pid::new(11));
+        assert_eq!(app.selected_index(), Some(0));
+    }
+
+    #[test]
+    fn n_with_only_handled_needs_you_sessions_does_nothing() {
+        let mut app = app_with(&[(10, PaneState::NeedsYou), (11, PaneState::Idle)]);
+        app.board_mut().toggle_handled(Pid::new(10));
+        assert_eq!(app.handle_key(press(KeyCode::Char('n'))), Action::Nothing);
+        assert_eq!(app.status(), Some("No session needs you"));
+    }
+
+    /// The pid of the selected row.
+    fn selected_pid(app: &App) -> Option<Pid> {
+        let index = app.selected_index()?;
+        app.board()
+            .rows()
+            .get(index)
+            .map(|session| session.file.pid)
+    }
+
+    /// The pids of the rows, in the order of the screen.
+    fn row_order(app: &App) -> Vec<u32> {
+        app.board()
+            .rows()
+            .iter()
+            .map(|session| session.file.pid.as_u32())
+            .collect()
+    }
+
+    /// Tell if the session with the pid has a handled mark.
+    fn is_handled(app: &App, pid: u32) -> bool {
+        app.board()
+            .get(Pid::new(pid))
+            .is_some_and(crate::board::Session::is_handled)
+    }
+
+    #[test]
+    fn h_marks_the_selected_session_and_the_cursor_stays_on_its_row() {
+        let mut app = three_rows();
+        assert_eq!(app.handle_key(press(KeyCode::Char('h'))), Action::Nothing);
+        assert!(is_handled(&app, 10));
+        assert_eq!(row_order(&app), vec![11, 12, 10]);
+        assert_eq!(app.selected_index(), Some(0));
+        assert_eq!(selected_pid(&app), Some(Pid::new(11)));
+        assert_eq!(app.status(), Some("Marked dir10 as handled"));
+    }
+
+    #[test]
+    fn a_second_h_marks_the_next_session() {
+        let mut app = three_rows();
+        app.handle_key(press(KeyCode::Char('h')));
+        app.handle_key(press(KeyCode::Char('h')));
+        assert!(is_handled(&app, 10));
+        assert!(is_handled(&app, 11));
+        assert_eq!(row_order(&app), vec![12, 10, 11]);
+        assert_eq!(selected_pid(&app), Some(Pid::new(12)));
+    }
+
+    #[test]
+    fn a_shifted_h_also_marks_the_selected_session() {
+        let mut app = three_rows();
+        let shifted = KeyEvent::new(KeyCode::Char('H'), KeyModifiers::SHIFT);
+        assert_eq!(app.handle_key(shifted), Action::Nothing);
+        assert!(is_handled(&app, 10));
+    }
+
+    #[test]
+    fn h_on_a_handled_session_removes_the_mark_and_the_cursor_follows_it() {
+        let mut app = three_rows();
+        app.handle_key(press(KeyCode::Char('h')));
+        app.handle_key(press(KeyCode::Char('j')));
+        app.handle_key(press(KeyCode::Char('j')));
+        assert_eq!(selected_pid(&app), Some(Pid::new(10)));
+        app.handle_key(press(KeyCode::Char('h')));
+        assert!(!is_handled(&app, 10));
+        assert_eq!(row_order(&app), vec![10, 11, 12]);
+        assert_eq!(selected_pid(&app), Some(Pid::new(10)));
+        assert_eq!(app.status(), Some("Removed the handled mark from dir10"));
+    }
+
+    #[test]
+    fn h_on_an_empty_board_marks_nothing() {
+        let mut app = App::new();
+        assert_eq!(app.handle_key(press(KeyCode::Char('h'))), Action::Nothing);
+        assert_eq!(app.status(), Some("No session to mark"));
+    }
+
+    #[test]
     fn q_and_control_c_quit() {
         let mut app = three_rows();
         assert_eq!(app.handle_key(press(KeyCode::Char('q'))), Action::Quit);
