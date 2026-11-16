@@ -1283,4 +1283,113 @@ mod tests {
             assert_eq!(pixmap.pixel(0, 0), expected, "{appearance:?}");
         }
     }
+
+    /// The colors of the columns of the two charts.
+    const COLUMN_COLORS: [Rgba; 6] = [SYSTEM, USER, NORMAL, WARN, CRITICAL, UNKNOWN];
+    /// The smallest contrast ratio that WCAG 2 accepts for normal text.
+    const MIN_CONTRAST: f64 = 4.5;
+
+    /// The color of the menu bar behind the image, as the tests take it: white
+    /// in the light appearance, and black in the dark appearance.
+    fn bar(appearance: Appearance) -> f64 {
+        match appearance {
+            Appearance::Light => 1.0,
+            Appearance::Dark => 0.0,
+        }
+    }
+
+    /// The color that a pixel shows over the bar, with each channel from 0 to 1.
+    fn shown([red, green, blue, alpha]: Rgba, appearance: Appearance) -> [f64; 3] {
+        let unit = f64::from(u8::MAX);
+        let alpha = f64::from(alpha) / unit;
+        let over =
+            |channel: u8| f64::from(channel) / unit * alpha + bar(appearance) * (1.0 - alpha);
+        [over(red), over(green), over(blue)]
+    }
+
+    /// The relative luminance of a color, as WCAG 2 gives it.
+    fn luminance(color: [f64; 3]) -> f64 {
+        let linear = |channel: f64| {
+            if channel <= 0.04045 {
+                channel / 12.92
+            } else {
+                ((channel + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let [red, green, blue] = color.map(linear);
+        0.2126 * red + 0.7152 * green + 0.0722 * blue
+    }
+
+    /// The contrast ratio of two colors, as WCAG 2 gives it.
+    fn contrast(left: [f64; 3], right: [f64; 3]) -> f64 {
+        let (left, right) = (luminance(left), luminance(right));
+        (left.max(right) + 0.05) / (left.min(right) + 0.05)
+    }
+
+    /// Where the label crosses a column or a frame, its ink is black or white,
+    /// whichever contrasts more with the pixel behind it.
+    #[test]
+    fn the_label_over_each_column_and_frame_has_a_contrast_of_at_least_4_5_to_1() {
+        for appearance in APPEARANCES {
+            let mut behind = COLUMN_COLORS.to_vec();
+            behind.push(appearance.frame());
+            let mut pixmap = row_of(&behind);
+            pixmap
+                .paint_label(&row_glyphs(&vec![FULL; behind.len()]), appearance)
+                .unwrap();
+            for (x, color) in (0..).zip(&behind) {
+                let ratio = contrast(
+                    shown(pixmap.pixel(x, 0), appearance),
+                    shown(*color, appearance),
+                );
+                assert!(
+                    ratio >= MIN_CONTRAST,
+                    "{appearance:?}: the label over {color:?} has a contrast of {ratio:.2} to 1"
+                );
+            }
+        }
+    }
+
+    /// Black contrasts more than white with each color of a column, so the
+    /// label over a column takes the label color of the light appearance in
+    /// both appearances. Black at 85% over an opaque color keeps 38 / 255 of
+    /// each channel, and the pixel stays opaque.
+    #[test]
+    fn the_label_over_a_column_is_black_at_85_percent_in_each_appearance() {
+        let [.., label_alpha] = Appearance::Light.label();
+        let rest = u32::from(u8::MAX - label_alpha);
+        let kept = |channel: u8| {
+            let rounded = (u32::from(channel) * rest + u32::from(u8::MAX) / 2) / u32::from(u8::MAX);
+            u8::try_from(rounded).unwrap()
+        };
+        let expected: Vec<Rgba> = COLUMN_COLORS
+            .iter()
+            .map(|&[red, green, blue, _]| [kept(red), kept(green), kept(blue), u8::MAX])
+            .collect();
+        for appearance in APPEARANCES {
+            let mut pixmap = row_of(&COLUMN_COLORS);
+            pixmap
+                .paint_label(&row_glyphs(&[FULL; 6]), appearance)
+                .unwrap();
+            assert_eq!(row_pixels(&pixmap), expected, "{appearance:?}");
+        }
+    }
+
+    /// Over a column, the ink is black in both appearances, so the label
+    /// takes the coverage of the glyphs in black: the label color of the
+    /// light appearance.
+    #[test]
+    fn the_label_over_a_column_takes_the_coverage_of_the_glyphs_in_black() {
+        let black_only = Glyphs::new(row_coverage(&[FULL]), row_coverage(&[NONE])).unwrap();
+        let white_only = Glyphs::new(row_coverage(&[NONE]), row_coverage(&[FULL])).unwrap();
+        for appearance in APPEARANCES {
+            let mut pixmap = row_of(&[USER]);
+            pixmap.paint_label(&white_only, appearance).unwrap();
+            assert_eq!(pixmap.pixel(0, 0), USER, "{appearance:?}: white only");
+
+            let mut pixmap = row_of(&[USER]);
+            pixmap.paint_label(&black_only, appearance).unwrap();
+            assert_ne!(pixmap.pixel(0, 0), USER, "{appearance:?}: black only");
+        }
+    }
 }

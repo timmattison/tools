@@ -789,17 +789,11 @@ mod tests {
         );
     }
 
-    /// The distance between two colors, as the sum of the squares of the
-    /// differences of the red, green, and blue channels.
-    fn distance(left: [u8; 3], right: [u8; 3]) -> i32 {
-        left.iter()
-            .zip(right)
-            .map(|(&a, b)| (i32::from(a) - i32::from(b)).pow(2))
-            .sum()
-    }
-
+    /// Over a red column, black contrasts more than white, so the label is
+    /// black in both appearances. Each pixel that it paints over the column
+    /// thus gets darker in each channel.
     #[test]
-    fn the_label_stays_visible_over_full_columns() {
+    fn the_label_only_darkens_full_columns_in_each_appearance() {
         let geometry =
             Geometry::from_status_bar(THICKNESS, f64::from(LABEL_SCALE), Some(label_line_height()));
         let rows = geometry
@@ -835,18 +829,24 @@ mod tests {
                 appearance
             ));
 
-            let target = rgb(appearance.label());
-            let system = rgb(SYSTEM);
-            let painted = lines.clone().any(|y| {
-                columns.clone().any(|x| {
-                    let old = rgb(before.pixel(x, y));
-                    let new = rgb(pixmap.pixel(x, y));
-                    old == system && distance(new, target) < distance(old, target)
-                })
-            });
+            let mut painted = 0;
+            for y in lines.clone() {
+                for x in columns.clone() {
+                    let old = before.pixel(x, y);
+                    let new = pixmap.pixel(x, y);
+                    assert_eq!(rgb(old), rgb(SYSTEM), "({x}, {y}) is not on a column");
+                    if new != old {
+                        painted += 1;
+                        assert!(
+                            rgb(new).iter().zip(rgb(old)).all(|(new, old)| *new <= old),
+                            "{appearance:?}: the label made ({x}, {y}) lighter: {old:?} to {new:?}"
+                        );
+                    }
+                }
+            }
             assert!(
-                painted,
-                "no system pixel of the label rows moved toward the label color in {appearance:?}"
+                painted > 0,
+                "{appearance:?}: the label painted no pixel of the columns"
             );
         }
     }
