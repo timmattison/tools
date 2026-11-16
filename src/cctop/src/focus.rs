@@ -363,4 +363,73 @@ mod tests {
             "docs: Zellij focused pane terminal_310 · WezTerm focused pane 239"
         );
     }
+
+    #[test]
+    fn a_focus_outside_zellij_reads_the_tty_of_the_target_and_skips_step_1() {
+        let target = FocusTarget::of(&session(51234, Some("docs"), None));
+        let runner = Arc::new(
+            FakeRunner::new()
+                .answer(&words(&ps_argv()), ok(PS))
+                .answer(
+                    &words(&tty_argv(Pid::new(51234))),
+                    ok("p51234\nf0\nn/dev/ttys097\n"),
+                )
+                .answer(&words(&list_argv()), ok(PANES)),
+        );
+        let writer = Arc::new(RecordingWriter::default());
+        let report = focus(&target, &tools(&runner, &writer));
+        assert_eq!(
+            runner.calls(),
+            vec![ps_argv(), tty_argv(Pid::new(51234)), list_argv()]
+        );
+        assert_eq!(
+            writer.writes(),
+            vec![(
+                PathBuf::from("/dev/ttys097"),
+                focus_request(235).into_bytes()
+            )]
+        );
+        assert_eq!(report.zellij, None);
+        assert_eq!(report.wezterm, Ok(235));
+        assert_eq!(report.status_line(), "docs: WezTerm focused pane 235");
+    }
+
+    #[test]
+    fn the_first_client_with_a_wezterm_pane_gets_the_request() {
+        // A second client (pid 1000) with no tty, and a third (pid 2000)
+        // with a tty that no pane shows, stand before the client 19800.
+        let sockets = format!(
+            "{SOCKETS}p1000\nf5\nd0xa1\nn->0x692bb8b027c5345a\np2000\nf5\nd0xa2\nn->0x692bb8b027c5345a\n"
+        );
+        let runner = Arc::new(
+            FakeRunner::new()
+                .answer(&words(&list_sessions_argv()), ok(SESSIONS))
+                .answer(
+                    &words(&focus_argv(&zellij_target().zellij.unwrap())),
+                    ok(""),
+                )
+                .answer(&words(&ps_argv()), ok(PS))
+                .answer(&words(&unix_sockets_argv()), ok(&sockets))
+                .answer(&words(&tty_argv(Pid::new(19800))), ok(TTY))
+                .answer(
+                    &words(&tty_argv(Pid::new(1000))),
+                    ok("p1000\nf0\n"),
+                )
+                .answer(
+                    &words(&tty_argv(Pid::new(2000))),
+                    ok("p2000\nf0\nn/dev/ttys999\n"),
+                )
+                .answer(&words(&list_argv()), ok(PANES)),
+        );
+        let writer = Arc::new(RecordingWriter::default());
+        let report = focus(&zellij_target(), &tools(&runner, &writer));
+        assert_eq!(report.wezterm, Ok(239));
+        assert_eq!(
+            writer.writes(),
+            vec![(
+                PathBuf::from("/dev/ttys231"),
+                focus_request(239).into_bytes()
+            )]
+        );
+    }
 }
