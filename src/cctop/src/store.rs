@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use proctree::Pid;
 
-use crate::liveness::{ProcessClock, is_stale};
-use crate::state::{StateFile, parse_state_file, pid_of_file_name};
+use crate::liveness::{is_stale, ProcessClock};
+use crate::state::{parse_state_file, pid_of_file_name, StateFile};
 
 /// The result of the read of one state file.
 #[derive(Debug)]
@@ -137,28 +137,56 @@ pub fn watch(
     dir: &Path,
     on_event: impl Fn(DirEvent) + Send + 'static,
 ) -> notify::Result<notify::RecommendedWatcher> {
-    let mut watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
-        match result {
+    let mut watcher =
+        notify::recommended_watcher(move |result: notify::Result<notify::Event>| match result {
             Ok(event) => dir_events(&event).into_iter().for_each(&on_event),
             Err(_) => on_event(DirEvent::Rescan),
-        }
-    })?;
+        })?;
     notify::Watcher::watch(&mut watcher, dir, notify::RecursiveMode::NonRecursive)?;
     Ok(watcher)
 }
 
+/// Helpers that the tests of this module and of `sync` share.
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod test_support {
+    use std::collections::HashMap;
 
-    const FIXTURE: &str = include_str!("../fixtures/state-file-outside.json");
+    use proctree::Pid;
+
+    use crate::liveness::ProcessClock;
 
     /// The JSON of a state file of the contract, outside Zellij.
-    fn state_json(pid: u32, state: &str, started_at: u64, stamp: u64) -> String {
+    pub(crate) fn state_json(pid: u32, state: &str, started_at: u64, stamp: u64) -> String {
         format!(
             r#"{{"version":1,"pid":{pid},"sessionId":"s-{pid}","startedAt":{started_at},"state":"{state}","stamp":{stamp},"cwd":"/path/to/worktree","zellijSession":null,"zellijPane":null}}"#
         )
     }
+
+    /// A process table that the test fills by hand.
+    pub(crate) struct FakeClock(pub(crate) HashMap<Pid, u64>);
+
+    impl ProcessClock for FakeClock {
+        fn start_times(&mut self, pids: &[Pid]) -> std::collections::HashMap<Pid, u64> {
+            pids.iter()
+                .filter_map(|pid| self.0.get(pid).map(|secs| (*pid, *secs)))
+                .collect()
+        }
+    }
+
+    pub(crate) fn clock_with(pid: u32, start_secs: u64) -> FakeClock {
+        FakeClock(std::collections::HashMap::from([(
+            Pid::new(pid),
+            start_secs,
+        )]))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::{clock_with, state_json, FakeClock};
+    use super::*;
+
+    const FIXTURE: &str = include_str!("../fixtures/state-file-outside.json");
 
     #[test]
     fn the_directory_read_takes_only_pid_json_names_sorted_by_pid() {
@@ -183,21 +211,6 @@ mod tests {
     fn a_missing_directory_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
         assert!(read_dir(&dir.path().join("none")).is_err());
-    }
-
-    /// A process table that the test fills by hand.
-    struct FakeClock(std::collections::HashMap<Pid, u64>);
-
-    impl ProcessClock for FakeClock {
-        fn start_times(&mut self, pids: &[Pid]) -> std::collections::HashMap<Pid, u64> {
-            pids.iter()
-                .filter_map(|pid| self.0.get(pid).map(|secs| (*pid, *secs)))
-                .collect()
-        }
-    }
-
-    fn clock_with(pid: u32, start_secs: u64) -> FakeClock {
-        FakeClock(std::collections::HashMap::from([(Pid::new(pid), start_secs)]))
     }
 
     #[test]
