@@ -431,6 +431,16 @@ fn unit_channel(value: u8) -> f64 {
     f64::from(value) / f64::from(u8::MAX)
 }
 
+/// RED STUB: the old band rectangle.
+fn label_rect(geometry: Geometry) -> Option<NSRect> {
+    geometry.band_rows_points().map(|band| {
+        NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(68.0, f64::from(band.end - band.start)),
+        )
+    })
+}
+
 /// Draws `text` into `band` of `representation`, in `color`.
 ///
 /// `band` is in points, with its origin at the bottom left of the image. The
@@ -596,23 +606,23 @@ mod tests {
     use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass};
     use objc2_app_kit::{NSBitmapImageRep, NSEventTrackingRunLoopMode};
     use objc2_core_foundation::{CFRunLoop, CFString};
-    use objc2_foundation::{NSDate, NSObject, NSPoint, NSRect, NSRunLoop, NSSize, NSTimer};
+    use objc2_foundation::{NSDate, NSObject, NSRunLoop, NSSize, NSTimer};
 
     use super::{
-        bitmap_representation, draw_label, label_line_height, start_repeating_timer,
+        bitmap_representation, draw_label, label_line_height, label_rect, start_repeating_timer,
         BYTES_PER_PIXEL, TIMER_TOLERANCE,
     };
-    use crate::chart::{render, Appearance, Geometry};
-    use crate::history::{History, DEFAULT_CAPACITY};
+    use crate::chart::{render, Appearance, Geometry, Pixmap, Rgba, FRAME_POINTS, SYSTEM};
+    use crate::cpu::{CpuShare, Ticks};
+    use crate::history::History;
+    use crate::pressure::Pressure;
+    use crate::sample::Sample;
 
     /// The thickness of the status bar in the label test, in points.
     const THICKNESS: f64 = 22.0;
 
     /// The scale of the label test. Each point is 2 pixels high.
     const LABEL_SCALE: u32 = 2;
-
-    /// The index of the alpha channel in one pixel.
-    const ALPHA: usize = 3;
 
     /// A host name for the label test.
     const LABEL: &str = "M4-Pro-Mac-Mini";
@@ -638,55 +648,135 @@ mod tests {
             .collect()
     }
 
-    /// Tells if a pixel of the rows is not transparent.
-    fn inked(rows: &[Vec<u8>]) -> bool {
-        rows.iter().any(|row| {
-            row.as_chunks::<BYTES_PER_PIXEL>()
-                .0
-                .iter()
-                .any(|pixel| pixel[ALPHA] > 0)
-        })
+    /// Tells if any row of `after` differs from the same row of `before`.
+    fn changed(before: &[Vec<u8>], after: &[Vec<u8>]) -> bool {
+        before.iter().zip(after).any(|(old, new)| old != new)
     }
 
-    #[test]
-    fn the_label_paints_the_band_in_points_and_nothing_above_it() {
-        let geometry =
-            Geometry::from_status_bar(THICKNESS, f64::from(LABEL_SCALE), Some(label_line_height()));
-        let band = geometry
-            .band_rows_points()
-            .expect("the status bar holds a band");
-        let pixmap = render(&History::new(DEFAULT_CAPACITY), geometry, Appearance::Light);
+    /// The image of the label test, as a bitmap representation.
+    fn representation_of(pixmap: &Pixmap) -> objc2::rc::Retained<NSBitmapImageRep> {
         let points = NSSize::new(
             f64::from(pixmap.width_points()),
             f64::from(pixmap.height_points()),
         );
-        let representation = bitmap_representation(&pixmap, points).expect("a representation");
-        let before = rows_of(&representation);
-        let rect = NSRect::new(
-            NSPoint::new(0.0, 0.0),
-            NSSize::new(points.width, f64::from(band.end - band.start)),
+        bitmap_representation(pixmap, points).expect("a representation")
+    }
+
+    #[test]
+    fn the_label_paints_the_top_of_the_interior_and_nothing_in_the_bottom_half() {
+        let geometry =
+            Geometry::from_status_bar(THICKNESS, f64::from(LABEL_SCALE), Some(label_line_height()));
+        let rows = geometry
+            .label_rows_points()
+            .expect("the status bar holds a label");
+        let pixmap = render(
+            &History::new(geometry.columns()),
+            geometry,
+            Appearance::Light,
         );
+        let representation = representation_of(&pixmap);
+        let before = rows_of(&representation);
         assert!(draw_label(
             &representation,
             LABEL,
-            rect,
+            label_rect(geometry).expect("the status bar holds a label"),
             Appearance::Light.label()
         ));
         let after = rows_of(&representation);
+        assert_eq!(after.len(), before.len());
 
         let scale = usize::try_from(LABEL_SCALE).unwrap();
-        let band_top = usize::try_from(band.start).unwrap() * scale;
-        let band_middle = band_top + usize::try_from(band.end - band.start).unwrap() * scale / 2;
-        assert_eq!(after.len(), before.len());
-        for (row, (old, new)) in before.iter().zip(&after).enumerate().take(band_top) {
-            assert_eq!(old, new, "the label changed row {row}, above the band");
+        let top = usize::try_from(rows.start).unwrap() * scale;
+        let bottom = usize::try_from(rows.end).unwrap() * scale;
+        let middle = (top + bottom) / 2;
+        let half = usize::try_from(pixmap.height()).unwrap() / 2;
+        for (row, (old, new)) in before.iter().zip(&after).enumerate().skip(half) {
+            assert_eq!(old, new, "the label changed row {row}, in the bottom half");
         }
-        // A drawing in pixels, not in points, fills only the lower half.
+        // A drawing in pixels, not in points, fills only one half of the rows.
         assert!(
-            inked(&after[band_top..band_middle]),
-            "the upper half is empty"
+            changed(&before[top..middle], &after[top..middle]),
+            "the upper half of the label rows did not change"
         );
-        assert!(inked(&after[band_middle..]), "the lower half is empty");
+        assert!(
+            changed(&before[middle..bottom], &after[middle..bottom]),
+            "the lower half of the label rows did not change"
+        );
+    }
+
+    /// The distance between two colors, as the sum of the squares of the
+    /// differences of the red, green, and blue channels.
+    fn distance(left: [u8; 3], right: [u8; 3]) -> i32 {
+        left.iter()
+            .zip(right)
+            .map(|(&a, b)| (i32::from(a) - i32::from(b)).pow(2))
+            .sum()
+    }
+
+    #[test]
+    fn the_label_stays_visible_over_full_columns() {
+        let geometry =
+            Geometry::from_status_bar(THICKNESS, f64::from(LABEL_SCALE), Some(label_line_height()));
+        let rows = geometry
+            .label_rows_points()
+            .expect("the status bar holds a label");
+        let mut history = History::new(geometry.columns());
+        for _ in 0..geometry.columns().get() {
+            history.push(Sample {
+                cpu: CpuShare::between(
+                    Ticks::default(),
+                    Ticks {
+                        user: 0,
+                        system: 100,
+                        idle: 0,
+                        nice: 0,
+                    },
+                ),
+                pressure: Pressure::from_raw(1, 0),
+            });
+        }
+        let scale = usize::try_from(LABEL_SCALE).unwrap();
+        let side = usize::try_from(geometry.height_points()).unwrap();
+        let frame = usize::try_from(FRAME_POINTS).unwrap();
+        let columns = frame * scale..(side - frame) * scale;
+        let lines = usize::try_from(rows.start).unwrap() * scale
+            ..usize::try_from(rows.end).unwrap() * scale;
+        let rgb = |pixel: &[u8]| [pixel[0], pixel[1], pixel[2]];
+
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            let pixmap = render(&history, geometry, appearance);
+            let representation = representation_of(&pixmap);
+            let before = rows_of(&representation);
+            assert!(draw_label(
+                &representation,
+                LABEL,
+                label_rect(geometry).expect("the status bar holds a label"),
+                appearance.label()
+            ));
+            let after = rows_of(&representation);
+
+            let [red, green, blue, _] = appearance.label();
+            let target = [red, green, blue];
+            let [system_red, system_green, system_blue, _]: Rgba = SYSTEM;
+            let system = [system_red, system_green, system_blue];
+            let painted = lines.clone().any(|y| {
+                columns.clone().any(|x| {
+                    let old = &before[y][x * BYTES_PER_PIXEL..(x + 1) * BYTES_PER_PIXEL];
+                    let new = &after[y][x * BYTES_PER_PIXEL..(x + 1) * BYTES_PER_PIXEL];
+                    rgb(old) == system && distance(rgb(new), target) < distance(rgb(old), target)
+                })
+            });
+            assert!(
+                painted,
+                "no system pixel of the label rows moved toward the label color in {appearance:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_thin_bar_has_no_label_rect() {
+        let geometry = Geometry::from_status_bar(10.0, 2.0, Some(label_line_height()));
+        assert!(label_rect(geometry).is_none());
     }
 
     /// The interval of the probe timer, in seconds.
