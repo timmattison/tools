@@ -38,7 +38,7 @@ use objc2_foundation::{
 };
 
 use crate::chart::{render, Appearance, Coverage, Geometry, Glyphs, Pixmap, Rgba, FRAME_POINTS};
-use crate::connection::{Feed, HostNaming, Remote, SSH_PROGRAM};
+use crate::connection::{Feed, Remote, SSH_PROGRAM};
 use crate::interval::Interval;
 use crate::reader::Reader;
 use crate::text::{menu_titles, Origin, MENU_LINES, QUIT_TITLE};
@@ -696,7 +696,7 @@ pub fn run(interval: Interval, remote: Option<Remote>, on_ready: impl FnOnce()) 
             input: KernelInput::new(),
         },
         Some(remote) => Source::Remote {
-            input: RemoteInput::new(remote.destination.as_str().to_owned(), HostNaming::Reported),
+            input: RemoteInput::new(remote.destination.as_str().to_owned(), remote.naming),
             feed: Feed::new(SSH_PROGRAM, remote, interval),
         },
     };

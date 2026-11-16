@@ -31,9 +31,9 @@ use std::num::NonZeroU32;
 use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
 use std::thread;
 
-use crate::connection::Remote;
+use crate::connection::{HostNaming, Remote};
 use crate::flags::{
-    flag, flag_with_value, BACKGROUND_CHILD, EXIT_AFTER, HOST, INTERVAL, REMOTE_BINARY,
+    flag, flag_with_value, BACKGROUND_CHILD, EXIT_AFTER, HOST, INTERVAL, REMOTE_BINARY, RESOLVE,
 };
 use crate::instance::{self, ClaimError, LockFile, Pid, Target};
 use crate::interval::Interval;
@@ -72,7 +72,8 @@ pub struct Settings {
 }
 
 impl Settings {
-    /// Gives the target of these settings.
+    /// Gives the target of these settings. The naming of the second Mac does
+    /// not change the target.
     #[must_use]
     pub fn target(&self) -> Target {
         self.remote.as_ref().map_or(Target::Local, |remote| {
@@ -97,6 +98,9 @@ pub fn child_arguments(settings: &Settings) -> Vec<String> {
             REMOTE_BINARY,
             remote.remote_binary.as_str(),
         ));
+        if remote.naming == HostNaming::Reported {
+            arguments.push(flag(RESOLVE));
+        }
     }
     if let Some(seconds) = settings.exit_after {
         arguments.push(flag_with_value(EXIT_AFTER, &seconds.to_string()));

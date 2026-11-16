@@ -71,7 +71,8 @@ struct Cli {
     count: Option<u64>,
 
     /// Show the charts of a second Mac. glance opens one ssh connection to
-    /// DESTINATION and runs `glance --stream` there.
+    /// DESTINATION and runs `glance --stream` there. The status item names
+    /// the Mac DESTINATION, as you typed it.
     #[arg(
         long = flags::HOST,
         value_name = "DESTINATION",
@@ -88,6 +89,12 @@ struct Cli {
         default_value = DEFAULT_REMOTE_BINARY
     )]
     remote_binary: RemoteBinary,
+
+    /// Show the name that the second Mac reports, as `hostname -s` gives it
+    /// there, in place of DESTINATION. Before the first line arrives, the
+    /// status item shows DESTINATION. Needs --host.
+    #[arg(long = flags::RESOLVE, requires = "host")]
+    resolve: bool,
 
     /// Start the status item in the background and return to the shell.
     #[arg(short, long, conflicts_with_all = ["stream", "sample"])]
@@ -116,7 +123,11 @@ impl Cli {
         self.host.clone().map(|destination| Remote {
             destination,
             remote_binary: self.remote_binary.clone(),
-            naming: HostNaming::Destination,
+            naming: if self.resolve {
+                HostNaming::Reported
+            } else {
+                HostNaming::Destination
+            },
         })
     }
 }
