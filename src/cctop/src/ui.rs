@@ -15,10 +15,24 @@ use crate::state::{EpochMillis, PaneState};
 /// Draw the screen: the table of sessions, the change log, and the status
 /// line. `now` gives the time that the elapsed times count to.
 pub fn draw(frame: &mut Frame, app: &App, now: EpochMillis) {
-    let [table_area, log_area] =
-        Layout::vertical([Constraint::Min(3), Constraint::Length(LOG_HEIGHT)]).areas(frame.area());
+    let [table_area, log_area, status_area] = Layout::vertical([
+        Constraint::Min(3),
+        Constraint::Length(LOG_HEIGHT),
+        Constraint::Length(1),
+    ])
+    .areas(frame.area());
     draw_table(frame, table_area, app, now);
     draw_log(frame, log_area, app);
+    draw_status(frame, status_area, app);
+}
+
+/// The text of the bottom line when there is no status.
+const KEY_HELP: &str = "j/k move · enter focus · n next needs-you · q quit";
+
+/// Draw the status text, or the help for the keys, in `area`.
+fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
+    let text = app.status().unwrap_or(KEY_HELP);
+    frame.render_widget(Paragraph::new(text), area);
 }
 
 /// The number of changes that the log shows.
