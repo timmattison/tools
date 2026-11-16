@@ -25,11 +25,11 @@ pub struct FocusTarget {
 impl FocusTarget {
     /// Makes the target of `session`.
     #[must_use]
-    pub fn of(_session: &Session) -> Self {
+    pub fn of(session: &Session) -> Self {
         Self {
-            pid: Pid::new(0),
-            label: String::new(),
-            zellij: None,
+            pid: session.file.pid,
+            label: session.label(),
+            zellij: session.file.zellij_location(),
         }
     }
 }
