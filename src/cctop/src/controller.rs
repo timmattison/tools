@@ -354,6 +354,10 @@ mod tests {
         EpochMillis::new(NOW.as_u64() + ms)
     }
 
+    fn before_now(ms: u64) -> EpochMillis {
+        EpochMillis::new(NOW.as_u64() - ms)
+    }
+
     /// Pid 100 waits in `needs-you`. Pids 101 and 102 work. A key press
     /// `j` at `NOW` selects pid 101. A change of pid 102 to `needs-you` then
     /// sorts to row 1, above the selected row 2.
@@ -386,6 +390,27 @@ mod tests {
         controller.handle(AppEvent::Tick, after_now(JUMP_HOLD_MS - 1));
         assert_eq!(selected_pid(&controller), Pid::new(101));
         controller.handle(AppEvent::Tick, after_now(JUMP_HOLD_MS));
+        assert_eq!(selected_pid(&controller), Pid::new(102));
+    }
+
+    /// A clock that moves back after a key press still ends the hold, `JUMP_HOLD_MS` after the change.
+    #[test]
+    fn a_held_jump_still_comes_after_the_clock_moves_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut controller = hold_fixture(dir.path());
+        write(dir.path(), 102, "needs-you", 20);
+        let step = before_now(10_000);
+        controller.handle(file_event(102), step);
+        assert_eq!(selected_pid(&controller), Pid::new(101));
+        controller.handle(
+            AppEvent::Tick,
+            EpochMillis::new(step.as_u64() + JUMP_HOLD_MS - 1),
+        );
+        assert_eq!(selected_pid(&controller), Pid::new(101));
+        controller.handle(
+            AppEvent::Tick,
+            EpochMillis::new(step.as_u64() + JUMP_HOLD_MS),
+        );
         assert_eq!(selected_pid(&controller), Pid::new(102));
     }
 
