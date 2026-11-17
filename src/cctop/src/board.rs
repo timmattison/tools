@@ -229,7 +229,7 @@ impl Board {
     /// holds every state, also a state with no session. Each count splits the
     /// sessions of its state by the handled mark.
     #[must_use]
-    pub fn state_counts(&self) -> [StateCount; 5] {
+    pub fn state_counts(&self) -> [StateCount; 6] {
         let mut ranked = PaneState::ALL;
         ranked.sort_by_key(|state| state.rank());
         ranked.map(|state| {
