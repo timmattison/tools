@@ -46,16 +46,20 @@ pub trait ProcessClock {
 }
 
 /// The process table of the system, read with `sysinfo`.
+///
+/// Each read uses a new `sysinfo::System`. `sysinfo` reads the status of a
+/// process (`pbi_status` on macOS) only when it sees the pid for the first
+/// time. A later refresh of a known pid keeps the old status. Thus a long-lived
+/// `System` does not see a later `SIGSTOP`. A new `System` makes each read a
+/// first read. It is still one read of the process table.
 #[derive(Debug, Default)]
-pub struct SystemClock {
-    system: sysinfo::System,
-}
+pub struct SystemClock;
 
 impl SystemClock {
-    /// A clock that has read no process yet.
+    /// A clock for the process table of the system.
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self
     }
 }
 
@@ -65,22 +69,29 @@ impl ProcessClock for SystemClock {
             .iter()
             .map(|pid| sysinfo::Pid::from_u32(pid.as_u32()))
             .collect();
-        self.system.refresh_processes_specifics(
+        let mut system = sysinfo::System::new();
+        system.refresh_processes_specifics(
             sysinfo::ProcessesToUpdate::Some(&wanted),
             true,
             sysinfo::ProcessRefreshKind::nothing(),
         );
         pids.iter()
             .filter_map(|pid| {
-                let process = self.system.process(sysinfo::Pid::from_u32(pid.as_u32()))?;
-                if process.status() == sysinfo::ProcessStatus::Zombie {
+                let process = system.process(sysinfo::Pid::from_u32(pid.as_u32()))?;
+                let status = process.status();
+                if status == sysinfo::ProcessStatus::Zombie {
                     return None;
                 }
+                let run = if status == sysinfo::ProcessStatus::Stop {
+                    RunStatus::Stopped
+                } else {
+                    RunStatus::Running
+                };
                 Some((
                     *pid,
                     ProcessFacts {
                         start_secs: process.start_time(),
-                        run: RunStatus::Running,
+                        run,
                     },
                 ))
             })
