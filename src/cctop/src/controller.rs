@@ -66,8 +66,9 @@ impl Controller {
     /// # Errors
     ///
     /// Returns the error of the read of the state directory.
-    pub fn start(&mut self) -> std::io::Result<()> {
-        self.sync.initial(self.app.board_mut(), self.clock.as_mut())
+    pub fn start(&mut self, now: EpochMillis) -> std::io::Result<()> {
+        self.sync
+            .initial(self.app.board_mut(), self.clock.as_mut(), now)
     }
 
     /// Tell the controller that the terminal is `rows` rows high. The page
@@ -192,7 +193,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), 100, "idle", 10);
         let mut controller = controller(dir.path(), true);
-        controller.start().unwrap();
+        controller.start(NOW).unwrap();
         assert_eq!(controller.app().board().len(), 1);
         assert!(controller.app().board().changes().next().is_none());
     }
@@ -205,7 +206,7 @@ mod tests {
             write(dir.path(), pid, "idle", 10);
         }
         let mut controller = controller_of(dir.path(), &pids, true);
-        controller.start().unwrap();
+        controller.start(NOW).unwrap();
         let small = crate::ui::page_size(20).get();
         let large = crate::ui::page_size(40).get();
         assert!(small > 1, "a page of 1 cannot prove a resize: {small}");
@@ -238,7 +239,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), 100, "idle", 10);
         let mut controller = controller(dir.path(), true);
-        controller.start().unwrap();
+        controller.start(NOW).unwrap();
         let effects = controller.handle(key(KeyCode::Enter), NOW);
         assert_eq!(effects.len(), 1);
         match &effects[0] {
@@ -252,7 +253,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), 100, "working", 10);
         let mut controller = controller(dir.path(), true);
-        controller.start().unwrap();
+        controller.start(NOW).unwrap();
         write(dir.path(), 100, "needs-you", 20);
         let effects = controller.handle(file_event(100), NOW);
         assert_eq!(effects, vec![Effect::Notify("worktree needs you".into())]);
@@ -263,7 +264,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), 100, "working", 10);
         let mut controller = controller(dir.path(), false);
-        controller.start().unwrap();
+        controller.start(NOW).unwrap();
         write(dir.path(), 100, "needs-you", 20);
         assert_eq!(controller.handle(file_event(100), NOW), vec![]);
         assert_eq!(controller.app().board().changes().count(), 1);
@@ -274,7 +275,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), 100, "working", 10);
         let mut controller = controller(dir.path(), true);
-        controller.start().unwrap();
+        controller.start(NOW).unwrap();
         write(dir.path(), 100, "idle", 20);
         assert_eq!(controller.handle(file_event(100), NOW), vec![]);
         assert_eq!(controller.app().board().changes().count(), 1);
@@ -287,7 +288,7 @@ mod tests {
         // The process started after the session claims: the pid was reused.
         let sync = Sync::with_dirs(dir.path().to_path_buf(), dir.path().join("sessions"));
         let mut controller = Controller::new(sync, Box::new(clock_with(100, START_SECS)), true);
-        controller.start().unwrap();
+        controller.start(NOW).unwrap();
         assert_eq!(controller.app().board().len(), 1);
         controller.clock = Box::new(clock_with(100, STARTED_MS / 1000 + 50));
         assert_eq!(controller.handle(AppEvent::Tick, NOW), vec![]);
@@ -320,7 +321,7 @@ mod tests {
         write(dir, 100, "needs-you", 10);
         write(dir, 101, "working", 10);
         let mut controller = controller_of(dir, &[100, 101], notify);
-        controller.start().unwrap();
+        controller.start(NOW).unwrap();
         assert_eq!(selected_pid(&controller), Pid::new(100));
         controller
     }
@@ -376,7 +377,7 @@ mod tests {
             write(dir.path(), pid, "working", 10);
         }
         let mut controller = controller_of(dir.path(), &[100, 101, 102, 103], true);
-        controller.start().unwrap();
+        controller.start(NOW).unwrap();
         write(dir.path(), 101, "needs-you", 30);
         write(dir.path(), 102, "needs-you", 20);
         write(dir.path(), 103, "needs-you", 40);
@@ -401,7 +402,7 @@ mod tests {
         write(dir, 101, "working", 10);
         write(dir, 102, "working", 10);
         let mut controller = controller_of(dir, &[100, 101, 102, 103], true);
-        controller.start().unwrap();
+        controller.start(NOW).unwrap();
         controller.handle(key(KeyCode::Char('j')), NOW);
         assert_eq!(selected_pid(&controller), Pid::new(101));
         controller

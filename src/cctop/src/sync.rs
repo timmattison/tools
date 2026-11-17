@@ -50,7 +50,12 @@ impl Sync {
     /// # Errors
     ///
     /// Returns the error of the read of the state directory.
-    pub fn initial(&self, board: &mut Board, clock: &mut dyn ProcessClock) -> std::io::Result<()> {
+    pub fn initial(
+        &self,
+        board: &mut Board,
+        clock: &mut dyn ProcessClock,
+        now: EpochMillis,
+    ) -> std::io::Result<()> {
         let files: Vec<StateFile> = store::read_dir(&self.state_dir)?
             .into_iter()
             .filter_map(|(_, outcome)| match outcome {
@@ -62,9 +67,10 @@ impl Sync {
             .iter()
             .map(|file| (file.pid, file.started_at))
             .collect();
-        let stale = survey(&sessions, clock).stale;
+        let found = survey(&sessions, clock);
+        let _ = now;
         for file in files {
-            if stale.contains(&file.pid) {
+            if found.stale.contains(&file.pid) {
                 // A new process can have reused the pid since the first read. Its
                 // file stays, and its own write event loads it.
                 let _removed = store::remove_if_stale(&self.state_dir, file.pid, clock);
@@ -252,7 +258,9 @@ mod tests {
         env.write(20, "working", 2_000_100);
         env.name(10);
         let mut board = Board::new();
-        env.sync.initial(&mut board, &mut live(&[10, 20])).unwrap();
+        env.sync
+            .initial(&mut board, &mut live(&[10, 20]), NOW)
+            .unwrap();
         assert_eq!(board.pids(), vec![Pid::new(10), Pid::new(20)]);
         let first = board.get(Pid::new(10)).unwrap();
         assert_eq!(first.name.as_deref(), Some("issue-697-d1"));
@@ -267,7 +275,7 @@ mod tests {
         env.write(10, "idle", 2_000_000);
         env.write(20, "idle", 2_000_000);
         let mut board = Board::new();
-        env.sync.initial(&mut board, &mut live(&[10])).unwrap();
+        env.sync.initial(&mut board, &mut live(&[10]), NOW).unwrap();
         assert_eq!(board.pids(), vec![Pid::new(10)]);
         assert!(env.exists(10));
         assert!(!env.exists(20));
@@ -279,7 +287,9 @@ mod tests {
         env.write(10, "idle", 2_000_000);
         std::fs::write(env.state.path().join("20.json"), "not json").unwrap();
         let mut board = Board::new();
-        env.sync.initial(&mut board, &mut live(&[10, 20])).unwrap();
+        env.sync
+            .initial(&mut board, &mut live(&[10, 20]), NOW)
+            .unwrap();
         assert_eq!(board.pids(), vec![Pid::new(10)]);
         assert!(env.exists(20));
     }
@@ -290,7 +300,7 @@ mod tests {
         let sync = Sync::with_dirs(env.state.path().join("none"), env.sessions.path().into());
         let mut board = Board::new();
         let mut clock = FakeClock::new(HashMap::new());
-        assert!(sync.initial(&mut board, &mut clock).is_err());
+        assert!(sync.initial(&mut board, &mut clock, NOW).is_err());
     }
 
     const NOW: EpochMillis = EpochMillis::new(9_000_000);
@@ -319,7 +329,7 @@ mod tests {
         let env = Env::new();
         env.write(10, "idle", 2_000_000);
         let mut board = Board::new();
-        env.sync.initial(&mut board, &mut live(&[10])).unwrap();
+        env.sync.initial(&mut board, &mut live(&[10]), NOW).unwrap();
         env.write(10, "working", 2_000_500);
         let changes = file_event(&env, 10, &mut live(&[10]), &mut board);
         assert_eq!(changes.len(), 1);
@@ -332,7 +342,7 @@ mod tests {
         let env = Env::new();
         env.write(10, "idle", 2_000_000);
         let mut board = Board::new();
-        env.sync.initial(&mut board, &mut live(&[10])).unwrap();
+        env.sync.initial(&mut board, &mut live(&[10]), NOW).unwrap();
         std::fs::remove_file(env.state.path().join("10.json")).unwrap();
         let changes = file_event(&env, 10, &mut live(&[10]), &mut board);
         assert_eq!(changes.len(), 1);
@@ -347,7 +357,7 @@ mod tests {
         let env = Env::new();
         env.write(10, "idle", 2_000_000);
         let mut board = Board::new();
-        env.sync.initial(&mut board, &mut live(&[10])).unwrap();
+        env.sync.initial(&mut board, &mut live(&[10]), NOW).unwrap();
         std::fs::write(env.state.path().join("10.json"), "{\"version\":").unwrap();
         let changes = file_event(&env, 10, &mut live(&[10]), &mut board);
         assert!(changes.is_empty());
@@ -359,7 +369,7 @@ mod tests {
         let env = Env::new();
         env.write(10, "idle", 2_000_000);
         let mut board = Board::new();
-        env.sync.initial(&mut board, &mut live(&[10])).unwrap();
+        env.sync.initial(&mut board, &mut live(&[10]), NOW).unwrap();
         env.write(10, "working", 2_000_500);
         let changes = file_event(&env, 10, &mut FakeClock::new(HashMap::new()), &mut board);
         assert_eq!(changes.len(), 1);
@@ -385,7 +395,7 @@ mod tests {
         env.write(20, "idle", 2_000_000);
         let mut board = Board::new();
         env.sync
-            .initial(&mut board, &mut live(&[10, 20, 30]))
+            .initial(&mut board, &mut live(&[10, 20, 30]), NOW)
             .unwrap();
         // 10 changes, 20 goes away, 30 is new, 40 holds a bad file.
         env.write(10, "needs-you", 2_000_500);
@@ -419,7 +429,7 @@ mod tests {
         let env = Env::new();
         env.write(10, "idle", 2_000_000);
         let mut board = Board::new();
-        env.sync.initial(&mut board, &mut live(&[10])).unwrap();
+        env.sync.initial(&mut board, &mut live(&[10]), NOW).unwrap();
         std::fs::write(env.state.path().join("10.json"), "bad").unwrap();
         let changes = env
             .sync
@@ -434,7 +444,9 @@ mod tests {
         env.write(10, "idle", 2_000_000);
         env.write(20, "working", 2_000_000);
         let mut board = Board::new();
-        env.sync.initial(&mut board, &mut live(&[10, 20])).unwrap();
+        env.sync
+            .initial(&mut board, &mut live(&[10, 20]), NOW)
+            .unwrap();
         let changes = env.sync.on_tick(&mut board, &mut live(&[10]), NOW);
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].pid, Pid::new(20));
@@ -451,7 +463,7 @@ mod tests {
         let env = Env::new();
         env.write(10, "idle", 2_000_000);
         let mut board = Board::new();
-        env.sync.initial(&mut board, &mut live(&[10])).unwrap();
+        env.sync.initial(&mut board, &mut live(&[10]), NOW).unwrap();
         assert!(env
             .sync
             .on_tick(&mut board, &mut live(&[10]), NOW)
@@ -463,7 +475,7 @@ mod tests {
     fn board_with_idle_ten(env: &Env) -> Board {
         env.write(10, "idle", 2_000_000);
         let mut board = Board::new();
-        env.sync.initial(&mut board, &mut live(&[10])).unwrap();
+        env.sync.initial(&mut board, &mut live(&[10]), NOW).unwrap();
         board
     }
 
@@ -516,10 +528,42 @@ mod tests {
         env.write(30, "idle", 2_000_000);
         let mut board = Board::new();
         env.sync
-            .initial(&mut board, &mut live(&[10, 20, 30]))
+            .initial(&mut board, &mut live(&[10, 20, 30]), NOW)
             .unwrap();
         let mut clock = live(&[10, 20, 30]).with_stopped(20);
         env.sync.on_tick(&mut board, &mut clock, NOW);
+        assert_eq!(clock.reads, 1);
+    }
+
+    #[test]
+    fn the_first_read_loads_a_stopped_session_as_frozen_since_the_first_read() {
+        let env = Env::new();
+        env.write(10, "idle", 2_000_000);
+        env.write(20, "working", 2_000_100);
+        let mut board = Board::new();
+        let mut clock = live(&[10, 20]).with_stopped(10);
+        env.sync.initial(&mut board, &mut clock, NOW).unwrap();
+        let stopped = board.get(Pid::new(10)).unwrap();
+        assert_eq!(stopped.state(), PaneState::Frozen);
+        assert_eq!(stopped.since, NOW);
+        let running = board.get(Pid::new(20)).unwrap();
+        assert_eq!(running.state(), PaneState::Working);
+        assert_eq!(running.since, EpochMillis::new(2_000_100));
+        assert_eq!(board.changes().count(), 0);
+        assert!(env.exists(10));
+        assert!(env.exists(20));
+    }
+
+    // This test passes before the first read uses the survey of the stop. It
+    // guards the rule that the first read reads the process table once.
+    #[test]
+    fn the_first_read_reads_the_process_table_once() {
+        let env = Env::new();
+        env.write(10, "idle", 2_000_000);
+        env.write(20, "working", 2_000_100);
+        let mut board = Board::new();
+        let mut clock = live(&[10, 20]);
+        env.sync.initial(&mut board, &mut clock, NOW).unwrap();
         assert_eq!(clock.reads, 1);
     }
 }

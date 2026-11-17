@@ -94,7 +94,7 @@ fn run(dirs: &ClaudeDirs, notify: bool) -> Result<(), String> {
     .map_err(|error| format!("cannot watch {}: {error}", state_dir.display()))?;
     let mut controller = Controller::new(Sync::new(dirs), Box::new(SystemClock::new()), notify);
     controller
-        .start()
+        .start(EpochMillis::now())
         .map_err(|error| format!("cannot read {}: {error}", state_dir.display()))?;
     let input_tx = tx.clone();
     std::thread::spawn(move || {
