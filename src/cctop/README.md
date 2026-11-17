@@ -46,7 +46,7 @@ Each marker is one code point of East Asian Width `W`, with no variation selecto
 
 ### The handled mark
 
-Press `h` to mark the selected session as handled. The row goes to the bottom of the rows in its state, and its state shows ` - handled`. The latest mark goes to the bottom of its state. The cursor then selects the next row that has no mark, thus you can press `h` again to mark that session. When no such row is below it, the cursor stays on the marked row.
+Press `h` to mark the selected session as handled. The row goes to the bottom of the rows in its state, and its state shows ` - handled`. The latest mark goes to the bottom of its state. The cursor then selects the next `needs-you` or `idle` row that has no mark, thus you can press `h` again to mark that session. When no such row is below it, the cursor stays on the marked row.
 
 Only a session in `needs-you` or `idle` takes a mark. A mark tells that you saw the session and have nothing to do for it now, and only these two states wait for you. When you press `h` on a session in `working`, `agents`, or `shells`, cctop puts no mark on it. The row and the cursor do not move, and the status line shows `Cannot mark <name> as handled: only needs-you and idle sessions take a mark`.
 
