@@ -888,4 +888,34 @@ mod tests {
         );
         assert!(!board.get(Pid::new(7)).expect("on the board").is_handled());
     }
+
+    #[test]
+    fn a_frozen_session_sorts_last() {
+        let mut board = Board::new();
+        board.load(file(1, PaneState::Working, 100, 500), None);
+        board.load(file(2, PaneState::NeedsYou, 100, 500), None);
+        board.load(file(3, PaneState::NeedsYou, 100, 100), None);
+        board.set_run_status(Pid::new(3), RunStatus::Stopped, EpochMillis::new(1_000));
+        let pids: Vec<u32> = board
+            .rows()
+            .iter()
+            .map(|session| session.file.pid.as_u32())
+            .collect();
+        assert_eq!(pids, vec![2, 1, 3]);
+    }
+
+    #[test]
+    fn state_counts_count_a_frozen_session_as_frozen() {
+        let board = frozen_board(PaneState::NeedsYou);
+        let counts = board.state_counts();
+        let of = |state: PaneState| {
+            let count = counts
+                .iter()
+                .find(|count| count.state == state)
+                .expect("each state has a count");
+            (count.unmarked, count.handled)
+        };
+        assert_eq!(of(PaneState::Frozen), (1, 0));
+        assert_eq!(of(PaneState::NeedsYou), (0, 0));
+    }
 }
