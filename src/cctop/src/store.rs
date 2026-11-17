@@ -186,6 +186,14 @@ pub(crate) mod test_support {
         }
     }
 
+    impl FakeClock {
+        /// The same table, with the process `pid` stopped.
+        pub(crate) fn with_stopped(mut self, pid: u32) -> Self {
+            self.stopped.insert(Pid::new(pid));
+            self
+        }
+    }
+
     impl ProcessClock for FakeClock {
         fn processes(&mut self, pids: &[Pid]) -> HashMap<Pid, ProcessFacts> {
             self.reads += 1;

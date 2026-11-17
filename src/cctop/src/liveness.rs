@@ -132,6 +132,7 @@ pub fn survey(sessions: &[(Pid, EpochMillis)], clock: &mut dyn ProcessClock) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::test_support::FakeClock;
 
     #[cfg(unix)]
     use std::os::unix::process::CommandExt;
@@ -167,30 +168,6 @@ mod tests {
     #[test]
     fn the_comparison_does_not_overflow() {
         assert!(is_stale(STARTED_AT, Some(u64::MAX)));
-    }
-
-    /// A clock that answers from a map and counts its calls.
-    struct FakeClock {
-        times: HashMap<Pid, u64>,
-        calls: Vec<Vec<Pid>>,
-    }
-
-    impl ProcessClock for FakeClock {
-        fn processes(&mut self, pids: &[Pid]) -> HashMap<Pid, ProcessFacts> {
-            self.calls.push(pids.to_vec());
-            self.times
-                .iter()
-                .map(|(pid, secs)| {
-                    (
-                        *pid,
-                        ProcessFacts {
-                            start_secs: *secs,
-                            run: RunStatus::Running,
-                        },
-                    )
-                })
-                .collect()
-        }
     }
 
     #[test]
@@ -328,28 +305,23 @@ mod tests {
     }
 
     #[test]
-    fn survey_gives_the_stale_pids_sorted_from_one_read() {
-        let sessions = [
-            (Pid::new(40), STARTED_AT),
-            (Pid::new(30), STARTED_AT),
-            (Pid::new(20), STARTED_AT),
-            (Pid::new(10), STARTED_AT),
-        ];
-        let mut clock = FakeClock {
-            times: HashMap::from([
-                (Pid::new(10), 1_794_823_262),
-                (Pid::new(30), 1_794_823_999),
-                (Pid::new(40), 1_794_823_000),
-            ]),
-            calls: Vec::new(),
-        };
-        assert_eq!(
-            survey(&sessions, &mut clock).stale,
-            vec![Pid::new(20), Pid::new(30)]
-        );
-        assert_eq!(
-            clock.calls,
-            vec![vec![Pid::new(40), Pid::new(30), Pid::new(20), Pid::new(10)]]
-        );
+    fn survey_gives_the_stale_and_the_stopped_pids_sorted_from_one_read() {
+        let sessions: Vec<(Pid, EpochMillis)> = [50, 40, 30, 20, 10]
+            .iter()
+            .map(|pid| (Pid::new(*pid), STARTED_AT))
+            .collect();
+        let mut clock = FakeClock::new(HashMap::from([
+            (Pid::new(10), 1_794_823_262),
+            (Pid::new(30), 1_794_823_999),
+            (Pid::new(40), 1_794_823_000),
+            (Pid::new(50), 1_794_823_000),
+        ]))
+        .with_stopped(40)
+        .with_stopped(50)
+        .with_stopped(30);
+        let result = survey(&sessions, &mut clock);
+        assert_eq!(result.stale, vec![Pid::new(20), Pid::new(30)]);
+        assert_eq!(result.stopped, vec![Pid::new(40), Pid::new(50)]);
+        assert_eq!(clock.reads, 1);
     }
 }
