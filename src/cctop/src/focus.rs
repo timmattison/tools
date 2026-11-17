@@ -16,6 +16,9 @@ use crate::{ancestry, lsof, wezterm, zellij};
 /// The note that the status text adds when the session of a focus is frozen.
 pub const FROZEN_NOTE: &str = "the session is frozen";
 
+/// The text between the parts of a status line.
+pub const STATUS_SEPARATOR: &str = " · ";
+
 /// The session to focus.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FocusTarget {
@@ -74,7 +77,8 @@ impl FocusReport {
         self.zellij.as_ref().is_none_or(Result::is_ok) && self.wezterm.is_ok()
     }
 
-    /// Makes the status line. Its parts are separated by ` · `.
+    /// Makes the status line. Its parts are separated by ` · `. A stopped
+    /// session adds [`FROZEN_NOTE`] as the last part.
     #[must_use]
     pub fn status_line(&self) -> String {
         let mut parts = Vec::new();
@@ -87,7 +91,10 @@ impl FocusReport {
             Ok(pane) => parts.push(format!("WezTerm focused pane {pane}")),
             Err(error) => parts.push(format!("WezTerm failed: {error}")),
         }
-        format!("{}: {}", self.label, parts.join(" · "))
+        if self.run == RunStatus::Stopped {
+            parts.push(FROZEN_NOTE.to_string());
+        }
+        format!("{}: {}", self.label, parts.join(STATUS_SEPARATOR))
     }
 }
 

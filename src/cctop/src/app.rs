@@ -5,7 +5,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use proctree::Pid;
 
 use crate::board::{Board, HandledToggle};
-use crate::focus::FocusTarget;
+use crate::focus::{FocusTarget, FROZEN_NOTE, STATUS_SEPARATOR};
+use crate::liveness::RunStatus;
 use crate::state::{EpochMillis, PaneState};
 
 /// What the main loop does after a key.
@@ -252,7 +253,9 @@ impl App {
         self.focus_selected()
     }
 
-    /// Ask the main loop to focus the selected session.
+    /// Ask the main loop to focus the selected session. The status text also
+    /// tells that the session is frozen when its process is stopped. The app
+    /// sends no `SIGCONT`, so the focus does not thaw the session.
     fn focus_selected(&mut self) -> Action {
         let target = self.selected_index().and_then(|index| {
             self.board
@@ -261,7 +264,12 @@ impl App {
                 .map(|session| FocusTarget::of(session))
         });
         if let Some(target) = target {
-            self.status = Some(format!("Focusing {}", target.label));
+            let mut status = format!("Focusing {}", target.label);
+            if target.run == RunStatus::Stopped {
+                status.push_str(STATUS_SEPARATOR);
+                status.push_str(FROZEN_NOTE);
+            }
+            self.status = Some(status);
             Action::Focus(target)
         } else {
             self.status = Some("No session to focus".to_string());
