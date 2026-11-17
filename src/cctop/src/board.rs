@@ -4,6 +4,7 @@ use std::collections::{HashMap, VecDeque};
 
 use proctree::Pid;
 
+use crate::liveness::RunStatus;
 use crate::state::{EpochMillis, PaneState, StateFile};
 
 /// One live Claude Code session on the board.
@@ -15,6 +16,8 @@ pub struct Session {
     pub name: Option<String>,
     /// The time when the session entered its current state.
     pub since: EpochMillis,
+    /// Tell if the process of the session runs or is stopped.
+    pub run: RunStatus,
     /// The handled mark of the session, when the person gave it one. A change
     /// of state removes the mark.
     pub handled: Option<HandledMark>,
@@ -50,6 +53,12 @@ impl Session {
             .unwrap_or_else(|| self.file.directory_name())
     }
 
+    /// The state that the screen shows. It is the state of the file.
+    #[must_use]
+    pub fn state(&self) -> PaneState {
+        self.file.state
+    }
+
     /// Tell if the session has a handled mark.
     #[must_use]
     pub fn is_handled(&self) -> bool {
@@ -60,7 +69,7 @@ impl Session {
     /// [`HANDLED_SUFFIX`], for example `idle - handled`.
     #[must_use]
     pub fn state_label(&self) -> String {
-        let state = self.file.state.label();
+        let state = self.state().label();
         if self.is_handled() {
             format!("{state}{HANDLED_SUFFIX}")
         } else {
@@ -134,9 +143,16 @@ impl Board {
                 file,
                 name,
                 since,
+                run: RunStatus::Running,
                 handled: None,
             },
         );
+    }
+
+    /// Put a state file of a stopped process on the board at the first read.
+    pub fn load_stopped(&mut self, file: StateFile, name: Option<String>, now: EpochMillis) {
+        let _ = now;
+        self.load(file, name);
     }
 
     /// Apply a state file that was read after the start. The function gives
@@ -162,6 +178,7 @@ impl Board {
             file,
             name,
             since,
+            run: RunStatus::Running,
             handled,
         };
         let label = session.label();
@@ -178,6 +195,12 @@ impl Board {
         };
         self.record(change.clone());
         Some(change)
+    }
+
+    /// Set the run status of the session with the pid.
+    pub fn set_run_status(&mut self, pid: Pid, run: RunStatus, now: EpochMillis) -> Option<Change> {
+        let _ = (pid, run, now);
+        None
     }
 
     /// Put a change at the end of the log. The log drops the oldest change
@@ -326,6 +349,7 @@ mod tests {
             file: file(1, PaneState::Idle, 100, 200),
             name: None,
             since: EpochMillis::new(200),
+            run: RunStatus::Running,
             handled: None,
         };
         assert_eq!(session.label(), "worktree");
@@ -737,5 +761,79 @@ mod tests {
             board.changes().last().map(|change| change.at.as_u64()),
             Some(11)
         );
+    }
+
+    /// A board with a session of pid 7 that the process table shows stopped
+    /// at 1_000.
+    fn frozen_board(state: PaneState) -> Board {
+        let mut board = Board::new();
+        board.load(file(7, state, 100, 500), None);
+        board.set_run_status(Pid::new(7), RunStatus::Stopped, EpochMillis::new(1_000));
+        board
+    }
+
+    #[test]
+    fn a_stopped_session_shows_frozen_for_each_file_state() {
+        use PaneState::{Agents, Frozen, Idle, NeedsYou, Shells, Working};
+        for state in [Working, NeedsYou, Idle, Agents, Shells] {
+            let mut board = Board::new();
+            board.load(file(7, state, 100, 500), None);
+            let change = board
+                .set_run_status(Pid::new(7), RunStatus::Stopped, EpochMillis::new(1_000))
+                .expect("a freeze is a change");
+            let expected = Change {
+                at: EpochMillis::new(1_000),
+                pid: Pid::new(7),
+                label: "worktree".to_string(),
+                old: Some(state),
+                new: Some(Frozen),
+            };
+            assert_eq!(change, expected, "{state:?}");
+            let session = board.get(Pid::new(7)).expect("the session is on the board");
+            assert_eq!(session.state(), Frozen, "{state:?}");
+            assert_eq!(session.state_label(), "frozen", "{state:?}");
+            assert_eq!(session.file.state, state, "{state:?}");
+            assert_eq!(session.since, EpochMillis::new(1_000), "{state:?}");
+            assert_eq!(board.changes().cloned().collect::<Vec<_>>(), vec![expected]);
+        }
+    }
+
+    #[test]
+    fn a_continued_session_shows_the_state_of_its_file_again() {
+        let mut board = frozen_board(PaneState::Idle);
+        let change = board
+            .set_run_status(Pid::new(7), RunStatus::Running, EpochMillis::new(2_000))
+            .expect("a thaw is a change");
+        assert_eq!(change.old, Some(PaneState::Frozen));
+        assert_eq!(change.new, Some(PaneState::Idle));
+        assert_eq!(change.at, EpochMillis::new(2_000));
+        let session = board.get(Pid::new(7)).expect("the session is on the board");
+        assert_eq!(session.since, EpochMillis::new(2_000));
+        assert_eq!(session.state(), PaneState::Idle);
+    }
+
+    #[test]
+    fn set_run_status_of_an_unknown_pid_or_of_the_same_status_changes_nothing() {
+        let mut board = Board::new();
+        board.load(file(7, PaneState::Idle, 100, 500), None);
+        let now = EpochMillis::new(1_000);
+        assert_eq!(
+            board.set_run_status(Pid::new(8), RunStatus::Stopped, now),
+            None
+        );
+        assert_eq!(
+            board.set_run_status(Pid::new(7), RunStatus::Running, now),
+            None
+        );
+        assert!(board
+            .set_run_status(Pid::new(7), RunStatus::Stopped, now)
+            .is_some());
+        let later = EpochMillis::new(2_000);
+        assert_eq!(
+            board.set_run_status(Pid::new(7), RunStatus::Stopped, later),
+            None
+        );
+        assert_eq!(board.changes().count(), 1);
+        assert_eq!(board.get(Pid::new(7)).expect("on the board").since, now);
     }
 }
