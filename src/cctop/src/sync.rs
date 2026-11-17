@@ -444,4 +444,68 @@ mod tests {
             .is_empty());
         assert_eq!(board.pids(), vec![Pid::new(10)]);
     }
+
+    /// A board with the session 10 loaded as `idle` and running.
+    fn board_with_idle_ten(env: &Env) -> Board {
+        env.write(10, "idle", 2_000_000);
+        let mut board = Board::new();
+        env.sync.initial(&mut board, &mut live(&[10])).unwrap();
+        board
+    }
+
+    #[test]
+    fn a_tick_that_sees_a_stop_gives_a_change_and_keeps_the_file() {
+        let env = Env::new();
+        let mut board = board_with_idle_ten(&env);
+        let mut clock = live(&[10]).with_stopped(10);
+        let changes = env.sync.on_tick(&mut board, &mut clock, NOW);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].pid, Pid::new(10));
+        assert_eq!(changes[0].old, Some(PaneState::Idle));
+        assert_eq!(changes[0].new, Some(PaneState::Frozen));
+        assert_eq!(changes[0].at, NOW);
+        let session = board.get(Pid::new(10)).unwrap();
+        assert_eq!(session.state(), PaneState::Frozen);
+        assert_eq!(session.file.state, PaneState::Idle);
+        assert!(env.exists(10));
+    }
+
+    #[test]
+    fn a_tick_that_sees_the_process_continue_gives_a_change() {
+        let env = Env::new();
+        let mut board = board_with_idle_ten(&env);
+        let mut stopped = live(&[10]).with_stopped(10);
+        env.sync.on_tick(&mut board, &mut stopped, NOW);
+        let changes = env.sync.on_tick(&mut board, &mut live(&[10]), NOW);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].old, Some(PaneState::Frozen));
+        assert_eq!(changes[0].new, Some(PaneState::Idle));
+        assert_eq!(board.get(Pid::new(10)).unwrap().state(), PaneState::Idle);
+    }
+
+    #[test]
+    fn a_tick_that_sees_no_new_stop_gives_no_change() {
+        let env = Env::new();
+        let mut board = board_with_idle_ten(&env);
+        let mut clock = live(&[10]).with_stopped(10);
+        assert_eq!(env.sync.on_tick(&mut board, &mut clock, NOW).len(), 1);
+        assert!(env.sync.on_tick(&mut board, &mut clock, NOW).is_empty());
+    }
+
+    // This test passes before the tick reads the stop. It guards the rule that
+    // one tick reads the process table once.
+    #[test]
+    fn a_tick_reads_the_process_table_once() {
+        let env = Env::new();
+        env.write(10, "idle", 2_000_000);
+        env.write(20, "working", 2_000_000);
+        env.write(30, "idle", 2_000_000);
+        let mut board = Board::new();
+        env.sync
+            .initial(&mut board, &mut live(&[10, 20, 30]))
+            .unwrap();
+        let mut clock = live(&[10, 20, 30]).with_stopped(20);
+        env.sync.on_tick(&mut board, &mut clock, NOW);
+        assert_eq!(clock.reads, 1);
+    }
 }
