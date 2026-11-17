@@ -863,4 +863,29 @@ mod tests {
         assert_eq!(board.changes().count(), 1);
         assert_eq!(board.get(Pid::new(7)).expect("on the board").since, now);
     }
+
+    #[test]
+    fn a_freeze_removes_the_handled_mark() {
+        let mut board = Board::new();
+        board.load(file(7, PaneState::Idle, 100, 500), None);
+        assert_eq!(
+            board.toggle_handled(Pid::new(7)),
+            Some(HandledToggle::Marked)
+        );
+        let now = EpochMillis::new(1_000);
+        board.set_run_status(Pid::new(7), RunStatus::Stopped, now);
+        assert!(!board.get(Pid::new(7)).expect("on the board").is_handled());
+        board.set_run_status(Pid::new(7), RunStatus::Running, EpochMillis::new(2_000));
+        assert!(!board.get(Pid::new(7)).expect("on the board").is_handled());
+    }
+
+    #[test]
+    fn toggle_handled_refuses_a_frozen_session() {
+        let mut board = frozen_board(PaneState::Idle);
+        assert_eq!(
+            board.toggle_handled(Pid::new(7)),
+            Some(HandledToggle::Refused)
+        );
+        assert!(!board.get(Pid::new(7)).expect("on the board").is_handled());
+    }
 }
