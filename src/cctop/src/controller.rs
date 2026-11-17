@@ -76,7 +76,7 @@ impl Controller {
     /// Handle one event at the time `now`. Return the effects to run.
     pub fn handle(&mut self, event: AppEvent, now: EpochMillis) -> Vec<Effect> {
         match event {
-            AppEvent::Terminal(Event::Key(key)) => match self.app.handle_key(key) {
+            AppEvent::Terminal(Event::Key(key)) => match self.app.handle_key(key, now) {
                 Action::Nothing => Vec::new(),
                 Action::Quit => vec![Effect::Quit],
                 Action::Focus(target) => vec![Effect::Focus(target)],
