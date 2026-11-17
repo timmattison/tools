@@ -303,6 +303,7 @@ mod tests {
             label: "tools".into(),
             zellij: None,
             wezterm: Ok(7),
+            run: crate::liveness::RunStatus::Running,
         };
         let line = report.status_line();
         assert_eq!(controller.handle(AppEvent::FocusDone(report), NOW), vec![]);

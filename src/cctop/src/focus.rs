@@ -7,10 +7,14 @@ use std::sync::Arc;
 use proctree::{Pid, ProcessTree};
 
 use crate::board::Session;
+use crate::liveness::RunStatus;
 use crate::runner::{Runner, COMMAND_LIMIT};
 use crate::state::{ZellijLocation, ZellijPaneId};
 use crate::wezterm::TtyWriter;
 use crate::{ancestry, lsof, wezterm, zellij};
+
+/// The note that the status text adds when the session of a focus is frozen.
+pub const FROZEN_NOTE: &str = "the session is frozen";
 
 /// The session to focus.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +26,8 @@ pub struct FocusTarget {
     /// The Zellij session and pane of the session. `None` when the state file
     /// does not name both.
     pub zellij: Option<ZellijLocation>,
+    /// Tells if the process of the session runs or is stopped.
+    pub run: RunStatus,
 }
 
 impl FocusTarget {
@@ -32,6 +38,7 @@ impl FocusTarget {
             pid: session.file.pid,
             label: session.label(),
             zellij: session.file.zellij_location(),
+            run: session.run,
         }
     }
 }
@@ -56,6 +63,8 @@ pub struct FocusReport {
     /// The result of step 2. `Ok` holds the `WezTerm` pane that got the focus
     /// request.
     pub wezterm: Result<u64, String>,
+    /// Tells if the process of the session runs or is stopped.
+    pub run: RunStatus,
 }
 
 impl FocusReport {
@@ -98,6 +107,7 @@ pub fn focus(target: &FocusTarget, tools: &FocusTools) -> FocusReport {
         label: target.label.clone(),
         zellij,
         wezterm: focus_wezterm(target, tools),
+        run: target.run,
     }
 }
 
@@ -216,6 +226,7 @@ mod tests {
                     session: "tools".to_string(),
                     pane: ZellijPaneId::parse("310").unwrap(),
                 }),
+                run: RunStatus::Running,
             }
         );
     }
@@ -236,7 +247,20 @@ mod tests {
             label: "docs".to_string(),
             zellij,
             wezterm,
+            run: RunStatus::Running,
         }
+    }
+
+    #[test]
+    fn the_status_line_tells_that_a_frozen_session_is_frozen() {
+        let mut frozen = report(Some(Ok(pane("310"))), Ok(7));
+        frozen.run = RunStatus::Stopped;
+        assert_eq!(
+            frozen.status_line(),
+            "docs: Zellij focused pane terminal_310 · WezTerm focused pane 7 · the session is frozen"
+        );
+        let running = report(Some(Ok(pane("310"))), Ok(7));
+        assert!(!running.status_line().contains("frozen"));
     }
 
     fn pane(text: &str) -> ZellijPaneId {

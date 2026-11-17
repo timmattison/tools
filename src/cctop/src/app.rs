@@ -545,6 +545,22 @@ mod tests {
     }
 
     #[test]
+    fn enter_on_a_frozen_session_focuses_it_and_the_status_tells_that_it_is_frozen() {
+        let mut app = App::new();
+        app.board_mut().load_stopped(
+            file(10, "dir10", PaneState::Idle, 10),
+            None,
+            EpochMillis::new(500),
+        );
+        let action = app.handle_key(press(KeyCode::Enter), KEY_TIME);
+        match action {
+            Action::Focus(target) => assert_eq!(target.run, RunStatus::Stopped),
+            other => panic!("expected a focus action, got {other:?}"),
+        }
+        assert_eq!(app.status(), Some("Focusing dir10 · the session is frozen"));
+    }
+
+    #[test]
     fn enter_names_the_session_by_its_registry_name() {
         let mut app = App::new();
         app.board_mut().load(
