@@ -66,7 +66,7 @@ The colors are the colors of the `claude-tab-bar` Zellij plugin (`Palette::DEFAU
 
 Under the rows, cctop shows the change log. It lists the changes since cctop started, newest first. A change is a new session, a new state, or the end of a session. The first read at start logs nothing.
 
-The last line is the status line. It shows the result of the last focus request or the last notification error. Without a message, it shows the keys. A move key (`j`, `k`, Up, or Down) clears the message.
+The last line is the status line. It shows the result of the last focus request or the last notification error. Without a message, it shows the keys. A move key (`j`, `k`, Up, Down, Page Up, Page Down, Home, or End) clears the message.
 
 ## The state files
 
@@ -118,10 +118,16 @@ A held jump stops when its session leaves `needs-you`, ends, or gets a handled m
 | --- | --- |
 | `j`, Down | Select the next row. |
 | `k`, Up | Select the previous row. |
+| Page Down | Select the row one page below the selected row. Stop at the last row. |
+| Page Up | Select the row one page above the selected row. Stop at the first row. |
+| Home | Select the first row. |
+| End | Select the last row. |
 | Enter | Focus the selected session. |
 | `n` | Select the next `needs-you` session that has no handled mark, and focus it. |
 | `h`, `H` | Mark the selected `needs-you` or `idle` session as handled, or remove its mark. A session in a different state takes no mark. |
 | `q`, Ctrl-C | Quit. |
+
+One page is the number of session rows that the table shows at the current height of the terminal. The header row and the borders do not count. A page is at least 1 row. The selection does not wrap.
 
 ## The focus
 
