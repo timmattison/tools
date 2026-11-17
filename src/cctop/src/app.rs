@@ -681,6 +681,7 @@ mod tests {
             );
         }
     }
+
     #[test]
     fn h_on_an_empty_board_marks_nothing() {
         let mut app = App::new();
