@@ -15,23 +15,46 @@ use crate::state::{EpochMillis, PaneState};
 /// Draw the screen: the table of sessions, the change log, and the status
 /// line. `now` gives the time that the elapsed times count to.
 pub fn draw(frame: &mut Frame, app: &App, now: EpochMillis) {
-    let [table_area, log_area, status_area] = Layout::vertical([
-        Constraint::Min(3),
-        Constraint::Length(LOG_HEIGHT),
-        Constraint::Length(1),
-    ])
-    .areas(frame.area());
+    let [table_area, log_area, status_area] = screen_areas(frame.area());
     draw_table(frame, table_area, app, now);
     draw_log(frame, log_area, app);
     draw_status(frame, status_area, app);
 }
 
+/// The height of the status line.
+const STATUS_HEIGHT: u16 = 1;
+
+/// The height of the header row of the table.
+const HEADER_HEIGHT: u16 = 1;
+
+/// The areas of the table, the log, and the status line in `area`.
+fn screen_areas(area: Rect) -> [Rect; 3] {
+    Layout::vertical([
+        Constraint::Min(3),
+        Constraint::Length(LOG_HEIGHT),
+        Constraint::Length(STATUS_HEIGHT),
+    ])
+    .areas(area)
+}
+
+/// The block that borders the table.
+fn table_block() -> Block<'static> {
+    Block::bordered()
+}
+
 /// The page size for a terminal `terminal_height` rows high: the number of
 /// session rows that [`draw`] shows in the table at that height, and at
-/// least 1.
+/// least 1. The header row and the borders of the table do not count. The
+/// function reads the layout of [`draw`], so the two cannot disagree.
 #[must_use]
-pub fn page_size(_terminal_height: u16) -> PageSize {
-    PageSize::new(1)
+pub fn page_size(terminal_height: u16) -> PageSize {
+    // The width does not change a vertical layout.
+    let [table_area, _, _] = screen_areas(Rect::new(0, 0, 1, terminal_height));
+    let rows = table_block()
+        .inner(table_area)
+        .height
+        .saturating_sub(HEADER_HEIGHT);
+    PageSize::new(usize::from(rows))
 }
 
 /// The text of the bottom line when there is no status.
@@ -140,7 +163,7 @@ fn table_title(board: &Board) -> String {
 /// Draw the table of sessions in `area`.
 fn draw_table(frame: &mut Frame, area: Rect, app: &App, now: EpochMillis) {
     let board = app.board();
-    let block = Block::bordered().title(table_title(board));
+    let block = table_block().title(table_title(board));
     if board.is_empty() {
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -186,6 +209,7 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App, now: EpochMillis) {
         Constraint::Min(8),
     ];
     let header = Row::new(["", "STATE", "TIME", "ZELLIJ", "DIRECTORY", "NAME"])
+        .height(HEADER_HEIGHT)
         .style(Style::new().add_modifier(Modifier::BOLD));
     let table = Table::new(rows, widths)
         .header(header)
