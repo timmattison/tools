@@ -918,4 +918,34 @@ mod tests {
         assert_eq!(of(PaneState::Frozen), (1, 0));
         assert_eq!(of(PaneState::NeedsYou), (0, 0));
     }
+
+    #[test]
+    fn a_newer_file_of_a_frozen_session_changes_nothing_on_the_screen() {
+        let mut board = frozen_board(PaneState::Idle);
+        let applied = board.apply(file(7, PaneState::Working, 100, 1_500), None);
+        assert_eq!(applied, None);
+        assert_eq!(board.changes().count(), 1);
+        let session = board.get(Pid::new(7)).expect("on the board");
+        assert_eq!(session.since, EpochMillis::new(1_000));
+        assert_eq!(session.state(), PaneState::Frozen);
+        assert_eq!(session.file.state, PaneState::Working);
+        assert_eq!(session.file.stamp, EpochMillis::new(1_500));
+        let thaw = board
+            .set_run_status(Pid::new(7), RunStatus::Running, EpochMillis::new(2_000))
+            .expect("a thaw is a change");
+        assert_eq!(thaw.old, Some(PaneState::Frozen));
+        assert_eq!(thaw.new, Some(PaneState::Working));
+    }
+
+    #[test]
+    fn a_reused_pid_of_a_frozen_session_is_a_running_session() {
+        let mut board = frozen_board(PaneState::Idle);
+        let change = board
+            .apply(file(7, PaneState::Working, 200, 1_500), None)
+            .expect("a new process is a change");
+        assert_eq!(change.old, None);
+        assert_eq!(change.new, Some(PaneState::Working));
+        let session = board.get(Pid::new(7)).expect("on the board");
+        assert_eq!(session.state(), PaneState::Working);
+    }
 }
