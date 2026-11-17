@@ -122,6 +122,9 @@ pub fn survey(sessions: &[(Pid, EpochMillis)], clock: &mut dyn ProcessClock) -> 
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    use std::os::unix::process::CommandExt;
+
     const STARTED_AT: EpochMillis = EpochMillis::new(1_794_823_262_488);
 
     /// 2020-01-01T00:00:00Z in seconds. A real start time is later than this.
@@ -199,6 +202,118 @@ mod tests {
             "start {start} is more than one day before now {now_secs}"
         );
         assert!(!times.contains_key(&absent));
+    }
+
+    /// The longest time that a test waits for the process table to show a
+    /// signal. The bound is large because it measures the machine, not the code.
+    #[cfg(unix)]
+    const SIGNAL_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// The time between two reads of the process table while a test waits.
+    #[cfg(unix)]
+    const SIGNAL_POLL: std::time::Duration = std::time::Duration::from_millis(10);
+
+    /// A `sleep 60` process and its watchdog. A stopped process runs no code,
+    /// so its `sleep` does not end by itself. When cargo dies after the stop,
+    /// the process stays stopped forever. The watchdog is a shell in its own
+    /// process group, so a Ctrl-C to the group of the test does not reach it.
+    /// It waits 60 seconds and then kills the process with `SIGKILL`, which
+    /// ends a stopped process. `Drop` ends both children, also after a failed
+    /// assertion.
+    #[cfg(unix)]
+    struct SleepGuard {
+        target: std::process::Child,
+        watchdog: std::process::Child,
+    }
+
+    #[cfg(unix)]
+    impl SleepGuard {
+        fn start() -> Self {
+            let target = childenv::fixture_command("sleep")
+                .arg("60")
+                .spawn()
+                .expect("sleep starts");
+            let watchdog = childenv::fixture_command("/bin/sh")
+                .args([
+                    "-c",
+                    "sleep 60; kill -KILL \"$1\" 2>/dev/null",
+                    "cctop-watchdog",
+                    &target.id().to_string(),
+                ])
+                .process_group(0)
+                .spawn()
+                .expect("watchdog starts");
+            Self { target, watchdog }
+        }
+
+        fn pid(&self) -> Pid {
+            Pid::new(self.target.id())
+        }
+
+        /// Send `signal` to the target with the `kill` program.
+        fn signal(&self, signal: &str) {
+            let status = childenv::fixture_command("/bin/kill")
+                .args([signal, &self.target.id().to_string()])
+                .status()
+                .expect("kill starts");
+            assert!(status.success(), "kill {signal} failed: {status}");
+        }
+
+        /// Read the process table until the target has the run status `want`.
+        /// The result is the facts of the last read.
+        fn wait_for(&self, clock: &mut SystemClock, want: RunStatus) -> Option<ProcessFacts> {
+            let pid = self.pid();
+            let deadline = std::time::Instant::now() + SIGNAL_WAIT;
+            loop {
+                let facts = clock.processes(&[pid]).get(&pid).copied();
+                let reached = facts.is_some_and(|facts| facts.run == want);
+                if reached || std::time::Instant::now() >= deadline {
+                    return facts;
+                }
+                std::thread::sleep(SIGNAL_POLL);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for SleepGuard {
+        fn drop(&mut self) {
+            let _ = self.target.kill();
+            let _ = self.target.wait();
+            let _ = childenv::fixture_command("/bin/kill")
+                .args(["-KILL", "--", &format!("-{}", self.watchdog.id())])
+                .status();
+            let _ = self.watchdog.wait();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_system_clock_sees_a_stopped_process_and_then_a_continued_one() {
+        let guard = SleepGuard::start();
+        let pid = guard.pid();
+        let mut clock = SystemClock::new();
+        let before = guard
+            .wait_for(&mut clock, RunStatus::Running)
+            .expect("the child is live");
+        assert_eq!(before.run, RunStatus::Running);
+
+        guard.signal("-STOP");
+        let stopped = guard.wait_for(&mut clock, RunStatus::Stopped);
+        assert_eq!(stopped.map(|facts| facts.run), Some(RunStatus::Stopped));
+        assert_eq!(
+            stopped.map(|facts| facts.start_secs),
+            Some(before.start_secs)
+        );
+
+        guard.signal("-CONT");
+        let running = guard.wait_for(&mut clock, RunStatus::Running);
+        assert_eq!(running.map(|facts| facts.run), Some(RunStatus::Running));
+        assert_eq!(
+            running.map(|facts| facts.start_secs),
+            Some(before.start_secs)
+        );
+        assert!(clock.processes(&[pid]).contains_key(&pid));
     }
 
     #[test]
