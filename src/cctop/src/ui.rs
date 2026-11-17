@@ -9,7 +9,7 @@ use ratatui::widgets::{Block, Paragraph, Row, Table, TableState};
 use ratatui::Frame;
 
 use crate::app::App;
-use crate::board::Change;
+use crate::board::{Board, Change};
 use crate::state::{EpochMillis, PaneState};
 
 /// Draw the screen: the table of sessions, the change log, and the status
@@ -102,13 +102,38 @@ fn state_color(state: PaneState) -> Color {
     Color::Rgb(rgb.red, rgb.green, rgb.blue)
 }
 
+/// The text between two parts of the title of the table.
+const TITLE_SEPARATOR: &str = " · ";
+
+/// The title of the table: the number of sessions, then the count of each
+/// state in the sort order of the rows. A count reads `unmarked/handled`
+/// and the marker of its state follows it.
+fn table_title(board: &Board) -> String {
+    let count = board.len();
+    let noun = if count == 1 { "session" } else { "sessions" };
+    let counts: Vec<String> = board
+        .state_counts()
+        .iter()
+        .map(|state| {
+            format!(
+                "{}/{} {}",
+                state.unmarked,
+                state.handled,
+                state.state.marker()
+            )
+        })
+        .collect();
+    format!(
+        " cctop{TITLE_SEPARATOR}{count} {noun}{TITLE_SEPARATOR}{} ",
+        counts.join(TITLE_SEPARATOR)
+    )
+}
+
 /// Draw the table of sessions in `area`.
 fn draw_table(frame: &mut Frame, area: Rect, app: &App, now: EpochMillis) {
     let board = app.board();
-    let count = board.len();
-    let noun = if count == 1 { "session" } else { "sessions" };
-    let block = Block::bordered().title(format!(" cctop · {count} {noun} "));
-    if count == 0 {
+    let block = Block::bordered().title(table_title(board));
+    if board.is_empty() {
         let inner = block.inner(area);
         frame.render_widget(block, area);
         frame.render_widget(Paragraph::new(EMPTY_HINT), inner);
