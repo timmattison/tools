@@ -142,10 +142,11 @@ impl App {
     /// Put a handled mark on the selected session, or remove its mark. A new
     /// mark moves the session to the bottom of its state. The cursor then
     /// selects the first row at or below the old index of the marked row that
-    /// has no mark and has a state that takes a mark. If no such row exists, the cursor stays on the marked
-    /// session. A removed mark moves the session up, and the cursor goes with
-    /// the session. A session whose state takes no mark keeps its row and the
-    /// cursor, and the status text tells why.
+    /// has no mark and has a state that takes a mark. If no such row exists,
+    /// the cursor stays on the marked session. A removed mark moves the
+    /// session up, and the cursor goes with the session. A session whose state
+    /// takes no mark keeps its row and the cursor, and the status text tells
+    /// why.
     fn toggle_handled_selected(&mut self) {
         let selected = self.selected_index().and_then(|index| {
             let session = self.board.rows().get(index).copied()?;
