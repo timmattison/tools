@@ -32,8 +32,8 @@ pub enum HandledToggle {
     Marked,
     /// The function removed the handled mark of the session.
     Unmarked,
-    /// The state of the session takes no handled mark. The board does not
-    /// change.
+    /// The state of the session takes no handled mark, see
+    /// [`PaneState::takes_handled_mark`]. The board does not change.
     Refused,
 }
 
@@ -208,12 +208,17 @@ impl Board {
     /// Put a handled mark on the session with the pid, or remove its mark.
     /// The function gives `Some(HandledToggle::Marked)` when the session now
     /// has a mark, `Some(HandledToggle::Unmarked)` when it removed the mark,
-    /// and `None` when the board does not hold the pid. A new mark sorts the
-    /// row below each other row in its state.
+    /// and `None` when the board does not hold the pid. It gives
+    /// `Some(HandledToggle::Refused)` and changes nothing when the session has
+    /// no mark and its state takes none, see [`PaneState::takes_handled_mark`].
+    /// A new mark sorts the row below each other row in its state.
     pub fn toggle_handled(&mut self, pid: Pid) -> Option<HandledToggle> {
         let session = self.sessions.get_mut(&pid)?;
         if session.handled.take().is_some() {
             return Some(HandledToggle::Unmarked);
+        }
+        if !session.file.state.takes_handled_mark() {
+            return Some(HandledToggle::Refused);
         }
         session.handled = Some(HandledMark(self.next_mark));
         self.next_mark += 1;
