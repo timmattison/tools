@@ -315,6 +315,25 @@ mod tests {
     }
 
     #[test]
+    fn a_file_event_of_a_stopped_process_freezes_the_session_at_the_read() {
+        let env = Env::new();
+        env.write(7, "idle", 10);
+        let mut board = Board::new();
+        env.sync.initial(&mut board, &mut live(&[7]), NOW).unwrap();
+        env.write(7, "needs-you", 20);
+        let now = EpochMillis::new(5_000);
+        let mut clock = live(&[7]).with_stopped(7);
+        let changes =
+            env.sync
+                .on_dir_event(&mut board, DirEvent::File(Pid::new(7)), &mut clock, now);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].old, Some(PaneState::Idle));
+        assert_eq!(changes[0].new, Some(PaneState::Frozen));
+        assert_eq!(changes[0].at, now);
+        assert_eq!(board.get(Pid::new(7)).unwrap().since, now);
+    }
+
+    #[test]
     fn a_new_file_gives_one_change_with_no_old_state() {
         let env = Env::new();
         env.write(10, "needs-you", 2_000_000);

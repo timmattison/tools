@@ -143,6 +143,7 @@ mod tests {
 
     use super::*;
     use crate::app::JUMP_HOLD_MS;
+    use crate::state::PaneState;
     use crate::store::test_support::{clock_with, state_json, FakeClock};
 
     const STARTED_MS: u64 = 1_000_000;
@@ -257,6 +258,35 @@ mod tests {
         write(dir.path(), 100, "needs-you", 20);
         let effects = controller.handle(file_event(100), NOW);
         assert_eq!(effects, vec![Effect::Notify("worktree needs you".into())]);
+    }
+
+    #[test]
+    fn a_file_event_after_a_continue_reads_the_running_process() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), 100, "idle", 10);
+        let stopped = clock_with(100, START_SECS).with_stopped(100);
+        let sync = Sync::with_dirs(dir.path().to_path_buf(), dir.path().join("sessions"));
+        let mut controller = Controller::new(sync, Box::new(stopped), true);
+        controller.start(NOW).unwrap();
+        controller.clock = Box::new(clock_with(100, START_SECS));
+        write(dir.path(), 100, "needs-you", 20);
+        let effects = controller.handle(file_event(100), NOW);
+        assert_eq!(effects, vec![Effect::Notify("worktree needs you".into())]);
+        let shown = controller.app().board().get(Pid::new(100)).unwrap().state();
+        assert_eq!(shown, PaneState::NeedsYou);
+    }
+
+    #[test]
+    fn a_file_event_after_a_stop_reads_the_stopped_process() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), 100, "idle", 10);
+        let mut controller = controller(dir.path(), true);
+        controller.start(NOW).unwrap();
+        controller.clock = Box::new(clock_with(100, START_SECS).with_stopped(100));
+        write(dir.path(), 100, "needs-you", 20);
+        assert_eq!(controller.handle(file_event(100), NOW), vec![]);
+        let shown = controller.app().board().get(Pid::new(100)).unwrap().state();
+        assert_eq!(shown, PaneState::Frozen);
     }
 
     #[test]
