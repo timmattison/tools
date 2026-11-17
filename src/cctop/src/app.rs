@@ -4,7 +4,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use proctree::Pid;
 
-use crate::board::Board;
+use crate::board::{Board, HandledToggle};
 use crate::focus::FocusTarget;
 use crate::state::{EpochMillis, PaneState};
 
@@ -149,10 +149,12 @@ impl App {
 
     /// Put a handled mark on the selected session, or remove its mark. A new
     /// mark moves the session to the bottom of its state. The cursor then
-    /// selects the first row with no mark at or below the old index of the
-    /// marked row. If no such row exists, the cursor stays on the marked
-    /// session. A removed mark moves the session up, and the cursor goes with
-    /// the session.
+    /// selects the first row at or below the old index of the marked row that
+    /// has no mark and has a state that takes a mark. If no such row exists,
+    /// the cursor stays on the marked session. A removed mark moves the
+    /// session up, and the cursor goes with the session. A session whose state
+    /// takes no mark keeps its row and the cursor, and the status text tells
+    /// why.
     fn toggle_handled_selected(&mut self) {
         let selected = self.selected_index().and_then(|index| {
             let session = self.board.rows().get(index).copied()?;
@@ -163,13 +165,15 @@ impl App {
             return;
         };
         match self.board.toggle_handled(pid) {
-            Some(true) => {
+            Some(HandledToggle::Marked) => {
                 let next = self
                     .board
                     .rows()
                     .iter()
                     .skip(index)
-                    .position(|session| !session.is_handled())
+                    .position(|session| {
+                        !session.is_handled() && session.file.state.takes_handled_mark()
+                    })
                     .map(|offset| index + offset);
                 match next {
                     Some(next) => self.select(next),
@@ -177,9 +181,15 @@ impl App {
                 }
                 self.status = Some(format!("Marked {label} as handled"));
             }
-            Some(false) => {
+            Some(HandledToggle::Unmarked) => {
                 self.sync_selection();
                 self.status = Some(format!("Removed the handled mark from {label}"));
+            }
+            Some(HandledToggle::Refused) => {
+                self.status = Some(format!(
+                    "Cannot mark {label} as handled: only {} sessions take a mark",
+                    states_that_take_a_mark()
+                ));
             }
             None => {}
         }
@@ -250,6 +260,21 @@ impl App {
         self.last_index = index;
         self.selected = self.board.rows().get(index).map(|session| session.file.pid);
     }
+}
+
+/// The labels of the states that take a handled mark, in the sort order of
+/// the rows, joined by ` and `. The text is `needs-you and idle`.
+fn states_that_take_a_mark() -> String {
+    let mut states: Vec<PaneState> = PaneState::ALL
+        .into_iter()
+        .filter(|state| state.takes_handled_mark())
+        .collect();
+    states.sort_by_key(|state| state.rank());
+    states
+        .into_iter()
+        .map(PaneState::label)
+        .collect::<Vec<_>>()
+        .join(" and ")
 }
 
 #[cfg(test)]
@@ -644,6 +669,47 @@ mod tests {
         assert_eq!(row_order(&app), vec![10, 11, 12]);
         assert_eq!(selected_pid(&app), Some(Pid::new(10)));
         assert_eq!(app.status(), Some("Removed the handled mark from dir10"));
+    }
+
+    #[test]
+    fn h_on_a_session_that_does_not_wait_for_the_person_marks_nothing() {
+        for state in [PaneState::Working, PaneState::Agents, PaneState::Shells] {
+            let mut app = app_with(&[(10, PaneState::NeedsYou), (11, state), (12, state)]);
+            app.handle_key(press(KeyCode::Char('j')), KEY_TIME);
+            assert_eq!(selected_pid(&app), Some(Pid::new(11)), "{state:?}");
+            assert_eq!(
+                app.handle_key(press(KeyCode::Char('h')), KEY_TIME),
+                Action::Nothing,
+                "{state:?}"
+            );
+            assert!(!is_handled(&app, 11), "{state:?}");
+            assert_eq!(row_order(&app), vec![10, 11, 12], "{state:?}");
+            assert_eq!(selected_pid(&app), Some(Pid::new(11)), "{state:?}");
+            assert_eq!(
+                app.status(),
+                Some("Cannot mark dir11 as handled: only needs-you and idle sessions take a mark"),
+                "{state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn after_a_mark_the_cursor_skips_a_session_that_takes_no_mark() {
+        for state in [PaneState::Working, PaneState::Agents, PaneState::Shells] {
+            let mut app = app_with(&[
+                (10, PaneState::NeedsYou),
+                (11, PaneState::Idle),
+                (12, state),
+            ]);
+            assert_eq!(selected_pid(&app), Some(Pid::new(10)), "{state:?}");
+            app.handle_key(press(KeyCode::Char('h')), KEY_TIME);
+            assert!(is_handled(&app, 10), "{state:?}");
+            assert_eq!(selected_pid(&app), Some(Pid::new(11)), "{state:?}");
+            app.handle_key(press(KeyCode::Char('h')), KEY_TIME);
+            assert!(is_handled(&app, 11), "{state:?}");
+            assert_eq!(selected_pid(&app), Some(Pid::new(11)), "{state:?}");
+            assert_eq!(app.status(), Some("Marked dir11 as handled"), "{state:?}");
+        }
     }
 
     #[test]

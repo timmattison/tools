@@ -20,15 +20,16 @@ The rows are in this order: `needs-you`, `idle`, `agents`, `shells`, `working`. 
 The top border of the table shows the number of sessions, then one count for each state. You can see how many sessions need you, and you do not have to read the rows:
 
 ```text
-┌ cctop · 14 sessions · 1/2 ❗ · 0/1 💤 · 3/7 🤖 · 0/0 🐚 · 0/0 🏃 ───────┐
+┌ cctop · 14 sessions · 1/2 ❗ · 3/7 💤 · 1/0 🤖 · 0/0 🐚 · 0/0 🏃 ───────┐
 ```
 
-Each count has the shape `<no mark>/<handled> <marker>`. The left number counts the sessions in that state that have no [handled mark](#the-handled-mark). The right number counts the sessions in that state that have a handled mark. In the example, 10 sessions are in `agents`: 3 with no mark and 7 with a mark.
+Each count has the shape `<no mark>/<handled> <marker>`. The left number counts the sessions in that state that have no [handled mark](#the-handled-mark). The right number counts the sessions in that state that have a handled mark. In the example, 10 sessions are in `idle`: 3 with no mark and 7 with a mark.
 
 - The counts are in the order of the rows. The `needs-you` count stands first, thus a cut at the right edge removes it last.
 - Each count shows, also when both numbers are 0. The empty board shows the five counts too, all `0/0`.
 - Both numbers show, also when the right number is 0: `2/0 💤`, not `2 💤`. Each count has one shape, thus a new mark does not move the counts after it.
 - A handled session counts on the right side of its state. A change of state removes the mark, thus the session then counts on the left side of its new state.
+- Only a `needs-you` or `idle` session takes a mark. Thus the right number of `agents`, `shells`, and `working` is always 0, but it shows, because each count has one shape.
 - At 70 columns, the whole title line shows when each number has 1 digit.
 
 | State | Marker | Code point |
@@ -45,7 +46,9 @@ Each marker is one code point of East Asian Width `W`, with no variation selecto
 
 ### The handled mark
 
-Press `h` to mark the selected session as handled. The row goes to the bottom of the rows in its state, and its state shows ` - handled`. The latest mark goes to the bottom of its state. The cursor then selects the next row that has no mark, thus you can press `h` again to mark that session. When no such row is below it, the cursor stays on the marked row.
+Press `h` to mark the selected session as handled. The row goes to the bottom of the rows in its state, and its state shows ` - handled`. The latest mark goes to the bottom of its state. The cursor then selects the next `needs-you` or `idle` row that has no mark, thus you can press `h` again to mark that session. When no such row is below it, the cursor stays on the marked row.
+
+Only a session in `needs-you` or `idle` takes a mark. A mark tells that you saw the session and have nothing to do for it now, and only these two states wait for you. When you press `h` on a session in `working`, `agents`, or `shells`, cctop puts no mark on it. The row and the cursor do not move, and the status line shows `Cannot mark <name> as handled: only needs-you and idle sessions take a mark`.
 
 The mark stays until the session changes state. A new write of the same state keeps the mark. When the state changes, the mark goes away, and it does not come back when the session returns to the old state.
 
@@ -117,7 +120,7 @@ A held jump stops when its session leaves `needs-you`, ends, or gets a handled m
 | `k`, Up | Select the previous row. |
 | Enter | Focus the selected session. |
 | `n` | Select the next `needs-you` session that has no handled mark, and focus it. |
-| `h`, `H` | Mark the selected session as handled, or remove its mark. |
+| `h`, `H` | Mark the selected `needs-you` or `idle` session as handled, or remove its mark. A session in a different state takes no mark. |
 | `q`, Ctrl-C | Quit. |
 
 ## The focus

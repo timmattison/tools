@@ -25,6 +25,18 @@ pub struct Session {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct HandledMark(u64);
 
+/// The result of [`Board::toggle_handled`] for a session on the board.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandledToggle {
+    /// The session now has a handled mark.
+    Marked,
+    /// The function removed the handled mark of the session.
+    Unmarked,
+    /// The state of the session takes no handled mark, see
+    /// [`PaneState::takes_handled_mark`]. The board does not change.
+    Refused,
+}
+
 /// The text that follows the state of a handled session on the screen.
 pub const HANDLED_SUFFIX: &str = " - handled";
 
@@ -194,17 +206,23 @@ impl Board {
     }
 
     /// Put a handled mark on the session with the pid, or remove its mark.
-    /// The function gives `Some(true)` when the session now has a mark,
-    /// `Some(false)` when it has none, and `None` when the board does not hold
-    /// the pid. A new mark sorts the row below each other row in its state.
-    pub fn toggle_handled(&mut self, pid: Pid) -> Option<bool> {
+    /// The function gives `Some(HandledToggle::Marked)` when the session now
+    /// has a mark, `Some(HandledToggle::Unmarked)` when it removed the mark,
+    /// and `None` when the board does not hold the pid. It gives
+    /// `Some(HandledToggle::Refused)` and changes nothing when the session has
+    /// no mark and its state takes none, see [`PaneState::takes_handled_mark`].
+    /// A new mark sorts the row below each other row in its state.
+    pub fn toggle_handled(&mut self, pid: Pid) -> Option<HandledToggle> {
         let session = self.sessions.get_mut(&pid)?;
         if session.handled.take().is_some() {
-            return Some(false);
+            return Some(HandledToggle::Unmarked);
+        }
+        if !session.file.state.takes_handled_mark() {
+            return Some(HandledToggle::Refused);
         }
         session.handled = Some(HandledMark(self.next_mark));
         self.next_mark += 1;
-        Some(true)
+        Some(HandledToggle::Marked)
     }
 
     /// The count of each state, in the sort order of the rows. The array
@@ -574,7 +592,10 @@ mod tests {
     fn a_handled_row_sorts_below_each_other_row_in_its_state() {
         let mut board = board_with_three_idle_rows();
         assert_eq!(row_order(&board), vec![6, 5, 8, 4, 3]);
-        assert_eq!(board.toggle_handled(Pid::new(5)), Some(true));
+        assert_eq!(
+            board.toggle_handled(Pid::new(5)),
+            Some(HandledToggle::Marked)
+        );
         assert_eq!(row_order(&board), vec![6, 8, 4, 5, 3]);
     }
 
@@ -587,10 +608,31 @@ mod tests {
     }
 
     #[test]
+    fn toggle_handled_refuses_a_session_that_does_not_wait_for_the_person() {
+        for state in [PaneState::Working, PaneState::Agents, PaneState::Shells] {
+            let mut board = Board::new();
+            board.load(file(7, state, 100, 500), None);
+            assert_eq!(
+                board.toggle_handled(Pid::new(7)),
+                Some(HandledToggle::Refused),
+                "{state:?}"
+            );
+            let session = board.get(Pid::new(7)).expect("the session is on the board");
+            assert!(!session.is_handled(), "{state:?}");
+        }
+    }
+
+    #[test]
     fn a_second_toggle_removes_the_mark_and_restores_the_order() {
         let mut board = board_with_three_idle_rows();
-        assert_eq!(board.toggle_handled(Pid::new(5)), Some(true));
-        assert_eq!(board.toggle_handled(Pid::new(5)), Some(false));
+        assert_eq!(
+            board.toggle_handled(Pid::new(5)),
+            Some(HandledToggle::Marked)
+        );
+        assert_eq!(
+            board.toggle_handled(Pid::new(5)),
+            Some(HandledToggle::Unmarked)
+        );
         let session = board.get(Pid::new(5)).expect("the session is on the board");
         assert!(!session.is_handled());
         assert_eq!(row_order(&board), vec![6, 5, 8, 4, 3]);
@@ -617,7 +659,10 @@ mod tests {
     fn a_change_of_state_removes_the_mark() {
         let mut board = Board::new();
         board.load(file(7, PaneState::Idle, 100, 500), None);
-        assert_eq!(board.toggle_handled(Pid::new(7)), Some(true));
+        assert_eq!(
+            board.toggle_handled(Pid::new(7)),
+            Some(HandledToggle::Marked)
+        );
         board.apply(file(7, PaneState::Working, 100, 600), None);
         let is_handled = |board: &Board| board.get(Pid::new(7)).map(Session::is_handled);
         assert_eq!(is_handled(&board), Some(false));
@@ -639,7 +684,10 @@ mod tests {
     fn a_reused_pid_has_no_mark() {
         let mut board = Board::new();
         board.load(file(7, PaneState::Idle, 100, 500), None);
-        assert_eq!(board.toggle_handled(Pid::new(7)), Some(true));
+        assert_eq!(
+            board.toggle_handled(Pid::new(7)),
+            Some(HandledToggle::Marked)
+        );
         board.apply(file(7, PaneState::Idle, 200, 900), None);
         let session = board.get(Pid::new(7)).expect("the session is on the board");
         assert!(!session.is_handled());

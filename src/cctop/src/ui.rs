@@ -496,10 +496,10 @@ mod tests {
         app.board_mut()
             .load(file(5, "e", PaneState::Working, 100), None);
         app.board_mut().toggle_handled(Pid::new(2));
-        app.board_mut().toggle_handled(Pid::new(4));
+        app.board_mut().toggle_handled(Pid::new(3));
         let text = title(&render(&app, 127_000));
         assert!(
-            text.contains(" cctop · 5 sessions · 1/1 ❗ · 1/0 💤 · 0/1 🤖 · 0/0 🐚 · 1/0 🏃 "),
+            text.contains(" cctop · 5 sessions · 1/1 ❗ · 0/1 💤 · 1/0 🤖 · 0/0 🐚 · 1/0 🏃 "),
             "{text}"
         );
     }
@@ -539,17 +539,17 @@ mod tests {
         add(&mut app, PaneState::NeedsYou, false);
         add(&mut app, PaneState::NeedsYou, true);
         add(&mut app, PaneState::NeedsYou, true);
-        add(&mut app, PaneState::Idle, true);
         for _ in 0..3 {
-            add(&mut app, PaneState::Agents, false);
+            add(&mut app, PaneState::Idle, false);
         }
         for _ in 0..7 {
-            add(&mut app, PaneState::Agents, true);
+            add(&mut app, PaneState::Idle, true);
         }
+        add(&mut app, PaneState::Agents, false);
         let buffer = render_at(&app, 1_000, 70);
         let text = title(&buffer);
         assert!(
-            text.contains(" cctop · 14 sessions · 1/2 ❗ · 0/1 💤 · 3/7 🤖 · 0/0 🐚 · 0/0 🏃 "),
+            text.contains(" cctop · 14 sessions · 1/2 ❗ · 3/7 💤 · 1/0 🤖 · 0/0 🐚 · 0/0 🏃 "),
             "{text}"
         );
         assert_eq!(buffer[(69, 0)].symbol(), "┐");

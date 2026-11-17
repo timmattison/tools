@@ -85,6 +85,17 @@ impl PaneState {
         }
     }
 
+    /// Tell if a session in the state can take a handled mark. A mark tells
+    /// that the person saw the session and has nothing to do for it now, thus
+    /// only a state that waits for the person takes one.
+    #[must_use]
+    pub fn takes_handled_mark(self) -> bool {
+        match self {
+            PaneState::NeedsYou | PaneState::Idle => true,
+            PaneState::Working | PaneState::Agents | PaneState::Shells => false,
+        }
+    }
+
     /// The color of the state. It is the default palette of the tab bar.
     #[must_use]
     pub fn color(self) -> Rgb {
