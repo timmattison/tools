@@ -436,6 +436,24 @@ mod tests {
     }
 
     #[test]
+    fn the_state_block_of_a_frozen_row_is_blue() {
+        let mut app = App::new();
+        app.board_mut().load_stopped(
+            file(10, "dir10", PaneState::Idle, 1_000),
+            None,
+            EpochMillis::new(1_000),
+        );
+        let buffer = render(&app, 127_000);
+        let (y, line) = line_with(&buffer, "frozen");
+        let x = line
+            .chars()
+            .position(|symbol| symbol == '█')
+            .expect("the row holds a block");
+        let x = u16::try_from(x).expect("the column fits");
+        assert_eq!(buffer[(x, y)].fg, Color::Rgb(0x4d, 0xab, 0xf7));
+    }
+
+    #[test]
     fn only_the_highlight_shows_the_selected_row() {
         let buffer = render(&two_session_app(), 127_000);
         let (needs_y, needs_line) = line_with(&buffer, "needs-you");
