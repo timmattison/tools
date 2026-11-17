@@ -24,6 +24,32 @@ pub enum Action {
 /// press.
 pub const JUMP_HOLD_MS: u64 = 2_000;
 
+/// The number of session rows that one Page Up or Page Down moves the
+/// selection. A page is at least 1 row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageSize(std::num::NonZeroUsize);
+
+impl PageSize {
+    /// A page of `rows` rows. A page of 0 rows becomes a page of 1 row.
+    #[must_use]
+    pub fn new(rows: usize) -> Self {
+        Self(std::num::NonZeroUsize::new(rows).unwrap_or(std::num::NonZeroUsize::MIN))
+    }
+
+    /// The number of rows of the page. It is at least 1.
+    #[must_use]
+    pub fn get(self) -> usize {
+        self.0.get()
+    }
+}
+
+impl Default for PageSize {
+    /// A page of 1 row.
+    fn default() -> Self {
+        Self(std::num::NonZeroUsize::MIN)
+    }
+}
+
 /// The state of the screen.
 #[derive(Debug, Default)]
 pub struct App {
@@ -33,6 +59,7 @@ pub struct App {
     status: Option<String>,
     last_key: Option<EpochMillis>,
     held: Vec<Pid>,
+    page_size: PageSize,
 }
 
 impl App {
@@ -78,6 +105,11 @@ impl App {
         self.status = Some(text.into());
     }
 
+    /// Set the number of rows that Page Up and Page Down move the selection.
+    pub fn set_page_size(&mut self, page: PageSize) {
+        self.page_size = page;
+    }
+
     /// Handle one key. The function moves the selection, changes the status
     /// text (a move key clears it), and tells the main loop what to do next.
     /// The argument `now` is the time of the key. A key press holds a jump
@@ -91,6 +123,10 @@ impl App {
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => self.move_selection(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1),
+            KeyCode::PageDown => self.move_selection(self.page_step()),
+            KeyCode::PageUp => self.move_selection(-self.page_step()),
+            KeyCode::Home => self.move_selection(isize::MIN),
+            KeyCode::End => self.move_selection(isize::MAX),
             KeyCode::Enter => return self.focus_selected(),
             KeyCode::Char('n') => return self.focus_next_needs_you(),
             KeyCode::Char('h' | 'H') => self.toggle_handled_selected(),
@@ -242,9 +278,15 @@ impl App {
         self.selected = self.board.rows().get(index).map(|session| session.file.pid);
     }
 
+    /// The number of rows of one page, as a step of the selection.
+    fn page_step(&self) -> isize {
+        isize::try_from(self.page_size.get()).unwrap_or(isize::MAX)
+    }
+
     /// Clear the status text, then select the row `step` rows away, and stay
-    /// inside the board. The status clears also when the selection cannot
-    /// move.
+    /// inside the board. The step saturates at both ends, thus `isize::MIN`
+    /// selects the first row and `isize::MAX` selects the last row. The
+    /// status clears also when the selection cannot move.
     fn move_selection(&mut self, step: isize) {
         self.status = None;
         let Some(index) = self.selected_index() else {
@@ -408,11 +450,71 @@ mod tests {
         assert_eq!(app.selected_index(), Some(0), "no wrap at the start");
     }
 
+    fn ten_idle_rows() -> App {
+        let rows: Vec<(u32, PaneState)> = (10..20).map(|pid| (pid, PaneState::Idle)).collect();
+        app_with(&rows)
+    }
+
+    #[test]
+    fn page_down_and_page_up_move_by_the_page_size_and_stop_at_the_ends() {
+        let mut app = ten_idle_rows();
+        app.set_page_size(PageSize::new(4));
+        for expected in [4, 8, 9, 9] {
+            app.handle_key(press(KeyCode::PageDown), KEY_TIME);
+            assert_eq!(
+                app.selected_index(),
+                Some(expected),
+                "Page Down must select row {expected}"
+            );
+        }
+        for expected in [5, 1, 0, 0] {
+            app.handle_key(press(KeyCode::PageUp), KEY_TIME);
+            assert_eq!(
+                app.selected_index(),
+                Some(expected),
+                "Page Up must select row {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn home_selects_the_first_row_and_end_selects_the_last_row() {
+        let mut app = ten_idle_rows();
+        for _ in 0..4 {
+            app.handle_key(press(KeyCode::Char('j')), KEY_TIME);
+        }
+        assert_eq!(app.selected_index(), Some(4));
+        app.handle_key(press(KeyCode::End), KEY_TIME);
+        assert_eq!(
+            app.selected_index(),
+            Some(9),
+            "End must select the last row"
+        );
+        for _ in 0..5 {
+            app.handle_key(press(KeyCode::Char('k')), KEY_TIME);
+        }
+        assert_eq!(app.selected_index(), Some(4));
+        app.handle_key(press(KeyCode::Home), KEY_TIME);
+        assert_eq!(
+            app.selected_index(),
+            Some(0),
+            "Home must select the first row"
+        );
+    }
+
     #[test]
     fn a_move_on_an_empty_board_does_nothing() {
         let mut app = App::new();
         app.handle_key(press(KeyCode::Char('j')), KEY_TIME);
         app.handle_key(press(KeyCode::Char('k')), KEY_TIME);
+        for code in [
+            KeyCode::PageDown,
+            KeyCode::PageUp,
+            KeyCode::Home,
+            KeyCode::End,
+        ] {
+            app.handle_key(press(code), KEY_TIME);
+        }
         assert_eq!(app.selected_index(), None);
     }
 
@@ -458,6 +560,10 @@ mod tests {
             KeyCode::Char('k'),
             KeyCode::Down,
             KeyCode::Up,
+            KeyCode::PageDown,
+            KeyCode::PageUp,
+            KeyCode::Home,
+            KeyCode::End,
         ] {
             let mut app = three_rows();
             app.handle_key(press(KeyCode::Enter), KEY_TIME);
@@ -469,10 +575,22 @@ mod tests {
 
     #[test]
     fn a_move_key_on_an_empty_board_clears_the_status() {
-        let mut app = App::new();
-        app.set_status("No session needs you");
-        app.handle_key(press(KeyCode::Char('j')), KEY_TIME);
-        assert_eq!(app.status(), None);
+        for code in [
+            KeyCode::Char('j'),
+            KeyCode::PageDown,
+            KeyCode::PageUp,
+            KeyCode::Home,
+            KeyCode::End,
+        ] {
+            let mut app = App::new();
+            app.set_status("No session needs you");
+            app.handle_key(press(code), KEY_TIME);
+            assert_eq!(
+                app.status(),
+                None,
+                "key {code:?} must clear the status on an empty board"
+            );
+        }
     }
 
     #[test]

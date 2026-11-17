@@ -8,22 +8,53 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Paragraph, Row, Table, TableState};
 use ratatui::Frame;
 
-use crate::app::App;
+use crate::app::{App, PageSize};
 use crate::board::{Board, Change};
 use crate::state::{EpochMillis, PaneState};
 
 /// Draw the screen: the table of sessions, the change log, and the status
 /// line. `now` gives the time that the elapsed times count to.
 pub fn draw(frame: &mut Frame, app: &App, now: EpochMillis) {
-    let [table_area, log_area, status_area] = Layout::vertical([
-        Constraint::Min(3),
-        Constraint::Length(LOG_HEIGHT),
-        Constraint::Length(1),
-    ])
-    .areas(frame.area());
+    let [table_area, log_area, status_area] = screen_areas(frame.area());
     draw_table(frame, table_area, app, now);
     draw_log(frame, log_area, app);
     draw_status(frame, status_area, app);
+}
+
+/// The height of the status line.
+const STATUS_HEIGHT: u16 = 1;
+
+/// The height of the header row of the table.
+const HEADER_HEIGHT: u16 = 1;
+
+/// The areas of the table, the log, and the status line in `area`.
+fn screen_areas(area: Rect) -> [Rect; 3] {
+    Layout::vertical([
+        Constraint::Min(3),
+        Constraint::Length(LOG_HEIGHT),
+        Constraint::Length(STATUS_HEIGHT),
+    ])
+    .areas(area)
+}
+
+/// The block that borders the table.
+fn table_block() -> Block<'static> {
+    Block::bordered()
+}
+
+/// The page size for a terminal `terminal_height` rows high: the number of
+/// session rows that [`draw`] shows in the table at that height, and at
+/// least 1. The header row and the borders of the table do not count. The
+/// function reads the layout of [`draw`], so the two cannot disagree.
+#[must_use]
+pub fn page_size(terminal_height: u16) -> PageSize {
+    // The width does not change a vertical layout.
+    let [table_area, _, _] = screen_areas(Rect::new(0, 0, 1, terminal_height));
+    let rows = table_block()
+        .inner(table_area)
+        .height
+        .saturating_sub(HEADER_HEIGHT);
+    PageSize::new(usize::from(rows))
 }
 
 /// The text of the bottom line when there is no status.
@@ -132,7 +163,7 @@ fn table_title(board: &Board) -> String {
 /// Draw the table of sessions in `area`.
 fn draw_table(frame: &mut Frame, area: Rect, app: &App, now: EpochMillis) {
     let board = app.board();
-    let block = Block::bordered().title(table_title(board));
+    let block = table_block().title(table_title(board));
     if board.is_empty() {
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -178,6 +209,7 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App, now: EpochMillis) {
         Constraint::Min(8),
     ];
     let header = Row::new(["", "STATE", "TIME", "ZELLIJ", "DIRECTORY", "NAME"])
+        .height(HEADER_HEIGHT)
         .style(Style::new().add_modifier(Modifier::BOLD));
     let table = Table::new(rows, widths)
         .header(header)
@@ -280,8 +312,14 @@ mod tests {
 
     /// Draw `app` on a terminal that is `width` columns wide.
     fn render_at(app: &App, now: u64, width: u16) -> Buffer {
+        render_sized(app, now, width, HEIGHT)
+    }
+
+    /// Draw `app` on a terminal that is `width` columns wide and `height`
+    /// rows high.
+    fn render_sized(app: &App, now: u64, width: u16, height: u16) -> Buffer {
         let mut terminal =
-            Terminal::new(TestBackend::new(width, HEIGHT)).expect("a test terminal opens");
+            Terminal::new(TestBackend::new(width, height)).expect("a test terminal opens");
         terminal
             .draw(|frame| draw(frame, app, EpochMillis::new(now)))
             .expect("the test terminal draws");
@@ -324,6 +362,27 @@ mod tests {
                 || panic!("no line holds {needle:?}"),
                 |(y, line)| (u16::try_from(y).expect("the line number fits"), line),
             )
+    }
+
+    #[test]
+    fn the_page_size_is_the_number_of_session_rows_that_draw_shows() {
+        let mut app = App::new();
+        for pid in 1..=100_u32 {
+            app.board_mut()
+                .load(file(pid, &format!("d{pid}"), PaneState::Idle, 10), None);
+        }
+        for height in 1..=60_u16 {
+            let buffer = render_sized(&app, 1_000, WIDTH, height);
+            let counted = lines(&buffer)
+                .iter()
+                .filter(|line| line.contains(STATE_BLOCK))
+                .count();
+            assert_eq!(
+                page_size(height).get(),
+                counted.max(1),
+                "at height {height} the table shows {counted} rows"
+            );
+        }
     }
 
     fn two_session_app() -> App {

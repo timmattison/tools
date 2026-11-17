@@ -12,6 +12,7 @@ use crate::notification::needs_you_message;
 use crate::state::EpochMillis;
 use crate::store::DirEvent;
 use crate::sync::Sync;
+use crate::ui;
 
 /// One event of the main loop.
 #[derive(Debug)]
@@ -69,6 +70,12 @@ impl Controller {
         self.sync.initial(self.app.board_mut(), self.clock.as_mut())
     }
 
+    /// Tell the controller that the terminal is `rows` rows high. The page
+    /// size of Page Up and Page Down then fits the table at that height.
+    pub fn set_terminal_height(&mut self, rows: u16) {
+        self.app.set_page_size(ui::page_size(rows));
+    }
+
     /// The app, for the draw.
     #[must_use]
     pub fn app(&self) -> &App {
@@ -83,6 +90,10 @@ impl Controller {
                 Action::Quit => vec![Effect::Quit],
                 Action::Focus(target) => vec![Effect::Focus(target)],
             },
+            AppEvent::Terminal(Event::Resize(_, rows)) => {
+                self.set_terminal_height(rows);
+                Vec::new()
+            }
             AppEvent::Terminal(_) => Vec::new(),
             AppEvent::Dir(event) => {
                 let changes =
@@ -187,7 +198,31 @@ mod tests {
     }
 
     #[test]
-    fn q_quits_and_a_resize_does_nothing() {
+    fn a_resize_changes_the_page_size_that_page_down_uses() {
+        let dir = tempfile::tempdir().unwrap();
+        let pids: Vec<u32> = (100..160).collect();
+        for &pid in &pids {
+            write(dir.path(), pid, "idle", 10);
+        }
+        let mut controller = controller_of(dir.path(), &pids, true);
+        controller.start().unwrap();
+        let small = crate::ui::page_size(20).get();
+        let large = crate::ui::page_size(40).get();
+        assert!(small > 1, "a page of 1 cannot prove a resize: {small}");
+        assert!(large > small, "a taller terminal shows more rows");
+        assert!(small + large < 60, "the rows must outlast both pages");
+
+        controller.handle(AppEvent::Terminal(Event::Resize(80, 20)), NOW);
+        controller.handle(key(KeyCode::PageDown), NOW);
+        assert_eq!(controller.app().selected_index(), Some(small));
+
+        controller.handle(AppEvent::Terminal(Event::Resize(80, 40)), NOW);
+        controller.handle(key(KeyCode::PageDown), NOW);
+        assert_eq!(controller.app().selected_index(), Some(small + large));
+    }
+
+    #[test]
+    fn q_quits_and_a_resize_gives_no_effect() {
         let dir = tempfile::tempdir().unwrap();
         let mut controller = controller(dir.path(), true);
         assert_eq!(
