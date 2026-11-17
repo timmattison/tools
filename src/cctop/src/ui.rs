@@ -179,7 +179,7 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App, now: EpochMillis) {
     let rows: Vec<Row> = sessions
         .into_iter()
         .map(|(session, state_label)| {
-            let state = session.file.state;
+            let state = session.state();
             Row::new([
                 Span::styled(STATE_BLOCK, Style::new().fg(state_color(state))).into(),
                 Text::from(state_label),
