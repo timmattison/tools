@@ -1,4 +1,5 @@
-//! The check that tells if the process of a session still runs.
+//! The checks that tell if the process of a session is live, and if a live
+//! process is stopped.
 
 use std::collections::HashMap;
 
