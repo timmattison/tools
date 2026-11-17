@@ -94,6 +94,14 @@ impl App {
         Action::Nothing
     }
 
+    /// Tell the app that the sessions `pids` changed to `needs-you`.
+    /// The app then selects one of them.
+    pub fn on_needs_you(&mut self, _pids: &[Pid], _now: EpochMillis) {}
+
+    /// Tell the app that time passed. The app then ends a held jump when the
+    /// hold is over.
+    pub fn on_tick(&mut self, _now: EpochMillis) {}
+
     /// Put a handled mark on the selected session, or remove its mark. A new
     /// mark moves the session to the bottom of its state. The cursor then
     /// selects the first row with no mark at or below the old index of the
