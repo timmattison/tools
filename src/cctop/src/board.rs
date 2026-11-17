@@ -275,7 +275,7 @@ impl Board {
         Some(HandledToggle::Marked)
     }
 
-    /// The count of each state, in the sort order of the rows. The array
+    /// The count of each shown state, in the sort order of the rows. The array
     /// holds every state, also a state with no session. Each count splits the
     /// sessions of its state by the handled mark.
     #[must_use]
@@ -286,7 +286,7 @@ impl Board {
             let in_state = self
                 .sessions
                 .values()
-                .filter(|session| session.file.state == state);
+                .filter(|session| session.state() == state);
             let (unmarked, handled) =
                 in_state.fold((0_usize, 0_usize), |(unmarked, handled), session| {
                     if session.is_handled() {
@@ -329,7 +329,7 @@ impl Board {
         self.sessions.is_empty()
     }
 
-    /// The sessions in the order of the screen: by the rank of the state, then
+    /// The sessions in the order of the screen: by the rank of the shown state, then
     /// the sessions with no handled mark, then the handled sessions in the
     /// order of their marks, then the oldest `since` first, then the pid.
     #[must_use]
@@ -337,7 +337,7 @@ impl Board {
         let mut rows: Vec<&Session> = self.sessions.values().collect();
         rows.sort_by_key(|session| {
             (
-                session.file.state.rank(),
+                session.state().rank(),
                 session.handled,
                 session.since,
                 session.file.pid.as_u32(),
