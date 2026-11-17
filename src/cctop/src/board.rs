@@ -212,10 +212,20 @@ impl Board {
     /// sessions of its state by the handled mark.
     #[must_use]
     pub fn state_counts(&self) -> [StateCount; 5] {
-        PaneState::ALL.map(|state| StateCount {
-            state,
-            unmarked: 0,
-            handled: 0,
+        let mut ranked = PaneState::ALL;
+        ranked.sort_by_key(|state| state.rank());
+        ranked.map(|state| {
+            let in_state = self
+                .sessions
+                .values()
+                .filter(|session| session.file.state == state);
+            let (handled, unmarked): (Vec<_>, Vec<_>) =
+                in_state.partition(|session| session.is_handled());
+            StateCount {
+                state,
+                unmarked: unmarked.len(),
+                handled: handled.len(),
+            }
         })
     }
 
