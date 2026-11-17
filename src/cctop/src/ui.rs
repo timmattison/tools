@@ -558,7 +558,9 @@ mod tests {
         app.board_mut().toggle_handled(Pid::new(3));
         let text = title(&render(&app, 127_000));
         assert!(
-            text.contains(" cctop · 5 sessions · 1/1 ❗ · 0/1 💤 · 1/0 🤖 · 0/0 🐚 · 1/0 🏃 · 0/0 🧊 "),
+            text.contains(
+                " cctop · 5 sessions · 1/1 ❗ · 0/1 💤 · 1/0 🤖 · 0/0 🐚 · 1/0 🏃 · 0/0 🧊 "
+            ),
             "{text}"
         );
     }
@@ -567,7 +569,9 @@ mod tests {
     fn the_empty_board_shows_six_counts_of_zero() {
         let text = title(&render(&App::new(), 1_000));
         assert!(
-            text.contains(" cctop · 0 sessions · 0/0 ❗ · 0/0 💤 · 0/0 🤖 · 0/0 🐚 · 0/0 🏃 · 0/0 🧊 "),
+            text.contains(
+                " cctop · 0 sessions · 0/0 ❗ · 0/0 💤 · 0/0 🤖 · 0/0 🐚 · 0/0 🏃 · 0/0 🧊 "
+            ),
             "{text}"
         );
     }
@@ -608,7 +612,9 @@ mod tests {
         let buffer = render_at(&app, 1_000, 79);
         let text = title(&buffer);
         assert!(
-            text.contains(" cctop · 14 sessions · 1/2 ❗ · 3/7 💤 · 1/0 🤖 · 0/0 🐚 · 0/0 🏃 · 0/0 🧊 "),
+            text.contains(
+                " cctop · 14 sessions · 1/2 ❗ · 3/7 💤 · 1/0 🤖 · 0/0 🐚 · 0/0 🏃 · 0/0 🧊 "
+            ),
             "{text}"
         );
         assert_eq!(buffer[(78, 0)].symbol(), "┐");
