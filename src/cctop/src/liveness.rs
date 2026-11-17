@@ -123,10 +123,18 @@ pub fn survey(sessions: &[(Pid, EpochMillis)], clock: &mut dyn ProcessClock) -> 
         .map(|(pid, _)| *pid)
         .collect();
     stale.sort_by_key(|pid| pid.as_u32());
-    Survey {
-        stale,
-        stopped: Vec::new(),
-    }
+    let mut stopped: Vec<Pid> = sessions
+        .iter()
+        .map(|(pid, _)| *pid)
+        .filter(|pid| !stale.contains(pid))
+        .filter(|pid| {
+            facts
+                .get(pid)
+                .is_some_and(|facts| facts.run == RunStatus::Stopped)
+        })
+        .collect();
+    stopped.sort_by_key(|pid| pid.as_u32());
+    Survey { stale, stopped }
 }
 
 #[cfg(test)]
