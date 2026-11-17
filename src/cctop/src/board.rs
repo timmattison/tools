@@ -597,6 +597,21 @@ mod tests {
     }
 
     #[test]
+    fn toggle_handled_refuses_a_session_that_does_not_wait_for_the_person() {
+        for state in [PaneState::Working, PaneState::Agents, PaneState::Shells] {
+            let mut board = Board::new();
+            board.load(file(7, state, 100, 500), None);
+            assert_eq!(
+                board.toggle_handled(Pid::new(7)),
+                Some(HandledToggle::Refused),
+                "{state:?}"
+            );
+            let session = board.get(Pid::new(7)).expect("the session is on the board");
+            assert!(!session.is_handled(), "{state:?}");
+        }
+    }
+
+    #[test]
     fn a_second_toggle_removes_the_mark_and_restores_the_order() {
         let mut board = board_with_three_idle_rows();
         assert_eq!(
