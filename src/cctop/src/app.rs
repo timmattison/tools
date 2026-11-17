@@ -103,9 +103,11 @@ impl App {
         Action::Nothing
     }
 
-    /// Tell the app that the sessions `pids` changed to `needs-you`.
+    /// Tell the app that the sessions `pids` changed to `needs-you` at `now`.
     /// The app holds them until [`JUMP_HOLD_MS`] passes after the last key
-    /// press at `now`. Then it selects the one that sorts first on the board.
+    /// press. Then it selects the one that sorts first on the board. If the
+    /// clock moves back to a time before the last key press, the hold starts
+    /// again at the new time.
     pub fn on_needs_you(&mut self, pids: &[Pid], now: EpochMillis) {
         self.held.extend_from_slice(pids);
         self.flush_held(now);
