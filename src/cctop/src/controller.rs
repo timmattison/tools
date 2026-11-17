@@ -444,4 +444,56 @@ mod tests {
         controller.handle(file_event(103), after_now(JUMP_HOLD_MS + 100));
         assert_eq!(selected_pid(&controller), Pid::new(102));
     }
+
+    /// Hold a jump to pid 102, run `change` during the hold, then send a tick
+    /// after the hold. The selection must stay on pid 101.
+    fn assert_held_jump_stops(change: impl FnOnce(&Path, &mut Controller)) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut controller = hold_fixture(dir.path());
+        write(dir.path(), 102, "needs-you", 20);
+        controller.handle(file_event(102), after_now(500));
+        change(dir.path(), &mut controller);
+        controller.handle(AppEvent::Tick, after_now(JUMP_HOLD_MS));
+        assert_eq!(selected_pid(&controller), Pid::new(101));
+    }
+
+    #[test]
+    fn a_held_jump_stops_when_the_session_leaves_needs_you() {
+        assert_held_jump_stops(|dir, controller| {
+            write(dir, 102, "idle", 30);
+            controller.handle(file_event(102), after_now(1_000));
+        });
+    }
+
+    #[test]
+    fn a_held_jump_stops_when_the_session_ends() {
+        assert_held_jump_stops(|dir, controller| {
+            std::fs::remove_file(dir.join("102.json")).unwrap();
+            controller.handle(file_event(102), after_now(1_000));
+        });
+    }
+
+    #[test]
+    fn a_held_jump_stops_when_the_session_gets_a_handled_mark() {
+        assert_held_jump_stops(|_dir, controller| {
+            controller
+                .app
+                .board_mut()
+                .toggle_handled(Pid::new(102))
+                .unwrap();
+        });
+    }
+
+    #[test]
+    fn a_held_jump_goes_to_the_next_session_when_the_first_one_leaves_needs_you() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut controller = hold_fixture(dir.path());
+        write(dir.path(), 102, "needs-you", 20);
+        write(dir.path(), 103, "needs-you", 25);
+        controller.handle(AppEvent::Dir(DirEvent::Rescan), after_now(500));
+        write(dir.path(), 102, "idle", 30);
+        controller.handle(file_event(102), after_now(1_000));
+        controller.handle(AppEvent::Tick, after_now(JUMP_HOLD_MS));
+        assert_eq!(selected_pid(&controller), Pid::new(103));
+    }
 }
