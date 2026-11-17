@@ -19,6 +19,11 @@ pub enum Action {
     Focus(FocusTarget),
 }
 
+/// The time in milliseconds that a key press holds a jump. A jump to a
+/// session that needs you waits until this time passes after the last key
+/// press.
+pub const JUMP_HOLD_MS: u64 = 2_000;
+
 /// The state of the screen.
 #[derive(Debug, Default)]
 pub struct App {

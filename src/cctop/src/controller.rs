@@ -126,10 +126,11 @@ impl Controller {
 mod tests {
     use std::path::Path;
 
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use proctree::Pid;
 
     use super::*;
+    use crate::app::JUMP_HOLD_MS;
     use crate::store::test_support::{clock_with, state_json, FakeClock};
 
     const STARTED_MS: u64 = 1_000_000;
@@ -345,6 +346,102 @@ mod tests {
         write(dir.path(), 102, "needs-you", 20);
         write(dir.path(), 103, "needs-you", 40);
         controller.handle(AppEvent::Dir(DirEvent::Rescan), NOW);
+        assert_eq!(selected_pid(&controller), Pid::new(102));
+    }
+
+    /// The time `ms` milliseconds after `NOW`.
+    fn after_now(ms: u64) -> EpochMillis {
+        EpochMillis::new(NOW.as_u64() + ms)
+    }
+
+    /// Pid 100 waits in `needs-you`. Pids 101 and 102 work. A key press
+    /// `j` at `NOW` selects pid 101. A change of pid 102 to `needs-you` then
+    /// sorts to row 1, above the selected row 2.
+    fn hold_fixture(dir: &Path) -> Controller {
+        write(dir, 100, "needs-you", 10);
+        write(dir, 101, "working", 10);
+        write(dir, 102, "working", 10);
+        let mut controller = controller_of(dir, &[100, 101, 102, 103], true);
+        controller.start().unwrap();
+        controller.handle(key(KeyCode::Char('j')), NOW);
+        assert_eq!(selected_pid(&controller), Pid::new(101));
+        controller
+    }
+
+    fn release(code: KeyCode) -> AppEvent {
+        AppEvent::Terminal(Event::Key(KeyEvent::new_with_kind(
+            code,
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        )))
+    }
+
+    #[test]
+    fn a_key_press_holds_a_jump_until_the_hold_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut controller = hold_fixture(dir.path());
+        write(dir.path(), 102, "needs-you", 20);
+        controller.handle(file_event(102), after_now(500));
+        assert_eq!(selected_pid(&controller), Pid::new(101));
+        controller.handle(AppEvent::Tick, after_now(JUMP_HOLD_MS - 1));
+        assert_eq!(selected_pid(&controller), Pid::new(101));
+        controller.handle(AppEvent::Tick, after_now(JUMP_HOLD_MS));
+        assert_eq!(selected_pid(&controller), Pid::new(102));
+    }
+
+    #[test]
+    fn a_key_press_exactly_the_hold_before_the_change_does_not_hold() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut controller = hold_fixture(dir.path());
+        write(dir.path(), 102, "needs-you", 20);
+        controller.handle(file_event(102), after_now(JUMP_HOLD_MS));
+        assert_eq!(selected_pid(&controller), Pid::new(102));
+    }
+
+    #[test]
+    fn a_second_key_press_starts_the_hold_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut controller = hold_fixture(dir.path());
+        write(dir.path(), 102, "needs-you", 20);
+        controller.handle(file_event(102), after_now(500));
+        controller.handle(key(KeyCode::Char('j')), after_now(1_000));
+        controller.handle(AppEvent::Tick, after_now(JUMP_HOLD_MS));
+        assert_eq!(selected_pid(&controller), Pid::new(101));
+        controller.handle(AppEvent::Tick, after_now(1_000 + JUMP_HOLD_MS));
+        assert_eq!(selected_pid(&controller), Pid::new(102));
+    }
+
+    #[test]
+    fn a_key_release_does_not_hold_a_jump() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut controller = hold_fixture(dir.path());
+        write(dir.path(), 102, "needs-you", 20);
+        controller.handle(release(KeyCode::Char('j')), after_now(JUMP_HOLD_MS + 500));
+        controller.handle(file_event(102), after_now(JUMP_HOLD_MS + 600));
+        assert_eq!(selected_pid(&controller), Pid::new(102));
+    }
+
+    #[test]
+    fn a_change_after_the_hold_ends_jumps_to_the_first_of_it_and_the_held_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut controller = hold_fixture(dir.path());
+        write(dir.path(), 102, "needs-you", 20);
+        controller.handle(file_event(102), after_now(500));
+        // Pid 103 sorts above pid 102, because its stamp is older.
+        write(dir.path(), 103, "needs-you", 15);
+        controller.handle(file_event(103), after_now(JUMP_HOLD_MS + 100));
+        assert_eq!(selected_pid(&controller), Pid::new(103));
+    }
+
+    /// The same as above, but the held session sorts first.
+    #[test]
+    fn a_held_session_that_sorts_first_wins_over_a_later_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut controller = hold_fixture(dir.path());
+        write(dir.path(), 102, "needs-you", 20);
+        controller.handle(file_event(102), after_now(500));
+        write(dir.path(), 103, "needs-you", 25);
+        controller.handle(file_event(103), after_now(JUMP_HOLD_MS + 100));
         assert_eq!(selected_pid(&controller), Pid::new(102));
     }
 }
