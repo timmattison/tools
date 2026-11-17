@@ -103,9 +103,11 @@ impl App {
         Action::Nothing
     }
 
-    /// Tell the app that the sessions `pids` changed to `needs-you`.
+    /// Tell the app that the sessions `pids` changed to `needs-you` at `now`.
     /// The app holds them until [`JUMP_HOLD_MS`] passes after the last key
-    /// press at `now`. Then it selects the one that sorts first on the board.
+    /// press. Then it selects the one that sorts first on the board. If the
+    /// clock moves back to a time before the last key press, the hold starts
+    /// again at the new time.
     pub fn on_needs_you(&mut self, pids: &[Pid], now: EpochMillis) {
         self.held.extend_from_slice(pids);
         self.flush_held(now);
@@ -120,8 +122,14 @@ impl App {
     /// Select the first row of the board among the held sessions that are
     /// still in the state `needs-you` and have no handled mark. Then
     /// forget all held sessions. A key press less than [`JUMP_HOLD_MS`]
-    /// before `now` keeps the held sessions and selects nothing.
+    /// before `now` keeps the held sessions and selects nothing. A key press
+    /// time later than `now` means the clock moved back. The function then
+    /// sets the time of the key to `now`, so the hold ends [`JUMP_HOLD_MS`]
+    /// after that.
     fn flush_held(&mut self, now: EpochMillis) {
+        if self.last_key.is_some_and(|key| key > now) {
+            self.last_key = Some(now);
+        }
         let held_by_key = self
             .last_key
             .is_some_and(|key| now.saturating_since(key) < JUMP_HOLD_MS);

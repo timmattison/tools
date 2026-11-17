@@ -237,12 +237,18 @@ impl Board {
                 .sessions
                 .values()
                 .filter(|session| session.file.state == state);
-            let (handled, unmarked): (Vec<_>, Vec<_>) =
-                in_state.partition(|session| session.is_handled());
+            let (unmarked, handled) =
+                in_state.fold((0_usize, 0_usize), |(unmarked, handled), session| {
+                    if session.is_handled() {
+                        (unmarked, handled + 1)
+                    } else {
+                        (unmarked + 1, handled)
+                    }
+                });
             StateCount {
                 state,
-                unmarked: unmarked.len(),
-                handled: handled.len(),
+                unmarked,
+                handled,
             }
         })
     }
