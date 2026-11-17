@@ -123,6 +123,10 @@ impl App {
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => self.move_selection(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1),
+            KeyCode::PageDown => self.move_selection(self.page_step()),
+            KeyCode::PageUp => self.move_selection(-self.page_step()),
+            KeyCode::Home => self.move_selection(isize::MIN),
+            KeyCode::End => self.move_selection(isize::MAX),
             KeyCode::Enter => return self.focus_selected(),
             KeyCode::Char('n') => return self.focus_next_needs_you(),
             KeyCode::Char('h' | 'H') => self.toggle_handled_selected(),
@@ -274,9 +278,15 @@ impl App {
         self.selected = self.board.rows().get(index).map(|session| session.file.pid);
     }
 
+    /// The number of rows of one page, as a step of the selection.
+    fn page_step(&self) -> isize {
+        isize::try_from(self.page_size.get()).unwrap_or(isize::MAX)
+    }
+
     /// Clear the status text, then select the row `step` rows away, and stay
-    /// inside the board. The status clears also when the selection cannot
-    /// move.
+    /// inside the board. The step saturates at both ends, thus `isize::MIN`
+    /// selects the first row and `isize::MAX` selects the last row. The
+    /// status clears also when the selection cannot move.
     fn move_selection(&mut self, step: isize) {
         self.status = None;
         let Some(index) = self.selected_index() else {
@@ -475,13 +485,21 @@ mod tests {
         }
         assert_eq!(app.selected_index(), Some(4));
         app.handle_key(press(KeyCode::End), KEY_TIME);
-        assert_eq!(app.selected_index(), Some(9), "End must select the last row");
+        assert_eq!(
+            app.selected_index(),
+            Some(9),
+            "End must select the last row"
+        );
         for _ in 0..5 {
             app.handle_key(press(KeyCode::Char('k')), KEY_TIME);
         }
         assert_eq!(app.selected_index(), Some(4));
         app.handle_key(press(KeyCode::Home), KEY_TIME);
-        assert_eq!(app.selected_index(), Some(0), "Home must select the first row");
+        assert_eq!(
+            app.selected_index(),
+            Some(0),
+            "Home must select the first row"
+        );
     }
 
     #[test]
