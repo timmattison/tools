@@ -53,10 +53,14 @@ impl Session {
             .unwrap_or_else(|| self.file.directory_name())
     }
 
-    /// The state that the screen shows. It is the state of the file.
+    /// The state that the screen shows. A stopped process shows `frozen`,
+    /// whatever the file says. Else it is the state of the file.
     #[must_use]
     pub fn state(&self) -> PaneState {
-        self.file.state
+        match self.run {
+            RunStatus::Stopped => PaneState::Frozen,
+            RunStatus::Running => self.file.state,
+        }
     }
 
     /// Tell if the session has a handled mark.
@@ -197,10 +201,33 @@ impl Board {
         Some(change)
     }
 
-    /// Set the run status of the session with the pid.
+    /// Set the run status of the session with the pid. The function gives
+    /// `None` when the board does not hold the pid, or when the session has
+    /// the run status already. A freeze and a thaw are each a change of state.
+    /// The time in the state starts again at `now`, the tick that saw the
+    /// change. The change goes into the log, and the handled mark goes away.
     pub fn set_run_status(&mut self, pid: Pid, run: RunStatus, now: EpochMillis) -> Option<Change> {
-        let _ = (pid, run, now);
-        None
+        let session = self.sessions.get_mut(&pid)?;
+        if session.run == run {
+            return None;
+        }
+        let old = session.state();
+        session.run = run;
+        let new = session.state();
+        if old == new {
+            return None;
+        }
+        session.since = now;
+        session.handled = None;
+        let change = Change {
+            at: now,
+            pid,
+            label: session.label(),
+            old: Some(old),
+            new: Some(new),
+        };
+        self.record(change.clone());
+        Some(change)
     }
 
     /// Put a change at the end of the log. The log drops the oldest change
@@ -764,7 +791,7 @@ mod tests {
     }
 
     /// A board with a session of pid 7 that the process table shows stopped
-    /// at 1_000.
+    /// at `1_000`.
     fn frozen_board(state: PaneState) -> Board {
         let mut board = Board::new();
         board.load(file(7, state, 100, 500), None);
