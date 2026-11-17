@@ -324,6 +324,7 @@ mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 
+    use crate::liveness::RunStatus;
     use crate::state::{EpochMillis, PaneState, StateFile};
 
     /// The time that every key of these tests carries.
@@ -671,6 +672,46 @@ mod tests {
         let action = app.handle_key(press(KeyCode::Char('n')), KEY_TIME);
         assert_eq!(focus_pid(&action), Pid::new(11));
         assert_eq!(app.selected_index(), Some(0));
+    }
+
+    #[test]
+    fn n_skips_a_frozen_session_whose_file_says_needs_you() {
+        let mut app = app_with(&[(10, PaneState::NeedsYou), (11, PaneState::NeedsYou)]);
+        app.board_mut()
+            .set_run_status(Pid::new(11), RunStatus::Stopped, EpochMillis::new(500));
+        for _ in 0..2 {
+            let action = app.handle_key(press(KeyCode::Char('n')), KEY_TIME);
+            assert_eq!(focus_pid(&action), Pid::new(10));
+        }
+    }
+
+    #[test]
+    fn a_held_jump_does_not_select_a_session_that_froze_during_the_hold() {
+        let mut app = app_with(&[(10, PaneState::Idle), (11, PaneState::Idle)]);
+        app.handle_key(press(KeyCode::Char('j')), KEY_TIME);
+        assert_eq!(selected_pid(&app), Some(Pid::new(11)));
+        // Session 10 changes to `needs-you` while the key press holds the jump.
+        app.board_mut()
+            .apply(file(10, "dir10", PaneState::NeedsYou, 100), None);
+        app.on_needs_you(&[Pid::new(10)], KEY_TIME);
+        app.board_mut()
+            .set_run_status(Pid::new(10), RunStatus::Stopped, EpochMillis::new(1_500));
+        app.on_tick(EpochMillis::new(1_000 + JUMP_HOLD_MS));
+        assert_eq!(selected_pid(&app), Some(Pid::new(11)));
+    }
+
+    #[test]
+    fn after_a_mark_the_cursor_skips_a_frozen_session_whose_file_takes_a_mark() {
+        let mut app = app_with(&[(10, PaneState::Idle)]);
+        app.board_mut().load_stopped(
+            file(11, "dir11", PaneState::Idle, 11),
+            None,
+            EpochMillis::new(500),
+        );
+        assert_eq!(row_order(&app), vec![10, 11], "the frozen row sorts last");
+        app.handle_key(press(KeyCode::Char('h')), KEY_TIME);
+        assert!(is_handled(&app, 10));
+        assert_eq!(selected_pid(&app), Some(Pid::new(10)));
     }
 
     #[test]
