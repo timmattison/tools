@@ -4,7 +4,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use proctree::Pid;
 
-use crate::board::Board;
+use crate::board::{Board, HandledToggle};
 use crate::focus::FocusTarget;
 use crate::state::{EpochMillis, PaneState};
 
@@ -155,7 +155,7 @@ impl App {
             return;
         };
         match self.board.toggle_handled(pid) {
-            Some(true) => {
+            Some(HandledToggle::Marked) => {
                 let next = self
                     .board
                     .rows()
@@ -169,11 +169,11 @@ impl App {
                 }
                 self.status = Some(format!("Marked {label} as handled"));
             }
-            Some(false) => {
+            Some(HandledToggle::Unmarked) => {
                 self.sync_selection();
                 self.status = Some(format!("Removed the handled mark from {label}"));
             }
-            None => {}
+            Some(HandledToggle::Refused) | None => {}
         }
     }
 
