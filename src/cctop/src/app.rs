@@ -31,6 +31,7 @@ pub struct App {
     selected: Option<Pid>,
     last_index: usize,
     status: Option<String>,
+    last_key: Option<EpochMillis>,
     held: Vec<Pid>,
 }
 
@@ -79,11 +80,13 @@ impl App {
 
     /// Handle one key. The function moves the selection, changes the status
     /// text (a move key clears it), and tells the main loop what to do next.
-    /// The argument `now` is the time of the key. A key release does nothing.
-    pub fn handle_key(&mut self, key: KeyEvent, _now: EpochMillis) -> Action {
+    /// The argument `now` is the time of the key. A key press holds a jump
+    /// for [`JUMP_HOLD_MS`]. A key release does nothing and holds no jump.
+    pub fn handle_key(&mut self, key: KeyEvent, now: EpochMillis) -> Action {
         if key.kind == KeyEventKind::Release {
             return Action::Nothing;
         }
+        self.last_key = Some(now);
         self.sync_selection();
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => self.move_selection(1),
@@ -101,22 +104,27 @@ impl App {
     }
 
     /// Tell the app that the sessions `pids` changed to `needs-you`.
-    /// The app then selects one of them.
-    pub fn on_needs_you(&mut self, pids: &[Pid], _now: EpochMillis) {
+    /// The app holds them until [`JUMP_HOLD_MS`] passes after the last key
+    /// press at `now`. Then it selects the one that sorts first on the board.
+    pub fn on_needs_you(&mut self, pids: &[Pid], now: EpochMillis) {
         self.held.extend_from_slice(pids);
-        self.flush_held();
+        self.flush_held(now);
     }
 
     /// Tell the app that time passed. The app then ends a held jump when the
-    /// hold is over.
-    pub fn on_tick(&mut self, _now: EpochMillis) {
-        self.flush_held();
+    /// hold is over at `now`.
+    pub fn on_tick(&mut self, now: EpochMillis) {
+        self.flush_held(now);
     }
 
     /// Select the first row of the board among the held sessions. Then
-    /// forget all held sessions.
-    fn flush_held(&mut self) {
-        if self.held.is_empty() {
+    /// forget all held sessions. A key press less than [`JUMP_HOLD_MS`]
+    /// before `now` keeps the held sessions and selects nothing.
+    fn flush_held(&mut self, now: EpochMillis) {
+        let held_by_key = self
+            .last_key
+            .is_some_and(|key| now.saturating_since(key) < JUMP_HOLD_MS);
+        if self.held.is_empty() || held_by_key {
             return;
         }
         let first = self
