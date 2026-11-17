@@ -26,6 +26,7 @@ pub struct App {
     selected: Option<Pid>,
     last_index: usize,
     status: Option<String>,
+    held: Vec<Pid>,
 }
 
 impl App {
@@ -96,11 +97,33 @@ impl App {
 
     /// Tell the app that the sessions `pids` changed to `needs-you`.
     /// The app then selects one of them.
-    pub fn on_needs_you(&mut self, _pids: &[Pid], _now: EpochMillis) {}
+    pub fn on_needs_you(&mut self, pids: &[Pid], _now: EpochMillis) {
+        self.held.extend_from_slice(pids);
+        self.flush_held();
+    }
 
     /// Tell the app that time passed. The app then ends a held jump when the
     /// hold is over.
-    pub fn on_tick(&mut self, _now: EpochMillis) {}
+    pub fn on_tick(&mut self, _now: EpochMillis) {
+        self.flush_held();
+    }
+
+    /// Select the first row of the board among the held sessions. Then
+    /// forget all held sessions.
+    fn flush_held(&mut self) {
+        if self.held.is_empty() {
+            return;
+        }
+        let first = self
+            .board
+            .rows()
+            .iter()
+            .position(|session| self.held.contains(&session.file.pid));
+        if let Some(index) = first {
+            self.select(index);
+        }
+        self.held.clear();
+    }
 
     /// Put a handled mark on the selected session, or remove its mark. A new
     /// mark moves the session to the bottom of its state. The cursor then
