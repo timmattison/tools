@@ -639,6 +639,27 @@ mod tests {
     }
 
     #[test]
+    fn h_on_a_session_that_does_not_wait_for_the_person_marks_nothing() {
+        for state in [PaneState::Working, PaneState::Agents, PaneState::Shells] {
+            let mut app = app_with(&[(10, PaneState::NeedsYou), (11, state), (12, state)]);
+            app.handle_key(press(KeyCode::Char('j')), KEY_TIME);
+            assert_eq!(selected_pid(&app), Some(Pid::new(11)), "{state:?}");
+            assert_eq!(
+                app.handle_key(press(KeyCode::Char('h')), KEY_TIME),
+                Action::Nothing,
+                "{state:?}"
+            );
+            assert!(!is_handled(&app, 11), "{state:?}");
+            assert_eq!(row_order(&app), vec![10, 11, 12], "{state:?}");
+            assert_eq!(selected_pid(&app), Some(Pid::new(11)), "{state:?}");
+            assert_eq!(
+                app.status(),
+                Some("Cannot mark dir11 as handled: only needs-you and idle sessions take a mark"),
+                "{state:?}"
+            );
+        }
+    }
+    #[test]
     fn h_on_an_empty_board_marks_nothing() {
         let mut app = App::new();
         assert_eq!(
