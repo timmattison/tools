@@ -179,7 +179,7 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App, now: EpochMillis) {
     let rows: Vec<Row> = sessions
         .into_iter()
         .map(|(session, state_label)| {
-            let state = session.file.state;
+            let state = session.state();
             Row::new([
                 Span::styled(STATE_BLOCK, Style::new().fg(state_color(state))).into(),
                 Text::from(state_label),
@@ -258,6 +258,7 @@ mod tests {
     use ratatui::style::Color;
     use ratatui::Terminal;
 
+    use crate::liveness::RunStatus;
     use crate::state::StateFile;
 
     const SECOND: u64 = 1000;
@@ -436,6 +437,24 @@ mod tests {
     }
 
     #[test]
+    fn the_state_block_of_a_frozen_row_is_blue() {
+        let mut app = App::new();
+        app.board_mut().load_stopped(
+            file(10, "dir10", PaneState::Idle, 1_000),
+            None,
+            EpochMillis::new(1_000),
+        );
+        let buffer = render(&app, 127_000);
+        let (y, line) = line_with(&buffer, "frozen");
+        let x = line
+            .chars()
+            .position(|symbol| symbol == '█')
+            .expect("the row holds a block");
+        let x = u16::try_from(x).expect("the column fits");
+        assert_eq!(buffer[(x, y)].fg, Color::Rgb(0x4d, 0xab, 0xf7));
+    }
+
+    #[test]
     fn only_the_highlight_shows_the_selected_row() {
         let buffer = render(&two_session_app(), 127_000);
         let (needs_y, needs_line) = line_with(&buffer, "needs-you");
@@ -558,16 +577,20 @@ mod tests {
         app.board_mut().toggle_handled(Pid::new(3));
         let text = title(&render(&app, 127_000));
         assert!(
-            text.contains(" cctop · 5 sessions · 1/1 ❗ · 0/1 💤 · 1/0 🤖 · 0/0 🐚 · 1/0 🏃 "),
+            text.contains(
+                " cctop · 5 sessions · 1/1 ❗ · 0/1 💤 · 1/0 🤖 · 0/0 🐚 · 1/0 🏃 · 0/0 🧊 "
+            ),
             "{text}"
         );
     }
 
     #[test]
-    fn the_empty_board_shows_five_counts_of_zero() {
+    fn the_empty_board_shows_six_counts_of_zero() {
         let text = title(&render(&App::new(), 1_000));
         assert!(
-            text.contains(" cctop · 0 sessions · 0/0 ❗ · 0/0 💤 · 0/0 🤖 · 0/0 🐚 · 0/0 🏃 "),
+            text.contains(
+                " cctop · 0 sessions · 0/0 ❗ · 0/0 💤 · 0/0 🤖 · 0/0 🐚 · 0/0 🏃 · 0/0 🧊 "
+            ),
             "{text}"
         );
     }
@@ -585,7 +608,7 @@ mod tests {
     }
 
     #[test]
-    fn the_whole_title_fits_in_70_columns() {
+    fn the_whole_title_fits_in_79_columns() {
         let mut app = App::new();
         let mut pid = 1;
         let mut add = |app: &mut App, state: PaneState, handled: bool| {
@@ -605,13 +628,15 @@ mod tests {
             add(&mut app, PaneState::Idle, true);
         }
         add(&mut app, PaneState::Agents, false);
-        let buffer = render_at(&app, 1_000, 70);
+        let buffer = render_at(&app, 1_000, 79);
         let text = title(&buffer);
         assert!(
-            text.contains(" cctop · 14 sessions · 1/2 ❗ · 3/7 💤 · 1/0 🤖 · 0/0 🐚 · 0/0 🏃 "),
+            text.contains(
+                " cctop · 14 sessions · 1/2 ❗ · 3/7 💤 · 1/0 🤖 · 0/0 🐚 · 0/0 🏃 · 0/0 🧊 "
+            ),
             "{text}"
         );
-        assert_eq!(buffer[(69, 0)].symbol(), "┐");
+        assert_eq!(buffer[(78, 0)].symbol(), "┐");
     }
 
     #[test]
@@ -627,8 +652,12 @@ mod tests {
         let mut app = App::new();
         app.board_mut()
             .load(file(11, "dir11", PaneState::Idle, 100), None);
-        app.board_mut()
-            .apply(file(11, "dir11", PaneState::NeedsYou, 200), None);
+        app.board_mut().apply(
+            file(11, "dir11", PaneState::NeedsYou, 200),
+            None,
+            RunStatus::Running,
+            EpochMillis::new(0),
+        );
         let buffer = render(&app, 1_000);
         assert!(lines(&buffer)
             .iter()
@@ -642,6 +671,8 @@ mod tests {
         app.board_mut().apply(
             file(12, "dir12", PaneState::Working, 300),
             Some("beta".to_string()),
+            RunStatus::Running,
+            EpochMillis::new(0),
         );
         let buffer = render(&app, 1_000);
         assert!(lines(&buffer)
@@ -669,6 +700,8 @@ mod tests {
             app.board_mut().apply(
                 file(pid, &format!("d{pid}"), PaneState::Working, u64::from(pid)),
                 None,
+                RunStatus::Running,
+                EpochMillis::new(0),
             );
         }
         let buffer = render(&app, 1_000);

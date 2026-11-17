@@ -5,7 +5,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use proctree::Pid;
 
 use crate::board::{Board, HandledToggle};
-use crate::focus::FocusTarget;
+use crate::focus::{FocusTarget, FROZEN_NOTE, STATUS_SEPARATOR};
+use crate::liveness::RunStatus;
 use crate::state::{EpochMillis, PaneState};
 
 /// What the main loop does after a key.
@@ -155,8 +156,9 @@ impl App {
         self.flush_held(now);
     }
 
-    /// Select the first row of the board among the held sessions that are
-    /// still in the state `needs-you` and have no handled mark. Then
+    /// Select the first row of the board among the held sessions that show
+    /// the state `needs-you` and have no handled mark. A frozen session shows
+    /// the state `frozen`, so the jump skips it. Then
     /// forget all held sessions. A key press less than [`JUMP_HOLD_MS`]
     /// before `now` keeps the held sessions and selects nothing. A key press
     /// time later than `now` means the clock moved back. The function then
@@ -174,7 +176,7 @@ impl App {
         }
         let first = self.board.rows().iter().position(|session| {
             self.held.contains(&session.file.pid)
-                && session.file.state == PaneState::NeedsYou
+                && session.state() == PaneState::NeedsYou
                 && !session.is_handled()
         });
         if let Some(index) = first {
@@ -186,7 +188,8 @@ impl App {
     /// Put a handled mark on the selected session, or remove its mark. A new
     /// mark moves the session to the bottom of its state. The cursor then
     /// selects the first row at or below the old index of the marked row that
-    /// has no mark and has a state that takes a mark. If no such row exists,
+    /// has no mark and shows a state that takes a mark. A frozen session shows
+    /// the state `frozen`, so the cursor skips it. If no such row exists,
     /// the cursor stays on the marked session. A removed mark moves the
     /// session up, and the cursor goes with the session. A session whose state
     /// takes no mark keeps its row and the cursor, and the status text tells
@@ -208,7 +211,7 @@ impl App {
                     .iter()
                     .skip(index)
                     .position(|session| {
-                        !session.is_handled() && session.file.state.takes_handled_mark()
+                        !session.is_handled() && session.state().takes_handled_mark()
                     })
                     .map(|offset| index + offset);
                 match next {
@@ -231,18 +234,17 @@ impl App {
         }
     }
 
-    /// Select the next session in the state `needs-you` that has no handled
-    /// mark, and ask the main loop to focus it. The search starts after the
-    /// selected row and wraps around, so the selected row counts last.
+    /// Select the next session that shows the state `needs-you` and has no
+    /// handled mark, and ask the main loop to focus it. The search starts after the
+    /// selected row and wraps around, so the selected row counts last. A
+    /// frozen session shows the state `frozen`, so the search skips it.
     fn focus_next_needs_you(&mut self) -> Action {
         let rows = self.board.rows();
         let count = rows.len();
         let current = self.selected_index().unwrap_or(0);
         let found = (1..=count)
             .map(|offset| (current + offset) % count)
-            .find(|&index| {
-                rows[index].file.state == PaneState::NeedsYou && !rows[index].is_handled()
-            });
+            .find(|&index| rows[index].state() == PaneState::NeedsYou && !rows[index].is_handled());
         let Some(index) = found else {
             self.status = Some("No session needs you".to_string());
             return Action::Nothing;
@@ -251,7 +253,9 @@ impl App {
         self.focus_selected()
     }
 
-    /// Ask the main loop to focus the selected session.
+    /// Ask the main loop to focus the selected session. The status text also
+    /// tells that the session is frozen when its process is stopped. The app
+    /// sends no `SIGCONT`, so the focus does not thaw the session.
     fn focus_selected(&mut self) -> Action {
         let target = self.selected_index().and_then(|index| {
             self.board
@@ -260,7 +264,12 @@ impl App {
                 .map(|session| FocusTarget::of(session))
         });
         if let Some(target) = target {
-            self.status = Some(format!("Focusing {}", target.label));
+            let mut status = format!("Focusing {}", target.label);
+            if target.run == RunStatus::Stopped {
+                status.push_str(STATUS_SEPARATOR);
+                status.push_str(FROZEN_NOTE);
+            }
+            self.status = Some(status);
             Action::Focus(target)
         } else {
             self.status = Some("No session to focus".to_string());
@@ -324,6 +333,7 @@ mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 
+    use crate::liveness::RunStatus;
     use crate::state::{EpochMillis, PaneState, StateFile};
 
     /// The time that every key of these tests carries.
@@ -375,12 +385,20 @@ mod tests {
         app.selected = Some(Pid::new(12));
         assert_eq!(app.selected_index(), Some(2));
         // Session 11 becomes `needs-you`, so it sorts above session 10.
-        app.board_mut()
-            .apply(file(11, "dir11", PaneState::NeedsYou, 100), None);
+        app.board_mut().apply(
+            file(11, "dir11", PaneState::NeedsYou, 100),
+            None,
+            RunStatus::Running,
+            EpochMillis::new(0),
+        );
         assert_eq!(app.selected_index(), Some(2));
         // Session 12 becomes `needs-you` and moves to row 1.
-        app.board_mut()
-            .apply(file(12, "dir12", PaneState::NeedsYou, 101), None);
+        app.board_mut().apply(
+            file(12, "dir12", PaneState::NeedsYou, 101),
+            None,
+            RunStatus::Running,
+            EpochMillis::new(0),
+        );
         assert_eq!(app.selected_index(), Some(1));
     }
 
@@ -543,6 +561,22 @@ mod tests {
     }
 
     #[test]
+    fn enter_on_a_frozen_session_focuses_it_and_the_status_tells_that_it_is_frozen() {
+        let mut app = App::new();
+        app.board_mut().load_stopped(
+            file(10, "dir10", PaneState::Idle, 10),
+            None,
+            EpochMillis::new(500),
+        );
+        let action = app.handle_key(press(KeyCode::Enter), KEY_TIME);
+        match action {
+            Action::Focus(target) => assert_eq!(target.run, RunStatus::Stopped),
+            other => panic!("expected a focus action, got {other:?}"),
+        }
+        assert_eq!(app.status(), Some("Focusing dir10 · the session is frozen"));
+    }
+
+    #[test]
     fn enter_names_the_session_by_its_registry_name() {
         let mut app = App::new();
         app.board_mut().load(
@@ -671,6 +705,50 @@ mod tests {
         let action = app.handle_key(press(KeyCode::Char('n')), KEY_TIME);
         assert_eq!(focus_pid(&action), Pid::new(11));
         assert_eq!(app.selected_index(), Some(0));
+    }
+
+    #[test]
+    fn n_skips_a_frozen_session_whose_file_says_needs_you() {
+        let mut app = app_with(&[(10, PaneState::NeedsYou), (11, PaneState::NeedsYou)]);
+        app.board_mut()
+            .set_run_status(Pid::new(11), RunStatus::Stopped, EpochMillis::new(500));
+        for _ in 0..2 {
+            let action = app.handle_key(press(KeyCode::Char('n')), KEY_TIME);
+            assert_eq!(focus_pid(&action), Pid::new(10));
+        }
+    }
+
+    #[test]
+    fn a_held_jump_does_not_select_a_session_that_froze_during_the_hold() {
+        let mut app = app_with(&[(10, PaneState::Idle), (11, PaneState::Idle)]);
+        app.handle_key(press(KeyCode::Char('j')), KEY_TIME);
+        assert_eq!(selected_pid(&app), Some(Pid::new(11)));
+        // Session 10 changes to `needs-you` while the key press holds the jump.
+        app.board_mut().apply(
+            file(10, "dir10", PaneState::NeedsYou, 100),
+            None,
+            RunStatus::Running,
+            EpochMillis::new(0),
+        );
+        app.on_needs_you(&[Pid::new(10)], KEY_TIME);
+        app.board_mut()
+            .set_run_status(Pid::new(10), RunStatus::Stopped, EpochMillis::new(1_500));
+        app.on_tick(EpochMillis::new(1_000 + JUMP_HOLD_MS));
+        assert_eq!(selected_pid(&app), Some(Pid::new(11)));
+    }
+
+    #[test]
+    fn after_a_mark_the_cursor_skips_a_frozen_session_whose_file_takes_a_mark() {
+        let mut app = app_with(&[(10, PaneState::Idle)]);
+        app.board_mut().load_stopped(
+            file(11, "dir11", PaneState::Idle, 11),
+            None,
+            EpochMillis::new(500),
+        );
+        assert_eq!(row_order(&app), vec![10, 11], "the frozen row sorts last");
+        app.handle_key(press(KeyCode::Char('h')), KEY_TIME);
+        assert!(is_handled(&app, 10));
+        assert_eq!(selected_pid(&app), Some(Pid::new(10)));
     }
 
     #[test]

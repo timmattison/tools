@@ -87,7 +87,10 @@ pub fn remove_if_stale(dir: &Path, pid: Pid, clock: &mut dyn ProcessClock) -> bo
     let ReadOutcome::Present(file) = read_state_file(&path) else {
         return false;
     };
-    let start_secs = clock.start_times(&[pid]).get(&pid).copied();
+    let start_secs = clock
+        .processes(&[pid])
+        .get(&pid)
+        .map(|facts| facts.start_secs);
     is_stale(file.started_at, start_secs) && std::fs::remove_file(&path).is_ok()
 }
 
@@ -149,11 +152,11 @@ pub fn watch(
 /// Helpers that the tests of this module and of `sync` share.
 #[cfg(test)]
 pub(crate) mod test_support {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     use proctree::Pid;
 
-    use crate::liveness::ProcessClock;
+    use crate::liveness::{ProcessClock, ProcessFacts, RunStatus};
 
     /// The JSON of a state file of the contract, outside Zellij.
     pub(crate) fn state_json(pid: u32, state: &str, started_at: u64, stamp: u64) -> String {
@@ -163,26 +166,60 @@ pub(crate) mod test_support {
     }
 
     /// A process table that the test fills by hand.
-    pub(crate) struct FakeClock(pub(crate) HashMap<Pid, u64>);
+    pub(crate) struct FakeClock {
+        /// The start time of each live process, in whole seconds since the epoch.
+        pub(crate) starts: HashMap<Pid, u64>,
+        /// The live processes that are stopped.
+        pub(crate) stopped: HashSet<Pid>,
+        /// The number of reads of the table.
+        pub(crate) reads: usize,
+    }
+
+    impl FakeClock {
+        /// A table with these live processes, none of them stopped.
+        pub(crate) fn new(starts: HashMap<Pid, u64>) -> Self {
+            Self {
+                starts,
+                stopped: HashSet::new(),
+                reads: 0,
+            }
+        }
+    }
+
+    impl FakeClock {
+        /// The same table, with the process `pid` stopped.
+        pub(crate) fn with_stopped(mut self, pid: u32) -> Self {
+            self.stopped.insert(Pid::new(pid));
+            self
+        }
+    }
 
     impl ProcessClock for FakeClock {
-        fn start_times(&mut self, pids: &[Pid]) -> std::collections::HashMap<Pid, u64> {
+        fn processes(&mut self, pids: &[Pid]) -> HashMap<Pid, ProcessFacts> {
+            self.reads += 1;
             pids.iter()
-                .filter_map(|pid| self.0.get(pid).map(|secs| (*pid, *secs)))
+                .filter_map(|pid| {
+                    let start_secs = *self.starts.get(pid)?;
+                    let run = if self.stopped.contains(pid) {
+                        RunStatus::Stopped
+                    } else {
+                        RunStatus::Running
+                    };
+                    Some((*pid, ProcessFacts { start_secs, run }))
+                })
                 .collect()
         }
     }
 
     pub(crate) fn clock_with(pid: u32, start_secs: u64) -> FakeClock {
-        FakeClock(std::collections::HashMap::from([(
-            Pid::new(pid),
-            start_secs,
-        )]))
+        FakeClock::new(HashMap::from([(Pid::new(pid), start_secs)]))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::test_support::{clock_with, state_json, FakeClock};
     use super::*;
 
@@ -218,7 +255,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = state_file_path(dir.path(), Pid::new(77));
         std::fs::write(&path, state_json(77, "idle", 1_000_000, 2_000_000)).unwrap();
-        let mut clock = FakeClock(std::collections::HashMap::new());
+        let mut clock = FakeClock::new(HashMap::new());
         assert!(remove_if_stale(dir.path(), Pid::new(77), &mut clock));
         assert!(!path.exists());
     }
@@ -247,7 +284,7 @@ mod tests {
     #[test]
     fn a_missing_file_gives_false() {
         let dir = tempfile::tempdir().unwrap();
-        let mut clock = FakeClock(std::collections::HashMap::new());
+        let mut clock = FakeClock::new(HashMap::new());
         assert!(!remove_if_stale(dir.path(), Pid::new(77), &mut clock));
     }
 
@@ -256,7 +293,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = state_file_path(dir.path(), Pid::new(77));
         std::fs::write(&path, "not json").unwrap();
-        let mut clock = FakeClock(std::collections::HashMap::new());
+        let mut clock = FakeClock::new(HashMap::new());
         assert!(!remove_if_stale(dir.path(), Pid::new(77), &mut clock));
         assert!(path.exists());
     }

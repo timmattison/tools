@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use proctree::Pid;
 
 use crate::board::{Board, Change};
-use crate::liveness::{stale_pids, ProcessClock};
+use crate::liveness::{survey, ProcessClock};
 use crate::paths::ClaudeDirs;
 use crate::registry;
 use crate::state::{EpochMillis, StateFile};
@@ -43,14 +43,21 @@ impl Sync {
 
     /// Load the live sessions into `board`. This is the first read.
     ///
-    /// The function logs no change. It removes the file of each stale
-    /// session, and it does not load that session. It skips a file that it
-    /// cannot read.
+    /// The function reads the process table once for all sessions, and once
+    /// more for each stale session before it removes the file. It logs no
+    /// change. It removes the file of each stale session, and it does not
+    /// load that session. It loads a stopped session as `frozen` since `now`.
+    /// It skips a file that it cannot read.
     ///
     /// # Errors
     ///
     /// Returns the error of the read of the state directory.
-    pub fn initial(&self, board: &mut Board, clock: &mut dyn ProcessClock) -> std::io::Result<()> {
+    pub fn initial(
+        &self,
+        board: &mut Board,
+        clock: &mut dyn ProcessClock,
+        now: EpochMillis,
+    ) -> std::io::Result<()> {
         let files: Vec<StateFile> = store::read_dir(&self.state_dir)?
             .into_iter()
             .filter_map(|(_, outcome)| match outcome {
@@ -62,16 +69,20 @@ impl Sync {
             .iter()
             .map(|file| (file.pid, file.started_at))
             .collect();
-        let stale = stale_pids(&sessions, clock);
+        let found = survey(&sessions, clock);
         for file in files {
-            if stale.contains(&file.pid) {
+            if found.stale.contains(&file.pid) {
                 // A new process can have reused the pid since the first read. Its
                 // file stays, and its own write event loads it.
                 let _removed = store::remove_if_stale(&self.state_dir, file.pid, clock);
                 continue;
             }
             let name = registry::session_name(&self.sessions_dir, file.pid);
-            board.load(file, name);
+            if found.stopped.contains(&file.pid) {
+                board.load_stopped(file, name, now);
+            } else {
+                board.load(file, name);
+            }
         }
         Ok(())
     }
@@ -79,7 +90,8 @@ impl Sync {
     /// Apply one directory event to `board`. Return the changes that it made.
     ///
     /// `File(pid)` reads the file of that pid. A good file of a live process
-    /// goes to the board. A good file of a stale process goes away, with its
+    /// goes to the board, with the run status that the survey of its process
+    /// read. A good file of a stale process goes away, with its
     /// session. A missing file removes the session. A file that cannot be read
     /// changes nothing. `Rescan` does this for each file in the directory, and
     /// it removes each session whose file is gone.
@@ -101,11 +113,16 @@ impl Sync {
         }
     }
 
-    /// Remove each stale session from the board and from the directory.
+    /// Check each session on the board against the process table.
     ///
-    /// A process that ends can leave its file behind. This check finds such
-    /// sessions. It returns the changes, one for each removed session. A live
-    /// session stays.
+    /// The function reads the process table once for all sessions, and once
+    /// more for each stale session before it removes the file. A process that
+    /// ends can leave its file behind. The function removes each such stale
+    /// session from the board and from the directory. A stopped process is
+    /// live, thus its file stays. For each other session, the function gives
+    /// the run status to the board, so a stop shows as `frozen` and a continue
+    /// shows the state of the file again. It returns the changes: one for each
+    /// removed session, and one for each freeze or thaw.
     pub fn on_tick(
         &self,
         board: &mut Board,
@@ -117,10 +134,15 @@ impl Sync {
             .into_iter()
             .filter_map(|pid| Some((pid, board.get(pid)?.file.started_at)))
             .collect();
+        let found = survey(&sessions, clock);
         let mut changes = Vec::new();
-        for pid in stale_pids(&sessions, clock) {
-            let _removed = store::remove_if_stale(&self.state_dir, pid, clock);
-            changes.extend(board.remove(pid, now));
+        for (pid, _) in &sessions {
+            if found.stale.contains(pid) {
+                let _removed = store::remove_if_stale(&self.state_dir, *pid, clock);
+                changes.extend(board.remove(*pid, now));
+            } else {
+                changes.extend(board.set_run_status(*pid, found.run_status(*pid), now));
+            }
         }
         changes
     }
@@ -149,7 +171,10 @@ impl Sync {
         changes
     }
 
-    /// Apply the read of one file to the board.
+    /// Apply the read of one file to the board. The function surveys the
+    /// process of the file once. The board gets the run status that the
+    /// survey read, so a file that arrives between two ticks is compared with
+    /// the live run status, not with the status of the last tick.
     fn apply_outcome(
         &self,
         board: &mut Board,
@@ -160,8 +185,8 @@ impl Sync {
     ) -> Option<Change> {
         match outcome {
             ReadOutcome::Present(file) => {
-                let stale = !stale_pids(&[(pid, file.started_at)], clock).is_empty();
-                if stale {
+                let found = survey(&[(pid, file.started_at)], clock);
+                if !found.stale.is_empty() {
                     // When the file stays, a new process owns the pid, and its
                     // own write event loads the new file.
                     return store::remove_if_stale(&self.state_dir, pid, clock)
@@ -169,7 +194,7 @@ impl Sync {
                         .flatten();
                 }
                 let name = registry::session_name(&self.sessions_dir, pid);
-                board.apply(file, name)
+                board.apply(file, name, found.run_status(pid), now)
             }
             ReadOutcome::Gone => board.remove(pid, now),
             ReadOutcome::Unreadable(_) => None,
@@ -228,7 +253,7 @@ mod tests {
 
     /// A clock where each pid in `live` runs and started before the session.
     fn live(pids: &[u32]) -> FakeClock {
-        FakeClock(pids.iter().map(|pid| (Pid::new(*pid), 500)).collect())
+        FakeClock::new(pids.iter().map(|pid| (Pid::new(*pid), 500)).collect())
     }
 
     #[test]
@@ -238,7 +263,9 @@ mod tests {
         env.write(20, "working", 2_000_100);
         env.name(10);
         let mut board = Board::new();
-        env.sync.initial(&mut board, &mut live(&[10, 20])).unwrap();
+        env.sync
+            .initial(&mut board, &mut live(&[10, 20]), NOW)
+            .unwrap();
         assert_eq!(board.pids(), vec![Pid::new(10), Pid::new(20)]);
         let first = board.get(Pid::new(10)).unwrap();
         assert_eq!(first.name.as_deref(), Some("issue-697-d1"));
@@ -253,7 +280,7 @@ mod tests {
         env.write(10, "idle", 2_000_000);
         env.write(20, "idle", 2_000_000);
         let mut board = Board::new();
-        env.sync.initial(&mut board, &mut live(&[10])).unwrap();
+        env.sync.initial(&mut board, &mut live(&[10]), NOW).unwrap();
         assert_eq!(board.pids(), vec![Pid::new(10)]);
         assert!(env.exists(10));
         assert!(!env.exists(20));
@@ -265,7 +292,9 @@ mod tests {
         env.write(10, "idle", 2_000_000);
         std::fs::write(env.state.path().join("20.json"), "not json").unwrap();
         let mut board = Board::new();
-        env.sync.initial(&mut board, &mut live(&[10, 20])).unwrap();
+        env.sync
+            .initial(&mut board, &mut live(&[10, 20]), NOW)
+            .unwrap();
         assert_eq!(board.pids(), vec![Pid::new(10)]);
         assert!(env.exists(20));
     }
@@ -275,8 +304,8 @@ mod tests {
         let env = Env::new();
         let sync = Sync::with_dirs(env.state.path().join("none"), env.sessions.path().into());
         let mut board = Board::new();
-        let mut clock = FakeClock(HashMap::new());
-        assert!(sync.initial(&mut board, &mut clock).is_err());
+        let mut clock = FakeClock::new(HashMap::new());
+        assert!(sync.initial(&mut board, &mut clock, NOW).is_err());
     }
 
     const NOW: EpochMillis = EpochMillis::new(9_000_000);
@@ -284,6 +313,25 @@ mod tests {
     fn file_event(env: &Env, pid: u32, clock: &mut FakeClock, board: &mut Board) -> Vec<Change> {
         env.sync
             .on_dir_event(board, DirEvent::File(Pid::new(pid)), clock, NOW)
+    }
+
+    #[test]
+    fn a_file_event_of_a_stopped_process_freezes_the_session_at_the_read() {
+        let env = Env::new();
+        env.write(7, "idle", 10);
+        let mut board = Board::new();
+        env.sync.initial(&mut board, &mut live(&[7]), NOW).unwrap();
+        env.write(7, "needs-you", 20);
+        let now = EpochMillis::new(5_000);
+        let mut clock = live(&[7]).with_stopped(7);
+        let changes =
+            env.sync
+                .on_dir_event(&mut board, DirEvent::File(Pid::new(7)), &mut clock, now);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].old, Some(PaneState::Idle));
+        assert_eq!(changes[0].new, Some(PaneState::Frozen));
+        assert_eq!(changes[0].at, now);
+        assert_eq!(board.get(Pid::new(7)).unwrap().since, now);
     }
 
     #[test]
@@ -305,7 +353,7 @@ mod tests {
         let env = Env::new();
         env.write(10, "idle", 2_000_000);
         let mut board = Board::new();
-        env.sync.initial(&mut board, &mut live(&[10])).unwrap();
+        env.sync.initial(&mut board, &mut live(&[10]), NOW).unwrap();
         env.write(10, "working", 2_000_500);
         let changes = file_event(&env, 10, &mut live(&[10]), &mut board);
         assert_eq!(changes.len(), 1);
@@ -318,7 +366,7 @@ mod tests {
         let env = Env::new();
         env.write(10, "idle", 2_000_000);
         let mut board = Board::new();
-        env.sync.initial(&mut board, &mut live(&[10])).unwrap();
+        env.sync.initial(&mut board, &mut live(&[10]), NOW).unwrap();
         std::fs::remove_file(env.state.path().join("10.json")).unwrap();
         let changes = file_event(&env, 10, &mut live(&[10]), &mut board);
         assert_eq!(changes.len(), 1);
@@ -333,7 +381,7 @@ mod tests {
         let env = Env::new();
         env.write(10, "idle", 2_000_000);
         let mut board = Board::new();
-        env.sync.initial(&mut board, &mut live(&[10])).unwrap();
+        env.sync.initial(&mut board, &mut live(&[10]), NOW).unwrap();
         std::fs::write(env.state.path().join("10.json"), "{\"version\":").unwrap();
         let changes = file_event(&env, 10, &mut live(&[10]), &mut board);
         assert!(changes.is_empty());
@@ -345,9 +393,9 @@ mod tests {
         let env = Env::new();
         env.write(10, "idle", 2_000_000);
         let mut board = Board::new();
-        env.sync.initial(&mut board, &mut live(&[10])).unwrap();
+        env.sync.initial(&mut board, &mut live(&[10]), NOW).unwrap();
         env.write(10, "working", 2_000_500);
-        let changes = file_event(&env, 10, &mut FakeClock(HashMap::new()), &mut board);
+        let changes = file_event(&env, 10, &mut FakeClock::new(HashMap::new()), &mut board);
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].new, None);
         assert!(board.is_empty());
@@ -359,7 +407,7 @@ mod tests {
         let env = Env::new();
         env.write(10, "idle", 2_000_000);
         let mut board = Board::new();
-        let changes = file_event(&env, 10, &mut FakeClock(HashMap::new()), &mut board);
+        let changes = file_event(&env, 10, &mut FakeClock::new(HashMap::new()), &mut board);
         assert!(changes.is_empty());
         assert!(!env.exists(10));
     }
@@ -371,7 +419,7 @@ mod tests {
         env.write(20, "idle", 2_000_000);
         let mut board = Board::new();
         env.sync
-            .initial(&mut board, &mut live(&[10, 20, 30]))
+            .initial(&mut board, &mut live(&[10, 20, 30]), NOW)
             .unwrap();
         // 10 changes, 20 goes away, 30 is new, 40 holds a bad file.
         env.write(10, "needs-you", 2_000_500);
@@ -405,7 +453,7 @@ mod tests {
         let env = Env::new();
         env.write(10, "idle", 2_000_000);
         let mut board = Board::new();
-        env.sync.initial(&mut board, &mut live(&[10])).unwrap();
+        env.sync.initial(&mut board, &mut live(&[10]), NOW).unwrap();
         std::fs::write(env.state.path().join("10.json"), "bad").unwrap();
         let changes = env
             .sync
@@ -420,7 +468,9 @@ mod tests {
         env.write(10, "idle", 2_000_000);
         env.write(20, "working", 2_000_000);
         let mut board = Board::new();
-        env.sync.initial(&mut board, &mut live(&[10, 20])).unwrap();
+        env.sync
+            .initial(&mut board, &mut live(&[10, 20]), NOW)
+            .unwrap();
         let changes = env.sync.on_tick(&mut board, &mut live(&[10]), NOW);
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].pid, Pid::new(20));
@@ -437,11 +487,107 @@ mod tests {
         let env = Env::new();
         env.write(10, "idle", 2_000_000);
         let mut board = Board::new();
-        env.sync.initial(&mut board, &mut live(&[10])).unwrap();
+        env.sync.initial(&mut board, &mut live(&[10]), NOW).unwrap();
         assert!(env
             .sync
             .on_tick(&mut board, &mut live(&[10]), NOW)
             .is_empty());
         assert_eq!(board.pids(), vec![Pid::new(10)]);
+    }
+
+    /// A board with the session 10 loaded as `idle` and running.
+    fn board_with_idle_ten(env: &Env) -> Board {
+        env.write(10, "idle", 2_000_000);
+        let mut board = Board::new();
+        env.sync.initial(&mut board, &mut live(&[10]), NOW).unwrap();
+        board
+    }
+
+    #[test]
+    fn a_tick_that_sees_a_stop_gives_a_change_and_keeps_the_file() {
+        let env = Env::new();
+        let mut board = board_with_idle_ten(&env);
+        let mut clock = live(&[10]).with_stopped(10);
+        let changes = env.sync.on_tick(&mut board, &mut clock, NOW);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].pid, Pid::new(10));
+        assert_eq!(changes[0].old, Some(PaneState::Idle));
+        assert_eq!(changes[0].new, Some(PaneState::Frozen));
+        assert_eq!(changes[0].at, NOW);
+        let session = board.get(Pid::new(10)).unwrap();
+        assert_eq!(session.state(), PaneState::Frozen);
+        assert_eq!(session.file.state, PaneState::Idle);
+        assert!(env.exists(10));
+    }
+
+    #[test]
+    fn a_tick_that_sees_the_process_continue_gives_a_change() {
+        let env = Env::new();
+        let mut board = board_with_idle_ten(&env);
+        let mut stopped = live(&[10]).with_stopped(10);
+        env.sync.on_tick(&mut board, &mut stopped, NOW);
+        let changes = env.sync.on_tick(&mut board, &mut live(&[10]), NOW);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].old, Some(PaneState::Frozen));
+        assert_eq!(changes[0].new, Some(PaneState::Idle));
+        assert_eq!(board.get(Pid::new(10)).unwrap().state(), PaneState::Idle);
+    }
+
+    #[test]
+    fn a_tick_that_sees_no_new_stop_gives_no_change() {
+        let env = Env::new();
+        let mut board = board_with_idle_ten(&env);
+        let mut clock = live(&[10]).with_stopped(10);
+        assert_eq!(env.sync.on_tick(&mut board, &mut clock, NOW).len(), 1);
+        assert!(env.sync.on_tick(&mut board, &mut clock, NOW).is_empty());
+    }
+
+    // This test passes before the tick reads the stop. It guards the rule that
+    // one tick reads the process table once.
+    #[test]
+    fn a_tick_reads_the_process_table_once() {
+        let env = Env::new();
+        env.write(10, "idle", 2_000_000);
+        env.write(20, "working", 2_000_000);
+        env.write(30, "idle", 2_000_000);
+        let mut board = Board::new();
+        env.sync
+            .initial(&mut board, &mut live(&[10, 20, 30]), NOW)
+            .unwrap();
+        let mut clock = live(&[10, 20, 30]).with_stopped(20);
+        env.sync.on_tick(&mut board, &mut clock, NOW);
+        assert_eq!(clock.reads, 1);
+    }
+
+    #[test]
+    fn the_first_read_loads_a_stopped_session_as_frozen_since_the_first_read() {
+        let env = Env::new();
+        env.write(10, "idle", 2_000_000);
+        env.write(20, "working", 2_000_100);
+        let mut board = Board::new();
+        let mut clock = live(&[10, 20]).with_stopped(10);
+        env.sync.initial(&mut board, &mut clock, NOW).unwrap();
+        let stopped = board.get(Pid::new(10)).unwrap();
+        assert_eq!(stopped.state(), PaneState::Frozen);
+        assert_eq!(stopped.since, NOW);
+        let running = board.get(Pid::new(20)).unwrap();
+        assert_eq!(running.state(), PaneState::Working);
+        assert_eq!(running.since, EpochMillis::new(2_000_100));
+        assert_eq!(board.changes().count(), 0);
+        assert!(env.exists(10));
+        assert!(env.exists(20));
+    }
+
+    // This test passes before the first read uses the survey of the stop. It
+    // guards the rule that the first read reads the process table once.
+    #[test]
+    fn the_first_read_reads_the_process_table_once() {
+        let env = Env::new();
+        env.write(10, "idle", 2_000_000);
+        env.write(20, "working", 2_000_100);
+        let mut board = Board::new();
+        let mut clock = live(&[10, 20]);
+        env.sync.initial(&mut board, &mut clock, NOW).unwrap();
+        assert_eq!(clock.reads, 1);
     }
 }
