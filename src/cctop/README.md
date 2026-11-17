@@ -7,30 +7,30 @@ cctop is a full-screen terminal view of your Claude Code sessions. It shows one 
 Each row has these parts:
 
 - A color block with the state of the session.
-- The state: `working`, `needs-you`, `idle`, `agents`, or `shells`. A handled session adds ` - handled`, for example `idle - handled`.
+- The state: `working`, `needs-you`, `idle`, `agents`, `shells`, or `frozen`. A handled session adds ` - handled`, for example `idle - handled`. cctop shows `frozen` when the process of the session is stopped, see [The frozen state](#the-frozen-state).
 - The time in that state.
 - The Zellij session, or `—` outside Zellij.
 - The name of the directory of the session.
 - The registry name of the session, if it has one.
 
-The rows are in this order: `needs-you`, `idle`, `agents`, `shells`, `working`. Rows in the same state show the oldest first, then the handled rows in the order of their marks.
+The rows are in this order: `needs-you`, `idle`, `agents`, `shells`, `working`, `frozen`. Rows in the same state show the oldest first, then the handled rows in the order of their marks.
 
 ### The title line
 
 The top border of the table shows the number of sessions, then one count for each state. You can see how many sessions need you, and you do not have to read the rows:
 
 ```text
-┌ cctop · 14 sessions · 1/2 ❗ · 3/7 💤 · 1/0 🤖 · 0/0 🐚 · 0/0 🏃 ───────┐
+┌ cctop · 14 sessions · 1/2 ❗ · 3/7 💤 · 1/0 🤖 · 0/0 🐚 · 0/0 🏃 · 0/0 🧊 ──┐
 ```
 
 Each count has the shape `<no mark>/<handled> <marker>`. The left number counts the sessions in that state that have no [handled mark](#the-handled-mark). The right number counts the sessions in that state that have a handled mark. In the example, 10 sessions are in `idle`: 3 with no mark and 7 with a mark.
 
 - The counts are in the order of the rows. The `needs-you` count stands first, thus a cut at the right edge removes it last.
-- Each count shows, also when both numbers are 0. The empty board shows the five counts too, all `0/0`.
+- Each count shows, also when both numbers are 0. The empty board shows the six counts too, all `0/0`.
 - Both numbers show, also when the right number is 0: `2/0 💤`, not `2 💤`. Each count has one shape, thus a new mark does not move the counts after it.
 - A handled session counts on the right side of its state. A change of state removes the mark, thus the session then counts on the left side of its new state.
-- Only a `needs-you` or `idle` session takes a mark. Thus the right number of `agents`, `shells`, and `working` is always 0, but it shows, because each count has one shape.
-- At 70 columns, the whole title line shows when each number has 1 digit.
+- Only a `needs-you` or `idle` session takes a mark. Thus the right number of `agents`, `shells`, `working`, and `frozen` is always 0, but it shows, because each count has one shape.
+- At 79 columns, the whole title line shows when each number has 1 digit.
 
 | State | Marker | Code point |
 | --- | --- | --- |
@@ -39,22 +39,23 @@ Each count has the shape `<no mark>/<handled> <marker>`. The left number counts 
 | `agents` | 🤖 | U+1F916 ROBOT FACE |
 | `shells` | 🐚 | U+1F41A SPIRAL SHELL |
 | `working` | 🏃 | U+1F3C3 RUNNER |
+| `frozen` | 🧊 | U+1F9CA ICE CUBE |
 
 Each marker is one code point of East Asian Width `W`, with no variation selector and no joiner. Thus all terminals agree that each marker is 2 columns wide. `ha` uses the same rule, and it also uses 🏃 for a running job and 💤 for a stale repository. A marker has no foreground color, because a terminal draws an emoji in its own colors.
 
-`needs-you` uses ❗ and not ‼️. `‼` (U+203C) has East Asian Width `N` and text presentation by default. It draws as an emoji only with the variation selector U+FE0F. Zellij removes each zero-width code point from its grid, and U+FE0F is one of them. In a Zellij pane, `‼️` thus draws as a text glyph 1 column wide, and the screen does not agree with the width that cctop uses for the title. ❗ is the nearest emoji that obeys the rule.
+`needs-you` uses ❗ and not ‼️. `‼` (U+203C) has East Asian Width `N` and text presentation by default. It draws as an emoji only with the variation selector U+FE0F. Zellij removes each zero-width code point from its grid, and U+FE0F is one of them. In a Zellij pane, `‼️` thus draws as a text glyph 1 column wide, and the screen does not agree with the width that cctop uses for the title. ❗ is the nearest emoji that obeys the rule. For the same reason, `frozen` uses 🧊 and not ❄️: `❄` (U+2744) has East Asian Width `N`, and it draws as an emoji only with U+FE0F.
 
 ### The handled mark
 
 Press `h` to mark the selected session as handled. The row goes to the bottom of the rows in its state, and its state shows ` - handled`. The latest mark goes to the bottom of its state. The cursor then selects the next `needs-you` or `idle` row that has no mark, thus you can press `h` again to mark that session. When no such row is below it, the cursor stays on the marked row.
 
-Only a session in `needs-you` or `idle` takes a mark. A mark tells that you saw the session and have nothing to do for it now, and only these two states wait for you. When you press `h` on a session in `working`, `agents`, or `shells`, cctop puts no mark on it. The row and the cursor do not move, and the status line shows `Cannot mark <name> as handled: only needs-you and idle sessions take a mark`.
+Only a session in `needs-you` or `idle` takes a mark. A mark tells that you saw the session and have nothing to do for it now, and only these two states wait for you. When you press `h` on a session in `working`, `agents`, `shells`, or `frozen`, cctop puts no mark on it. The row and the cursor do not move, and the status line shows `Cannot mark <name> as handled: only needs-you and idle sessions take a mark`.
 
-The mark stays until the session changes state. A new write of the same state keeps the mark. When the state changes, the mark goes away, and it does not come back when the session returns to the old state.
+The mark stays until the session changes state. A new write of the same state keeps the mark. When the state changes, the mark goes away, and it does not come back when the session returns to the old state. A freeze is a change of state, thus a freeze removes the mark too.
 
 Press `h` on a handled session to remove the mark. The row goes back to its place, and the cursor goes with it. `n` skips a handled session. The change log does not show a mark.
 
-The colors are the colors of the `claude-tab-bar` Zellij plugin (`Palette::DEFAULT` in its `src/paint.rs`), thus cctop and the tab bars agree:
+The colors are the colors of the `claude-tab-bar` Zellij plugin (`Palette::DEFAULT` in its `src/paint.rs`), thus cctop and the tab bars agree. The palette has no color for `frozen`, thus cctop gives it blue:
 
 | State | Color |
 | --- | --- |
@@ -63,8 +64,9 @@ The colors are the colors of the `claude-tab-bar` Zellij plugin (`Palette::DEFAU
 | `idle` | red, `#e03131` |
 | `agents` | white, `#ffffff` |
 | `shells` | cyan, `#00cccc` |
+| `frozen` | blue, `#4dabf7` |
 
-Under the rows, cctop shows the change log. It lists the changes since cctop started, newest first. A change is a new session, a new state, or the end of a session. The first read at start logs nothing.
+Under the rows, cctop shows the change log. It lists the changes since cctop started, newest first. A change is a new session, a new state, or the end of a session. A freeze and a thaw are each a new state. The first read at start logs nothing.
 
 The last line is the status line. It shows the result of the last focus request or the last notification error. Without a message, it shows the keys. A move key (`j`, `k`, Up, Down, Page Up, Page Down, Home, or End) clears the message.
 
@@ -82,9 +84,29 @@ The `zellij-pane-state` mod of timmattison/dotfiles issue #44 writes these files
 
 ### The stale rule
 
-A session is stale when its pid has no live process. It is also stale when the process with that pid started after `startedAt`, because a new process reused the pid. A zombie counts as gone.
+A session is stale when its pid has no live process. It is also stale when the process with that pid started after `startedAt`, because a new process reused the pid. A zombie counts as gone. A stopped process is live, thus a [frozen](#the-frozen-state) session stays, and cctop keeps its file.
 
 cctop removes the file of a stale session. Before it removes the file, it reads the file again and checks the rule on the new content. A new process can write a new file in the meantime.
+
+## The frozen state
+
+cctop shows a session as `frozen` when its process is stopped, for example by `SIGSTOP`. A stopped process runs no code, thus the `zellij-pane-state` mod cannot write a new state, and the state file keeps the last state. cctop thus reads the stop from the process table of the OS, not from the state file. The state in the file does not change this result.
+
+- cctop reads the stop at the first read and on each 1 s tick.
+- When the process continues, the next tick shows the state of the file again. If the file changed while the process was stopped, cctop shows the new state.
+- A freeze and a thaw are each a change of state. The change log shows each one, and the time in the state starts again at the tick that saw the change.
+- The OS does not record when a process stopped. Thus a session that was frozen before cctop started shows the time since the first read.
+- A freeze removes a handled mark. A frozen session takes no mark, because it does not wait for you.
+- A frozen session gets no notification and no jump, and `n` skips it. A thaw gives no notification and no jump either, also when the file says `needs-you`.
+- Enter focuses the pane of a frozen session as it does for each other session. The status line also shows `the session is frozen`. cctop sends no `SIGCONT`. The script that froze the session owns the thaw.
+- When a frozen process exits, the [stale rule](#the-stale-rule) removes its row.
+
+### The contract for a freeze script
+
+- Send `SIGSTOP` to the pid that the state file names (`<pid>.json`). If the script stops only a parent wrapper, the Claude Code process continues to run, and cctop shows a live session.
+- Use `SIGSTOP`, not `SIGTSTP`. A process can catch `SIGTSTP`, and then it does not stop.
+- Send `SIGCONT` to the same pid to thaw the session. cctop sees the thaw on the next tick, also when a different source sends the `SIGCONT`, for example `fg`.
+- Do not write `frozen` into the state file. cctop cannot parse a state file that holds `frozen`, and it ignores that file.
 
 ## The notification
 
@@ -122,7 +144,7 @@ A held jump stops when its session leaves `needs-you`, ends, or gets a handled m
 | Page Up | Select the row one page above the selected row. Stop at the first row. |
 | Home | Select the first row. |
 | End | Select the last row. |
-| Enter | Focus the selected session. |
+| Enter | Focus the selected session. For a frozen session, the status line also shows `the session is frozen`. |
 | `n` | Select the next `needs-you` session that has no handled mark, and focus it. |
 | `h`, `H` | Mark the selected `needs-you` or `idle` session as handled, or remove its mark. A session in a different state takes no mark. |
 | `q`, Ctrl-C | Quit. |
