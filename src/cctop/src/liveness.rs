@@ -19,11 +19,30 @@ pub fn is_stale(started_at: EpochMillis, process_start_secs: Option<u64>) -> boo
     }
 }
 
-/// A source for the start time of processes.
+/// Tell if a live process runs or is stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RunStatus {
+    /// The process runs, or it can run.
+    Running,
+    /// The process is stopped, for example by `SIGSTOP`. It runs no code until
+    /// it gets `SIGCONT`.
+    Stopped,
+}
+
+/// What one read of the process table tells about one live process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessFacts {
+    /// The start time of the process, in whole seconds since the epoch.
+    pub start_secs: u64,
+    /// Tell if the process runs or is stopped.
+    pub run: RunStatus,
+}
+
+/// A source for the facts about processes.
 pub trait ProcessClock {
-    /// The start time of each live, non-zombie process in `pids`, in whole
-    /// seconds since the epoch. A pid with no such process is not in the map.
-    fn start_times(&mut self, pids: &[Pid]) -> HashMap<Pid, u64>;
+    /// The facts about each live, non-zombie process in `pids`, from one read
+    /// of the process table. A pid with no such process is not in the map.
+    fn processes(&mut self, pids: &[Pid]) -> HashMap<Pid, ProcessFacts>;
 }
 
 /// The process table of the system, read with `sysinfo`.
@@ -41,7 +60,7 @@ impl SystemClock {
 }
 
 impl ProcessClock for SystemClock {
-    fn start_times(&mut self, pids: &[Pid]) -> HashMap<Pid, u64> {
+    fn processes(&mut self, pids: &[Pid]) -> HashMap<Pid, ProcessFacts> {
         let wanted: Vec<sysinfo::Pid> = pids
             .iter()
             .map(|pid| sysinfo::Pid::from_u32(pid.as_u32()))
@@ -57,25 +76,46 @@ impl ProcessClock for SystemClock {
                 if process.status() == sysinfo::ProcessStatus::Zombie {
                     return None;
                 }
-                Some((*pid, process.start_time()))
+                Some((
+                    *pid,
+                    ProcessFacts {
+                        start_secs: process.start_time(),
+                        run: RunStatus::Running,
+                    },
+                ))
             })
             .collect()
     }
 }
 
-/// The pids of the stale sessions, sorted. The function asks `clock` once for
-/// all pids.
+/// What one read of the process table tells about a set of sessions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Survey {
+    /// The pids of the stale sessions, sorted.
+    pub stale: Vec<Pid>,
+    /// The pids of the live sessions whose process is stopped, sorted. A stale
+    /// pid is never in this list.
+    pub stopped: Vec<Pid>,
+}
+
+/// Read the process table once for `sessions`. The function asks `clock` once
+/// for all pids, and sorts the pids of the result.
 #[must_use]
-pub fn stale_pids(sessions: &[(Pid, EpochMillis)], clock: &mut dyn ProcessClock) -> Vec<Pid> {
+pub fn survey(sessions: &[(Pid, EpochMillis)], clock: &mut dyn ProcessClock) -> Survey {
     let pids: Vec<Pid> = sessions.iter().map(|(pid, _)| *pid).collect();
-    let times = clock.start_times(&pids);
+    let facts = clock.processes(&pids);
     let mut stale: Vec<Pid> = sessions
         .iter()
-        .filter(|(pid, started_at)| is_stale(*started_at, times.get(pid).copied()))
+        .filter(|(pid, started_at)| {
+            is_stale(*started_at, facts.get(pid).map(|facts| facts.start_secs))
+        })
         .map(|(pid, _)| *pid)
         .collect();
     stale.sort_by_key(|pid| pid.as_u32());
-    stale
+    Survey {
+        stale,
+        stopped: Vec::new(),
+    }
 }
 
 #[cfg(test)]
@@ -122,9 +162,20 @@ mod tests {
     }
 
     impl ProcessClock for FakeClock {
-        fn start_times(&mut self, pids: &[Pid]) -> HashMap<Pid, u64> {
+        fn processes(&mut self, pids: &[Pid]) -> HashMap<Pid, ProcessFacts> {
             self.calls.push(pids.to_vec());
-            self.times.clone()
+            self.times
+                .iter()
+                .map(|(pid, secs)| {
+                    (
+                        *pid,
+                        ProcessFacts {
+                            start_secs: *secs,
+                            run: RunStatus::Running,
+                        },
+                    )
+                })
+                .collect()
         }
     }
 
@@ -133,9 +184,11 @@ mod tests {
         let own = Pid::current();
         let absent = Pid::new(99_999_999);
         let mut clock = SystemClock::new();
-        let times = clock.start_times(&[own, absent]);
+        let times = clock.processes(&[own, absent]);
         let now_secs = EpochMillis::now().as_u64() / 1000;
-        let start = times.get(&own).copied().expect("this process is live");
+        let own_facts = times.get(&own).copied().expect("this process is live");
+        let start = own_facts.start_secs;
+        assert_eq!(own_facts.run, RunStatus::Running);
         assert!(start <= now_secs, "start {start} is after now {now_secs}");
         assert!(
             start > YEAR_2020_SECS,
@@ -149,7 +202,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_pids_gives_the_gone_and_the_reused_pid_sorted() {
+    fn survey_gives_the_stale_pids_sorted_from_one_read() {
         let sessions = [
             (Pid::new(40), STARTED_AT),
             (Pid::new(30), STARTED_AT),
@@ -165,7 +218,7 @@ mod tests {
             calls: Vec::new(),
         };
         assert_eq!(
-            stale_pids(&sessions, &mut clock),
+            survey(&sessions, &mut clock).stale,
             vec![Pid::new(20), Pid::new(30)]
         );
         assert_eq!(

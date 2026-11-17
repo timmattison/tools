@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use proctree::Pid;
 
 use crate::board::{Board, Change};
-use crate::liveness::{stale_pids, ProcessClock};
+use crate::liveness::{survey, ProcessClock};
 use crate::paths::ClaudeDirs;
 use crate::registry;
 use crate::state::{EpochMillis, StateFile};
@@ -62,7 +62,7 @@ impl Sync {
             .iter()
             .map(|file| (file.pid, file.started_at))
             .collect();
-        let stale = stale_pids(&sessions, clock);
+        let stale = survey(&sessions, clock).stale;
         for file in files {
             if stale.contains(&file.pid) {
                 // A new process can have reused the pid since the first read. Its
@@ -118,7 +118,7 @@ impl Sync {
             .filter_map(|pid| Some((pid, board.get(pid)?.file.started_at)))
             .collect();
         let mut changes = Vec::new();
-        for pid in stale_pids(&sessions, clock) {
+        for pid in survey(&sessions, clock).stale {
             let _removed = store::remove_if_stale(&self.state_dir, pid, clock);
             changes.extend(board.remove(pid, now));
         }
@@ -160,7 +160,7 @@ impl Sync {
     ) -> Option<Change> {
         match outcome {
             ReadOutcome::Present(file) => {
-                let stale = !stale_pids(&[(pid, file.started_at)], clock).is_empty();
+                let stale = !survey(&[(pid, file.started_at)], clock).stale.is_empty();
                 if stale {
                     // When the file stays, a new process owns the pid, and its
                     // own write event loads the new file.
@@ -228,7 +228,7 @@ mod tests {
 
     /// A clock where each pid in `live` runs and started before the session.
     fn live(pids: &[u32]) -> FakeClock {
-        FakeClock(pids.iter().map(|pid| (Pid::new(*pid), 500)).collect())
+        FakeClock::new(pids.iter().map(|pid| (Pid::new(*pid), 500)).collect())
     }
 
     #[test]
@@ -275,7 +275,7 @@ mod tests {
         let env = Env::new();
         let sync = Sync::with_dirs(env.state.path().join("none"), env.sessions.path().into());
         let mut board = Board::new();
-        let mut clock = FakeClock(HashMap::new());
+        let mut clock = FakeClock::new(HashMap::new());
         assert!(sync.initial(&mut board, &mut clock).is_err());
     }
 
@@ -347,7 +347,7 @@ mod tests {
         let mut board = Board::new();
         env.sync.initial(&mut board, &mut live(&[10])).unwrap();
         env.write(10, "working", 2_000_500);
-        let changes = file_event(&env, 10, &mut FakeClock(HashMap::new()), &mut board);
+        let changes = file_event(&env, 10, &mut FakeClock::new(HashMap::new()), &mut board);
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].new, None);
         assert!(board.is_empty());
@@ -359,7 +359,7 @@ mod tests {
         let env = Env::new();
         env.write(10, "idle", 2_000_000);
         let mut board = Board::new();
-        let changes = file_event(&env, 10, &mut FakeClock(HashMap::new()), &mut board);
+        let changes = file_event(&env, 10, &mut FakeClock::new(HashMap::new()), &mut board);
         assert!(changes.is_empty());
         assert!(!env.exists(10));
     }

@@ -163,7 +163,7 @@ mod tests {
 
     /// A controller whose clock knows every pid in `pids`.
     fn controller_of(dir: &Path, pids: &[u32], notify: bool) -> Controller {
-        let clock = FakeClock(
+        let clock = FakeClock::new(
             pids.iter()
                 .map(|&pid| (Pid::new(pid), START_SECS))
                 .collect(),
@@ -348,7 +348,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut controller = jump_fixture(dir.path(), true);
         write(dir.path(), 102, "needs-you", 20);
-        controller.clock = Box::new(FakeClock(
+        controller.clock = Box::new(FakeClock::new(
             [100, 101, 102]
                 .iter()
                 .map(|&pid| (Pid::new(pid), START_SECS))
