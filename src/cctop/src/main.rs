@@ -112,6 +112,10 @@ fn run(dirs: &ClaudeDirs, notify: bool) -> Result<(), String> {
     // `ratatui::init` also installs a panic hook that restores the terminal.
     let mut terminal = ratatui::init();
     let _guard = TerminalGuard;
+    let size = terminal
+        .size()
+        .map_err(|error| format!("cannot read the size of the terminal: {error}"))?;
+    controller.set_terminal_height(size.height);
     let mut next_tick = Instant::now() + TICK;
     loop {
         terminal

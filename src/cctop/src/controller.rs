@@ -12,6 +12,7 @@ use crate::notification::needs_you_message;
 use crate::state::EpochMillis;
 use crate::store::DirEvent;
 use crate::sync::Sync;
+use crate::ui;
 
 /// One event of the main loop.
 #[derive(Debug)]
@@ -69,6 +70,12 @@ impl Controller {
         self.sync.initial(self.app.board_mut(), self.clock.as_mut())
     }
 
+    /// Tell the controller that the terminal is `rows` rows high. The page
+    /// size of Page Up and Page Down then fits the table at that height.
+    pub fn set_terminal_height(&mut self, rows: u16) {
+        self.app.set_page_size(ui::page_size(rows));
+    }
+
     /// The app, for the draw.
     #[must_use]
     pub fn app(&self) -> &App {
@@ -83,6 +90,10 @@ impl Controller {
                 Action::Quit => vec![Effect::Quit],
                 Action::Focus(target) => vec![Effect::Focus(target)],
             },
+            AppEvent::Terminal(Event::Resize(_, rows)) => {
+                self.set_terminal_height(rows);
+                Vec::new()
+            }
             AppEvent::Terminal(_) => Vec::new(),
             AppEvent::Dir(event) => {
                 let changes =
@@ -211,7 +222,7 @@ mod tests {
     }
 
     #[test]
-    fn q_quits_and_a_resize_does_nothing() {
+    fn q_quits_and_a_resize_gives_no_effect() {
         let dir = tempfile::tempdir().unwrap();
         let mut controller = controller(dir.path(), true);
         assert_eq!(
