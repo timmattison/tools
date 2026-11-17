@@ -154,9 +154,20 @@ impl Board {
     }
 
     /// Put a state file of a stopped process on the board at the first read.
+    /// The session shows `frozen`. The OS does not record when a process
+    /// stopped, thus the time in the state starts at `now`, the time of the
+    /// first read. The session has no handled mark, and the log gets no entry.
     pub fn load_stopped(&mut self, file: StateFile, name: Option<String>, now: EpochMillis) {
-        let _ = now;
-        self.load(file, name);
+        self.sessions.insert(
+            file.pid,
+            Session {
+                file,
+                name,
+                since: now,
+                run: RunStatus::Stopped,
+                handled: None,
+            },
+        );
     }
 
     /// Apply a state file that was read after the start. The function gives
@@ -252,7 +263,7 @@ impl Board {
             at: now,
             pid,
             label: session.label(),
-            old: Some(session.file.state),
+            old: Some(session.state()),
             new: None,
         };
         self.record(change.clone());
