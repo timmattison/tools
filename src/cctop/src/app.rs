@@ -144,7 +144,8 @@ impl App {
     /// selects the first row with no mark at or below the old index of the
     /// marked row. If no such row exists, the cursor stays on the marked
     /// session. A removed mark moves the session up, and the cursor goes with
-    /// the session.
+    /// the session. A session whose state takes no mark keeps its row and the
+    /// cursor, and the status text tells why.
     fn toggle_handled_selected(&mut self) {
         let selected = self.selected_index().and_then(|index| {
             let session = self.board.rows().get(index).copied()?;
@@ -173,7 +174,13 @@ impl App {
                 self.sync_selection();
                 self.status = Some(format!("Removed the handled mark from {label}"));
             }
-            Some(HandledToggle::Refused) | None => {}
+            Some(HandledToggle::Refused) => {
+                self.status = Some(format!(
+                    "Cannot mark {label} as handled: only {} sessions take a mark",
+                    states_that_take_a_mark()
+                ));
+            }
+            None => {}
         }
     }
 
@@ -242,6 +249,21 @@ impl App {
         self.last_index = index;
         self.selected = self.board.rows().get(index).map(|session| session.file.pid);
     }
+}
+
+/// The labels of the states that take a handled mark, in the sort order of
+/// the rows, joined by ` and `. The text is `needs-you and idle`.
+fn states_that_take_a_mark() -> String {
+    let mut states: Vec<PaneState> = PaneState::ALL
+        .into_iter()
+        .filter(|state| state.takes_handled_mark())
+        .collect();
+    states.sort_by_key(|state| state.rank());
+    states
+        .into_iter()
+        .map(PaneState::label)
+        .collect::<Vec<_>>()
+        .join(" and ")
 }
 
 #[cfg(test)]
