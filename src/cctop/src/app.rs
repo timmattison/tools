@@ -117,7 +117,8 @@ impl App {
         self.flush_held(now);
     }
 
-    /// Select the first row of the board among the held sessions. Then
+    /// Select the first row of the board among the held sessions that are
+    /// still in the state `needs-you` and have no handled mark. Then
     /// forget all held sessions. A key press less than [`JUMP_HOLD_MS`]
     /// before `now` keeps the held sessions and selects nothing.
     fn flush_held(&mut self, now: EpochMillis) {
@@ -127,11 +128,11 @@ impl App {
         if self.held.is_empty() || held_by_key {
             return;
         }
-        let first = self
-            .board
-            .rows()
-            .iter()
-            .position(|session| self.held.contains(&session.file.pid));
+        let first = self.board.rows().iter().position(|session| {
+            self.held.contains(&session.file.pid)
+                && session.file.state == PaneState::NeedsYou
+                && !session.is_handled()
+        });
         if let Some(index) = first {
             self.select(index);
         }
