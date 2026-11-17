@@ -24,6 +24,32 @@ pub enum Action {
 /// press.
 pub const JUMP_HOLD_MS: u64 = 2_000;
 
+/// The number of session rows that one Page Up or Page Down moves the
+/// selection. A page is at least 1 row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageSize(std::num::NonZeroUsize);
+
+impl PageSize {
+    /// A page of `rows` rows. A page of 0 rows becomes a page of 1 row.
+    #[must_use]
+    pub fn new(rows: usize) -> Self {
+        Self(std::num::NonZeroUsize::new(rows).unwrap_or(std::num::NonZeroUsize::MIN))
+    }
+
+    /// The number of rows of the page. It is at least 1.
+    #[must_use]
+    pub fn get(self) -> usize {
+        self.0.get()
+    }
+}
+
+impl Default for PageSize {
+    /// A page of 1 row.
+    fn default() -> Self {
+        Self(std::num::NonZeroUsize::MIN)
+    }
+}
+
 /// The state of the screen.
 #[derive(Debug, Default)]
 pub struct App {
