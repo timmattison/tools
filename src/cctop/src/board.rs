@@ -492,7 +492,7 @@ mod tests {
 
     #[test]
     fn state_counts_count_a_state_of_sessions_with_no_mark() {
-        use PaneState::{Agents, Idle, NeedsYou, Shells, Working};
+        use PaneState::{Agents, Frozen, Idle, NeedsYou, Shells, Working};
         let mut board = Board::new();
         board.load(file(1, Agents, 1, 100), None);
         board.load(file(2, Agents, 1, 100), None);
@@ -504,7 +504,8 @@ mod tests {
                 (Idle, 0, 0),
                 (Agents, 3, 0),
                 (Shells, 0, 0),
-                (Working, 0, 0)
+                (Working, 0, 0),
+                (Frozen, 0, 0)
             ]
         );
     }
@@ -541,7 +542,7 @@ mod tests {
         let board = Board::new();
         let counts = board.state_counts();
         let ranks: Vec<u8> = counts.iter().map(|count| count.state.rank()).collect();
-        assert_eq!(ranks, [0, 1, 2, 3, 4]);
+        assert_eq!(ranks, [0, 1, 2, 3, 4, 5]);
         assert!(counts
             .iter()
             .all(|count| count.unmarked == 0 && count.handled == 0));

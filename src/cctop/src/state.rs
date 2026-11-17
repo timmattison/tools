@@ -20,6 +20,8 @@ pub enum PaneState {
     Agents,
     /// The session waits for its shells.
     Shells,
+    /// The process of the session is stopped.
+    Frozen,
 }
 
 /// A color of the palette, in 8-bit channels.
@@ -52,6 +54,7 @@ impl PaneState {
             PaneState::Idle => "idle",
             PaneState::Agents => "agents",
             PaneState::Shells => "shells",
+            PaneState::Frozen => todo!("issue #710"),
         }
     }
 
@@ -70,6 +73,7 @@ impl PaneState {
             PaneState::Agents => '\u{1F916}',
             PaneState::Shells => '\u{1F41A}',
             PaneState::Working => '\u{1F3C3}',
+            PaneState::Frozen => todo!("issue #710"),
         }
     }
 
@@ -82,6 +86,7 @@ impl PaneState {
             PaneState::Agents => 2,
             PaneState::Shells => 3,
             PaneState::Working => 4,
+            PaneState::Frozen => todo!("issue #710"),
         }
     }
 
@@ -92,6 +97,7 @@ impl PaneState {
     pub fn takes_handled_mark(self) -> bool {
         match self {
             PaneState::NeedsYou | PaneState::Idle => true,
+            PaneState::Frozen => todo!("issue #710"),
             PaneState::Working | PaneState::Agents | PaneState::Shells => false,
         }
     }
@@ -105,6 +111,7 @@ impl PaneState {
             PaneState::Idle => (0xe0, 0x31, 0x31),
             PaneState::Agents => (0xff, 0xff, 0xff),
             PaneState::Shells => (0x00, 0xcc, 0xcc),
+            PaneState::Frozen => todo!("issue #710"),
         };
         Rgb { red, green, blue }
     }
@@ -410,7 +417,7 @@ mod tests {
 
     #[test]
     fn rank_gives_the_sort_order() {
-        let mut states = PaneState::ALL;
+        let mut states = PaneState::ALL.to_vec();
         states.sort_by_key(|state| state.rank());
         assert_eq!(
             states,
@@ -420,16 +427,20 @@ mod tests {
                 PaneState::Agents,
                 PaneState::Shells,
                 PaneState::Working,
+                PaneState::Frozen,
             ]
         );
         let ranks: Vec<u8> = states.iter().map(|state| state.rank()).collect();
-        assert_eq!(ranks, [0, 1, 2, 3, 4]);
+        assert_eq!(ranks, [0, 1, 2, 3, 4, 5]);
     }
 
     #[test]
     fn label_gives_the_contract_strings() {
         let labels: Vec<&str> = PaneState::ALL.iter().map(|state| state.label()).collect();
-        assert_eq!(labels, ["working", "needs-you", "idle", "agents", "shells"]);
+        assert_eq!(
+            labels,
+            ["working", "needs-you", "idle", "agents", "shells", "frozen"]
+        );
     }
 
     #[test]
@@ -440,6 +451,7 @@ mod tests {
         assert_eq!(PaneState::Agents.marker(), '\u{1F916}');
         assert_eq!(PaneState::Shells.marker(), '\u{1F41A}');
         assert_eq!(PaneState::Working.marker(), '\u{1F3C3}');
+        assert_eq!(PaneState::Frozen.marker(), '\u{1F9CA}');
         for state in PaneState::ALL {
             assert_eq!(state.marker().width(), Some(2), "{}", state.label());
         }
@@ -453,6 +465,21 @@ mod tests {
         assert_eq!(PaneState::Idle.color(), rgb(0xe0, 0x31, 0x31));
         assert_eq!(PaneState::Agents.color(), rgb(0xff, 0xff, 0xff));
         assert_eq!(PaneState::Shells.color(), rgb(0x00, 0xcc, 0xcc));
+        assert_eq!(PaneState::Frozen.color(), rgb(0x4d, 0xab, 0xf7));
+    }
+
+    #[test]
+    fn a_frozen_session_takes_no_handled_mark() {
+        assert!(!PaneState::Frozen.takes_handled_mark());
+    }
+
+    #[test]
+    fn a_state_file_that_holds_frozen_is_a_parse_error() {
+        let json = ZELLIJ.replace("needs-you", "frozen");
+        assert!(matches!(
+            parse_state_file(&json),
+            Err(StateFileError::Json(_))
+        ));
     }
 
     #[test]
