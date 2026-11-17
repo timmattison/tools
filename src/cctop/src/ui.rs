@@ -258,6 +258,7 @@ mod tests {
     use ratatui::style::Color;
     use ratatui::Terminal;
 
+    use crate::liveness::RunStatus;
     use crate::state::StateFile;
 
     const SECOND: u64 = 1000;
@@ -651,8 +652,12 @@ mod tests {
         let mut app = App::new();
         app.board_mut()
             .load(file(11, "dir11", PaneState::Idle, 100), None);
-        app.board_mut()
-            .apply(file(11, "dir11", PaneState::NeedsYou, 200), None);
+        app.board_mut().apply(
+            file(11, "dir11", PaneState::NeedsYou, 200),
+            None,
+            RunStatus::Running,
+            EpochMillis::new(0),
+        );
         let buffer = render(&app, 1_000);
         assert!(lines(&buffer)
             .iter()
@@ -666,6 +671,8 @@ mod tests {
         app.board_mut().apply(
             file(12, "dir12", PaneState::Working, 300),
             Some("beta".to_string()),
+            RunStatus::Running,
+            EpochMillis::new(0),
         );
         let buffer = render(&app, 1_000);
         assert!(lines(&buffer)
@@ -693,6 +700,8 @@ mod tests {
             app.board_mut().apply(
                 file(pid, &format!("d{pid}"), PaneState::Working, u64::from(pid)),
                 None,
+                RunStatus::Running,
+                EpochMillis::new(0),
             );
         }
         let buffer = render(&app, 1_000);

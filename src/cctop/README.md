@@ -93,11 +93,11 @@ cctop removes the file of a stale session. Before it removes the file, it reads 
 cctop shows a session as `frozen` when its process is stopped, for example by `SIGSTOP`. A stopped process runs no code, thus the `zellij-pane-state` mod cannot write a new state, and the state file keeps the last state. cctop thus reads the stop from the process table of the OS, not from the state file. The state in the file does not change this result.
 
 - cctop reads the stop at the first read and on each 1 s tick.
-- When the process continues, the next tick shows the state of the file again. If the file changed while the process was stopped, cctop shows the new state.
-- A freeze and a thaw are each a change of state. The change log shows each one, and the time in the state starts again at the tick that saw the change.
+- When the process continues, the next tick or the read of a new state file shows the state of the file again. The first of the two wins. If the file changed while the process was stopped, cctop shows the new state.
+- A freeze and a thaw are each a change of state. The change log shows each one. The time in the state starts again when cctop sees the change. A freeze that cctop sees first through a new state file starts at the read of that file. A thaw that cctop sees first through a new state file starts at the stamp of that file.
 - The OS does not record when a process stopped. Thus a session that was frozen before cctop started shows the time since the first read.
 - A freeze removes a handled mark. A frozen session takes no mark, because it does not wait for you.
-- A frozen session gets no notification and no jump, and `n` skips it. A thaw gives no notification and no jump either, also when the file says `needs-you`.
+- A frozen session gets no notification and no jump, and `n` skips it. A thaw of an unchanged file gives no notification and no jump either, also when the file says `needs-you`. A new write of `needs-you` after the process continues is a new state. It gives a notification and a jump, as for each other session.
 - Enter focuses the pane of a frozen session as it does for each other session. The status line also shows `the session is frozen`. cctop sends no `SIGCONT`. The script that froze the session owns the thaw.
 - When a frozen process exits, the [stale rule](#the-stale-rule) removes its row.
 
@@ -105,7 +105,7 @@ cctop shows a session as `frozen` when its process is stopped, for example by `S
 
 - Send `SIGSTOP` to the pid that the state file names (`<pid>.json`). If the script stops only a parent wrapper, the Claude Code process continues to run, and cctop shows a live session.
 - Use `SIGSTOP`, not `SIGTSTP`. A process can catch `SIGTSTP`, and then it does not stop.
-- Send `SIGCONT` to the same pid to thaw the session. cctop sees the thaw on the next tick, also when a different source sends the `SIGCONT`, for example `fg`.
+- Send `SIGCONT` to the same pid to thaw the session. cctop sees the thaw on the next tick, or at the next write of the state file if that comes first. It sees the thaw also when a different source sends the `SIGCONT`, for example `fg`.
 - Do not write `frozen` into the state file. cctop cannot parse a state file that holds `frozen`, and it ignores that file.
 
 ## The notification

@@ -385,12 +385,20 @@ mod tests {
         app.selected = Some(Pid::new(12));
         assert_eq!(app.selected_index(), Some(2));
         // Session 11 becomes `needs-you`, so it sorts above session 10.
-        app.board_mut()
-            .apply(file(11, "dir11", PaneState::NeedsYou, 100), None);
+        app.board_mut().apply(
+            file(11, "dir11", PaneState::NeedsYou, 100),
+            None,
+            RunStatus::Running,
+            EpochMillis::new(0),
+        );
         assert_eq!(app.selected_index(), Some(2));
         // Session 12 becomes `needs-you` and moves to row 1.
-        app.board_mut()
-            .apply(file(12, "dir12", PaneState::NeedsYou, 101), None);
+        app.board_mut().apply(
+            file(12, "dir12", PaneState::NeedsYou, 101),
+            None,
+            RunStatus::Running,
+            EpochMillis::new(0),
+        );
         assert_eq!(app.selected_index(), Some(1));
     }
 
@@ -716,8 +724,12 @@ mod tests {
         app.handle_key(press(KeyCode::Char('j')), KEY_TIME);
         assert_eq!(selected_pid(&app), Some(Pid::new(11)));
         // Session 10 changes to `needs-you` while the key press holds the jump.
-        app.board_mut()
-            .apply(file(10, "dir10", PaneState::NeedsYou, 100), None);
+        app.board_mut().apply(
+            file(10, "dir10", PaneState::NeedsYou, 100),
+            None,
+            RunStatus::Running,
+            EpochMillis::new(0),
+        );
         app.on_needs_you(&[Pid::new(10)], KEY_TIME);
         app.board_mut()
             .set_run_status(Pid::new(10), RunStatus::Stopped, EpochMillis::new(1_500));

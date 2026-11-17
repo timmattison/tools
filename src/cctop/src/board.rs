@@ -172,12 +172,23 @@ impl Board {
 
     /// Apply a state file that was read after the start. The function gives
     /// the change that the file makes, or `None` when the board shows no
-    /// change of state. The change goes into the log. The board compares the
-    /// shown states, thus a newer file of a frozen session changes nothing on
-    /// the screen. The board keeps the file. A session in the same shown state
-    /// keeps its handled mark, and a change of state removes it. A new process
-    /// with a known pid is a running session.
-    pub fn apply(&mut self, file: StateFile, name: Option<String>) -> Option<Change> {
+    /// change of state. The change goes into the log. `run` is the run status
+    /// of the process at the read, and the new session takes it. A file with a
+    /// stamp that is not newer than the file of the same process changes
+    /// nothing, the run status included, because a rescan reads files that
+    /// did not change. The board compares the shown states, thus a newer file
+    /// of a frozen session changes nothing on the screen. The board keeps the
+    /// file. A session in the same shown state keeps its handled mark, and a
+    /// change of state removes it. The time in a new state is the stamp of the
+    /// file. When the process is stopped, the OS does not record when it
+    /// stopped, thus the time is `now`, the time of the read.
+    pub fn apply(
+        &mut self,
+        file: StateFile,
+        name: Option<String>,
+        run: RunStatus,
+        now: EpochMillis,
+    ) -> Option<Change> {
         let pid = file.pid;
         let stamp = file.stamp;
         let known = self.sessions.get(&pid);
@@ -185,12 +196,15 @@ impl Board {
         if same_process.is_some_and(|known| stamp <= known.file.stamp) {
             return None;
         }
-        let run = same_process.map_or(RunStatus::Running, |known| known.run);
+        let at = match run {
+            RunStatus::Stopped => now,
+            RunStatus::Running => stamp,
+        };
         let old = same_process.map(Session::state);
         let mut session = Session {
             file,
             name,
-            since: stamp,
+            since: at,
             run,
             handled: None,
         };
@@ -206,7 +220,7 @@ impl Board {
             return None;
         }
         let change = Change {
-            at: stamp,
+            at,
             pid,
             label,
             old,
@@ -219,7 +233,7 @@ impl Board {
     /// Set the run status of the session with the pid. The function gives
     /// `None` when the board does not hold the pid, or when the session has
     /// the run status already. A freeze and a thaw are each a change of state.
-    /// The time in the state starts again at `now`, the tick that saw the
+    /// The time in the state starts again at `now`, the time of the read that saw the
     /// change. The change goes into the log, and the handled mark goes away.
     pub fn set_run_status(&mut self, pid: Pid, run: RunStatus, now: EpochMillis) -> Option<Change> {
         let session = self.sessions.get_mut(&pid)?;
@@ -426,6 +440,8 @@ mod tests {
             .apply(
                 file(7, PaneState::Working, 100, 500),
                 Some("named".to_string()),
+                RunStatus::Running,
+                EpochMillis::new(0),
             )
             .expect("a new session is a change");
         assert_eq!(
@@ -459,7 +475,12 @@ mod tests {
         let mut board = Board::new();
         board.load(file(7, PaneState::Idle, 100, 500), None);
         let change = board
-            .apply(file(7, PaneState::Working, 100, 900), None)
+            .apply(
+                file(7, PaneState::Working, 100, 900),
+                None,
+                RunStatus::Running,
+                EpochMillis::new(0),
+            )
             .expect("a new state is a change");
         assert_eq!(
             change,
@@ -483,11 +504,21 @@ mod tests {
         board.load(file(7, PaneState::Idle, 100, 500), None);
         let before = board.get(Pid::new(7)).cloned();
         assert_eq!(
-            board.apply(file(7, PaneState::Working, 100, 500), Some("a".into())),
+            board.apply(
+                file(7, PaneState::Working, 100, 500),
+                Some("a".into()),
+                RunStatus::Running,
+                EpochMillis::new(0)
+            ),
             None
         );
         assert_eq!(
-            board.apply(file(7, PaneState::Working, 100, 400), Some("b".into())),
+            board.apply(
+                file(7, PaneState::Working, 100, 400),
+                Some("b".into()),
+                RunStatus::Running,
+                EpochMillis::new(0)
+            ),
             None
         );
         assert_eq!(board.get(Pid::new(7)).cloned(), before);
@@ -499,7 +530,12 @@ mod tests {
         let mut board = Board::new();
         board.load(file(7, PaneState::Idle, 100, 500), None);
         let change = board
-            .apply(file(7, PaneState::Idle, 200, 300), None)
+            .apply(
+                file(7, PaneState::Idle, 200, 300),
+                None,
+                RunStatus::Running,
+                EpochMillis::new(0),
+            )
             .expect("a new session is a change");
         assert_eq!(change.old, None);
         assert_eq!(change.new, Some(PaneState::Idle));
@@ -516,7 +552,15 @@ mod tests {
         let mut newer = file(7, PaneState::Idle, 100, 900);
         newer.cwd = std::path::PathBuf::from("/elsewhere/project");
         newer.session_id = "new-id".to_string();
-        assert_eq!(board.apply(newer, Some("renamed".into())), None);
+        assert_eq!(
+            board.apply(
+                newer,
+                Some("renamed".into()),
+                RunStatus::Running,
+                EpochMillis::new(0)
+            ),
+            None
+        );
         let session = board.get(Pid::new(7)).expect("the session is on the board");
         assert_eq!(session.since, EpochMillis::new(500));
         assert_eq!(session.file.stamp, EpochMillis::new(900));
@@ -730,10 +774,20 @@ mod tests {
             board.toggle_handled(Pid::new(7)),
             Some(HandledToggle::Marked)
         );
-        board.apply(file(7, PaneState::Working, 100, 600), None);
+        board.apply(
+            file(7, PaneState::Working, 100, 600),
+            None,
+            RunStatus::Running,
+            EpochMillis::new(0),
+        );
         let is_handled = |board: &Board| board.get(Pid::new(7)).map(Session::is_handled);
         assert_eq!(is_handled(&board), Some(false));
-        board.apply(file(7, PaneState::Idle, 100, 700), None);
+        board.apply(
+            file(7, PaneState::Idle, 100, 700),
+            None,
+            RunStatus::Running,
+            EpochMillis::new(0),
+        );
         assert_eq!(is_handled(&board), Some(false), "the mark does not return");
     }
 
@@ -742,7 +796,15 @@ mod tests {
         let mut board = Board::new();
         board.load(file(7, PaneState::Idle, 100, 500), None);
         board.toggle_handled(Pid::new(7));
-        assert_eq!(board.apply(file(7, PaneState::Idle, 100, 900), None), None);
+        assert_eq!(
+            board.apply(
+                file(7, PaneState::Idle, 100, 900),
+                None,
+                RunStatus::Running,
+                EpochMillis::new(0)
+            ),
+            None
+        );
         let session = board.get(Pid::new(7)).expect("the session is on the board");
         assert!(session.is_handled());
     }
@@ -755,7 +817,12 @@ mod tests {
             board.toggle_handled(Pid::new(7)),
             Some(HandledToggle::Marked)
         );
-        board.apply(file(7, PaneState::Idle, 200, 900), None);
+        board.apply(
+            file(7, PaneState::Idle, 200, 900),
+            None,
+            RunStatus::Running,
+            EpochMillis::new(0),
+        );
         let session = board.get(Pid::new(7)).expect("the session is on the board");
         assert!(!session.is_handled());
     }
@@ -775,8 +842,18 @@ mod tests {
     #[test]
     fn changes_give_the_newest_first() {
         let mut board = Board::new();
-        board.apply(file(1, PaneState::Working, 1, 10), None);
-        board.apply(file(1, PaneState::Idle, 1, 20), None);
+        board.apply(
+            file(1, PaneState::Working, 1, 10),
+            None,
+            RunStatus::Running,
+            EpochMillis::new(0),
+        );
+        board.apply(
+            file(1, PaneState::Idle, 1, 20),
+            None,
+            RunStatus::Running,
+            EpochMillis::new(0),
+        );
         board.remove(Pid::new(1), EpochMillis::new(30));
         let times: Vec<u64> = board.changes().map(|change| change.at.as_u64()).collect();
         assert_eq!(times, vec![30, 20, 10]);
@@ -792,7 +869,12 @@ mod tests {
             } else {
                 PaneState::Idle
             };
-            board.apply(file(1, state, 1, stamp), None);
+            board.apply(
+                file(1, state, 1, stamp),
+                None,
+                RunStatus::Running,
+                EpochMillis::new(0),
+            );
         }
         assert_eq!(board.changes().count(), LOG_CAPACITY);
         assert_eq!(
@@ -937,7 +1019,12 @@ mod tests {
     #[test]
     fn a_newer_file_of_a_frozen_session_changes_nothing_on_the_screen() {
         let mut board = frozen_board(PaneState::Idle);
-        let applied = board.apply(file(7, PaneState::Working, 100, 1_500), None);
+        let applied = board.apply(
+            file(7, PaneState::Working, 100, 1_500),
+            None,
+            RunStatus::Stopped,
+            EpochMillis::new(1_600),
+        );
         assert_eq!(applied, None);
         assert_eq!(board.changes().count(), 1);
         let session = board.get(Pid::new(7)).expect("on the board");
@@ -956,7 +1043,12 @@ mod tests {
     fn a_reused_pid_of_a_frozen_session_is_a_running_session() {
         let mut board = frozen_board(PaneState::Idle);
         let change = board
-            .apply(file(7, PaneState::Working, 200, 1_500), None)
+            .apply(
+                file(7, PaneState::Working, 200, 1_500),
+                None,
+                RunStatus::Running,
+                EpochMillis::new(0),
+            )
             .expect("a new process is a change");
         assert_eq!(change.old, None);
         assert_eq!(change.new, Some(PaneState::Working));

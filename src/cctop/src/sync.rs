@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use proctree::Pid;
 
 use crate::board::{Board, Change};
-use crate::liveness::{survey, ProcessClock, RunStatus};
+use crate::liveness::{survey, ProcessClock};
 use crate::paths::ClaudeDirs;
 use crate::registry;
 use crate::state::{EpochMillis, StateFile};
@@ -89,7 +89,8 @@ impl Sync {
     /// Apply one directory event to `board`. Return the changes that it made.
     ///
     /// `File(pid)` reads the file of that pid. A good file of a live process
-    /// goes to the board. A good file of a stale process goes away, with its
+    /// goes to the board, with the run status that the survey of its process
+    /// read. A good file of a stale process goes away, with its
     /// session. A missing file removes the session. A file that cannot be read
     /// changes nothing. `Rescan` does this for each file in the directory, and
     /// it removes each session whose file is gone.
@@ -138,12 +139,7 @@ impl Sync {
                 let _removed = store::remove_if_stale(&self.state_dir, *pid, clock);
                 changes.extend(board.remove(*pid, now));
             } else {
-                let run = if found.stopped.contains(pid) {
-                    RunStatus::Stopped
-                } else {
-                    RunStatus::Running
-                };
-                changes.extend(board.set_run_status(*pid, run, now));
+                changes.extend(board.set_run_status(*pid, found.run_status(*pid), now));
             }
         }
         changes
@@ -173,7 +169,10 @@ impl Sync {
         changes
     }
 
-    /// Apply the read of one file to the board.
+    /// Apply the read of one file to the board. The function surveys the
+    /// process of the file once. The board gets the run status that the
+    /// survey read, so a file that arrives between two ticks is compared with
+    /// the live run status, not with the status of the last tick.
     fn apply_outcome(
         &self,
         board: &mut Board,
@@ -184,8 +183,8 @@ impl Sync {
     ) -> Option<Change> {
         match outcome {
             ReadOutcome::Present(file) => {
-                let stale = !survey(&[(pid, file.started_at)], clock).stale.is_empty();
-                if stale {
+                let found = survey(&[(pid, file.started_at)], clock);
+                if !found.stale.is_empty() {
                     // When the file stays, a new process owns the pid, and its
                     // own write event loads the new file.
                     return store::remove_if_stale(&self.state_dir, pid, clock)
@@ -193,7 +192,7 @@ impl Sync {
                         .flatten();
                 }
                 let name = registry::session_name(&self.sessions_dir, pid);
-                board.apply(file, name)
+                board.apply(file, name, found.run_status(pid), now)
             }
             ReadOutcome::Gone => board.remove(pid, now),
             ReadOutcome::Unreadable(_) => None,

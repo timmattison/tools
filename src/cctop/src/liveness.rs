@@ -109,6 +109,19 @@ pub struct Survey {
     pub stopped: Vec<Pid>,
 }
 
+impl Survey {
+    /// The run status of `pid` in this survey: `Stopped` when the pid is in
+    /// `stopped`, else `Running`.
+    #[must_use]
+    pub fn run_status(&self, pid: Pid) -> RunStatus {
+        if self.stopped.contains(&pid) {
+            RunStatus::Stopped
+        } else {
+            RunStatus::Running
+        }
+    }
+}
+
 /// Read the process table once for `sessions`. The function asks `clock` once
 /// for all pids, and sorts the pids of the result.
 #[must_use]
