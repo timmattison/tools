@@ -9,7 +9,7 @@ use ratatui::widgets::{Block, Paragraph, Row, Table, TableState};
 use ratatui::Frame;
 
 use crate::app::App;
-use crate::board::Change;
+use crate::board::{Board, Change};
 use crate::state::{EpochMillis, PaneState};
 
 /// Draw the screen: the table of sessions, the change log, and the status
@@ -102,13 +102,38 @@ fn state_color(state: PaneState) -> Color {
     Color::Rgb(rgb.red, rgb.green, rgb.blue)
 }
 
+/// The text between two parts of the title of the table.
+const TITLE_SEPARATOR: &str = " · ";
+
+/// The title of the table: the number of sessions, then the count of each
+/// state in the sort order of the rows. A count reads `unmarked/handled`
+/// and the marker of its state follows it.
+fn table_title(board: &Board) -> String {
+    let count = board.len();
+    let noun = if count == 1 { "session" } else { "sessions" };
+    let counts: Vec<String> = board
+        .state_counts()
+        .iter()
+        .map(|state| {
+            format!(
+                "{}/{} {}",
+                state.unmarked,
+                state.handled,
+                state.state.marker()
+            )
+        })
+        .collect();
+    format!(
+        " cctop{TITLE_SEPARATOR}{count} {noun}{TITLE_SEPARATOR}{} ",
+        counts.join(TITLE_SEPARATOR)
+    )
+}
+
 /// Draw the table of sessions in `area`.
 fn draw_table(frame: &mut Frame, area: Rect, app: &App, now: EpochMillis) {
     let board = app.board();
-    let count = board.len();
-    let noun = if count == 1 { "session" } else { "sessions" };
-    let block = Block::bordered().title(format!(" cctop · {count} {noun} "));
-    if count == 0 {
+    let block = Block::bordered().title(table_title(board));
+    if board.is_empty() {
         let inner = block.inner(area);
         frame.render_widget(block, area);
         frame.render_widget(Paragraph::new(EMPTY_HINT), inner);
@@ -264,10 +289,22 @@ mod tests {
     }
 
     /// The text of line `y` of the buffer.
+    ///
+    /// Ratatui writes a wide glyph into one cell and resets the next cell to
+    /// a space. The function skips the cells that a wide glyph hides.
     fn row_text(buffer: &Buffer, y: u16) -> String {
-        (0..buffer.area.width)
-            .map(|x| buffer[(x, y)].symbol().to_string())
-            .collect()
+        let mut text = String::new();
+        let mut skip = 0;
+        for x in 0..buffer.area.width {
+            if skip > 0 {
+                skip -= 1;
+                continue;
+            }
+            let symbol = buffer[(x, y)].symbol();
+            skip = unicode_width::UnicodeWidthStr::width(symbol).saturating_sub(1);
+            text.push_str(symbol);
+        }
+        text
     }
 
     /// The text of all lines of the buffer.
@@ -438,6 +475,84 @@ mod tests {
         assert_eq!(time_x, 5 + 19, "{header}");
         let (_, line) = line_with(&buffer, "dir-with-a-long");
         assert!(line.contains(LONG_NAME), "{line}");
+    }
+
+    /// The top line of the table, which holds the title.
+    fn title(buffer: &Buffer) -> String {
+        row_text(buffer, 0)
+    }
+
+    #[test]
+    fn the_title_shows_the_count_of_each_state_in_the_sort_order() {
+        let mut app = App::new();
+        app.board_mut()
+            .load(file(1, "a", PaneState::NeedsYou, 100), None);
+        app.board_mut()
+            .load(file(2, "b", PaneState::NeedsYou, 100), None);
+        app.board_mut()
+            .load(file(3, "c", PaneState::Idle, 100), None);
+        app.board_mut()
+            .load(file(4, "d", PaneState::Agents, 100), None);
+        app.board_mut()
+            .load(file(5, "e", PaneState::Working, 100), None);
+        app.board_mut().toggle_handled(Pid::new(2));
+        app.board_mut().toggle_handled(Pid::new(4));
+        let text = title(&render(&app, 127_000));
+        assert!(
+            text.contains(" cctop · 5 sessions · 1/1 ❗ · 1/0 💤 · 0/1 🤖 · 0/0 🐚 · 1/0 🏃 "),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn the_empty_board_shows_five_counts_of_zero() {
+        let text = title(&render(&App::new(), 1_000));
+        assert!(
+            text.contains(" cctop · 0 sessions · 0/0 ❗ · 0/0 💤 · 0/0 🤖 · 0/0 🐚 · 0/0 🏃 "),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn the_title_moves_a_session_from_unmarked_to_handled() {
+        let mut app = App::new();
+        app.board_mut()
+            .load(file(7, "a", PaneState::Idle, 100), None);
+        let before = title(&render(&app, 1_000));
+        assert!(before.contains("1/0 💤"), "{before}");
+        app.board_mut().toggle_handled(Pid::new(7));
+        let after = title(&render(&app, 1_000));
+        assert!(after.contains("0/1 💤"), "{after}");
+    }
+
+    #[test]
+    fn the_whole_title_fits_in_70_columns() {
+        let mut app = App::new();
+        let mut pid = 1;
+        let mut add = |app: &mut App, state: PaneState, handled: bool| {
+            app.board_mut().load(file(pid, "d", state, 100), None);
+            if handled {
+                app.board_mut().toggle_handled(Pid::new(pid));
+            }
+            pid += 1;
+        };
+        add(&mut app, PaneState::NeedsYou, false);
+        add(&mut app, PaneState::NeedsYou, true);
+        add(&mut app, PaneState::NeedsYou, true);
+        add(&mut app, PaneState::Idle, true);
+        for _ in 0..3 {
+            add(&mut app, PaneState::Agents, false);
+        }
+        for _ in 0..7 {
+            add(&mut app, PaneState::Agents, true);
+        }
+        let buffer = render_at(&app, 1_000, 70);
+        let text = title(&buffer);
+        assert!(
+            text.contains(" cctop · 14 sessions · 1/2 ❗ · 0/1 💤 · 3/7 🤖 · 0/0 🐚 · 0/0 🏃 "),
+            "{text}"
+        );
+        assert_eq!(buffer[(69, 0)].symbol(), "┐");
     }
 
     #[test]

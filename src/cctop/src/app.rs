@@ -6,7 +6,7 @@ use proctree::Pid;
 
 use crate::board::Board;
 use crate::focus::FocusTarget;
-use crate::state::PaneState;
+use crate::state::{EpochMillis, PaneState};
 
 /// What the main loop does after a key.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,6 +19,11 @@ pub enum Action {
     Focus(FocusTarget),
 }
 
+/// The time in milliseconds that a key press holds a jump. A jump to a
+/// session that needs you waits until this time passes after the last key
+/// press.
+pub const JUMP_HOLD_MS: u64 = 2_000;
+
 /// The state of the screen.
 #[derive(Debug, Default)]
 pub struct App {
@@ -26,6 +31,8 @@ pub struct App {
     selected: Option<Pid>,
     last_index: usize,
     status: Option<String>,
+    last_key: Option<EpochMillis>,
+    held: Vec<Pid>,
 }
 
 impl App {
@@ -72,12 +79,14 @@ impl App {
     }
 
     /// Handle one key. The function moves the selection, changes the status
-    /// text (a move key clears it), and tells the main loop what to do next. A key release does
-    /// nothing.
-    pub fn handle_key(&mut self, key: KeyEvent) -> Action {
+    /// text (a move key clears it), and tells the main loop what to do next.
+    /// The argument `now` is the time of the key. A key press holds a jump
+    /// for [`JUMP_HOLD_MS`]. A key release does nothing and holds no jump.
+    pub fn handle_key(&mut self, key: KeyEvent, now: EpochMillis) -> Action {
         if key.kind == KeyEventKind::Release {
             return Action::Nothing;
         }
+        self.last_key = Some(now);
         self.sync_selection();
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => self.move_selection(1),
@@ -92,6 +101,50 @@ impl App {
             _ => {}
         }
         Action::Nothing
+    }
+
+    /// Tell the app that the sessions `pids` changed to `needs-you` at `now`.
+    /// The app holds them until [`JUMP_HOLD_MS`] passes after the last key
+    /// press. Then it selects the one that sorts first on the board. If the
+    /// clock moves back to a time before the last key press, the hold starts
+    /// again at the new time.
+    pub fn on_needs_you(&mut self, pids: &[Pid], now: EpochMillis) {
+        self.held.extend_from_slice(pids);
+        self.flush_held(now);
+    }
+
+    /// Tell the app that time passed. The app then ends a held jump when the
+    /// hold is over at `now`.
+    pub fn on_tick(&mut self, now: EpochMillis) {
+        self.flush_held(now);
+    }
+
+    /// Select the first row of the board among the held sessions that are
+    /// still in the state `needs-you` and have no handled mark. Then
+    /// forget all held sessions. A key press less than [`JUMP_HOLD_MS`]
+    /// before `now` keeps the held sessions and selects nothing. A key press
+    /// time later than `now` means the clock moved back. The function then
+    /// sets the time of the key to `now`, so the hold ends [`JUMP_HOLD_MS`]
+    /// after that.
+    fn flush_held(&mut self, now: EpochMillis) {
+        if self.last_key.is_some_and(|key| key > now) {
+            self.last_key = Some(now);
+        }
+        let held_by_key = self
+            .last_key
+            .is_some_and(|key| now.saturating_since(key) < JUMP_HOLD_MS);
+        if self.held.is_empty() || held_by_key {
+            return;
+        }
+        let first = self.board.rows().iter().position(|session| {
+            self.held.contains(&session.file.pid)
+                && session.file.state == PaneState::NeedsYou
+                && !session.is_handled()
+        });
+        if let Some(index) = first {
+            self.select(index);
+        }
+        self.held.clear();
     }
 
     /// Put a handled mark on the selected session, or remove its mark. A new
@@ -206,6 +259,9 @@ mod tests {
 
     use crate::state::{EpochMillis, PaneState, StateFile};
 
+    /// The time that every key of these tests carries.
+    const KEY_TIME: EpochMillis = EpochMillis::new(1_000);
+
     /// A state file in the directory `/path/<name>` with no Zellij place.
     fn file(pid: u32, name: &str, state: PaneState, stamp: u64) -> StateFile {
         StateFile {
@@ -303,32 +359,35 @@ mod tests {
     #[test]
     fn j_and_down_move_down_and_stop_at_the_last_row() {
         let mut app = three_rows();
-        assert_eq!(app.handle_key(press(KeyCode::Char('j'))), Action::Nothing);
+        assert_eq!(
+            app.handle_key(press(KeyCode::Char('j')), KEY_TIME),
+            Action::Nothing
+        );
         assert_eq!(app.selected_index(), Some(1));
-        app.handle_key(press(KeyCode::Down));
+        app.handle_key(press(KeyCode::Down), KEY_TIME);
         assert_eq!(app.selected_index(), Some(2));
-        app.handle_key(press(KeyCode::Down));
+        app.handle_key(press(KeyCode::Down), KEY_TIME);
         assert_eq!(app.selected_index(), Some(2), "no wrap at the end");
     }
 
     #[test]
     fn k_and_up_move_up_and_stop_at_the_first_row() {
         let mut app = three_rows();
-        app.handle_key(press(KeyCode::Char('j')));
-        app.handle_key(press(KeyCode::Char('j')));
-        app.handle_key(press(KeyCode::Char('k')));
+        app.handle_key(press(KeyCode::Char('j')), KEY_TIME);
+        app.handle_key(press(KeyCode::Char('j')), KEY_TIME);
+        app.handle_key(press(KeyCode::Char('k')), KEY_TIME);
         assert_eq!(app.selected_index(), Some(1));
-        app.handle_key(press(KeyCode::Up));
+        app.handle_key(press(KeyCode::Up), KEY_TIME);
         assert_eq!(app.selected_index(), Some(0));
-        app.handle_key(press(KeyCode::Up));
+        app.handle_key(press(KeyCode::Up), KEY_TIME);
         assert_eq!(app.selected_index(), Some(0), "no wrap at the start");
     }
 
     #[test]
     fn a_move_on_an_empty_board_does_nothing() {
         let mut app = App::new();
-        app.handle_key(press(KeyCode::Char('j')));
-        app.handle_key(press(KeyCode::Char('k')));
+        app.handle_key(press(KeyCode::Char('j')), KEY_TIME);
+        app.handle_key(press(KeyCode::Char('k')), KEY_TIME);
         assert_eq!(app.selected_index(), None);
     }
 
@@ -340,17 +399,17 @@ mod tests {
             KeyModifiers::NONE,
             KeyEventKind::Release,
         );
-        assert_eq!(app.handle_key(release), Action::Nothing);
+        assert_eq!(app.handle_key(release, KEY_TIME), Action::Nothing);
         assert_eq!(app.selected_index(), Some(0));
     }
 
     #[test]
     fn enter_focuses_the_selected_session() {
         let mut app = three_rows();
-        app.handle_key(press(KeyCode::Char('j')));
+        app.handle_key(press(KeyCode::Char('j')), KEY_TIME);
         let expected = FocusTarget::of(app.board().get(Pid::new(11)).expect("session 11 exists"));
         assert_eq!(
-            app.handle_key(press(KeyCode::Enter)),
+            app.handle_key(press(KeyCode::Enter), KEY_TIME),
             Action::Focus(expected)
         );
         assert_eq!(app.status(), Some("Focusing dir11"));
@@ -363,7 +422,7 @@ mod tests {
             file(10, "dir10", PaneState::Idle, 10),
             Some("my-name".to_string()),
         );
-        app.handle_key(press(KeyCode::Enter));
+        app.handle_key(press(KeyCode::Enter), KEY_TIME);
         assert_eq!(app.status(), Some("Focusing my-name"));
     }
 
@@ -376,9 +435,9 @@ mod tests {
             KeyCode::Up,
         ] {
             let mut app = three_rows();
-            app.handle_key(press(KeyCode::Enter));
+            app.handle_key(press(KeyCode::Enter), KEY_TIME);
             assert_eq!(app.status(), Some("Focusing dir10"));
-            app.handle_key(press(code));
+            app.handle_key(press(code), KEY_TIME);
             assert_eq!(app.status(), None, "key {code:?} must clear the status");
         }
     }
@@ -387,14 +446,17 @@ mod tests {
     fn a_move_key_on_an_empty_board_clears_the_status() {
         let mut app = App::new();
         app.set_status("No session needs you");
-        app.handle_key(press(KeyCode::Char('j')));
+        app.handle_key(press(KeyCode::Char('j')), KEY_TIME);
         assert_eq!(app.status(), None);
     }
 
     #[test]
     fn enter_on_an_empty_board_has_nothing_to_focus() {
         let mut app = App::new();
-        assert_eq!(app.handle_key(press(KeyCode::Enter)), Action::Nothing);
+        assert_eq!(
+            app.handle_key(press(KeyCode::Enter), KEY_TIME),
+            Action::Nothing
+        );
         assert_eq!(app.status(), Some("No session to focus"));
     }
 
@@ -412,11 +474,11 @@ mod tests {
             (11, PaneState::NeedsYou),
             (12, PaneState::Working),
         ]);
-        let first = app.handle_key(press(KeyCode::Char('n')));
+        let first = app.handle_key(press(KeyCode::Char('n')), KEY_TIME);
         assert_eq!(focus_pid(&first), Pid::new(11));
         assert_eq!(app.selected_index(), Some(1));
         assert_eq!(app.status(), Some("Focusing dir11"));
-        let second = app.handle_key(press(KeyCode::Char('n')));
+        let second = app.handle_key(press(KeyCode::Char('n')), KEY_TIME);
         assert_eq!(focus_pid(&second), Pid::new(10));
         assert_eq!(app.selected_index(), Some(0));
     }
@@ -428,9 +490,9 @@ mod tests {
             (11, PaneState::Working),
             (12, PaneState::Working),
         ]);
-        app.handle_key(press(KeyCode::Char('j')));
-        app.handle_key(press(KeyCode::Char('j')));
-        let action = app.handle_key(press(KeyCode::Char('n')));
+        app.handle_key(press(KeyCode::Char('j')), KEY_TIME);
+        app.handle_key(press(KeyCode::Char('j')), KEY_TIME);
+        let action = app.handle_key(press(KeyCode::Char('n')), KEY_TIME);
         assert_eq!(focus_pid(&action), Pid::new(10));
         assert_eq!(app.selected_index(), Some(0));
     }
@@ -438,7 +500,7 @@ mod tests {
     #[test]
     fn n_on_the_only_needs_you_row_gives_that_row_again() {
         let mut app = app_with(&[(10, PaneState::NeedsYou), (11, PaneState::Idle)]);
-        let action = app.handle_key(press(KeyCode::Char('n')));
+        let action = app.handle_key(press(KeyCode::Char('n')), KEY_TIME);
         assert_eq!(focus_pid(&action), Pid::new(10));
         assert_eq!(app.selected_index(), Some(0));
     }
@@ -446,7 +508,10 @@ mod tests {
     #[test]
     fn n_with_no_needs_you_session_does_nothing() {
         let mut app = three_rows();
-        assert_eq!(app.handle_key(press(KeyCode::Char('n'))), Action::Nothing);
+        assert_eq!(
+            app.handle_key(press(KeyCode::Char('n')), KEY_TIME),
+            Action::Nothing
+        );
         assert_eq!(app.status(), Some("No session needs you"));
         assert_eq!(app.selected_index(), Some(0));
     }
@@ -460,7 +525,7 @@ mod tests {
         ]);
         app.board_mut().toggle_handled(Pid::new(10));
         // The rows are 11, 10 (handled), 12, and the cursor is on row 0.
-        let action = app.handle_key(press(KeyCode::Char('n')));
+        let action = app.handle_key(press(KeyCode::Char('n')), KEY_TIME);
         assert_eq!(focus_pid(&action), Pid::new(11));
         assert_eq!(app.selected_index(), Some(0));
     }
@@ -469,7 +534,10 @@ mod tests {
     fn n_with_only_handled_needs_you_sessions_does_nothing() {
         let mut app = app_with(&[(10, PaneState::NeedsYou), (11, PaneState::Idle)]);
         app.board_mut().toggle_handled(Pid::new(10));
-        assert_eq!(app.handle_key(press(KeyCode::Char('n'))), Action::Nothing);
+        assert_eq!(
+            app.handle_key(press(KeyCode::Char('n')), KEY_TIME),
+            Action::Nothing
+        );
         assert_eq!(app.status(), Some("No session needs you"));
     }
 
@@ -501,7 +569,10 @@ mod tests {
     #[test]
     fn h_marks_the_selected_session_and_selects_the_next_unmarked_row() {
         let mut app = three_rows();
-        assert_eq!(app.handle_key(press(KeyCode::Char('h'))), Action::Nothing);
+        assert_eq!(
+            app.handle_key(press(KeyCode::Char('h')), KEY_TIME),
+            Action::Nothing
+        );
         assert!(is_handled(&app, 10));
         assert_eq!(row_order(&app), vec![11, 12, 10]);
         assert_eq!(app.selected_index(), Some(0));
@@ -512,7 +583,7 @@ mod tests {
     #[test]
     fn h_selects_the_first_unmarked_row_at_or_below_the_old_index() {
         let mut app = app_with(&[(10, PaneState::NeedsYou), (20, PaneState::Idle)]);
-        app.handle_key(press(KeyCode::Char('h')));
+        app.handle_key(press(KeyCode::Char('h')), KEY_TIME);
         assert!(is_handled(&app, 10));
         assert_eq!(selected_pid(&app), Some(Pid::new(20)));
     }
@@ -526,7 +597,7 @@ mod tests {
         ]);
         app.board_mut().toggle_handled(Pid::new(11));
         assert_eq!(row_order(&app), vec![10, 11, 20]);
-        app.handle_key(press(KeyCode::Char('h')));
+        app.handle_key(press(KeyCode::Char('h')), KEY_TIME);
         assert_eq!(row_order(&app), vec![11, 10, 20]);
         assert_eq!(selected_pid(&app), Some(Pid::new(20)));
     }
@@ -535,7 +606,7 @@ mod tests {
     fn h_stays_on_the_marked_row_when_no_unmarked_row_is_below() {
         let mut app = app_with(&[(10, PaneState::NeedsYou), (11, PaneState::NeedsYou)]);
         app.board_mut().toggle_handled(Pid::new(11));
-        app.handle_key(press(KeyCode::Char('h')));
+        app.handle_key(press(KeyCode::Char('h')), KEY_TIME);
         assert_eq!(row_order(&app), vec![11, 10]);
         assert!(is_handled(&app, 10));
         assert!(is_handled(&app, 11));
@@ -545,8 +616,8 @@ mod tests {
     #[test]
     fn a_second_h_marks_the_next_session() {
         let mut app = three_rows();
-        app.handle_key(press(KeyCode::Char('h')));
-        app.handle_key(press(KeyCode::Char('h')));
+        app.handle_key(press(KeyCode::Char('h')), KEY_TIME);
+        app.handle_key(press(KeyCode::Char('h')), KEY_TIME);
         assert!(is_handled(&app, 10));
         assert!(is_handled(&app, 11));
         assert_eq!(row_order(&app), vec![12, 10, 11]);
@@ -557,18 +628,18 @@ mod tests {
     fn a_shifted_h_also_marks_the_selected_session() {
         let mut app = three_rows();
         let shifted = KeyEvent::new(KeyCode::Char('H'), KeyModifiers::SHIFT);
-        assert_eq!(app.handle_key(shifted), Action::Nothing);
+        assert_eq!(app.handle_key(shifted, KEY_TIME), Action::Nothing);
         assert!(is_handled(&app, 10));
     }
 
     #[test]
     fn h_on_a_handled_session_removes_the_mark_and_the_cursor_follows_it() {
         let mut app = three_rows();
-        app.handle_key(press(KeyCode::Char('h')));
-        app.handle_key(press(KeyCode::Char('j')));
-        app.handle_key(press(KeyCode::Char('j')));
+        app.handle_key(press(KeyCode::Char('h')), KEY_TIME);
+        app.handle_key(press(KeyCode::Char('j')), KEY_TIME);
+        app.handle_key(press(KeyCode::Char('j')), KEY_TIME);
         assert_eq!(selected_pid(&app), Some(Pid::new(10)));
-        app.handle_key(press(KeyCode::Char('h')));
+        app.handle_key(press(KeyCode::Char('h')), KEY_TIME);
         assert!(!is_handled(&app, 10));
         assert_eq!(row_order(&app), vec![10, 11, 12]);
         assert_eq!(selected_pid(&app), Some(Pid::new(10)));
@@ -578,22 +649,31 @@ mod tests {
     #[test]
     fn h_on_an_empty_board_marks_nothing() {
         let mut app = App::new();
-        assert_eq!(app.handle_key(press(KeyCode::Char('h'))), Action::Nothing);
+        assert_eq!(
+            app.handle_key(press(KeyCode::Char('h')), KEY_TIME),
+            Action::Nothing
+        );
         assert_eq!(app.status(), Some("No session to mark"));
     }
 
     #[test]
     fn q_and_control_c_quit() {
         let mut app = three_rows();
-        assert_eq!(app.handle_key(press(KeyCode::Char('q'))), Action::Quit);
+        assert_eq!(
+            app.handle_key(press(KeyCode::Char('q')), KEY_TIME),
+            Action::Quit
+        );
         let control_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        assert_eq!(app.handle_key(control_c), Action::Quit);
+        assert_eq!(app.handle_key(control_c, KEY_TIME), Action::Quit);
     }
 
     #[test]
     fn a_plain_c_does_nothing() {
         let mut app = three_rows();
-        assert_eq!(app.handle_key(press(KeyCode::Char('c'))), Action::Nothing);
+        assert_eq!(
+            app.handle_key(press(KeyCode::Char('c')), KEY_TIME),
+            Action::Nothing
+        );
         assert_eq!(app.status(), None);
     }
 }

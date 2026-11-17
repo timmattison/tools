@@ -85,6 +85,17 @@ impl Change {
 /// when it is full.
 pub const LOG_CAPACITY: usize = 500;
 
+/// The number of sessions in one state, split by the handled mark.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StateCount {
+    /// The state that the count is about.
+    pub state: PaneState,
+    /// The sessions in the state with no handled mark.
+    pub unmarked: usize,
+    /// The sessions in the state with a handled mark.
+    pub handled: usize,
+}
+
 /// The live sessions, and the log of their changes.
 #[derive(Debug, Default)]
 pub struct Board {
@@ -194,6 +205,34 @@ impl Board {
         session.handled = Some(HandledMark(self.next_mark));
         self.next_mark += 1;
         Some(true)
+    }
+
+    /// The count of each state, in the sort order of the rows. The array
+    /// holds every state, also a state with no session. Each count splits the
+    /// sessions of its state by the handled mark.
+    #[must_use]
+    pub fn state_counts(&self) -> [StateCount; 5] {
+        let mut ranked = PaneState::ALL;
+        ranked.sort_by_key(|state| state.rank());
+        ranked.map(|state| {
+            let in_state = self
+                .sessions
+                .values()
+                .filter(|session| session.file.state == state);
+            let (unmarked, handled) =
+                in_state.fold((0_usize, 0_usize), |(unmarked, handled), session| {
+                    if session.is_handled() {
+                        (unmarked, handled + 1)
+                    } else {
+                        (unmarked + 1, handled)
+                    }
+                });
+            StateCount {
+                state,
+                unmarked,
+                handled,
+            }
+        })
     }
 
     /// The session with the pid, when the board holds it.
@@ -422,6 +461,72 @@ mod tests {
         );
         assert!(board.get(Pid::new(7)).is_none());
         assert_eq!(board.changes().cloned().collect::<Vec<_>>(), vec![change]);
+    }
+
+    /// The counts of the board as `(state, unmarked, handled)` rows.
+    fn counts(board: &Board) -> Vec<(PaneState, usize, usize)> {
+        board
+            .state_counts()
+            .iter()
+            .map(|count| (count.state, count.unmarked, count.handled))
+            .collect()
+    }
+
+    #[test]
+    fn state_counts_count_a_state_of_sessions_with_no_mark() {
+        use PaneState::{Agents, Idle, NeedsYou, Shells, Working};
+        let mut board = Board::new();
+        board.load(file(1, Agents, 1, 100), None);
+        board.load(file(2, Agents, 1, 100), None);
+        board.load(file(3, Agents, 1, 100), None);
+        assert_eq!(
+            counts(&board),
+            [
+                (NeedsYou, 0, 0),
+                (Idle, 0, 0),
+                (Agents, 3, 0),
+                (Shells, 0, 0),
+                (Working, 0, 0)
+            ]
+        );
+    }
+
+    #[test]
+    fn state_counts_count_a_state_of_handled_sessions() {
+        let mut board = Board::new();
+        board.load(file(1, PaneState::Idle, 1, 100), None);
+        board.load(file(2, PaneState::Idle, 1, 100), None);
+        board.toggle_handled(Pid::new(1));
+        board.toggle_handled(Pid::new(2));
+        let idle = board.state_counts()[1];
+        assert_eq!(
+            (idle.state, idle.unmarked, idle.handled),
+            (PaneState::Idle, 0, 2)
+        );
+    }
+
+    #[test]
+    fn state_counts_split_a_state_with_both_kinds() {
+        let mut board = Board::new();
+        board.load(file(1, PaneState::NeedsYou, 1, 100), None);
+        board.load(file(2, PaneState::NeedsYou, 1, 100), None);
+        board.load(file(3, PaneState::NeedsYou, 1, 100), None);
+        board.load(file(4, PaneState::Working, 1, 100), None);
+        board.toggle_handled(Pid::new(2));
+        let counts = board.state_counts();
+        assert_eq!((counts[0].unmarked, counts[0].handled), (2, 1));
+        assert_eq!((counts[4].unmarked, counts[4].handled), (1, 0));
+    }
+
+    #[test]
+    fn state_counts_hold_every_state_in_rank_order() {
+        let board = Board::new();
+        let counts = board.state_counts();
+        let ranks: Vec<u8> = counts.iter().map(|count| count.state.rank()).collect();
+        assert_eq!(ranks, [0, 1, 2, 3, 4]);
+        assert!(counts
+            .iter()
+            .all(|count| count.unmarked == 0 && count.handled == 0));
     }
 
     #[test]

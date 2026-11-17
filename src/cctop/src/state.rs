@@ -55,6 +55,24 @@ impl PaneState {
         }
     }
 
+    /// The marker of the state in the title of the table. Each marker is one
+    /// code point of East Asian Width `W`, thus every terminal agrees that it
+    /// is 2 columns wide. The return type is `char`, so a marker cannot hold a
+    /// variation selector or a joiner. `needs-you` uses U+2757 and not
+    /// U+203C: U+203C has East Asian Width `N` and draws as an emoji only with
+    /// U+FE0F, and Zellij removes each zero-width code point from its grid, so
+    /// in a Zellij pane it draws 1 column wide.
+    #[must_use]
+    pub fn marker(self) -> char {
+        match self {
+            PaneState::NeedsYou => '\u{2757}',
+            PaneState::Idle => '\u{1F4A4}',
+            PaneState::Agents => '\u{1F916}',
+            PaneState::Shells => '\u{1F41A}',
+            PaneState::Working => '\u{1F3C3}',
+        }
+    }
+
     /// The place of the state in the sort order. A low rank sorts first.
     #[must_use]
     pub fn rank(self) -> u8 {
@@ -401,6 +419,19 @@ mod tests {
     fn label_gives_the_contract_strings() {
         let labels: Vec<&str> = PaneState::ALL.iter().map(|state| state.label()).collect();
         assert_eq!(labels, ["working", "needs-you", "idle", "agents", "shells"]);
+    }
+
+    #[test]
+    fn marker_gives_one_wide_code_point_for_each_state() {
+        use unicode_width::UnicodeWidthChar;
+        assert_eq!(PaneState::NeedsYou.marker(), '\u{2757}');
+        assert_eq!(PaneState::Idle.marker(), '\u{1F4A4}');
+        assert_eq!(PaneState::Agents.marker(), '\u{1F916}');
+        assert_eq!(PaneState::Shells.marker(), '\u{1F41A}');
+        assert_eq!(PaneState::Working.marker(), '\u{1F3C3}');
+        for state in PaneState::ALL {
+            assert_eq!(state.marker().width(), Some(2), "{}", state.label());
+        }
     }
 
     #[test]
