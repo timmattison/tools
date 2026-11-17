@@ -952,4 +952,29 @@ mod tests {
         let session = board.get(Pid::new(7)).expect("on the board");
         assert_eq!(session.state(), PaneState::Working);
     }
+
+    #[test]
+    fn load_stopped_shows_frozen_since_the_first_read_and_logs_nothing() {
+        let mut board = Board::new();
+        board.load_stopped(
+            file(7, PaneState::Idle, 100, 500),
+            None,
+            EpochMillis::new(9_000),
+        );
+        let session = board.get(Pid::new(7)).expect("on the board");
+        assert_eq!(session.state(), PaneState::Frozen);
+        assert_eq!(session.since, EpochMillis::new(9_000));
+        assert!(!session.is_handled());
+        assert_eq!(board.changes().count(), 0);
+    }
+
+    #[test]
+    fn the_end_of_a_frozen_session_logs_frozen_as_the_old_state() {
+        let mut board = frozen_board(PaneState::Idle);
+        let change = board
+            .remove(Pid::new(7), EpochMillis::new(3_000))
+            .expect("the session was on the board");
+        assert_eq!(change.old, Some(PaneState::Frozen));
+        assert_eq!(change.new, None);
+    }
 }
