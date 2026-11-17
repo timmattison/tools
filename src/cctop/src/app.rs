@@ -683,6 +683,25 @@ mod tests {
     }
 
     #[test]
+    fn after_a_mark_the_cursor_skips_a_session_that_takes_no_mark() {
+        for state in [PaneState::Working, PaneState::Agents, PaneState::Shells] {
+            let mut app = app_with(&[
+                (10, PaneState::NeedsYou),
+                (11, PaneState::Idle),
+                (12, state),
+            ]);
+            assert_eq!(selected_pid(&app), Some(Pid::new(10)), "{state:?}");
+            app.handle_key(press(KeyCode::Char('h')), KEY_TIME);
+            assert!(is_handled(&app, 10), "{state:?}");
+            assert_eq!(selected_pid(&app), Some(Pid::new(11)), "{state:?}");
+            app.handle_key(press(KeyCode::Char('h')), KEY_TIME);
+            assert!(is_handled(&app, 11), "{state:?}");
+            assert_eq!(selected_pid(&app), Some(Pid::new(11)), "{state:?}");
+            assert_eq!(app.status(), Some("Marked dir11 as handled"), "{state:?}");
+        }
+    }
+
+    #[test]
     fn h_on_an_empty_board_marks_nothing() {
         let mut app = App::new();
         assert_eq!(
