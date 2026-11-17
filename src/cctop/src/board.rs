@@ -161,30 +161,34 @@ impl Board {
 
     /// Apply a state file that was read after the start. The function gives
     /// the change that the file makes, or `None` when the board shows no
-    /// change of state. The change goes into the log. A session in the same
-    /// state keeps its handled mark, and a change of state removes it.
+    /// change of state. The change goes into the log. The board compares the
+    /// shown states, thus a newer file of a frozen session changes nothing on
+    /// the screen. The board keeps the file. A session in the same shown state
+    /// keeps its handled mark, and a change of state removes it. A new process
+    /// with a known pid is a running session.
     pub fn apply(&mut self, file: StateFile, name: Option<String>) -> Option<Change> {
         let pid = file.pid;
         let stamp = file.stamp;
-        let new_state = file.state;
         let known = self.sessions.get(&pid);
         let same_process = known.filter(|known| known.file.started_at == file.started_at);
         if same_process.is_some_and(|known| stamp <= known.file.stamp) {
             return None;
         }
-        let old = same_process.map(|known| known.file.state);
-        let same_state = same_process.is_some_and(|known| known.file.state == new_state);
-        let (since, handled) = match same_process {
-            Some(known) if same_state => (known.since, known.handled),
-            _ => (stamp, None),
-        };
-        let session = Session {
+        let run = same_process.map_or(RunStatus::Running, |known| known.run);
+        let old = same_process.map(Session::state);
+        let mut session = Session {
             file,
             name,
-            since,
-            run: RunStatus::Running,
-            handled,
+            since: stamp,
+            run,
+            handled: None,
         };
+        let new_state = session.state();
+        let same_state = old == Some(new_state);
+        if let Some(known) = same_process.filter(|_| same_state) {
+            session.since = known.since;
+            session.handled = known.handled;
+        }
         let label = session.label();
         self.sessions.insert(pid, session);
         if same_state {
