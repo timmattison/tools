@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use proctree::Pid;
 
 use crate::board::{Board, Change};
-use crate::liveness::{survey, ProcessClock};
+use crate::liveness::{survey, ProcessClock, RunStatus};
 use crate::paths::ClaudeDirs;
 use crate::registry;
 use crate::state::{EpochMillis, StateFile};
@@ -101,11 +101,15 @@ impl Sync {
         }
     }
 
-    /// Remove each stale session from the board and from the directory.
+    /// Check each session on the board against the process table.
     ///
-    /// A process that ends can leave its file behind. This check finds such
-    /// sessions. It returns the changes, one for each removed session. A live
-    /// session stays.
+    /// The function reads the table once. A process that ends can leave its
+    /// file behind. The function removes each such stale session from the
+    /// board and from the directory. A stopped process is live, thus its file
+    /// stays. For each other session, the function gives the run status to the
+    /// board, so a stop shows as `frozen` and a continue shows the state of
+    /// the file again. It returns the changes: one for each removed session,
+    /// and one for each freeze or thaw.
     pub fn on_tick(
         &self,
         board: &mut Board,
@@ -117,10 +121,20 @@ impl Sync {
             .into_iter()
             .filter_map(|pid| Some((pid, board.get(pid)?.file.started_at)))
             .collect();
+        let found = survey(&sessions, clock);
         let mut changes = Vec::new();
-        for pid in survey(&sessions, clock).stale {
-            let _removed = store::remove_if_stale(&self.state_dir, pid, clock);
-            changes.extend(board.remove(pid, now));
+        for (pid, _) in &sessions {
+            if found.stale.contains(pid) {
+                let _removed = store::remove_if_stale(&self.state_dir, *pid, clock);
+                changes.extend(board.remove(*pid, now));
+            } else {
+                let run = if found.stopped.contains(pid) {
+                    RunStatus::Stopped
+                } else {
+                    RunStatus::Running
+                };
+                changes.extend(board.set_run_status(*pid, run, now));
+            }
         }
         changes
     }
