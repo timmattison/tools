@@ -233,8 +233,9 @@ impl Board {
     /// Set the run status of the session with the pid. The function gives
     /// `None` when the board does not hold the pid, or when the session has
     /// the run status already. A freeze and a thaw are each a change of state.
-    /// The time in the state starts again at `now`, the time of the read that saw the
-    /// change. The change goes into the log, and the handled mark goes away.
+    /// The time in the state starts again at `now`, the time of the read that
+    /// saw the change. The change goes into the log, and the handled mark goes
+    /// away.
     pub fn set_run_status(&mut self, pid: Pid, run: RunStatus, now: EpochMillis) -> Option<Change> {
         let session = self.sessions.get_mut(&pid)?;
         if session.run == run {
