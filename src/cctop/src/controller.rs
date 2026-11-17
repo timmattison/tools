@@ -5,6 +5,7 @@ use crossterm::event::Event;
 use proctree::Pid;
 
 use crate::app::{Action, App};
+use crate::board::Change;
 use crate::focus::{FocusReport, FocusTarget};
 use crate::liveness::ProcessClock;
 use crate::notification::needs_you_message;
@@ -87,18 +88,17 @@ impl Controller {
                 let changes =
                     self.sync
                         .on_dir_event(self.app.board_mut(), event, self.clock.as_mut(), now);
-                let needs_you: Vec<Pid> = changes
+                let needs_you: Vec<&Change> = changes
                     .iter()
                     .filter(|change| change.is_needs_you())
-                    .map(|change| change.pid)
                     .collect();
-                self.app.on_needs_you(&needs_you, now);
+                let pids: Vec<Pid> = needs_you.iter().map(|change| change.pid).collect();
+                self.app.on_needs_you(&pids, now);
                 if !self.notify {
                     return Vec::new();
                 }
-                changes
-                    .iter()
-                    .filter(|change| change.is_needs_you())
+                needs_you
+                    .into_iter()
                     .map(|change| Effect::Notify(needs_you_message(change)))
                     .collect()
             }
