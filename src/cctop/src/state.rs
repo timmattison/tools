@@ -64,7 +64,13 @@ impl PaneState {
     /// in a Zellij pane it draws 1 column wide.
     #[must_use]
     pub fn marker(self) -> char {
-        '?'
+        match self {
+            PaneState::NeedsYou => '\u{2757}',
+            PaneState::Idle => '\u{1F4A4}',
+            PaneState::Agents => '\u{1F916}',
+            PaneState::Shells => '\u{1F41A}',
+            PaneState::Working => '\u{1F3C3}',
+        }
     }
 
     /// The place of the state in the sort order. A low rank sorts first.
