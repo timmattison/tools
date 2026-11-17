@@ -43,9 +43,10 @@ impl Sync {
 
     /// Load the live sessions into `board`. This is the first read.
     ///
-    /// The function logs no change. It removes the file of each stale
-    /// session, and it does not load that session. It skips a file that it
-    /// cannot read.
+    /// The function reads the process table once. It logs no change. It
+    /// removes the file of each stale session, and it does not load that
+    /// session. It loads a stopped session as `frozen` since `now`. It skips
+    /// a file that it cannot read.
     ///
     /// # Errors
     ///
@@ -68,7 +69,6 @@ impl Sync {
             .map(|file| (file.pid, file.started_at))
             .collect();
         let found = survey(&sessions, clock);
-        let _ = now;
         for file in files {
             if found.stale.contains(&file.pid) {
                 // A new process can have reused the pid since the first read. Its
@@ -77,7 +77,11 @@ impl Sync {
                 continue;
             }
             let name = registry::session_name(&self.sessions_dir, file.pid);
-            board.load(file, name);
+            if found.stopped.contains(&file.pid) {
+                board.load_stopped(file, name, now);
+            } else {
+                board.load(file, name);
+            }
         }
         Ok(())
     }
