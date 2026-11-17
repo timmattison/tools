@@ -100,7 +100,7 @@ When a session changes to `needs-you`, cctop moves the selection to its row at o
 
 ### The hold
 
-A key press holds the jump for 2 seconds. When you pressed a key less than 2 seconds before the change, the selection does not move yet. Each key press starts the hold again. A key release does not. The first tick after the end of the hold moves the selection. cctop ticks each second, thus the jump comes at most 3 seconds after your last key press.
+A key press holds the jump for 2 seconds. When you pressed a key less than 2 seconds before the change, the selection does not move yet. Each key press starts the hold again. A key release does not. The first tick after the end of the hold moves the selection. cctop ticks each second, thus the jump comes at most 3 seconds after your last key press. If the system clock moves back during the hold, cctop starts the hold again at the new time, thus the jump still comes.
 
 The hold prevents two errors:
 
