@@ -128,12 +128,12 @@ pub struct Exemption {
 
 /// Every use of an entry spelling that is deliberate.
 ///
-/// The first three entries are final. The entries after the comment line are
-/// temporary: each one leaves when its tool moves onto `altscreen`.
+/// Each entry is final. Two cover `altscreen` itself, the one entrance, and one
+/// covers the pty tests of `krt`.
 ///
 /// Public so a test can measure the list against what the repository holds. An
 /// entry that matches nothing is reported by [`Report::unused_exemptions`].
-pub const EXEMPTIONS: [Exemption; 4] = [
+pub const EXEMPTIONS: [Exemption; 3] = [
     Exemption {
         file: "src/altscreen/src/lib.rs",
         spelling: "EnterAlternateScreen",
@@ -149,12 +149,6 @@ pub const EXEMPTIONS: [Exemption; 4] = [
         spelling: "CSI ?1049 h",
         reason: "the pty tests search the output of `krt` for the entry sequence; \
                  they write to no user terminal",
-    },
-    // Each temporary entry below leaves when its tool moves onto `altscreen`.
-    Exemption {
-        file: "src/krt/src/live.rs",
-        spelling: "EnterAlternateScreen",
-        reason: "moves onto altscreen in issue #593",
     },
 ];
 
