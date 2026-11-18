@@ -885,6 +885,22 @@ mod tests {
     }
 
     #[test]
+    fn h_on_a_frozen_row_tells_that_the_session_is_frozen() {
+        let mut app = App::new();
+        app.board_mut().load_stopped(
+            file(10, "dir10", PaneState::Idle, 10),
+            None,
+            EpochMillis::new(500),
+        );
+        app.handle_key(press(KeyCode::Char('h')), KEY_TIME);
+        assert_eq!(
+            app.status(),
+            Some("Cannot mark dir10 as handled: the session is frozen")
+        );
+        assert!(!is_handled(&app, 10));
+    }
+
+    #[test]
     fn h_on_a_session_that_does_not_wait_for_the_person_marks_nothing() {
         for state in [PaneState::Working, PaneState::Agents, PaneState::Shells] {
             let mut app = app_with(&[(10, PaneState::NeedsYou), (11, state), (12, state)]);
