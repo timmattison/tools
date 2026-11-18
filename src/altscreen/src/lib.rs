@@ -16,6 +16,10 @@
 //!   shell screen, where the user can read it.
 //! - The session never asks the terminal for the cursor position.
 //!
+//! With the `ratatui` feature, `RatatuiSession` also gives a ratatui
+//! `Terminal` over crossterm. The terminal is made after the erase, so its
+//! empty back buffer agrees with the blank screen.
+//!
 //! # Example
 //!
 //! ```no_run

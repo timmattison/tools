@@ -4,6 +4,7 @@ use std::io::{self, Stdout};
 use std::sync::Arc;
 
 use ratatui::backend::{Backend, CrosstermBackend};
+use ratatui::layout::Rect;
 use ratatui::Terminal;
 
 use crate::{Options, Port, Session};
@@ -32,6 +33,8 @@ use crate::{Options, Port, Session};
 pub struct RatatuiSession<B: Backend = CrosstermBackend<Stdout>> {
     /// This field comes first, so it drops before the session restores.
     terminal: Terminal<B>,
+    /// Held for its `Drop`, which restores the terminal.
+    #[expect(dead_code, reason = "held for its Drop, which restores the terminal")]
     session: Session,
 }
 
@@ -65,7 +68,15 @@ where
     #[doc(hidden)]
     pub fn enter_on(port: Arc<dyn Port>, backend: B, options: Options) -> io::Result<Self> {
         let session = Session::enter_on(port, options)?;
-        let terminal = Terminal::new(backend).map_err(io::Error::other)?;
+        let mut terminal = Terminal::new(backend).map_err(io::Error::other)?;
+        // Resizing to the current size erases the screen through the backend and
+        // resets the back buffer, with no query. `Terminal::clear` would do the
+        // same, but it asks the terminal for the cursor position and waits for
+        // an answer that a recording or a slow link never gives.
+        let size = terminal.size().map_err(io::Error::other)?;
+        terminal
+            .resize(Rect::new(0, 0, size.width, size.height))
+            .map_err(io::Error::other)?;
         Ok(Self { terminal, session })
     }
 }
