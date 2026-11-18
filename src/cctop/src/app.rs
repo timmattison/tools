@@ -190,9 +190,10 @@ impl App {
     /// has no mark and takes a mark. [`crate::board::Session::takes_handled_mark`] refuses a
     /// frozen session, so the cursor skips it. If no such row exists,
     /// the cursor stays on the marked session. A removed mark moves the
-    /// session up, and the cursor goes with the session. A session whose state
-    /// takes no mark keeps its row and the cursor, and the status text tells
-    /// why.
+    /// session up, and the cursor goes with the session. A frozen session
+    /// keeps its row and the cursor, and the status text tells that it is
+    /// frozen. A session whose state takes no mark keeps its row and the
+    /// cursor, and the status text tells why.
     fn toggle_handled_selected(&mut self) {
         let selected = self.selected_index().and_then(|index| {
             let session = self.board.rows().get(index).copied()?;
@@ -226,6 +227,9 @@ impl App {
                     "Cannot mark {label} as handled: only {} sessions take a mark",
                     states_that_take_a_mark()
                 ));
+            }
+            Some(HandledToggle::Frozen) => {
+                self.status = Some(format!("Cannot mark {label} as handled: {FROZEN_NOTE}"));
             }
             None => {}
         }

@@ -38,6 +38,9 @@ pub enum HandledToggle {
     /// The session takes no handled mark, see [`Session::takes_handled_mark`].
     /// The board does not change.
     Refused,
+    /// The session is frozen, and a frozen session takes no handled mark.
+    /// The board does not change.
+    Frozen,
 }
 
 /// The text that follows the state of a handled session on the screen.
@@ -368,13 +371,18 @@ impl Board {
     /// The function gives `Some(HandledToggle::Marked)` when the session now
     /// has a mark, `Some(HandledToggle::Unmarked)` when it removed the mark,
     /// and `None` when the board does not hold the pid. It gives
-    /// `Some(HandledToggle::Refused)` and changes nothing when the session has
-    /// no mark and takes none, see [`Session::takes_handled_mark`].
+    /// `Some(HandledToggle::Frozen)` and changes nothing when the session has
+    /// no mark and is frozen. It gives `Some(HandledToggle::Refused)` and
+    /// changes nothing when the session has no mark, is not frozen, and takes
+    /// none, see [`Session::takes_handled_mark`].
     /// A new mark sorts the row below each other row in its state.
     pub fn toggle_handled(&mut self, pid: Pid) -> Option<HandledToggle> {
         let session = self.sessions.get_mut(&pid)?;
         if session.handled.take().is_some() {
             return Some(HandledToggle::Unmarked);
+        }
+        if session.is_frozen() {
+            return Some(HandledToggle::Frozen);
         }
         if !session.takes_handled_mark() {
             return Some(HandledToggle::Refused);
@@ -1115,7 +1123,7 @@ mod tests {
             let mut board = frozen_board(state);
             assert_eq!(
                 board.toggle_handled(Pid::new(7)),
-                Some(HandledToggle::Refused),
+                Some(HandledToggle::Frozen),
                 "{state:?}"
             );
             let session = board.get(Pid::new(7)).expect("on the board");
