@@ -303,4 +303,62 @@ mod tests {
         );
         let _ = std::panic::take_hook();
     }
+
+    const DISABLE_MOUSE: &str = "\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1002l\x1b[?1000l";
+    const SHOW: &str = "\x1b[?25h";
+    const LEAVE: &str = "\x1b[?1049l";
+
+    #[test]
+    fn drop_restores_mouse_cursor_screen_and_raw_mode_in_order() {
+        let _lock = PANIC_HOOK_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        let (port, events) = fake(|_| {});
+        let session = Session::enter_on(port, Options::default().mouse_capture(true)).unwrap();
+        let entered = snapshot(&events).len();
+        drop(session);
+        assert_eq!(
+            snapshot(&events)[entered..],
+            [
+                write(DISABLE_MOUSE),
+                write(SHOW),
+                write(LEAVE),
+                Event::RawOff
+            ]
+        );
+    }
+
+    #[test]
+    fn a_failed_show_cursor_write_does_not_skip_the_other_steps() {
+        let _lock = PANIC_HOOK_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        let (port, events) = fake(|p| p.fail_write_containing = Some(b"25h"));
+        let session = Session::enter_on(port, Options::default()).unwrap();
+        let entered = snapshot(&events).len();
+        drop(session);
+        assert_eq!(
+            snapshot(&events)[entered..],
+            [write(SHOW), write(LEAVE), Event::RawOff]
+        );
+    }
+
+    #[test]
+    fn a_failed_raw_off_is_ignored_on_drop() {
+        let _lock = PANIC_HOOK_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        let (port, events) = fake(|p| p.fail_raw_off = true);
+        let session = Session::enter_on(port, Options::default()).unwrap();
+        let entered = snapshot(&events).len();
+        drop(session);
+        assert_eq!(
+            snapshot(&events)[entered..],
+            [write(SHOW), write(LEAVE), Event::RawOff]
+        );
+    }
+
+    #[test]
+    fn drop_without_raw_mode_sends_no_raw_off() {
+        let _lock = PANIC_HOOK_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        let (port, events) = fake(|_| {});
+        let session = Session::enter_on(port, Options::default().raw_mode(false)).unwrap();
+        let entered = snapshot(&events).len();
+        drop(session);
+        assert_eq!(snapshot(&events)[entered..], [write(SHOW), write(LEAVE)]);
+    }
 }
