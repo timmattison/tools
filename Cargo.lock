@@ -7739,6 +7739,7 @@ dependencies = [
 name = "seescc"
 version = "0.1.0"
 dependencies = [
+ "altscreen",
  "anyhow",
  "buildinfo",
  "childenv",
