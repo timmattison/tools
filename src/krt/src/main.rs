@@ -2324,14 +2324,19 @@ fn screen_of(
     config: &ResolvedConfig,
     start: &RunRecord,
     path: &Path,
-) -> Result<(Box<dyn live::Screen>, Option<live::TerminalGuard>), TraceFailure> {
+) -> Result<(Box<dyn live::Screen>, Option<altscreen::Session>), TraceFailure> {
     if display_of(config.headless, std::io::stdout().is_terminal()) == Display::Headless {
         return Ok((
             Box::new(live::Headless::new(std::io::stdout(), live::SystemClock)),
             None,
         ));
     }
-    let guard = live::TerminalGuard::enter().map_err(|error| {
+    // The session takes raw mode, so a key of the reader reaches the run, and
+    // the alternate screen, so the lines that stood in the terminal come back at
+    // the end. It hides the cursor, which a table that redraws ten times each
+    // second drags across itself. Its panic hook puts the terminal back before
+    // the message of a panic prints, so the reader reads that message.
+    let guard = altscreen::Session::enter(altscreen::Options::default()).map_err(|error| {
         TraceFailure::new(
             &format!("the live table did not take the terminal: {error}"),
             EXIT_FAILURE,
