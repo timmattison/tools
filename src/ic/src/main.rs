@@ -1315,30 +1315,6 @@ fn update_adaptive_fps(
     *last_display_time = Instant::now();
 }
 
-/// RAII guard that restores the main screen buffer and shows the cursor on drop.
-/// This ensures terminal state is restored even if video playback panics.
-struct AlternateScreenGuard;
-
-impl AlternateScreenGuard {
-    fn enter() -> Result<Self> {
-        // Switch to alternate screen buffer and hide cursor for clean full-screen rendering.
-        // The alternate screen buffer prevents scrollback accumulation and eliminates
-        // ghost progress bars caused by terminal scrolling during image display.
-        print!("\x1b[?1049h\x1b[?25l");
-        io::stdout().flush()?;
-        Ok(Self)
-    }
-}
-
-impl Drop for AlternateScreenGuard {
-    fn drop(&mut self) {
-        // Restore main screen buffer and show cursor.
-        // Ignore flush errors — best effort during cleanup.
-        print!("\x1b[?25h\x1b[?1049l");
-        let _ = io::stdout().flush();
-    }
-}
-
 fn play_video_simple(
     file_path: &Path,
     _frame_duration: Duration,
@@ -1349,7 +1325,8 @@ fn play_video_simple(
     let terminal_caps = Capabilities::detect_by_asking();
     let (_raw_mode, input_rx, _input_handle) = setup_video_controls(&terminal_caps)?;
 
-    let _screen_guard = AlternateScreenGuard::enter()?;
+    // Termion owns raw mode, so the session leaves it alone.
+    let _session = altscreen::Session::enter(altscreen::Options::default().raw_mode(false))?;
 
     play_video_inner(file_path, args, duration, fps, &input_rx)
 }

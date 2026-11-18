@@ -9,6 +9,7 @@ name = "ic"
 path = "src/main.rs"
 
 [dependencies]
+altscreen.workspace = true
 anyhow.workspace = true
 buildinfo.workspace = true
 childenv.workspace = true
