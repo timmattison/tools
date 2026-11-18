@@ -9,6 +9,7 @@ name = "diskhog"
 path = "src/main.rs"
 
 [dependencies]
+altscreen = { workspace = true, features = ["ratatui"] }
 childenv.workspace = true
 sysinfo.workspace = true
 tokio.workspace = true
