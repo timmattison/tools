@@ -1,11 +1,7 @@
 use buildinfo::version_string;
 use chrono::{DateTime, Datelike, Local, NaiveDateTime, TimeZone};
 use clap::Parser;
-use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-};
+use crossterm::event::{self, Event, KeyCode};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout},
@@ -80,28 +76,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         exit(1);
     }
 
-    // Setup terminal
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-
-    // Clear the screen before displaying anything
-    terminal.clear()?;
+    // Setup terminal. The session restores it on every exit, a panic included.
+    let mut session =
+        altscreen::RatatuiSession::enter(altscreen::Options::default().mouse_capture(true))?;
 
     // Create app and run
     let app = App::new(target_time, cli.command);
-    let command_to_run = run_app(&mut terminal, app)?;
+    let command_to_run = run_app(session.terminal(), app)?;
 
     // Always restore terminal before doing anything else
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
+    drop(session);
 
     // Now execute the command if we have one
     if let Some(command) = command_to_run {
