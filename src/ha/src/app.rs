@@ -171,9 +171,10 @@ where
         }
     }
 
-    /// Runs the loop until the user quits, or until the first refresh cycle reads no target. A cycle that
-    /// ends with a spent API budget does not count, and the next cycle
-    /// decides. The loop draws no frame after it finds that.
+    /// Runs the loop until the user quits, or until the first refresh cycle
+    /// reads no target. A cycle that ends with a spent API budget does not
+    /// count, and the next cycle decides. The loop draws no frame after it
+    /// finds that.
     ///
     /// # Errors
     /// Returns [`RunError::Terminal`] when the terminal cannot draw or read.
