@@ -5,6 +5,11 @@ use std::path::{Path, PathBuf};
 
 use crate::ClipboardError;
 
+/// The permission bits that let a process run a file.
+#[cfg(unix)]
+const EXECUTE_BITS: u32 = 0o111;
+
+/// The commands on one search path.
 pub(crate) struct Commands {
     search_path: Option<OsString>,
 }
@@ -18,9 +23,36 @@ impl Commands {
         Self { search_path: None }
     }
 
-    pub(crate) fn find(&self, _name: &str) -> Option<PathBuf> {
-        let _ = &self.search_path;
-        None
+    /// The first program called `name` on the search path.
+    ///
+    /// An entry that is not an absolute path is skipped. A shell reads an empty
+    /// entry as the current directory, and this crate must not run `./pbcopy`.
+    /// A program must be a regular file with an execute bit.
+    pub(crate) fn find(&self, name: &str) -> Option<PathBuf> {
+        let search_path = self.search_path.as_ref()?;
+        std::env::split_paths(search_path)
+            .filter(|dir| dir.is_absolute())
+            .map(|dir| dir.join(name))
+            .find(|candidate| is_program(candidate))
+    }
+}
+
+/// Whether `path` is a regular file that a process can run.
+fn is_program(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & EXECUTE_BITS != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
     }
 }
 
