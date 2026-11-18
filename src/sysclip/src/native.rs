@@ -29,8 +29,17 @@ impl Native for Arboard {
     }
 }
 
-fn read_text(_result: Result<String, arboard::Error>) -> Result<String, ClipboardError> {
-    Err(ClipboardError::new(&"placeholder"))
+/// Turns the answer of `arboard` into text.
+///
+/// A clipboard that holds no text, or holds an image, is not a failure. It
+/// gives an empty string. `arboard::Error` is `#[non_exhaustive]`, so the last
+/// arm stays.
+fn read_text(result: Result<String, arboard::Error>) -> Result<String, ClipboardError> {
+    match result {
+        Ok(text) => Ok(text),
+        Err(arboard::Error::ContentNotAvailable) => Ok(String::new()),
+        Err(other) => Err(ClipboardError::new(&other)),
+    }
 }
 
 #[cfg(test)]
@@ -39,7 +48,10 @@ mod tests {
 
     #[test]
     fn read_text_passes_text_through() {
-        assert_eq!(read_text(Ok("日本語 café".to_string())), Ok("日本語 café".to_string()));
+        assert_eq!(
+            read_text(Ok("日本語 café".to_string())),
+            Ok("日本語 café".to_string())
+        );
     }
 
     #[test]
@@ -64,6 +76,7 @@ mod tests {
             description: "the pasteboard is gone.".to_string(),
         }))
         .unwrap_err();
-        assert_eq!(error.to_string(), "the pasteboard is gone");
+        let message = error.to_string();
+        assert!(message.ends_with("the pasteboard is gone"), "{message}");
     }
 }

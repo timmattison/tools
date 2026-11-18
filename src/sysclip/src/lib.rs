@@ -19,8 +19,25 @@ pub const PASTE_COMMAND: &str = "pbpaste";
 pub struct ClipboardError(String);
 
 impl ClipboardError {
+    /// The failure that `cause` names.
+    ///
+    /// The space around the cause goes away, and so does one period at the end
+    /// of it. `arboard` writes a whole sentence with a period on it, and this
+    /// crate joins causes into longer messages. A cause that is only a period
+    /// stays as it is, because an error with no cause at all reads as a bug in
+    /// the tool.
     pub(crate) fn new(cause: &impl fmt::Display) -> Self {
-        Self(cause.to_string())
+        let written = cause.to_string();
+        let clause = written.trim();
+        let shortened = clause.strip_suffix('.').unwrap_or(clause);
+        Self(
+            if shortened.is_empty() {
+                clause
+            } else {
+                shortened
+            }
+            .to_string(),
+        )
     }
 }
 
@@ -71,12 +88,18 @@ mod tests {
 
     #[test]
     fn error_new_trims_the_cause() {
-        assert_eq!(ClipboardError::new(&"  spaced out \n").to_string(), "spaced out");
+        assert_eq!(
+            ClipboardError::new(&"  spaced out \n").to_string(),
+            "spaced out"
+        );
     }
 
     #[test]
     fn error_new_strips_one_trailing_period() {
-        assert_eq!(ClipboardError::new(&"a sentence.").to_string(), "a sentence");
+        assert_eq!(
+            ClipboardError::new(&"a sentence.").to_string(),
+            "a sentence"
+        );
         assert_eq!(ClipboardError::new(&"dots..").to_string(), "dots.");
     }
 

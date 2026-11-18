@@ -2,9 +2,9 @@
 
 use std::ffi::OsString;
 
-use crate::ClipboardError;
 use crate::command::Commands;
 use crate::native::Native;
+use crate::ClipboardError;
 
 pub(crate) struct Environment {
     pub(crate) mosh_open_socket: Option<OsString>,
@@ -20,7 +20,9 @@ impl Environment {
     }
 
     fn is_mosh_session(&self) -> bool {
-        self.mosh_open_socket.as_ref().is_some_and(|v| !v.is_empty())
+        self.mosh_open_socket
+            .as_ref()
+            .is_some_and(|v| !v.is_empty())
     }
 }
 
