@@ -36,7 +36,7 @@ pub async fn play(file_path: PathBuf, speed: f64, paused: bool) -> Result<()> {
     }
 
     // The session restores the terminal on every exit, including `?` and panics.
-    let _session = altscreen::Session::enter(altscreen::Options::default())?;
+    let session = altscreen::Session::enter(altscreen::Options::default())?;
 
     let mut current_event_idx = 0;
     let mut is_paused = paused;
@@ -117,7 +117,7 @@ pub async fn play(file_path: PathBuf, speed: f64, paused: bool) -> Result<()> {
     }
 
     // The session restores the terminal on drop, and the status prints after it.
-    drop(_session);
+    drop(session);
 
     if current_event_idx >= recording.events.len() {
         println!("\nPlayback complete!");
