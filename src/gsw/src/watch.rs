@@ -18,12 +18,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::cursor::{Hide, MoveTo, Show};
+use crossterm::cursor::MoveTo;
 use crossterm::event::{self, Event as CtEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
-};
+use crossterm::terminal::{Clear, ClearType};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
@@ -1677,7 +1675,7 @@ fn listed_paths(watched: &RefCell<Watched>) -> Vec<WorktreePath> {
 /// started from ([`Snapshot::log_start`]), and never from the live HEAD. The
 /// resize reads nothing when the cached log is complete
 /// ([`Snapshot::log_complete`]) or has no start.
-/// The [`TerminalGuard`] restores the main screen and cursor on every exit path.
+/// The `altscreen` session restores the main screen and cursor on every exit path.
 ///
 /// Takes the [`RepoHandle`] **by value**: watch mode owns the repository for
 /// the rest of the process. The handle moves into the [`Watched`] of the home
@@ -1696,14 +1694,14 @@ pub(crate) fn run(
     cfg: &RenderConfig,
     pulls: Option<PullSettings>,
 ) -> Result<()> {
-    // Before the guard takes the screen, so a refusal prints on the screen the
-    // user started from, and not on the alternate screen that the guard
+    // Before the session takes the screen, so a refusal prints on the screen the
+    // user started from, and not on the alternate screen that the session
     // clears when it goes.
     let start = StartPoint {
         home: resolve_home(&handle)?,
         branch: StartBranch::read(handle.repo()),
     };
-    let _guard = TerminalGuard::enter()?;
+    let _session = altscreen::Session::enter(altscreen::Options::default())?;
 
     // Seed the cache with one git walk and paint the first frame at offset 0,
     // byte-identical to a one-shot render of the same state. That frame's
@@ -4457,63 +4455,6 @@ fn spawn_event_reader(tx: Sender<Event>) {
             }
         }
     });
-}
-
-/// A panic hook, matching what [`std::panic::take_hook`] returns. Held in an
-/// [`Arc`] so the installed wrapper and [`TerminalGuard::drop`] can both reach
-/// the same pre-watch hook — the wrapper to chain to it, `Drop` to reinstate it.
-type PanicHook = Arc<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send>;
-
-/// RAII guard for the alternate screen, hidden cursor, and raw mode. Restores
-/// the main screen and cursor on drop *and* via a panic hook, so no exit path
-/// — normal return, propagated error, or panic — can leave the terminal in a
-/// wedged state. The panic hook restores *before* the default handler prints,
-/// so the panic message lands on the main screen rather than the torn-down
-/// alternate one. On drop the pre-watch panic hook is reinstated, so our
-/// terminal-restoring wrapper never lingers as global process state once the
-/// guard is gone.
-struct TerminalGuard {
-    /// The panic hook in effect before [`TerminalGuard::enter`] wrapped it,
-    /// reinstated on drop. `Option` only so `Drop` can move it back out.
-    previous_hook: Option<PanicHook>,
-}
-
-impl TerminalGuard {
-    fn enter() -> Result<Self> {
-        enable_raw_mode()?;
-        execute!(io::stdout(), EnterAlternateScreen, Hide)?;
-
-        let previous: PanicHook = Arc::from(std::panic::take_hook());
-        let chained = Arc::clone(&previous);
-        std::panic::set_hook(Box::new(move |info| {
-            restore_terminal();
-            (*chained)(info);
-        }));
-
-        Ok(TerminalGuard {
-            previous_hook: Some(previous),
-        })
-    }
-}
-
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
-        restore_terminal();
-        // Reinstate the pre-watch panic hook so our terminal-restoring wrapper
-        // doesn't outlive the guard as global process state.
-        if let Some(previous) = self.previous_hook.take() {
-            std::panic::set_hook(Box::new(move |info| (*previous)(info)));
-        }
-    }
-}
-
-/// Best-effort restore of the terminal to its pre-watch state. Idempotent and
-/// failure-tolerant: both the panic hook and `Drop` may call it (a panic runs
-/// the hook, then unwinding runs `Drop`), and a partially-entered terminal
-/// must still be cleaned up, so every step is independently ignored on error.
-fn restore_terminal() {
-    let _ = disable_raw_mode();
-    let _ = execute!(io::stdout(), Show, LeaveAlternateScreen);
 }
 
 #[cfg(test)]
