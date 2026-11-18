@@ -130,7 +130,12 @@ impl Session {
         if options.raw_mode {
             port.enable_raw_mode()?;
         }
-        port.write(entry_bytes(options).as_bytes())?;
+        if let Err(error) = port.write(entry_bytes(options).as_bytes()) {
+            if options.raw_mode {
+                let _ = port.disable_raw_mode();
+            }
+            return Err(error);
+        }
         Ok(Session { port, options })
     }
 }
