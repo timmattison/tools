@@ -1,0 +1,12 @@
+[package]
+name = "altscreen"
+version = "0.1.0"
+edition.workspace = true
+description = "The one entrance to the alternate screen: it clears the screen on entry and restores the terminal on every exit"
+license = "MIT"
+
+[dependencies]
+crossterm.workspace = true
+
+[lints]
+workspace = true

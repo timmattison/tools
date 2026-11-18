@@ -227,6 +227,7 @@ op-cache = { path = "src/op-cache" }
 clipboardmon = { path = "src/clipboardmon" }
 faulte = { path = "src/faulte" }
 filewalker = { path = "src/filewalker" }
+altscreen = { path = "src/altscreen" }
 ghrest = { path = "src/ghrest" }
 gitscratch = { path = "src/gitscratch" }
 httpfile = { path = "src/httpfile" }
