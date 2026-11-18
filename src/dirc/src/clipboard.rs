@@ -8,18 +8,13 @@
 //! points [`open_named`] at a file of its own and touches nothing the machine
 //! shares.
 //!
-//! # What a write of the clipboard leaves behind
+//! # The clipboard of the machine
 //!
-//! [`SystemClipboard::write`] calls `set_text` and nothing more. On X11 the
-//! content of the clipboard belongs to the process that owns the selection, so
-//! a tool that writes the clipboard and exits at once loses what it wrote.
-//! `arboard` answers that with `SetExtLinux::wait()`, which holds the selection
-//! until another program takes it. That call blocks, and a `dirc` that blocks
-//! never gives the shell its prompt back. `clipboard-random` and `clipboardmon`
-//! are the other tools of this workspace that write the clipboard, and both
-//! make the same trade: the plain call, and a clipboard that a bare X11 session
-//! can drop. A desktop with a clipboard manager keeps the text, because the
-//! manager takes the selection.
+//! [`SystemClipboard`] is the clipboard of the `sysclip` crate. In a mosh-rs
+//! session, `sysclip` sends the text through the `pbcopy` and `pbpaste` shims
+//! to the clipboard of the client. Everywhere else it opens the clipboard of
+//! the machine first. The crate doc of `sysclip` holds the order rule and the
+//! X11 trade that a write of the clipboard makes.
 
 use std::ffi::OsStr;
 use std::fmt;
@@ -59,8 +54,8 @@ pub trait Clipboard {
     fn write(&mut self, text: &str) -> Result<(), ClipboardError>;
 }
 
-/// The clipboard of the machine.
-pub struct SystemClipboard(arboard::Clipboard);
+/// The clipboard of the user, through `sysclip`.
+pub struct SystemClipboard(sysclip::Clipboard);
 
 /// A clipboard that is one file.
 ///
@@ -96,19 +91,22 @@ impl ClipboardError {
 }
 
 impl SystemClipboard {
-    /// Opens the clipboard of the machine.
+    /// Opens the clipboard of the user.
     ///
-    /// The clipboard is opened once and kept. The Go tool calls
-    /// `clipboard.Init()` before it does anything and stops when that fails, so
-    /// a `dirc` that cannot reach the clipboard says so before it does any
-    /// work.
+    /// The clipboard comes from `sysclip`, and it is opened once and kept. The
+    /// Go tool calls `clipboard.Init()` before it does anything and stops when
+    /// that fails, so a `dirc` that cannot reach the clipboard says so before
+    /// it does any work. In a mosh-rs session (`MOSH_OPEN_SOCKET` is set) the
+    /// text goes through the `pbcopy` and `pbpaste` shims to the clipboard of
+    /// the client.
     ///
     /// # Errors
     ///
-    /// Gives [`ClipboardError`] when the clipboard cannot be opened. A machine
-    /// with no display is such a machine, and so is a session over SSH.
+    /// Gives [`ClipboardError`] when the clipboard of the machine cannot be
+    /// opened and `PATH` holds no `pbcopy` and no `pbpaste`, for example on a
+    /// Linux server with no display.
     pub fn new() -> Result<Self, ClipboardError> {
-        arboard::Clipboard::new()
+        sysclip::Clipboard::open()
             .map(Self)
             .map_err(|cause| ClipboardError::new(&cause))
     }
@@ -116,16 +114,16 @@ impl SystemClipboard {
 
 impl Clipboard for SystemClipboard {
     fn read(&mut self) -> Result<String, ClipboardError> {
-        from_arboard(self.0.get_text())
+        self.0.read().map_err(|cause| ClipboardError::new(&cause))
     }
 
-    /// Puts `text` on the clipboard of the machine.
+    /// Puts `text` on the clipboard of the user.
     ///
-    /// The plain `set_text`, with no `SetExtLinux`. The module comment says
-    /// what that costs on X11 and why the other choice costs more.
+    /// The crate doc of `sysclip` says what a write costs on X11 and why the
+    /// other choice costs more.
     fn write(&mut self, text: &str) -> Result<(), ClipboardError> {
         self.0
-            .set_text(text)
+            .write(text)
             .map_err(|cause| ClipboardError::new(&cause))
     }
 }
@@ -219,27 +217,6 @@ pub fn open() -> Result<Box<dyn Clipboard>, ClipboardError> {
 /// because a Unix kernel takes a path that no Rust string holds.
 fn named_file(value: Option<&OsStr>) -> Option<&OsStr> {
     value.filter(|named| !named.to_string_lossy().trim().is_empty())
-}
-
-/// The read `result` as text.
-///
-/// Pure, so the mapping is tested without a clipboard. The one judgment in it
-/// is `ContentNotAvailable`: `arboard` says that for a clipboard with nothing
-/// in it and for a clipboard that holds an image, and neither of them is a
-/// failure to a tool that wants a path.
-///
-/// # Errors
-///
-/// Gives [`ClipboardError`] for every other failure.
-fn from_arboard(result: Result<String, arboard::Error>) -> Result<String, ClipboardError> {
-    match result {
-        Ok(text) => Ok(text),
-        Err(arboard::Error::ContentNotAvailable) => Ok(String::new()),
-        // `arboard::Error` is `#[non_exhaustive]`, so this arm is required and
-        // a new variant of a later version arrives here as a failure that
-        // names itself, rather than as a build that stops.
-        Err(cause) => Err(ClipboardError::new(&cause)),
-    }
 }
 
 #[cfg(test)]
@@ -348,46 +325,5 @@ mod tests {
         // that dropped it here opens the clipboard of the machine instead.
         let not_text = OsString::from_vec(vec![b'/', 0xff, b'x']);
         assert_eq!(named_file(Some(&not_text)), Some(not_text.as_os_str()));
-    }
-
-    #[test]
-    fn text_from_the_clipboard_arrives_whole() {
-        assert_eq!(from_arboard(Ok(COPIED.to_string())), Ok(COPIED.to_string()));
-    }
-
-    #[test]
-    fn a_clipboard_with_no_content_holds_nothing() {
-        assert_eq!(
-            from_arboard(Err(arboard::Error::ContentNotAvailable)),
-            Ok(String::new())
-        );
-    }
-
-    #[test]
-    fn a_platform_with_no_clipboard_cannot_be_read() {
-        let message = from_arboard(Err(arboard::Error::ClipboardNotSupported))
-            .expect_err("the platform has no clipboard")
-            .to_string();
-        assert!(message.contains("not supported"), "{message}");
-        // `arboard` writes a whole sentence, period included. Every other
-        // message of `dirc` ends without one.
-        assert!(!message.ends_with('.'), "{message}");
-    }
-
-    #[test]
-    fn an_unknown_failure_carries_its_description() {
-        let message = from_arboard(Err(arboard::Error::Unknown {
-            description: "the window server said no".to_string(),
-        }))
-        .expect_err("the read failed")
-        .to_string();
-        // `arboard` writes its own sentence around the description, so the
-        // test pins the description and the shape of the message, and not the
-        // wording `arboard` puts between them.
-        assert!(
-            message.starts_with("Failed to reach the clipboard: "),
-            "{message}"
-        );
-        assert!(message.contains("the window server said no"), "{message}");
     }
 }
