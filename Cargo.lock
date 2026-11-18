@@ -4111,6 +4111,7 @@ dependencies = [
 name = "ha"
 version = "0.1.0"
 dependencies = [
+ "altscreen",
  "buildinfo",
  "childenv",
  "chrono",

@@ -186,7 +186,7 @@ exit 1
 #[cfg(unix)]
 const BOUND_ON_THE_TERMINAL: &str = r#"alarm(shift @ARGV); open(STDIN, '<&', \*STDOUT) or die "stdin: $!"; open(STDERR, '>&', \*STDOUT) or die "stderr: $!"; exec { $ARGV[0] } @ARGV or die "exec: $!";"#;
 
-/// The bytes that leave the alternate screen. `ratatui::restore` writes them.
+/// The bytes that leave the alternate screen. The restore of `altscreen` writes them.
 #[cfg(unix)]
 const LEAVE_ALTERNATE_SCREEN: &str = "\x1b[?1049l";
 

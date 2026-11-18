@@ -5,6 +5,7 @@ edition.workspace = true
 description = "Hot actions: a self-refreshing terminal view of GitHub Actions runs and merge queues across repositories and owners"
 
 [dependencies]
+altscreen = { workspace = true, features = ["ratatui"] }
 buildinfo.workspace = true
 childenv.workspace = true
 chrono.workspace = true
