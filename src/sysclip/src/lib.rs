@@ -1,4 +1,61 @@
-//! The clipboard of a tool.
+//! The clipboard of a tool, for a machine and for a mosh-rs session.
+//!
+//! # Why this crate exists
+//!
+//! The mosh-rs server puts a `pbcopy` shim and a `pbpaste` shim on the `PATH`
+//! of a session. It also sets `MOSH_OPEN_SOCKET`. Each shim sends the text to
+//! the clipboard of the client computer, where the person sits.
+//!
+//! `arboard` does not know the shims. It opens the clipboard of the server
+//! instead. On a macOS server with no GUI session, that fails with "The
+//! selected clipboard is not supported with the current system configuration".
+//! On a headless Linux server, it waits for an X11 display and times out. On a
+//! Mac server with a GUI login, it works, but it writes the pasteboard of the
+//! wrong machine.
+//!
+//! # The order rule
+//!
+//! 1. In a mosh session, `MOSH_OPEN_SOCKET` is set and it is not empty. The
+//!    native clipboard never opens. Each read runs `pbpaste` and each write
+//!    runs `pbcopy`, both found on `PATH`. A failure of the command is the
+//!    answer. [`Clipboard::open`] fails when `PATH` holds neither command.
+//! 2. Outside a mosh session, the native clipboard goes first. When it fails,
+//!    or when it does not open, and `PATH` holds the command, the command is
+//!    the fallback. When both fail, the message names both causes. When `PATH`
+//!    holds no command, the error of the native clipboard is the error.
+//!
+//! A `PATH` entry that is not an absolute path is skipped. A shell reads an
+//! empty entry as the current directory, and this crate must not run
+//! `./pbcopy`.
+//!
+//! # Why [`Clipboard::open_native`] exists
+//!
+//! A tool that polls the clipboard, such as `clipboardmon`, reads it each 500
+//! ms. The mosh-rs client allows 5 pastes in 10 seconds, and each paste shows
+//! a notification bar. A poll through `pbpaste` would hit that limit at once.
+//! [`Clipboard::open_native`] uses the native clipboard only and never runs a
+//! command.
+//!
+//! # What a write leaves behind
+//!
+//! A write calls `set_text` and nothing more. On X11 the content of the
+//! clipboard belongs to the process that owns the selection. A tool that
+//! writes the clipboard and exits at once loses what it wrote. `arboard`
+//! answers that with `SetExtLinux::wait()`, which holds the selection until
+//! another program takes it. That call blocks, and a tool that blocks never
+//! gives the shell its prompt back. This crate makes the trade of the other
+//! tools of this workspace: the plain call, and a clipboard that a bare X11
+//! session can drop. A desktop with a clipboard manager keeps the text,
+//! because the manager takes the selection.
+//!
+//! # Example
+//!
+//! ```no_run
+//! let mut clipboard = sysclip::Clipboard::open()?;
+//! clipboard.write("hello")?;
+//! assert_eq!(clipboard.read()?, "hello");
+//! # Ok::<(), sysclip::ClipboardError>(())
+//! ```
 
 use std::fmt;
 
@@ -41,11 +98,14 @@ impl ClipboardError {
     }
 }
 
-/// The clipboard.
+/// The clipboard, with the order rule of the crate.
+///
+/// The crate documentation holds the rule. Nothing of `arboard` is public.
 pub struct Clipboard(route::Router<native::Arboard>);
 
 impl Clipboard {
-    /// Opens the clipboard by the order rule.
+    /// Opens the clipboard by the order rule, from the environment of this
+    /// process. It reads `MOSH_OPEN_SOCKET` and `PATH`.
     ///
     /// # Errors
     ///
@@ -54,7 +114,9 @@ impl Clipboard {
         route::Router::open(route::Environment::from_process(), native::Arboard::open).map(Self)
     }
 
-    /// Opens the native clipboard only.
+    /// Opens the native clipboard only. No read or write runs a command.
+    ///
+    /// Use it for a tool that polls the clipboard.
     ///
     /// # Errors
     ///
@@ -63,7 +125,8 @@ impl Clipboard {
         Ok(Self(route::Router::native_only(native::Arboard::open()?)))
     }
 
-    /// The text on the clipboard.
+    /// The text on the clipboard. An empty string means the clipboard holds no
+    /// text.
     ///
     /// # Errors
     ///
