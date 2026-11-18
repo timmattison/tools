@@ -17,6 +17,7 @@
 // move module-doc link resolution to the crate root, silently breaking every
 // intra-doc link inside those headers.
 pub mod alternate_screen;
+pub mod arboard_wall;
 pub mod doc_links;
 pub mod git_env_sweep;
 pub mod target_lints;
