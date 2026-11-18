@@ -229,77 +229,13 @@ impl Port for StdoutPort {
 }
 
 #[cfg(test)]
+pub(crate) mod test_support;
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, PoisonError};
-
-    /// The panic hook is process-global, so each test that enters holds this.
-    static PANIC_HOOK_LOCK: Mutex<()> = Mutex::new(());
-
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    enum Event {
-        RawOn,
-        RawOff,
-        Write(Vec<u8>),
-    }
-
-    #[derive(Default)]
-    struct FakePort {
-        events: Arc<Mutex<Vec<Event>>>,
-        fail_write_containing: Option<&'static [u8]>,
-        fail_raw_off: bool,
-    }
-
-    impl FakePort {
-        fn record(&self, event: Event) {
-            self.events
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push(event);
-        }
-    }
-
-    impl Port for FakePort {
-        fn write(&self, bytes: &[u8]) -> io::Result<()> {
-            self.record(Event::Write(bytes.to_vec()));
-            match self.fail_write_containing {
-                Some(marker) if bytes.windows(marker.len()).any(|w| w == marker) => {
-                    Err(io::Error::other("write failed"))
-                }
-                _ => Ok(()),
-            }
-        }
-
-        fn enable_raw_mode(&self) -> io::Result<()> {
-            self.record(Event::RawOn);
-            Ok(())
-        }
-
-        fn disable_raw_mode(&self) -> io::Result<()> {
-            self.record(Event::RawOff);
-            if self.fail_raw_off {
-                Err(io::Error::other("raw off failed"))
-            } else {
-                Ok(())
-            }
-        }
-    }
-
-    type Events = Arc<Mutex<Vec<Event>>>;
-
-    fn fake(configure: impl FnOnce(&mut FakePort)) -> (Arc<FakePort>, Events) {
-        let mut port = FakePort::default();
-        configure(&mut port);
-        let events = Arc::clone(&port.events);
-        (Arc::new(port), events)
-    }
-
-    fn snapshot(events: &Events) -> Vec<Event> {
-        events
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
-    }
+    use crate::test_support::{fake, snapshot, Event, PANIC_HOOK_LOCK};
+    use std::sync::PoisonError;
 
     fn write(bytes: &str) -> Event {
         Event::Write(bytes.as_bytes().to_vec())
