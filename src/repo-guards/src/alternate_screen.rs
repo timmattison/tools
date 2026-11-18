@@ -128,9 +128,12 @@ pub struct Exemption {
 
 /// Every use of an entry spelling that is deliberate.
 ///
+/// The first three entries are final. The entries after the comment line are
+/// temporary: each one leaves when its tool moves onto `altscreen`.
+///
 /// Public so a test can measure the list against what the repository holds. An
 /// entry that matches nothing is reported by [`Report::unused_exemptions`].
-pub const EXEMPTIONS: [Exemption; 3] = [
+pub const EXEMPTIONS: [Exemption; 11] = [
     Exemption {
         file: "src/altscreen/src/lib.rs",
         spelling: "EnterAlternateScreen",
@@ -146,6 +149,47 @@ pub const EXEMPTIONS: [Exemption; 3] = [
         spelling: "CSI ?1049 h",
         reason: "the pty tests search the output of `krt` for the entry sequence; \
                  they write to no user terminal",
+    },
+    // Each temporary entry below leaves when its tool moves onto `altscreen`.
+    Exemption {
+        file: "src/beta/src/player.rs",
+        spelling: "EnterAlternateScreen",
+        reason: "moves onto altscreen in issue #593",
+    },
+    Exemption {
+        file: "src/diskhog/src/main.rs",
+        spelling: "EnterAlternateScreen",
+        reason: "moves onto altscreen in issue #593",
+    },
+    Exemption {
+        file: "src/gitrdun/src/ui.rs",
+        spelling: "EnterAlternateScreen",
+        reason: "moves onto altscreen in issue #593",
+    },
+    Exemption {
+        file: "src/gsw/src/watch.rs",
+        spelling: "EnterAlternateScreen",
+        reason: "moves onto altscreen in issue #593",
+    },
+    Exemption {
+        file: "src/krt/src/live.rs",
+        spelling: "EnterAlternateScreen",
+        reason: "moves onto altscreen in issue #593",
+    },
+    Exemption {
+        file: "src/runat/src/main.rs",
+        spelling: "EnterAlternateScreen",
+        reason: "moves onto altscreen in issue #593",
+    },
+    Exemption {
+        file: "src/seescc/src/watch.rs",
+        spelling: "EnterAlternateScreen",
+        reason: "moves onto altscreen in issue #593",
+    },
+    Exemption {
+        file: "src/ic/src/main.rs",
+        spelling: "CSI ?1049 h",
+        reason: "moves onto altscreen in issue #593",
     },
 ];
 

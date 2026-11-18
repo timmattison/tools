@@ -15,6 +15,10 @@ use crate::ui::render_duration;
 use crate::{counted, HOP, NEVER_REACHED, REACHED, ROUND, ROW, SUMMARY_SEPARATOR};
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+#[expect(
+    clippy::disallowed_types,
+    reason = "moves onto altscreen in issue #593"
+)]
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
 };

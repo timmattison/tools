@@ -1,6 +1,10 @@
 use buildinfo::version_string;
 use chrono::{DateTime, Datelike, Local, NaiveDateTime, TimeZone};
 use clap::Parser;
+#[expect(
+    clippy::disallowed_types,
+    reason = "moves onto altscreen in issue #593"
+)]
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
     execute,

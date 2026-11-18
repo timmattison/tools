@@ -1,5 +1,9 @@
 use anyhow::Result;
 use chrono::{DateTime, Local};
+#[expect(
+    clippy::disallowed_types,
+    reason = "moves onto altscreen in issue #593"
+)]
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     execute,

@@ -110,6 +110,10 @@ fn run(dirs: &ClaudeDirs, notify: bool) -> Result<(), String> {
         writer: Arc::new(DeviceWriter),
     };
     // `ratatui::init` also installs a panic hook that restores the terminal.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "moves onto altscreen in issue #593"
+    )]
     let mut terminal = ratatui::init();
     let _guard = TerminalGuard;
     let size = terminal

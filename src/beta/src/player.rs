@@ -1,4 +1,8 @@
 use anyhow::Result;
+#[expect(
+    clippy::disallowed_types,
+    reason = "moves onto altscreen in issue #593"
+)]
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
     event::{self, Event as TermEvent, KeyCode},

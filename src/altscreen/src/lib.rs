@@ -33,6 +33,11 @@
 use std::io;
 use std::sync::Arc;
 
+#[expect(
+    clippy::disallowed_types,
+    reason = "altscreen is the one entrance to the alternate screen; it renders this command into the bytes of its entry write"
+)]
+use crossterm::terminal::EnterAlternateScreen;
 use crossterm::Command;
 
 /// The options of a session.
@@ -202,7 +207,7 @@ fn send(port: &dyn Port, command: &impl Command) {
 fn entry_bytes(options: Options) -> String {
     let mut out = String::new();
     // Writing ANSI into a `String` cannot fail.
-    let _ = crossterm::terminal::EnterAlternateScreen.write_ansi(&mut out);
+    let _ = EnterAlternateScreen.write_ansi(&mut out);
     let _ = crossterm::terminal::Clear(crossterm::terminal::ClearType::All).write_ansi(&mut out);
     let _ = crossterm::cursor::MoveTo(0, 0).write_ansi(&mut out);
     let _ = crossterm::cursor::Hide.write_ansi(&mut out);
