@@ -406,3 +406,25 @@ fn the_report_names_the_remedy() {
     assert!(text.contains("altscreen::RatatuiSession::enter"), "{text}");
     assert!(text.contains(MODE_1049), "{text}");
 }
+
+/// The root of this repository, as an absolute path.
+fn repo_root() -> std::path::PathBuf {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    fs::canonicalize(&root)
+        .unwrap_or_else(|e| panic!("cannot canonicalize {}: {e}", root.display()))
+}
+
+/// The real repository enters the alternate screen only through `altscreen`,
+/// apart from the exemptions that [`EXEMPTIONS`] states.
+#[test]
+fn this_workspace_enters_the_alternate_screen_only_through_altscreen() {
+    let report = alternate_screen::audit(&repo_root()).expect("the audit reaches a verdict");
+
+    assert!(report.files_examined() > 0, "the audit read nothing");
+    assert!(report.is_compliant(), "{report}");
+    assert!(
+        report.unused_exemptions().is_empty(),
+        "an exemption that matches nothing has outlived the code it excused: {:?}",
+        report.unused_exemptions()
+    );
+}
