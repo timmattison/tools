@@ -6,10 +6,6 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use buildinfo::version_string;
 use clap::Parser;
-#[expect(
-    clippy::disallowed_types,
-    reason = "moves onto altscreen in issue #593"
-)]
 use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers},
     execute,
