@@ -45,16 +45,6 @@ struct Cli {
     no_notify: bool,
 }
 
-/// Restores the terminal when it drops, so every way out of the loop leaves
-/// the terminal as it was.
-struct TerminalGuard;
-
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
-        ratatui::restore();
-    }
-}
-
 fn main() -> ExitCode {
     let cli = Cli::parse();
     if !std::io::stdout().is_terminal() {
@@ -109,9 +99,11 @@ fn run(dirs: &ClaudeDirs, notify: bool) -> Result<(), String> {
         runner: Arc::clone(&runner),
         writer: Arc::new(DeviceWriter),
     };
-    // `ratatui::init` also installs a panic hook that restores the terminal.
-    let mut terminal = ratatui::init();
-    let _guard = TerminalGuard;
+    // The session clears the screen, restores the terminal on every exit, and
+    // installs a panic hook that restores it too.
+    let mut session = altscreen::RatatuiSession::enter(altscreen::Options::default())
+        .map_err(|error| format!("cannot enter the alternate screen: {error}"))?;
+    let terminal = session.terminal();
     let size = terminal
         .size()
         .map_err(|error| format!("cannot read the size of the terminal: {error}"))?;

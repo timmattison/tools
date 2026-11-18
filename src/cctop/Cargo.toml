@@ -14,6 +14,7 @@ name = "cctop"
 path = "src/main.rs"
 
 [dependencies]
+altscreen = { workspace = true, features = ["ratatui"] }
 base64.workspace = true
 buildinfo.workspace = true
 chrono.workspace = true

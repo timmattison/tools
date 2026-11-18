@@ -105,6 +105,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "altscreen"
+version = "0.1.0"
+dependencies = [
+ "crossterm",
+ "ratatui",
+]
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -917,6 +925,7 @@ name = "beta"
 version = "0.1.0"
 dependencies = [
  "ab_glyph",
+ "altscreen",
  "anyhow",
  "base64 0.22.1",
  "childenv",
@@ -1303,6 +1312,7 @@ dependencies = [
 name = "cctop"
 version = "0.1.0"
 dependencies = [
+ "altscreen",
  "base64 0.22.1",
  "buildinfo",
  "childenv",
@@ -2279,6 +2289,7 @@ dependencies = [
 name = "diskhog"
 version = "0.1.0"
 dependencies = [
+ "altscreen",
  "anyhow",
  "buildinfo",
  "childenv",
@@ -2962,6 +2973,7 @@ dependencies = [
 name = "gitrdun"
 version = "0.1.0"
 dependencies = [
+ "altscreen",
  "anyhow",
  "buildinfo",
  "chrono",
@@ -4053,6 +4065,7 @@ dependencies = [
 name = "gsw"
 version = "0.1.0"
 dependencies = [
+ "altscreen",
  "anyhow",
  "buildinfo",
  "childenv",
@@ -4101,6 +4114,7 @@ dependencies = [
 name = "ha"
 version = "0.1.0"
 dependencies = [
+ "altscreen",
  "buildinfo",
  "childenv",
  "chrono",
@@ -4459,6 +4473,7 @@ dependencies = [
 name = "ic"
 version = "0.1.0"
 dependencies = [
+ "altscreen",
  "anyhow",
  "buildinfo",
  "childenv",
@@ -5087,6 +5102,7 @@ dependencies = [
 name = "krt"
 version = "0.1.0"
 dependencies = [
+ "altscreen",
  "buildinfo",
  "childenv",
  "chrono",
@@ -7460,6 +7476,7 @@ dependencies = [
 name = "runat"
 version = "0.1.0"
 dependencies = [
+ "altscreen",
  "buildinfo",
  "childenv",
  "chrono",
@@ -7723,6 +7740,7 @@ dependencies = [
 name = "seescc"
 version = "0.1.0"
 dependencies = [
+ "altscreen",
  "anyhow",
  "buildinfo",
  "childenv",

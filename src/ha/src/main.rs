@@ -78,16 +78,6 @@ impl From<Cli> for CommandLine {
     }
 }
 
-/// Restores the terminal when it drops, so every way out of `run` leaves
-/// the terminal as it was.
-struct TerminalGuard;
-
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
-        ratatui::restore();
-    }
-}
-
 fn main() -> ExitCode {
     let command = Cli::command().after_help(settings::help_after(
         settings::default_config_path().as_deref(),
@@ -134,9 +124,9 @@ fn main() -> ExitCode {
 /// does not count, and the next cycle decides. The terminal is back in its
 /// normal state when this function returns.
 fn run_view(settings: &Settings, rate: RateLimit, worker: &Worker) -> Result<(), RunError> {
-    // `ratatui::init` also installs a panic hook that restores the terminal.
-    let mut terminal = ratatui::init();
-    let _guard = TerminalGuard;
+    // The session clears the screen, restores the terminal on every exit, and
+    // installs a panic hook that restores it too.
+    let mut session = altscreen::RatatuiSession::enter(altscreen::Options::default())?;
     let status = Status {
         rate: Some(rate),
         ..Status::default()
@@ -156,5 +146,5 @@ fn run_view(settings: &Settings, rate: RateLimit, worker: &Worker) -> Result<(),
             .billing
             .then(|| BillingBoard::new(accounts_of(&settings.targets))),
     );
-    app.run(&mut terminal, &mut TerminalEvents)
+    app.run(session.terminal(), &mut TerminalEvents)
 }
