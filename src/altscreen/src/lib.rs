@@ -127,8 +127,26 @@ impl Session {
     /// Returns the error of raw mode or of the entry write.
     #[doc(hidden)]
     pub fn enter_on(port: Arc<dyn Port>, options: Options) -> io::Result<Session> {
+        if options.raw_mode {
+            port.enable_raw_mode()?;
+        }
+        port.write(entry_bytes(options).as_bytes())?;
         Ok(Session { port, options })
     }
+}
+
+/// Builds the entry bytes: enter, erase, home, hide, and optional mouse capture.
+fn entry_bytes(options: Options) -> String {
+    let mut out = String::new();
+    // Writing ANSI into a `String` cannot fail.
+    let _ = crossterm::terminal::EnterAlternateScreen.write_ansi(&mut out);
+    let _ = crossterm::terminal::Clear(crossterm::terminal::ClearType::All).write_ansi(&mut out);
+    let _ = crossterm::cursor::MoveTo(0, 0).write_ansi(&mut out);
+    let _ = crossterm::cursor::Hide.write_ansi(&mut out);
+    if options.mouse_capture {
+        let _ = crossterm::event::EnableMouseCapture.write_ansi(&mut out);
+    }
+    out
 }
 
 /// The real terminal: standard output and crossterm raw mode.
