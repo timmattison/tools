@@ -567,6 +567,35 @@ mod tests {
     }
 
     #[test]
+    fn the_title_counts_only_live_rows_and_ends_with_the_frozen_count() {
+        let mut app = App::new();
+        app.board_mut()
+            .load(file(1, "a", PaneState::NeedsYou, 100), None);
+        app.board_mut()
+            .load(file(2, "b", PaneState::NeedsYou, 100), None);
+        app.board_mut().toggle_handled(Pid::new(2));
+        app.board_mut().load_stopped(
+            file(3, "c", PaneState::NeedsYou, 100),
+            None,
+            EpochMillis::new(100),
+        );
+        app.board_mut().load_stopped(
+            file(4, "d", PaneState::Idle, 100),
+            None,
+            EpochMillis::new(100),
+        );
+        app.board_mut()
+            .load(file(5, "e", PaneState::Working, 100), None);
+        let text = title(&render(&app, 127_000));
+        assert!(
+            text.contains(
+                " cctop · 5 sessions · 1/1 ❗ · 0/0 💤 · 0/0 🤖 · 0/0 🐚 · 1/0 🏃 · 2 🧊 "
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn the_empty_board_shows_six_counts_of_zero() {
         let text = title(&render(&App::new(), 1_000));
         assert!(
