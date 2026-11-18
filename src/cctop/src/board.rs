@@ -898,6 +898,23 @@ mod tests {
     }
 
     #[test]
+    fn a_stopped_session_shows_the_state_of_its_file_and_the_frozen_flag() {
+        use PaneState::{Agents, Idle, NeedsYou, Shells, Working};
+        for state in [Working, NeedsYou, Idle, Agents, Shells] {
+            let mut board = Board::new();
+            board.load(file(7, state, 100, 500), None);
+            board.set_run_status(Pid::new(7), RunStatus::Stopped, EpochMillis::new(1_000));
+            let session = board.get(Pid::new(7)).expect("the session is on the board");
+            assert_eq!(session.state(), state, "{state:?}");
+            assert_eq!(
+                session.state_label(),
+                format!("{} - frozen", state.label()),
+                "{state:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_stopped_session_shows_frozen_for_each_file_state() {
         use PaneState::{Agents, Frozen, Idle, NeedsYou, Shells, Working};
         for state in [Working, NeedsYou, Idle, Agents, Shells] {
