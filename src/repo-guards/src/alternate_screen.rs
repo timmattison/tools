@@ -133,7 +133,7 @@ pub struct Exemption {
 ///
 /// Public so a test can measure the list against what the repository holds. An
 /// entry that matches nothing is reported by [`Report::unused_exemptions`].
-pub const EXEMPTIONS: [Exemption; 11] = [
+pub const EXEMPTIONS: [Exemption; 10] = [
     Exemption {
         file: "src/altscreen/src/lib.rs",
         spelling: "EnterAlternateScreen",
@@ -158,11 +158,6 @@ pub const EXEMPTIONS: [Exemption; 11] = [
     },
     Exemption {
         file: "src/diskhog/src/main.rs",
-        spelling: "EnterAlternateScreen",
-        reason: "moves onto altscreen in issue #593",
-    },
-    Exemption {
-        file: "src/gitrdun/src/ui.rs",
         spelling: "EnterAlternateScreen",
         reason: "moves onto altscreen in issue #593",
     },
