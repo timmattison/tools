@@ -284,4 +284,18 @@ mod tests {
         std::mem::forget(session);
         let _ = std::panic::take_hook();
     }
+
+    #[test]
+    fn failed_entry_write_undoes_raw_mode_and_returns_the_error() {
+        let _lock = PANIC_HOOK_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        let (port, events) = fake(|p| p.fail_write_containing = Some(b"1049h"));
+        let result = Session::enter_on(port, Options::default());
+        let error = result.err().expect("the entry must fail");
+        assert_eq!(error.to_string(), "write failed");
+        assert_eq!(
+            snapshot(&events),
+            [Event::RawOn, write(ENTRY), Event::RawOff]
+        );
+        let _ = std::panic::take_hook();
+    }
 }
