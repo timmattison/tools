@@ -885,35 +885,35 @@ fn run_building(gh: &FakeGh, args: &[&str], env: &[(&str, &str)]) -> Output {
     command.output().unwrap()
 }
 
+/// Whether a run of [`run_through_shims`] can run the fake `claude`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Claude {
+    /// [`NO_CLAUDE_ENV`] stays in the environment, as [`wn`] sets it.
+    Off,
+    /// [`NO_CLAUDE_ENV`] goes out, as [`run_building`] takes it out.
+    On,
+}
+
 /// Run `wn` in a mosh-rs session whose clipboard is the pair of fake commands
-/// of `gh`, with `env` on top of the environment of [`wn`].
+/// of `gh`.
 ///
-/// It takes [`NO_CLIPBOARD_ENV`] out and sets `MOSH_OPEN_SOCKET` to a path in
-/// the temporary directory of `gh`. The socket does not exist, and it need not:
-/// `sysclip` runs `pbcopy` and `pbpaste` from `PATH` in such a session and
-/// opens no socket and no clipboard. The run then reads and writes the files of
-/// the fake and never the clipboard of the machine. A test that wants the run
-/// of `claude` takes [`NO_CLAUDE_ENV`] out the way [`run_building`] does, by
-/// naming it in `env` with [`BUILD`] as its value.
-fn run_through_shims(gh: &FakeGh, args: &[&str], env: &[(&str, &str)]) -> Output {
+/// It starts from the environment of [`wn`], takes [`NO_CLIPBOARD_ENV`] out and
+/// sets `MOSH_OPEN_SOCKET` to a path in the temporary directory of `gh`. The
+/// socket does not exist, and it need not: `sysclip` runs `pbcopy` and
+/// `pbpaste` from `PATH` in such a session and opens no socket and no
+/// clipboard. The run then reads and writes the files of the fake and never the
+/// clipboard of the machine.
+fn run_through_shims(gh: &FakeGh, args: &[&str], claude: Claude) -> Output {
     let mut command = wn(gh, args, "80", false, None);
     command.env_remove(NO_CLIPBOARD_ENV).env(
         sysclip::MOSH_OPEN_SOCKET_ENV,
         gh.path().join("mosh-open.sock"),
     );
-    for (name, value) in env {
-        if *value == BUILD {
-            command.env_remove(name);
-        } else {
-            command.env(name, value);
-        }
+    if claude == Claude::On {
+        command.env_remove(NO_CLAUDE_ENV);
     }
     command.output().unwrap()
 }
-
-/// The value that takes a variable out of the environment of
-/// [`run_through_shims`].
-const BUILD: &str = "\u{0}remove";
 
 /// The document with its `generated` taken out.
 ///
@@ -1210,7 +1210,7 @@ fn a_mosh_session_reads_the_chain_through_pbpaste() {
     // so the run reads a file of this test and never the clipboard of the
     // machine.
     let gh = FakeGh::new(THREE_ISSUES).with_shims(ONE_OPEN_CHAIN);
-    let output = run_through_shims(&gh, &["--repo", REPO], &[]);
+    let output = run_through_shims(&gh, &["--repo", REPO], Claude::Off);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     assert!(
         stdout(&output).ends_with("Start #278 next with 'si 278'\n"),
@@ -1226,7 +1226,7 @@ fn a_refused_paste_in_a_mosh_session_names_the_shim() {
     let gh = FakeGh::new(THREE_ISSUES)
         .with_shims(ONE_OPEN_CHAIN)
         .with_refusing_pbpaste();
-    let output = run_through_shims(&gh, &["--repo", REPO], &[(NO_CLAUDE_ENV, NO_CLAUDE)]);
+    let output = run_through_shims(&gh, &["--repo", REPO], Claude::Off);
     assert_eq!(output.status.code(), Some(2), "the run could not answer");
     assert!(
         stderr(&output).contains(
@@ -2457,7 +2457,7 @@ fn a_mosh_session_keeps_the_plan_through_pbcopy() {
     let gh = FakeGh::new(JSON_ISSUES)
         .with_shims("")
         .with_claude(&prints_the_plan());
-    let output = run_through_shims(&gh, &["--repo", REPO], &[(NO_CLAUDE_ENV, BUILD)]);
+    let output = run_through_shims(&gh, &["--repo", REPO], Claude::On);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     // The answer, then the note that says the plan is on the clipboard.
     assert_eq!(
