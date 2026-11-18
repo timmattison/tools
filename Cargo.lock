@@ -1311,6 +1311,7 @@ dependencies = [
 name = "cctop"
 version = "0.1.0"
 dependencies = [
+ "altscreen",
  "base64 0.22.1",
  "buildinfo",
  "childenv",
