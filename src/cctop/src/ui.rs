@@ -102,7 +102,7 @@ where
 }
 
 /// The spans of a shown state. The name of the state has the color of the
-/// state. A frozen state adds the flag, with the word `frozen` in blue. When
+/// state. A frozen side adds the flag, with the word `frozen` in blue. When
 /// there is no state, the spans are one dash.
 fn state_spans(shown: Option<ShownState>) -> Vec<Span<'static>> {
     match shown {

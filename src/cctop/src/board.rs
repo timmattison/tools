@@ -239,9 +239,9 @@ impl Board {
     }
 
     /// Put a state file of a stopped process on the board at the first read.
-    /// The session shows the state of its file and the frozen flag. The OS does not record when a process
-    /// stopped, thus the time in the state starts at `now`, the time of the
-    /// first read. The session has no handled mark, and the log gets no entry.
+    /// The session shows the state of its file and the frozen flag. The OS
+    /// does not record when a process stopped, thus the time in the state
+    /// starts at `now`, the time of the first read. The session has no handled mark, and the log gets no entry.
     pub fn load_stopped(&mut self, file: StateFile, name: Option<String>, now: EpochMillis) {
         self.sessions.insert(
             file.pid,
@@ -263,8 +263,8 @@ impl Board {
     /// nothing, the run status included, because a rescan reads files that
     /// did not change. The board compares the shown states, thus a newer file
     /// of a frozen session with a new state is a change, and the row stays
-    /// frozen. The board keeps the file. A session in the same shown state keeps its handled mark, and a
-    /// change of state removes it. The time in a new state is the stamp of the
+    /// frozen. The board keeps the file. A session in the same shown state
+    /// keeps its handled mark, and a change of the shown state removes it. The time in a new state is the stamp of the
     /// file. When the process is stopped, the OS does not record when it
     /// stopped, thus the time is `now`, the time of the read.
     pub fn apply(
