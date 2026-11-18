@@ -695,6 +695,126 @@ nothing is reported, so a stale entry fails too. The list holds three entries:
 - `runat` - the countdown view, through the ratatui session, with mouse capture
 - `seescc` - the watch view
 
+## System Clipboard
+
+Every tool in this repository that reads or writes the clipboard of the machine
+**must** go through the `sysclip` library crate at `src/sysclip/`. A direct
+dependency on `arboard` fails the guard, and a direct use of its clipboard fails
+clippy.
+
+### Why
+
+The mosh-rs server puts a `pbcopy` shim and a `pbpaste` shim on the `PATH` of
+each session, and it sets `MOSH_OPEN_SOCKET`. Each shim sends the text through
+that socket to the clipboard of the client computer, which is the clipboard of
+the person at the keyboard.
+
+`arboard` does not know about the shims. It opens the clipboard of the server.
+On a Mac where the session cannot reach the pasteboard of a GUI login, AppKit
+gives no pasteboard, and `arboard` fails with "The selected clipboard is not
+supported with the current system configuration". On a Linux server with no
+display, it fails with an X11 timeout. On a Mac with a GUI login, it succeeds,
+and that is worse: the text goes to the pasteboard of the server, and the
+person at the client does not get it.
+
+Five crates used `arboard` directly, and two of them kept their own copy of the
+same error map. A private fallback in each crate is five copies that drift.
+
+### The Order Rule
+
+`sysclip::Clipboard::open` picks the clipboard in this order:
+
+1. If `MOSH_OPEN_SOCKET` is set and not empty, the session has the shims.
+   `sysclip` runs `pbcopy` or `pbpaste` from `PATH` and never opens `arboard`.
+   A failure of the command is the answer, because the pasteboard of the server
+   is not the clipboard of the user.
+2. Else, `sysclip` uses `arboard`. If `arboard` fails, `sysclip` runs `pbcopy`
+   or `pbpaste` from `PATH`. `ContentNotAvailable` on a read is not a failure.
+   It is an empty clipboard.
+3. If `PATH` holds no such command, the error is the `arboard` error.
+4. If both fail, the error names both causes.
+
+A command gets the text on its standard input, and gives the text on its
+standard output. A non-zero exit is a failure, and the error holds the first
+line of its standard error, for example `mosh-open: did not paste: …`.
+
+`sysclip::Clipboard::open_native` skips the commands. It is for a tool that
+polls. The mosh-rs client allows 5 pastes in each 10 seconds, and it shows each
+paste on its notification bar, so a poll through `pbpaste` each 500 ms fails
+and fills the bar. `clipboardmon` uses it.
+
+### Usage
+
+Take the crate with `sysclip.workspace = true`:
+
+```rust
+let mut clipboard = sysclip::Clipboard::open()?;
+clipboard.write("/tmp/somewhere")?;
+let text = clipboard.read()?; // an empty string when the clipboard holds no text
+```
+
+The error type, `sysclip::ClipboardError`, holds a message. It has no trailing
+period, so a caller can put it inside a longer sentence.
+
+No test reaches the clipboard of the machine. The order rule takes the opener
+of `arboard`, the environment and the search path as parameters, so the unit
+tests of `sysclip` cover each branch and set no process variable. An end-to-end
+test starts the binary with `MOSH_OPEN_SOCKET` set and with a `PATH` that holds
+a fake `pbcopy` and `pbpaste` in a temporary directory of its own. `dirc` and
+`wn` hold such tests.
+
+### The Ban
+
+`clippy.toml` bans `arboard::Clipboard` in `disallowed-types` and
+`arboard::Clipboard::new` in `disallowed-methods`. A call of
+`arboard::Clipboard::new` raises both lints, and a name of the type in a `use`,
+a signature or a field raises `disallowed_types`. `disallowed_methods` is
+`deny` in the workspace lint set, and the pre-commit hook runs clippy with
+`-D warnings`, so each spelling fails the gate. The ban matches the name of the
+crate, so a renamed dependency and a `use … as` rename are caught too.
+
+`sysclip` is the one legitimate user. It says so at each of its sites with
+`#[expect(clippy::disallowed_types, reason = "...")]` (and
+`clippy::disallowed_methods` at the call), and clippy fails if that
+expectation stops being fulfilled.
+
+### The Guard
+
+`repo_guards::arboard_wall` reads `cargo metadata`. It fails when a workspace
+member other than `sysclip` has a direct dependency on the package `arboard`,
+of any kind: normal, dev or build, for every target. It matches the name of the
+package, so a renamed dependency (`clip = { package = "arboard", … }`) is
+caught. It refuses a result where `sysclip` itself is missing, because a guard
+that finds no owner proves nothing.
+
+### What the Ban and the Guard Do Not Prove
+
+- A dependency of a dependency. A crate outside this workspace that opens the
+  clipboard itself is out of reach of both.
+- A tool that runs `pbcopy` or `xclip` itself with `childenv::command`. That is
+  a spawn, not a use of `arboard`.
+- Clippy on macOS does not compile a `#[cfg(windows)]` site.
+
+### Guards Enforcing This
+
+- `clippy.toml` `disallowed-types` and `disallowed-methods` — a use of
+  `arboard::Clipboard` outside `sysclip` fails the build.
+  `src/repo-guards/tests/arboard_ban.rs` runs clippy on a fixture of each form
+  and reads the real `clippy.toml`.
+- `repo_guards::arboard_wall` (`src/repo-guards/src/arboard_wall.rs`) — no
+  workspace member other than `sysclip` depends on `arboard`.
+  `src/repo-guards/tests/arboard_wall.rs` holds one fixture for each kind of
+  dependency and one for the rename, and one test that audits this workspace.
+
+### Crates Currently Using sysclip
+
+- `clipboard-random` - each write of the generated data
+- `clipboardmon` - the poll of the board tools, through `open_native`
+- `dirc` - `SystemClipboard`. `FileClipboard` and `DIRC_CLIPBOARD_FILE` stay
+- `update-aws-credentials` - the read of the credentials
+- `wn` - the read of the chain, and the write of the plan. `WN_NO_CLIPBOARD`
+  stays
+
 ## Version Information
 
 All tools in this repository **must** display version information including git hash and dirty status when `--version` or `-V` is used.

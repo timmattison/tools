@@ -71,7 +71,7 @@ impl ClipboardError {
     /// The failure `cause` names.
     ///
     /// The space around the cause is dropped, and so is a period at the end of
-    /// it. `arboard` writes a whole sentence with a period on it, and every
+    /// it. A cause can arrive as a whole sentence with a period on it, and every
     /// other message of `dirc` ends without one. A cause that is nothing but a
     /// period is kept as it is, because an error that names no cause at all
     /// reads as a bug in the tool rather than as a state of the machine.
