@@ -28,6 +28,15 @@ pub enum PaneState {
 /// draws as an emoji only with U+FE0F, which Zellij removes.
 pub const FROZEN_MARKER: char = '\u{1F9CA}';
 
+/// The color of the word `frozen` on the screen. The palette of the
+/// `claude-tab-bar` plugin has no color for a frozen session, thus cctop
+/// gives it blue.
+pub const FROZEN_COLOR: Rgb = Rgb {
+    red: 0x4d,
+    green: 0xab,
+    blue: 0xf7,
+};
+
 /// A color of the palette, in 8-bit channels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rgb {

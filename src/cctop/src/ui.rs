@@ -9,8 +9,10 @@ use ratatui::widgets::{Block, Paragraph, Row, Table, TableState};
 use ratatui::Frame;
 
 use crate::app::{App, PageSize};
-use crate::board::{Board, Change, ShownState};
-use crate::state::{EpochMillis, PaneState, FROZEN_MARKER};
+use crate::board::{
+    Board, Change, Session, ShownState, FLAG_SEPARATOR, FROZEN_LABEL, HANDLED_SUFFIX,
+};
+use crate::state::{EpochMillis, PaneState, Rgb, FROZEN_COLOR, FROZEN_MARKER};
 
 /// Draw the screen: the table of sessions, the change log, and the status
 /// line. `now` gives the time that the elapsed times count to.
@@ -127,10 +129,37 @@ fn state_width<'a>(labels: impl Iterator<Item = &'a str>) -> u16 {
         .fold(MIN_STATE_WIDTH, u16::max)
 }
 
+/// A color of the palette, as a color of the terminal.
+fn rgb_color(rgb: Rgb) -> Color {
+    Color::Rgb(rgb.red, rgb.green, rgb.blue)
+}
+
 /// The color of a state, as a color of the terminal.
 fn state_color(state: PaneState) -> Color {
-    let rgb = state.color();
-    Color::Rgb(rgb.red, rgb.green, rgb.blue)
+    rgb_color(state.color())
+}
+
+/// The two spans of the frozen flag: the separator with no color, then the
+/// word `frozen` in blue.
+fn frozen_flag() -> [Span<'static>; 2] {
+    [
+        Span::raw(FLAG_SEPARATOR),
+        Span::styled(FROZEN_LABEL, Style::new().fg(rgb_color(FROZEN_COLOR))),
+    ]
+}
+
+/// The state cell of a row. It has the same text and the same order as
+/// [`Session::state_label`]. The state has no color, because the block has it.
+/// The word `frozen` is blue.
+fn state_line(session: &Session) -> Line<'static> {
+    let mut spans = vec![Span::raw(session.state().label())];
+    if session.is_handled() {
+        spans.push(Span::raw(HANDLED_SUFFIX));
+    }
+    if session.is_frozen() {
+        spans.extend(frozen_flag());
+    }
+    Line::from(spans)
 }
 
 /// The text between two parts of the title of the table.
@@ -181,11 +210,11 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App, now: EpochMillis) {
     let state_width = state_width(sessions.iter().map(|(_, label)| label.as_str()));
     let rows: Vec<Row> = sessions
         .into_iter()
-        .map(|(session, state_label)| {
+        .map(|(session, _)| {
             let state = session.state();
             Row::new([
                 Span::styled(STATE_BLOCK, Style::new().fg(state_color(state))).into(),
-                Text::from(state_label),
+                Text::from(state_line(session)),
                 Text::from(format_elapsed(now.saturating_since(session.since))),
                 Text::from(
                     session
