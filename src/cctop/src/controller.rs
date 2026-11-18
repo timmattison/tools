@@ -285,8 +285,9 @@ mod tests {
         controller.clock = Box::new(clock_with(100, START_SECS).with_stopped(100));
         write(dir.path(), 100, "needs-you", 20);
         assert_eq!(controller.handle(file_event(100), NOW), vec![]);
-        let shown = controller.app().board().get(Pid::new(100)).unwrap().state();
-        assert_eq!(shown, PaneState::Frozen);
+        let session = controller.app().board().get(Pid::new(100)).unwrap();
+        assert_eq!(session.state(), PaneState::NeedsYou);
+        assert!(session.is_frozen());
     }
 
     #[test]

@@ -156,9 +156,9 @@ impl App {
         self.flush_held(now);
     }
 
-    /// Select the first row of the board among the held sessions that show
-    /// the state `needs-you` and have no handled mark. A frozen session shows
-    /// the state `frozen`, so the jump skips it. Then
+    /// Select the first row of the board among the held sessions that wait
+    /// for the person. [`crate::board::Session::waits_for_you`] refuses a frozen session and
+    /// a handled session, so the jump skips them. Then
     /// forget all held sessions. A key press less than [`JUMP_HOLD_MS`]
     /// before `now` keeps the held sessions and selects nothing. A key press
     /// time later than `now` means the clock moved back. The function then
@@ -174,11 +174,10 @@ impl App {
         if self.held.is_empty() || held_by_key {
             return;
         }
-        let first = self.board.rows().iter().position(|session| {
-            self.held.contains(&session.file.pid)
-                && session.state() == PaneState::NeedsYou
-                && !session.is_handled()
-        });
+        let first =
+            self.board.rows().iter().position(|session| {
+                self.held.contains(&session.file.pid) && session.waits_for_you()
+            });
         if let Some(index) = first {
             self.select(index);
         }
@@ -188,8 +187,8 @@ impl App {
     /// Put a handled mark on the selected session, or remove its mark. A new
     /// mark moves the session to the bottom of its state. The cursor then
     /// selects the first row at or below the old index of the marked row that
-    /// has no mark and shows a state that takes a mark. A frozen session shows
-    /// the state `frozen`, so the cursor skips it. If no such row exists,
+    /// has no mark and takes a mark. [`crate::board::Session::takes_handled_mark`] refuses a
+    /// frozen session, so the cursor skips it. If no such row exists,
     /// the cursor stays on the marked session. A removed mark moves the
     /// session up, and the cursor goes with the session. A session whose state
     /// takes no mark keeps its row and the cursor, and the status text tells
@@ -210,9 +209,7 @@ impl App {
                     .rows()
                     .iter()
                     .skip(index)
-                    .position(|session| {
-                        !session.is_handled() && session.state().takes_handled_mark()
-                    })
+                    .position(|session| !session.is_handled() && session.takes_handled_mark())
                     .map(|offset| index + offset);
                 match next {
                     Some(next) => self.select(next),
@@ -234,17 +231,18 @@ impl App {
         }
     }
 
-    /// Select the next session that shows the state `needs-you` and has no
-    /// handled mark, and ask the main loop to focus it. The search starts after the
-    /// selected row and wraps around, so the selected row counts last. A
-    /// frozen session shows the state `frozen`, so the search skips it.
+    /// Select the next session that waits for the person, and ask the main
+    /// loop to focus it. The search starts after the selected row and wraps
+    /// around, so the selected row counts last. [`crate::board::Session::waits_for_you`]
+    /// refuses a frozen session and a handled session, so the search skips
+    /// them.
     fn focus_next_needs_you(&mut self) -> Action {
         let rows = self.board.rows();
         let count = rows.len();
         let current = self.selected_index().unwrap_or(0);
         let found = (1..=count)
             .map(|offset| (current + offset) % count)
-            .find(|&index| rows[index].state() == PaneState::NeedsYou && !rows[index].is_handled());
+            .find(|&index| rows[index].waits_for_you());
         let Some(index) = found else {
             self.status = Some("No session needs you".to_string());
             return Action::Nothing;

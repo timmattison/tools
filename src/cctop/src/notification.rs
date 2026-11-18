@@ -57,6 +57,7 @@ mod tests {
     use proctree::Pid;
 
     use super::*;
+    use crate::board::ShownState;
     use crate::runner::fake::FakeRunner;
     use crate::runner::{CommandOutput, RunError};
     use crate::state::{EpochMillis, PaneState};
@@ -100,8 +101,8 @@ mod tests {
             at: EpochMillis::new(1),
             pid: Pid::new(7),
             label: "日本語 tools".to_string(),
-            old: Some(PaneState::Working),
-            new: Some(PaneState::NeedsYou),
+            old: Some(ShownState::live(PaneState::Working)),
+            new: Some(ShownState::live(PaneState::NeedsYou)),
         };
         assert_eq!(needs_you_message(&change), "日本語 tools needs you");
     }

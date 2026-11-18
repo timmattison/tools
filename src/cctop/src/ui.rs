@@ -9,7 +9,7 @@ use ratatui::widgets::{Block, Paragraph, Row, Table, TableState};
 use ratatui::Frame;
 
 use crate::app::{App, PageSize};
-use crate::board::{Board, Change};
+use crate::board::{Board, Change, ShownState};
 use crate::state::{EpochMillis, PaneState};
 
 /// Draw the screen: the table of sessions, the change log, and the status
@@ -98,10 +98,10 @@ where
     ])
 }
 
-/// The label of a state in its color, or a dash when there is no state.
-fn state_span(state: Option<PaneState>) -> Span<'static> {
-    match state {
-        Some(state) => Span::styled(state.label(), Style::new().fg(state_color(state))),
+/// The label of a shown state in the color of its state, or a dash when there is no state.
+fn state_span(shown: Option<ShownState>) -> Span<'static> {
+    match shown {
+        Some(shown) => Span::styled(shown.label(), Style::new().fg(state_color(shown.state()))),
         None => Span::raw(NONE_TEXT),
     }
 }
@@ -434,24 +434,6 @@ mod tests {
             .expect("the row holds a block");
         let x = u16::try_from(x).expect("the column fits");
         assert_eq!(buffer[(x, y)].fg, Color::Rgb(0xfa, 0xb0, 0x05));
-    }
-
-    #[test]
-    fn the_state_block_of_a_frozen_row_is_blue() {
-        let mut app = App::new();
-        app.board_mut().load_stopped(
-            file(10, "dir10", PaneState::Idle, 1_000),
-            None,
-            EpochMillis::new(1_000),
-        );
-        let buffer = render(&app, 127_000);
-        let (y, line) = line_with(&buffer, "frozen");
-        let x = line
-            .chars()
-            .position(|symbol| symbol == '█')
-            .expect("the row holds a block");
-        let x = u16::try_from(x).expect("the column fits");
-        assert_eq!(buffer[(x, y)].fg, Color::Rgb(0x4d, 0xab, 0xf7));
     }
 
     #[test]
