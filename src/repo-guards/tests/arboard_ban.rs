@@ -223,7 +223,7 @@ fn clippy_bans_the_clipboard_of_arboard_in_each_syntactic_form() {
         .map(|(file, lint)| ((*file).to_string(), (*lint).to_string()))
         .collect();
     assert!(
-        expected.is_subset(&found),
+        expected.is_subset(found),
         "the ban missed a form.\nexpected at least: {expected:#?}\nfound: {found:#?}"
     );
 }

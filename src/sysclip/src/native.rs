@@ -7,9 +7,20 @@ pub(crate) trait Native {
     fn write(&mut self, text: &str) -> Result<(), ClipboardError>;
 }
 
-pub(crate) struct Arboard(arboard::Clipboard);
+pub(crate) struct Arboard(
+    #[expect(
+        clippy::disallowed_types,
+        reason = "sysclip is the one entrance to arboard, and the ban sends every other crate here"
+    )]
+    arboard::Clipboard,
+);
 
 impl Arboard {
+    #[expect(
+        clippy::disallowed_methods,
+        clippy::disallowed_types,
+        reason = "sysclip is the one entrance to arboard, and the ban sends every other crate here"
+    )]
     pub(crate) fn open() -> Result<Self, ClipboardError> {
         arboard::Clipboard::new()
             .map(Self)
