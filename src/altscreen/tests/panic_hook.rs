@@ -92,9 +92,16 @@ fn a_panic_restores_the_terminal_before_the_previous_hook_runs() {
     expected.push(Event::PreviousHook);
     assert_eq!(snapshot(&events)[entered..], expected);
 
-    // Drop the session: the previous hook comes back.
+    // Drop the session: the previous hook comes back. The panic hook
+    // restored the terminal already, so the drop sends nothing.
+    let before_drop = snapshot(&events).len();
     drop(session);
     let after_drop = snapshot(&events).len();
+    assert_eq!(
+        before_drop, after_drop,
+        "the drop must not restore a second time: {:?}",
+        snapshot(&events)
+    );
     let caught = panic::catch_unwind(|| panic!("again"));
     assert!(caught.is_err());
     assert_eq!(snapshot(&events)[after_drop..], [Event::PreviousHook]);
@@ -118,11 +125,9 @@ fn a_session_that_drops_while_the_thread_unwinds_does_not_abort() {
     let all = snapshot(&events);
     assert_eq!(all[0], Event::RawOn);
     let restores = all.iter().filter(|e| **e == Event::RawOff).count();
-    assert!(restores >= 1, "the restore must run: {all:?}");
-    assert!(
-        all.contains(&write("\x1b[?1049l")),
-        "leave must be sent: {all:?}"
-    );
+    assert_eq!(restores, 1, "raw mode must go off once: {all:?}");
+    let leaves = all.iter().filter(|e| **e == write("\x1b[?1049l")).count();
+    assert_eq!(leaves, 1, "leave must be sent once: {all:?}");
 
     let _ = panic::take_hook();
 }
