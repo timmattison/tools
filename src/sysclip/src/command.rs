@@ -136,3 +136,95 @@ mod tests {
         assert_eq!(Commands::none().find("pbcopy"), None);
     }
 }
+
+#[cfg(all(test, unix))]
+mod run_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    const TEXT: &str = "日本語 café 🎉\n";
+
+    /// Writes an executable script in `dir` and gives its path.
+    fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[test]
+    fn copy_writes_the_text_byte_for_byte() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = script(
+            dir.path(),
+            "pbcopy",
+            "#!/bin/sh\nexec /bin/cat > \"${0%/*}/copied\"\n",
+        );
+        copy(&program, TEXT).unwrap();
+        assert_eq!(std::fs::read(dir.path().join("copied")).unwrap(), TEXT.as_bytes());
+    }
+
+    #[test]
+    fn paste_gives_the_output_byte_for_byte() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("held"), TEXT).unwrap();
+        let program = script(dir.path(), "pbpaste", "#!/bin/sh\nexec /bin/cat \"${0%/*}/held\"\n");
+        assert_eq!(paste(&program).unwrap(), TEXT);
+    }
+
+    #[test]
+    fn a_failed_command_gives_the_first_line_of_its_stderr() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = "#!/bin/sh\necho >&2\necho '  mosh-open: did not paste: the client refused ' >&2\necho 'second line' >&2\nexit 1\n";
+        let program = script(dir.path(), "pbpaste", body);
+        let error = paste(&program).unwrap_err();
+        assert_eq!(error.to_string(), "mosh-open: did not paste: the client refused");
+        let program = script(dir.path(), "pbcopy", body);
+        let error = copy(&program, TEXT).unwrap_err();
+        assert_eq!(error.to_string(), "mosh-open: did not paste: the client refused");
+    }
+
+    #[test]
+    fn a_failed_command_with_no_stderr_gives_its_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = script(dir.path(), "pbpaste", "#!/bin/sh\nexit 3\n");
+        assert_eq!(paste(&program).unwrap_err().to_string(), "pbpaste exited with status 3");
+    }
+
+    #[test]
+    fn a_command_that_a_signal_stops_gives_the_signal() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = script(dir.path(), "pbcopy", "#!/bin/sh\nkill -9 $$\n");
+        assert_eq!(
+            copy(&program, "x").unwrap_err().to_string(),
+            "pbcopy was stopped by signal 9"
+        );
+    }
+
+    #[test]
+    fn paste_fails_on_output_that_is_not_utf8() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = script(dir.path(), "pbpaste", "#!/bin/sh\nprintf '\\377\\376'\n");
+        assert_eq!(
+            paste(&program).unwrap_err().to_string(),
+            "pbpaste wrote text that is not UTF-8"
+        );
+    }
+
+    #[test]
+    fn a_command_that_cannot_start_gives_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("pbpaste");
+        let message = paste(&program).unwrap_err().to_string();
+        assert!(message.starts_with("cannot start "), "{message}");
+        assert!(message.contains(&program.display().to_string()), "{message}");
+    }
+
+    #[test]
+    fn copy_survives_a_command_that_exits_without_reading() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = script(dir.path(), "pbcopy", "#!/bin/sh\nexit 0\n");
+        let big = "x".repeat(1 << 20);
+        copy(&program, &big).unwrap();
+    }
+}
