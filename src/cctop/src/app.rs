@@ -743,9 +743,15 @@ mod tests {
             None,
             EpochMillis::new(500),
         );
-        let before = selected_pid(&app);
+        // The cursor stands on the live row, so a jump to the frozen row moves it.
+        app.selected = Some(Pid::new(10));
+        assert_ne!(
+            app.board().rows()[0].file.pid,
+            Pid::new(10),
+            "the live row is not the default selection"
+        );
         app.on_needs_you(&[Pid::new(11)], EpochMillis::new(1_000));
-        assert_eq!(selected_pid(&app), before);
+        assert_eq!(selected_pid(&app), Some(Pid::new(10)));
     }
 
     #[test]
