@@ -223,6 +223,7 @@ windows-sys = { version = "0.60", features = [
 # Internal crates
 buildinfo = { path = "src/buildinfo" }
 childenv = { path = "src/childenv" }
+sysclip = { path = "src/sysclip" }
 op-cache = { path = "src/op-cache" }
 clipboardmon = { path = "src/clipboardmon" }
 faulte = { path = "src/faulte" }

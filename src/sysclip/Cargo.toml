@@ -1,0 +1,17 @@
+[package]
+name = "sysclip"
+version = "0.1.0"
+edition.workspace = true
+description = "The clipboard of a tool, with the order rule for a mosh-rs session"
+license = "MIT"
+
+[dependencies]
+arboard.workspace = true
+childenv.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
