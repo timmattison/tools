@@ -1518,11 +1518,11 @@ name = "clipboard-random"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "arboard",
  "base64 0.22.1",
  "buildinfo",
  "clap",
  "rand 0.9.5",
+ "sysclip",
 ]
 
 [[package]]
@@ -1539,8 +1539,8 @@ name = "clipboardmon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "arboard",
  "log",
+ "sysclip",
 ]
 
 [[package]]
@@ -9351,12 +9351,12 @@ name = "update-aws-credentials"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "arboard",
  "aws-config",
  "aws-credential-types",
  "aws-sdk-sts",
  "buildinfo",
  "dirs",
+ "sysclip",
  "tokio",
 ]
 
