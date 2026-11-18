@@ -10369,6 +10369,7 @@ dependencies = [
  "libc",
  "regex",
  "serde_json",
+ "sysclip",
  "tempfile",
  "termsize",
  "termwindow",

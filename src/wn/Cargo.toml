@@ -19,6 +19,7 @@ colored.workspace = true
 indicatif.workspace = true
 regex.workspace = true
 serde_json.workspace = true
+sysclip.workspace = true
 termsize.workspace = true
 termwindow.workspace = true
 textfit.workspace = true
