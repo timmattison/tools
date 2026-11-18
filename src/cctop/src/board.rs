@@ -178,11 +178,13 @@ pub struct Change {
 
 impl Change {
     /// Tell if the change makes a session wait for the person. The new state
-    /// must be a live `needs-you`, and the old state must be another one.
+    /// must be a live `needs-you`, and the old state must not be `needs-you`,
+    /// frozen or live. Thus a freeze and a thaw are never a change to
+    /// `needs-you`.
     #[must_use]
     pub fn is_needs_you(&self) -> bool {
-        let needs_you = Some(ShownState::live(PaneState::NeedsYou));
-        self.new == needs_you && self.old != needs_you
+        self.new == Some(ShownState::live(PaneState::NeedsYou))
+            && self.old.map(ShownState::state) != Some(PaneState::NeedsYou)
     }
 }
 
@@ -522,6 +524,13 @@ mod tests {
         assert!(!change(Some(needs_you), Some(needs_you)).is_needs_you());
         assert!(!change(Some(needs_you), Some(idle)).is_needs_you());
         assert!(!change(Some(needs_you), None).is_needs_you());
+        let frozen_needs_you = ShownState::frozen(PaneState::NeedsYou);
+        assert!(!change(Some(frozen_needs_you), Some(needs_you)).is_needs_you());
+        assert!(!change(Some(needs_you), Some(frozen_needs_you)).is_needs_you());
+        assert!(!change(None, Some(frozen_needs_you)).is_needs_you());
+        assert!(!change(Some(idle), Some(frozen_needs_you)).is_needs_you());
+        let frozen_idle = ShownState::frozen(PaneState::Idle);
+        assert!(change(Some(frozen_idle), Some(needs_you)).is_needs_you());
     }
 
     #[test]
