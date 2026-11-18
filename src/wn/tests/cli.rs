@@ -2459,7 +2459,13 @@ fn a_mosh_session_keeps_the_plan_through_pbcopy() {
         .with_claude(&prints_the_plan());
     let output = run_through_shims(&gh, &["--repo", REPO], &[(NO_CLAUDE_ENV, BUILD)]);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
-    assert_eq!(stdout(&output), JSON_ANSWER);
+    // The answer, then the note that says the plan is on the clipboard.
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "{JSON_ANSWER}\nThe plan is on the clipboard. Run wn --refresh to build a new one.\n"
+        )
+    );
     assert_eq!(gh.recorded_clipboard(), undated(JSON_PLAN));
 }
 
