@@ -1,7 +1,9 @@
 //! The commands `pbcopy` and `pbpaste`.
 
 use std::ffi::OsString;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Output, Stdio};
 
 use crate::ClipboardError;
 
@@ -56,12 +58,101 @@ fn is_program(path: &Path) -> bool {
     }
 }
 
-pub(crate) fn copy(_program: &Path, _text: &str) -> Result<(), ClipboardError> {
-    Err(ClipboardError::new(&"placeholder"))
+/// Runs `program` and gives the text it writes. The program is `pbpaste`.
+///
+/// The text comes back byte for byte, with no trim.
+pub(crate) fn paste(program: &Path) -> Result<String, ClipboardError> {
+    let output = childenv::command(program)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|cause| start_failure(program, &cause))?;
+    check_status(program, &output)?;
+    String::from_utf8(output.stdout).map_err(|_| {
+        ClipboardError::new(&format!(
+            "{} wrote text that is not UTF-8",
+            name_of(program)
+        ))
+    })
 }
 
-pub(crate) fn paste(_program: &Path) -> Result<String, ClipboardError> {
-    Err(ClipboardError::new(&"placeholder"))
+/// Runs `program` and gives it `text` on its standard input. The program is
+/// `pbcopy`.
+pub(crate) fn copy(program: &Path, text: &str) -> Result<(), ClipboardError> {
+    let mut child = childenv::command(program)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|cause| start_failure(program, &cause))?;
+    let stdin = child.stdin.take();
+    // A thread writes, so a child that fills its stderr pipe before it reads
+    // cannot hold this call forever.
+    let (written, waited) = std::thread::scope(|scope| {
+        let writer = scope.spawn(move || {
+            let Some(mut stdin) = stdin else {
+                return Ok(());
+            };
+            stdin.write_all(text.as_bytes())
+        });
+        let waited = child.wait_with_output();
+        let written = writer.join().unwrap_or_else(|_| Ok(()));
+        (written, waited)
+    });
+    let output = waited.map_err(|cause| start_failure(program, &cause))?;
+    check_status(program, &output)?;
+    match written {
+        Err(cause) if cause.kind() != ErrorKind::BrokenPipe => Err(ClipboardError::new(&format!(
+            "cannot write to {}: {cause}",
+            name_of(program)
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// The name of `program`, for a message.
+fn name_of(program: &Path) -> String {
+    program
+        .file_name()
+        .unwrap_or(program.as_os_str())
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// The message for a program that did not start.
+fn start_failure(program: &Path, cause: &std::io::Error) -> ClipboardError {
+    ClipboardError::new(&format!("cannot start {}: {cause}", program.display()))
+}
+
+/// Gives the failure of a program that did not exit with status 0.
+///
+/// The message is the first line of stderr that holds text. A program with no
+/// such line gets its status named.
+fn check_status(program: &Path, output: &Output) -> Result<(), ClipboardError> {
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if let Some(line) = stderr.lines().map(str::trim).find(|line| !line.is_empty()) {
+        return Err(ClipboardError::new(&line));
+    }
+    let name = name_of(program);
+    if let Some(code) = output.status.code() {
+        return Err(ClipboardError::new(&format!(
+            "{name} exited with status {code}"
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = output.status.signal() {
+            return Err(ClipboardError::new(&format!(
+                "{name} was stopped by signal {signal}"
+            )));
+        }
+    }
+    Err(ClipboardError::new(&format!("{name} failed")))
 }
 
 #[cfg(test)]
@@ -161,14 +252,21 @@ mod run_tests {
             "#!/bin/sh\nexec /bin/cat > \"${0%/*}/copied\"\n",
         );
         copy(&program, TEXT).unwrap();
-        assert_eq!(std::fs::read(dir.path().join("copied")).unwrap(), TEXT.as_bytes());
+        assert_eq!(
+            std::fs::read(dir.path().join("copied")).unwrap(),
+            TEXT.as_bytes()
+        );
     }
 
     #[test]
     fn paste_gives_the_output_byte_for_byte() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("held"), TEXT).unwrap();
-        let program = script(dir.path(), "pbpaste", "#!/bin/sh\nexec /bin/cat \"${0%/*}/held\"\n");
+        let program = script(
+            dir.path(),
+            "pbpaste",
+            "#!/bin/sh\nexec /bin/cat \"${0%/*}/held\"\n",
+        );
         assert_eq!(paste(&program).unwrap(), TEXT);
     }
 
@@ -178,17 +276,26 @@ mod run_tests {
         let body = "#!/bin/sh\necho >&2\necho '  mosh-open: did not paste: the client refused ' >&2\necho 'second line' >&2\nexit 1\n";
         let program = script(dir.path(), "pbpaste", body);
         let error = paste(&program).unwrap_err();
-        assert_eq!(error.to_string(), "mosh-open: did not paste: the client refused");
+        assert_eq!(
+            error.to_string(),
+            "mosh-open: did not paste: the client refused"
+        );
         let program = script(dir.path(), "pbcopy", body);
         let error = copy(&program, TEXT).unwrap_err();
-        assert_eq!(error.to_string(), "mosh-open: did not paste: the client refused");
+        assert_eq!(
+            error.to_string(),
+            "mosh-open: did not paste: the client refused"
+        );
     }
 
     #[test]
     fn a_failed_command_with_no_stderr_gives_its_status() {
         let dir = tempfile::tempdir().unwrap();
         let program = script(dir.path(), "pbpaste", "#!/bin/sh\nexit 3\n");
-        assert_eq!(paste(&program).unwrap_err().to_string(), "pbpaste exited with status 3");
+        assert_eq!(
+            paste(&program).unwrap_err().to_string(),
+            "pbpaste exited with status 3"
+        );
     }
 
     #[test]
@@ -217,7 +324,10 @@ mod run_tests {
         let program = dir.path().join("pbpaste");
         let message = paste(&program).unwrap_err().to_string();
         assert!(message.starts_with("cannot start "), "{message}");
-        assert!(message.contains(&program.display().to_string()), "{message}");
+        assert!(
+            message.contains(&program.display().to_string()),
+            "{message}"
+        );
     }
 
     #[test]
