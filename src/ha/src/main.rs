@@ -135,10 +135,6 @@ fn main() -> ExitCode {
 /// normal state when this function returns.
 fn run_view(settings: &Settings, rate: RateLimit, worker: &Worker) -> Result<(), RunError> {
     // `ratatui::init` also installs a panic hook that restores the terminal.
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "moves onto altscreen in issue #593"
-    )]
     let mut terminal = ratatui::init();
     let _guard = TerminalGuard;
     let status = Status {
