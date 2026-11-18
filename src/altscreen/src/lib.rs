@@ -103,7 +103,11 @@ pub trait Port: Send + Sync {
 pub struct Session {
     port: Arc<dyn Port>,
     options: Options,
+    previous_hook: Option<Arc<PanicHook>>,
 }
+
+/// The type of a panic hook, as `std::panic::take_hook` returns it.
+type PanicHook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send + 'static>;
 
 impl Session {
     /// Enters the alternate screen on the real terminal.
@@ -134,14 +138,37 @@ impl Session {
             }
             return Err(error);
         }
-        Ok(Session { port, options })
+        let previous: Arc<PanicHook> = Arc::from(std::panic::take_hook());
+        let chained = Arc::clone(&previous);
+        let hook_port = Arc::clone(&port);
+        std::panic::set_hook(Box::new(move |info| {
+            restore(hook_port.as_ref(), options);
+            (*chained)(info);
+        }));
+        Ok(Session {
+            port,
+            options,
+            previous_hook: Some(previous),
+        })
     }
 }
 
 impl Drop for Session {
-    /// Restores the terminal.
+    /// Restores the terminal, then puts the previous panic hook back.
+    ///
+    /// The hook is put back only when the thread is not panicking.
+    /// `std::panic::set_hook` panics on a panicking thread, so a session that
+    /// drops during unwinding would cause a double panic and an abort. During
+    /// unwinding, the chained hook stays in place. A later restore does no
+    /// harm.
     fn drop(&mut self) {
         restore(self.port.as_ref(), self.options);
+        if std::thread::panicking() {
+            return;
+        }
+        if let Some(previous) = self.previous_hook.take() {
+            std::panic::set_hook(Box::new(move |info| (*previous)(info)));
+        }
     }
 }
 
@@ -282,7 +309,9 @@ mod tests {
 
     #[test]
     fn default_entry_is_raw_mode_then_one_clearing_write() {
-        let _lock = PANIC_HOOK_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        let _lock = PANIC_HOOK_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let (port, events) = fake(|_| {});
         let session = Session::enter_on(port, Options::default()).unwrap();
         assert_eq!(snapshot(&events), [Event::RawOn, write(ENTRY)]);
@@ -292,7 +321,9 @@ mod tests {
 
     #[test]
     fn mouse_capture_joins_the_single_entry_write_after_the_hide() {
-        let _lock = PANIC_HOOK_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        let _lock = PANIC_HOOK_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let (port, events) = fake(|_| {});
         let session = Session::enter_on(port, Options::default().mouse_capture(true)).unwrap();
         let mut command = String::new();
@@ -309,7 +340,9 @@ mod tests {
 
     #[test]
     fn raw_mode_off_sends_no_raw_on() {
-        let _lock = PANIC_HOOK_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        let _lock = PANIC_HOOK_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let (port, events) = fake(|_| {});
         let session = Session::enter_on(port, Options::default().raw_mode(false)).unwrap();
         assert_eq!(snapshot(&events), [write(ENTRY)]);
@@ -319,7 +352,9 @@ mod tests {
 
     #[test]
     fn failed_entry_write_undoes_raw_mode_and_returns_the_error() {
-        let _lock = PANIC_HOOK_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        let _lock = PANIC_HOOK_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let (port, events) = fake(|p| p.fail_write_containing = Some(b"1049h"));
         let result = Session::enter_on(port, Options::default());
         let error = result.err().expect("the entry must fail");
@@ -337,7 +372,9 @@ mod tests {
 
     #[test]
     fn drop_restores_mouse_cursor_screen_and_raw_mode_in_order() {
-        let _lock = PANIC_HOOK_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        let _lock = PANIC_HOOK_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let (port, events) = fake(|_| {});
         let session = Session::enter_on(port, Options::default().mouse_capture(true)).unwrap();
         let entered = snapshot(&events).len();
@@ -355,7 +392,9 @@ mod tests {
 
     #[test]
     fn a_failed_show_cursor_write_does_not_skip_the_other_steps() {
-        let _lock = PANIC_HOOK_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        let _lock = PANIC_HOOK_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let (port, events) = fake(|p| p.fail_write_containing = Some(b"25h"));
         let session = Session::enter_on(port, Options::default()).unwrap();
         let entered = snapshot(&events).len();
@@ -368,7 +407,9 @@ mod tests {
 
     #[test]
     fn a_failed_raw_off_is_ignored_on_drop() {
-        let _lock = PANIC_HOOK_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        let _lock = PANIC_HOOK_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let (port, events) = fake(|p| p.fail_raw_off = true);
         let session = Session::enter_on(port, Options::default()).unwrap();
         let entered = snapshot(&events).len();
@@ -381,7 +422,9 @@ mod tests {
 
     #[test]
     fn drop_without_raw_mode_sends_no_raw_off() {
-        let _lock = PANIC_HOOK_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        let _lock = PANIC_HOOK_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let (port, events) = fake(|_| {});
         let session = Session::enter_on(port, Options::default().raw_mode(false)).unwrap();
         let entered = snapshot(&events).len();

@@ -59,11 +59,7 @@ fn write(text: &str) -> Event {
 
 /// The events of one restore, as the hook records them.
 fn restore_events() -> Vec<Event> {
-    vec![
-        write("\x1b[?25h"),
-        write("\x1b[?1049l"),
-        Event::RawOff,
-    ]
+    vec![write("\x1b[?25h"), write("\x1b[?1049l"), Event::RawOff]
 }
 
 /// Installs a previous hook that records a marker.
@@ -73,8 +69,11 @@ fn install_previous_hook(events: &Events) {
 }
 
 fn enter(events: &Events) -> Session {
-    Session::enter_on(Arc::new(RecordingPort(Arc::clone(events))), Options::default())
-        .expect("the entry must work")
+    Session::enter_on(
+        Arc::new(RecordingPort(Arc::clone(events))),
+        Options::default(),
+    )
+    .expect("the entry must work")
 }
 
 #[test]
@@ -120,7 +119,10 @@ fn a_session_that_drops_while_the_thread_unwinds_does_not_abort() {
     assert_eq!(all[0], Event::RawOn);
     let restores = all.iter().filter(|e| **e == Event::RawOff).count();
     assert!(restores >= 1, "the restore must run: {all:?}");
-    assert!(all.contains(&write("\x1b[?1049l")), "leave must be sent: {all:?}");
+    assert!(
+        all.contains(&write("\x1b[?1049l")),
+        "leave must be sent: {all:?}"
+    );
 
     let _ = panic::take_hook();
 }
