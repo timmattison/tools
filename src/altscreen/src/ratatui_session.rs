@@ -34,8 +34,7 @@ pub struct RatatuiSession<B: Backend = CrosstermBackend<Stdout>> {
     /// This field comes first, so it drops before the session restores.
     terminal: Terminal<B>,
     /// Held for its `Drop`, which restores the terminal.
-    #[expect(dead_code, reason = "held for its Drop, which restores the terminal")]
-    session: Session,
+    _session: Session,
 }
 
 impl RatatuiSession {
@@ -77,7 +76,10 @@ where
         terminal
             .resize(Rect::new(0, 0, size.width, size.height))
             .map_err(io::Error::other)?;
-        Ok(Self { terminal, session })
+        Ok(Self {
+            terminal,
+            _session: session,
+        })
     }
 }
 
