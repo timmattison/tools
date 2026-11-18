@@ -101,9 +101,7 @@ pub trait Port: Send + Sync {
 /// The terminal is restored when the session drops.
 #[must_use = "the terminal is restored when the session drops"]
 pub struct Session {
-    #[expect(dead_code, reason = "the restore on drop reads it")]
     port: Arc<dyn Port>,
-    #[expect(dead_code, reason = "the restore on drop reads it")]
     options: Options,
 }
 
@@ -138,6 +136,35 @@ impl Session {
         }
         Ok(Session { port, options })
     }
+}
+
+impl Drop for Session {
+    /// Restores the terminal.
+    fn drop(&mut self) {
+        restore(self.port.as_ref(), self.options);
+    }
+}
+
+/// Restores the terminal. Every step runs even when an earlier step fails,
+/// and a second call does no harm. Each write is separate, so one failed
+/// write does not skip the others.
+fn restore(port: &dyn Port, options: Options) {
+    if options.mouse_capture {
+        send(port, &crossterm::event::DisableMouseCapture);
+    }
+    send(port, &crossterm::cursor::Show);
+    send(port, &crossterm::terminal::LeaveAlternateScreen);
+    if options.raw_mode {
+        let _ = port.disable_raw_mode();
+    }
+}
+
+/// Writes one command to the port and ignores the error.
+fn send(port: &dyn Port, command: &impl Command) {
+    let mut out = String::new();
+    // Writing ANSI into a `String` cannot fail.
+    let _ = command.write_ansi(&mut out);
+    let _ = port.write(out.as_bytes());
 }
 
 /// Builds the entry bytes: enter, erase, home, hide, and optional mouse capture.
