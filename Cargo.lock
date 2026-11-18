@@ -2246,6 +2246,7 @@ dependencies = [
  "buildinfo",
  "childenv",
  "clap",
+ "sysclip",
  "tempfile",
  "thiserror 2.0.21",
 ]

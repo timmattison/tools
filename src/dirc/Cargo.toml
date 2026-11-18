@@ -8,6 +8,7 @@ description = "Directory Clipboard — copies the current directory to the clipb
 arboard.workspace = true
 buildinfo.workspace = true
 clap.workspace = true
+sysclip.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
