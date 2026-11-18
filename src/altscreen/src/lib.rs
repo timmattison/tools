@@ -228,6 +228,11 @@ impl Port for StdoutPort {
     }
 }
 
+#[cfg(feature = "ratatui")]
+mod ratatui_session;
+#[cfg(feature = "ratatui")]
+pub use ratatui_session::RatatuiSession;
+
 #[cfg(test)]
 pub(crate) mod test_support;
 
