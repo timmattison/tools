@@ -88,19 +88,6 @@ impl ShownState {
     pub fn is_frozen(self) -> bool {
         self.run == RunStatus::Stopped
     }
-
-    /// The text for the screen. A live state gives `idle`. A frozen state
-    /// adds [`FLAG_SEPARATOR`] and [`FROZEN_LABEL`], for example
-    /// `idle - frozen`.
-    #[must_use]
-    pub fn label(self) -> String {
-        let state = self.state.label();
-        if self.is_frozen() {
-            format!("{state}{FLAG_SEPARATOR}{FROZEN_LABEL}")
-        } else {
-            state.to_string()
-        }
-    }
 }
 
 impl Session {

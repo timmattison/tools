@@ -91,20 +91,32 @@ fn change_line<Tz: TimeZone>(change: &Change, zone: &Tz) -> Line<'static>
 where
     Tz::Offset: std::fmt::Display,
 {
-    Line::from(vec![
+    let mut spans = vec![
         Span::raw(clock_time(change.at, zone)),
         Span::raw(format!("  {}  ", change.label)),
-        state_span(change.old),
-        Span::raw(" → "),
-        state_span(change.new),
-    ])
+    ];
+    spans.extend(state_spans(change.old));
+    spans.push(Span::raw(" → "));
+    spans.extend(state_spans(change.new));
+    Line::from(spans)
 }
 
-/// The label of a shown state in the color of its state, or a dash when there is no state.
-fn state_span(shown: Option<ShownState>) -> Span<'static> {
+/// The spans of a shown state. The name of the state has the color of the
+/// state. A frozen state adds the flag, with the word `frozen` in blue. When
+/// there is no state, the spans are one dash.
+fn state_spans(shown: Option<ShownState>) -> Vec<Span<'static>> {
     match shown {
-        Some(shown) => Span::styled(shown.label(), Style::new().fg(state_color(shown.state()))),
-        None => Span::raw(NONE_TEXT),
+        Some(shown) => {
+            let mut spans = vec![Span::styled(
+                shown.state().label(),
+                Style::new().fg(state_color(shown.state())),
+            )];
+            if shown.is_frozen() {
+                spans.extend(frozen_flag());
+            }
+            spans
+        }
+        None => vec![Span::raw(NONE_TEXT)],
     }
 }
 
