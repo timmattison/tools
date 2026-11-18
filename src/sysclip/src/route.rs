@@ -1,17 +1,22 @@
-//! The order rule.
+//! The order rule: which clipboard each read and write uses.
 
 use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 
-use crate::command::Commands;
+use crate::command::{self, Commands};
 use crate::native::Native;
-use crate::ClipboardError;
+use crate::{ClipboardError, COPY_COMMAND, MOSH_OPEN_SOCKET_ENV, PASTE_COMMAND};
 
+/// The two variables of the process that the order rule reads.
 pub(crate) struct Environment {
+    /// The value of `MOSH_OPEN_SOCKET`.
     pub(crate) mosh_open_socket: Option<OsString>,
+    /// The value of `PATH`.
     pub(crate) search_path: Option<OsString>,
 }
 
 impl Environment {
+    /// The environment of this process.
     pub(crate) fn from_process() -> Self {
         Self {
             mosh_open_socket: std::env::var_os(crate::MOSH_OPEN_SOCKET_ENV),
@@ -19,36 +24,67 @@ impl Environment {
         }
     }
 
+    /// Whether the mosh-rs server set its socket. An empty value is not set.
     fn is_mosh_session(&self) -> bool {
         self.mosh_open_socket
             .as_ref()
-            .is_some_and(|v| !v.is_empty())
+            .is_some_and(|value| !value.is_empty())
     }
 }
 
+/// What the router knows about the native clipboard.
 enum NativeState<N> {
+    /// A mosh session. The native clipboard never opened.
     Skipped,
+    /// The native clipboard is open.
     Open(N),
+    /// The native clipboard did not open. The error says why.
     Failed(ClipboardError),
 }
 
+/// The order rule of the crate. [`Router::open`] holds the full text of it.
 pub(crate) struct Router<N> {
     native: NativeState<N>,
     commands: Commands,
 }
 
 impl<N: Native> Router<N> {
+    /// Chooses the route for `environment`.
+    ///
+    /// 1. In a mosh session, `opener` never runs. The commands on the search
+    ///    path do all of the work. A search path with neither command is an
+    ///    error.
+    /// 2. Otherwise `opener` runs. When it fails and the search path holds a
+    ///    command, the commands are the fallback. When it fails and the search
+    ///    path holds no command, its error is the error.
     pub(crate) fn open(
         environment: Environment,
-        _opener: impl FnOnce() -> Result<N, ClipboardError>,
+        opener: impl FnOnce() -> Result<N, ClipboardError>,
     ) -> Result<Self, ClipboardError> {
-        let _ = environment.is_mosh_session();
-        let _ = NativeState::<N>::Skipped;
-        let _ = NativeState::<N>::Failed(ClipboardError::new(&"x"));
-        let _ = Commands::on(environment.search_path);
-        Err(ClipboardError::new(&"placeholder"))
+        let mosh = environment.is_mosh_session();
+        let commands = Commands::on(environment.search_path);
+        let has_command =
+            commands.find(COPY_COMMAND).is_some() || commands.find(PASTE_COMMAND).is_some();
+        if mosh {
+            if !has_command {
+                return Err(ClipboardError::new(&format!(
+                    "{MOSH_OPEN_SOCKET_ENV} is set, but PATH holds no {COPY_COMMAND} and no {PASTE_COMMAND}"
+                )));
+            }
+            return Ok(Self {
+                native: NativeState::Skipped,
+                commands,
+            });
+        }
+        let native = match opener() {
+            Ok(native) => NativeState::Open(native),
+            Err(cause) if has_command => NativeState::Failed(cause),
+            Err(cause) => return Err(cause),
+        };
+        Ok(Self { native, commands })
     }
 
+    /// A router that uses the native clipboard and never a command.
     pub(crate) fn native_only(native: N) -> Self {
         Self {
             native: NativeState::Open(native),
@@ -56,13 +92,69 @@ impl<N: Native> Router<N> {
         }
     }
 
+    /// The text on the clipboard.
     pub(crate) fn read(&mut self) -> Result<String, ClipboardError> {
-        let _ = (&self.native, &self.commands);
-        Err(ClipboardError::new(&"placeholder"))
+        let cause = match &mut self.native {
+            NativeState::Skipped => return self.read_by_command(),
+            NativeState::Open(native) => match native.read() {
+                Ok(text) => return Ok(text),
+                Err(cause) => cause,
+            },
+            NativeState::Failed(cause) => cause.clone(),
+        };
+        self.fall_back(cause, PASTE_COMMAND, command::paste)
     }
 
-    pub(crate) fn write(&mut self, _text: &str) -> Result<(), ClipboardError> {
-        Err(ClipboardError::new(&"placeholder"))
+    /// Puts `text` on the clipboard.
+    pub(crate) fn write(&mut self, text: &str) -> Result<(), ClipboardError> {
+        let cause = match &mut self.native {
+            NativeState::Skipped => return self.write_by_command(text),
+            NativeState::Open(native) => match native.write(text) {
+                Ok(()) => return Ok(()),
+                Err(cause) => cause,
+            },
+            NativeState::Failed(cause) => cause.clone(),
+        };
+        self.fall_back(cause, COPY_COMMAND, |program| command::copy(program, text))
+    }
+
+    /// Reads in a mosh session. A failure of the command is the answer.
+    fn read_by_command(&self) -> Result<String, ClipboardError> {
+        let program = self.required(PASTE_COMMAND)?;
+        command::paste(&program)
+    }
+
+    /// Writes in a mosh session. A failure of the command is the answer.
+    fn write_by_command(&self, text: &str) -> Result<(), ClipboardError> {
+        let program = self.required(COPY_COMMAND)?;
+        command::copy(&program, text)
+    }
+
+    /// The path of the command `name` in a mosh session.
+    fn required(&self, name: &str) -> Result<PathBuf, ClipboardError> {
+        self.commands.find(name).ok_or_else(|| {
+            ClipboardError::new(&format!(
+                "{MOSH_OPEN_SOCKET_ENV} is set, but PATH holds no {name}"
+            ))
+        })
+    }
+
+    /// Runs the command `name` after the native clipboard failed with `cause`.
+    ///
+    /// With no such command on the search path, `cause` is the error. When the
+    /// command fails too, the error names both causes.
+    fn fall_back<T>(
+        &self,
+        cause: ClipboardError,
+        name: &str,
+        run: impl FnOnce(&Path) -> Result<T, ClipboardError>,
+    ) -> Result<T, ClipboardError> {
+        let Some(program) = self.commands.find(name) else {
+            return Err(cause);
+        };
+        run(&program).map_err(|second| {
+            ClipboardError::new(&format!("{cause}, and {name} failed too: {second}"))
+        })
     }
 }
 
@@ -151,7 +243,10 @@ mod tests {
 
     #[test]
     fn a_failed_command_in_a_mosh_session_is_the_answer() {
-        let dir = shims(&[(COPY_COMMAND, REFUSING_STUB), (PASTE_COMMAND, REFUSING_STUB)]);
+        let dir = shims(&[
+            (COPY_COMMAND, REFUSING_STUB),
+            (PASTE_COMMAND, REFUSING_STUB),
+        ]);
         let mut router = Router::open(environment(Some("/tmp/sock"), &dir), no_open).unwrap();
         assert_eq!(router.read().unwrap_err().to_string(), REFUSAL);
         assert_eq!(router.write("x").unwrap_err().to_string(), REFUSAL);
@@ -164,8 +259,7 @@ mod tests {
             read: Some(Ok("native text".to_string())),
             ..Fake::default()
         };
-        let mut router =
-            Router::open(environment(Some(""), &dir), || Ok(fake.clone())).unwrap();
+        let mut router = Router::open(environment(Some(""), &dir), || Ok(fake.clone())).unwrap();
         assert_eq!(router.read().unwrap(), "native text");
     }
 
@@ -259,7 +353,10 @@ mod tests {
 
     #[test]
     fn when_both_fail_the_error_names_both_causes() {
-        let dir = shims(&[(COPY_COMMAND, REFUSING_STUB), (PASTE_COMMAND, REFUSING_STUB)]);
+        let dir = shims(&[
+            (COPY_COMMAND, REFUSING_STUB),
+            (PASTE_COMMAND, REFUSING_STUB),
+        ]);
         let fake = Fake {
             read: Some(Err(failure("read failed."))),
             write: Some(Err(failure("write failed."))),
@@ -274,10 +371,8 @@ mod tests {
             router.write("x").unwrap_err().to_string(),
             format!("write failed, and pbcopy failed too: {REFUSAL}")
         );
-        let mut router = Router::<Fake>::open(environment(None, &dir), || {
-            Err(failure("no display."))
-        })
-        .unwrap();
+        let mut router =
+            Router::<Fake>::open(environment(None, &dir), || Err(failure("no display."))).unwrap();
         assert_eq!(
             router.read().unwrap_err().to_string(),
             format!("no display, and pbpaste failed too: {REFUSAL}")

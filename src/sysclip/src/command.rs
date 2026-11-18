@@ -97,7 +97,7 @@ pub(crate) fn copy(program: &Path, text: &str) -> Result<(), ClipboardError> {
             stdin.write_all(text.as_bytes())
         });
         let waited = child.wait_with_output();
-        let written = writer.join().unwrap_or_else(|_| Ok(()));
+        let written = writer.join().unwrap_or(Ok(()));
         (written, waited)
     });
     let output = waited.map_err(|cause| start_failure(program, &cause))?;
