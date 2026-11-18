@@ -395,18 +395,19 @@ impl Board {
         Some(HandledToggle::Marked)
     }
 
-    /// The count of each shown state, in the sort order of the rows. The array
-    /// holds every state, also a state with no session. Each count splits the
-    /// sessions of its state by the handled mark.
+    /// The count of each state, in the sort order of the rows. The array holds
+    /// every state, also a state with no session. A count holds only the live
+    /// rows of its state, and splits them by the handled mark. A frozen row is
+    /// in no count. See [`Board::frozen_count`].
     #[must_use]
-    pub fn state_counts(&self) -> [StateCount; 6] {
+    pub fn state_counts(&self) -> [StateCount; 5] {
         let mut ranked = PaneState::ALL;
         ranked.sort_by_key(|state| state.rank());
         ranked.map(|state| {
             let in_state = self
                 .sessions
                 .values()
-                .filter(|session| session.state() == state);
+                .filter(|session| !session.is_frozen() && session.state() == state);
             let (unmarked, handled) =
                 in_state.fold((0_usize, 0_usize), |(unmarked, handled), session| {
                     if session.is_handled() {
@@ -421,6 +422,15 @@ impl Board {
                 handled,
             }
         })
+    }
+
+    /// The number of frozen rows on the board, whatever their state.
+    #[must_use]
+    pub fn frozen_count(&self) -> usize {
+        self.sessions
+            .values()
+            .filter(|session| session.is_frozen())
+            .count()
     }
 
     /// The session with the pid, when the board holds it.
@@ -696,7 +706,7 @@ mod tests {
 
     #[test]
     fn state_counts_count_a_state_of_sessions_with_no_mark() {
-        use PaneState::{Agents, Frozen, Idle, NeedsYou, Shells, Working};
+        use PaneState::{Agents, Idle, NeedsYou, Shells, Working};
         let mut board = Board::new();
         board.load(file(1, Agents, 1, 100), None);
         board.load(file(2, Agents, 1, 100), None);
@@ -708,8 +718,7 @@ mod tests {
                 (Idle, 0, 0),
                 (Agents, 3, 0),
                 (Shells, 0, 0),
-                (Working, 0, 0),
-                (Frozen, 0, 0)
+                (Working, 0, 0)
             ]
         );
     }
@@ -746,7 +755,7 @@ mod tests {
         let board = Board::new();
         let counts = board.state_counts();
         let ranks: Vec<u8> = counts.iter().map(|count| count.state.rank()).collect();
-        assert_eq!(ranks, [0, 1, 2, 3, 4, 5]);
+        assert_eq!(ranks, [0, 1, 2, 3, 4]);
         assert!(counts
             .iter()
             .all(|count| count.unmarked == 0 && count.handled == 0));

@@ -20,11 +20,13 @@ pub enum PaneState {
     Agents,
     /// The session waits for its shells.
     Shells,
-    /// The process of the session is stopped. cctop finds this state in the
-    /// process table, never in a state file.
-    #[serde(skip_deserializing)]
-    Frozen,
 }
+
+/// The marker of the frozen rows in the title of the table. It is one code
+/// point of East Asian Width `W`, as each marker of [`PaneState::marker`].
+/// It is U+1F9CA and not U+2744, because U+2744 has East Asian Width `N` and
+/// draws as an emoji only with U+FE0F, which Zellij removes.
+pub const FROZEN_MARKER: char = '\u{1F9CA}';
 
 /// A color of the palette, in 8-bit channels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,13 +41,12 @@ pub struct Rgb {
 
 impl PaneState {
     /// Each state, in the order of the declaration.
-    pub const ALL: [PaneState; 6] = [
+    pub const ALL: [PaneState; 5] = [
         PaneState::Working,
         PaneState::NeedsYou,
         PaneState::Idle,
         PaneState::Agents,
         PaneState::Shells,
-        PaneState::Frozen,
     ];
 
     /// The word that the state file and the screen use for the state.
@@ -57,7 +58,6 @@ impl PaneState {
             PaneState::Idle => "idle",
             PaneState::Agents => "agents",
             PaneState::Shells => "shells",
-            PaneState::Frozen => "frozen",
         }
     }
 
@@ -67,9 +67,7 @@ impl PaneState {
     /// variation selector or a joiner. `needs-you` uses U+2757 and not
     /// U+203C: U+203C has East Asian Width `N` and draws as an emoji only with
     /// U+FE0F, and Zellij removes each zero-width code point from its grid, so
-    /// in a Zellij pane it draws 1 column wide. `frozen` uses U+1F9CA and not
-    /// U+2744, because U+2744 has East Asian Width `N` and draws as an emoji
-    /// only with U+FE0F, which Zellij removes.
+    /// in a Zellij pane it draws 1 column wide.
     #[must_use]
     pub fn marker(self) -> char {
         match self {
@@ -78,7 +76,6 @@ impl PaneState {
             PaneState::Agents => '\u{1F916}',
             PaneState::Shells => '\u{1F41A}',
             PaneState::Working => '\u{1F3C3}',
-            PaneState::Frozen => '\u{1F9CA}',
         }
     }
 
@@ -91,7 +88,6 @@ impl PaneState {
             PaneState::Agents => 2,
             PaneState::Shells => 3,
             PaneState::Working => 4,
-            PaneState::Frozen => 5,
         }
     }
 
@@ -102,13 +98,11 @@ impl PaneState {
     pub fn takes_handled_mark(self) -> bool {
         match self {
             PaneState::NeedsYou | PaneState::Idle => true,
-            PaneState::Working | PaneState::Agents | PaneState::Shells | PaneState::Frozen => false,
+            PaneState::Working | PaneState::Agents | PaneState::Shells => false,
         }
     }
 
-    /// The color of the state. It is the default palette of the tab bar, except
-    /// for `frozen`. That state is not in the palette of the `claude-tab-bar`
-    /// plugin, thus cctop gives it blue.
+    /// The color of the state. It is the default palette of the tab bar.
     #[must_use]
     pub fn color(self) -> Rgb {
         let (red, green, blue) = match self {
@@ -117,7 +111,6 @@ impl PaneState {
             PaneState::Idle => (0xe0, 0x31, 0x31),
             PaneState::Agents => (0xff, 0xff, 0xff),
             PaneState::Shells => (0x00, 0xcc, 0xcc),
-            PaneState::Frozen => (0x4d, 0xab, 0xf7),
         };
         Rgb { red, green, blue }
     }
@@ -433,20 +426,16 @@ mod tests {
                 PaneState::Agents,
                 PaneState::Shells,
                 PaneState::Working,
-                PaneState::Frozen,
             ]
         );
         let ranks: Vec<u8> = states.iter().map(|state| state.rank()).collect();
-        assert_eq!(ranks, [0, 1, 2, 3, 4, 5]);
+        assert_eq!(ranks, [0, 1, 2, 3, 4]);
     }
 
     #[test]
     fn label_gives_the_contract_strings() {
         let labels: Vec<&str> = PaneState::ALL.iter().map(|state| state.label()).collect();
-        assert_eq!(
-            labels,
-            ["working", "needs-you", "idle", "agents", "shells", "frozen"]
-        );
+        assert_eq!(labels, ["working", "needs-you", "idle", "agents", "shells"]);
     }
 
     #[test]
@@ -457,7 +446,6 @@ mod tests {
         assert_eq!(PaneState::Agents.marker(), '\u{1F916}');
         assert_eq!(PaneState::Shells.marker(), '\u{1F41A}');
         assert_eq!(PaneState::Working.marker(), '\u{1F3C3}');
-        assert_eq!(PaneState::Frozen.marker(), '\u{1F9CA}');
         for state in PaneState::ALL {
             assert_eq!(state.marker().width(), Some(2), "{}", state.label());
         }
@@ -471,12 +459,13 @@ mod tests {
         assert_eq!(PaneState::Idle.color(), rgb(0xe0, 0x31, 0x31));
         assert_eq!(PaneState::Agents.color(), rgb(0xff, 0xff, 0xff));
         assert_eq!(PaneState::Shells.color(), rgb(0x00, 0xcc, 0xcc));
-        assert_eq!(PaneState::Frozen.color(), rgb(0x4d, 0xab, 0xf7));
     }
 
     #[test]
-    fn a_frozen_session_takes_no_handled_mark() {
-        assert!(!PaneState::Frozen.takes_handled_mark());
+    fn the_frozen_marker_is_one_wide_code_point() {
+        use unicode_width::UnicodeWidthChar;
+        assert_eq!(FROZEN_MARKER, '\u{1F9CA}');
+        assert_eq!(FROZEN_MARKER.width(), Some(2));
     }
 
     #[test]

@@ -10,7 +10,7 @@ use ratatui::Frame;
 
 use crate::app::{App, PageSize};
 use crate::board::{Board, Change, ShownState};
-use crate::state::{EpochMillis, PaneState};
+use crate::state::{EpochMillis, PaneState, FROZEN_MARKER};
 
 /// Draw the screen: the table of sessions, the change log, and the status
 /// line. `now` gives the time that the elapsed times count to.
@@ -137,8 +137,10 @@ fn state_color(state: PaneState) -> Color {
 const TITLE_SEPARATOR: &str = " · ";
 
 /// The title of the table: the number of sessions, then the count of each
-/// state in the sort order of the rows. A count reads `unmarked/handled`
-/// and the marker of its state follows it.
+/// state in the sort order of the rows, then the count of frozen rows. A count
+/// of a state reads `unmarked/handled` and the marker of its state follows it.
+/// It holds only live rows. The last count has one number, the number of
+/// frozen rows, because a frozen row takes no handled mark.
 fn table_title(board: &Board) -> String {
     let count = board.len();
     let noun = if count == 1 { "session" } else { "sessions" };
@@ -155,8 +157,9 @@ fn table_title(board: &Board) -> String {
         })
         .collect();
     format!(
-        " cctop{TITLE_SEPARATOR}{count} {noun}{TITLE_SEPARATOR}{} ",
-        counts.join(TITLE_SEPARATOR)
+        " cctop{TITLE_SEPARATOR}{count} {noun}{TITLE_SEPARATOR}{}{TITLE_SEPARATOR}{} {FROZEN_MARKER} ",
+        counts.join(TITLE_SEPARATOR),
+        board.frozen_count()
     )
 }
 
@@ -560,7 +563,7 @@ mod tests {
         let text = title(&render(&app, 127_000));
         assert!(
             text.contains(
-                " cctop · 5 sessions · 1/1 ❗ · 0/1 💤 · 1/0 🤖 · 0/0 🐚 · 1/0 🏃 · 0/0 🧊 "
+                " cctop · 5 sessions · 1/1 ❗ · 0/1 💤 · 1/0 🤖 · 0/0 🐚 · 1/0 🏃 · 0 🧊 "
             ),
             "{text}"
         );
@@ -596,11 +599,11 @@ mod tests {
     }
 
     #[test]
-    fn the_empty_board_shows_six_counts_of_zero() {
+    fn the_empty_board_shows_five_counts_of_zero_and_no_frozen_row() {
         let text = title(&render(&App::new(), 1_000));
         assert!(
             text.contains(
-                " cctop · 0 sessions · 0/0 ❗ · 0/0 💤 · 0/0 🤖 · 0/0 🐚 · 0/0 🏃 · 0/0 🧊 "
+                " cctop · 0 sessions · 0/0 ❗ · 0/0 💤 · 0/0 🤖 · 0/0 🐚 · 0/0 🏃 · 0 🧊 "
             ),
             "{text}"
         );
@@ -643,7 +646,7 @@ mod tests {
         let text = title(&buffer);
         assert!(
             text.contains(
-                " cctop · 14 sessions · 1/2 ❗ · 3/7 💤 · 1/0 🤖 · 0/0 🐚 · 0/0 🏃 · 0/0 🧊 "
+                " cctop · 14 sessions · 1/2 ❗ · 3/7 💤 · 1/0 🤖 · 0/0 🐚 · 0/0 🏃 · 0 🧊 "
             ),
             "{text}"
         );
