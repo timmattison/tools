@@ -106,7 +106,7 @@ disallowed-methods = [
     # type fails the build at its own site. `sysclip` states its exemption with
     # an `#[expect]` and a reason at its sites. The matching type ban is in
     # `disallowed-types` below.
-    { path = "arboard::Clipboard::new", reason = "open the clipboard through sysclip::Clipboard::open, or sysclip::open_native for a poll; sysclip keeps the mosh-rs shims and the order rule" },
+    { path = "arboard::Clipboard::new", reason = "open the clipboard through sysclip::Clipboard::open, or sysclip::Clipboard::open_native for a poll; sysclip keeps the mosh-rs shims and the order rule" },
 ]
 
 # A full-screen tool enters the alternate screen so that the shell screen comes
@@ -125,5 +125,5 @@ disallowed-types = [
     { path = "termion::screen::ToAlternateScreen", reason = "enter the alternate screen through altscreen::Session::enter; it erases the screen in the same write, and mosh ignores mode 1049" },
     { path = "termion::screen::AlternateScreen", reason = "enter the alternate screen through altscreen::Session::enter; it erases the screen in the same write, and mosh ignores mode 1049" },
     # See the block above `arboard::Clipboard::new` in `disallowed-methods`.
-    { path = "arboard::Clipboard", reason = "hold the clipboard through sysclip::Clipboard, or open one with sysclip::open_native for a poll; sysclip keeps the mosh-rs shims and the order rule" },
+    { path = "arboard::Clipboard", reason = "hold the clipboard through sysclip::Clipboard, or open one with sysclip::Clipboard::open_native for a poll; sysclip keeps the mosh-rs shims and the order rule" },
 ]

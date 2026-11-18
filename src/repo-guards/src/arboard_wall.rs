@@ -174,7 +174,7 @@ impl fmt::Display for Report {
         }
         writeln!(
             f,
-            "{} dependencies on `{GUARDED_PACKAGE}` outside `{OWNER}`:",
+            "dependencies on `{GUARDED_PACKAGE}` outside `{OWNER}` ({}):",
             self.offenders.len()
         )?;
         for offender in &self.offenders {
