@@ -373,7 +373,86 @@ fn spellings(path: &Path) -> Result<Vec<String>, AlternateScreenError> {
     Ok(found.into_iter().collect())
 }
 
+/// The escape character that opens a 7-bit control sequence introducer.
+const ESCAPE: char = '\u{1b}';
+
+/// The single-character 8-bit control sequence introducer.
+const CSI_8_BIT: char = '\u{9b}';
+
 /// Walk `tokens`, recording every entry spelling to any depth.
+///
+/// Recursion follows every group, so a spelling inside the body of a macro
+/// invocation is reached the same way a top-level one is.
 fn collect(tokens: TokenStream, found: &mut BTreeSet<String>) {
-    let _ = (tokens, found);
+    for tree in tokens {
+        match tree {
+            TokenTree::Ident(ident) => {
+                let text = ident.to_string();
+                let name = text.strip_prefix("r#").unwrap_or(&text);
+                if IDENTIFIERS.contains(&name) {
+                    found.insert(name.to_owned());
+                }
+            }
+            TokenTree::Literal(literal) => {
+                if let Some(value) = literal_value(literal) {
+                    collect_modes(&value, found);
+                }
+            }
+            TokenTree::Group(group) => collect(group.stream(), found),
+            TokenTree::Punct(_) => {}
+        }
+    }
+}
+
+/// The value of a string, byte string, or C string literal, after escapes, as
+/// characters. Each byte of a byte string or a C string stands for the
+/// character of the same number. Any other literal gives `None`.
+fn literal_value(literal: proc_macro2::Literal) -> Option<Vec<char>> {
+    match syn::Lit::new(literal) {
+        syn::Lit::Str(text) => Some(text.value().chars().collect()),
+        syn::Lit::ByteStr(bytes) => Some(bytes.value().into_iter().map(char::from).collect()),
+        syn::Lit::CStr(bytes) => Some(
+            bytes
+                .value()
+                .to_bytes()
+                .iter()
+                .copied()
+                .map(char::from)
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+/// Record every alternate-screen entry sequence that `value` holds.
+///
+/// A sequence is an introducer, `?`, parameters of digits and `;`, and a final
+/// `h`. Each parameter in [`MODES`] is recorded as `CSI ?<mode> h`.
+fn collect_modes(value: &[char], found: &mut BTreeSet<String>) {
+    for (index, &character) in value.iter().enumerate() {
+        let after_introducer = match character {
+            ESCAPE if value.get(index + 1) == Some(&'[') => index + 2,
+            CSI_8_BIT => index + 1,
+            _ => continue,
+        };
+        if value.get(after_introducer) != Some(&'?') {
+            continue;
+        }
+
+        let parameters = &value[after_introducer + 1..];
+        let length = parameters
+            .iter()
+            .take_while(|c| c.is_ascii_digit() || **c == ';')
+            .count();
+        if parameters.get(length) != Some(&'h') {
+            continue;
+        }
+
+        let text: String = parameters[..length].iter().collect();
+        for mode in text.split(';').filter_map(|part| part.parse::<u32>().ok()) {
+            if MODES.contains(&mode) {
+                found.insert(format!("CSI ?{mode} h"));
+            }
+        }
+    }
 }
