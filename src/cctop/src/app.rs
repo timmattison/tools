@@ -738,6 +738,19 @@ mod tests {
     }
 
     #[test]
+    fn a_needs_you_signal_for_a_frozen_session_moves_no_selection() {
+        let mut app = app_with(&[(10, PaneState::Idle)]);
+        app.board_mut().load_stopped(
+            file(11, "dir11", PaneState::NeedsYou, 11),
+            None,
+            EpochMillis::new(500),
+        );
+        let before = selected_pid(&app);
+        app.on_needs_you(&[Pid::new(11)], EpochMillis::new(1_000));
+        assert_eq!(selected_pid(&app), before);
+    }
+
+    #[test]
     fn after_a_mark_the_cursor_skips_a_frozen_session_whose_file_takes_a_mark() {
         let mut app = app_with(&[(10, PaneState::Idle)]);
         app.board_mut().load_stopped(

@@ -979,12 +979,16 @@ mod tests {
 
     #[test]
     fn toggle_handled_refuses_a_frozen_session() {
-        let mut board = frozen_board(PaneState::Idle);
-        assert_eq!(
-            board.toggle_handled(Pid::new(7)),
-            Some(HandledToggle::Refused)
-        );
-        assert!(!board.get(Pid::new(7)).expect("on the board").is_handled());
+        for state in [PaneState::NeedsYou, PaneState::Idle] {
+            let mut board = frozen_board(state);
+            assert_eq!(
+                board.toggle_handled(Pid::new(7)),
+                Some(HandledToggle::Refused),
+                "{state:?}"
+            );
+            let session = board.get(Pid::new(7)).expect("on the board");
+            assert!(!session.is_handled(), "{state:?}");
+        }
     }
 
     #[test]
