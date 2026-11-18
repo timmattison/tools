@@ -98,7 +98,8 @@ fn a_panic_restores_the_terminal_before_the_previous_hook_runs() {
     drop(session);
     let after_drop = snapshot(&events).len();
     assert_eq!(
-        before_drop, after_drop,
+        before_drop,
+        after_drop,
         "the drop must not restore a second time: {:?}",
         snapshot(&events)
     );

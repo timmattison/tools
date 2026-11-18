@@ -31,6 +31,7 @@
 //! ```
 
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 #[expect(
@@ -113,6 +114,8 @@ pub struct Session {
     port: Arc<dyn Port>,
     options: Options,
     previous_hook: Option<Arc<PanicHook>>,
+    /// Set by the first restore, from the panic hook or from `drop`.
+    restored: Arc<AtomicBool>,
 }
 
 /// The type of a panic hook, as `std::panic::take_hook` returns it.
@@ -150,14 +153,17 @@ impl Session {
         let previous: Arc<PanicHook> = Arc::from(std::panic::take_hook());
         let chained = Arc::clone(&previous);
         let hook_port = Arc::clone(&port);
+        let restored = Arc::new(AtomicBool::new(false));
+        let hook_restored = Arc::clone(&restored);
         std::panic::set_hook(Box::new(move |info| {
-            restore(hook_port.as_ref(), options);
+            restore_once(hook_port.as_ref(), options, &hook_restored);
             (*chained)(info);
         }));
         Ok(Session {
             port,
             options,
             previous_hook: Some(previous),
+            restored,
         })
     }
 }
@@ -165,13 +171,17 @@ impl Session {
 impl Drop for Session {
     /// Restores the terminal, then puts the previous panic hook back.
     ///
+    /// The session restores the terminal once, on the first of the panic hook
+    /// and this drop. A second leave sequence restores the saved cursor again
+    /// in tmux and xterm, and the prompt then prints over the panic message.
+    ///
     /// The hook is put back only when the thread is not panicking.
     /// `std::panic::set_hook` panics on a panicking thread, so a session that
     /// drops during unwinding would cause a double panic and an abort. During
-    /// unwinding, the chained hook stays in place. A later restore does no
-    /// harm.
+    /// unwinding, the chained hook stays in place, and it sends nothing more
+    /// because the restore flag is set.
     fn drop(&mut self) {
-        restore(self.port.as_ref(), self.options);
+        restore_once(self.port.as_ref(), self.options, &self.restored);
         if std::thread::panicking() {
             return;
         }
@@ -181,9 +191,21 @@ impl Drop for Session {
     }
 }
 
-/// Restores the terminal. Every step runs even when an earlier step fails,
-/// and a second call does no harm. Each write is separate, so one failed
-/// write does not skip the others.
+/// Restores the terminal, only if `restored` was not yet set.
+///
+/// The panic hook and `Drop` both come here, so they restore once between
+/// them. A second leave sequence restores the saved cursor again in tmux and
+/// xterm, and the prompt then prints over the panic message. An atomic flag
+/// is used because a panic can poison a mutex, and the hook runs in a panic.
+fn restore_once(port: &dyn Port, options: Options, restored: &AtomicBool) {
+    if !restored.swap(true, Ordering::SeqCst) {
+        restore(port, options);
+    }
+}
+
+/// Restores the terminal. Every step runs even when an earlier step fails.
+/// Each write is separate, so one failed write does not skip the others.
+/// A second call is not harmless: call it through `restore_once`.
 fn restore(port: &dyn Port, options: Options) {
     if options.mouse_capture {
         send(port, &crossterm::event::DisableMouseCapture);
