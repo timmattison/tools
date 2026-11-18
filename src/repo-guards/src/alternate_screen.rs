@@ -32,7 +32,9 @@
 //!
 //! 1. **An identifier.** A token that is an identifier equal to one of
 //!    [`IDENTIFIERS`], with a leading `r#` removed. The match is exact, so a
-//!    name that only contains one of them is not a match.
+//!    name that only contains one of them is not a match. A `use … as` rename is
+//!    caught, because the original name is an identifier token of the `use`
+//!    item.
 //! 2. **A string literal that holds an entry sequence.** The guard takes the
 //!    value of the literal, after escapes. A byte string and a C string give
 //!    their bytes, and each byte stands for the character of the same number.
@@ -68,8 +70,6 @@
 //!   complete sequence into one literal.
 //! - **A sequence that `concat!` joins from parts.** Each part is a literal on
 //!   its own, and none holds the whole sequence.
-//! - **A `use … as` rename.** Clippy catches that spelling, because it is a
-//!   `use` item.
 //! - **`ratatui::init`.** Clippy catches that function.
 //!
 //! # Exemptions

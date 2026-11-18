@@ -129,6 +129,17 @@ fn f(out: &mut Vec<u8>) {
 }
 
 #[test]
+fn reports_a_use_as_rename() {
+    assert_reports(
+        r#"use crossterm::terminal::EnterAlternateScreen as Enter;
+fn f(out: &mut Vec<u8>) {
+    execute!(out, Enter);
+}"#,
+        &["EnterAlternateScreen"],
+    );
+}
+
+#[test]
 fn reports_a_write_ansi_call_on_the_command() {
     assert_reports(
         r#"fn f(s: &mut String) {
