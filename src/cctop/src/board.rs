@@ -449,15 +449,17 @@ impl Board {
         self.sessions.is_empty()
     }
 
-    /// The sessions in the order of the screen: by the rank of the shown state, then
-    /// the sessions with no handled mark, then the handled sessions in the
-    /// order of their marks, then the oldest `since` first, then the pid.
+    /// The sessions in the order of the screen. The first key is the rank of
+    /// the state. In one state, the live rows with no mark come first. The live
+    /// rows with a mark come next, in the order of their marks. The frozen rows
+    /// come last. In each part, the oldest `since` comes first, then the pid.
     #[must_use]
     pub fn rows(&self) -> Vec<&Session> {
         let mut rows: Vec<&Session> = self.sessions.values().collect();
         rows.sort_by_key(|session| {
             (
                 session.state().rank(),
+                session.is_frozen(),
                 session.handled,
                 session.since,
                 session.file.pid.as_u32(),
