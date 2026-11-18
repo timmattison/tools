@@ -368,6 +368,18 @@ mod tests {
             )
     }
 
+    /// The column of the first match of `needle` in `line`. It counts
+    /// characters and not bytes, because the border is wider than one byte.
+    fn column_of(line: &str, needle: &str) -> u16 {
+        let chars: Vec<char> = line.chars().collect();
+        let wanted: Vec<char> = needle.chars().collect();
+        let index = chars
+            .windows(wanted.len())
+            .position(|window| window == wanted.as_slice())
+            .unwrap_or_else(|| panic!("{needle:?} is not in {line:?}"));
+        u16::try_from(index).expect("the column fits")
+    }
+
     #[test]
     fn the_page_size_is_the_number_of_session_rows_that_draw_shows() {
         let mut app = App::new();
@@ -746,5 +758,31 @@ mod tests {
             row_text(&buffer, HEIGHT - 1).trim_end(),
             "No session needs you"
         );
+    }
+
+    /// The color of the word `frozen`, as a color of the terminal.
+    const FROZEN_BLUE: Color = Color::Rgb(0x4d, 0xab, 0xf7);
+
+    #[test]
+    fn a_frozen_row_keeps_the_color_of_its_state_and_shows_frozen_in_blue() {
+        let mut app = App::new();
+        app.board_mut().load_stopped(
+            file(10, "dir10", PaneState::Idle, 1_000),
+            None,
+            EpochMillis::new(1_000),
+        );
+        let buffer = render(&app, 127_000);
+        let (y, line) = line_with(&buffer, "dir10");
+        assert!(line.contains("idle - frozen"), "{line}");
+        let block = column_of(&line, "█");
+        assert_eq!(buffer[(block, y)].fg, Color::Rgb(0xe0, 0x31, 0x31));
+        let frozen = column_of(&line, "frozen");
+        for x in frozen..frozen + 6 {
+            assert_eq!(buffer[(x, y)].fg, FROZEN_BLUE, "column {x} of {line}");
+        }
+        let idle = column_of(&line, "idle");
+        for x in idle..idle + 4 {
+            assert_ne!(buffer[(x, y)].fg, FROZEN_BLUE, "column {x} of {line}");
+        }
     }
 }
