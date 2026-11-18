@@ -541,6 +541,160 @@ constructor or states an exemption at its site. It does not prove three things:
   builds, so a directory the walk never reaches shows up as a set difference
   instead of a clean report
 
+## Alternate Screen
+
+Every tool in this repository that enters the alternate screen of the terminal
+**must** enter it through the `altscreen` library crate at `src/altscreen/`. A
+raw entry fails the build or the guard.
+
+### Why
+
+A tool that enters the alternate screen depends on the terminal to clear it.
+xterm clears the screen for mode 1049, but the emulator in the mosh server
+ignores the modes 47, 1047 and 1049. Thus the text of the shell stays on the
+screen.
+
+ratatui does not help. It sends no clear at startup, and its first frame is a
+diff against an empty buffer. Thus ratatui writes only the cells that are not
+blank, and the shell text shows through each blank cell. `gitrdun` and `cctop`
+shipped this defect. `ha` had it until PR #596 (branch `issue-592`) put a clear
+into its view loop. Issue #593 moved that clear into one helper.
+
+Ten tools had their own code to enter the alternate screen, and each one gave a
+different subset of the guarantees below. `gitrdun` and `runat` left the shell
+in raw mode after a panic. `diskhog` and `runat` called `Terminal::clear`, which
+asks the terminal for the cursor position and waits for the answer. A terminal
+that does not answer, for example a recording under `script`, stopped them at
+the start.
+
+### What the Helper Guarantees
+
+- The erase of the whole screen goes out in the same write as the entry.
+- A failed entry leaves no raw mode.
+- Each exit restores the terminal: a drop, an error, and a panic.
+- A panic restores the terminal first, so the panic message prints on the
+  screen of the shell.
+- The session never asks the terminal for the cursor position.
+
+### Usage
+
+Take the crate with `altscreen.workspace = true`. A tool that paints the screen
+itself holds a `Session`:
+
+```rust
+let _session = altscreen::Session::enter(altscreen::Options::default())?;
+```
+
+A tool that draws with ratatui takes the feature `ratatui`, and draws on the
+`Terminal` of the session:
+
+```toml
+altscreen = { workspace = true, features = ["ratatui"] }
+```
+
+```rust
+let mut session = altscreen::RatatuiSession::enter(altscreen::Options::default())?;
+session.terminal().draw(|frame| render(frame))?;
+```
+
+`Options` has two settings:
+
+- `raw_mode(false)` is for a tool that holds raw mode another way. `ic` holds it
+  through termion.
+- `mouse_capture(true)` turns mouse capture on, and the restore turns it off.
+  `runat` uses it.
+
+To restore the terminal before the tool does more work, drop the session.
+`runat` does this before it runs its command, and `diskhog` does it before it
+prints its shutdown errors.
+
+### The Ban
+
+`clippy.toml` bans the spellings that clippy can see:
+
+- `disallowed-types`: the `use` of `crossterm::terminal::EnterAlternateScreen`,
+  `termion::screen::ToAlternateScreen` and `termion::screen::AlternateScreen`.
+  A `use … as` rename and the re-export through `ratatui::crossterm` are caught
+  too.
+- `disallowed-methods`: `ratatui::init`, `ratatui::try_init`, `ratatui::run`, and
+  the `into_alternate_screen` method of termion.
+
+`ratatui::init_with_options` and `ratatui::try_init_with_options` stay open. They
+do not enter the alternate screen, and an inline viewport is a correct use of
+them.
+
+`altscreen` is the one legitimate user. It says so at its import with
+`#[expect(clippy::disallowed_types, reason = "...")]`, and clippy fails if that
+expectation stops being fulfilled.
+
+### The Guard
+
+Clippy does not see three spellings. `disallowed-types` checks `use` items, not
+a unit struct in the position of a value, so
+`execute!(out, crossterm::terminal::EnterAlternateScreen)` with no import passes
+it. A name that a glob import brings in passes it too. Clippy reads no string
+literal, so `print!("\x1b[?1049h")` passes it.
+
+`repo_guards::alternate_screen` reads tokens to close that gap. It has two
+rules:
+
+- **The identifier rule.** No identifier token is `EnterAlternateScreen`,
+  `ToAlternateScreen`, `AlternateScreen`, `IntoAlternateScreen` or
+  `into_alternate_screen`. A comment and a string are not identifier tokens, so
+  prose stays data. A local type named `AlternateScreen` is reported too. That
+  failure is loud, and a rename fixes it.
+- **The literal rule.** No string literal, byte string literal or C string
+  literal holds a DEC private mode set (`ESC [ ? Pm h`, or the 8-bit CSI) whose
+  parameters include 47, 1047 or 1049. The rule reads the value of the literal
+  after the escapes, so each spelling of ESC is one spelling. It parses the
+  parameter list, so `\x1b[?25;1049h` is caught. A leave sequence (`…l`) is not
+  reported.
+
+The guard reads the same set of files as `repo_guards::git_env_sweep`: the Rust
+that cargo compiles. It parses each file first, so a file that does not parse
+is a refusal and not a clean report.
+
+### The Exemptions
+
+`repo_guards::alternate_screen::EXEMPTIONS` keys each entry on (file, spelling),
+so a new spelling in an exempt file is still a violation. An entry that matches
+nothing is reported, so a stale entry fails too. The list holds three entries:
+
+- `src/altscreen/src/lib.rs`, `EnterAlternateScreen` — the one entrance. It
+  writes the entry command into the bytes of its entry write.
+- `src/altscreen/src/lib.rs`, `CSI ?1049 h` — its unit tests expect the exact
+  entry bytes.
+- `src/krt/tests/terminal.rs`, `CSI ?1049 h` — the pty tests of `krt` search the
+  output for the entry sequence. They write to no user terminal.
+
+### What the Ban and the Guard Do Not Prove
+
+- A sequence that code builds at runtime, for example
+  `format!("\x1b[?{}h", 1049)`.
+- A sequence that `concat!` joins from parts.
+
+### Guards Enforcing This
+
+- `clippy.toml` `disallowed-types` and `disallowed-methods` — the spellings of
+  "The Ban" fail the build
+- `repo_guards::alternate_screen` (`src/repo-guards/src/alternate_screen.rs`) —
+  no file cargo compiles names a listed identifier or holds an entry sequence,
+  other than the exempt ones. `src/repo-guards/tests/alternate_screen.rs` holds
+  one fixture for each syntactic form, and one test that audits this workspace
+
+### Tools Currently Using altscreen
+
+- `beta` - the player of a recording
+- `cctop` - the full-screen view, through the ratatui session
+- `diskhog` - the full-screen view, through the ratatui session
+- `gitrdun` - the progress view, through the ratatui session
+- `gsw` - the watch view
+- `ha` - the full-screen view, through the ratatui session
+- `ic` - the video player, with raw mode off, because termion holds raw mode
+- `krt` - the live view
+- `runat` - the countdown view, through the ratatui session, with mouse capture
+- `seescc` - the watch view
+
 ## Version Information
 
 All tools in this repository **must** display version information including git hash and dirty status when `--version` or `-V` is used.
