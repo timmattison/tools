@@ -814,4 +814,30 @@ mod tests {
             assert_ne!(buffer[(x, y)].fg, FROZEN_BLUE, "column {x} of {line}");
         }
     }
+
+    #[test]
+    fn the_log_shows_a_freeze_and_a_thaw_with_the_state_on_both_sides() {
+        let mut app = App::new();
+        app.board_mut()
+            .load(file(11, "dir11", PaneState::NeedsYou, 100), None);
+        app.board_mut()
+            .set_run_status(Pid::new(11), RunStatus::Stopped, EpochMillis::new(200));
+        app.board_mut()
+            .set_run_status(Pid::new(11), RunStatus::Running, EpochMillis::new(300));
+        let buffer = render(&app, 1_000);
+        let (y, freeze) = line_with(&buffer, "dir11  needs-you → needs-you - frozen");
+        let (_, thaw) = line_with(&buffer, "dir11  needs-you - frozen → needs-you");
+        assert_ne!(freeze, thaw);
+        let amber = Color::Rgb(0xfa, 0xb0, 0x05);
+        let first = column_of(&freeze, "needs-you");
+        assert_eq!(buffer[(first, y)].fg, amber, "{freeze}");
+        let arrow = column_of(&freeze, "→");
+        let tail: String = freeze.chars().skip(usize::from(arrow)).collect();
+        let second = arrow + column_of(&tail, "needs-you");
+        assert_eq!(buffer[(second, y)].fg, amber, "{freeze}");
+        let frozen = column_of(&freeze, "frozen");
+        for x in frozen..frozen + 6 {
+            assert_eq!(buffer[(x, y)].fg, FROZEN_BLUE, "column {x} of {freeze}");
+        }
+    }
 }
