@@ -778,6 +778,25 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn a_frozen_row_sorts_in_the_group_of_its_state_below_the_live_rows() {
+        use PaneState::{Idle, NeedsYou, Working};
+        let mut board = Board::new();
+        board.load(file(1, Working, 1, 100), None);
+        board.load(file(2, NeedsYou, 1, 500), None);
+        board.load(file(3, NeedsYou, 1, 600), None);
+        assert_eq!(
+            board.toggle_handled(Pid::new(3)),
+            Some(HandledToggle::Marked)
+        );
+        board.load_stopped(file(4, NeedsYou, 1, 1), None, EpochMillis::new(50));
+        board.load_stopped(file(5, NeedsYou, 1, 1), None, EpochMillis::new(40));
+        board.load_stopped(file(7, NeedsYou, 1, 1), None, EpochMillis::new(40));
+        board.load(file(6, Idle, 1, 10), None);
+        board.load_stopped(file(8, Idle, 1, 1), None, EpochMillis::new(5));
+        assert_eq!(row_order(&board), vec![2, 3, 5, 7, 4, 6, 8, 1]);
+    }
+
     /// A board with one `needs-you` row, three idle rows, and one `agents`
     /// row. The idle rows sort 5, 8, 4.
     fn board_with_three_idle_rows() -> Board {
