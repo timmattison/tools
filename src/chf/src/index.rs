@@ -289,18 +289,14 @@ fn list_candidates(folder: &Path) -> std::io::Result<Vec<Candidate>> {
 }
 
 /// The session files among `paths`, the entries of one project folder.
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "the entry error ends the listing once the next commit lands"
-)]
+/// An entry error ends the listing, so the folder counts as unreadable and
+/// keeps its cache file.
 fn candidates_from(
     paths: impl IntoIterator<Item = std::io::Result<PathBuf>>,
 ) -> std::io::Result<Vec<Candidate>> {
     let mut candidates = Vec::new();
     for path in paths {
-        let Ok(path) = path else {
-            continue;
-        };
+        let path = path?;
         let Some(file_name) = path.file_name() else {
             continue;
         };
