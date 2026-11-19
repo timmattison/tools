@@ -303,4 +303,60 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn the_hotkey_toggles_the_panel() {
+        let (mut panel, mut target) = shown(vec![]);
+        let jobs = panel.handle(PanelInput::Hotkey { rows: 30 }, &mut target, NOW);
+        assert_eq!(jobs, vec![PanelJob::Hide]);
+        assert!(!panel.is_visible());
+        assert!(target.calls.is_empty());
+        let jobs = panel.handle(PanelInput::Hotkey { rows: 30 }, &mut target, NOW);
+        assert_eq!(jobs, vec![PanelJob::Show]);
+        assert!(panel.is_visible());
+    }
+
+    #[test]
+    fn escape_hides_the_panel() {
+        let (mut panel, mut target) = shown(vec![]);
+        let jobs = panel.handle(PanelInput::Key(PanelKey::Hide), &mut target, NOW);
+        assert_eq!(jobs, vec![PanelJob::Hide]);
+        assert!(!panel.is_visible());
+        assert!(target.calls.is_empty());
+    }
+
+    #[test]
+    fn an_ignored_key_does_nothing() {
+        let (mut panel, mut target) = shown(vec![]);
+        let jobs = panel.handle(PanelInput::Key(PanelKey::Ignore), &mut target, NOW);
+        assert_eq!(jobs, vec![]);
+        assert!(panel.is_visible());
+        assert!(target.calls.is_empty());
+    }
+
+    #[test]
+    fn losing_the_key_focus_hides_a_shown_panel_only() {
+        let (mut panel, mut target) = shown(vec![]);
+        let jobs = panel.handle(PanelInput::ResignKey, &mut target, NOW);
+        assert_eq!(jobs, vec![PanelJob::Hide]);
+        assert!(!panel.is_visible());
+        let jobs = panel.handle(PanelInput::ResignKey, &mut target, NOW);
+        assert_eq!(jobs, vec![]);
+    }
+
+    #[test]
+    fn a_key_while_hidden_reaches_no_target() {
+        let mut panel = Panel::new();
+        let mut target = FakeTarget::answering(vec![vec![Effect::Quit]]);
+        for input in [
+            key_input(KeyCode::Enter),
+            PanelInput::Key(PanelKey::Hide),
+            PanelInput::Key(PanelKey::Ignore),
+            PanelInput::ResignKey,
+        ] {
+            assert_eq!(panel.handle(input, &mut target, NOW), vec![]);
+        }
+        assert!(target.calls.is_empty());
+        assert!(!panel.is_visible());
+    }
 }
