@@ -9,12 +9,22 @@ license = "MIT"
 name = "cctop_bar"
 path = "src/lib.rs"
 
+[[bin]]
+name = "cctop-bar"
+path = "src/main.rs"
+
 [dependencies]
+buildinfo.workspace = true
 cctop.workspace = true
+clap.workspace = true
 crossterm.workspace = true
 ratatui.workspace = true
 thiserror.workspace = true
 unicode-width.workspace = true
+
+[dev-dependencies]
+childenv.workspace = true
+testcolor.workspace = true
 
 [lints]
 workspace = true

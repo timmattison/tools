@@ -81,10 +81,7 @@ mod tests {
     fn the_default_settings_give_the_copy_the_default_chord() {
         assert_eq!(
             child_arguments(&settings(true, Some(Chord::default()), None)),
-            [
-                "--spawned-copy",
-                "--hotkey=ctrl+alt+shift+cmd+backspace"
-            ]
+            ["--spawned-copy", "--hotkey=ctrl+alt+shift+cmd+backspace"]
         );
     }
 

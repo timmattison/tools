@@ -1336,9 +1336,13 @@ dependencies = [
 name = "cctop-bar"
 version = "0.1.0"
 dependencies = [
+ "buildinfo",
  "cctop",
+ "childenv",
+ "clap",
  "crossterm",
  "ratatui",
+ "testcolor",
  "thiserror 2.0.21",
  "unicode-width",
 ]
