@@ -60,7 +60,11 @@ pub enum NotifyOutcome {
 /// A failed look at the lock sends the notification: a second notification
 /// is better than none.
 pub fn notify_now(runner: &dyn Runner, gate: &NotifyGate, message: &str) -> NotifyOutcome {
-    let _ = gate;
+    if let NotifyGate::UnlessHeld(lock) = gate {
+        if let Ok(Some(holder)) = soleinstance::instance::holder(lock) {
+            return NotifyOutcome::Skipped(holder);
+        }
+    }
     match notification::send(runner, message) {
         Ok(()) => NotifyOutcome::Sent,
         Err(text) => NotifyOutcome::Failed(text),
