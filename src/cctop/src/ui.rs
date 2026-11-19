@@ -185,6 +185,15 @@ const TITLE_SEPARATOR: &str = " · ";
 /// It holds only live rows. The last count has one number, the number of
 /// frozen rows, because a frozen row takes no handled mark.
 fn table_title(board: &Board) -> String {
+    format!(" cctop{TITLE_SEPARATOR}{} ", title_counts(board))
+}
+
+/// The counts part of the title line, with no frame and no name: the number
+/// of sessions, the `unmarked/handled` count of each state, and the number of
+/// frozen rows. `table_title` puts it between its name and its last space,
+/// and the menu of `cctop-bar` shows it as it is.
+#[must_use]
+pub fn title_counts(board: &Board) -> String {
     let count = board.len();
     let noun = if count == 1 { "session" } else { "sessions" };
     let counts: Vec<String> = board
@@ -200,16 +209,10 @@ fn table_title(board: &Board) -> String {
         })
         .collect();
     format!(
-        " cctop{TITLE_SEPARATOR}{count} {noun}{TITLE_SEPARATOR}{}{TITLE_SEPARATOR}{} {FROZEN_MARKER} ",
+        "{count} {noun}{TITLE_SEPARATOR}{}{TITLE_SEPARATOR}{} {FROZEN_MARKER}",
         counts.join(TITLE_SEPARATOR),
         board.frozen_count()
     )
-}
-
-/// The counts part of the title line, with no frame and no name.
-#[must_use]
-pub fn title_counts(_board: &Board) -> String {
-    String::new()
 }
 
 /// Draw the table of sessions in `area`.
