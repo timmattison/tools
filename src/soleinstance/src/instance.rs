@@ -39,6 +39,29 @@ use std::time::{Duration, Instant};
 /// is `SEEK_SET`, which `libc` gives as a wider integer than the field.
 const FROM_THE_START: libc::c_short = 0;
 
+/// The two `l_type` values that this module uses.
+///
+/// `libc` gives `F_WRLCK` and `F_UNLCK` as the same integer as the `l_type`
+/// field on macOS, and as a wider integer on Linux. The values are 0 to 3, so
+/// the cast loses nothing. The cast is a no-op on macOS and a narrowing on
+/// Linux, so each platform raises a different lint, and the module allows
+/// both.
+mod record_type {
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::unnecessary_cast,
+        reason = "the values are 0 to 3, and the width of the field differs by platform"
+    )]
+
+    /// The `l_type` of a write lock.
+    pub(super) const WRITE_LOCK: libc::c_short = libc::F_WRLCK as libc::c_short;
+
+    /// The `l_type` of a record that no process holds.
+    pub(super) const NO_LOCK: libc::c_short = libc::F_UNLCK as libc::c_short;
+}
+
+use record_type::{NO_LOCK, WRITE_LOCK};
+
 /// How many times [`claim`] tries again when the holder ends between the
 /// refusal of the lock and the look at the holder.
 const CLAIM_ATTEMPTS: u32 = 10;
@@ -63,6 +86,12 @@ impl LockFile {
     #[must_use]
     pub fn in_data_directory(data: &Path, directory: &str, file_name: &str) -> Self {
         Self(data.join(directory).join(file_name))
+    }
+
+    /// Gives the lock file at `path`.
+    #[must_use]
+    pub fn at_path(path: impl Into<PathBuf>) -> Self {
+        Self(path.into())
     }
 
     /// Gives the lock file `file_name` in the directory `directory` below the
@@ -227,7 +256,7 @@ fn whole_file(kind: libc::c_short) -> libc::flock {
 /// Gives the PID of the process that holds the lock of `file`, or `None` when
 /// no other process holds it.
 fn holder_of(file: &File) -> io::Result<Option<Pid>> {
-    let mut record = whole_file(libc::F_WRLCK);
+    let mut record = whole_file(WRITE_LOCK);
     // SAFETY: The descriptor is open for the life of `file`. `F_GETLK` takes a
     // pointer to one `flock` record, and the kernel writes only into that
     // record.
@@ -241,7 +270,7 @@ fn holder_of(file: &File) -> io::Result<Option<Pid>> {
     if result == -1 {
         return Err(io::Error::last_os_error());
     }
-    if record.l_type == libc::F_UNLCK {
+    if record.l_type == NO_LOCK {
         return Ok(None);
     }
     Pid::new(record.l_pid).map(Some).ok_or_else(|| {
@@ -282,7 +311,7 @@ pub fn holder(lock: &LockFile) -> io::Result<Option<Pid>> {
 pub fn claim(lock: &LockFile) -> Result<Claim, ClaimError> {
     let file = lock.open_or_make().map_err(ClaimError::Io)?;
     for _ in 0..CLAIM_ATTEMPTS {
-        let record = whole_file(libc::F_WRLCK);
+        let record = whole_file(WRITE_LOCK);
         // SAFETY: The descriptor is open for the life of `file`. `F_SETLK`
         // takes a pointer to one `flock` record and only reads it.
         let result =
@@ -448,6 +477,14 @@ mod tests {
     }
 
     #[test]
+    fn a_lock_file_at_a_path_has_that_path() {
+        assert_eq!(
+            LockFile::at_path("/data/x.lock").path(),
+            Path::new("/data/x.lock")
+        );
+    }
+
+    #[test]
     fn the_lock_file_of_the_user_is_below_the_data_directory_of_the_user() {
         let data = dirs::data_dir().expect("the data directory of this user");
         let lock = LockFile::for_user(DIRECTORY, FILE_NAME).expect("the lock file of this user");
@@ -498,7 +535,7 @@ mod tests {
     #[test]
     fn a_lock_record_starts_at_the_start_of_the_file() {
         assert_eq!(libc::c_int::from(FROM_THE_START), libc::SEEK_SET);
-        let record = whole_file(libc::F_WRLCK);
+        let record = whole_file(WRITE_LOCK);
         assert_eq!((record.l_start, record.l_len), (0, 0));
     }
 

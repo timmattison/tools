@@ -58,11 +58,12 @@ pub fn serve_hold_request() {
     let Some(path) = env::var_os(HOLD_LOCK_VARIABLE) else {
         return;
     };
-    let _ = path;
+    let lock = LockFile::at_path(path);
     thread::spawn(|| {
         thread::sleep(HELPER_LIFE);
         std::process::exit(1);
     });
+    let _claim = claim(&lock).unwrap_or_else(|error| panic!("the helper cannot claim: {error:?}"));
     println!("{HELD_PREFIX}{}", Pid::of_this_process());
     let _ = std::io::stdout().flush();
     let mut rest = Vec::new();
@@ -73,10 +74,7 @@ pub fn serve_hold_request() {
 #[derive(Debug)]
 pub struct HeldLock {
     pid: Pid,
-    child: Child,
-    stdin: Option<ChildStdin>,
-    /// Kept open until the child ends, so its last lines find a reader.
-    _stdout: BufReader<ChildStdout>,
+    _helper: Helper,
 }
 
 impl HeldLock {
@@ -87,7 +85,17 @@ impl HeldLock {
     }
 }
 
-impl Drop for HeldLock {
+/// The child process, from its start. A drop closes its stdin and waits for
+/// it, also when the start of the hold fails.
+#[derive(Debug)]
+struct Helper {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    /// Open until the child ends, so its last lines find a reader.
+    stdout: BufReader<ChildStdout>,
+}
+
+impl Drop for Helper {
     fn drop(&mut self) {
         drop(self.stdin.take());
         let _ = self.child.wait();
@@ -119,13 +127,22 @@ pub fn hold_in_child(lock: &LockFile, helper_test: &str) -> HeldLock {
         .stdout(Stdio::piped())
         .spawn()
         .expect("the helper test starts");
-    let stdin = child.stdin.take();
     let stdout = child.stdout.take().expect("the stdout of the helper");
-    let mut stdout = BufReader::new(stdout);
+    let stdin = child.stdin.take();
+    let mut helper = Helper {
+        child,
+        stdin,
+        stdout: BufReader::new(stdout),
+    };
     let mut line = String::new();
     loop {
         line.clear();
-        if stdout.read_line(&mut line).expect("a line of the helper") == 0 {
+        if helper
+            .stdout
+            .read_line(&mut line)
+            .expect("a line of the helper")
+            == 0
+        {
             break;
         }
         // libtest writes `test <name> ... ` before the output of the test on
@@ -135,9 +152,7 @@ pub fn hold_in_child(lock: &LockFile, helper_test: &str) -> HeldLock {
             let pid = Pid::new(raw).expect("a PID above zero");
             return HeldLock {
                 pid,
-                child,
-                stdin,
-                _stdout: stdout,
+                _helper: helper,
             };
         }
     }
