@@ -79,7 +79,9 @@ impl Controller {
 
     /// Turn the notification on or off. Off stops the `Effect::Notify` of
     /// later changes to `needs-you`. The jump of the selection does not change.
-    pub fn set_notify(&mut self, _on: bool) {}
+    pub fn set_notify(&mut self, on: bool) {
+        self.notify = on;
+    }
 
     /// Whether the controller asks for a notification.
     #[must_use]
