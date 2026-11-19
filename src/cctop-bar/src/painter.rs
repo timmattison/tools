@@ -439,6 +439,44 @@ mod tests {
     }
 
     #[test]
+    fn a_white_tile_gets_a_black_edge_in_a_light_menu_bar() {
+        let white = rgba(PaneState::Agents.color());
+        let black = rgba(BLACK);
+        let filled = paint_light(&map(vec![tile(PaneState::Agents)], 0, 0), 1);
+        assert_eq!(filled.pixel(3, TOP), black);
+        assert_eq!(filled.pixel(10, TOP + 11), black);
+        assert_eq!(filled.pixel(4, TOP + 1), white);
+        assert_eq!(filled.pixel(7, 12), white);
+
+        let handled = Tile {
+            state: PaneState::Agents,
+            handled: true,
+            frozen: false,
+        };
+        let outline = paint_light(&map(vec![handled], 0, 0), 1);
+        assert_eq!(outline.pixel(3, TOP), black);
+        assert_eq!(outline.pixel(4, TOP + 1), white);
+        assert_eq!(outline.pixel(7, 12), TRANSPARENT);
+    }
+
+    #[test]
+    fn a_white_tile_has_no_edge_in_a_dark_menu_bar() {
+        let image = paint(
+            &map(vec![tile(PaneState::Agents)], 0, 0),
+            BAR,
+            1,
+            Appearance::Dark,
+        );
+        assert_eq!(image.pixel(3, TOP), rgba(PaneState::Agents.color()));
+    }
+
+    #[test]
+    fn a_tile_of_a_darker_color_has_no_edge_in_a_light_menu_bar() {
+        let image = paint_light(&map(vec![tile(PaneState::NeedsYou)], 0, 0), 1);
+        assert_eq!(image.pixel(3, TOP), rgba(PaneState::NeedsYou.color()));
+    }
+
+    #[test]
     fn a_frozen_tile_is_filled_with_the_frozen_color() {
         let frozen = Tile {
             state: PaneState::Working,
