@@ -89,7 +89,37 @@ impl Panel {
         match input {
             PanelInput::Hotkey { rows } if !self.visible => self.show(rows, target, now),
             PanelInput::ShowItem { rows } => self.show(rows, target, now),
+            PanelInput::Key(PanelKey::Key(key)) if self.visible => self.key(key, target, now),
             _ => Vec::new(),
+        }
+    }
+
+    /// Give `key` to the target and turn its effects into jobs.
+    fn key(
+        &mut self,
+        key: KeyEvent,
+        target: &mut impl PanelTarget,
+        now: EpochMillis,
+    ) -> Vec<PanelJob> {
+        let mut jobs = Vec::new();
+        for effect in target.key(key, now) {
+            match effect {
+                Effect::Quit => {}
+                Effect::Focus(focus) => {
+                    jobs.push(PanelJob::Focus(focus));
+                    self.hide_into(&mut jobs);
+                }
+                Effect::Notify(text) => jobs.push(PanelJob::Notify(text)),
+            }
+        }
+        jobs
+    }
+
+    /// Hide the panel and add a `Hide` job to `jobs`, unless one is there.
+    fn hide_into(&mut self, jobs: &mut Vec<PanelJob>) {
+        self.visible = false;
+        if !jobs.contains(&PanelJob::Hide) {
+            jobs.push(PanelJob::Hide);
         }
     }
 
