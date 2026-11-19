@@ -77,6 +77,10 @@ struct Cli {
 
 impl Cli {
     /// The settings of this command line.
+    #[cfg_attr(
+        all(not(target_os = "macos"), not(test)),
+        expect(dead_code, reason = "only the run on macOS reads the settings")
+    )]
     fn settings(&self) -> Settings {
         Settings {
             notify: !self.no_notify,
