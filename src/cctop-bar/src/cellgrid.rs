@@ -8,12 +8,52 @@ use ratatui::layout::{Position, Rect, Size};
 use ratatui::style::Color;
 use unicode_width::UnicodeWidthStr;
 
+/// The color of a 24-bit value `0xRRGGBB`.
+const fn hex(value: u32) -> Rgb {
+    let [_, red, green, blue] = value.to_be_bytes();
+    Rgb { red, green, blue }
+}
+
 /// The 16 colors of the palette, in the order of the named colors of ratatui.
-pub const DEFAULT_PALETTE: [Rgb; 16] = [Rgb {
-    red: 0,
-    green: 0,
-    blue: 0,
-}; 16];
+pub const DEFAULT_PALETTE: [Rgb; 16] = [
+    hex(0x00_0000),
+    hex(0xcd_3131),
+    hex(0x0d_bc79),
+    hex(0xe5_e510),
+    hex(0x24_72c8),
+    hex(0xbc_3fbc),
+    hex(0x11_a8cd),
+    hex(0xe5_e5e5),
+    hex(0x66_6666),
+    hex(0xf1_4c4c),
+    hex(0x23_d18b),
+    hex(0xf5_f543),
+    hex(0x3b_8eea),
+    hex(0xd6_70d6),
+    hex(0x29_b8db),
+    hex(0xff_ffff),
+];
+
+/// The foreground of the panel.
+pub const DEFAULT_FOREGROUND: Rgb = hex(0xcc_cccc);
+
+/// The background of the panel.
+pub const DEFAULT_BACKGROUND: Rgb = hex(0x1e_1e1e);
+
+/// The levels of one channel of the 6 by 6 by 6 color cube of xterm.
+const CUBE_LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
+
+/// The first index of the color cube.
+const CUBE_START: u8 = 16;
+
+/// The first index of the gray ramp.
+const GRAY_START: u8 = 232;
+
+/// The level of the first gray of the ramp.
+const GRAY_BASE: u8 = 8;
+
+/// The step between two grays of the ramp.
+const GRAY_STEP: u8 = 10;
 
 /// The colors that the panel uses for the cells that name none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,16 +69,8 @@ pub struct PanelColors {
 impl Default for PanelColors {
     fn default() -> Self {
         Self {
-            foreground: Rgb {
-                red: 0,
-                green: 0,
-                blue: 0,
-            },
-            background: Rgb {
-                red: 0,
-                green: 0,
-                blue: 0,
-            },
+            foreground: DEFAULT_FOREGROUND,
+            background: DEFAULT_BACKGROUND,
             palette: DEFAULT_PALETTE,
         }
     }
@@ -94,11 +126,49 @@ fn glyph_cells(symbol: &str) -> u16 {
     u16::try_from(width).unwrap_or(1)
 }
 
-/// The color `color` stands for. A color that is not 24-bit gives `fallback`.
-fn resolve(color: Color, fallback: Rgb) -> Rgb {
+/// The color `color` stands for. `Reset` gives `fallback`.
+fn resolve(color: Color, fallback: Rgb, palette: &[Rgb; 16]) -> Rgb {
     match color {
+        Color::Reset => fallback,
         Color::Rgb(red, green, blue) => Rgb { red, green, blue },
-        _ => fallback,
+        Color::Indexed(index) => indexed(index, palette),
+        Color::Black => palette[0],
+        Color::Red => palette[1],
+        Color::Green => palette[2],
+        Color::Yellow => palette[3],
+        Color::Blue => palette[4],
+        Color::Magenta => palette[5],
+        Color::Cyan => palette[6],
+        Color::Gray => palette[7],
+        Color::DarkGray => palette[8],
+        Color::LightRed => palette[9],
+        Color::LightGreen => palette[10],
+        Color::LightYellow => palette[11],
+        Color::LightBlue => palette[12],
+        Color::LightMagenta => palette[13],
+        Color::LightCyan => palette[14],
+        Color::White => palette[15],
+    }
+}
+
+/// The color of the xterm index `index`.
+fn indexed(index: u8, palette: &[Rgb; 16]) -> Rgb {
+    if index < CUBE_START {
+        palette[usize::from(index)]
+    } else if index < GRAY_START {
+        let offset = usize::from(index - CUBE_START);
+        Rgb {
+            red: CUBE_LEVELS[offset / 36],
+            green: CUBE_LEVELS[offset / 6 % 6],
+            blue: CUBE_LEVELS[offset % 6],
+        }
+    } else {
+        let level = GRAY_BASE + GRAY_STEP * (index - GRAY_START);
+        Rgb {
+            red: level,
+            green: level,
+            blue: level,
+        }
     }
 }
 
@@ -163,7 +233,11 @@ impl CellGrid {
                     column,
                     glyph: symbol.to_string(),
                     cells,
-                    color: resolve(self.buffer[(column, row)].fg, colors.foreground),
+                    color: resolve(
+                        self.buffer[(column, row)].fg,
+                        colors.foreground,
+                        &colors.palette,
+                    ),
                     bold: false,
                 });
             }
