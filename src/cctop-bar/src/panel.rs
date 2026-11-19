@@ -366,4 +366,32 @@ mod tests {
         assert!(target.calls.is_empty());
         assert!(!panel.is_visible());
     }
+
+    /// A controller that reads no directory: its tests never call `start`.
+    fn idle_controller() -> Controller {
+        let sync = cctop::sync::Sync::with_dirs(
+            std::path::PathBuf::from("/nonexistent/cctop-bar-state"),
+            std::path::PathBuf::from("/nonexistent/cctop-bar-sessions"),
+        );
+        Controller::new(sync, Box::new(cctop::liveness::SystemClock::new()), false)
+    }
+
+    #[test]
+    fn the_controller_gets_the_keys_of_the_panel() {
+        let mut controller = idle_controller();
+        controller.set_rows(30);
+        let effects = PanelTarget::key(&mut controller, plain(KeyCode::Char('q')), NOW);
+        assert_eq!(effects, vec![Effect::Quit]);
+        let effects = PanelTarget::key(&mut controller, plain(KeyCode::Char('j')), NOW);
+        assert_eq!(effects, vec![]);
+    }
+
+    #[test]
+    fn a_panel_over_a_controller_hides_on_q() {
+        let mut controller = idle_controller();
+        let mut panel = Panel::new();
+        panel.handle(PanelInput::Hotkey { rows: 30 }, &mut controller, NOW);
+        let jobs = panel.handle(key_input(KeyCode::Char('q')), &mut controller, NOW);
+        assert_eq!(jobs, vec![PanelJob::Hide]);
+    }
 }
