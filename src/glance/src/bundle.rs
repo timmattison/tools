@@ -294,4 +294,24 @@ mod tests {
         assert_ne!(after.ino(), before);
         assert_eq!(after.permissions().mode() & 0o777, 0o755);
     }
+
+    #[test]
+    fn a_changed_info_plist_is_written_again() {
+        let data = data_directory();
+        let source = data.path().join("source-binary");
+        fs::write(&source, b"distinctive bytes of the source").expect("the source");
+        let bundle = Bundle::in_data_directory(data.path());
+        bundle.ensure(&source).expect("first ensure");
+        let right = fs::read_to_string(bundle.info_plist()).expect("plist");
+        fs::write(bundle.info_plist(), "changed by hand").expect("overwrite");
+        bundle.ensure(&source).expect("second ensure");
+        assert_eq!(
+            fs::read_to_string(bundle.info_plist()).expect("plist"),
+            right
+        );
+        assert_eq!(
+            plutil_json(&bundle.info_plist())["CFBundleIdentifier"],
+            IDENTIFIER
+        );
+    }
 }
