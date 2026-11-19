@@ -36,8 +36,7 @@
 //! - A crate that reaches the clipboard another way, for example when it runs
 //!   `pbcopy` itself.
 
-use std::env;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -52,12 +51,6 @@ pub const GUARDED_PACKAGE: &str = "arboard";
 /// The one member that may depend on [`GUARDED_PACKAGE`].
 pub const OWNER: &str = "sysclip";
 
-/// Environment variable that names the cargo of the running toolchain.
-const CARGO_ENV: &str = "CARGO";
-
-/// Program that starts when [`CARGO_ENV`] is not set.
-const CARGO_FALLBACK: &str = "cargo";
-
 /// Arguments of the metadata query. `--no-deps` and `--offline` need no network.
 const METADATA_ARGS: [&str; 5] = [
     "metadata",
@@ -66,19 +59,6 @@ const METADATA_ARGS: [&str; 5] = [
     "--format-version",
     "1",
 ];
-
-/// Variables that change what cargo reads or where it writes.
-const SCRUBBED_VARS: [&str; 5] = [
-    "CARGO_ENCODED_RUSTDOCFLAGS",
-    "CARGO_ENCODED_RUSTFLAGS",
-    "CARGO_TARGET_DIR",
-    "RUSTDOCFLAGS",
-    "RUSTFLAGS",
-];
-
-/// Every variable with this prefix is removed too. It is the environment form
-/// of the `[build]` table of the cargo configuration.
-const SCRUBBED_PREFIX: &str = "CARGO_BUILD_";
 
 /// Everything that can stop the audit from reaching a verdict.
 ///
@@ -201,28 +181,21 @@ impl fmt::Display for Report {
     }
 }
 
-/// The program that starts cargo.
-fn cargo_program() -> OsString {
-    env::var_os(CARGO_ENV).unwrap_or_else(|| OsString::from(CARGO_FALLBACK))
-}
-
-/// Start cargo in `dir` with a scrubbed environment and collect its output.
+/// Start cargo in `dir` and collect its output.
+///
+/// The environment is not scrubbed. `cargo metadata --no-deps` reads no build
+/// flag and writes no target directory, so the variables that `doc_links`
+/// removes do not change its answer.
 fn run(program: &OsStr, dir: &Path) -> Result<Output, ArboardWallError> {
-    let mut command = childenv::command(program);
-    command.current_dir(dir).args(METADATA_ARGS);
-    for name in SCRUBBED_VARS {
-        command.env_remove(name);
-    }
-    for (name, _) in env::vars_os() {
-        if name.to_string_lossy().starts_with(SCRUBBED_PREFIX) {
-            command.env_remove(&name);
-        }
-    }
-    command.output().map_err(|source| ArboardWallError::Spawn {
-        program: program.to_string_lossy().into_owned(),
-        dir: dir.to_path_buf(),
-        source,
-    })
+    childenv::command(program)
+        .current_dir(dir)
+        .args(METADATA_ARGS)
+        .output()
+        .map_err(|source| ArboardWallError::Spawn {
+            program: program.to_string_lossy().into_owned(),
+            dir: dir.to_path_buf(),
+            source,
+        })
 }
 
 /// A string field of `value`, or a refusal that names `path`.
@@ -326,7 +299,7 @@ fn report_from(text: &[u8]) -> Result<Report, ArboardWallError> {
 /// the expected JSON, or when no workspace member is named [`OWNER`]. An error
 /// is never a clean report.
 pub fn audit(repo_root: &Path) -> Result<Report, ArboardWallError> {
-    let program = cargo_program();
+    let program = crate::cargo::program();
     let output = run(&program, repo_root)?;
     if !output.status.success() {
         return Err(ArboardWallError::MetadataFailed {
