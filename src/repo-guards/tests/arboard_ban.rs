@@ -19,9 +19,11 @@
 //! banned path by the name of the crate and the path of the item. The stand-in
 //! is thus enough, and the fixture builds in seconds without a registry.
 //!
-//! A run that gives no compiler message is a failure, not a clean report. The
-//! test never reads the exit status of clippy, because a fixture that does not
-//! compile and a ban that finds nothing must not look the same.
+//! A run that gives no compiler message passes the sanity check of `run_clippy`
+//! only when clippy exits with status 0. A run that failed to build and gave no
+//! message fails that check. A healthy run that gave no message fails the
+//! positive test, because it found no ban diagnostic. Thus a broken fixture and
+//! a quiet ban both fail, and each one fails with its own message.
 //!
 //! Parallel safety: the fixture and its target directory live in one
 //! `tempfile::TempDir`. The test sets no variable in its own process.
