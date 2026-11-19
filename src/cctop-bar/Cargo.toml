@@ -24,6 +24,7 @@ unicode-width.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 dispatch2 = { workspace = true, features = ["std"] }
+global-hotkey.workspace = true
 objc2.workspace = true
 objc2-app-kit = { workspace = true, features = [
     "std",
@@ -32,22 +33,44 @@ objc2-app-kit = { workspace = true, features = [
     "NSBitmapImageRep",
     "NSButton",
     "NSCell",
+    "NSColor",
     "NSColorSpace",
     "NSControl",
+    "NSEvent",
+    "NSFont",
+    "NSFontDescriptor",
     "NSGraphics",
+    "NSGraphicsContext",
     "NSImage",
     "NSImageRep",
     "NSMenu",
     "NSMenuItem",
+    "NSPanel",
     "NSResponder",
     "NSRunningApplication",
     "NSScreen",
     "NSStatusBar",
     "NSStatusBarButton",
     "NSStatusItem",
+    "NSStringDrawing",
+    "NSText",
     "NSView",
     "NSWindow",
+    "NSWorkspace",
     "objc2-core-foundation",
+] }
+objc2-core-foundation = { workspace = true, features = [
+    "std",
+    "CFArray",
+    "CFCGTypes",
+    "CFDictionary",
+    "CFNumber",
+    "CFString",
+] }
+objc2-core-graphics = { workspace = true, features = [
+    "std",
+    "CGGeometry",
+    "CGWindow",
 ] }
 objc2-foundation = { workspace = true, features = [
     "std",

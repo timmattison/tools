@@ -10,6 +10,8 @@
 //! queue. [`deliver`] runs there and hands the event to the shell. A repeating
 //! timer of 1 s sends the tick. No timer polls for events.
 
+mod hotkey;
+
 use std::cell::RefCell;
 use std::process::ExitCode;
 use std::sync::Arc;
