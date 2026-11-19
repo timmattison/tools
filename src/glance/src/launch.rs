@@ -166,22 +166,26 @@ fn run_here(lock: &LockFile, settings: Settings, is_copy: bool) -> ExitCode {
     if let Err(error) = instance::end_with_success_on_terminate() {
         return fail(&format!("cannot catch SIGTERM: {error}"));
     }
-    let line = format!(
-        "{}\n",
-        ready_line(&settings.target(), Pid::of_this_process())
-    );
+    let target = settings.target();
+    let line = format!("{}\n", ready_line(&target, Pid::of_this_process()));
     let exit_after = settings.exit_after;
-    shell::run(settings.interval, settings.remote, move || {
-        say(&line);
-        if is_copy {
-            // The start has its line and nobody reads either pipe, so an
-            // error here has no channel to report on.
-            let _ = instance::send_output_nowhere();
-        }
-        if let Some(seconds) = exit_after {
-            instance::end_after(seconds);
-        }
-    })
+    let autosave_name = target.autosave_name();
+    shell::run(
+        settings.interval,
+        settings.remote,
+        &autosave_name,
+        move || {
+            say(&line);
+            if is_copy {
+                // The start has its line and nobody reads either pipe, so an
+                // error here has no channel to report on.
+                let _ = instance::send_output_nowhere();
+            }
+            if let Some(seconds) = exit_after {
+                instance::end_after(seconds);
+            }
+        },
+    )
 }
 
 /// Starts a copy that runs the status item, and waits until its status item
