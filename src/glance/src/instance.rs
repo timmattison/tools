@@ -106,6 +106,12 @@ impl Target {
             }
         }
     }
+
+    /// Gives the autosave name of the status item of this target.
+    #[must_use]
+    pub fn autosave_name(&self) -> String {
+        String::new()
+    }
 }
 
 /// The lock file that marks the status item of one target.
@@ -570,6 +576,37 @@ mod tests {
     fn two_different_destinations_give_two_different_names() {
         assert_ne!(host("a/b").file_name(), host("a%2Fb").file_name());
         assert_ne!(host("local").file_name(), Target::Local.file_name());
+    }
+
+    #[test]
+    fn the_local_status_item_has_the_autosave_name_glance_local() {
+        assert_eq!(Target::Local.autosave_name(), "glance.local");
+    }
+
+    #[test]
+    fn the_autosave_name_of_a_host_is_glance_host_and_the_escaped_destination() {
+        assert_eq!(host("m1-ts").autosave_name(), "glance.host.m1-ts");
+        assert_eq!(
+            host("tim@M4 Pro/日").autosave_name(),
+            "glance.host.tim@%4D4%20%50ro%2F%E6%97%A5"
+        );
+    }
+
+    #[test]
+    fn two_different_destinations_give_two_different_autosave_names() {
+        for (a, b) in [
+            ("Alpha", "alpha"),
+            ("Tim@m1", "tim@m1"),
+            ("a/b", "a%2Fb"),
+            ("a b", "a%20b"),
+        ] {
+            assert_ne!(
+                host(a).autosave_name(),
+                host(b).autosave_name(),
+                "{a} and {b}"
+            );
+        }
+        assert_ne!(host("local").autosave_name(), Target::Local.autosave_name());
     }
 
     #[test]
