@@ -55,14 +55,44 @@ pub enum PanelKey {
 /// `NSEvent.modifierFlags` as raw bits.
 #[must_use]
 pub fn map_key(key_code: u16, characters: Option<&str>, flags: u64) -> PanelKey {
-    let _ = (
-        key_code,
-        characters,
-        flags,
-        KeyCode::Enter,
-        KeyModifiers::NONE,
-    );
-    PanelKey::Ignore
+    let code = match named_key(key_code) {
+        Some(code) => code,
+        None => match characters.and_then(|text| text.chars().next()) {
+            Some(character) => KeyCode::Char(character),
+            None => return PanelKey::Ignore,
+        },
+    };
+    PanelKey::Key(KeyEvent::new(code, modifiers(flags)))
+}
+
+/// The crossterm key of a key code that names a key, not a character.
+fn named_key(key_code: u16) -> Option<KeyCode> {
+    Some(match key_code {
+        KEY_CODE_UP => KeyCode::Up,
+        KEY_CODE_DOWN => KeyCode::Down,
+        KEY_CODE_LEFT => KeyCode::Left,
+        KEY_CODE_RIGHT => KeyCode::Right,
+        KEY_CODE_PAGE_UP => KeyCode::PageUp,
+        KEY_CODE_PAGE_DOWN => KeyCode::PageDown,
+        KEY_CODE_HOME => KeyCode::Home,
+        KEY_CODE_END => KeyCode::End,
+        KEY_CODE_RETURN | KEY_CODE_KEYPAD_ENTER => KeyCode::Enter,
+        KEY_CODE_TAB => KeyCode::Tab,
+        KEY_CODE_BACKSPACE => KeyCode::Backspace,
+        _ => return None,
+    })
+}
+
+/// The crossterm modifiers of the `AppKit` flags.
+fn modifiers(flags: u64) -> KeyModifiers {
+    let mut modifiers = KeyModifiers::NONE;
+    if flags & CONTROL_FLAG != 0 {
+        modifiers |= KeyModifiers::CONTROL;
+    }
+    if flags & SHIFT_FLAG != 0 {
+        modifiers |= KeyModifiers::SHIFT;
+    }
+    modifiers
 }
 
 #[cfg(test)]
