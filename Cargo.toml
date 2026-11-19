@@ -223,6 +223,7 @@ windows-sys = { version = "0.60", features = [
 # Internal crates
 buildinfo = { path = "src/buildinfo" }
 childenv = { path = "src/childenv" }
+soleinstance = { path = "src/soleinstance" }
 sysclip = { path = "src/sysclip" }
 claude-transcript = { path = "src/claude-transcript" }
 op-cache = { path = "src/op-cache" }

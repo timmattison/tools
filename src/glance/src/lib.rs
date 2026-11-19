@@ -48,11 +48,13 @@
 //! - `reader` (macOS only) — the one module that calls the kernel.
 //! - `shell` (macOS only) — the status item, its menu, and its timer, through
 //!   AppKit.
-//! - `instance` (macOS only) — the one status item of each target: the lock
-//!   that marks it, and the calls to the kernel that detach it from the
-//!   terminal and that stop it.
+//! - `instance` (macOS only) — the one status item of each target: the name of
+//!   the lock that marks it. The lock and the calls to the kernel that detach
+//!   the status item from the terminal and that stop it are in the
+//!   `soleinstance` crate.
 //! - `launch` (macOS only) — what one run does with the status item of its
-//!   target: start it here, start it in the background, or stop it.
+//!   target: start it here, start it in the background, or stop it. The flow
+//!   is in `soleinstance`.
 //!
 //! # One status item for each target
 //!
@@ -67,9 +69,10 @@
 //! # Unsafe code
 //!
 //! The modules `reader`, `shell`, `instance`, and `launch` are specific to
-//! macOS. Only `reader`, `shell`, and `instance` can hold unsafe code. The
-//! crate denies `unsafe_code`, and only their three declarations expect it,
-//! so a review of those three files covers all of the unsafe code.
+//! macOS. Only `reader` and `shell` can hold unsafe code. The crate denies
+//! `unsafe_code`, and only their two declarations expect it, so a review of
+//! those two files covers all of the unsafe code. The calls for the lock, the
+//! signals, and the session are in `soleinstance`.
 
 #![deny(unsafe_code)]
 
@@ -80,10 +83,6 @@ pub mod flags;
 pub mod history;
 pub mod host;
 #[cfg(target_os = "macos")]
-#[expect(
-    unsafe_code,
-    reason = "the instance module calls the kernel through libc for its lock, its signals, and its session. It is one of the three modules that can hold unsafe code"
-)]
 pub mod instance;
 pub mod interval;
 #[cfg(target_os = "macos")]
@@ -92,14 +91,14 @@ pub mod pressure;
 #[cfg(target_os = "macos")]
 #[expect(
     unsafe_code,
-    reason = "the reader calls the kernel through libc. It is one of the three modules that can hold unsafe code"
+    reason = "the reader calls the kernel through libc. It is one of the two modules that can hold unsafe code"
 )]
 pub mod reader;
 pub mod sample;
 #[cfg(target_os = "macos")]
 #[expect(
     unsafe_code,
-    reason = "the shell calls AppKit through objc2. It is one of the three modules that can hold unsafe code"
+    reason = "the shell calls AppKit through objc2. It is one of the two modules that can hold unsafe code"
 )]
 pub mod shell;
 pub mod text;
