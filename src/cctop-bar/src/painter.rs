@@ -57,6 +57,10 @@ const WHITE: Rgb = Rgb {
 };
 /// A pixel that no shape covers.
 const TRANSPARENT: [u8; 4] = [0, 0, 0, 0];
+/// The luma, in parts of 10 000, from which a tile color is light. On a light
+/// menu bar, a tile of such a color gets an edge in the ink, so that it stays
+/// visible. Of the state colors, only the white of `agents` is light.
+const LIGHT_LUMA: u32 = 8_500;
 /// The number of bytes of one pixel.
 const BYTES_PER_PIXEL: usize = 4;
 
@@ -270,7 +274,13 @@ pub fn paint(minimap: &Minimap, thickness: u32, scale: u32, appearance: Appearan
         if index > 0 {
             left += TILE_GAP * scale;
         }
-        paint_tile(&mut canvas, *tile, left, top, tile_width, band, scale);
+        paint_tile(
+            &mut canvas,
+            *tile,
+            (left, top, tile_width, band),
+            scale,
+            appearance,
+        );
         left += tile_width;
     }
     if let Some(mark) = &overflow {
@@ -279,20 +289,44 @@ pub fn paint(minimap: &Minimap, thickness: u32, scale: u32, appearance: Appearan
     canvas.pixmap
 }
 
-/// Paint one tile in its rectangle.
+/// Paint one tile in its rectangle `(x, y, width, height)`.
+///
+/// On a light menu bar, a tile of a light color gets an edge in the black ink
+/// as its outer ring. A filled tile keeps its color inside the edge. An
+/// outline tile draws its own ring inside the edge.
 fn paint_tile(
     canvas: &mut Canvas,
     tile: Tile,
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
+    (x, y, width, height): (u32, u32, u32, u32),
     scale: u32,
+    appearance: Appearance,
 ) {
+    let border = BORDER * scale;
+    let color = tile.color();
+    let edged = appearance == Appearance::Light && is_light(color);
     match tile.style() {
-        TileStyle::Filled => canvas.fill(x, y, width, height, tile.color()),
-        TileStyle::Outline => canvas.outline(x, y, width, height, BORDER * scale, tile.color()),
+        TileStyle::Filled => canvas.fill(x, y, width, height, color),
+        TileStyle::Outline if edged => canvas.outline(
+            x + border,
+            y + border,
+            width.saturating_sub(2 * border),
+            height.saturating_sub(2 * border),
+            border,
+            color,
+        ),
+        TileStyle::Outline => canvas.outline(x, y, width, height, border, color),
     }
+    if edged {
+        canvas.outline(x, y, width, height, border, BLACK);
+    }
+}
+
+/// Tell if `color` is light: its luma (Rec. 709 weights on the 8-bit values)
+/// is at least [`LIGHT_LUMA`].
+fn is_light(color: Rgb) -> bool {
+    let luma =
+        2_126 * u32::from(color.red) + 7_152 * u32::from(color.green) + 722 * u32::from(color.blue);
+    luma >= LIGHT_LUMA * 255
 }
 
 #[cfg(test)]
@@ -613,7 +647,10 @@ mod tests {
         // 3 + field 11 + gap 4 + tiles 8 + 2 + 8 + gap 3 + "+10" 17 + 3.
         assert_eq!(image.width(), 3 + 11 + 4 + 18 + 3 + 17 + 3);
         assert_eq!(image.pixel(18, 12), rgba(PaneState::Idle.color()));
-        assert_eq!(image.pixel(28, 12), rgba(PaneState::Agents.color()));
+        // The white agents tile starts at column 28 with its black edge.
+        assert_eq!(image.pixel(27, 12), TRANSPARENT);
+        assert_eq!(image.pixel(28, 12), rgba(BLACK));
+        assert_eq!(image.pixel(31, 12), rgba(PaneState::Agents.color()));
         assert_eq!(image.pixel(36, 12), TRANSPARENT);
     }
 
