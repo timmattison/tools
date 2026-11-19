@@ -122,4 +122,21 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    #[ignore = "a helper that the lock tests start in a child process"]
+    fn hold_lock_helper() {
+        soleinstance::testing::serve_hold_request();
+    }
+
+    #[test]
+    fn a_lock_that_cctop_bar_holds_stops_the_notification() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = LockFile::in_data_directory(dir.path(), BAR_LOCK_DIRECTORY, BAR_LOCK_FILE);
+        let held = soleinstance::testing::hold_in_child(&lock, "jobs::tests::hold_lock_helper");
+        let runner = FakeRunner::new();
+        let outcome = notify_now(&runner, &NotifyGate::UnlessHeld(lock), "m");
+        assert_eq!(outcome, NotifyOutcome::Skipped(held.pid()));
+        assert_eq!(runner.calls(), Vec::<Vec<String>>::new());
+    }
 }
