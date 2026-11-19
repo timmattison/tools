@@ -38,6 +38,10 @@ const EXIT_UNSUPPORTED: u8 = 1;
 
 /// The command line of `cctop-bar`.
 #[derive(Parser)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each bool is one flag of the command line"
+)]
 #[command(name = settings::NAME, version = buildinfo::version_string!(), about = ABOUT, after_help = AFTER_HELP)]
 struct Cli {
     /// Send no notification when a session changes to needs-you.
@@ -57,7 +61,7 @@ struct Cli {
     no_hotkey: bool,
 
     /// Run the status item in this process, which keeps the terminal until
-    /// the status item stops. Give it to a LaunchAgent.
+    /// the status item stops. Give it to a launch agent.
     #[arg(short, long)]
     foreground: bool,
 
@@ -90,11 +94,74 @@ fn main() -> ExitCode {
     run(&Cli::parse())
 }
 
-/// Runs `cctop-bar` on macOS.
+/// The exit code of a refused start.
+#[cfg(target_os = "macos")]
+const EXIT_USAGE: u8 = 2;
+
+/// The status item of `cctop-bar`, as [`soleinstance::launch`] runs it.
+#[cfg(target_os = "macos")]
+struct Bar {
+    settings: Settings,
+    dirs: cctop::paths::ClaudeDirs,
+}
+
+#[cfg(target_os = "macos")]
+impl soleinstance::launch::Program for Bar {
+    fn name(&self) -> &str {
+        settings::NAME
+    }
+
+    fn lock(&self) -> std::io::Result<soleinstance::instance::LockFile> {
+        cctop::jobs::bar_lock_for_user()
+    }
+
+    fn child_arguments(&self) -> Vec<String> {
+        settings::child_arguments(&self.settings)
+    }
+
+    fn ready_line(&self, pid: soleinstance::instance::Pid) -> String {
+        settings::ready_line(pid)
+    }
+
+    fn stopped_line(&self, pid: soleinstance::instance::Pid) -> String {
+        settings::stopped_line(pid)
+    }
+
+    fn exit_after(&self) -> Option<NonZeroU32> {
+        self.settings.exit_after
+    }
+
+    fn run_here(self, on_ready: Box<dyn FnOnce()>) -> ExitCode {
+        cctop_bar::shell::run(self.settings, &self.dirs, on_ready)
+    }
+}
+
+/// Starts or stops the status item on macOS.
 #[cfg(target_os = "macos")]
 fn run(cli: &Cli) -> ExitCode {
-    let _ = (cli.settings(), cli.foreground, cli.spawned_copy);
-    ExitCode::SUCCESS
+    use soleinstance::launch::Mode;
+
+    let dirs = match cctop::paths::ClaudeDirs::from_process_env() {
+        Ok(dirs) => dirs,
+        Err(error) => {
+            eprintln!("{}: {error}", settings::NAME);
+            return ExitCode::from(EXIT_USAGE);
+        }
+    };
+    let mode = if cli.spawned_copy {
+        Mode::SpawnedCopy
+    } else if cli.foreground {
+        Mode::Foreground
+    } else {
+        Mode::Background
+    };
+    soleinstance::launch::run(
+        mode,
+        Bar {
+            settings: cli.settings(),
+            dirs,
+        },
+    )
 }
 
 /// Refuses to run on a platform other than macOS.
