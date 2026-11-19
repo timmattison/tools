@@ -274,4 +274,24 @@ mod tests {
             plist
         );
     }
+
+    #[test]
+    fn a_call_with_a_different_source_replaces_the_executable() {
+        let data = data_directory();
+        let source_a = data.path().join("source-a");
+        let source_b = data.path().join("source-b");
+        fs::write(&source_a, b"bytes of source A").expect("source A");
+        fs::write(&source_b, b"other, longer bytes of source B").expect("source B");
+        let bundle = Bundle::in_data_directory(data.path());
+        bundle.ensure(&source_a).expect("ensure with A");
+        let before = fs::metadata(bundle.executable()).expect("executable").ino();
+        bundle.ensure(&source_b).expect("ensure with B");
+        let after = fs::metadata(bundle.executable()).expect("executable");
+        assert_eq!(
+            fs::read(bundle.executable()).expect("the executable"),
+            b"other, longer bytes of source B"
+        );
+        assert_ne!(after.ino(), before);
+        assert_eq!(after.permissions().mode() & 0o777, 0o755);
+    }
 }
