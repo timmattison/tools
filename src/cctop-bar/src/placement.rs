@@ -84,8 +84,8 @@ pub fn place(input: &PlacementInput<'_>) -> Option<Placement> {
     }
     let screen = active_screen(input)?;
     let visible = screen.visible;
-    let columns = cells_in(visible.width, cell.width);
-    let rows = cells_in(visible.height, cell.height);
+    let columns = cells_in(visible.width, cell.width, MIN_COLUMNS);
+    let rows = cells_in(visible.height, cell.height, MIN_ROWS);
     let width = f64::from(columns) * cell.width;
     let height = f64::from(rows) * cell.height;
     Some(Placement {
@@ -146,8 +146,12 @@ fn contains(rect: Rect, point: Point) -> bool {
 }
 
 /// The number of whole cells in two thirds of `extent`, clamped to `u16`.
-fn cells_in(extent: f64, cell: f64) -> u16 {
-    clamp_to_u16((extent * 2.0 / 3.0 / cell).floor())
+/// The count is at least `minimum`, or the cells that fit in `extent` when
+/// they are fewer.
+fn cells_in(extent: f64, cell: f64, minimum: u16) -> u16 {
+    let two_thirds = clamp_to_u16((extent * 2.0 / 3.0 / cell).floor());
+    let fit = clamp_to_u16((extent / cell).floor());
+    two_thirds.max(minimum.min(fit))
 }
 
 /// `value` as a `u16`, with 0 and `u16::MAX` as the bounds.
