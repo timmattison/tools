@@ -39,20 +39,30 @@ pub struct Settings {
 /// as a person's run, so the copy gets the same settings.
 #[must_use]
 pub fn child_arguments(settings: &Settings) -> Vec<String> {
-    let _ = (settings, HOTKEY, NO_HOTKEY, NO_NOTIFY, SPAWNED_COPY, EXIT_AFTER);
-    Vec::new()
+    let mut arguments = vec![format!("--{SPAWNED_COPY}")];
+    if !settings.notify {
+        arguments.push(format!("--{NO_NOTIFY}"));
+    }
+    arguments.push(match settings.hotkey {
+        Some(chord) => format!("--{HOTKEY}={chord}"),
+        None => format!("--{NO_HOTKEY}"),
+    });
+    if let Some(seconds) = settings.exit_after {
+        arguments.push(format!("--{EXIT_AFTER}={seconds}"));
+    }
+    arguments
 }
 
 /// The line that tells that the status item is up.
 #[must_use]
 pub fn ready_line(pid: impl Display) -> String {
-    format!("{NAME}: {pid}")
+    format!("{NAME}: the status item runs as PID {pid}. Run {NAME} again to stop it.")
 }
 
 /// The line that tells that a run stopped the status item.
 #[must_use]
 pub fn stopped_line(pid: impl Display) -> String {
-    format!("{NAME}: {pid}")
+    format!("{NAME}: stopped the status item that ran as PID {pid}.")
 }
 
 #[cfg(test)]
