@@ -156,14 +156,13 @@ impl App {
         self.flush_held(now);
     }
 
-    /// Select the first row of the board among the held sessions that show
-    /// the state `needs-you` and have no handled mark. A frozen session shows
-    /// the state `frozen`, so the jump skips it. Then
-    /// forget all held sessions. A key press less than [`JUMP_HOLD_MS`]
-    /// before `now` keeps the held sessions and selects nothing. A key press
-    /// time later than `now` means the clock moved back. The function then
-    /// sets the time of the key to `now`, so the hold ends [`JUMP_HOLD_MS`]
-    /// after that.
+    /// Select the first row of the board among the held sessions that wait for
+    /// the person. [`crate::board::Session::waits_for_you`] refuses a frozen
+    /// session and a handled session, so the jump skips them. Then forget all
+    /// held sessions. A key press less than [`JUMP_HOLD_MS`] before `now` keeps
+    /// the held sessions and selects nothing. A key press time later than `now`
+    /// means the clock moved back. The function then sets the time of the key
+    /// to `now`, so the hold ends [`JUMP_HOLD_MS`] after that.
     fn flush_held(&mut self, now: EpochMillis) {
         if self.last_key.is_some_and(|key| key > now) {
             self.last_key = Some(now);
@@ -174,11 +173,10 @@ impl App {
         if self.held.is_empty() || held_by_key {
             return;
         }
-        let first = self.board.rows().iter().position(|session| {
-            self.held.contains(&session.file.pid)
-                && session.state() == PaneState::NeedsYou
-                && !session.is_handled()
-        });
+        let first =
+            self.board.rows().iter().position(|session| {
+                self.held.contains(&session.file.pid) && session.waits_for_you()
+            });
         if let Some(index) = first {
             self.select(index);
         }
@@ -188,12 +186,13 @@ impl App {
     /// Put a handled mark on the selected session, or remove its mark. A new
     /// mark moves the session to the bottom of its state. The cursor then
     /// selects the first row at or below the old index of the marked row that
-    /// has no mark and shows a state that takes a mark. A frozen session shows
-    /// the state `frozen`, so the cursor skips it. If no such row exists,
-    /// the cursor stays on the marked session. A removed mark moves the
-    /// session up, and the cursor goes with the session. A session whose state
-    /// takes no mark keeps its row and the cursor, and the status text tells
-    /// why.
+    /// has no mark and takes a mark.
+    /// [`crate::board::Session::takes_handled_mark`] refuses a frozen session,
+    /// so the cursor skips it. If no such row exists, the cursor stays on the
+    /// marked session. A removed mark moves the session up, and the cursor goes
+    /// with the session. A frozen session keeps its row and the cursor, and the
+    /// status text tells that it is frozen. A session whose state takes no mark
+    /// keeps its row and the cursor, and the status text tells why.
     fn toggle_handled_selected(&mut self) {
         let selected = self.selected_index().and_then(|index| {
             let session = self.board.rows().get(index).copied()?;
@@ -210,9 +209,7 @@ impl App {
                     .rows()
                     .iter()
                     .skip(index)
-                    .position(|session| {
-                        !session.is_handled() && session.state().takes_handled_mark()
-                    })
+                    .position(|session| !session.is_handled() && session.takes_handled_mark())
                     .map(|offset| index + offset);
                 match next {
                     Some(next) => self.select(next),
@@ -230,21 +227,25 @@ impl App {
                     states_that_take_a_mark()
                 ));
             }
+            Some(HandledToggle::Frozen) => {
+                self.status = Some(format!("Cannot mark {label} as handled: {FROZEN_NOTE}"));
+            }
             None => {}
         }
     }
 
-    /// Select the next session that shows the state `needs-you` and has no
-    /// handled mark, and ask the main loop to focus it. The search starts after the
-    /// selected row and wraps around, so the selected row counts last. A
-    /// frozen session shows the state `frozen`, so the search skips it.
+    /// Select the next session that waits for the person, and ask the main loop
+    /// to focus it. The search starts after the selected row and wraps around,
+    /// so the selected row counts last.
+    /// [`crate::board::Session::waits_for_you`] refuses a frozen session and a
+    /// handled session, so the search skips them.
     fn focus_next_needs_you(&mut self) -> Action {
         let rows = self.board.rows();
         let count = rows.len();
         let current = self.selected_index().unwrap_or(0);
         let found = (1..=count)
             .map(|offset| (current + offset) % count)
-            .find(|&index| rows[index].state() == PaneState::NeedsYou && !rows[index].is_handled());
+            .find(|&index| rows[index].waits_for_you());
         let Some(index) = found else {
             self.status = Some("No session needs you".to_string());
             return Action::Nothing;
@@ -738,6 +739,26 @@ mod tests {
     }
 
     #[test]
+    fn a_needs_you_signal_for_a_frozen_session_moves_no_selection() {
+        let mut app = app_with(&[(10, PaneState::Idle)]);
+        app.board_mut().load_stopped(
+            file(11, "dir11", PaneState::NeedsYou, 11),
+            None,
+            EpochMillis::new(500),
+        );
+        // The cursor stands on the live row, so a jump to the frozen row moves
+        // it.
+        app.selected = Some(Pid::new(10));
+        assert_ne!(
+            app.board().rows()[0].file.pid,
+            Pid::new(10),
+            "the live row is not the default selection"
+        );
+        app.on_needs_you(&[Pid::new(11)], EpochMillis::new(1_000));
+        assert_eq!(selected_pid(&app), Some(Pid::new(10)));
+    }
+
+    #[test]
     fn after_a_mark_the_cursor_skips_a_frozen_session_whose_file_takes_a_mark() {
         let mut app = app_with(&[(10, PaneState::Idle)]);
         app.board_mut().load_stopped(
@@ -865,6 +886,22 @@ mod tests {
         assert_eq!(row_order(&app), vec![10, 11, 12]);
         assert_eq!(selected_pid(&app), Some(Pid::new(10)));
         assert_eq!(app.status(), Some("Removed the handled mark from dir10"));
+    }
+
+    #[test]
+    fn h_on_a_frozen_row_tells_that_the_session_is_frozen() {
+        let mut app = App::new();
+        app.board_mut().load_stopped(
+            file(10, "dir10", PaneState::Idle, 10),
+            None,
+            EpochMillis::new(500),
+        );
+        app.handle_key(press(KeyCode::Char('h')), KEY_TIME);
+        assert_eq!(
+            app.status(),
+            Some("Cannot mark dir10 as handled: the session is frozen")
+        );
+        assert!(!is_handled(&app, 10));
     }
 
     #[test]

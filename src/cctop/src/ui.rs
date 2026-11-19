@@ -9,8 +9,10 @@ use ratatui::widgets::{Block, Paragraph, Row, Table, TableState};
 use ratatui::Frame;
 
 use crate::app::{App, PageSize};
-use crate::board::{Board, Change};
-use crate::state::{EpochMillis, PaneState};
+use crate::board::{
+    Board, Change, Session, ShownState, FLAG_SEPARATOR, FROZEN_LABEL, HANDLED_SUFFIX,
+};
+use crate::state::{EpochMillis, PaneState, Rgb, FROZEN_COLOR, FROZEN_MARKER};
 
 /// Draw the screen: the table of sessions, the change log, and the status
 /// line. `now` gives the time that the elapsed times count to.
@@ -89,20 +91,32 @@ fn change_line<Tz: TimeZone>(change: &Change, zone: &Tz) -> Line<'static>
 where
     Tz::Offset: std::fmt::Display,
 {
-    Line::from(vec![
+    let mut spans = vec![
         Span::raw(clock_time(change.at, zone)),
         Span::raw(format!("  {}  ", change.label)),
-        state_span(change.old),
-        Span::raw(" → "),
-        state_span(change.new),
-    ])
+    ];
+    spans.extend(state_spans(change.old));
+    spans.push(Span::raw(" → "));
+    spans.extend(state_spans(change.new));
+    Line::from(spans)
 }
 
-/// The label of a state in its color, or a dash when there is no state.
-fn state_span(state: Option<PaneState>) -> Span<'static> {
-    match state {
-        Some(state) => Span::styled(state.label(), Style::new().fg(state_color(state))),
-        None => Span::raw(NONE_TEXT),
+/// The spans of a shown state. The name of the state has the color of the
+/// state. A frozen side adds the flag, with the word `frozen` in blue. When
+/// there is no state, the spans are one dash.
+fn state_spans(shown: Option<ShownState>) -> Vec<Span<'static>> {
+    match shown {
+        Some(shown) => {
+            let mut spans = vec![Span::styled(
+                shown.state().label(),
+                Style::new().fg(state_color(shown.state())),
+            )];
+            if shown.is_frozen() {
+                spans.extend(frozen_flag());
+            }
+            spans
+        }
+        None => vec![Span::raw(NONE_TEXT)],
     }
 }
 
@@ -119,26 +133,57 @@ const NONE_TEXT: &str = "—";
 /// handled mark.
 const MIN_STATE_WIDTH: u16 = 10;
 
-/// The width of the state column: the longest state text of `labels`, and at
-/// least [`MIN_STATE_WIDTH`].
-fn state_width<'a>(labels: impl Iterator<Item = &'a str>) -> u16 {
-    labels
-        .map(|label| u16::try_from(label.chars().count()).unwrap_or(u16::MAX))
+/// The width of the state column: the widest of `widths`, and at least
+/// [`MIN_STATE_WIDTH`]. Each width is the width of a drawn state line.
+fn state_width(widths: impl IntoIterator<Item = usize>) -> u16 {
+    widths
+        .into_iter()
+        .map(|width| u16::try_from(width).unwrap_or(u16::MAX))
         .fold(MIN_STATE_WIDTH, u16::max)
+}
+
+/// A color of the palette, as a color of the terminal.
+fn rgb_color(rgb: Rgb) -> Color {
+    Color::Rgb(rgb.red, rgb.green, rgb.blue)
 }
 
 /// The color of a state, as a color of the terminal.
 fn state_color(state: PaneState) -> Color {
-    let rgb = state.color();
-    Color::Rgb(rgb.red, rgb.green, rgb.blue)
+    rgb_color(state.color())
+}
+
+/// The two spans of the frozen flag: the separator with no color, then the
+/// word `frozen` in blue.
+fn frozen_flag() -> [Span<'static>; 2] {
+    [
+        Span::raw(FLAG_SEPARATOR),
+        Span::styled(FROZEN_LABEL, Style::new().fg(rgb_color(FROZEN_COLOR))),
+    ]
+}
+
+/// The state cell of a row. The state has no color, because the block has it.
+/// The word `frozen` is blue. `draw_table` takes the width of the state column
+/// from this line, thus the width and the text cannot disagree. A test holds
+/// its text equal to [`Session::state_label`].
+fn state_line(session: &Session) -> Line<'static> {
+    let mut spans = vec![Span::raw(session.state().label())];
+    if session.is_handled() {
+        spans.push(Span::raw(HANDLED_SUFFIX));
+    }
+    if session.is_frozen() {
+        spans.extend(frozen_flag());
+    }
+    Line::from(spans)
 }
 
 /// The text between two parts of the title of the table.
 const TITLE_SEPARATOR: &str = " · ";
 
 /// The title of the table: the number of sessions, then the count of each
-/// state in the sort order of the rows. A count reads `unmarked/handled`
-/// and the marker of its state follows it.
+/// state in the sort order of the rows, then the count of frozen rows. A count
+/// of a state reads `unmarked/handled` and the marker of its state follows it.
+/// It holds only live rows. The last count has one number, the number of
+/// frozen rows, because a frozen row takes no handled mark.
 fn table_title(board: &Board) -> String {
     let count = board.len();
     let noun = if count == 1 { "session" } else { "sessions" };
@@ -155,8 +200,9 @@ fn table_title(board: &Board) -> String {
         })
         .collect();
     format!(
-        " cctop{TITLE_SEPARATOR}{count} {noun}{TITLE_SEPARATOR}{} ",
-        counts.join(TITLE_SEPARATOR)
+        " cctop{TITLE_SEPARATOR}{count} {noun}{TITLE_SEPARATOR}{}{TITLE_SEPARATOR}{} {FROZEN_MARKER} ",
+        counts.join(TITLE_SEPARATOR),
+        board.frozen_count()
     )
 }
 
@@ -173,16 +219,16 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App, now: EpochMillis) {
     let sessions: Vec<_> = board
         .rows()
         .into_iter()
-        .map(|session| (session, session.state_label()))
+        .map(|session| (session, state_line(session)))
         .collect();
-    let state_width = state_width(sessions.iter().map(|(_, label)| label.as_str()));
+    let state_width = state_width(sessions.iter().map(|(_, line)| line.width()));
     let rows: Vec<Row> = sessions
         .into_iter()
-        .map(|(session, state_label)| {
+        .map(|(session, line)| {
             let state = session.state();
             Row::new([
                 Span::styled(STATE_BLOCK, Style::new().fg(state_color(state))).into(),
-                Text::from(state_label),
+                Text::from(line),
                 Text::from(format_elapsed(now.saturating_since(session.since))),
                 Text::from(
                     session
@@ -265,6 +311,49 @@ mod tests {
     const MINUTE: u64 = 60 * SECOND;
     const HOUR: u64 = 60 * MINUTE;
     const DAY: u64 = 24 * HOUR;
+
+    #[test]
+    fn state_line_has_the_text_of_state_label() {
+        use PaneState::{Agents, Idle, NeedsYou, Shells, Working};
+        let pid = Pid::new(7);
+        for state in [Working, NeedsYou, Idle, Agents, Shells] {
+            let mut board = Board::new();
+            board.load(file(7, "dir", state, 500), None);
+            let live = board.get(pid).expect("the session is loaded");
+            let mut cases = vec![("live", live.state_label(), line_text(&state_line(live)))];
+            if live.takes_handled_mark() {
+                board.toggle_handled(pid);
+                let handled = board.get(pid).expect("the session is loaded");
+                assert!(handled.is_handled(), "{state:?}");
+                cases.push((
+                    "handled",
+                    handled.state_label(),
+                    line_text(&state_line(handled)),
+                ));
+            }
+            let mut frozen = Board::new();
+            frozen.load(file(7, "dir", state, 500), None);
+            frozen.set_run_status(pid, RunStatus::Stopped, EpochMillis::new(1_000));
+            let frozen = frozen.get(pid).expect("the session is loaded");
+            assert!(frozen.is_frozen(), "{state:?}");
+            cases.push((
+                "frozen",
+                frozen.state_label(),
+                line_text(&state_line(frozen)),
+            ));
+            for (kind, label, text) in cases {
+                assert_eq!(text, label, "{state:?} {kind}");
+            }
+        }
+    }
+
+    /// The text of a line: the content of its spans, joined.
+    fn line_text(line: &Line) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
 
     #[test]
     fn format_elapsed_uses_the_unit_that_fits() {
@@ -365,6 +454,18 @@ mod tests {
             )
     }
 
+    /// The column of the first match of `needle` in `line`. It counts
+    /// characters and not bytes, because the border is wider than one byte.
+    fn column_of(line: &str, needle: &str) -> u16 {
+        let chars: Vec<char> = line.chars().collect();
+        let wanted: Vec<char> = needle.chars().collect();
+        let index = chars
+            .windows(wanted.len())
+            .position(|window| window == wanted.as_slice())
+            .unwrap_or_else(|| panic!("{needle:?} is not in {line:?}"));
+        u16::try_from(index).expect("the column fits")
+    }
+
     #[test]
     fn the_page_size_is_the_number_of_session_rows_that_draw_shows() {
         let mut app = App::new();
@@ -434,24 +535,6 @@ mod tests {
             .expect("the row holds a block");
         let x = u16::try_from(x).expect("the column fits");
         assert_eq!(buffer[(x, y)].fg, Color::Rgb(0xfa, 0xb0, 0x05));
-    }
-
-    #[test]
-    fn the_state_block_of_a_frozen_row_is_blue() {
-        let mut app = App::new();
-        app.board_mut().load_stopped(
-            file(10, "dir10", PaneState::Idle, 1_000),
-            None,
-            EpochMillis::new(1_000),
-        );
-        let buffer = render(&app, 127_000);
-        let (y, line) = line_with(&buffer, "frozen");
-        let x = line
-            .chars()
-            .position(|symbol| symbol == '█')
-            .expect("the row holds a block");
-        let x = u16::try_from(x).expect("the column fits");
-        assert_eq!(buffer[(x, y)].fg, Color::Rgb(0x4d, 0xab, 0xf7));
     }
 
     #[test]
@@ -578,18 +661,47 @@ mod tests {
         let text = title(&render(&app, 127_000));
         assert!(
             text.contains(
-                " cctop · 5 sessions · 1/1 ❗ · 0/1 💤 · 1/0 🤖 · 0/0 🐚 · 1/0 🏃 · 0/0 🧊 "
+                " cctop · 5 sessions · 1/1 ❗ · 0/1 💤 · 1/0 🤖 · 0/0 🐚 · 1/0 🏃 · 0 🧊 "
             ),
             "{text}"
         );
     }
 
     #[test]
-    fn the_empty_board_shows_six_counts_of_zero() {
+    fn the_title_counts_only_live_rows_and_ends_with_the_frozen_count() {
+        let mut app = App::new();
+        app.board_mut()
+            .load(file(1, "a", PaneState::NeedsYou, 100), None);
+        app.board_mut()
+            .load(file(2, "b", PaneState::NeedsYou, 100), None);
+        app.board_mut().toggle_handled(Pid::new(2));
+        app.board_mut().load_stopped(
+            file(3, "c", PaneState::NeedsYou, 100),
+            None,
+            EpochMillis::new(100),
+        );
+        app.board_mut().load_stopped(
+            file(4, "d", PaneState::Idle, 100),
+            None,
+            EpochMillis::new(100),
+        );
+        app.board_mut()
+            .load(file(5, "e", PaneState::Working, 100), None);
+        let text = title(&render(&app, 127_000));
+        assert!(
+            text.contains(
+                " cctop · 5 sessions · 1/1 ❗ · 0/0 💤 · 0/0 🤖 · 0/0 🐚 · 1/0 🏃 · 2 🧊 "
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn the_empty_board_shows_five_counts_of_zero_and_no_frozen_row() {
         let text = title(&render(&App::new(), 1_000));
         assert!(
             text.contains(
-                " cctop · 0 sessions · 0/0 ❗ · 0/0 💤 · 0/0 🤖 · 0/0 🐚 · 0/0 🏃 · 0/0 🧊 "
+                " cctop · 0 sessions · 0/0 ❗ · 0/0 💤 · 0/0 🤖 · 0/0 🐚 · 0/0 🏃 · 0 🧊 "
             ),
             "{text}"
         );
@@ -632,7 +744,7 @@ mod tests {
         let text = title(&buffer);
         assert!(
             text.contains(
-                " cctop · 14 sessions · 1/2 ❗ · 3/7 💤 · 1/0 🤖 · 0/0 🐚 · 0/0 🏃 · 0/0 🧊 "
+                " cctop · 14 sessions · 1/2 ❗ · 3/7 💤 · 1/0 🤖 · 0/0 🐚 · 0/0 🏃 · 0 🧊 "
             ),
             "{text}"
         );
@@ -732,5 +844,57 @@ mod tests {
             row_text(&buffer, HEIGHT - 1).trim_end(),
             "No session needs you"
         );
+    }
+
+    /// The color of the word `frozen`, as a color of the terminal.
+    const FROZEN_BLUE: Color = Color::Rgb(0x4d, 0xab, 0xf7);
+
+    #[test]
+    fn a_frozen_row_keeps_the_color_of_its_state_and_shows_frozen_in_blue() {
+        let mut app = App::new();
+        app.board_mut().load_stopped(
+            file(10, "dir10", PaneState::Idle, 1_000),
+            None,
+            EpochMillis::new(1_000),
+        );
+        let buffer = render(&app, 127_000);
+        let (y, line) = line_with(&buffer, "dir10");
+        assert!(line.contains("idle - frozen"), "{line}");
+        let block = column_of(&line, "█");
+        assert_eq!(buffer[(block, y)].fg, Color::Rgb(0xe0, 0x31, 0x31));
+        let frozen = column_of(&line, "frozen");
+        for x in frozen..frozen + 6 {
+            assert_eq!(buffer[(x, y)].fg, FROZEN_BLUE, "column {x} of {line}");
+        }
+        let idle = column_of(&line, "idle");
+        for x in idle..idle + 4 {
+            assert_ne!(buffer[(x, y)].fg, FROZEN_BLUE, "column {x} of {line}");
+        }
+    }
+
+    #[test]
+    fn the_log_shows_a_freeze_and_a_thaw_with_the_state_on_both_sides() {
+        let mut app = App::new();
+        app.board_mut()
+            .load(file(11, "dir11", PaneState::NeedsYou, 100), None);
+        app.board_mut()
+            .set_run_status(Pid::new(11), RunStatus::Stopped, EpochMillis::new(200));
+        app.board_mut()
+            .set_run_status(Pid::new(11), RunStatus::Running, EpochMillis::new(300));
+        let buffer = render(&app, 1_000);
+        let (y, freeze) = line_with(&buffer, "dir11  needs-you → needs-you - frozen");
+        let (_, thaw) = line_with(&buffer, "dir11  needs-you - frozen → needs-you");
+        assert_ne!(freeze, thaw);
+        let amber = Color::Rgb(0xfa, 0xb0, 0x05);
+        let first = column_of(&freeze, "needs-you");
+        assert_eq!(buffer[(first, y)].fg, amber, "{freeze}");
+        let arrow = column_of(&freeze, "→");
+        let tail: String = freeze.chars().skip(usize::from(arrow)).collect();
+        let second = arrow + column_of(&tail, "needs-you");
+        assert_eq!(buffer[(second, y)].fg, amber, "{freeze}");
+        let frozen = column_of(&freeze, "frozen");
+        for x in frozen..frozen + 6 {
+            assert_eq!(buffer[(x, y)].fg, FROZEN_BLUE, "column {x} of {freeze}");
+        }
     }
 }

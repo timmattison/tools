@@ -45,9 +45,9 @@ impl Sync {
     ///
     /// The function reads the process table once for all sessions, and once
     /// more for each stale session before it removes the file. It logs no
-    /// change. It removes the file of each stale session, and it does not
-    /// load that session. It loads a stopped session as `frozen` since `now`.
-    /// It skips a file that it cannot read.
+    /// change. It removes the file of each stale session, and it does not load
+    /// that session. It loads a stopped session with the frozen flag since
+    /// `now`. It skips a file that it cannot read.
     ///
     /// # Errors
     ///
@@ -120,9 +120,9 @@ impl Sync {
     /// ends can leave its file behind. The function removes each such stale
     /// session from the board and from the directory. A stopped process is
     /// live, thus its file stays. For each other session, the function gives
-    /// the run status to the board, so a stop shows as `frozen` and a continue
-    /// shows the state of the file again. It returns the changes: one for each
-    /// removed session, and one for each freeze or thaw.
+    /// the run status to the board, so a stop adds the frozen flag and a
+    /// continue removes it. It returns the changes: one for each removed
+    /// session, and one for each freeze or thaw.
     pub fn on_tick(
         &self,
         board: &mut Board,
@@ -209,6 +209,7 @@ mod tests {
     use proctree::Pid;
 
     use super::*;
+    use crate::board::ShownState;
     use crate::state::PaneState;
     use crate::store::test_support::{state_json, FakeClock};
 
@@ -328,8 +329,11 @@ mod tests {
             env.sync
                 .on_dir_event(&mut board, DirEvent::File(Pid::new(7)), &mut clock, now);
         assert_eq!(changes.len(), 1);
-        assert_eq!(changes[0].old, Some(PaneState::Idle));
-        assert_eq!(changes[0].new, Some(PaneState::Frozen));
+        assert_eq!(changes[0].old, Some(ShownState::live(PaneState::Idle)));
+        assert_eq!(
+            changes[0].new,
+            Some(ShownState::frozen(PaneState::NeedsYou))
+        );
         assert_eq!(changes[0].at, now);
         assert_eq!(board.get(Pid::new(7)).unwrap().since, now);
     }
@@ -343,7 +347,7 @@ mod tests {
         let changes = file_event(&env, 10, &mut live(&[10]), &mut board);
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].old, None);
-        assert_eq!(changes[0].new, Some(PaneState::NeedsYou));
+        assert_eq!(changes[0].new, Some(ShownState::live(PaneState::NeedsYou)));
         assert_eq!(changes[0].label, "issue-697-d1");
         assert_eq!(board.pids(), vec![Pid::new(10)]);
     }
@@ -357,8 +361,8 @@ mod tests {
         env.write(10, "working", 2_000_500);
         let changes = file_event(&env, 10, &mut live(&[10]), &mut board);
         assert_eq!(changes.len(), 1);
-        assert_eq!(changes[0].old, Some(PaneState::Idle));
-        assert_eq!(changes[0].new, Some(PaneState::Working));
+        assert_eq!(changes[0].old, Some(ShownState::live(PaneState::Idle)));
+        assert_eq!(changes[0].new, Some(ShownState::live(PaneState::Working)));
     }
 
     #[test]
@@ -370,7 +374,7 @@ mod tests {
         std::fs::remove_file(env.state.path().join("10.json")).unwrap();
         let changes = file_event(&env, 10, &mut live(&[10]), &mut board);
         assert_eq!(changes.len(), 1);
-        assert_eq!(changes[0].old, Some(PaneState::Idle));
+        assert_eq!(changes[0].old, Some(ShownState::live(PaneState::Idle)));
         assert_eq!(changes[0].new, None);
         assert_eq!(changes[0].at, NOW);
         assert!(board.is_empty());
@@ -432,7 +436,7 @@ mod tests {
             &mut live(&[10, 20, 30, 40]),
             NOW,
         );
-        let mut summary: Vec<(u32, Option<PaneState>, Option<PaneState>)> = changes
+        let mut summary: Vec<(u32, Option<ShownState>, Option<ShownState>)> = changes
             .iter()
             .map(|change| (change.pid.as_u32(), change.old, change.new))
             .collect();
@@ -440,9 +444,13 @@ mod tests {
         assert_eq!(
             summary,
             vec![
-                (10, Some(PaneState::Idle), Some(PaneState::NeedsYou)),
-                (20, Some(PaneState::Idle), None),
-                (30, None, Some(PaneState::Working)),
+                (
+                    10,
+                    Some(ShownState::live(PaneState::Idle)),
+                    Some(ShownState::live(PaneState::NeedsYou))
+                ),
+                (20, Some(ShownState::live(PaneState::Idle)), None),
+                (30, None, Some(ShownState::live(PaneState::Working))),
             ]
         );
         assert_eq!(board.pids(), vec![Pid::new(10), Pid::new(30)]);
@@ -474,7 +482,7 @@ mod tests {
         let changes = env.sync.on_tick(&mut board, &mut live(&[10]), NOW);
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].pid, Pid::new(20));
-        assert_eq!(changes[0].old, Some(PaneState::Working));
+        assert_eq!(changes[0].old, Some(ShownState::live(PaneState::Working)));
         assert_eq!(changes[0].new, None);
         assert_eq!(changes[0].at, NOW);
         assert_eq!(board.pids(), vec![Pid::new(10)]);
@@ -511,11 +519,12 @@ mod tests {
         let changes = env.sync.on_tick(&mut board, &mut clock, NOW);
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].pid, Pid::new(10));
-        assert_eq!(changes[0].old, Some(PaneState::Idle));
-        assert_eq!(changes[0].new, Some(PaneState::Frozen));
+        assert_eq!(changes[0].old, Some(ShownState::live(PaneState::Idle)));
+        assert_eq!(changes[0].new, Some(ShownState::frozen(PaneState::Idle)));
         assert_eq!(changes[0].at, NOW);
         let session = board.get(Pid::new(10)).unwrap();
-        assert_eq!(session.state(), PaneState::Frozen);
+        assert_eq!(session.state(), PaneState::Idle);
+        assert!(session.is_frozen());
         assert_eq!(session.file.state, PaneState::Idle);
         assert!(env.exists(10));
     }
@@ -528,9 +537,11 @@ mod tests {
         env.sync.on_tick(&mut board, &mut stopped, NOW);
         let changes = env.sync.on_tick(&mut board, &mut live(&[10]), NOW);
         assert_eq!(changes.len(), 1);
-        assert_eq!(changes[0].old, Some(PaneState::Frozen));
-        assert_eq!(changes[0].new, Some(PaneState::Idle));
-        assert_eq!(board.get(Pid::new(10)).unwrap().state(), PaneState::Idle);
+        assert_eq!(changes[0].old, Some(ShownState::frozen(PaneState::Idle)));
+        assert_eq!(changes[0].new, Some(ShownState::live(PaneState::Idle)));
+        let session = board.get(Pid::new(10)).unwrap();
+        assert_eq!(session.state(), PaneState::Idle);
+        assert!(!session.is_frozen());
     }
 
     #[test]
@@ -568,7 +579,8 @@ mod tests {
         let mut clock = live(&[10, 20]).with_stopped(10);
         env.sync.initial(&mut board, &mut clock, NOW).unwrap();
         let stopped = board.get(Pid::new(10)).unwrap();
-        assert_eq!(stopped.state(), PaneState::Frozen);
+        assert_eq!(stopped.state(), PaneState::Idle);
+        assert!(stopped.is_frozen());
         assert_eq!(stopped.since, NOW);
         let running = board.get(Pid::new(20)).unwrap();
         assert_eq!(running.state(), PaneState::Working);

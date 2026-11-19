@@ -143,6 +143,7 @@ mod tests {
 
     use super::*;
     use crate::app::JUMP_HOLD_MS;
+    use crate::board::ShownState;
     use crate::state::PaneState;
     use crate::store::test_support::{clock_with, state_json, FakeClock};
 
@@ -277,6 +278,26 @@ mod tests {
     }
 
     #[test]
+    fn a_thaw_of_a_needs_you_file_gives_no_notification_and_no_jump() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), 100, "needs-you", 10);
+        let stopped = clock_with(100, START_SECS).with_stopped(100);
+        let sync = Sync::with_dirs(dir.path().to_path_buf(), dir.path().join("sessions"));
+        let mut controller = Controller::new(sync, Box::new(stopped), true);
+        controller.start(NOW).unwrap();
+        controller.clock = Box::new(clock_with(100, START_SECS));
+        write(dir.path(), 100, "needs-you", 20);
+        let effects = controller.handle(file_event(100), NOW);
+        assert_eq!(effects, vec![]);
+        let session = controller.app().board().get(Pid::new(100)).unwrap();
+        assert_eq!(session.state(), PaneState::NeedsYou);
+        assert!(!session.is_frozen());
+        let newest = controller.app().board().changes().next().unwrap();
+        assert_eq!(newest.old, Some(ShownState::frozen(PaneState::NeedsYou)));
+        assert_eq!(newest.new, Some(ShownState::live(PaneState::NeedsYou)));
+    }
+
+    #[test]
     fn a_file_event_after_a_stop_reads_the_stopped_process() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), 100, "idle", 10);
@@ -285,8 +306,9 @@ mod tests {
         controller.clock = Box::new(clock_with(100, START_SECS).with_stopped(100));
         write(dir.path(), 100, "needs-you", 20);
         assert_eq!(controller.handle(file_event(100), NOW), vec![]);
-        let shown = controller.app().board().get(Pid::new(100)).unwrap().state();
-        assert_eq!(shown, PaneState::Frozen);
+        let session = controller.app().board().get(Pid::new(100)).unwrap();
+        assert_eq!(session.state(), PaneState::NeedsYou);
+        assert!(session.is_frozen());
     }
 
     #[test]

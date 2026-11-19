@@ -35,13 +35,63 @@ pub enum HandledToggle {
     Marked,
     /// The function removed the handled mark of the session.
     Unmarked,
-    /// The state of the session takes no handled mark, see
-    /// [`PaneState::takes_handled_mark`]. The board does not change.
+    /// The session takes no handled mark, see [`Session::takes_handled_mark`].
+    /// The board does not change.
     Refused,
+    /// The session is frozen, and a frozen session takes no handled mark.
+    /// The board does not change.
+    Frozen,
 }
 
 /// The text that follows the state of a handled session on the screen.
 pub const HANDLED_SUFFIX: &str = " - handled";
+
+/// The text between the state of a row and a flag of the row on the screen.
+pub const FLAG_SEPARATOR: &str = " - ";
+
+/// The word that follows the state of a frozen row on the screen.
+pub const FROZEN_LABEL: &str = "frozen";
+
+/// What the screen shows for the state of a session: the state of its file,
+/// and the frozen flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ShownState {
+    state: PaneState,
+    run: RunStatus,
+}
+
+impl ShownState {
+    /// The shown state of a session with the state `state` and the run status
+    /// `run`.
+    #[must_use]
+    pub const fn new(state: PaneState, run: RunStatus) -> Self {
+        Self { state, run }
+    }
+
+    /// The shown state of a session whose process runs.
+    #[must_use]
+    pub const fn live(state: PaneState) -> Self {
+        Self::new(state, RunStatus::Running)
+    }
+
+    /// The shown state of a session whose process is stopped.
+    #[must_use]
+    pub const fn frozen(state: PaneState) -> Self {
+        Self::new(state, RunStatus::Stopped)
+    }
+
+    /// The state of the file of the session.
+    #[must_use]
+    pub fn state(self) -> PaneState {
+        self.state
+    }
+
+    /// Tell if the process of the session is stopped.
+    #[must_use]
+    pub fn is_frozen(self) -> bool {
+        self.run == RunStatus::Stopped
+    }
+}
 
 impl Session {
     /// The text that names the session on the screen: its name, else the name
@@ -53,14 +103,41 @@ impl Session {
             .unwrap_or_else(|| self.file.directory_name())
     }
 
-    /// The state that the screen shows. A stopped process shows `frozen`,
-    /// whatever the file says. Else it is the state of the file.
+    /// The state that the screen shows. It is the state of the file. A stopped
+    /// process runs no hook, thus its file keeps the last state that Claude
+    /// Code wrote. See [`Session::is_frozen`] for the frozen flag.
     #[must_use]
     pub fn state(&self) -> PaneState {
-        match self.run {
-            RunStatus::Stopped => PaneState::Frozen,
-            RunStatus::Running => self.file.state,
-        }
+        self.file.state
+    }
+
+    /// Tell if the process of the session is stopped.
+    #[must_use]
+    pub fn is_frozen(&self) -> bool {
+        self.run == RunStatus::Stopped
+    }
+
+    /// The state of the file and the frozen flag, as the screen shows them.
+    #[must_use]
+    pub fn shown(&self) -> ShownState {
+        ShownState::new(self.file.state, self.run)
+    }
+
+    /// Tell if the session waits for the person. The state must be
+    /// `needs-you`, and the session must have no handled mark and must not be
+    /// frozen. The jump and the key `n` use this one check, thus a frozen or
+    /// handled row never passes it.
+    #[must_use]
+    pub fn waits_for_you(&self) -> bool {
+        self.state() == PaneState::NeedsYou && !self.is_handled() && !self.is_frozen()
+    }
+
+    /// Tell if the session can take a handled mark. A frozen row takes no
+    /// mark. Else it depends on the state, see
+    /// [`PaneState::takes_handled_mark`].
+    #[must_use]
+    pub fn takes_handled_mark(&self) -> bool {
+        !self.is_frozen() && self.state().takes_handled_mark()
     }
 
     /// Tell if the session has a handled mark.
@@ -69,20 +146,26 @@ impl Session {
         self.handled.is_some()
     }
 
-    /// The state of the session for the screen. A handled session adds
-    /// [`HANDLED_SUFFIX`], for example `idle - handled`.
+    /// The plain text of the state cell of the row. A handled session adds
+    /// [`HANDLED_SUFFIX`], for example `idle - handled`. A frozen session adds
+    /// [`FLAG_SEPARATOR`] and [`FROZEN_LABEL`], for example
+    /// `needs-you - frozen`.
     #[must_use]
     pub fn state_label(&self) -> String {
-        let state = self.state().label();
+        let mut label = self.state().label().to_string();
         if self.is_handled() {
-            format!("{state}{HANDLED_SUFFIX}")
-        } else {
-            state.to_string()
+            label.push_str(HANDLED_SUFFIX);
         }
+        if self.is_frozen() {
+            label.push_str(FLAG_SEPARATOR);
+            label.push_str(FROZEN_LABEL);
+        }
+        label
     }
 }
 
-/// One change in the log: a session appeared, changed state, or ended.
+/// One change in the log: a session appeared, changed state, froze, thawed, or
+/// ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Change {
     /// The time of the change.
@@ -91,18 +174,21 @@ pub struct Change {
     pub pid: Pid,
     /// The label of the session at the time of the change.
     pub label: String,
-    /// The state before the change. `None` when the session is new.
-    pub old: Option<PaneState>,
-    /// The state after the change. `None` when the session ended.
-    pub new: Option<PaneState>,
+    /// The shown state before the change. `None` when the session is new.
+    pub old: Option<ShownState>,
+    /// The shown state after the change. `None` when the session ended.
+    pub new: Option<ShownState>,
 }
 
 impl Change {
     /// Tell if the change makes a session wait for the person. The new state
-    /// must be `needs-you`, and the old state must be another one.
+    /// must be a live `needs-you`, and the old state must not be `needs-you`,
+    /// frozen or live. Thus a freeze and a thaw are never a change to
+    /// `needs-you`.
     #[must_use]
     pub fn is_needs_you(&self) -> bool {
-        self.new == Some(PaneState::NeedsYou) && self.old != Some(PaneState::NeedsYou)
+        self.new == Some(ShownState::live(PaneState::NeedsYou))
+            && self.old.map(ShownState::state) != Some(PaneState::NeedsYou)
     }
 }
 
@@ -154,9 +240,10 @@ impl Board {
     }
 
     /// Put a state file of a stopped process on the board at the first read.
-    /// The session shows `frozen`. The OS does not record when a process
-    /// stopped, thus the time in the state starts at `now`, the time of the
-    /// first read. The session has no handled mark, and the log gets no entry.
+    /// The session shows the state of its file and the frozen flag. The OS does
+    /// not record when a process stopped, thus the time in the state starts at
+    /// `now`, the time of the first read. The session has no handled mark, and
+    /// the log gets no entry.
     pub fn load_stopped(&mut self, file: StateFile, name: Option<String>, now: EpochMillis) {
         self.sessions.insert(
             file.pid,
@@ -170,18 +257,19 @@ impl Board {
         );
     }
 
-    /// Apply a state file that was read after the start. The function gives
-    /// the change that the file makes, or `None` when the board shows no
-    /// change of state. The change goes into the log. `run` is the run status
-    /// of the process at the read, and the new session takes it. A file with a
-    /// stamp that is not newer than the file of the same process changes
-    /// nothing, the run status included, because a rescan reads files that
-    /// did not change. The board compares the shown states, thus a newer file
-    /// of a frozen session changes nothing on the screen. The board keeps the
-    /// file. A session in the same shown state keeps its handled mark, and a
-    /// change of state removes it. The time in a new state is the stamp of the
-    /// file. When the process is stopped, the OS does not record when it
-    /// stopped, thus the time is `now`, the time of the read.
+    /// Apply a state file that was read after the start. The function gives the
+    /// change that the file makes, or `None` when the board shows no change of
+    /// state. The change goes into the log. `run` is the run status of the
+    /// process at the read, and the new session takes it. A file with a stamp
+    /// that is not newer than the file of the same process changes nothing, the
+    /// run status included, because a rescan reads files that did not change.
+    /// The board compares the shown states, thus a newer file of a frozen
+    /// session with a new state is a change, and the row stays frozen. The
+    /// board keeps the file. A session in the same shown state keeps its
+    /// handled mark, and a change of the shown state removes it. The time in a
+    /// new state is the stamp of the file. When the process is stopped, the OS
+    /// does not record when it stopped, thus the time is `now`, the time of the
+    /// read.
     pub fn apply(
         &mut self,
         file: StateFile,
@@ -200,7 +288,7 @@ impl Board {
             RunStatus::Stopped => now,
             RunStatus::Running => stamp,
         };
-        let old = same_process.map(Session::state);
+        let old = same_process.map(Session::shown);
         let mut session = Session {
             file,
             name,
@@ -208,7 +296,7 @@ impl Board {
             run,
             handled: None,
         };
-        let new_state = session.state();
+        let new_state = session.shown();
         let same_state = old == Some(new_state);
         if let Some(known) = same_process.filter(|_| same_state) {
             session.since = known.since;
@@ -232,21 +320,18 @@ impl Board {
 
     /// Set the run status of the session with the pid. The function gives
     /// `None` when the board does not hold the pid, or when the session has
-    /// the run status already. A freeze and a thaw are each a change of state.
-    /// The time in the state starts again at `now`, the time of the read that
-    /// saw the change. The change goes into the log, and the handled mark goes
-    /// away.
+    /// the run status already. A freeze and a thaw are each a change of the
+    /// shown state. The time in the state starts again at `now`, the time of
+    /// the read that saw the change. The change goes into the log, and the
+    /// handled mark goes away.
     pub fn set_run_status(&mut self, pid: Pid, run: RunStatus, now: EpochMillis) -> Option<Change> {
         let session = self.sessions.get_mut(&pid)?;
         if session.run == run {
             return None;
         }
-        let old = session.state();
+        let old = session.shown();
         session.run = run;
-        let new = session.state();
-        if old == new {
-            return None;
-        }
+        let new = session.shown();
         session.since = now;
         session.handled = None;
         let change = Change {
@@ -278,7 +363,7 @@ impl Board {
             at: now,
             pid,
             label: session.label(),
-            old: Some(session.state()),
+            old: Some(session.shown()),
             new: None,
         };
         self.record(change.clone());
@@ -289,15 +374,20 @@ impl Board {
     /// The function gives `Some(HandledToggle::Marked)` when the session now
     /// has a mark, `Some(HandledToggle::Unmarked)` when it removed the mark,
     /// and `None` when the board does not hold the pid. It gives
-    /// `Some(HandledToggle::Refused)` and changes nothing when the session has
-    /// no mark and its shown state takes none, see [`PaneState::takes_handled_mark`].
+    /// `Some(HandledToggle::Frozen)` and changes nothing when the session has
+    /// no mark and is frozen. It gives `Some(HandledToggle::Refused)` and
+    /// changes nothing when the session has no mark, is not frozen, and takes
+    /// none, see [`Session::takes_handled_mark`].
     /// A new mark sorts the row below each other row in its state.
     pub fn toggle_handled(&mut self, pid: Pid) -> Option<HandledToggle> {
         let session = self.sessions.get_mut(&pid)?;
         if session.handled.take().is_some() {
             return Some(HandledToggle::Unmarked);
         }
-        if !session.state().takes_handled_mark() {
+        if session.is_frozen() {
+            return Some(HandledToggle::Frozen);
+        }
+        if !session.takes_handled_mark() {
             return Some(HandledToggle::Refused);
         }
         session.handled = Some(HandledMark(self.next_mark));
@@ -305,18 +395,19 @@ impl Board {
         Some(HandledToggle::Marked)
     }
 
-    /// The count of each shown state, in the sort order of the rows. The array
-    /// holds every state, also a state with no session. Each count splits the
-    /// sessions of its state by the handled mark.
+    /// The count of each state, in the sort order of the rows. The array holds
+    /// every state, also a state with no session. A count holds only the live
+    /// rows of its state, and splits them by the handled mark. A frozen row is
+    /// in no count. See [`Board::frozen_count`].
     #[must_use]
-    pub fn state_counts(&self) -> [StateCount; 6] {
+    pub fn state_counts(&self) -> [StateCount; 5] {
         let mut ranked = PaneState::ALL;
         ranked.sort_by_key(|state| state.rank());
         ranked.map(|state| {
             let in_state = self
                 .sessions
                 .values()
-                .filter(|session| session.state() == state);
+                .filter(|session| !session.is_frozen() && session.state() == state);
             let (unmarked, handled) =
                 in_state.fold((0_usize, 0_usize), |(unmarked, handled), session| {
                     if session.is_handled() {
@@ -331,6 +422,15 @@ impl Board {
                 handled,
             }
         })
+    }
+
+    /// The number of frozen rows on the board, whatever their state.
+    #[must_use]
+    pub fn frozen_count(&self) -> usize {
+        self.sessions
+            .values()
+            .filter(|session| session.is_frozen())
+            .count()
     }
 
     /// The session with the pid, when the board holds it.
@@ -359,15 +459,17 @@ impl Board {
         self.sessions.is_empty()
     }
 
-    /// The sessions in the order of the screen: by the rank of the shown state, then
-    /// the sessions with no handled mark, then the handled sessions in the
-    /// order of their marks, then the oldest `since` first, then the pid.
+    /// The sessions in the order of the screen. The first key is the rank of
+    /// the state. In one state, the live rows with no mark come first. The live
+    /// rows with a mark come next, in the order of their marks. The frozen rows
+    /// come last. In each part, the oldest `since` comes first, then the pid.
     #[must_use]
     pub fn rows(&self) -> Vec<&Session> {
         let mut rows: Vec<&Session> = self.sessions.values().collect();
         rows.sort_by_key(|session| {
             (
                 session.state().rank(),
+                session.is_frozen(),
                 session.handled,
                 session.since,
                 session.file.pid.as_u32(),
@@ -414,7 +516,7 @@ mod tests {
         assert_eq!(session.label(), "fix the bug");
     }
 
-    fn change(old: Option<PaneState>, new: Option<PaneState>) -> Change {
+    fn change(old: Option<ShownState>, new: Option<ShownState>) -> Change {
         Change {
             at: EpochMillis::new(1),
             pid: Pid::new(1),
@@ -426,12 +528,20 @@ mod tests {
 
     #[test]
     fn a_change_is_needs_you_only_when_the_session_enters_needs_you() {
-        use PaneState::{Idle, NeedsYou};
-        assert!(change(Some(Idle), Some(NeedsYou)).is_needs_you());
-        assert!(change(None, Some(NeedsYou)).is_needs_you());
-        assert!(!change(Some(NeedsYou), Some(NeedsYou)).is_needs_you());
-        assert!(!change(Some(NeedsYou), Some(Idle)).is_needs_you());
-        assert!(!change(Some(NeedsYou), None).is_needs_you());
+        let idle = ShownState::live(PaneState::Idle);
+        let needs_you = ShownState::live(PaneState::NeedsYou);
+        assert!(change(Some(idle), Some(needs_you)).is_needs_you());
+        assert!(change(None, Some(needs_you)).is_needs_you());
+        assert!(!change(Some(needs_you), Some(needs_you)).is_needs_you());
+        assert!(!change(Some(needs_you), Some(idle)).is_needs_you());
+        assert!(!change(Some(needs_you), None).is_needs_you());
+        let frozen_needs_you = ShownState::frozen(PaneState::NeedsYou);
+        assert!(!change(Some(frozen_needs_you), Some(needs_you)).is_needs_you());
+        assert!(!change(Some(needs_you), Some(frozen_needs_you)).is_needs_you());
+        assert!(!change(None, Some(frozen_needs_you)).is_needs_you());
+        assert!(!change(Some(idle), Some(frozen_needs_you)).is_needs_you());
+        let frozen_idle = ShownState::frozen(PaneState::Idle);
+        assert!(change(Some(frozen_idle), Some(needs_you)).is_needs_you());
     }
 
     #[test]
@@ -452,7 +562,7 @@ mod tests {
                 pid: Pid::new(7),
                 label: "named".to_string(),
                 old: None,
-                new: Some(PaneState::Working),
+                new: Some(ShownState::live(PaneState::Working)),
             }
         );
         let session = board.get(Pid::new(7)).expect("the session is on the board");
@@ -489,8 +599,8 @@ mod tests {
                 at: EpochMillis::new(900),
                 pid: Pid::new(7),
                 label: "worktree".to_string(),
-                old: Some(PaneState::Idle),
-                new: Some(PaneState::Working),
+                old: Some(ShownState::live(PaneState::Idle)),
+                new: Some(ShownState::live(PaneState::Working)),
             }
         );
         let session = board.get(Pid::new(7)).expect("the session is on the board");
@@ -539,7 +649,7 @@ mod tests {
             )
             .expect("a new session is a change");
         assert_eq!(change.old, None);
-        assert_eq!(change.new, Some(PaneState::Idle));
+        assert_eq!(change.new, Some(ShownState::live(PaneState::Idle)));
         assert_eq!(change.at, EpochMillis::new(300));
         let session = board.get(Pid::new(7)).expect("the session is on the board");
         assert_eq!(session.file.started_at, EpochMillis::new(200));
@@ -584,7 +694,7 @@ mod tests {
                 at: EpochMillis::new(1000),
                 pid: Pid::new(7),
                 label: "worktree".to_string(),
-                old: Some(PaneState::Idle),
+                old: Some(ShownState::live(PaneState::Idle)),
                 new: None,
             }
         );
@@ -603,7 +713,7 @@ mod tests {
 
     #[test]
     fn state_counts_count_a_state_of_sessions_with_no_mark() {
-        use PaneState::{Agents, Frozen, Idle, NeedsYou, Shells, Working};
+        use PaneState::{Agents, Idle, NeedsYou, Shells, Working};
         let mut board = Board::new();
         board.load(file(1, Agents, 1, 100), None);
         board.load(file(2, Agents, 1, 100), None);
@@ -615,8 +725,7 @@ mod tests {
                 (Idle, 0, 0),
                 (Agents, 3, 0),
                 (Shells, 0, 0),
-                (Working, 0, 0),
-                (Frozen, 0, 0)
+                (Working, 0, 0)
             ]
         );
     }
@@ -653,7 +762,7 @@ mod tests {
         let board = Board::new();
         let counts = board.state_counts();
         let ranks: Vec<u8> = counts.iter().map(|count| count.state.rank()).collect();
-        assert_eq!(ranks, [0, 1, 2, 3, 4, 5]);
+        assert_eq!(ranks, [0, 1, 2, 3, 4]);
         assert!(counts
             .iter()
             .all(|count| count.unmarked == 0 && count.handled == 0));
@@ -685,6 +794,25 @@ mod tests {
             .iter()
             .map(|session| session.file.pid.as_u32())
             .collect()
+    }
+
+    #[test]
+    fn a_frozen_row_sorts_in_the_group_of_its_state_below_the_live_rows() {
+        use PaneState::{Idle, NeedsYou, Working};
+        let mut board = Board::new();
+        board.load(file(1, Working, 1, 100), None);
+        board.load(file(2, NeedsYou, 1, 500), None);
+        board.load(file(3, NeedsYou, 1, 600), None);
+        assert_eq!(
+            board.toggle_handled(Pid::new(3)),
+            Some(HandledToggle::Marked)
+        );
+        board.load_stopped(file(4, NeedsYou, 1, 1), None, EpochMillis::new(50));
+        board.load_stopped(file(5, NeedsYou, 1, 1), None, EpochMillis::new(40));
+        board.load_stopped(file(7, NeedsYou, 1, 1), None, EpochMillis::new(40));
+        board.load(file(6, Idle, 1, 10), None);
+        board.load_stopped(file(8, Idle, 1, 1), None, EpochMillis::new(5));
+        assert_eq!(row_order(&board), vec![2, 3, 5, 7, 4, 6, 8, 1]);
     }
 
     /// A board with one `needs-you` row, three idle rows, and one `agents`
@@ -898,8 +1026,25 @@ mod tests {
     }
 
     #[test]
-    fn a_stopped_session_shows_frozen_for_each_file_state() {
-        use PaneState::{Agents, Frozen, Idle, NeedsYou, Shells, Working};
+    fn a_stopped_session_shows_the_state_of_its_file_and_the_frozen_flag() {
+        use PaneState::{Agents, Idle, NeedsYou, Shells, Working};
+        for state in [Working, NeedsYou, Idle, Agents, Shells] {
+            let mut board = Board::new();
+            board.load(file(7, state, 100, 500), None);
+            board.set_run_status(Pid::new(7), RunStatus::Stopped, EpochMillis::new(1_000));
+            let session = board.get(Pid::new(7)).expect("the session is on the board");
+            assert_eq!(session.state(), state, "{state:?}");
+            assert_eq!(
+                session.state_label(),
+                format!("{} - frozen", state.label()),
+                "{state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_freeze_logs_the_state_of_the_file_on_both_sides() {
+        use PaneState::{Agents, Idle, NeedsYou, Shells, Working};
         for state in [Working, NeedsYou, Idle, Agents, Shells] {
             let mut board = Board::new();
             board.load(file(7, state, 100, 500), None);
@@ -910,14 +1055,11 @@ mod tests {
                 at: EpochMillis::new(1_000),
                 pid: Pid::new(7),
                 label: "worktree".to_string(),
-                old: Some(state),
-                new: Some(Frozen),
+                old: Some(ShownState::live(state)),
+                new: Some(ShownState::frozen(state)),
             };
             assert_eq!(change, expected, "{state:?}");
             let session = board.get(Pid::new(7)).expect("the session is on the board");
-            assert_eq!(session.state(), Frozen, "{state:?}");
-            assert_eq!(session.state_label(), "frozen", "{state:?}");
-            assert_eq!(session.file.state, state, "{state:?}");
             assert_eq!(session.since, EpochMillis::new(1_000), "{state:?}");
             assert_eq!(board.changes().cloned().collect::<Vec<_>>(), vec![expected]);
         }
@@ -929,12 +1071,13 @@ mod tests {
         let change = board
             .set_run_status(Pid::new(7), RunStatus::Running, EpochMillis::new(2_000))
             .expect("a thaw is a change");
-        assert_eq!(change.old, Some(PaneState::Frozen));
-        assert_eq!(change.new, Some(PaneState::Idle));
+        assert_eq!(change.old, Some(ShownState::frozen(PaneState::Idle)));
+        assert_eq!(change.new, Some(ShownState::live(PaneState::Idle)));
         assert_eq!(change.at, EpochMillis::new(2_000));
         let session = board.get(Pid::new(7)).expect("the session is on the board");
         assert_eq!(session.since, EpochMillis::new(2_000));
         assert_eq!(session.state(), PaneState::Idle);
+        assert!(!session.is_frozen());
     }
 
     #[test]
@@ -979,46 +1122,20 @@ mod tests {
 
     #[test]
     fn toggle_handled_refuses_a_frozen_session() {
-        let mut board = frozen_board(PaneState::Idle);
-        assert_eq!(
-            board.toggle_handled(Pid::new(7)),
-            Some(HandledToggle::Refused)
-        );
-        assert!(!board.get(Pid::new(7)).expect("on the board").is_handled());
+        for state in [PaneState::NeedsYou, PaneState::Idle] {
+            let mut board = frozen_board(state);
+            assert_eq!(
+                board.toggle_handled(Pid::new(7)),
+                Some(HandledToggle::Frozen),
+                "{state:?}"
+            );
+            let session = board.get(Pid::new(7)).expect("on the board");
+            assert!(!session.is_handled(), "{state:?}");
+        }
     }
 
     #[test]
-    fn a_frozen_session_sorts_last() {
-        let mut board = Board::new();
-        board.load(file(1, PaneState::Working, 100, 500), None);
-        board.load(file(2, PaneState::NeedsYou, 100, 500), None);
-        board.load(file(3, PaneState::NeedsYou, 100, 100), None);
-        board.set_run_status(Pid::new(3), RunStatus::Stopped, EpochMillis::new(1_000));
-        let pids: Vec<u32> = board
-            .rows()
-            .iter()
-            .map(|session| session.file.pid.as_u32())
-            .collect();
-        assert_eq!(pids, vec![2, 1, 3]);
-    }
-
-    #[test]
-    fn state_counts_count_a_frozen_session_as_frozen() {
-        let board = frozen_board(PaneState::NeedsYou);
-        let counts = board.state_counts();
-        let of = |state: PaneState| {
-            let count = counts
-                .iter()
-                .find(|count| count.state == state)
-                .expect("each state has a count");
-            (count.unmarked, count.handled)
-        };
-        assert_eq!(of(PaneState::Frozen), (1, 0));
-        assert_eq!(of(PaneState::NeedsYou), (0, 0));
-    }
-
-    #[test]
-    fn a_newer_file_of_a_frozen_session_changes_nothing_on_the_screen() {
+    fn a_newer_file_of_a_frozen_session_changes_its_state_and_stays_frozen() {
         let mut board = frozen_board(PaneState::Idle);
         let applied = board.apply(
             file(7, PaneState::Working, 100, 1_500),
@@ -1026,18 +1143,28 @@ mod tests {
             RunStatus::Stopped,
             EpochMillis::new(1_600),
         );
-        assert_eq!(applied, None);
-        assert_eq!(board.changes().count(), 1);
+        assert_eq!(
+            applied,
+            Some(Change {
+                at: EpochMillis::new(1_600),
+                pid: Pid::new(7),
+                label: "worktree".to_string(),
+                old: Some(ShownState::frozen(PaneState::Idle)),
+                new: Some(ShownState::frozen(PaneState::Working)),
+            })
+        );
+        assert_eq!(board.changes().count(), 2);
         let session = board.get(Pid::new(7)).expect("on the board");
-        assert_eq!(session.since, EpochMillis::new(1_000));
-        assert_eq!(session.state(), PaneState::Frozen);
-        assert_eq!(session.file.state, PaneState::Working);
+        assert_eq!(session.since, EpochMillis::new(1_600));
+        assert_eq!(session.state(), PaneState::Working);
+        assert!(session.is_frozen());
+        assert_eq!(session.state_label(), "working - frozen");
         assert_eq!(session.file.stamp, EpochMillis::new(1_500));
         let thaw = board
             .set_run_status(Pid::new(7), RunStatus::Running, EpochMillis::new(2_000))
             .expect("a thaw is a change");
-        assert_eq!(thaw.old, Some(PaneState::Frozen));
-        assert_eq!(thaw.new, Some(PaneState::Working));
+        assert_eq!(thaw.old, Some(ShownState::frozen(PaneState::Working)));
+        assert_eq!(thaw.new, Some(ShownState::live(PaneState::Working)));
     }
 
     #[test]
@@ -1052,13 +1179,14 @@ mod tests {
             )
             .expect("a new process is a change");
         assert_eq!(change.old, None);
-        assert_eq!(change.new, Some(PaneState::Working));
+        assert_eq!(change.new, Some(ShownState::live(PaneState::Working)));
         let session = board.get(Pid::new(7)).expect("on the board");
         assert_eq!(session.state(), PaneState::Working);
+        assert!(!session.is_frozen());
     }
 
     #[test]
-    fn load_stopped_shows_frozen_since_the_first_read_and_logs_nothing() {
+    fn load_stopped_shows_the_file_state_frozen_since_the_first_read_and_logs_nothing() {
         let mut board = Board::new();
         board.load_stopped(
             file(7, PaneState::Idle, 100, 500),
@@ -1066,19 +1194,20 @@ mod tests {
             EpochMillis::new(9_000),
         );
         let session = board.get(Pid::new(7)).expect("on the board");
-        assert_eq!(session.state(), PaneState::Frozen);
+        assert_eq!(session.state(), PaneState::Idle);
+        assert!(session.is_frozen());
         assert_eq!(session.since, EpochMillis::new(9_000));
         assert!(!session.is_handled());
         assert_eq!(board.changes().count(), 0);
     }
 
     #[test]
-    fn the_end_of_a_frozen_session_logs_frozen_as_the_old_state() {
+    fn the_end_of_a_frozen_session_logs_its_frozen_state_as_the_old_state() {
         let mut board = frozen_board(PaneState::Idle);
         let change = board
             .remove(Pid::new(7), EpochMillis::new(3_000))
             .expect("the session was on the board");
-        assert_eq!(change.old, Some(PaneState::Frozen));
+        assert_eq!(change.old, Some(ShownState::frozen(PaneState::Idle)));
         assert_eq!(change.new, None);
     }
 }
