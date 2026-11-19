@@ -167,4 +167,80 @@ mod tests {
         assert!(placement.frame.y >= MAIN.visible.y);
         assert!(placement.frame.y + placement.frame.height <= MAIN.visible.y + MAIN.visible.height);
     }
+
+    /// A screen of 1920 by 1080 points to the right of `MAIN`.
+    const RIGHT: Screen = Screen {
+        frame: rect(1440.0, 0.0, 1920.0, 1080.0),
+        visible: rect(1440.0, 0.0, 1920.0, 1055.0),
+    };
+
+    /// The screen that holds the center of the frame of `placement`.
+    fn screen_of(placement: &Placement) -> usize {
+        let center = placement.frame.x + placement.frame.width / 2.0;
+        usize::from(center >= RIGHT.frame.x)
+    }
+
+    #[test]
+    fn a_window_across_two_screens_picks_the_larger_overlap() {
+        let mut request = input(&[MAIN, RIGHT]);
+        request.front_window = Some(rect(1240.0, 100.0, 600.0, 400.0));
+        assert_eq!(screen_of(&place(&request).unwrap()), 1);
+        request.front_window = Some(rect(840.0, 100.0, 800.0, 400.0));
+        assert_eq!(screen_of(&place(&request).unwrap()), 0);
+    }
+
+    #[test]
+    fn no_front_window_picks_the_screen_under_the_mouse() {
+        let mut request = input(&[MAIN, RIGHT]);
+        request.mouse = Point {
+            x: 1500.0,
+            y: 100.0,
+        };
+        assert_eq!(screen_of(&place(&request).unwrap()), 1);
+        // The left edge belongs to the screen, the right edge does not.
+        request.mouse = Point {
+            x: 1440.0,
+            y: 100.0,
+        };
+        assert_eq!(screen_of(&place(&request).unwrap()), 1);
+        request.mouse = Point {
+            x: 1439.0,
+            y: 100.0,
+        };
+        assert_eq!(screen_of(&place(&request).unwrap()), 0);
+    }
+
+    #[test]
+    fn a_window_that_touches_no_screen_falls_back_to_the_mouse() {
+        let mut request = input(&[MAIN, RIGHT]);
+        request.front_window = Some(rect(-900.0, 100.0, 400.0, 400.0));
+        request.mouse = Point {
+            x: 2000.0,
+            y: 500.0,
+        };
+        assert_eq!(screen_of(&place(&request).unwrap()), 1);
+    }
+
+    #[test]
+    fn a_mouse_on_no_screen_picks_the_first_screen() {
+        let mut request = input(&[MAIN, RIGHT]);
+        request.mouse = Point {
+            x: -50.0,
+            y: 5000.0,
+        };
+        assert_eq!(screen_of(&place(&request).unwrap()), 0);
+    }
+
+    #[test]
+    fn the_panel_is_centered_in_the_visible_frame_of_the_chosen_screen() {
+        let mut request = input(&[MAIN, RIGHT]);
+        request.mouse = Point {
+            x: 2000.0,
+            y: 500.0,
+        };
+        let placement = place(&request).unwrap();
+        // 1920 / 3 * 2 is 1280 points, 160 columns. 1055 / 3 * 2 is 703 points, 43 rows.
+        assert_eq!((placement.columns, placement.rows), (160, 43));
+        assert_eq!(placement.frame, rect(1760.0, 182.0, 1280.0, 688.0));
+    }
 }
