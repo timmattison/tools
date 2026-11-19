@@ -322,4 +322,51 @@ mod tests {
         let placement = place(&input(&[plain_screen(1500.0, 300.0)])).unwrap();
         assert_eq!((placement.columns, placement.rows), (125, 18));
     }
+
+    #[test]
+    fn window_bounds_flip_from_the_top_left_to_the_bottom_left() {
+        let on_primary = flip_window_bounds(rect(100.0, 50.0, 600.0, 400.0), 900.0);
+        assert_eq!(on_primary, rect(100.0, 450.0, 600.0, 400.0));
+        // A display above the primary one has a negative y in window bounds.
+        let above = flip_window_bounds(rect(0.0, -1080.0, 1920.0, 1080.0), 900.0);
+        assert_eq!(above, rect(0.0, 900.0, 1920.0, 1080.0));
+    }
+
+    #[test]
+    fn a_flipped_window_on_the_second_display_picks_that_screen() {
+        let above = Screen {
+            frame: rect(0.0, 900.0, 1920.0, 1080.0),
+            visible: rect(0.0, 900.0, 1920.0, 1055.0),
+        };
+        let screens = [MAIN, above];
+        let mut request = input(&screens);
+        request.front_window = Some(flip_window_bounds(rect(300.0, -800.0, 600.0, 400.0), 900.0));
+        let placement = place(&request).unwrap();
+        assert!(placement.frame.y >= 900.0);
+    }
+
+    #[test]
+    fn no_screen_gives_no_placement() {
+        assert_eq!(place(&input(&[])), None);
+    }
+
+    #[test]
+    fn a_cell_size_that_is_not_positive_gives_no_placement() {
+        let mut request = input(&[MAIN]);
+        request.cell = CellSize {
+            width: 0.0,
+            height: 16.0,
+        };
+        assert_eq!(place(&request), None);
+        request.cell = CellSize {
+            width: 8.0,
+            height: -1.0,
+        };
+        assert_eq!(place(&request), None);
+        request.cell = CellSize {
+            width: f64::NAN,
+            height: 16.0,
+        };
+        assert_eq!(place(&request), None);
+    }
 }
