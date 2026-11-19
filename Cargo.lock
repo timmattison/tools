@@ -1520,9 +1520,11 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "buildinfo",
+ "childenv",
  "clap",
  "rand 0.9.5",
  "sysclip",
+ "tempfile",
 ]
 
 [[package]]
