@@ -26,6 +26,7 @@ serde_json = { workspace = true, features = ["float_roundtrip"] }
 dirs.workspace = true
 libc.workspace = true
 objc2.workspace = true
+tempfile.workspace = true
 objc2-app-kit = { workspace = true, features = [
     "std",
     "NSAppearance",

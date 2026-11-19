@@ -39,7 +39,23 @@ use std::time::{Duration, Instant};
 use crate::connection::Destination;
 
 /// The name of the directory of `glance` in the data directory of the user.
-const DIRECTORY_NAME: &str = "glance";
+pub(crate) const DIRECTORY_NAME: &str = "glance";
+
+/// Gives the data directory of the current user. On macOS it is
+/// `~/Library/Application Support`.
+///
+/// # Errors
+///
+/// Returns an error of kind [`io::ErrorKind::NotFound`] when the data
+/// directory of the user is not known.
+pub(crate) fn user_data_directory() -> io::Result<PathBuf> {
+    dirs::data_dir().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "the data directory of this user is not known",
+        )
+    })
+}
 
 /// The name of the lock file of the local status item.
 const LOCAL_FILE_NAME: &str = "local.lock";
@@ -162,14 +178,7 @@ impl LockFile {
     /// Returns an error of kind [`io::ErrorKind::NotFound`] when the data
     /// directory of the user is not known.
     pub fn for_user(target: &Target) -> io::Result<Self> {
-        dirs::data_dir()
-            .map(|data| Self::in_data_directory(&data, target))
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "the data directory of this user is not known",
-                )
-            })
+        user_data_directory().map(|data| Self::in_data_directory(&data, target))
     }
 
     /// Gives the path of the lock file.
