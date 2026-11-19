@@ -76,8 +76,43 @@ pub struct Placement {
 /// is not positive.
 #[must_use]
 pub fn place(input: &PlacementInput<'_>) -> Option<Placement> {
-    let _ = input;
-    None
+    let cell = input.cell;
+    if cell.width.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater)
+        || cell.height.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater)
+    {
+        return None;
+    }
+    let screen = input.screens.first()?;
+    let visible = screen.visible;
+    let columns = cells_in(visible.width, cell.width);
+    let rows = cells_in(visible.height, cell.height);
+    let width = f64::from(columns) * cell.width;
+    let height = f64::from(rows) * cell.height;
+    Some(Placement {
+        frame: Rect {
+            x: (visible.x + (visible.width - width) / 2.0).floor(),
+            y: (visible.y + (visible.height - height) / 2.0).floor(),
+            width,
+            height,
+        },
+        columns,
+        rows,
+    })
+}
+
+/// The number of whole cells in two thirds of `extent`, clamped to `u16`.
+fn cells_in(extent: f64, cell: f64) -> u16 {
+    clamp_to_u16((extent * 2.0 / 3.0 / cell).floor())
+}
+
+/// `value` as a `u16`, with 0 and `u16::MAX` as the bounds.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the value is clamped to the range of u16 first"
+)]
+fn clamp_to_u16(value: f64) -> u16 {
+    value.clamp(0.0, f64::from(u16::MAX)) as u16
 }
 
 /// A `CGWindow` bounds rectangle in Cocoa global points. The bounds have their
