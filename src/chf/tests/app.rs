@@ -447,6 +447,38 @@ fn page_keys_move_by_the_rows_of_the_list() {
     assert_eq!(app.list_offset(), 0);
 }
 
+/// After the query narrows the list, the list shows a full page, not one row.
+/// The selected session leaves the list, so the selection clamps to the last row.
+#[test]
+fn the_list_shows_a_full_page_after_the_query_narrows_it() {
+    let mut app = App::new();
+    let events: Vec<IndexEvent> = (0..12)
+        .map(|n| {
+            let id = format!("00000000-0000-4000-8000-0000000002{n:02}");
+            let word = if n >= 7 { "kiwi" } else { "plum" };
+            event(&id, word, n + 1, false)
+        })
+        .collect();
+    let effects = app.on_index(events);
+    settle(&mut app, effects);
+    app.on_drawn(Drawn {
+        list_rows: 3,
+        preview_scroll: 0,
+    });
+    for _ in 0..3 {
+        app.on_key(press(KeyCode::PageDown));
+    }
+    assert_eq!(app.hits().len(), 12);
+    assert_eq!(app.selected(), 9);
+    assert_eq!(app.list_offset(), 7);
+    let effects = app.on_key(ch('k'));
+    settle(&mut app, effects);
+    assert_eq!(app.hits().len(), 5);
+    assert_eq!(app.list_offset(), 2, "the page ends at the last row");
+    assert!(app.selected() >= app.list_offset());
+    assert!(app.selected() < app.list_offset() + 3);
+}
+
 #[test]
 fn on_drawn_makes_at_least_one_row() {
     let mut app = loaded();
