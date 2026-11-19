@@ -48,6 +48,8 @@
 //! - `reader` (macOS only) — the one module that calls the kernel.
 //! - `shell` (macOS only) — the status item, its menu, and its timer, through
 //!   AppKit.
+//! - `bundle` (macOS only) — the app bundle that each status item runs from, so
+//!   that macOS gives the status item a bundle identifier.
 //! - `instance` (macOS only) — the one status item of each target: the lock
 //!   that marks it, and the calls to the kernel that detach it from the
 //!   terminal and that stop it.
@@ -73,6 +75,8 @@
 
 #![deny(unsafe_code)]
 
+#[cfg(target_os = "macos")]
+pub mod bundle;
 pub mod chart;
 pub mod connection;
 pub mod cpu;
