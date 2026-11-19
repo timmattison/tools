@@ -285,16 +285,28 @@ fn discover(projects: &Path) -> Store {
 
 /// The session files directly inside one project folder.
 fn list_candidates(folder: &Path) -> std::io::Result<Vec<Candidate>> {
+    candidates_from(fs::read_dir(folder)?.map(|entry| entry.map(|entry| entry.path())))
+}
+
+/// The session files among `paths`, the entries of one project folder.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the entry error ends the listing once the next commit lands"
+)]
+fn candidates_from(
+    paths: impl IntoIterator<Item = std::io::Result<PathBuf>>,
+) -> std::io::Result<Vec<Candidate>> {
     let mut candidates = Vec::new();
-    for entry in fs::read_dir(folder)? {
-        let Ok(entry) = entry else {
+    for path in paths {
+        let Ok(path) = path else {
             continue;
         };
-        let file_name = entry.file_name();
-        let Some(id) = SessionId::from_file_name(&file_name) else {
+        let Some(file_name) = path.file_name() else {
             continue;
         };
-        let path = entry.path();
+        let Some(id) = SessionId::from_file_name(file_name) else {
+            continue;
+        };
         let stat = match fs::symlink_metadata(&path) {
             Ok(meta) if meta.is_file() => Ok(Stat {
                 size: meta.len(),
@@ -303,10 +315,11 @@ fn list_candidates(folder: &Path) -> std::io::Result<Vec<Candidate>> {
             Ok(_) => continue,
             Err(error) => Err(error.to_string()),
         };
+        let file = file_name.to_string_lossy().into_owned();
         candidates.push(Candidate {
             id,
             path,
-            file: file_name.to_string_lossy().into_owned(),
+            file,
             stat,
         });
     }
@@ -560,4 +573,22 @@ fn folder_hex(name: &OsStr) -> String {
     #[cfg(not(unix))]
     let hash = blake3::hash(name.to_string_lossy().as_bytes());
     hash.to_hex().chars().take(HEX_LEN).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::candidates_from;
+
+    /// An entry error part way through a listing ends the listing, so the
+    /// folder counts as unreadable and keeps its cache file.
+    #[test]
+    fn an_entry_error_ends_the_listing_of_a_folder() {
+        let entries = [
+            Ok(PathBuf::from("/nonexistent/notes.txt")),
+            Err(std::io::Error::other("readdir failed part way")),
+        ];
+        assert!(candidates_from(entries).is_err());
+    }
 }
