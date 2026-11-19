@@ -7,7 +7,11 @@ use ratatui::buffer::{Buffer, Cell};
 use ratatui::layout::{Position, Rect, Size};
 
 /// The 16 colors of the palette, in the order of the named colors of ratatui.
-pub const DEFAULT_PALETTE: [Rgb; 16] = [Rgb { red: 0, green: 0, blue: 0 }; 16];
+pub const DEFAULT_PALETTE: [Rgb; 16] = [Rgb {
+    red: 0,
+    green: 0,
+    blue: 0,
+}; 16];
 
 /// The colors that the panel uses for the cells that name none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,8 +27,16 @@ pub struct PanelColors {
 impl Default for PanelColors {
     fn default() -> Self {
         Self {
-            foreground: Rgb { red: 0, green: 0, blue: 0 },
-            background: Rgb { red: 0, green: 0, blue: 0 },
+            foreground: Rgb {
+                red: 0,
+                green: 0,
+                blue: 0,
+            },
+            background: Rgb {
+                red: 0,
+                green: 0,
+                blue: 0,
+            },
             palette: DEFAULT_PALETTE,
         }
     }
