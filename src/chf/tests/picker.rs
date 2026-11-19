@@ -31,6 +31,8 @@ const ALARM_SECONDS: &str = "120";
 const ALARM_WRAPPER: &str = "alarm(shift @ARGV); exec { $ARGV[0] } @ARGV or die \"exec: $!\";";
 /// The sequence that leaves the alternate screen.
 const LEAVE_SCREEN: &str = "\x1b[?1049l";
+/// The sequence that erases the whole screen.
+const ERASE_SCREEN: &str = "\x1b[2J";
 /// The text that the fake `crap` prints.
 const FAKE_RAN: &str = "FAKE-CRAP-RAN";
 /// The id of the session of each fixture.
@@ -264,6 +266,30 @@ fn enter_on_a_plain_session_runs_ch() {
         left < ran,
         "chf must restore the terminal before the resume"
     );
+}
+
+/// A terminal that ignores the alternate-screen modes keeps the text of the
+/// shell. The emulator in the mosh server is one. ratatui writes only the cells
+/// that are not blank, so only an erase removes that text from under the view.
+#[test]
+fn the_picker_erases_the_screen_before_it_draws_a_session() {
+    let home = tempfile::tempdir().expect("a temporary directory");
+    write_session(home.path(), "Zanzibar-trip-notes", false);
+    let mut picker = Picker::open(home.path(), "/bin/bash");
+    picker.wait_for("Zanzibar-trip-notes");
+    let shown = picker.shown();
+    let erased = shown.find(ERASE_SCREEN).unwrap_or_else(|| {
+        panic!("chf must erase the screen when it starts, and the screen showed {shown:?}")
+    });
+    let drawn = shown
+        .find("Zanzibar-trip-notes")
+        .expect("the picker drew the session");
+    assert!(
+        erased < drawn,
+        "chf must erase the screen before it draws a session: {shown:?}"
+    );
+    picker.press(b"\x1b");
+    assert_eq!(picker.wait_for_exit(), 130);
 }
 
 #[test]
