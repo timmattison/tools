@@ -64,9 +64,18 @@ pub struct Minimap {
 impl Minimap {
     /// The mini-map of the board with at most `limit` tiles.
     #[must_use]
-    pub fn of(_board: &Board, _limit: usize) -> Self {
+    pub fn of(board: &Board, _limit: usize) -> Self {
+        let tiles = board
+            .rows()
+            .into_iter()
+            .map(|session| Tile {
+                state: session.state(),
+                handled: session.is_handled(),
+                frozen: session.is_frozen(),
+            })
+            .collect();
         Self {
-            tiles: Vec::new(),
+            tiles,
             overflow: 0,
             attention: 0,
         }
