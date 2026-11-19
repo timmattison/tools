@@ -104,9 +104,60 @@ impl Bundle {
     /// Returns an error when `source` cannot be read, or when a directory or a
     /// file of the bundle cannot be written.
     pub fn ensure(&self, source: &Path) -> io::Result<()> {
-        let _ = source;
-        Ok(())
+        let executable = self.executable();
+        let bytes = fs::read(source)?;
+        replace_file(&executable, &bytes, EXECUTABLE_MODE)?;
+        replace_file(&self.info_plist(), info_plist_text().as_bytes(), PLIST_MODE)
     }
+}
+
+/// Writes `bytes` to a new temporary file next to `target`, sets its mode, and
+/// renames it over `target`. The new file has a new inode. It makes the
+/// directory of `target` when it is missing.
+///
+/// # Errors
+///
+/// Returns an error when `target` has no directory, or when a file cannot be
+/// written.
+fn replace_file(target: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
+    let directory = target.parent().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "the target has no directory")
+    })?;
+    fs::create_dir_all(directory)?;
+    let mut file = tempfile::Builder::new()
+        .prefix(TEMPORARY_PREFIX)
+        .tempfile_in(directory)?;
+    io::Write::write_all(&mut file, bytes)?;
+    file.as_file()
+        .set_permissions(fs::Permissions::from_mode(mode))?;
+    file.persist(target).map_err(|error| error.error)?;
+    Ok(())
+}
+
+/// Gives the text of the `Info.plist` of the bundle.
+fn info_plist_text() -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleExecutable</key>
+	<string>{EXECUTABLE_NAME}</string>
+	<key>CFBundleIdentifier</key>
+	<string>{IDENTIFIER}</string>
+	<key>CFBundleName</key>
+	<string>{DISPLAY_NAME}</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>{version}</string>
+	<key>LSUIElement</key>
+	<true/>
+</dict>
+</plist>
+"#
+    )
 }
 
 #[cfg(test)]
