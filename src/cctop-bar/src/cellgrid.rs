@@ -339,4 +339,159 @@ mod tests {
         let expected = PaneState::NeedsYou.color();
         assert!(blocks.iter().all(|op| op.color == expected));
     }
+
+    /// Colors whose palette entries are all different, so a wrong index shows.
+    fn distinct_colors() -> PanelColors {
+        let mut palette = [Rgb {
+            red: 0,
+            green: 0,
+            blue: 0,
+        }; 16];
+        for (index, entry) in palette.iter_mut().enumerate() {
+            let level = u8::try_from(index).unwrap() * 10 + 1;
+            *entry = Rgb {
+                red: level,
+                green: level + 1,
+                blue: level + 2,
+            };
+        }
+        PanelColors {
+            foreground: Rgb {
+                red: 200,
+                green: 201,
+                blue: 202,
+            },
+            background: Rgb {
+                red: 30,
+                green: 31,
+                blue: 32,
+            },
+            palette,
+        }
+    }
+
+    /// A grid of `width` by 2 cells where the cells of row 0 are `cells`.
+    fn grid_of(width: u16, cells: &[Cell]) -> CellGrid {
+        let mut grid = CellGrid::new(width, 2);
+        let content: Vec<(u16, u16, &Cell)> = cells
+            .iter()
+            .enumerate()
+            .map(|(x, cell)| (u16::try_from(x).unwrap(), 0, cell))
+            .collect();
+        grid.draw(content.into_iter()).unwrap();
+        grid
+    }
+
+    /// The foreground colors that `paint` gives to cells with the foregrounds `colors`.
+    fn glyph_colors(panel: &PanelColors, foregrounds: &[Color]) -> Vec<Rgb> {
+        let cells: Vec<Cell> = foregrounds
+            .iter()
+            .map(|color| {
+                let mut cell = Cell::new("x");
+                cell.set_fg(*color);
+                cell
+            })
+            .collect();
+        let width = u16::try_from(cells.len()).unwrap();
+        grid_of(width, &cells)
+            .paint(panel)
+            .glyphs
+            .iter()
+            .map(|op| op.color)
+            .collect()
+    }
+
+    #[test]
+    fn the_reset_color_maps_to_the_panel_colors() {
+        let panel = distinct_colors();
+        assert_eq!(
+            glyph_colors(&panel, &[Color::Reset]),
+            vec![panel.foreground]
+        );
+    }
+
+    #[test]
+    fn a_24_bit_color_stays_as_it_is() {
+        let panel = distinct_colors();
+        assert_eq!(
+            glyph_colors(&panel, &[Color::Rgb(1, 2, 3)]),
+            vec![Rgb {
+                red: 1,
+                green: 2,
+                blue: 3
+            }]
+        );
+    }
+
+    #[test]
+    fn the_named_colors_map_to_the_palette_in_order() {
+        let panel = distinct_colors();
+        let named = [
+            Color::Black,
+            Color::Red,
+            Color::Green,
+            Color::Yellow,
+            Color::Blue,
+            Color::Magenta,
+            Color::Cyan,
+            Color::Gray,
+            Color::DarkGray,
+            Color::LightRed,
+            Color::LightGreen,
+            Color::LightYellow,
+            Color::LightBlue,
+            Color::LightMagenta,
+            Color::LightCyan,
+            Color::White,
+        ];
+        assert_eq!(glyph_colors(&panel, &named), panel.palette.to_vec());
+    }
+
+    #[test]
+    fn the_indexed_colors_map_to_the_palette_the_cube_and_the_gray_ramp() {
+        let panel = distinct_colors();
+        let colors = glyph_colors(
+            &panel,
+            &[
+                Color::Indexed(0),
+                Color::Indexed(15),
+                Color::Indexed(16),
+                Color::Indexed(21),
+                Color::Indexed(196),
+                Color::Indexed(231),
+                Color::Indexed(59),
+                Color::Indexed(232),
+                Color::Indexed(255),
+            ],
+        );
+        let rgb = |red, green, blue| Rgb { red, green, blue };
+        assert_eq!(
+            colors,
+            vec![
+                panel.palette[0],
+                panel.palette[15],
+                rgb(0, 0, 0),
+                rgb(0, 0, 255),
+                rgb(255, 0, 0),
+                rgb(255, 255, 255),
+                rgb(95, 95, 95),
+                rgb(8, 8, 8),
+                rgb(238, 238, 238),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_default_colors_are_the_dark_panel() {
+        let panel = PanelColors::default();
+        let rgb = |value: u32| Rgb {
+            red: u8::try_from(value >> 16).unwrap(),
+            green: u8::try_from((value >> 8) & 0xff).unwrap(),
+            blue: u8::try_from(value & 0xff).unwrap(),
+        };
+        assert_eq!(panel.foreground, rgb(0xcccccc));
+        assert_eq!(panel.background, rgb(0x1e1e1e));
+        assert_eq!(panel.palette[1], rgb(0xcd3131));
+        assert_eq!(panel.palette[15], rgb(0xffffff));
+    }
 }
