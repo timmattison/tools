@@ -351,4 +351,14 @@ mod tests {
         bundle.ensure(&source).expect("ensure");
         assert!(!bundle.runs(&source));
     }
+
+    #[test]
+    fn a_missing_bundle_runs_nothing() {
+        let data = data_directory();
+        let source = data.path().join("source-binary");
+        fs::write(&source, b"distinctive bytes of the source").expect("the source");
+        let bundle = Bundle::in_data_directory(data.path());
+        assert!(!bundle.runs(&source));
+        assert!(!bundle.runs(&bundle.executable()));
+    }
 }
