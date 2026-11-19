@@ -8,6 +8,7 @@
 //! - `painter` paints the mini-map of the status item as pixels.
 //! - `menu` lists the entries of the menu as data.
 //! - `keymap` turns an `AppKit` key event into a crossterm key.
+//! - `placement` picks the screen, the cells and the frame of the panel.
 //! - `cellgrid` keeps the cells that the cctop screen draws and turns them into paint operations.
 
 // Stricter than the inherited `[workspace.lints]` set; see "Lint Configuration" in CLAUDE.md.
@@ -19,3 +20,4 @@ pub mod chord;
 pub mod keymap;
 pub mod menu;
 pub mod painter;
+pub mod placement;
