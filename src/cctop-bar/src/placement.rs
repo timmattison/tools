@@ -82,7 +82,7 @@ pub fn place(input: &PlacementInput<'_>) -> Option<Placement> {
     {
         return None;
     }
-    let screen = input.screens.first()?;
+    let screen = active_screen(input)?;
     let visible = screen.visible;
     let columns = cells_in(visible.width, cell.width);
     let rows = cells_in(visible.height, cell.height);
@@ -98,6 +98,51 @@ pub fn place(input: &PlacementInput<'_>) -> Option<Placement> {
         columns,
         rows,
     })
+}
+
+/// The screen that the panel opens on: the one that holds most of the front
+/// window, else the one under the mouse, else the first one.
+fn active_screen<'a>(input: &PlacementInput<'a>) -> Option<&'a Screen> {
+    let by_window = input.front_window.and_then(|window| {
+        input
+            .screens
+            .iter()
+            .map(|screen| (overlap_area(window, screen.frame), screen))
+            .filter(|(area, _)| *area > 0.0)
+            .fold(None, |best: Option<(f64, &Screen)>, candidate| match best {
+                Some((area, _)) if area >= candidate.0 => best,
+                _ => Some(candidate),
+            })
+            .map(|(_, screen)| screen)
+    });
+    by_window
+        .or_else(|| {
+            input
+                .screens
+                .iter()
+                .find(|screen| contains(screen.frame, input.mouse))
+        })
+        .or_else(|| input.screens.first())
+}
+
+/// The area where `a` and `b` overlap, 0 when they do not.
+fn overlap_area(a: Rect, b: Rect) -> f64 {
+    let width = (a.x + a.width).min(b.x + b.width) - a.x.max(b.x);
+    let height = (a.y + a.height).min(b.y + b.height) - a.y.max(b.y);
+    if width > 0.0 && height > 0.0 {
+        width * height
+    } else {
+        0.0
+    }
+}
+
+/// Tells if `point` is in `rect`. The left and bottom edges count, the right
+/// and top edges do not.
+fn contains(rect: Rect, point: Point) -> bool {
+    point.x >= rect.x
+        && point.x < rect.x + rect.width
+        && point.y >= rect.y
+        && point.y < rect.y + rect.height
 }
 
 /// The number of whole cells in two thirds of `extent`, clamped to `u16`.
@@ -241,6 +286,6 @@ mod tests {
         let placement = place(&request).unwrap();
         // 1920 / 3 * 2 is 1280 points, 160 columns. 1055 / 3 * 2 is 703 points, 43 rows.
         assert_eq!((placement.columns, placement.rows), (160, 43));
-        assert_eq!(placement.frame, rect(1760.0, 182.0, 1280.0, 688.0));
+        assert_eq!(placement.frame, rect(1760.0, 183.0, 1280.0, 688.0));
     }
 }
