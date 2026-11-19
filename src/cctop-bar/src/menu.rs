@@ -5,6 +5,7 @@ use crate::chord::Chord;
 use cctop::board::Board;
 use cctop::focus::FocusTarget;
 use cctop::state::EpochMillis;
+use cctop::ui::{format_elapsed, title_counts};
 
 /// The title of the item that shows cctop.
 pub const SHOW_TITLE: &str = "Show cctop";
@@ -54,8 +55,39 @@ pub struct MenuInput<'a> {
 /// The entries of the menu, top to bottom.
 #[must_use]
 pub fn entries(input: &MenuInput<'_>) -> Vec<MenuEntry> {
-    let _ = input;
-    Vec::new()
+    let mut list = vec![
+        MenuEntry::Counts(title_counts(input.board)),
+        MenuEntry::Separator,
+    ];
+    let waiting: Vec<MenuEntry> = input
+        .board
+        .rows()
+        .into_iter()
+        .filter(|session| session.waits_for_you())
+        .map(|session| MenuEntry::Session {
+            title: format!(
+                "{} · {}",
+                session.label(),
+                format_elapsed(input.now.saturating_since(session.since))
+            ),
+            target: FocusTarget::of(session),
+        })
+        .collect();
+    if !waiting.is_empty() {
+        list.extend(waiting);
+        list.push(MenuEntry::Separator);
+    }
+    list.push(MenuEntry::Show(match input.hotkey {
+        None => SHOW_TITLE.to_string(),
+        Some(chord) => format!("{SHOW_TITLE}  {}", chord.display()),
+    }));
+    list.push(MenuEntry::Notifications(input.notify));
+    if let Some(text) = input.last_error {
+        list.push(MenuEntry::Error(format!("Error: {text}")));
+    }
+    list.push(MenuEntry::Separator);
+    list.push(MenuEntry::Quit);
+    list
 }
 
 #[cfg(test)]
