@@ -45,9 +45,9 @@ impl Sync {
     ///
     /// The function reads the process table once for all sessions, and once
     /// more for each stale session before it removes the file. It logs no
-    /// change. It removes the file of each stale session, and it does not
-    /// load that session. It loads a stopped session with the frozen flag since `now`.
-    /// It skips a file that it cannot read.
+    /// change. It removes the file of each stale session, and it does not load
+    /// that session. It loads a stopped session with the frozen flag since
+    /// `now`. It skips a file that it cannot read.
     ///
     /// # Errors
     ///
@@ -120,9 +120,9 @@ impl Sync {
     /// ends can leave its file behind. The function removes each such stale
     /// session from the board and from the directory. A stopped process is
     /// live, thus its file stays. For each other session, the function gives
-    /// the run status to the board, so a stop adds the frozen flag and a continue
-    /// removes it. It returns the changes: one for each
-    /// removed session, and one for each freeze or thaw.
+    /// the run status to the board, so a stop adds the frozen flag and a
+    /// continue removes it. It returns the changes: one for each removed
+    /// session, and one for each freeze or thaw.
     pub fn on_tick(
         &self,
         board: &mut Board,

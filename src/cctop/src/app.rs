@@ -156,14 +156,13 @@ impl App {
         self.flush_held(now);
     }
 
-    /// Select the first row of the board among the held sessions that wait
-    /// for the person. [`crate::board::Session::waits_for_you`] refuses a frozen session and
-    /// a handled session, so the jump skips them. Then
-    /// forget all held sessions. A key press less than [`JUMP_HOLD_MS`]
-    /// before `now` keeps the held sessions and selects nothing. A key press
-    /// time later than `now` means the clock moved back. The function then
-    /// sets the time of the key to `now`, so the hold ends [`JUMP_HOLD_MS`]
-    /// after that.
+    /// Select the first row of the board among the held sessions that wait for
+    /// the person. [`crate::board::Session::waits_for_you`] refuses a frozen
+    /// session and a handled session, so the jump skips them. Then forget all
+    /// held sessions. A key press less than [`JUMP_HOLD_MS`] before `now` keeps
+    /// the held sessions and selects nothing. A key press time later than `now`
+    /// means the clock moved back. The function then sets the time of the key
+    /// to `now`, so the hold ends [`JUMP_HOLD_MS`] after that.
     fn flush_held(&mut self, now: EpochMillis) {
         if self.last_key.is_some_and(|key| key > now) {
             self.last_key = Some(now);
@@ -187,13 +186,13 @@ impl App {
     /// Put a handled mark on the selected session, or remove its mark. A new
     /// mark moves the session to the bottom of its state. The cursor then
     /// selects the first row at or below the old index of the marked row that
-    /// has no mark and takes a mark. [`crate::board::Session::takes_handled_mark`] refuses a
-    /// frozen session, so the cursor skips it. If no such row exists,
-    /// the cursor stays on the marked session. A removed mark moves the
-    /// session up, and the cursor goes with the session. A frozen session
-    /// keeps its row and the cursor, and the status text tells that it is
-    /// frozen. A session whose state takes no mark keeps its row and the
-    /// cursor, and the status text tells why.
+    /// has no mark and takes a mark.
+    /// [`crate::board::Session::takes_handled_mark`] refuses a frozen session,
+    /// so the cursor skips it. If no such row exists, the cursor stays on the
+    /// marked session. A removed mark moves the session up, and the cursor goes
+    /// with the session. A frozen session keeps its row and the cursor, and the
+    /// status text tells that it is frozen. A session whose state takes no mark
+    /// keeps its row and the cursor, and the status text tells why.
     fn toggle_handled_selected(&mut self) {
         let selected = self.selected_index().and_then(|index| {
             let session = self.board.rows().get(index).copied()?;
@@ -235,11 +234,11 @@ impl App {
         }
     }
 
-    /// Select the next session that waits for the person, and ask the main
-    /// loop to focus it. The search starts after the selected row and wraps
-    /// around, so the selected row counts last. [`crate::board::Session::waits_for_you`]
-    /// refuses a frozen session and a handled session, so the search skips
-    /// them.
+    /// Select the next session that waits for the person, and ask the main loop
+    /// to focus it. The search starts after the selected row and wraps around,
+    /// so the selected row counts last.
+    /// [`crate::board::Session::waits_for_you`] refuses a frozen session and a
+    /// handled session, so the search skips them.
     fn focus_next_needs_you(&mut self) -> Action {
         let rows = self.board.rows();
         let count = rows.len();
@@ -747,7 +746,8 @@ mod tests {
             None,
             EpochMillis::new(500),
         );
-        // The cursor stands on the live row, so a jump to the frozen row moves it.
+        // The cursor stands on the live row, so a jump to the frozen row moves
+        // it.
         app.selected = Some(Pid::new(10));
         assert_ne!(
             app.board().rows()[0].file.pid,
