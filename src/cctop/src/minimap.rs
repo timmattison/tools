@@ -4,7 +4,7 @@
 //! thus a frozen tile is always blue.
 
 use crate::board::Board;
-use crate::state::{PaneState, Rgb};
+use crate::state::{PaneState, Rgb, FROZEN_COLOR};
 
 /// The number of tiles that the status item shows at most.
 pub const TILE_LIMIT: usize = 12;
@@ -34,10 +34,10 @@ impl Tile {
     /// else the color of its state.
     #[must_use]
     pub fn color(self) -> Rgb {
-        Rgb {
-            red: 0,
-            green: 0,
-            blue: 0,
+        if self.frozen {
+            FROZEN_COLOR
+        } else {
+            self.state.color()
         }
     }
 
@@ -45,7 +45,11 @@ impl Tile {
     /// is handled. Else a handled tile is an outline, and the rest are filled.
     #[must_use]
     pub fn style(self) -> TileStyle {
-        TileStyle::Filled
+        if self.handled && !self.frozen {
+            TileStyle::Outline
+        } else {
+            TileStyle::Filled
+        }
     }
 }
 
@@ -86,7 +90,7 @@ impl Minimap {
 mod tests {
     use super::*;
     use crate::liveness::RunStatus;
-    use crate::state::{EpochMillis, StateFile, FROZEN_COLOR};
+    use crate::state::{EpochMillis, StateFile};
     use proctree::Pid;
 
     /// A state file in the directory `directory`.
