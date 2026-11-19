@@ -117,16 +117,181 @@ impl Pixmap {
     }
 }
 
+/// The rows of the dot font for `0` to `9` and `+`: five low bits for each
+/// row, top row first, the leftmost dot in bit 4.
+const GLYPHS: [(char, [u8; 7]); 11] = [
+    ('0', [0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E]),
+    ('1', [0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E]),
+    ('2', [0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F]),
+    ('3', [0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E]),
+    ('4', [0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02]),
+    ('5', [0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E]),
+    ('6', [0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E]),
+    ('7', [0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08]),
+    ('8', [0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E]),
+    ('9', [0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C]),
+    ('+', [0x00, 0x04, 0x04, 0x1F, 0x04, 0x04, 0x00]),
+];
+
+/// The rows of the glyph of `character`. A character outside the font is
+/// blank.
+fn glyph(character: char) -> [u8; 7] {
+    GLYPHS
+        .iter()
+        .find(|(known, _)| *known == character)
+        .map_or([0; 7], |(_, rows)| *rows)
+}
+
+/// The size of a pixel grid and the drawing on it.
+struct Canvas {
+    pixmap: Pixmap,
+}
+
+impl Canvas {
+    fn new(width: u32, height: u32, scale: u32) -> Self {
+        Self {
+            pixmap: Pixmap {
+                width,
+                height,
+                scale,
+                bytes: vec![0; width as usize * height as usize * BYTES_PER_PIXEL],
+            },
+        }
+    }
+
+    /// Set one pixel. A position outside the image is dropped.
+    fn set(&mut self, x: u32, y: u32, color: Rgb) {
+        if x >= self.pixmap.width || y >= self.pixmap.height {
+            return;
+        }
+        let start = (y as usize * self.pixmap.width as usize + x as usize) * BYTES_PER_PIXEL;
+        self.pixmap.bytes[start..start + BYTES_PER_PIXEL].copy_from_slice(&[
+            color.red,
+            color.green,
+            color.blue,
+            255,
+        ]);
+    }
+
+    /// Fill the rectangle at `(x, y)`, `width` by `height` pixels.
+    fn fill(&mut self, x: u32, y: u32, width: u32, height: u32, color: Rgb) {
+        for row in y..y.saturating_add(height) {
+            for column in x..x.saturating_add(width) {
+                self.set(column, row, color);
+            }
+        }
+    }
+
+    /// Draw the border of the rectangle, `border` pixels thick.
+    fn outline(&mut self, x: u32, y: u32, width: u32, height: u32, border: u32, color: Rgb) {
+        for row in 0..height {
+            for column in 0..width {
+                let edge = column < border
+                    || row < border
+                    || column >= width.saturating_sub(border)
+                    || row >= height.saturating_sub(border);
+                if edge {
+                    self.set(x + column, y + row, color);
+                }
+            }
+        }
+    }
+
+    /// Draw `text` with its top left corner at `(x, y)`.
+    fn text(&mut self, x: u32, y: u32, dot: u32, text: &str, color: Rgb) {
+        let mut left = x;
+        for character in text.chars() {
+            for (row, bits) in glyph(character).into_iter().enumerate() {
+                for column in 0..GLYPH_WIDTH {
+                    if bits & (1 << (GLYPH_WIDTH - 1 - column)) != 0 {
+                        let row = u32::try_from(row).unwrap_or(0);
+                        self.fill(left + column * dot, y + row * dot, dot, dot, color);
+                    }
+                }
+            }
+            left += GLYPH_ADVANCE * dot;
+        }
+    }
+}
+
+/// The width of `text` in dots: each glyph and the space after it, less the
+/// last space.
+fn text_dots(text: &str) -> u32 {
+    let glyphs = u32::try_from(text.chars().count()).unwrap_or(u32::MAX);
+    (glyphs * GLYPH_ADVANCE).saturating_sub(1)
+}
+
 /// Paint the mini-map for a menu bar `thickness` points high at backing
 /// `scale` (1 or 2; 0 counts as 1).
 #[must_use]
 pub fn paint(minimap: &Minimap, thickness: u32, scale: u32, appearance: Appearance) -> Pixmap {
-    let _ = (minimap, thickness, appearance);
-    Pixmap {
-        width: 0,
-        height: 0,
-        scale: scale.max(1),
-        bytes: Vec::new(),
+    let scale = scale.max(1);
+    let ink = match appearance {
+        Appearance::Light => BLACK,
+        Appearance::Dark => WHITE,
+    };
+    let height = thickness * scale;
+    let band_points = thickness
+        .saturating_sub(BAND_MARGIN)
+        .clamp(BAND_MIN, BAND_HEIGHT);
+    let band = band_points * scale;
+    let top = height.saturating_sub(band) / 2;
+    let dot = (band / DOT_DIVISOR).max(1);
+    let text_top = top + band.saturating_sub(GLYPH_HEIGHT * dot) / 2;
+
+    let empty = minimap.tiles.is_empty() && minimap.overflow == 0;
+    let tile_count = u32::try_from(minimap.tiles.len().max(usize::from(empty))).unwrap_or(0);
+    let attention = (minimap.attention > 0).then(|| minimap.attention.to_string());
+    let overflow = (minimap.overflow > 0).then(|| format!("+{}", minimap.overflow));
+
+    let mut width = 2 * PADDING * scale;
+    if let Some(number) = &attention {
+        width += text_dots(number) * dot + 2 * FIELD_PADDING * scale + FIELD_GAP * scale;
+    }
+    width += (tile_count * TILE_WIDTH + tile_count.saturating_sub(1) * TILE_GAP) * scale;
+    if let Some(mark) = &overflow {
+        width += OVERFLOW_GAP * scale + text_dots(mark) * dot;
+    }
+
+    let mut canvas = Canvas::new(width, height, scale);
+    let mut left = PADDING * scale;
+    if let Some(number) = &attention {
+        let field = text_dots(number) * dot + 2 * FIELD_PADDING * scale;
+        canvas.fill(left, top, field, band, AMBER);
+        canvas.text(left + FIELD_PADDING * scale, text_top, dot, number, BLACK);
+        left += field + FIELD_GAP * scale;
+    }
+    let tile_width = TILE_WIDTH * scale;
+    if empty {
+        canvas.outline(left, top, tile_width, band, BORDER * scale, ink);
+        left += tile_width;
+    }
+    for (index, tile) in minimap.tiles.iter().enumerate() {
+        if index > 0 {
+            left += TILE_GAP * scale;
+        }
+        paint_tile(&mut canvas, *tile, left, top, tile_width, band, scale);
+        left += tile_width;
+    }
+    if let Some(mark) = &overflow {
+        canvas.text(left + OVERFLOW_GAP * scale, text_top, dot, mark, ink);
+    }
+    canvas.pixmap
+}
+
+/// Paint one tile in its rectangle.
+fn paint_tile(
+    canvas: &mut Canvas,
+    tile: Tile,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    scale: u32,
+) {
+    match tile.style() {
+        TileStyle::Filled => canvas.fill(x, y, width, height, tile.color()),
+        TileStyle::Outline => canvas.outline(x, y, width, height, BORDER * scale, tile.color()),
     }
 }
 
@@ -342,7 +507,7 @@ mod tests {
     #[test]
     fn the_field_scales_with_the_backing_scale() {
         let image = paint_light(&map(vec![tile(PaneState::Working)], 0, 2), 2);
-        assert_eq!(image.width(), 2 * (6 + 11 + 4 + 8) + 0);
+        assert_eq!(image.width(), 2 * (6 + 11 + 4 + 8));
         assert_eq!(image.pixel(6, 12), rgba(AMBER));
         assert_eq!(image.pixel(27, 12), rgba(AMBER));
         assert_eq!(image.pixel(28, 24), TRANSPARENT);
