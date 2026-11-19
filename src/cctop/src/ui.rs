@@ -664,11 +664,8 @@ mod tests {
         app.board_mut()
             .load(file(4, "d", PaneState::Working, 100), None);
         app.board_mut().toggle_handled(Pid::new(2));
-        app.board_mut().set_run_status(
-            Pid::new(4),
-            RunStatus::Stopped,
-            EpochMillis::new(1_000),
-        );
+        app.board_mut()
+            .set_run_status(Pid::new(4), RunStatus::Stopped, EpochMillis::new(1_000));
         let full = table_title(app.board());
         let inner = full
             .strip_prefix(" cctop · ")

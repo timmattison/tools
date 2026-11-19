@@ -12,6 +12,7 @@
 //! - `focus` runs the two focus steps: `zellij` focuses the pane, and
 //!   `wezterm` writes the focus request to the terminal device of the pane.
 //!   `ancestry` and `lsof` find that device.
+//! - `minimap` turns a board into the tiles of the mini-map.
 //! - `notification` sends a macOS notification.
 //! - `runner` runs each external command, thus a test can answer a command
 //!   without it running.
@@ -31,6 +32,7 @@ pub mod controller;
 pub mod focus;
 pub mod liveness;
 pub mod lsof;
+pub mod minimap;
 pub mod notification;
 pub mod paths;
 pub mod registry;
