@@ -56,9 +56,13 @@ impl Cli {
     /// The settings of this command line.
     fn settings(&self) -> Settings {
         Settings {
-            notify: true,
-            hotkey: Some(Chord::default()),
-            exit_after: None,
+            notify: !self.no_notify,
+            hotkey: if self.no_hotkey {
+                None
+            } else {
+                Some(self.hotkey.unwrap_or_default())
+            },
+            exit_after: self.exit_after,
         }
     }
 }
