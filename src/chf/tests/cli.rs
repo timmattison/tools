@@ -6,6 +6,10 @@
 
 use std::process::{Command, Stdio};
 
+/// The byte that starts each control sequence of a terminal.
+#[cfg(unix)]
+const ESCAPE: u8 = 0x1b;
+
 /// The command for the `chf` binary, with an environment that holds only a
 /// home directory and a plain path.
 fn chf(home: &tempfile::TempDir) -> Command {
@@ -62,9 +66,12 @@ fn a_null_standard_input_is_refused_before_chf_draws() {
     command.env("TERM", "xterm-256color");
     let output = gitscratch::testing::pty::Pty::open(80).run_with_stdout_on_terminal(command);
     assert_eq!(output.status.code(), Some(2));
+    // Standard error goes to a pipe, so the terminal gets only standard
+    // output. An escape byte there means that chf changed the terminal, for
+    // example to enter the alternate screen, before it refused.
     let shown = String::from_utf8_lossy(&output.stdout);
     assert!(
-        !shown.contains("\x1b[?1049h"),
-        "chf must not enter the alternate screen: {shown:?}"
+        !output.stdout.contains(&ESCAPE),
+        "chf must send no control sequence to the terminal: {shown:?}"
     );
 }
