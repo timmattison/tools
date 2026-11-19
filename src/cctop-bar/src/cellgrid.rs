@@ -5,6 +5,7 @@ use cctop::state::Rgb;
 use ratatui::backend::{Backend, ClearType, WindowSize};
 use ratatui::buffer::{Buffer, Cell};
 use ratatui::layout::{Position, Rect, Size};
+use unicode_width::UnicodeWidthStr;
 
 /// The 16 colors of the palette, in the order of the named colors of ratatui.
 pub const DEFAULT_PALETTE: [Rgb; 16] = [Rgb {
@@ -82,6 +83,16 @@ pub struct Paint {
     pub glyphs: Vec<GlyphOp>,
 }
 
+/// The widest glyph that one cell pair holds.
+const MAX_GLYPH_CELLS: usize = 2;
+
+/// The number of cells that `symbol` covers: its display width, at least 1
+/// and at most 2.
+fn glyph_cells(symbol: &str) -> u16 {
+    let width = UnicodeWidthStr::width(symbol).clamp(1, MAX_GLYPH_CELLS);
+    u16::try_from(width).unwrap_or(1)
+}
+
 /// A ratatui backend of a fixed size that keeps each cell.
 pub struct CellGrid {
     buffer: Buffer,
@@ -122,8 +133,33 @@ impl CellGrid {
 
     /// The paint operations of the current cells.
     #[must_use]
-    pub fn paint(&self, _colors: &PanelColors) -> Paint {
-        Paint::default()
+    pub fn paint(&self, colors: &PanelColors) -> Paint {
+        let area = self.buffer.area;
+        let mut paint = Paint::default();
+        for row in 0..area.height {
+            // The columns that the wide glyph to their left covers.
+            let mut covered_until = 0;
+            for column in 0..area.width {
+                if column < covered_until {
+                    continue;
+                }
+                let symbol = self.buffer[(column, row)].symbol();
+                if symbol.is_empty() || symbol == " " {
+                    continue;
+                }
+                let cells = glyph_cells(symbol);
+                covered_until = column.saturating_add(cells);
+                paint.glyphs.push(GlyphOp {
+                    row,
+                    column,
+                    glyph: symbol.to_string(),
+                    cells,
+                    color: colors.foreground,
+                    bold: false,
+                });
+            }
+        }
+        paint
     }
 }
 
