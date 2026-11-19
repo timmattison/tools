@@ -55,6 +55,12 @@ pub enum PanelKey {
 /// `NSEvent.modifierFlags` as raw bits.
 #[must_use]
 pub fn map_key(key_code: u16, characters: Option<&str>, flags: u64) -> PanelKey {
+    if flags & COMMAND_FLAG != 0 {
+        return PanelKey::Ignore;
+    }
+    if key_code == KEY_CODE_ESCAPE {
+        return PanelKey::Hide;
+    }
     let code = match named_key(key_code) {
         Some(code) => code,
         None => match characters.and_then(|text| text.chars().next()) {
@@ -88,6 +94,9 @@ fn modifiers(flags: u64) -> KeyModifiers {
     let mut modifiers = KeyModifiers::NONE;
     if flags & CONTROL_FLAG != 0 {
         modifiers |= KeyModifiers::CONTROL;
+    }
+    if flags & OPTION_FLAG != 0 {
+        modifiers |= KeyModifiers::ALT;
     }
     if flags & SHIFT_FLAG != 0 {
         modifiers |= KeyModifiers::SHIFT;
