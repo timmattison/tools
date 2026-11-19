@@ -430,7 +430,10 @@ impl Board {
     /// come from one function.
     #[must_use]
     pub fn attention_count(&self) -> usize {
-        0
+        self.state_counts()
+            .iter()
+            .find(|count| count.state == PaneState::NeedsYou)
+            .map_or(0, |count| count.unmarked)
     }
 
     /// The number of frozen rows on the board, whatever their state.
