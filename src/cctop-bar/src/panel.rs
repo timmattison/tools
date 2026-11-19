@@ -19,12 +19,11 @@ pub trait PanelTarget {
 
 impl PanelTarget for Controller {
     fn set_rows(&mut self, rows: u16) {
-        let _ = rows;
+        self.set_terminal_height(rows);
     }
 
     fn key(&mut self, key: KeyEvent, now: EpochMillis) -> Vec<Effect> {
-        let _ = (key, now, AppEvent::Tick, Event::FocusGained);
-        Vec::new()
+        self.handle(AppEvent::Terminal(Event::Key(key)), now)
     }
 }
 
