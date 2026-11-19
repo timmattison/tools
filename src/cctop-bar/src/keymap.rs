@@ -162,4 +162,48 @@ mod tests {
             KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
         );
     }
+
+    #[test]
+    fn escape_hides_the_panel() {
+        assert_eq!(map_key(KEY_CODE_ESCAPE, Some("\u{1b}"), 0), PanelKey::Hide);
+    }
+
+    #[test]
+    fn a_key_with_the_command_flag_is_ignored() {
+        assert_eq!(map_key(12, Some("q"), COMMAND_FLAG), PanelKey::Ignore);
+        assert_eq!(
+            map_key(KEY_CODE_UP, None, COMMAND_FLAG | SHIFT_FLAG),
+            PanelKey::Ignore
+        );
+        assert_eq!(
+            map_key(KEY_CODE_ESCAPE, None, COMMAND_FLAG),
+            PanelKey::Ignore
+        );
+    }
+
+    #[test]
+    fn a_key_with_no_character_is_ignored() {
+        assert_eq!(map_key(0xff, None, 0), PanelKey::Ignore);
+        assert_eq!(map_key(0xff, Some(""), 0), PanelKey::Ignore);
+    }
+
+    #[test]
+    fn option_gives_the_alt_modifier() {
+        assert_eq!(
+            key(38, Some("j"), OPTION_FLAG),
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT)
+        );
+        assert_eq!(
+            key(KEY_CODE_UP, None, OPTION_FLAG | SHIFT_FLAG),
+            KeyEvent::new(KeyCode::Up, KeyModifiers::ALT | KeyModifiers::SHIFT)
+        );
+    }
+
+    #[test]
+    fn only_the_first_character_counts() {
+        assert_eq!(
+            key(0, Some("日本"), 0),
+            KeyEvent::new(KeyCode::Char('日'), KeyModifiers::NONE)
+        );
+    }
 }
