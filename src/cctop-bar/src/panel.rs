@@ -86,8 +86,25 @@ impl Panel {
         target: &mut impl PanelTarget,
         now: EpochMillis,
     ) -> Vec<PanelJob> {
-        let _ = (input, target, now, KeyCode::Home, KeyModifiers::NONE);
-        Vec::new()
+        match input {
+            PanelInput::Hotkey { rows } if !self.visible => self.show(rows, target, now),
+            PanelInput::ShowItem { rows } => self.show(rows, target, now),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Show the panel at `rows` rows with the first row selected.
+    fn show(
+        &mut self,
+        rows: u16,
+        target: &mut impl PanelTarget,
+        now: EpochMillis,
+    ) -> Vec<PanelJob> {
+        target.set_rows(rows);
+        // The keys of the panel select the first row. The effects of Home are none.
+        target.key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE), now);
+        self.visible = true;
+        vec![PanelJob::Show]
     }
 }
 
