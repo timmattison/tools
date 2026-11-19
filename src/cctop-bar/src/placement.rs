@@ -288,4 +288,34 @@ mod tests {
         assert_eq!((placement.columns, placement.rows), (160, 43));
         assert_eq!(placement.frame, rect(1760.0, 183.0, 1280.0, 688.0));
     }
+
+    const fn plain_screen(width: f64, height: f64) -> Screen {
+        Screen {
+            frame: rect(0.0, 0.0, width, height),
+            visible: rect(0.0, 0.0, width, height),
+        }
+    }
+
+    #[test]
+    fn a_small_screen_gets_the_minimum_when_the_visible_frame_holds_it() {
+        // Two thirds is 66 by 20 cells, but the screen holds 100 by 30.
+        let placement = place(&input(&[plain_screen(800.0, 480.0)])).unwrap();
+        assert_eq!((placement.columns, placement.rows), (MIN_COLUMNS, MIN_ROWS));
+        assert_eq!(placement.frame, rect(80.0, 48.0, 640.0, 384.0));
+    }
+
+    #[test]
+    fn a_screen_too_small_for_the_minimum_gets_the_cells_that_fit() {
+        // The screen holds 60 by 15 cells.
+        let placement = place(&input(&[plain_screen(480.0, 240.0)])).unwrap();
+        assert_eq!((placement.columns, placement.rows), (60, 15));
+        assert_eq!(placement.frame, rect(0.0, 0.0, 480.0, 240.0));
+    }
+
+    #[test]
+    fn the_minimum_applies_to_each_axis_on_its_own() {
+        // 1500 by 300 points: 125 columns at two thirds, and 12 rows that grow to the 18 that fit.
+        let placement = place(&input(&[plain_screen(1500.0, 300.0)])).unwrap();
+        assert_eq!((placement.columns, placement.rows), (125, 18));
+    }
 }
