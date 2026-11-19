@@ -143,7 +143,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -151,14 +151,6 @@ use std::process::Output;
 
 use serde_json::Value;
 use thiserror::Error;
-
-/// The variable cargo sets to its own path for the processes it starts. Read
-/// before the child environment is scrubbed, so the guard runs the same cargo
-/// that runs the tests.
-const CARGO_ENV: &str = "CARGO";
-
-/// What to start when nothing names a cargo.
-const CARGO_FALLBACK: &str = "cargo";
 
 /// The cargo subcommand that renders documentation.
 const DOC: &str = "doc";
@@ -758,7 +750,7 @@ impl fmt::Display for DocScan {
 /// package the workspace does not hold
 /// ([`UnknownPackage`](DocLinksError::UnknownPackage)).
 pub fn audit(workspace_root: &Path) -> Result<DocScan, DocLinksError> {
-    let cargo = cargo_program();
+    let cargo = crate::cargo::program();
     let workspace = workspace(&cargo, workspace_root)?;
 
     let mut scan = doc_pass(&cargo, workspace_root, &workspace, &DOC_ARGS)?;
@@ -855,14 +847,6 @@ struct Workspace {
     documentable: BTreeSet<DocTarget>,
     /// The directory a documented unit writes its pages into.
     doc_dir: PathBuf,
-}
-
-/// The cargo to start: the one that started this process, when there is one.
-///
-/// Read here, before [`run`] scrubs the child environment, so a run under
-/// `cargo test` uses the same toolchain as the run itself.
-fn cargo_program() -> OsString {
-    env::var_os(CARGO_ENV).unwrap_or_else(|| OsString::from(CARGO_FALLBACK))
 }
 
 /// Start cargo in `dir` with a scrubbed environment and collect its output.

@@ -128,6 +128,9 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
 - update-aws-credentials
     - Takes AWS credentials from your clipboard in the format provided by AWS SSO and writes it to
       your AWS config file. This is useful if you're using AWS SSO and you want to use the AWS CLI locally.
+    - In a mosh-rs session, it reads the clipboard of your client computer through the `pbpaste` shim that the
+      mosh-rs server puts on `PATH`. That read needs `MOSH_ALLOW_PASTE=1` on the client. When paste is off, the shim
+      runs the next `pbpaste` on `PATH`, which is the `pbpaste` of the server.
     - To install: `cargo install --git https://github.com/timmattison/tools update-aws-credentials`
 - sf (size of files)
     - Shows you the total size of files in the specified directories (and subdirectories) in a human-readable format. 
@@ -158,9 +161,13 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
     - To install: `cargo install --git https://github.com/timmattison/tools thermal-watch`
 - htmlboard
     - Waits for HTML to be put on the clipboard and then pretty prints it and puts it back in the clipboard.
+    - In a mosh-rs session, it watches the clipboard of the server, not the clipboard of your client computer. It
+      reads the clipboard each 500 ms, and the mosh-rs client allows only 5 pastes in each 10 seconds.
     - To install: `cargo install --git https://github.com/timmattison/tools htmlboard`
 - jsonboard
     - Waits for JSON to be put on the clipboard and then pretty prints it and puts it back in the clipboard.
+    - In a mosh-rs session, it watches the clipboard of the server, not the clipboard of your client computer. It
+      reads the clipboard each 500 ms, and the mosh-rs client allows only 5 pastes in each 10 seconds.
     - To install: `cargo install --git https://github.com/timmattison/tools jsonboard`
 - bm
     - Bulk Move - recursively find and move files matching a pattern to a destination directory. Named "bm" because
@@ -181,6 +188,8 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
     - To install: `cargo install --git https://github.com/timmattison/tools localnext`
 - unescapeboard
     - Waits for text with `\\"` in it to be put on the clipboard and then unescapes one level of it.
+    - In a mosh-rs session, it watches the clipboard of the server, not the clipboard of your client computer. It
+      reads the clipboard each 500 ms, and the mosh-rs client allows only 5 pastes in each 10 seconds.
     - To install: `cargo install --git https://github.com/timmattison/tools unescapeboard`
 - prhash
     - Hashes files with the requested hashing algorithm (MD5, SHA1, SHA256, SHA512, Blake3) and shows the progress
@@ -242,12 +251,16 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
     - Waits for text that looks like a YouTube video URL to be put on the clipboard and then extracts the video ID from
       it.
       I use this for deep linking videos to my Roku TVs through their APIs.
+    - In a mosh-rs session, it watches the clipboard of the server, not the clipboard of your client computer. It
+      reads the clipboard each 500 ms, and the mosh-rs client allows only 5 pastes in each 10 seconds.
     - To install: `cargo install --git https://github.com/timmattison/tools tubeboard`
 - safeboard
     - Monitors clipboard for dangerous Unicode characters that could be used in copy-paste attacks. Detects invisible 
       characters like zero-width spaces, directional overrides, and private use area characters that attackers use to 
       hide malicious code or commands. Options include `--audible` for sound alerts and `--modify` to prepend a warning 
       to dangerous content. Includes a test script to verify functionality.
+    - In a mosh-rs session, it watches the clipboard of the server, not the clipboard of your client computer. It
+      reads the clipboard each 500 ms, and the mosh-rs client allows only 5 pastes in each 10 seconds.
     - To install: `cargo install --git https://github.com/timmattison/tools safeboard`
 - gitrdun
     - Shows your recent git commits across multiple repositories. Useful for finding what you've been working on
@@ -345,6 +358,11 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
       one does not, so an alias written for the Go version needs the second dash.
     - Set `DIRC_CLIPBOARD_FILE` to the path of a file to read and write that file in place of the clipboard of the
       machine. This is what lets the tests of `dirc` run without touching the clipboard of the person at the keyboard.
+    - In a mosh-rs session, `dirc` copies to the clipboard of your client computer, and `dirc --paste` reads it. Both
+      go through the `pbcopy` and `pbpaste` shims that the mosh-rs server puts on `PATH`. A read needs
+      `MOSH_ALLOW_PASTE=1` on the client. When paste is off, the shim runs the next `pbpaste` on `PATH`, which is the
+      `pbpaste` of the server. Outside mosh-rs, `dirc` uses the clipboard of the machine, and it runs `pbcopy` or
+      `pbpaste` from `PATH` when that clipboard does not open.
     - To install: `cargo install --git https://github.com/timmattison/tools dirc`
 - gitdiggin
     - Recursively searches Git repositories for commits containing a specific string. Can search in commit messages by
@@ -366,6 +384,8 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
     - Generates random data and copies it to the clipboard. Supports two modes: binary data (with hex, base64, or raw 
       output formats) and text with diacritics (Zalgo text). Features include customizable parameters, presets for 
       text generation (mild, scary, insane, zalgo, doom), and a dry run mode to preview without copying.
+    - In a mosh-rs session, the data goes to the clipboard of your client computer, through the `pbcopy` shim that the
+      mosh-rs server puts on `PATH`.
     - To install: `cargo install --git https://github.com/timmattison/tools clipboard-random`
 - freeport
     - Finds a free TCP port on localhost (127.0.0.1) quickly and cross-platform. Supports random or sequential port 
@@ -1675,6 +1695,10 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
     variable is a common accident. The clipboard is also the cache a run of `claude` writes its
     plan to, so a reader who turns the clipboard off turns that cache off with it: every bare
     `wn` then pays for a new run and keeps nothing.
+  - In a mosh-rs session, the clipboard is the clipboard of your client computer. `wn` reads the
+    chain through the `pbpaste` shim that the mosh-rs server puts on `PATH`, and it keeps a plan
+    through the `pbcopy` shim. A read needs `MOSH_ALLOW_PASTE=1` on the client. When paste is
+    off, the shim runs the next `pbpaste` on `PATH`, which is the `pbpaste` of the server.
   - One GraphQL query through `gh` answers every number of the chain, so a chain of six issues
     costs one round trip and one unit of the rate limit, and the credential is the one `gh`
     already holds. Each round of blockers that stand nowhere in the chain costs one query more, as

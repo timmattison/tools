@@ -1518,11 +1518,13 @@ name = "clipboard-random"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "arboard",
  "base64 0.22.1",
  "buildinfo",
+ "childenv",
  "clap",
  "rand 0.9.5",
+ "sysclip",
+ "tempfile",
 ]
 
 [[package]]
@@ -1539,8 +1541,8 @@ name = "clipboardmon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "arboard",
  "log",
+ "sysclip",
 ]
 
 [[package]]
@@ -2242,10 +2244,10 @@ dependencies = [
 name = "dirc"
 version = "0.1.0"
 dependencies = [
- "arboard",
  "buildinfo",
  "childenv",
  "clap",
+ "sysclip",
  "tempfile",
  "thiserror 2.0.21",
 ]
@@ -8350,6 +8352,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sysclip"
+version = "0.1.0"
+dependencies = [
+ "arboard",
+ "childenv",
+ "shellquote",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "sysinfo"
 version = "0.36.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9341,12 +9354,14 @@ name = "update-aws-credentials"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "arboard",
  "aws-config",
  "aws-credential-types",
  "aws-sdk-sts",
  "buildinfo",
+ "childenv",
  "dirs",
+ "sysclip",
+ "tempfile",
  "tokio",
 ]
 
@@ -10348,7 +10363,6 @@ name = "wn"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "arboard",
  "buildinfo",
  "childenv",
  "chrono",
@@ -10359,6 +10373,7 @@ dependencies = [
  "libc",
  "regex",
  "serde_json",
+ "sysclip",
  "tempfile",
  "termsize",
  "termwindow",

@@ -25,7 +25,7 @@ A Rust command-line utility that generates random data or text with diacritics (
 ## Prerequisites
 
 - Rust (for building from source)
-- A graphical environment for clipboard access (not required for dry-run mode)
+- A graphical session or a mosh-rs session for clipboard access. In a mosh-rs session, the tool writes through the `pbcopy` shim. The `--dry-run` flag needs neither.
 
 ## Building
 
@@ -152,9 +152,9 @@ Test text generation without clipboard:
 This utility is designed to work on:
 
 - **macOS** - Primary target platform
-- **Linux** - Requires X11 or Wayland display server
+- **Linux** - Requires an X11 or Wayland display server, a mosh-rs session, or a `pbcopy` command on `PATH`. The `pbcopy` command is the fallback when the native clipboard fails.
 - **Windows** - Should work out of the box
 
 ## Note
 
-The clipboard functionality requires a graphical environment. If you're running in a headless environment (like CI/CD), use the `--dry-run` flag to test the functionality without clipboard access.
+The clipboard needs a graphical session or a mosh-rs session. In a mosh-rs session (`MOSH_OPEN_SOCKET` is set), the tool writes through the `pbcopy` shim and never opens the native clipboard. Outside a mosh-rs session, the tool uses the native clipboard first. If the native clipboard fails, the tool runs `pbcopy` from `PATH`. A headless environment, such as CI, has none of these routes. In that case, use the `--dry-run` flag.
