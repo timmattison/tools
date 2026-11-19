@@ -14,6 +14,20 @@ use clap::Parser;
 /// The one-line description that `--help` shows.
 const ABOUT: &str = "The cctop board in the menu bar: a mini-map of the Claude Code sessions";
 
+/// The text that `--help` shows after the options.
+const AFTER_HELP: &str = "\
+Each user has one status item. When it runs already, cctop-bar stops it and
+starts no new one. Thus a second run of the same command closes the status item.
+A new status item runs in the background, and cctop-bar returns to the shell
+when it is up. -f keeps the status item in the foreground.";
+
+/// The help of `--hotkey`: the default chord, the modifiers, and the keys.
+const HOTKEY_HELP: &str = "\
+The global hotkey that shows cctop. The default is ctrl+alt+shift+cmd+backspace,
+which is written \u{2303}\u{2325}\u{21e7}\u{2318}\u{232b} on the menu. Join the parts with +.
+Modifiers: ctrl, alt, shift, cmd. Keys: a-z, 0-9, f1-f20, backspace, space,
+escape, return, tab, up, down, left, right.";
+
 /// The text that `cctop-bar` gives on a platform other than macOS.
 #[cfg(not(target_os = "macos"))]
 const UNSUPPORTED_PLATFORM: &str = "cctop-bar supports macOS only.";
@@ -24,21 +38,26 @@ const EXIT_UNSUPPORTED: u8 = 1;
 
 /// The command line of `cctop-bar`.
 #[derive(Parser)]
-#[command(name = settings::NAME, version = buildinfo::version_string!(), about = ABOUT)]
+#[command(name = settings::NAME, version = buildinfo::version_string!(), about = ABOUT, after_help = AFTER_HELP)]
 struct Cli {
     /// Send no notification when a session changes to needs-you.
     #[arg(long = settings::NO_NOTIFY)]
     no_notify: bool,
 
-    /// The global hotkey.
-    #[arg(long = settings::HOTKEY, value_name = "CHORD", conflicts_with = "no_hotkey")]
+    #[arg(
+        long = settings::HOTKEY,
+        value_name = "CHORD",
+        conflicts_with = "no_hotkey",
+        help = HOTKEY_HELP
+    )]
     hotkey: Option<Chord>,
 
     /// Register no global hotkey.
     #[arg(long = settings::NO_HOTKEY)]
     no_hotkey: bool,
 
-    /// Run the status item in this process.
+    /// Run the status item in this process, which keeps the terminal until
+    /// the status item stops. Give it to a LaunchAgent.
     #[arg(short, long)]
     foreground: bool,
 
@@ -97,6 +116,12 @@ mod tests {
 
     fn chord(text: &str) -> Chord {
         text.parse().expect("a chord")
+    }
+
+    #[test]
+    fn the_hotkey_help_names_the_default_chord_in_both_forms() {
+        assert!(HOTKEY_HELP.contains(cctop_bar::chord::DEFAULT_CHORD));
+        assert!(HOTKEY_HELP.contains(&Chord::default().display()));
     }
 
     #[test]
