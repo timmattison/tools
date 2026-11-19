@@ -86,7 +86,7 @@ impl Minimap {
 mod tests {
     use super::*;
     use crate::liveness::RunStatus;
-    use crate::state::{EpochMillis, StateFile};
+    use crate::state::{EpochMillis, StateFile, FROZEN_COLOR};
     use proctree::Pid;
 
     /// A state file in the directory `directory`.
@@ -139,5 +139,42 @@ mod tests {
             .iter()
             .take(2)
             .all(|tile| tile.state == PaneState::NeedsYou));
+    }
+
+    fn tile(state: PaneState, handled: bool, frozen: bool) -> Tile {
+        Tile {
+            state,
+            handled,
+            frozen,
+        }
+    }
+
+    #[test]
+    fn a_plain_tile_is_filled_in_the_color_of_its_state() {
+        for state in PaneState::ALL {
+            let plain = tile(state, false, false);
+            assert_eq!(plain.color(), state.color(), "{state:?}");
+            assert_eq!(plain.style(), TileStyle::Filled, "{state:?}");
+        }
+    }
+
+    #[test]
+    fn a_handled_tile_is_an_outline_in_the_color_of_its_state() {
+        for state in PaneState::ALL {
+            let handled = tile(state, true, false);
+            assert_eq!(handled.color(), state.color(), "{state:?}");
+            assert_eq!(handled.style(), TileStyle::Outline, "{state:?}");
+        }
+    }
+
+    #[test]
+    fn a_frozen_tile_is_always_filled_in_the_frozen_color() {
+        for state in PaneState::ALL {
+            for handled in [false, true] {
+                let frozen = tile(state, handled, true);
+                assert_eq!(frozen.color(), FROZEN_COLOR, "{state:?} {handled}");
+                assert_eq!(frozen.style(), TileStyle::Filled, "{state:?} {handled}");
+            }
+        }
     }
 }
