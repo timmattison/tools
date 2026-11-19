@@ -193,4 +193,48 @@ mod tests {
             &[Call::Rows(40), Call::Key(plain(KeyCode::Home))]
         );
     }
+
+    /// A panel that is shown, with a target that answers each key with the next of `answers`.
+    fn shown(answers: Vec<Vec<Effect>>) -> (Panel, FakeTarget) {
+        let mut panel = Panel::new();
+        let mut target = FakeTarget::default();
+        panel.handle(PanelInput::Hotkey { rows: 30 }, &mut target, NOW);
+        target.calls.clear();
+        target.answers = answers.into();
+        (panel, target)
+    }
+
+    fn key_input(code: KeyCode) -> PanelInput {
+        PanelInput::Key(PanelKey::Key(plain(code)))
+    }
+
+    #[test]
+    fn enter_focuses_the_session_and_hides_the_panel() {
+        let (mut panel, mut target) = shown(vec![vec![Effect::Focus(focus_target())]]);
+        let jobs = panel.handle(key_input(KeyCode::Enter), &mut target, NOW);
+        assert_eq!(jobs, vec![PanelJob::Focus(focus_target()), PanelJob::Hide]);
+        assert!(!panel.is_visible());
+        assert_eq!(target.calls, vec![Call::Key(plain(KeyCode::Enter))]);
+    }
+
+    #[test]
+    fn a_notification_effect_gives_a_notify_job_and_keeps_the_panel() {
+        let (mut panel, mut target) = shown(vec![vec![Effect::Notify(
+            "a session needs you".to_string(),
+        )]]);
+        let jobs = panel.handle(key_input(KeyCode::Char('n')), &mut target, NOW);
+        assert_eq!(
+            jobs,
+            vec![PanelJob::Notify("a session needs you".to_string())]
+        );
+        assert!(panel.is_visible());
+    }
+
+    #[test]
+    fn a_key_with_no_effect_gives_no_job() {
+        let (mut panel, mut target) = shown(vec![vec![]]);
+        let jobs = panel.handle(key_input(KeyCode::Char('j')), &mut target, NOW);
+        assert_eq!(jobs, vec![]);
+        assert!(panel.is_visible());
+    }
 }
