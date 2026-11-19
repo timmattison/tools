@@ -5,6 +5,7 @@ use cctop::state::Rgb;
 use ratatui::backend::{Backend, ClearType, WindowSize};
 use ratatui::buffer::{Buffer, Cell};
 use ratatui::layout::{Position, Rect, Size};
+use ratatui::style::Color;
 use unicode_width::UnicodeWidthStr;
 
 /// The 16 colors of the palette, in the order of the named colors of ratatui.
@@ -93,6 +94,14 @@ fn glyph_cells(symbol: &str) -> u16 {
     u16::try_from(width).unwrap_or(1)
 }
 
+/// The color `color` stands for. A color that is not 24-bit gives `fallback`.
+fn resolve(color: Color, fallback: Rgb) -> Rgb {
+    match color {
+        Color::Rgb(red, green, blue) => Rgb { red, green, blue },
+        _ => fallback,
+    }
+}
+
 /// A ratatui backend of a fixed size that keeps each cell.
 pub struct CellGrid {
     buffer: Buffer,
@@ -154,7 +163,7 @@ impl CellGrid {
                     column,
                     glyph: symbol.to_string(),
                     cells,
-                    color: colors.foreground,
+                    color: resolve(self.buffer[(column, row)].fg, colors.foreground),
                     bold: false,
                 });
             }
