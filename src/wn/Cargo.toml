@@ -32,6 +32,7 @@ gitscratch = { workspace = true, features = ["testing"] }
 # terminal, which is right for a redirected run and which leaves a test with
 # nothing to read. `openpty` makes a terminal of a size the test chose.
 libc.workspace = true
+sysclip = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 testcolor.workspace = true
 

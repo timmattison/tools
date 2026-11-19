@@ -62,6 +62,8 @@ use std::fmt;
 mod command;
 mod native;
 mod route;
+#[cfg(all(unix, feature = "testing"))]
+pub mod testing;
 
 /// The variable that the mosh-rs server sets in a session.
 pub const MOSH_OPEN_SOCKET_ENV: &str = "MOSH_OPEN_SOCKET";

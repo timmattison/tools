@@ -23,8 +23,9 @@
 //! The tests that hold the clipboard in the run go through
 //! `run_through_shims`. It takes the variable out again, and it sets
 //! `MOSH_OPEN_SOCKET` to a path in the temporary directory of the test. The
-//! fake `gh` of the test then holds a fake `pbcopy` and a fake `pbpaste` that
-//! keep the clipboard in a file of that directory. In a session with that
+//! fake `gh` of the test then holds the fake `pbcopy` and `pbpaste` of
+//! `sysclip::testing::FakeShims`, which keep the clipboard in a file of that
+//! directory. In a session with that
 //! variable `sysclip` runs the two commands from `PATH` and never opens the
 //! clipboard of the machine. So no child of this file reaches the clipboard of
 //! the machine: each child turns the clipboard off, or goes through the shims.
@@ -56,6 +57,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
+use sysclip::testing::FakeShims;
 use unicode_width::UnicodeWidthStr;
 
 /// The repository the fake `gh` answers for.
@@ -579,9 +581,6 @@ const CLAUDE_ARGS_FILE: &str = "claude-args";
 /// The file the fake `claude` writes the prompt it was handed into.
 const PROMPT_FILE: &str = "prompt";
 
-/// The file the fake `pbcopy` and the fake `pbpaste` keep the clipboard in.
-const CLIPBOARD_FILE: &str = "clipboard";
-
 /// What the refusing `pbpaste` writes on standard error, the way the shim of a
 /// mosh-rs session does when the client allows no paste.
 const REFUSED_PASTE: &str = "mosh-open: did not paste: the client allows no paste";
@@ -595,6 +594,8 @@ const ARGS_FILE: &str = "args";
 /// A fake `gh` in a temporary directory of its own.
 struct FakeGh {
     dir: tempfile::TempDir,
+    /// The fake `pbcopy` and `pbpaste`, after [`FakeGh::with_shims`].
+    shims: Option<FakeShims>,
 }
 
 impl FakeGh {
@@ -629,7 +630,7 @@ exit {status}
         let gh = dir.path().join("gh");
         std::fs::write(&gh, script).unwrap();
         std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
-        Self { dir }
+        Self { dir, shims: None }
     }
 
     /// Write a `gh` that can name no repository for the current directory.
@@ -651,7 +652,7 @@ exit 1
         let gh = dir.path().join("gh");
         std::fs::write(&gh, script).unwrap();
         std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
-        Self { dir }
+        Self { dir, shims: None }
     }
 
     /// Write a `claude` beside the `gh`.
@@ -707,43 +708,34 @@ cat > '{prompt}'
     /// Write a `pbcopy` and a `pbpaste` beside the `gh`, and a clipboard file
     /// that holds `held`.
     ///
-    /// The two commands are the shims of a mosh-rs session. `pbcopy` replaces
-    /// the file with its standard input, and `pbpaste` prints the file. The
-    /// directory of the fake `gh` is first on `PATH`, so a run that goes
-    /// through them never reaches the clipboard of the machine.
-    fn with_shims(self, held: &str) -> Self {
-        std::fs::write(self.dir.path().join(CLIPBOARD_FILE), held).unwrap();
-        self.write_command(
-            "pbcopy",
-            &format!("#!/bin/sh\nexec /bin/cat > \"${{0%/*}}/{CLIPBOARD_FILE}\"\n"),
-        );
-        self.write_command(
-            "pbpaste",
-            &format!("#!/bin/sh\nexec /bin/cat \"${{0%/*}}/{CLIPBOARD_FILE}\"\n"),
-        );
+    /// The two commands are the fake shims of a mosh-rs session, from
+    /// `sysclip::testing::FakeShims`. The directory of the fake `gh` is first
+    /// on `PATH`, so a run that goes through them never reaches the clipboard
+    /// of the machine.
+    fn with_shims(mut self, held: &str) -> Self {
+        let shims = FakeShims::install(self.dir.path());
+        shims.hold(held);
+        self.shims = Some(shims);
         self
     }
 
     /// Write a `pbpaste` that refuses, the way the shim does when the client
     /// allows no paste. It replaces the one of [`FakeGh::with_shims`].
     fn with_refusing_pbpaste(self) -> Self {
-        self.write_command(
-            "pbpaste",
-            &format!("#!/bin/sh\nprintf '%s\\n' '{REFUSED_PASTE}' >&2\nexit 1\n"),
-        );
+        self.shims().refuse_paste(REFUSED_PASTE);
         self
     }
 
     /// What the clipboard file holds now.
     fn recorded_clipboard(&self) -> String {
-        std::fs::read_to_string(self.dir.path().join(CLIPBOARD_FILE)).unwrap()
+        self.shims().held()
     }
 
-    /// Write the executable `name` with the text `script`, beside the `gh`.
-    fn write_command(&self, name: &str, script: &str) {
-        let command = self.dir.path().join(name);
-        std::fs::write(&command, script).unwrap();
-        std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o755)).unwrap();
+    /// The fake shims of [`FakeGh::with_shims`].
+    fn shims(&self) -> &FakeShims {
+        self.shims
+            .as_ref()
+            .expect("the test installs the shims first")
     }
 
     fn path(&self) -> &Path {
@@ -898,17 +890,16 @@ enum Claude {
 /// of `gh`.
 ///
 /// It starts from the environment of [`wn`], takes [`NO_CLIPBOARD_ENV`] out and
-/// sets `MOSH_OPEN_SOCKET` to a path in the temporary directory of `gh`. The
+/// sets `MOSH_OPEN_SOCKET` to the socket path of the fake shims. The
 /// socket does not exist, and it need not: `sysclip` runs `pbcopy` and
 /// `pbpaste` from `PATH` in such a session and opens no socket and no
 /// clipboard. The run then reads and writes the files of the fake and never the
 /// clipboard of the machine.
 fn run_through_shims(gh: &FakeGh, args: &[&str], claude: Claude) -> Output {
     let mut command = wn(gh, args, "80", false, None);
-    command.env_remove(NO_CLIPBOARD_ENV).env(
-        sysclip::MOSH_OPEN_SOCKET_ENV,
-        gh.path().join("mosh-open.sock"),
-    );
+    command
+        .env_remove(NO_CLIPBOARD_ENV)
+        .env(sysclip::MOSH_OPEN_SOCKET_ENV, gh.shims().socket());
     if claude == Claude::On {
         command.env_remove(NO_CLAUDE_ENV);
     }

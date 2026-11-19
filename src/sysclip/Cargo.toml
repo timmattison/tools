@@ -9,6 +9,14 @@ license = "MIT"
 arboard.workspace = true
 childenv.workspace = true
 thiserror.workspace = true
+# Quotes the message of the refusing `pbpaste` in `testing`. Optional, so a
+# build without the `testing` feature holds none of it.
+shellquote = { workspace = true, optional = true }
+
+[features]
+# The fake `pbcopy` and `pbpaste` of a mosh-rs session, for the tests of other
+# crates. Take it as a dev-dependency only.
+testing = ["dep:shellquote"]
 
 [dev-dependencies]
 tempfile.workspace = true

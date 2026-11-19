@@ -17,9 +17,9 @@
 //! Two helpers start children. [`run_in`] gives the child
 //! [`CLIPBOARD_FILE_ENV`], which names a file in the temporary directory of the
 //! one test that made it. [`run_through_shims`] sets `MOSH_OPEN_SOCKET` and puts
-//! fake `pbcopy` and `pbpaste` commands first on `PATH`. In that route `sysclip`
-//! never opens the clipboard of the machine, and the fake commands keep the text
-//! in a file of the test. Each rule is thus a mechanism and not something each
+//! the fake `pbcopy` and `pbpaste` of `sysclip::testing::FakeShims` first on
+//! `PATH`. In that route `sysclip` never opens the clipboard of the machine, and
+//! the fake commands keep the text in a file of the test. Each rule is thus a mechanism and not something each
 //! test must remember: a test that forgot it would have to start a child of its
 //! own.
 //!
@@ -41,9 +41,10 @@
 use dirc::clipboard::CLIPBOARD_FILE_ENV;
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt;
-use std::os::unix::fs::{symlink, PermissionsExt};
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::Output;
+use sysclip::testing::FakeShims;
 
 /// The name of the file that stands in for the clipboard of the machine.
 ///
@@ -94,29 +95,12 @@ const COPIED: &str = "Copied to clipboard: ";
 /// `dirc` these tests catch.
 const LOGICAL_DIRECTORY_ENV: &str = "PWD";
 
+/// What the refusing `pbpaste` writes on standard error, the way the shim of a
+/// client that allows no paste does.
+const REFUSED_PASTE: &str = "mosh-open: did not paste: the client allows no paste";
+
 /// The directory of the fake commands, inside the temporary directory of a test.
 const SHIMS_DIRECTORY: &str = "shims";
-
-/// The system directories that stay on `PATH` behind the fake commands. The
-/// fake scripts need `cat` and `sh`.
-const SYSTEM_PATH: &str = "/usr/bin:/bin";
-
-/// The name of the socket a mosh-rs session names. The fake commands ignore it,
-/// so no socket has to be there.
-const SOCKET_NAME: &str = "mosh-open.sock";
-
-/// The fake `pbcopy`. It keeps its input in the file `clipboard` that sits next
-/// to it, and it finds its own directory through `${0%/*}`, so no path goes
-/// into the script.
-const FAKE_PBCOPY: &str = "#!/bin/sh\nexec /bin/cat > \"${0%/*}/clipboard\"\n";
-
-/// The fake `pbpaste`. It gives back the file that the fake `pbcopy` writes.
-const FAKE_PBPASTE: &str = "#!/bin/sh\nexec /bin/cat \"${0%/*}/clipboard\"\n";
-
-/// A `pbpaste` that refuses, the way the shim of a client that allows no paste
-/// does.
-const REFUSING_PBPASTE: &str =
-    "#!/bin/sh\necho 'mosh-open: did not paste: the client allows no paste' >&2\nexit 1\n";
 
 /// The status of a run that refused the clipboard it was given.
 const REFUSED: i32 = 1;
@@ -303,50 +287,6 @@ fn run_in(scratch: &Scratch, working_dir: &Path, args: &[&str]) -> Output {
         .expect("the built binary starts")
 }
 
-/// The fake `pbcopy` and `pbpaste` of one test.
-struct Shims {
-    /// The directory that holds the fake commands and the file `clipboard`.
-    dir: PathBuf,
-}
-
-impl Shims {
-    /// Fake commands that keep the text in a file.
-    fn new(scratch: &Scratch) -> Self {
-        Self::with_paste(scratch, FAKE_PBPASTE)
-    }
-
-    /// Fake commands whose `pbpaste` is the script `paste`.
-    fn with_paste(scratch: &Scratch, paste: &str) -> Self {
-        let dir = scratch.path().join(SHIMS_DIRECTORY);
-        std::fs::create_dir(&dir).expect("the shims directory is made");
-        for (name, script) in [
-            (sysclip::COPY_COMMAND, FAKE_PBCOPY),
-            (sysclip::PASTE_COMMAND, paste),
-        ] {
-            let path = dir.join(name);
-            std::fs::write(&path, script).expect("the fake command is written");
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-                .expect("the fake command is made executable");
-        }
-        Self { dir }
-    }
-
-    /// The file the fake commands keep the text in.
-    fn clipboard(&self) -> PathBuf {
-        self.dir.join("clipboard")
-    }
-
-    /// Puts `copied` where the fake `pbpaste` reads it.
-    fn write_clipboard(&self, copied: &str) {
-        std::fs::write(self.clipboard(), copied).expect("the shim file is written");
-    }
-
-    /// What the fake `pbcopy` kept.
-    fn clipboard_holds(&self) -> String {
-        std::fs::read_to_string(self.clipboard()).expect("the shim file is read")
-    }
-}
-
 /// Runs the built `dirc` in `working_dir`, in a mosh-rs session.
 ///
 /// `MOSH_OPEN_SOCKET` is set and the fake commands of `shims` come first on
@@ -354,20 +294,11 @@ impl Shims {
 /// machine. No `DIRC_CLIPBOARD_FILE` is set, because that variable would take
 /// the clipboard away from `sysclip` and the test would prove nothing. The
 /// environment is built from nothing, like the one of [`run_in`].
-fn run_through_shims(
-    scratch: &Scratch,
-    working_dir: &Path,
-    shims: &Shims,
-    args: &[&str],
-) -> Output {
-    let path = format!("{}:{SYSTEM_PATH}", text(&shims.dir));
-    childenv::fixture_command(env!("CARGO_BIN_EXE_dirc"))
-        .env_clear()
-        .env("PATH", path)
-        .env(
-            sysclip::MOSH_OPEN_SOCKET_ENV,
-            scratch.path().join(SOCKET_NAME),
-        )
+fn run_through_shims(working_dir: &Path, shims: &FakeShims, args: &[&str]) -> Output {
+    let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_dirc"));
+    command.env_clear();
+    shims
+        .enter_session(&mut command)
         .env(LOGICAL_DIRECTORY_ENV, working_dir)
         .current_dir(working_dir)
         .args(args)
@@ -559,24 +490,24 @@ fn copy_mode_copies_a_name_of_multi_byte_characters_whole() {
 #[test]
 fn copy_mode_in_a_mosh_session_writes_through_pbcopy() {
     let scratch = Scratch::new();
-    let shims = Shims::new(&scratch);
+    let shims = FakeShims::install(&scratch.path().join(SHIMS_DIRECTORY));
 
-    let output = run_through_shims(&scratch, scratch.path(), &shims, &[]);
+    let output = run_through_shims(scratch.path(), &shims, &[]);
 
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     let copied = resolved(scratch.path());
     assert_eq!(stdout(&output), format!("{COPIED}{copied}\n"));
-    assert_eq!(shims.clipboard_holds(), copied);
+    assert_eq!(shims.held(), copied);
 }
 
 #[test]
 fn paste_mode_in_a_mosh_session_reads_through_pbpaste() {
     let scratch = Scratch::new();
-    let shims = Shims::new(&scratch);
+    let shims = FakeShims::install(&scratch.path().join(SHIMS_DIRECTORY));
     let child = scratch.directory("plain");
-    shims.write_clipboard(text(&child));
+    shims.hold(text(&child));
 
-    let output = run_through_shims(&scratch, scratch.path(), &shims, &[PASTE]);
+    let output = run_through_shims(scratch.path(), &shims, &[PASTE]);
 
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     assert_eq!(stdout(&output), format!("cd '{}'\n", quoteless(&child)));
@@ -586,9 +517,10 @@ fn paste_mode_in_a_mosh_session_reads_through_pbpaste() {
 #[test]
 fn a_refused_paste_in_a_mosh_session_names_the_shim() {
     let scratch = Scratch::new();
-    let shims = Shims::with_paste(&scratch, REFUSING_PBPASTE);
+    let shims = FakeShims::install(&scratch.path().join(SHIMS_DIRECTORY));
+    shims.refuse_paste(REFUSED_PASTE);
 
-    let output = run_through_shims(&scratch, scratch.path(), &shims, &[PASTE]);
+    let output = run_through_shims(scratch.path(), &shims, &[PASTE]);
 
     assert_eq!(
         output.status.code(),
