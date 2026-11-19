@@ -96,10 +96,21 @@ impl Bundle {
         self.0.join(CONTENTS_NAME).join(INFO_PLIST_NAME)
     }
 
-    /// Tells if `program` is the executable of this bundle. Not yet written.
+    /// Tells if `program` is the executable of this bundle.
+    ///
+    /// The function compares the real paths of both files, so a path through
+    /// a symbolic link counts. A file that does not exist is not the
+    /// executable of the bundle. A foreground run uses this function to avoid
+    /// a second `exec` of the same file.
     #[must_use]
-    pub fn runs(&self, _program: &Path) -> bool {
-        false
+    pub fn runs(&self, program: &Path) -> bool {
+        match (
+            fs::canonicalize(program),
+            fs::canonicalize(self.executable()),
+        ) {
+            (Ok(program), Ok(executable)) => program == executable,
+            _ => false,
+        }
     }
 
     /// Makes sure that the bundle holds a copy of the file `source` as its
