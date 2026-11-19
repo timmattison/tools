@@ -329,6 +329,7 @@ mod tests {
     use super::*;
     use cctop::app::App;
     use cctop::state::{parse_state_file, EpochMillis, PaneState};
+    use ratatui::style::Modifier;
     use ratatui::Terminal;
 
     /// The time of the fixtures.
@@ -567,5 +568,132 @@ mod tests {
         assert_eq!(panel.background, rgb(0x1e1e1e));
         assert_eq!(panel.palette[1], rgb(0xcd3131));
         assert_eq!(panel.palette[15], rgb(0xffffff));
+    }
+
+    /// A cell with the symbol `symbol` and the colors `fg` and `bg`.
+    fn cell(symbol: &'static str, fg: Color, bg: Color, modifier: Modifier) -> Cell {
+        let mut cell = Cell::new(symbol);
+        cell.set_fg(fg).set_bg(bg).modifier = modifier;
+        cell
+    }
+
+    #[test]
+    fn a_reversed_cell_swaps_its_colors() {
+        let panel = distinct_colors();
+        let paint = grid_of(
+            1,
+            &[cell(
+                "x",
+                Color::Rgb(10, 20, 30),
+                Color::Reset,
+                Modifier::REVERSED,
+            )],
+        )
+        .paint(&panel);
+        assert_eq!(
+            paint.backgrounds,
+            vec![BackgroundRun {
+                row: 0,
+                column: 0,
+                cells: 1,
+                color: Rgb {
+                    red: 10,
+                    green: 20,
+                    blue: 30
+                },
+            }]
+        );
+        assert_eq!(paint.glyphs[0].color, panel.background);
+    }
+
+    #[test]
+    fn the_bold_modifier_makes_a_bold_glyph_and_other_modifiers_do_nothing() {
+        let panel = distinct_colors();
+        let paint = grid_of(
+            2,
+            &[
+                cell("a", Color::Reset, Color::Reset, Modifier::BOLD),
+                cell(
+                    "b",
+                    Color::Reset,
+                    Color::Reset,
+                    Modifier::ITALIC | Modifier::DIM,
+                ),
+            ],
+        )
+        .paint(&panel);
+        assert_eq!(
+            paint.glyphs.iter().map(|op| op.bold).collect::<Vec<_>>(),
+            vec![true, false]
+        );
+        assert!(paint.backgrounds.is_empty());
+    }
+
+    #[test]
+    fn the_header_of_the_table_is_bold() {
+        let app = app_with(&[(1, "needs-you", "日本語")]);
+        let terminal = draw_app(&app, 100, 30);
+        let paint = terminal.backend().paint(&PanelColors::default());
+        let header: Vec<&GlyphOp> = paint
+            .glyphs
+            .iter()
+            .filter(|op| op.row == 1 && op.glyph != "│")
+            .collect();
+        assert!(!header.is_empty());
+        assert!(header.iter().all(|op| op.bold));
+    }
+
+    #[test]
+    fn neighbours_of_one_background_merge_and_the_panel_background_is_left_out() {
+        let panel = distinct_colors();
+        let red = Color::Rgb(200, 0, 0);
+        let blue = Color::Rgb(0, 0, 200);
+        let plain = |fg| cell(" ", fg, Color::Reset, Modifier::empty());
+        let on = |bg| cell("x", Color::Reset, bg, Modifier::empty());
+        let paint = grid_of(
+            7,
+            &[
+                on(red),
+                on(red),
+                on(Color::Rgb(30, 31, 32)),
+                plain(Color::Reset),
+                on(red),
+                on(blue),
+                on(blue),
+            ],
+        )
+        .paint(&panel);
+        let run = |column, cells, color| BackgroundRun {
+            row: 0,
+            column,
+            cells,
+            color,
+        };
+        let rgb = |red, green, blue| Rgb { red, green, blue };
+        assert_eq!(
+            paint.backgrounds,
+            vec![
+                run(0, 2, rgb(200, 0, 0)),
+                run(4, 1, rgb(200, 0, 0)),
+                run(5, 2, rgb(0, 0, 200)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_cell_under_a_wide_glyph_joins_the_background_run() {
+        let panel = distinct_colors();
+        let red = Color::Rgb(200, 0, 0);
+        let paint = grid_of(
+            2,
+            &[
+                cell("❗", Color::Reset, red, Modifier::empty()),
+                cell(" ", Color::Reset, red, Modifier::empty()),
+            ],
+        )
+        .paint(&panel);
+        assert_eq!(paint.backgrounds.len(), 1);
+        assert_eq!(paint.backgrounds[0].cells, 2);
+        assert_eq!(paint.glyphs.len(), 1);
     }
 }
