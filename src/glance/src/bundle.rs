@@ -106,9 +106,24 @@ impl Bundle {
     pub fn ensure(&self, source: &Path) -> io::Result<()> {
         let executable = self.executable();
         let bytes = fs::read(source)?;
-        replace_file(&executable, &bytes, EXECUTABLE_MODE)?;
-        replace_file(&self.info_plist(), info_plist_text().as_bytes(), PLIST_MODE)
+        if !holds(&executable, &bytes) {
+            replace_file(&executable, &bytes, EXECUTABLE_MODE)?;
+        }
+        let plist = self.info_plist();
+        let text = info_plist_text();
+        if !holds(&plist, text.as_bytes()) {
+            replace_file(&plist, text.as_bytes(), PLIST_MODE)?;
+        }
+        Ok(())
     }
+}
+
+/// Tells if the file `path` exists and holds exactly `bytes`. A file of
+/// another length differs, so the function does not read it.
+fn holds(path: &Path, bytes: &[u8]) -> bool {
+    let same_length = fs::metadata(path)
+        .is_ok_and(|metadata| usize::try_from(metadata.len()).is_ok_and(|n| n == bytes.len()));
+    same_length && fs::read(path).is_ok_and(|current| current == bytes)
 }
 
 /// Writes `bytes` to a new temporary file next to `target`, sets its mode, and
