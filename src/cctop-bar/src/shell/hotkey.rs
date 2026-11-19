@@ -2,13 +2,117 @@
 //! crate. The crate registers it through Carbon `RegisterEventHotKey`, which
 //! needs no Accessibility permission and no Input Monitoring permission.
 
-use global_hotkey::hotkey::HotKey;
+use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 
-use crate::chord::Chord;
+use crate::chord::{Chord, ChordKey};
+
+/// The key codes of the letters, in the order `a` to `z`.
+const LETTERS: [Code; 26] = [
+    Code::KeyA,
+    Code::KeyB,
+    Code::KeyC,
+    Code::KeyD,
+    Code::KeyE,
+    Code::KeyF,
+    Code::KeyG,
+    Code::KeyH,
+    Code::KeyI,
+    Code::KeyJ,
+    Code::KeyK,
+    Code::KeyL,
+    Code::KeyM,
+    Code::KeyN,
+    Code::KeyO,
+    Code::KeyP,
+    Code::KeyQ,
+    Code::KeyR,
+    Code::KeyS,
+    Code::KeyT,
+    Code::KeyU,
+    Code::KeyV,
+    Code::KeyW,
+    Code::KeyX,
+    Code::KeyY,
+    Code::KeyZ,
+];
+
+/// The key codes of the digits, in the order 0 to 9.
+const DIGITS: [Code; 10] = [
+    Code::Digit0,
+    Code::Digit1,
+    Code::Digit2,
+    Code::Digit3,
+    Code::Digit4,
+    Code::Digit5,
+    Code::Digit6,
+    Code::Digit7,
+    Code::Digit8,
+    Code::Digit9,
+];
+
+/// The key codes of the function keys, in the order F1 to F20.
+const FUNCTION_KEYS: [Code; 20] = [
+    Code::F1,
+    Code::F2,
+    Code::F3,
+    Code::F4,
+    Code::F5,
+    Code::F6,
+    Code::F7,
+    Code::F8,
+    Code::F9,
+    Code::F10,
+    Code::F11,
+    Code::F12,
+    Code::F13,
+    Code::F14,
+    Code::F15,
+    Code::F16,
+    Code::F17,
+    Code::F18,
+    Code::F19,
+    Code::F20,
+];
+
+/// The key code of `key`, or `None` when the key is outside the ranges that
+/// the chord parser allows.
+fn code_of(key: ChordKey) -> Option<Code> {
+    match key {
+        ChordKey::Letter(letter) => {
+            let index = (letter as usize).checked_sub('a' as usize)?;
+            LETTERS.get(index).copied()
+        }
+        ChordKey::Digit(digit) => DIGITS.get(usize::from(digit)).copied(),
+        ChordKey::Function(number) => {
+            FUNCTION_KEYS.get(usize::from(number).checked_sub(1)?).copied()
+        }
+        ChordKey::Backspace => Some(Code::Backspace),
+        ChordKey::Space => Some(Code::Space),
+        ChordKey::Escape => Some(Code::Escape),
+        ChordKey::Return => Some(Code::Enter),
+        ChordKey::Tab => Some(Code::Tab),
+        ChordKey::Up => Some(Code::ArrowUp),
+        ChordKey::Down => Some(Code::ArrowDown),
+        ChordKey::Left => Some(Code::ArrowLeft),
+        ChordKey::Right => Some(Code::ArrowRight),
+    }
+}
 
 /// The hotkey of `chord`, or `None` when its key has no counterpart.
-pub fn hotkey_of(_chord: Chord) -> Option<HotKey> {
-    None
+pub fn hotkey_of(chord: Chord) -> Option<HotKey> {
+    let held = chord.modifiers();
+    let mut modifiers = Modifiers::empty();
+    for (is_held, flag) in [
+        (held.control, Modifiers::CONTROL),
+        (held.option, Modifiers::ALT),
+        (held.shift, Modifiers::SHIFT),
+        (held.command, Modifiers::META),
+    ] {
+        if is_held {
+            modifiers |= flag;
+        }
+    }
+    Some(HotKey::new(Some(modifiers), code_of(chord.key())?))
 }
 
 #[cfg(test)]
