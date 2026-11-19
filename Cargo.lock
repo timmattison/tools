@@ -1325,6 +1325,7 @@ dependencies = [
  "runlimit",
  "serde",
  "serde_json",
+ "soleinstance",
  "sysinfo",
  "tempfile",
  "thiserror 2.0.21",
