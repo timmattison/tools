@@ -181,4 +181,43 @@ mod tests {
             }
         }
     }
+
+    /// A board of `count` live sessions.
+    fn board_of(count: u32) -> Board {
+        let mut board = Board::new();
+        for pid in 1..=count {
+            board.load(file(pid, PaneState::Idle, "日本語"), None);
+        }
+        board
+    }
+
+    #[test]
+    fn a_board_past_the_limit_keeps_the_limit_and_counts_the_rest() {
+        let map = Minimap::of(&board_of(14), TILE_LIMIT);
+        assert_eq!(map.tiles.len(), 12);
+        assert_eq!(map.overflow, 2);
+    }
+
+    #[test]
+    fn a_board_under_the_limit_has_no_overflow() {
+        let map = Minimap::of(&board_of(3), TILE_LIMIT);
+        assert_eq!(map.tiles.len(), 3);
+        assert_eq!(map.overflow, 0);
+    }
+
+    #[test]
+    fn a_limit_of_zero_gives_no_tiles_and_all_overflow() {
+        let map = Minimap::of(&board_of(3), 0);
+        assert!(map.tiles.is_empty());
+        assert_eq!(map.overflow, 3);
+    }
+
+    #[test]
+    fn a_cut_drops_the_least_urgent_tiles() {
+        let mut board = board_of(13);
+        board.load(file(99, PaneState::NeedsYou, "café"), None);
+        let map = Minimap::of(&board, TILE_LIMIT);
+        assert_eq!(map.tiles[0].state, PaneState::NeedsYou);
+        assert_eq!(map.overflow, 2);
+    }
 }
