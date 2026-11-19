@@ -83,7 +83,7 @@ impl Minimap {
         Self {
             tiles,
             overflow,
-            attention: 0,
+            attention: board.attention_count(),
         }
     }
 }
