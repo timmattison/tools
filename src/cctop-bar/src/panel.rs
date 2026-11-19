@@ -104,7 +104,7 @@ impl Panel {
         let mut jobs = Vec::new();
         for effect in target.key(key, now) {
             match effect {
-                Effect::Quit => {}
+                Effect::Quit => self.hide_into(&mut jobs),
                 Effect::Focus(focus) => {
                     jobs.push(PanelJob::Focus(focus));
                     self.hide_into(&mut jobs);
