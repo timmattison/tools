@@ -589,10 +589,10 @@ mod tests {
             green: u8::try_from((value >> 8) & 0xff).unwrap(),
             blue: u8::try_from(value & 0xff).unwrap(),
         };
-        assert_eq!(panel.foreground, rgb(0xcccccc));
-        assert_eq!(panel.background, rgb(0x1e1e1e));
-        assert_eq!(panel.palette[1], rgb(0xcd3131));
-        assert_eq!(panel.palette[15], rgb(0xffffff));
+        assert_eq!(panel.foreground, rgb(0x00cc_cccc));
+        assert_eq!(panel.background, rgb(0x001e_1e1e));
+        assert_eq!(panel.palette[1], rgb(0x00cd_3131));
+        assert_eq!(panel.palette[15], rgb(0x00ff_ffff));
     }
 
     /// A cell with the symbol `symbol` and the colors `fg` and `bg`.
