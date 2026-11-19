@@ -5,7 +5,7 @@ use cctop::state::Rgb;
 use ratatui::backend::{Backend, ClearType, WindowSize};
 use ratatui::buffer::{Buffer, Cell};
 use ratatui::layout::{Position, Rect, Size};
-use ratatui::style::Color;
+use ratatui::style::{Color, Modifier};
 use unicode_width::UnicodeWidthStr;
 
 /// The color of a 24-bit value `0xRRGGBB`.
@@ -210,6 +210,17 @@ impl CellGrid {
         }
     }
 
+    /// The foreground and the background of `cell`, with the reverse applied.
+    fn cell_colors(cell: &Cell, colors: &PanelColors) -> (Rgb, Rgb) {
+        let foreground = resolve(cell.fg, colors.foreground, &colors.palette);
+        let background = resolve(cell.bg, colors.background, &colors.palette);
+        if cell.modifier.contains(Modifier::REVERSED) {
+            (background, foreground)
+        } else {
+            (foreground, background)
+        }
+    }
+
     /// The paint operations of the current cells.
     #[must_use]
     pub fn paint(&self, colors: &PanelColors) -> Paint {
@@ -218,12 +229,26 @@ impl CellGrid {
         for row in 0..area.height {
             // The columns that the wide glyph to their left covers.
             let mut covered_until = 0;
+            let mut run: Option<BackgroundRun> = None;
             for column in 0..area.width {
-                if column < covered_until {
-                    continue;
+                let cell = &self.buffer[(column, row)];
+                let (foreground, background) = Self::cell_colors(cell, colors);
+                match run.as_mut() {
+                    Some(open) if open.color == background => open.cells += 1,
+                    _ => {
+                        paint.backgrounds.extend(run.take());
+                        if background != colors.background {
+                            run = Some(BackgroundRun {
+                                row,
+                                column,
+                                cells: 1,
+                                color: background,
+                            });
+                        }
+                    }
                 }
-                let symbol = self.buffer[(column, row)].symbol();
-                if symbol.is_empty() || symbol == " " {
+                let symbol = cell.symbol();
+                if column < covered_until || symbol.is_empty() || symbol == " " {
                     continue;
                 }
                 let cells = glyph_cells(symbol);
@@ -233,14 +258,11 @@ impl CellGrid {
                     column,
                     glyph: symbol.to_string(),
                     cells,
-                    color: resolve(
-                        self.buffer[(column, row)].fg,
-                        colors.foreground,
-                        &colors.palette,
-                    ),
-                    bold: false,
+                    color: foreground,
+                    bold: cell.modifier.contains(Modifier::BOLD),
                 });
             }
+            paint.backgrounds.extend(run);
         }
         paint
     }
@@ -406,13 +428,16 @@ mod tests {
 
     #[test]
     fn the_state_blocks_have_the_color_of_the_state() {
-        let app = app_with(&[(1, "needs-you", "日本語")]);
+        // The first row is selected, thus the highlight reverses it. The second row shows the plain colors.
+        let app = app_with(&[(1, "needs-you", "日本語"), (2, "needs-you", "café")]);
         let terminal = draw_app(&app, 100, 30);
         let paint = terminal.backend().paint(&PanelColors::default());
-        let blocks: Vec<&GlyphOp> = paint.glyphs.iter().filter(|op| op.glyph == "█").collect();
-        assert_eq!(blocks.len(), 2);
         let expected = PaneState::NeedsYou.color();
-        assert!(blocks.iter().all(|op| op.color == expected));
+        let blocks: Vec<&GlyphOp> = paint.glyphs.iter().filter(|op| op.glyph == "█").collect();
+        assert_eq!(blocks.len(), 4);
+        assert_eq!(blocks.iter().filter(|op| op.color == expected).count(), 2);
+        // The reversed row has the color as its background, and the block takes the panel background.
+        assert!(paint.backgrounds.iter().any(|run| run.color == expected));
     }
 
     /// Colors whose palette entries are all different, so a wrong index shows.
