@@ -1,7 +1,7 @@
 //! The logic of `cctop-bar`, a macOS menu-bar program that runs the cctop
 //! board with no terminal.
 //!
-//! Each rule lives in a pure module that has no AppKit code, thus it builds
+//! Each rule lives in a pure module that has no `AppKit` code, thus it builds
 //! and runs its tests on every platform:
 //!
 //! - `chord` reads the global hotkey as text and gives its Carbon codes.

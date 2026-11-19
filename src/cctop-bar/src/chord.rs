@@ -1,13 +1,17 @@
 //! The global hotkey as text. A chord is a set of modifiers and one key, for
 //! example `ctrl+alt+shift+cmd+backspace`.
 
-use std::fmt;
+use std::fmt::{self, Write as _};
 use std::str::FromStr;
 
 /// The chord that opens cctop when the person gives no other.
 pub const DEFAULT_CHORD: &str = "ctrl+alt+shift+cmd+backspace";
 
 /// The modifier keys of a chord.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is one physical modifier key"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Modifiers {
     /// The control key.
@@ -101,21 +105,171 @@ impl Chord {
     /// `optionKey` 0x0800, `controlKey` 0x1000.
     #[must_use]
     pub fn carbon_modifiers(self) -> u32 {
-        0
+        let Modifiers {
+            control,
+            option,
+            shift,
+            command,
+        } = self.modifiers;
+        [
+            (command, CARBON_COMMAND),
+            (shift, CARBON_SHIFT),
+            (option, CARBON_OPTION),
+            (control, CARBON_CONTROL),
+        ]
+        .into_iter()
+        .filter(|(held, _)| *held)
+        .fold(0, |mask, (_, bit)| mask | bit)
     }
 
-    /// The Carbon virtual key code (`kVK_*`).
+    /// The Carbon virtual key code (`kVK_*`), from `HIToolbox/Events.h`.
     #[must_use]
     pub fn virtual_key_code(self) -> u16 {
-        0
+        match self.key {
+            ChordKey::Letter(letter) => letter_code(letter),
+            ChordKey::Digit(digit) => digit_code(digit),
+            ChordKey::Function(number) => function_code(number),
+            ChordKey::Backspace => 0x33,
+            ChordKey::Space => 0x31,
+            ChordKey::Escape => 0x35,
+            ChordKey::Return => 0x24,
+            ChordKey::Tab => 0x30,
+            ChordKey::Up => 0x7E,
+            ChordKey::Down => 0x7D,
+            ChordKey::Left => 0x7B,
+            ChordKey::Right => 0x7C,
+        }
     }
 
     /// The symbols that a Mac menu shows: the modifiers in the order
     /// control, option, shift, command, then the key.
     #[must_use]
     pub fn display(self) -> String {
-        String::new()
+        let Modifiers {
+            control,
+            option,
+            shift,
+            command,
+        } = self.modifiers;
+        let mut text = String::new();
+        for (held, symbol) in [
+            (control, '\u{2303}'),
+            (option, '\u{2325}'),
+            (shift, '\u{21E7}'),
+            (command, '\u{2318}'),
+        ] {
+            if held {
+                text.push(symbol);
+            }
+        }
+        match self.key {
+            ChordKey::Letter(letter) => text.push(letter.to_ascii_uppercase()),
+            ChordKey::Digit(digit) => text.push_str(&digit.to_string()),
+            ChordKey::Function(number) => {
+                let _ = write!(text, "F{number}");
+            }
+            ChordKey::Backspace => text.push('\u{232B}'),
+            ChordKey::Space => text.push_str("Space"),
+            ChordKey::Escape => text.push('\u{238B}'),
+            ChordKey::Return => text.push('\u{21A9}'),
+            ChordKey::Tab => text.push('\u{21E5}'),
+            ChordKey::Up => text.push('\u{2191}'),
+            ChordKey::Down => text.push('\u{2193}'),
+            ChordKey::Left => text.push('\u{2190}'),
+            ChordKey::Right => text.push('\u{2192}'),
+        }
+        text
     }
+}
+
+/// The Carbon mask bit of the command key.
+const CARBON_COMMAND: u32 = 0x0100;
+/// The Carbon mask bit of the shift key.
+const CARBON_SHIFT: u32 = 0x0200;
+/// The Carbon mask bit of the option key.
+const CARBON_OPTION: u32 = 0x0800;
+/// The Carbon mask bit of the control key.
+const CARBON_CONTROL: u32 = 0x1000;
+
+/// The key codes of `kVK_ANSI_A` to `kVK_ANSI_Z`, indexed from `a`. The
+/// values come from `HIToolbox/Events.h`.
+const LETTER_CODES: [u16; 26] = [
+    0x00, 0x0B, 0x08, 0x02, 0x0E, 0x03, 0x05, 0x04, 0x22, 0x26, 0x28, 0x25, 0x2E, 0x2D, 0x1F, 0x23,
+    0x0C, 0x0F, 0x01, 0x11, 0x20, 0x09, 0x0D, 0x07, 0x10, 0x06,
+];
+
+/// The key codes of `kVK_ANSI_0` to `kVK_ANSI_9`, indexed from 0. The values
+/// come from `HIToolbox/Events.h`.
+const DIGIT_CODES: [u16; 10] = [0x1D, 0x12, 0x13, 0x14, 0x15, 0x17, 0x16, 0x1A, 0x1C, 0x19];
+
+/// The key codes of `kVK_F1` to `kVK_F20`, indexed from F1. The values come
+/// from `HIToolbox/Events.h`.
+const FUNCTION_CODES: [u16; 20] = [
+    0x7A, 0x78, 0x63, 0x76, 0x60, 0x61, 0x62, 0x64, 0x65, 0x6D, 0x67, 0x6F, 0x69, 0x6B, 0x71, 0x6A,
+    0x40, 0x4F, 0x50, 0x5A,
+];
+
+/// The key code of a lower case letter. The parser admits no other letter.
+fn letter_code(letter: char) -> u16 {
+    let index = (letter as u32).saturating_sub('a' as u32) as usize;
+    LETTER_CODES.get(index).copied().unwrap_or(0)
+}
+
+/// The key code of a digit.
+fn digit_code(digit: u8) -> u16 {
+    DIGIT_CODES.get(usize::from(digit)).copied().unwrap_or(0)
+}
+
+/// The key code of a function key, numbered from 1.
+fn function_code(number: u8) -> u16 {
+    FUNCTION_CODES
+        .get(usize::from(number).wrapping_sub(1))
+        .copied()
+        .unwrap_or(0)
+}
+
+/// What one part of a chord text names.
+enum Part {
+    Modifier(fn(&mut Modifiers)),
+    Key(ChordKey),
+}
+
+/// Read one trimmed, lower case part.
+fn read_part(part: &str) -> Option<Part> {
+    let modifier = |set: fn(&mut Modifiers)| Some(Part::Modifier(set));
+    match part {
+        "ctrl" | "control" => modifier(|m| m.control = true),
+        "alt" | "opt" | "option" => modifier(|m| m.option = true),
+        "shift" => modifier(|m| m.shift = true),
+        "cmd" | "command" => modifier(|m| m.command = true),
+        "backspace" | "delete" => Some(Part::Key(ChordKey::Backspace)),
+        "space" => Some(Part::Key(ChordKey::Space)),
+        "escape" => Some(Part::Key(ChordKey::Escape)),
+        "return" => Some(Part::Key(ChordKey::Return)),
+        "tab" => Some(Part::Key(ChordKey::Tab)),
+        "up" => Some(Part::Key(ChordKey::Up)),
+        "down" => Some(Part::Key(ChordKey::Down)),
+        "left" => Some(Part::Key(ChordKey::Left)),
+        "right" => Some(Part::Key(ChordKey::Right)),
+        _ => read_character_key(part).map(Part::Key),
+    }
+}
+
+/// Read a letter, a digit, or a function key.
+fn read_character_key(part: &str) -> Option<ChordKey> {
+    let mut chars = part.chars();
+    if let (Some(first), None) = (chars.next(), chars.next()) {
+        if first.is_ascii_lowercase() {
+            return Some(ChordKey::Letter(first));
+        }
+        if let Some(digit) = first.to_digit(10).filter(|_| first.is_ascii_digit()) {
+            return u8::try_from(digit).ok().map(ChordKey::Digit);
+        }
+        return None;
+    }
+    let number: u8 = part.strip_prefix('f')?.parse().ok()?;
+    let plain = part.len() == 1 + number.to_string().len();
+    (plain && (1..=20).contains(&number)).then_some(ChordKey::Function(number))
 }
 
 impl Default for Chord {
@@ -129,14 +283,70 @@ impl Default for Chord {
 impl FromStr for Chord {
     type Err = ChordError;
 
-    fn from_str(_text: &str) -> Result<Self, Self::Err> {
-        Err(ChordError::Empty)
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        if text.trim().is_empty() {
+            return Err(ChordError::Empty);
+        }
+        let mut modifiers = Modifiers::default();
+        let mut key: Option<(String, ChordKey)> = None;
+        let mut any_modifier = false;
+        for raw in text.split('+') {
+            let part = raw.trim();
+            let lower = part.to_lowercase();
+            match read_part(&lower) {
+                Some(Part::Modifier(set)) => {
+                    set(&mut modifiers);
+                    any_modifier = true;
+                }
+                Some(Part::Key(found)) => {
+                    if let Some((first, _)) = key {
+                        return Err(ChordError::TwoKeys(first, lower));
+                    }
+                    key = Some((lower, found));
+                }
+                None => return Err(ChordError::Unknown(part.to_string())),
+            }
+        }
+        match (any_modifier, key) {
+            (false, _) => Err(ChordError::NoModifier),
+            (true, None) => Err(ChordError::NoKey),
+            (true, Some((_, key))) => Ok(Self { modifiers, key }),
+        }
     }
 }
 
 impl fmt::Display for Chord {
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        Ok(())
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Modifiers {
+            control,
+            option,
+            shift,
+            command,
+        } = self.modifiers;
+        for (held, name) in [
+            (control, "ctrl+"),
+            (option, "alt+"),
+            (shift, "shift+"),
+            (command, "cmd+"),
+        ] {
+            if held {
+                f.write_str(name)?;
+            }
+        }
+        match self.key {
+            ChordKey::Letter(letter) => write!(f, "{letter}"),
+            ChordKey::Digit(digit) => write!(f, "{digit}"),
+            ChordKey::Function(number) => write!(f, "f{number}"),
+            ChordKey::Backspace => f.write_str("backspace"),
+            ChordKey::Space => f.write_str("space"),
+            ChordKey::Escape => f.write_str("escape"),
+            ChordKey::Return => f.write_str("return"),
+            ChordKey::Tab => f.write_str("tab"),
+            ChordKey::Up => f.write_str("up"),
+            ChordKey::Down => f.write_str("down"),
+            ChordKey::Left => f.write_str("left"),
+            ChordKey::Right => f.write_str("right"),
+        }
     }
 }
 
@@ -148,7 +358,7 @@ mod tests {
         text.parse().unwrap()
     }
 
-    fn mods(control: bool, option: bool, shift: bool, command: bool) -> Modifiers {
+    fn mods([control, option, shift, command]: [bool; 4]) -> Modifiers {
         Modifiers {
             control,
             option,
@@ -160,32 +370,38 @@ mod tests {
     // Behavior 1: modifiers.
     #[test]
     fn each_modifier_name_and_alias_parses() {
-        assert_eq!(parse("ctrl+a").modifiers(), mods(true, false, false, false));
+        assert_eq!(
+            parse("ctrl+a").modifiers(),
+            mods([true, false, false, false])
+        );
         assert_eq!(
             parse("control+a").modifiers(),
-            mods(true, false, false, false)
+            mods([true, false, false, false])
         );
         for name in ["alt", "opt", "option"] {
             assert_eq!(
                 parse(&format!("{name}+a")).modifiers(),
-                mods(false, true, false, false)
+                mods([false, true, false, false])
             );
         }
         assert_eq!(
             parse("shift+a").modifiers(),
-            mods(false, false, true, false)
+            mods([false, false, true, false])
         );
-        assert_eq!(parse("cmd+a").modifiers(), mods(false, false, false, true));
+        assert_eq!(
+            parse("cmd+a").modifiers(),
+            mods([false, false, false, true])
+        );
         assert_eq!(
             parse("command+a").modifiers(),
-            mods(false, false, false, true)
+            mods([false, false, false, true])
         );
     }
 
     #[test]
     fn the_default_chord_has_four_modifiers_and_backspace() {
         let chord = Chord::default();
-        assert_eq!(chord.modifiers(), mods(true, true, true, true));
+        assert_eq!(chord.modifiers(), mods([true, true, true, true]));
         assert_eq!(chord.key(), ChordKey::Backspace);
     }
 
@@ -292,6 +508,59 @@ mod tests {
         }
     }
 
+    #[test]
+    fn every_letter_digit_and_function_key_has_its_events_h_code() {
+        let letters = [
+            ('a', 0x00),
+            ('s', 0x01),
+            ('d', 0x02),
+            ('f', 0x03),
+            ('h', 0x04),
+            ('g', 0x05),
+            ('z', 0x06),
+            ('x', 0x07),
+            ('c', 0x08),
+            ('v', 0x09),
+            ('b', 0x0B),
+            ('q', 0x0C),
+            ('w', 0x0D),
+            ('e', 0x0E),
+            ('r', 0x0F),
+            ('y', 0x10),
+            ('t', 0x11),
+            ('o', 0x1F),
+            ('u', 0x20),
+            ('i', 0x22),
+            ('p', 0x23),
+            ('l', 0x25),
+            ('j', 0x26),
+            ('k', 0x28),
+            ('n', 0x2D),
+            ('m', 0x2E),
+        ];
+        assert_eq!(letters.len(), 26);
+        for (letter, code) in letters {
+            let chord = Chord::new(mods([false, false, false, true]), ChordKey::Letter(letter));
+            assert_eq!(chord.virtual_key_code(), code, "{letter}");
+        }
+        let digits = [0x1D, 0x12, 0x13, 0x14, 0x15, 0x17, 0x16, 0x1A, 0x1C, 0x19];
+        for (digit, code) in (0_u8..).zip(digits) {
+            let chord = Chord::new(mods([false, false, false, true]), ChordKey::Digit(digit));
+            assert_eq!(chord.virtual_key_code(), code, "{digit}");
+        }
+        let functions = [
+            0x7A, 0x78, 0x63, 0x76, 0x60, 0x61, 0x62, 0x64, 0x65, 0x6D, 0x67, 0x6F, 0x69, 0x6B,
+            0x71, 0x6A, 0x40, 0x4F, 0x50, 0x5A,
+        ];
+        for (number, code) in (1_u8..).zip(functions) {
+            let chord = Chord::new(
+                mods([false, false, false, true]),
+                ChordKey::Function(number),
+            );
+            assert_eq!(chord.virtual_key_code(), code, "F{number}");
+        }
+    }
+
     // Behavior 5: display.
     #[test]
     fn display_shows_mac_symbols() {
@@ -327,10 +596,10 @@ mod tests {
         keys.extend((0..=9).map(ChordKey::Digit));
         keys.extend((1..=20).map(ChordKey::Function));
         let sets = [
-            mods(true, false, false, false),
-            mods(false, true, false, true),
-            mods(true, true, true, true),
-            mods(false, false, true, false),
+            mods([true, false, false, false]),
+            mods([false, true, false, true]),
+            mods([true, true, true, true]),
+            mods([false, false, true, false]),
         ];
         for key in keys {
             for set in sets {
