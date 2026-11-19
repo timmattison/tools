@@ -39,7 +39,7 @@ use std::fmt;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::num::NonZeroU32;
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
 use std::thread;
 
@@ -207,8 +207,9 @@ fn run_here(lock: &LockFile, settings: Settings, is_copy: bool) -> ExitCode {
 }
 
 /// Starts a copy that runs the status item from the executable of the app
-/// bundle, and waits until its status item is up. When the copy ends first, writes what the copy wrote to its stderr
-/// and its exit status, and gives the exit code of a failure.
+/// bundle, and waits until its status item is up. When the copy ends first,
+/// writes what the copy wrote to its stderr and its exit status, and gives the
+/// exit code of a failure.
 fn start_in_background(lock: &LockFile, settings: &Settings) -> ExitCode {
     if let Err(error) = lock.prepare() {
         return fail(&lock_problem(lock, &error));
@@ -240,12 +241,18 @@ fn start_in_background(lock: &LockFile, settings: &Settings) -> ExitCode {
 /// Makes sure that the app bundle of the user holds a copy of this program,
 /// and gives the bundle.
 fn prepare_bundle() -> Result<Bundle, String> {
+    let (current, bundle) = this_program_and_bundle()?;
+    ensure_bundle(&bundle, &current)?;
+    Ok(bundle)
+}
+
+/// Gives the path of this program and the app bundle of the user.
+fn this_program_and_bundle() -> Result<(PathBuf, Bundle), String> {
     let current =
         env::current_exe().map_err(|error| format!("cannot find the path of glance: {error}"))?;
     let bundle =
         Bundle::for_user().map_err(|error| format!("cannot find the bundle of glance: {error}"))?;
-    ensure_bundle(&bundle, &current)?;
-    Ok(bundle)
+    Ok((current, bundle))
 }
 
 /// Makes sure that `bundle` holds a copy of the program `current`.
@@ -265,10 +272,7 @@ fn ensure_bundle(bundle: &Bundle, current: &Path) -> Result<(), String> {
 /// with the same arguments. The PID and the terminal stay the same. The
 /// function returns `Ok` only when this process runs from the bundle.
 fn run_from_bundle() -> Result<(), String> {
-    let current =
-        env::current_exe().map_err(|error| format!("cannot find the path of glance: {error}"))?;
-    let bundle =
-        Bundle::for_user().map_err(|error| format!("cannot find the bundle of glance: {error}"))?;
+    let (current, bundle) = this_program_and_bundle()?;
     if bundle.runs(&current) {
         return Ok(());
     }
