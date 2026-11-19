@@ -50,6 +50,12 @@ const HOST_FILE_PREFIX: &str = "host-";
 /// The end of the name of each lock file.
 const LOCK_FILE_SUFFIX: &str = ".lock";
 
+/// The autosave name of the local status item.
+const LOCAL_AUTOSAVE_NAME: &str = "glance.local";
+
+/// The start of the autosave name of the status item of a host.
+const HOST_AUTOSAVE_PREFIX: &str = "glance.host.";
+
 /// The `l_whence` of a lock record that starts at the start of the file. This
 /// is `SEEK_SET`, which `libc` gives as a wider integer than the field.
 const FROM_THE_START: libc::c_short = 0;
@@ -92,26 +98,47 @@ impl Target {
         match self {
             Target::Local => LOCAL_FILE_NAME.to_owned(),
             Target::Host(destination) => {
-                let mut name = HOST_FILE_PREFIX.to_owned();
-                for byte in destination.as_str().bytes() {
-                    if byte.is_ascii_lowercase() || byte.is_ascii_digit() || b".-_@".contains(&byte)
-                    {
-                        name.push(char::from(byte));
-                    } else {
-                        name.push_str(&format!("%{byte:02X}"));
-                    }
-                }
-                name.push_str(LOCK_FILE_SUFFIX);
-                name
+                format!(
+                    "{HOST_FILE_PREFIX}{}{LOCK_FILE_SUFFIX}",
+                    escaped(destination)
+                )
             }
         }
     }
 
     /// Gives the autosave name of the status item of this target.
+    ///
+    /// AppKit keeps the position of a status item under its autosave name,
+    /// and a menu bar manager such as Bartender keys each item on that name
+    /// and the bundle identifier. With no name, each status item gets
+    /// `Item-0`, so all of them share one key. The local target gives
+    /// `glance.local`. A host gives `glance.host.` and the destination, with
+    /// the escape of [`Target::file_name`]. Thus two different destinations
+    /// never give the same name.
     #[must_use]
     pub fn autosave_name(&self) -> String {
-        String::new()
+        match self {
+            Target::Local => LOCAL_AUTOSAVE_NAME.to_owned(),
+            Target::Host(destination) => format!("{HOST_AUTOSAVE_PREFIX}{}", escaped(destination)),
+        }
     }
+}
+
+/// Gives `destination` with each byte that is not a lowercase ASCII letter, a
+/// digit, `.`, `-`, `_`, or `@` written as `%` and two uppercase hex digits.
+///
+/// The result holds no `/` and no uppercase letter from the destination, and
+/// two different destinations never give the same result.
+fn escaped(destination: &Destination) -> String {
+    let mut text = String::new();
+    for byte in destination.as_str().bytes() {
+        if byte.is_ascii_lowercase() || byte.is_ascii_digit() || b".-_@".contains(&byte) {
+            text.push(char::from(byte));
+        } else {
+            text.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    text
 }
 
 /// The lock file that marks the status item of one target.
