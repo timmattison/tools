@@ -261,4 +261,26 @@ mod tests {
         assert!(title.contains("cctop"), "{title}");
         assert!(title.contains("3 sessions"), "{title}");
     }
+
+    #[test]
+    fn a_wide_glyph_covers_two_cells_and_keeps_the_next_glyph_in_place() {
+        let app = app_with(&[(1, "needs-you", "日本語")]);
+        let terminal = draw_app(&app, 100, 30);
+        let paint = terminal.backend().paint(&PanelColors::default());
+        let title: Vec<&GlyphOp> = paint.glyphs.iter().filter(|op| op.row == 0).collect();
+        let wide = title
+            .iter()
+            .find(|op| op.glyph == "❗")
+            .expect("the marker");
+        assert_eq!(wide.cells, 2);
+        // The cell to the right of the marker is covered, the one after it is a space.
+        assert!(title.iter().all(|op| op.column != wide.column + 1));
+        assert!(title.iter().all(|op| op.column != wide.column + 2));
+        let next = title
+            .iter()
+            .find(|op| op.column > wide.column)
+            .expect("a glyph after the marker");
+        assert_eq!(next.column, wide.column + 3);
+        assert_eq!(next.cells, 1);
+    }
 }
