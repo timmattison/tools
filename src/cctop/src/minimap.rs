@@ -93,6 +93,7 @@ mod tests {
     use super::*;
     use crate::liveness::RunStatus;
     use crate::state::{EpochMillis, StateFile};
+    use crate::ui::title_counts;
     use proctree::Pid;
 
     /// A state file in the directory `directory`.
@@ -221,5 +222,45 @@ mod tests {
         let map = Minimap::of(&board, TILE_LIMIT);
         assert_eq!(map.tiles[0].state, PaneState::NeedsYou);
         assert_eq!(map.overflow, 2);
+    }
+
+    /// The left number of the `needs-you` count in the title line.
+    fn title_attention(board: &Board) -> usize {
+        let counts = title_counts(board);
+        let marker = PaneState::NeedsYou.marker();
+        let segment = counts
+            .split(" · ")
+            .find(|segment| segment.ends_with(marker))
+            .expect("the title holds a needs-you count");
+        let left = segment.split('/').next().expect("a split has a first part");
+        left.parse().expect("the left number is a count")
+    }
+
+    #[test]
+    fn the_attention_count_agrees_with_the_title_line() {
+        let mut empty_of_needs_you = Board::new();
+        empty_of_needs_you.load(file(1, PaneState::Working, "café"), None);
+        let boards = [mixed_board(), empty_of_needs_you, board_of(14)];
+        for board in &boards {
+            assert_eq!(
+                Minimap::of(board, TILE_LIMIT).attention,
+                title_attention(board)
+            );
+        }
+        assert_eq!(Minimap::of(&boards[0], TILE_LIMIT).attention, 1);
+    }
+
+    #[test]
+    fn the_attention_count_skips_a_handled_and_a_frozen_needs_you_row() {
+        let mut board = Board::new();
+        board.load(file(1, PaneState::NeedsYou, "日本語"), None);
+        board.load(file(2, PaneState::NeedsYou, "🎉"), None);
+        board.load(file(3, PaneState::NeedsYou, "café"), None);
+        board.load(file(4, PaneState::NeedsYou, "four"), None);
+        board.toggle_handled(Pid::new(2));
+        board.set_run_status(Pid::new(3), RunStatus::Stopped, EpochMillis::new(1_000));
+        let map = Minimap::of(&board, TILE_LIMIT);
+        assert_eq!(map.attention, 2);
+        assert_eq!(map.attention, title_attention(&board));
     }
 }
