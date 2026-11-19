@@ -110,6 +110,16 @@ impl CellGrid {
         &self.buffer
     }
 
+    /// Reset each cell of `region` that lies inside the grid.
+    fn reset_area(&mut self, region: Rect) {
+        let region = region.intersection(self.buffer.area);
+        for y in region.top()..region.bottom() {
+            for x in region.left()..region.right() {
+                self.buffer[(x, y)].reset();
+            }
+        }
+    }
+
     /// The paint operations of the current cells.
     #[must_use]
     pub fn paint(&self, _colors: &PanelColors) -> Paint {
@@ -120,10 +130,15 @@ impl CellGrid {
 impl Backend for CellGrid {
     type Error = std::io::Error;
 
-    fn draw<'a, I>(&mut self, _content: I) -> Result<(), Self::Error>
+    fn draw<'a, I>(&mut self, content: I) -> Result<(), Self::Error>
     where
         I: Iterator<Item = (u16, u16, &'a Cell)>,
     {
+        for (x, y, cell) in content {
+            if let Some(target) = self.buffer.cell_mut((x, y)) {
+                *target = cell.clone();
+            }
+        }
         Ok(())
     }
 
@@ -145,10 +160,32 @@ impl Backend for CellGrid {
     }
 
     fn clear(&mut self) -> Result<(), Self::Error> {
+        self.buffer.reset();
         Ok(())
     }
 
-    fn clear_region(&mut self, _clear_type: ClearType) -> Result<(), Self::Error> {
+    fn clear_region(&mut self, clear_type: ClearType) -> Result<(), Self::Error> {
+        let area = self.buffer.area;
+        let cursor = self.cursor;
+        let rest_of_line = Rect::new(cursor.x, cursor.y, area.width.saturating_sub(cursor.x), 1);
+        match clear_type {
+            ClearType::All => self.reset_area(area),
+            ClearType::CurrentLine => self.reset_area(Rect::new(0, cursor.y, area.width, 1)),
+            ClearType::UntilNewLine => self.reset_area(rest_of_line),
+            ClearType::AfterCursor => {
+                self.reset_area(rest_of_line);
+                self.reset_area(Rect::new(
+                    0,
+                    cursor.y.saturating_add(1),
+                    area.width,
+                    area.height,
+                ));
+            }
+            ClearType::BeforeCursor => {
+                self.reset_area(Rect::new(0, 0, area.width, cursor.y));
+                self.reset_area(Rect::new(0, cursor.y, cursor.x.saturating_add(1), 1));
+            }
+        }
         Ok(())
     }
 

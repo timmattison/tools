@@ -1337,7 +1337,10 @@ name = "cctop-bar"
 version = "0.1.0"
 dependencies = [
  "cctop",
+ "crossterm",
+ "ratatui",
  "thiserror 2.0.21",
+ "unicode-width",
 ]
 
 [[package]]
