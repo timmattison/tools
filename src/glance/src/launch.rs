@@ -31,6 +31,7 @@ use std::num::NonZeroU32;
 use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
 use std::thread;
 
+use crate::bundle::Bundle;
 use crate::connection::{HostNaming, Remote};
 use crate::flags::{
     flag, flag_with_value, EXIT_AFTER, HOST, INTERVAL, REMOTE_BINARY, RESOLVE, SPAWNED_COPY,
@@ -188,20 +189,21 @@ fn run_here(lock: &LockFile, settings: Settings, is_copy: bool) -> ExitCode {
     )
 }
 
-/// Starts a copy that runs the status item, and waits until its status item
-/// is up. When the copy ends first, writes what the copy wrote to its stderr
+/// Starts a copy that runs the status item from the executable of the app
+/// bundle, and waits until its status item is up. When the copy ends first, writes what the copy wrote to its stderr
 /// and its exit status, and gives the exit code of a failure.
 fn start_in_background(lock: &LockFile, settings: &Settings) -> ExitCode {
     if let Err(error) = lock.prepare() {
         return fail(&lock_problem(lock, &error));
     }
-    let program = match env::current_exe() {
-        Ok(program) => program,
-        Err(error) => return fail(&format!("cannot find the path of glance: {error}")),
+    let bundle = match prepare_bundle() {
+        Ok(bundle) => bundle,
+        Err(message) => return fail(&message),
     };
-    let spawned = copy_pipes(childenv::command(program).args(child_arguments(settings)))
-        .current_dir(CHILD_DIRECTORY)
-        .spawn();
+    let spawned =
+        copy_pipes(childenv::command(bundle.executable()).args(child_arguments(settings)))
+            .current_dir(CHILD_DIRECTORY)
+            .spawn();
     let mut child = match spawned {
         Ok(child) => child,
         Err(error) => return fail(&format!("cannot start the background copy: {error}")),
@@ -216,6 +218,22 @@ fn start_in_background(lock: &LockFile, settings: &Settings) -> ExitCode {
             ExitCode::from(EXIT_FAILURE)
         }
     }
+}
+
+/// Makes sure that the app bundle of the user holds a copy of this program,
+/// and gives the bundle.
+fn prepare_bundle() -> Result<Bundle, String> {
+    let current =
+        env::current_exe().map_err(|error| format!("cannot find the path of glance: {error}"))?;
+    let bundle =
+        Bundle::for_user().map_err(|error| format!("cannot find the bundle of glance: {error}"))?;
+    bundle.ensure(&current).map_err(|error| {
+        format!(
+            "cannot make the bundle {}: {error}",
+            bundle.path().display()
+        )
+    })?;
+    Ok(bundle)
 }
 
 /// Sets the pipes of the background copy: no stdin, and a pipe to the start
