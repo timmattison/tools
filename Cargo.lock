@@ -8179,6 +8179,7 @@ dependencies = [
  "childenv",
  "dirs",
  "libc",
+ "soleinstance",
  "tempfile",
 ]
 

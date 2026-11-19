@@ -25,3 +25,5 @@
 )]
 pub mod instance;
 pub mod launch;
+#[cfg(feature = "testing")]
+pub mod testing;

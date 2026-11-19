@@ -17,6 +17,7 @@ libc.workspace = true
 testing = []
 
 [dev-dependencies]
+soleinstance = { path = ".", features = ["testing"] }
 tempfile.workspace = true
 
 [lints]
