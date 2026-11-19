@@ -8,6 +8,7 @@ use std::sync::Arc;
 use soleinstance::instance::{LockFile, Pid as LockHolder};
 
 use crate::controller::AppEvent;
+use crate::focus::{focus, FocusTarget, FocusTools};
 use crate::notification;
 use crate::runner::Runner;
 
@@ -71,12 +72,59 @@ pub fn notify_now(runner: &dyn Runner, gate: &NotifyGate, message: &str) -> Noti
     }
 }
 
+/// The two jobs that can block: a focus and a notification. Each runs on its
+/// own thread.
+#[derive(Clone)]
+pub struct Jobs {
+    tools: FocusTools,
+    gate: NotifyGate,
+    sink: EventSink,
+}
+
+impl Jobs {
+    /// Jobs that run their commands with `tools`, ask `gate` before a
+    /// notification, and send their events to `sink`.
+    #[must_use]
+    pub fn new(tools: FocusTools, gate: NotifyGate, sink: EventSink) -> Self {
+        Self { tools, gate, sink }
+    }
+
+    /// Run a focus on its own thread, and send `AppEvent::FocusDone` with the
+    /// report to the sink.
+    pub fn spawn_focus(&self, target: FocusTarget) {
+        let tools = self.tools.clone();
+        let sink = Arc::clone(&self.sink);
+        std::thread::spawn(move || {
+            let report = focus(&target, &tools);
+            sink(AppEvent::FocusDone(report));
+        });
+    }
+
+    /// Send a notification on its own thread. A failure sends
+    /// `AppEvent::NotifyFailed` to the sink. A sent notification and a skipped
+    /// one send nothing.
+    pub fn spawn_notify(&self, message: String) {
+        let tools = self.tools.clone();
+        let gate = self.gate.clone();
+        let sink = Arc::clone(&self.sink);
+        std::thread::spawn(move || {
+            if let NotifyOutcome::Failed(text) = notify_now(&*tools.runner, &gate, &message) {
+                sink(AppEvent::NotifyFailed(text));
+            }
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::notification::{notification_argv, NOTIFICATION_TITLE};
     use crate::runner::fake::FakeRunner;
-    use crate::runner::CommandOutput;
+    use crate::runner::{CommandOutput, RunError};
+    use crate::wezterm::TtyWriter;
+    use std::path::Path;
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     fn expected_argv(message: &str) -> Vec<String> {
         notification_argv(NOTIFICATION_TITLE, message)
@@ -142,5 +190,78 @@ mod tests {
         let outcome = notify_now(&runner, &NotifyGate::UnlessHeld(lock), "m");
         assert_eq!(outcome, NotifyOutcome::Skipped(held.pid()));
         assert_eq!(runner.calls(), Vec::<Vec<String>>::new());
+    }
+
+    /// The longest wait for an event that must come.
+    const EVENT_WAIT: Duration = Duration::from_secs(10);
+
+    /// The wait that proves that no event comes.
+    const QUIET_WAIT: Duration = Duration::from_millis(300);
+
+    /// A runner whose each command exits with 1.
+    struct FailingRunner;
+
+    impl Runner for FailingRunner {
+        fn run(&self, _argv: &[String], _limit: Duration) -> Result<CommandOutput, RunError> {
+            Ok(CommandOutput::failed(1, "no permission"))
+        }
+    }
+
+    /// A writer that writes nothing.
+    struct NullWriter;
+
+    impl TtyWriter for NullWriter {
+        fn write(&self, _tty: &Path, _bytes: &[u8]) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn jobs_with(runner: Arc<dyn Runner>) -> (Jobs, mpsc::Receiver<AppEvent>) {
+        let (tx, rx) = mpsc::channel();
+        let sink: EventSink = Arc::new(move |event| {
+            let _ = tx.send(event);
+        });
+        let tools = FocusTools {
+            runner,
+            writer: Arc::new(NullWriter),
+        };
+        (Jobs::new(tools, NotifyGate::Always, sink), rx)
+    }
+
+    #[test]
+    fn a_failed_notification_sends_notify_failed() {
+        let (jobs, rx) = jobs_with(Arc::new(FailingRunner));
+        jobs.spawn_notify("m".to_string());
+        match rx.recv_timeout(EVENT_WAIT) {
+            Ok(AppEvent::NotifyFailed(text)) => {
+                assert_eq!(text, "osascript failed: no permission");
+            }
+            other => panic!("expected NotifyFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_sent_notification_sends_no_event() {
+        let runner = runner_that(CommandOutput::ok(""), "m");
+        let (jobs, rx) = jobs_with(Arc::new(runner));
+        jobs.spawn_notify("m".to_string());
+        assert!(rx.recv_timeout(QUIET_WAIT).is_err());
+    }
+
+    #[test]
+    fn a_focus_sends_one_focus_done() {
+        let (jobs, rx) = jobs_with(Arc::new(FailingRunner));
+        let target = FocusTarget {
+            pid: proctree::Pid::new(100),
+            label: "docs".to_string(),
+            zellij: None,
+            run: crate::liveness::RunStatus::Running,
+        };
+        jobs.spawn_focus(target);
+        match rx.recv_timeout(EVENT_WAIT) {
+            Ok(AppEvent::FocusDone(report)) => assert_eq!(report.label, "docs"),
+            other => panic!("expected FocusDone, got {other:?}"),
+        }
+        assert!(rx.recv_timeout(QUIET_WAIT).is_err());
     }
 }
