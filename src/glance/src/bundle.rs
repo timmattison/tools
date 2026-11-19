@@ -361,4 +361,18 @@ mod tests {
         assert!(!bundle.runs(&source));
         assert!(!bundle.runs(&bundle.executable()));
     }
+
+    #[test]
+    fn a_path_through_a_symbolic_link_runs_from_the_bundle() {
+        let data = data_directory();
+        let source = data.path().join("source-binary");
+        fs::write(&source, b"distinctive bytes of the source").expect("the source");
+        let bundle = Bundle::in_data_directory(data.path());
+        bundle.ensure(&source).expect("ensure");
+        let link = data.path().join("link-to-data");
+        std::os::unix::fs::symlink(data.path(), &link).expect("the link");
+        let through = link.join("glance/Glance.app/Contents/MacOS/glance");
+        assert!(through.is_file());
+        assert!(bundle.runs(&through));
+    }
 }
