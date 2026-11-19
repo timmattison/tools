@@ -23,3 +23,4 @@ pub mod menu;
 pub mod painter;
 pub mod panel;
 pub mod placement;
+pub mod settings;
