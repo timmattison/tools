@@ -89,6 +89,13 @@ impl Panel {
         match input {
             PanelInput::Hotkey { rows } if !self.visible => self.show(rows, target, now),
             PanelInput::ShowItem { rows } => self.show(rows, target, now),
+            PanelInput::Hotkey { .. } | PanelInput::Key(PanelKey::Hide) | PanelInput::ResignKey
+                if self.visible =>
+            {
+                let mut jobs = Vec::new();
+                self.hide_into(&mut jobs);
+                jobs
+            }
             PanelInput::Key(PanelKey::Key(key)) if self.visible => self.key(key, target, now),
             _ => Vec::new(),
         }
