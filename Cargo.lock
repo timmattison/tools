@@ -1432,6 +1432,7 @@ dependencies = [
 name = "chf"
 version = "0.1.0"
 dependencies = [
+ "altscreen",
  "blake3",
  "buildinfo",
  "childenv",

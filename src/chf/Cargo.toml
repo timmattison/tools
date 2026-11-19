@@ -10,6 +10,7 @@ name = "chf"
 path = "src/main.rs"
 
 [dependencies]
+altscreen = { workspace = true, features = ["ratatui"] }
 blake3.workspace = true
 buildinfo.workspace = true
 childenv.workspace = true

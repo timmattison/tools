@@ -48,16 +48,6 @@ with ch (the compacted version). Press e to resume with che (the expanded versio
 )]
 struct Cli {}
 
-/// Restores the terminal when it drops, so every way out of `run` leaves
-/// the terminal as it was.
-struct TerminalGuard;
-
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
-        ratatui::restore();
-    }
-}
-
 /// What the loop decides when it ends.
 enum Outcome {
     /// The person quit.
@@ -82,8 +72,14 @@ fn waiting_index_events(events: &Receiver<IndexEvent>) -> Vec<IndexEvent> {
 
 /// Runs the picker until the person quits or chooses a session.
 fn run_picker(home: &Path, events: &Receiver<IndexEvent>, searcher: &Searcher) -> Outcome {
-    let mut terminal = ratatui::init();
-    let _guard = TerminalGuard;
+    // The session erases the screen in the write that enters it, restores the
+    // terminal on every way out of this function, and installs a panic hook
+    // that restores it too.
+    let mut session = match altscreen::RatatuiSession::enter(altscreen::Options::default()) {
+        Ok(session) => session,
+        Err(error) => return Outcome::DrawFailed(error),
+    };
+    let terminal = session.terminal();
     let mut app = App::new();
     loop {
         let batch = waiting_index_events(events);
