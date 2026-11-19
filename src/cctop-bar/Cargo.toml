@@ -1,0 +1,17 @@
+[package]
+name = "cctop-bar"
+version = "0.1.0"
+edition.workspace = true
+description = "A macOS menu-bar mini-map of the Claude Code sessions, with a hotkey that opens cctop in a floating panel"
+license = "MIT"
+
+[lib]
+name = "cctop_bar"
+path = "src/lib.rs"
+
+[dependencies]
+cctop.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

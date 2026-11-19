@@ -1333,6 +1333,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cctop-bar"
+version = "0.1.0"
+dependencies = [
+ "cctop",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "cdknuke"
 version = "0.1.0"
 dependencies = [
