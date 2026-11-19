@@ -39,11 +39,11 @@ use tempfile::TempDir;
 const TYPES_LINT: &str = "clippy::disallowed_types";
 const METHODS_LINT: &str = "clippy::disallowed_methods";
 
-/// Each module file of the fixture, the lint that the ban must raise on it,
-/// and its source. A `None` lint means that the file must raise nothing.
 /// The source of the stand-in crate.
 const STAND_IN: &str = "pub struct Clipboard;\n\nimpl Clipboard {\n    pub fn new() -> Result<Self, String> {\n        Ok(Self)\n    }\n}\n";
 
+/// Each module file of the fixture, the lint that the ban must raise on it,
+/// and its source. A `None` lint means that the file must raise nothing.
 const FORMS: &[(&str, Option<&str>, &str)] = &[
     (
         "imported.rs",
@@ -78,14 +78,24 @@ const FORMS: &[(&str, Option<&str>, &str)] = &[
     ("clean.rs", None, "pub fn n() -> u32 {\n    7\n}\n"),
 ];
 
-/// The forms that must raise a diagnostic, with the lint of each.
-const FLAGGED: &[(&str, &str)] = &[
-    ("imported.rs", TYPES_LINT),
-    ("called.rs", METHODS_LINT),
-    ("annotated.rs", TYPES_LINT),
-    ("aliased.rs", TYPES_LINT),
-    ("renamed_crate.rs", METHODS_LINT),
-];
+/// The pairs of module file and lint that the ban must raise, which are the
+/// `Some` entries of `FORMS`.
+fn expected_bans() -> BTreeSet<(String, String)> {
+    FORMS
+        .iter()
+        .filter_map(|(file, lint, _)| lint.map(|lint| ((*file).to_string(), lint.to_string())))
+        .collect()
+}
+
+/// The module files that must raise nothing, which are the `None` entries of
+/// `FORMS`.
+fn quiet_files() -> BTreeSet<&'static str> {
+    FORMS
+        .iter()
+        .filter(|(_, lint, _)| lint.is_none())
+        .map(|(file, _, _)| *file)
+        .collect()
+}
 
 fn write(root: &Path, relative: &str, text: &str) {
     let path = root.join(relative);
@@ -220,10 +230,7 @@ fn run_clippy() -> BTreeSet<(String, String)> {
 #[test]
 fn clippy_bans_the_clipboard_of_arboard_in_each_syntactic_form() {
     let found = ban_diagnostics();
-    let expected: BTreeSet<(String, String)> = FLAGGED
-        .iter()
-        .map(|(file, lint)| ((*file).to_string(), (*lint).to_string()))
-        .collect();
+    let expected = expected_bans();
     assert!(
         expected.is_subset(found),
         "the ban missed a form.\nexpected at least: {expected:#?}\nfound: {found:#?}"
@@ -233,9 +240,10 @@ fn clippy_bans_the_clipboard_of_arboard_in_each_syntactic_form() {
 #[test]
 fn clippy_leaves_the_exempt_and_the_clean_forms_alone() {
     let found = ban_diagnostics();
+    let quiet = quiet_files();
     let wrongly: Vec<_> = found
         .iter()
-        .filter(|(file, _)| file == "exempt.rs" || file == "clean.rs")
+        .filter(|(file, _)| quiet.contains(file.as_str()))
         .collect();
     assert!(wrongly.is_empty(), "the ban flagged {wrongly:#?}");
 }
@@ -243,7 +251,8 @@ fn clippy_leaves_the_exempt_and_the_clean_forms_alone() {
 #[test]
 fn clippy_raises_no_other_ban_diagnostic_than_the_expected_ones() {
     let found = ban_diagnostics();
-    let flagged_files: BTreeSet<&str> = FLAGGED.iter().map(|(file, _)| *file).collect();
+    let expected = expected_bans();
+    let flagged_files: BTreeSet<&str> = expected.iter().map(|(file, _)| file.as_str()).collect();
     let stray: Vec<_> = found
         .iter()
         .filter(|(file, _)| !flagged_files.contains(file.as_str()))
