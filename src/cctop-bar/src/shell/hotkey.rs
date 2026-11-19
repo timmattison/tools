@@ -83,9 +83,9 @@ fn code_of(key: ChordKey) -> Option<Code> {
             LETTERS.get(index).copied()
         }
         ChordKey::Digit(digit) => DIGITS.get(usize::from(digit)).copied(),
-        ChordKey::Function(number) => {
-            FUNCTION_KEYS.get(usize::from(number).checked_sub(1)?).copied()
-        }
+        ChordKey::Function(number) => FUNCTION_KEYS
+            .get(usize::from(number).checked_sub(1)?)
+            .copied(),
         ChordKey::Backspace => Some(Code::Backspace),
         ChordKey::Space => Some(Code::Space),
         ChordKey::Escape => Some(Code::Escape),

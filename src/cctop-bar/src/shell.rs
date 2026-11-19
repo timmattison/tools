@@ -1,5 +1,6 @@
 //! The `AppKit` shell: one status item in the menu bar, with the mini-map of
-//! the sessions and a menu.
+//! the sessions and a menu, a global hotkey, and a floating panel that shows
+//! the cctop screen.
 //!
 //! The shell is thin. Each rule lives in a pure module of this crate or in
 //! the `cctop` library: the mini-map, the pixels, the menu entries, the
@@ -8,12 +9,16 @@
 //! Events reach the shell through one pipe. The watcher of the state
 //! directory and the jobs call [`post`], which sends the event to the main
 //! queue. [`deliver`] runs there and hands the event to the shell. A repeating
-//! timer of 1 s sends the tick. No timer polls for events.
+//! timer of 1 s sends the tick. No timer polls for events. The hotkey posts
+//! its own event, which opens or closes the panel.
 
+mod front_window;
 mod hotkey;
+mod panel_view;
 
 use std::cell::RefCell;
 use std::process::ExitCode;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use cctop::controller::{AppEvent, Controller, Effect};
@@ -27,6 +32,7 @@ use cctop::state::EpochMillis;
 use cctop::sync::Sync;
 use cctop::wezterm::DeviceWriter;
 use dispatch2::DispatchQueue;
+use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use objc2::rc::{autoreleasepool, Retained};
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{
@@ -36,17 +42,25 @@ use objc2_app_kit::{
     NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
     NSApplicationActivationPolicy, NSApplicationDidChangeScreenParametersNotification,
     NSBitmapFormat, NSBitmapImageRep, NSColorSpace, NSControlStateValueOff, NSControlStateValueOn,
-    NSDeviceRGBColorSpace, NSImage, NSMenu, NSMenuDelegate, NSMenuItem, NSScreen, NSStatusBar,
-    NSStatusItem, NSVariableStatusItemLength,
+    NSDeviceRGBColorSpace, NSEvent, NSImage, NSMenu, NSMenuDelegate, NSMenuItem, NSScreen,
+    NSStatusBar, NSStatusItem, NSVariableStatusItemLength, NSWindowDelegate,
 };
 use objc2_foundation::{
     NSArray, NSDistributedNotificationCenter, NSNotification, NSNotificationCenter,
     NSNotificationName, NSObject, NSObjectProtocol, NSRunLoop, NSRunLoopCommonModes, NSSize,
     NSString, NSTimer,
 };
+use ratatui::Terminal;
 
+use self::front_window::front_window;
+use self::hotkey::hotkey_of;
+use self::panel_view::{make_panel, GridPanel, GridView, SharedTerminal};
+use crate::cellgrid::CellGrid;
+use crate::chord::Chord;
 use crate::menu::{self, MenuEntry, MenuInput};
 use crate::painter::{self, Appearance, Pixmap};
+use crate::panel::{Panel, PanelInput, PanelJob};
+use crate::placement::{self, Placement, PlacementInput, Point, Rect, Screen};
 use crate::settings::Settings;
 
 /// The exit status of a start off the main thread.
@@ -87,6 +101,20 @@ const BYTES_PER_PIXEL: usize = 4;
 /// The bits in one pixel.
 const BITS_PER_PIXEL: isize = 32;
 
+/// The columns of the terminal before the first show. The first show resizes it.
+const INITIAL_COLUMNS: u16 = placement::MIN_COLUMNS;
+
+/// The rows of the terminal before the first show. The first show resizes it.
+const INITIAL_ROWS: u16 = placement::MIN_ROWS;
+
+/// An event that the main queue delivers to the shell.
+enum ShellEvent {
+    /// An event of the cctop app: the watcher, a job, or the tick.
+    App(AppEvent),
+    /// The person pressed the global hotkey.
+    Hotkey,
+}
+
 /// What decides the image of the status item. The item draws again only when
 /// this value changes.
 type PaintKey = (Minimap, Appearance, u32, u32);
@@ -99,12 +127,12 @@ struct State {
     last_error: Option<String>,
     /// What the image of the status item shows now.
     painted: Option<PaintKey>,
+    /// When the panel shows and hides.
+    panel: Panel,
 }
 
 /// The values that a `Bar` holds.
 struct Ivars {
-    /// The settings of the run.
-    settings: Settings,
     /// The status item in the menu bar.
     status_item: Retained<NSStatusItem>,
     /// The jobs that can block: a focus and a notification.
@@ -114,6 +142,16 @@ struct Ivars {
     /// The targets of the session items of the open menu. The tag of an item
     /// is the index in this list.
     targets: RefCell<Vec<FocusTarget>>,
+    /// The floating panel. It is hidden until the person shows it.
+    window: Retained<GridPanel>,
+    /// The view of the panel.
+    view: Retained<GridView>,
+    /// The cells that the cctop screen draws into.
+    terminal: SharedTerminal,
+    /// The chord that is registered, or `None` when no hotkey works.
+    registered: Option<Chord>,
+    /// The text of the failed registration of the hotkey.
+    hotkey_error: Option<String>,
 }
 
 define_class!(
@@ -151,6 +189,12 @@ define_class!(
             }
         }
 
+        /// Shows the panel, from the menu item.
+        #[unsafe(method(showPanel:))]
+        fn show_panel(&self, _item: &NSMenuItem) {
+            autoreleasepool(|_| self.show_request(false));
+        }
+
         /// Turns the notifications on or off.
         #[unsafe(method(toggleNotifications:))]
         fn toggle_notifications(&self, _item: &NSMenuItem) {
@@ -161,6 +205,14 @@ define_class!(
     }
 
     unsafe impl NSObjectProtocol for Bar {}
+
+    unsafe impl NSWindowDelegate for Bar {
+        /// Hides the panel when the person clicks outside it.
+        #[unsafe(method(windowDidResignKey:))]
+        fn window_did_resign_key(&self, _notification: &NSNotification) {
+            autoreleasepool(|_| self.input(PanelInput::ResignKey));
+        }
+    }
 
     unsafe impl NSMenuDelegate for Bar {
         /// Builds the items of the menu when it opens.
@@ -177,6 +229,14 @@ impl Bar {
         let this = Bar::alloc(mtm).set_ivars(ivars);
         // SAFETY: The signature of the `init` method of `NSObject` is correct.
         unsafe { msg_send![super(this), init] }
+    }
+
+    /// Handles one event of the shell on the main thread.
+    fn handle_shell(&self, event: ShellEvent) {
+        match event {
+            ShellEvent::App(event) => self.handle(event),
+            ShellEvent::Hotkey => self.show_request(true),
+        }
     }
 
     /// Handles one event on the main thread: updates the last error, gives
@@ -199,12 +259,116 @@ impl Bar {
             match effect {
                 Effect::Focus(target) => self.ivars().jobs.spawn_focus(target),
                 Effect::Notify(message) => self.ivars().jobs.spawn_notify(message),
-                // Only the keys of the panel make this effect. The slice of
-                // the panel handles it.
+                // Only the keys of the panel make this effect, and the panel
+                // turns it into a hide. Only the menu item quits the program.
                 Effect::Quit => {}
             }
         }
+        self.redraw_panel();
         self.refresh();
+    }
+
+    /// Gives `input` to the panel and runs the jobs that it returns.
+    fn input(&self, input: PanelInput) {
+        let jobs = {
+            let mut state = self.ivars().state.borrow_mut();
+            let State {
+                controller, panel, ..
+            } = &mut *state;
+            panel.handle(input, controller, EpochMillis::now())
+        };
+        self.run_jobs(jobs, None);
+        self.redraw_panel();
+    }
+
+    /// Shows the panel, or hides it when `hotkey` is true and it is shown.
+    ///
+    /// The placement comes first: the front window and the screens give the
+    /// size of the panel in rows. When no screen fits, nothing happens.
+    fn show_request(&self, hotkey: bool) {
+        let mtm = self.mtm();
+        let screens: Vec<Screen> = NSScreen::screens(mtm)
+            .iter()
+            .map(|screen| Screen {
+                frame: rect_of(screen.frame()),
+                visible: rect_of(screen.visibleFrame()),
+            })
+            .collect();
+        let mouse = NSEvent::mouseLocation();
+        let Some(placed) = placement::place(&PlacementInput {
+            front_window: front_window(mtm),
+            screens: &screens,
+            mouse: Point {
+                x: mouse.x,
+                y: mouse.y,
+            },
+            cell: self.ivars().view.cell(),
+        }) else {
+            return;
+        };
+        let rows = placed.rows;
+        let input = if hotkey {
+            PanelInput::Hotkey { rows }
+        } else {
+            PanelInput::ShowItem { rows }
+        };
+        let jobs = {
+            let mut state = self.ivars().state.borrow_mut();
+            let State {
+                controller, panel, ..
+            } = &mut *state;
+            panel.handle(input, controller, EpochMillis::now())
+        };
+        self.run_jobs(jobs, Some(placed));
+        self.redraw_panel();
+    }
+
+    /// Runs the jobs of the panel. A show needs `placed`.
+    fn run_jobs(&self, jobs: Vec<PanelJob>, placed: Option<Placement>) {
+        let ivars = self.ivars();
+        for job in jobs {
+            match job {
+                PanelJob::Show => {
+                    if let Some(placed) = placed {
+                        ivars
+                            .terminal
+                            .borrow_mut()
+                            .backend_mut()
+                            .resize(placed.columns, placed.rows);
+                        ivars.window.setFrame_display(frame_of(placed.frame), false);
+                    }
+                    self.draw_screen();
+                    ivars.window.makeKeyAndOrderFront(None);
+                    ivars.window.makeFirstResponder(Some(&ivars.view));
+                }
+                PanelJob::Hide => ivars.window.orderOut(None),
+                PanelJob::Focus(target) => ivars.jobs.spawn_focus(target),
+                PanelJob::Notify(message) => ivars.jobs.spawn_notify(message),
+            }
+        }
+    }
+
+    /// Draws the cctop screen again, when the panel is shown.
+    fn redraw_panel(&self) {
+        if self.ivars().state.borrow().panel.is_visible() {
+            self.draw_screen();
+        }
+    }
+
+    /// Draws the cctop screen into the cells and asks the view to paint them.
+    fn draw_screen(&self) {
+        let ivars = self.ivars();
+        let now = EpochMillis::now();
+        {
+            let state = ivars.state.borrow();
+            let app = state.controller.app();
+            // The backend of the grid does not fail.
+            let _ = ivars
+                .terminal
+                .borrow_mut()
+                .draw(|frame| cctop::ui::draw(frame, app, now));
+        }
+        ivars.view.setNeedsDisplay(true);
     }
 
     /// Draws the mini-map into the status item, when its image changed.
@@ -246,8 +410,11 @@ impl Bar {
                 board: state.controller.app().board(),
                 now: EpochMillis::now(),
                 notify: state.controller.notify(),
-                hotkey: self.ivars().settings.hotkey,
-                last_error: state.last_error.as_deref(),
+                hotkey: self.ivars().registered,
+                last_error: state
+                    .last_error
+                    .as_deref()
+                    .or(self.ivars().hotkey_error.as_deref()),
             });
             let targets: Vec<FocusTarget> = entries
                 .iter()
@@ -264,10 +431,11 @@ impl Bar {
         for entry in &entries {
             let item = match entry {
                 MenuEntry::Separator => NSMenuItem::separatorItem(mtm),
-                // The "Show cctop" item is disabled here. The slice of the
-                // panel enables it and gives it an action.
-                MenuEntry::Counts(text) | MenuEntry::Error(text) | MenuEntry::Show(text) => {
-                    disabled_item(mtm, text)
+                MenuEntry::Counts(text) | MenuEntry::Error(text) => disabled_item(mtm, text),
+                MenuEntry::Show(text) => {
+                    let item = action_item(mtm, text, sel!(showPanel:), "");
+                    set_target(&item, self);
+                    item
                 }
                 MenuEntry::Session { title, .. } => {
                     let item = action_item(mtm, title, sel!(focusSession:), "");
@@ -299,6 +467,51 @@ impl Bar {
             menu.addItem(&item);
         }
     }
+}
+
+/// The rectangle of `rect` as the placement module reads it.
+fn rect_of(rect: objc2_foundation::NSRect) -> Rect {
+    Rect {
+        x: rect.origin.x,
+        y: rect.origin.y,
+        width: rect.size.width,
+        height: rect.size.height,
+    }
+}
+
+/// The rectangle of `rect` as `AppKit` reads it.
+fn frame_of(rect: Rect) -> objc2_foundation::NSRect {
+    objc2_foundation::NSRect::new(
+        objc2_foundation::NSPoint::new(rect.x, rect.y),
+        NSSize::new(rect.width, rect.height),
+    )
+}
+
+/// Hands a key of the panel to the shell. It runs on the main thread.
+fn panel_input(input: PanelInput) {
+    let bar = BAR.with(|cell| cell.borrow().clone());
+    if let Some(bar) = bar {
+        autoreleasepool(|_| bar.input(input));
+    }
+}
+
+/// Registers the hotkey of `chord`. Returns the manager, which must stay
+/// alive for the life of the program, or the text of the failure.
+///
+/// The handler posts a [`ShellEvent::Hotkey`] for each press of this hotkey.
+fn register_hotkey(chord: Chord) -> Result<GlobalHotKeyManager, String> {
+    let hotkey = hotkey_of(chord).ok_or_else(|| "the key has no counterpart".to_string())?;
+    let manager = GlobalHotKeyManager::new().map_err(|error| error.to_string())?;
+    let id = hotkey.id();
+    GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
+        if event.id == id && event.state == HotKeyState::Pressed {
+            post(ShellEvent::Hotkey);
+        }
+    }));
+    manager
+        .register(hotkey)
+        .map_err(|error| error.to_string())?;
+    Ok(manager)
 }
 
 /// Makes `target` answer the action of `item`. The menu keeps no strong
@@ -512,15 +725,15 @@ thread_local! {
 }
 
 /// Hands `event` to the shell. It runs on the main thread, from the main queue.
-fn deliver(event: AppEvent) {
+fn deliver(event: ShellEvent) {
     let bar = BAR.with(|cell| cell.borrow().clone());
     if let Some(bar) = bar {
-        autoreleasepool(|_| bar.handle(event));
+        autoreleasepool(|_| bar.handle_shell(event));
     }
 }
 
 /// Sends `event` to the main thread. Any thread can call it.
-fn post(event: AppEvent) {
+fn post(event: ShellEvent) {
     DispatchQueue::main().exec_async(move || deliver(event));
 }
 
@@ -531,7 +744,7 @@ fn post(event: AppEvent) {
 /// the status item. It calls `on_ready` once, when the status item is up and
 /// just before the run loop starts.
 #[must_use]
-pub fn run(settings: Settings, dirs: &ClaudeDirs, on_ready: Box<dyn FnOnce()>) -> ExitCode {
+pub fn run(settings: &Settings, dirs: &ClaudeDirs, on_ready: Box<dyn FnOnce()>) -> ExitCode {
     let Some(mtm) = MainThreadMarker::new() else {
         eprintln!("{NOT_MAIN_THREAD}");
         return ExitCode::from(EXIT_NOT_MAIN_THREAD);
@@ -542,7 +755,9 @@ pub fn run(settings: Settings, dirs: &ClaudeDirs, on_ready: Box<dyn FnOnce()>) -
         return ExitCode::from(EXIT_START_FAILED);
     }
     // The watcher stays alive until `run` returns, which is the end of the program.
-    let _watcher = match cctop::store::watch(&state_dir, |event| post(AppEvent::Dir(event))) {
+    let _watcher = match cctop::store::watch(&state_dir, |event| {
+        post(ShellEvent::App(AppEvent::Dir(event)));
+    }) {
         Ok(watcher) => watcher,
         Err(error) => {
             eprintln!("cctop-bar: cannot watch {}: {error}", state_dir.display());
@@ -565,8 +780,34 @@ pub fn run(settings: Settings, dirs: &ClaudeDirs, on_ready: Box<dyn FnOnce()>) -
     // This process holds the lock of the bar. A `holder` call in the holding
     // process closes a descriptor of the lock file and releases its own lock,
     // so the gate must send each notification and never ask the lock.
-    let sink: EventSink = Arc::new(post);
+    let sink: EventSink = Arc::new(|event| post(ShellEvent::App(event)));
     let jobs = Jobs::new(tools, NotifyGate::Always, sink);
+
+    // The manager stays alive until `run` returns, which is the end of the program.
+    let (_hotkey_manager, registered, hotkey_error) = match settings.hotkey {
+        None => (None, None, None),
+        Some(chord) => match register_hotkey(chord) {
+            Ok(manager) => (Some(manager), Some(chord), None),
+            Err(error) => (
+                None,
+                None,
+                Some(format!(
+                    "The hotkey {} is not registered: {error}",
+                    chord.display()
+                )),
+            ),
+        },
+    };
+    let terminal: SharedTerminal = match Terminal::new(CellGrid::new(INITIAL_COLUMNS, INITIAL_ROWS))
+    {
+        Ok(terminal) => Rc::new(RefCell::new(terminal)),
+        Err(error) => {
+            eprintln!("cctop-bar: cannot make the screen of the panel: {error}");
+            return ExitCode::from(EXIT_START_FAILED);
+        }
+    };
+    let view = GridView::new(mtm, Rc::clone(&terminal), panel_input);
+    let window = make_panel(mtm, &view);
 
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
@@ -575,17 +816,25 @@ pub fn run(settings: Settings, dirs: &ClaudeDirs, on_ready: Box<dyn FnOnce()>) -
     let bar = Bar::new(
         mtm,
         Ivars {
-            settings,
             status_item,
             jobs,
             state: RefCell::new(State {
                 controller,
                 last_error: None,
                 painted: None,
+                panel: Panel::new(),
             }),
             targets: RefCell::new(Vec::new()),
+            window,
+            view,
+            terminal,
+            registered,
+            hotkey_error,
         },
     );
+    bar.ivars()
+        .window
+        .setDelegate(Some(ProtocolObject::from_ref(&*bar)));
     let menu = NSMenu::new(mtm);
     menu.setAutoenablesItems(false);
     menu.setDelegate(Some(ProtocolObject::from_ref(&*bar)));

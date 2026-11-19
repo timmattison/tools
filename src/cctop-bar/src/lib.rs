@@ -11,7 +11,7 @@
 //! - `placement` picks the screen, the cells and the frame of the panel.
 //! - `panel` decides when the panel shows and hides.
 //! - `settings` holds the settings, the arguments of the background copy and the lines of the launch.
-//! - `shell` (macOS only) is the one module with `AppKit` code: the status item and the menu.
+//! - `shell` (macOS only) is the one module with `AppKit` code: the status item, the menu, the global hotkey and the floating panel.
 //! - `cellgrid` keeps the cells that the cctop screen draws and turns them into paint operations.
 
 // Stricter than the inherited `[workspace.lints]` set; see "Lint Configuration" in CLAUDE.md.

@@ -136,7 +136,7 @@ impl soleinstance::launch::Program for Bar {
     }
 
     fn run_here(self, on_ready: Box<dyn FnOnce()>) -> ExitCode {
-        cctop_bar::shell::run(self.settings, &self.dirs, on_ready)
+        cctop_bar::shell::run(&self.settings, &self.dirs, on_ready)
     }
 }
 

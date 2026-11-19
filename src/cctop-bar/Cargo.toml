@@ -30,6 +30,7 @@ objc2-app-kit = { workspace = true, features = [
     "std",
     "NSAppearance",
     "NSApplication",
+    "NSAttributedString",
     "NSBitmapImageRep",
     "NSButton",
     "NSCell",
@@ -57,6 +58,7 @@ objc2-app-kit = { workspace = true, features = [
     "NSView",
     "NSWindow",
     "NSWorkspace",
+    "libc",
     "objc2-core-foundation",
 ] }
 objc2-core-foundation = { workspace = true, features = [
@@ -75,6 +77,9 @@ objc2-core-graphics = { workspace = true, features = [
 objc2-foundation = { workspace = true, features = [
     "std",
     "NSArray",
+    "NSAttributedString",
+    "NSDictionary",
+    "NSEnumerator",
     "NSDistributedNotificationCenter",
     "NSGeometry",
     "NSNotification",
