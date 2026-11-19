@@ -9358,8 +9358,10 @@ dependencies = [
  "aws-credential-types",
  "aws-sdk-sts",
  "buildinfo",
+ "childenv",
  "dirs",
  "sysclip",
+ "tempfile",
  "tokio",
 ]
 

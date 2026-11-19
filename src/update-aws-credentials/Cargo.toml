@@ -15,5 +15,10 @@ dirs.workspace = true
 sysclip.workspace = true
 tokio.workspace = true
 
+[dev-dependencies]
+childenv.workspace = true
+sysclip = { workspace = true, features = ["testing"] }
+tempfile.workspace = true
+
 [lints]
 workspace = true

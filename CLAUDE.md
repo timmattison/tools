@@ -760,10 +760,10 @@ No test reaches the clipboard of the machine. The order rule takes the opener
 of `arboard`, the environment and the search path as parameters, so the unit
 tests of `sysclip` cover each branch and set no process variable. An end-to-end
 test starts the binary with `MOSH_OPEN_SOCKET` set and with a `PATH` that holds
-a fake `pbcopy` and `pbpaste` in a temporary directory of its own. `dirc` and
-`wn` hold such tests. `sysclip::testing::FakeShims` (feature `testing`, as a
-dev-dependency) writes those fake commands. Each such test takes them from that
-one place.
+a fake `pbcopy` and `pbpaste` in a temporary directory of its own. `dirc`,
+`wn`, `clipboard-random` and `update-aws-credentials` hold such tests.
+`sysclip::testing::FakeShims` (feature `testing`, as a dev-dependency) writes
+those fake commands. Each such test takes them from that one place.
 
 ### The Ban
 
