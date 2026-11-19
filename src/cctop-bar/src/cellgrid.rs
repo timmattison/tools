@@ -721,4 +721,27 @@ mod tests {
         assert_eq!(paint.backgrounds[0].cells, 2);
         assert_eq!(paint.glyphs.len(), 1);
     }
+
+    #[test]
+    fn resize_changes_the_size_and_the_next_draw_fills_it() {
+        let app = app_with(&[(1, "needs-you", "日本語")]);
+        let mut terminal = draw_app(&app, 100, 30);
+        terminal.backend_mut().resize(60, 20);
+        assert_eq!(terminal.backend().size().unwrap(), Size::new(60, 20));
+        terminal
+            .draw(|frame| cctop::ui::draw(frame, &app, EpochMillis::new(NOW)))
+            .unwrap();
+        let grid = terminal.backend();
+        assert_eq!(grid.buffer().area, Rect::new(0, 0, 60, 20));
+        assert!(row_text(grid, 0).contains("cctop"));
+        // The bottom row holds the status line, and the border of the log is above it.
+        assert!(
+            row_text(grid, 18).starts_with('└'),
+            "{}",
+            row_text(grid, 18)
+        );
+        assert!(row_text(grid, 19).contains("enter focus"));
+        let paint = grid.paint(&PanelColors::default());
+        assert!(paint.glyphs.iter().all(|op| op.column < 60 && op.row < 20));
+    }
 }
