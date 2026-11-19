@@ -13,3 +13,4 @@
 #![warn(clippy::pedantic)]
 
 pub mod chord;
+pub mod painter;
