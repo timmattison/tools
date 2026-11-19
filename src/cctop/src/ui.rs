@@ -206,6 +206,12 @@ fn table_title(board: &Board) -> String {
     )
 }
 
+/// The counts part of the title line, with no frame and no name.
+#[must_use]
+pub fn title_counts(_board: &Board) -> String {
+    String::new()
+}
+
 /// Draw the table of sessions in `area`.
 fn draw_table(frame: &mut Frame, area: Rect, app: &App, now: EpochMillis) {
     let board = app.board();
@@ -641,6 +647,33 @@ mod tests {
     /// The top line of the table, which holds the title.
     fn title(buffer: &Buffer) -> String {
         row_text(buffer, 0)
+    }
+
+    #[test]
+    fn title_counts_is_the_title_text_between_the_name_and_the_last_space() {
+        let mut app = App::new();
+        app.board_mut()
+            .load(file(1, "日本語", PaneState::NeedsYou, 100), None);
+        app.board_mut()
+            .load(file(2, "café", PaneState::NeedsYou, 100), None);
+        app.board_mut()
+            .load(file(3, "🎉", PaneState::Idle, 100), None);
+        app.board_mut()
+            .load(file(4, "d", PaneState::Working, 100), None);
+        app.board_mut().toggle_handled(Pid::new(2));
+        app.board_mut().set_run_status(
+            Pid::new(4),
+            RunStatus::Stopped,
+            EpochMillis::new(1_000),
+        );
+        let full = table_title(app.board());
+        let inner = full
+            .strip_prefix(" cctop · ")
+            .and_then(|rest| rest.strip_suffix(' '))
+            .expect("the title has its frame");
+        assert_eq!(title_counts(app.board()), inner);
+        assert!(inner.starts_with("4 sessions · 1/1 ❗"), "{inner}");
+        assert!(inner.ends_with("1 🧊"), "{inner}");
     }
 
     #[test]
