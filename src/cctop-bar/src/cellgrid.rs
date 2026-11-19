@@ -245,7 +245,7 @@ impl Backend for CellGrid {
 mod tests {
     use super::*;
     use cctop::app::App;
-    use cctop::state::{parse_state_file, EpochMillis};
+    use cctop::state::{parse_state_file, EpochMillis, PaneState};
     use ratatui::Terminal;
 
     /// The time of the fixtures.
@@ -318,5 +318,16 @@ mod tests {
             .expect("a glyph after the marker");
         assert_eq!(next.column, wide.column + 3);
         assert_eq!(next.cells, 1);
+    }
+
+    #[test]
+    fn the_state_blocks_have_the_color_of_the_state() {
+        let app = app_with(&[(1, "needs-you", "日本語")]);
+        let terminal = draw_app(&app, 100, 30);
+        let paint = terminal.backend().paint(&PanelColors::default());
+        let blocks: Vec<&GlyphOp> = paint.glyphs.iter().filter(|op| op.glyph == "█").collect();
+        assert_eq!(blocks.len(), 2);
+        let expected = PaneState::NeedsYou.color();
+        assert!(blocks.iter().all(|op| op.color == expected));
     }
 }
