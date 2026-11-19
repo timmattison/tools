@@ -267,4 +267,40 @@ mod tests {
         assert_eq!(jobs, vec![]);
         assert!(panel.is_visible());
     }
+
+    #[test]
+    fn q_hides_the_panel_and_never_quits() {
+        let (mut panel, mut target) = shown(vec![vec![Effect::Quit]]);
+        let jobs = panel.handle(key_input(KeyCode::Char('q')), &mut target, NOW);
+        assert_eq!(jobs, vec![PanelJob::Hide]);
+        assert!(!panel.is_visible());
+    }
+
+    #[test]
+    fn control_c_hides_the_panel_too() {
+        let (mut panel, mut target) = shown(vec![vec![Effect::Quit]]);
+        let control_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let jobs = panel.handle(PanelInput::Key(PanelKey::Key(control_c)), &mut target, NOW);
+        assert_eq!(jobs, vec![PanelJob::Hide]);
+        assert_eq!(target.calls, vec![Call::Key(control_c)]);
+    }
+
+    #[test]
+    fn one_result_never_holds_two_hide_jobs() {
+        let (mut panel, mut target) = shown(vec![vec![
+            Effect::Focus(focus_target()),
+            Effect::Quit,
+            Effect::Quit,
+            Effect::Notify("x".to_string()),
+        ]]);
+        let jobs = panel.handle(key_input(KeyCode::Enter), &mut target, NOW);
+        assert_eq!(
+            jobs,
+            vec![
+                PanelJob::Focus(focus_target()),
+                PanelJob::Hide,
+                PanelJob::Notify("x".to_string()),
+            ]
+        );
+    }
 }
