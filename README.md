@@ -5919,7 +5919,9 @@ cargo install --git https://github.com/timmattison/tools chf
 
 cctop-bar shows the cctop board in the menu bar of macOS. The status item holds a mini-map with one tile for each Claude Code session. A tile has the color of the state of its session. The number of sessions that need you shows on an amber field. The menu lists the sessions that need you, and a click brings the terminal of a session to the front. The menu also holds the counts, the last error, and a switch for the notifications.
 
-Each user has one status item. Run `cctop-bar` to start it. It runs in the background, and the command returns when the status item is up. Run `cctop-bar` again to stop it. `cctop-bar -f` keeps the status item in the foreground, for example for a launch agent. When `cctop-bar` runs, it sends the notification that `cctop` otherwise sends, so you get one notification for each change.
+A global hotkey opens the normal cctop screen in a floating panel, in the center of the active screen and over a full-screen app. The panel has the keys of `cctop`. Enter focuses the selected session and hides the panel. Esc, `q`, or the hotkey hides it. The panel needs no terminal, because cctop-bar paints the cctop screen itself.
+
+Each user has one status item. Run `cctop-bar` to start it. It runs in the background, and the command returns when the status item is up. Run `cctop-bar` again to stop it. `cctop-bar -f` keeps the status item in the foreground, for example for a LaunchAgent. When `cctop-bar` runs, it sends the notification that `cctop` otherwise sends, so you get one notification for each change.
 
 The flags:
 
@@ -5928,6 +5930,10 @@ The flags:
 - `--no-hotkey` registers no global hotkey.
 - `-f`, `--foreground` runs the status item in the process of the command.
 
+CAUTION: OPTION + SHIFT + COMMAND + DELETE, WITH NO CONTROL, IS THE FINDER SHORTCUT THAT EMPTIES THE TRASH WITH NO CONFIRMATION. IF YOUR PRESS OF THE DEFAULT HOTKEY MISSES CONTROL WHILE FINDER IS IN FRONT, FINDER EMPTIES THE TRASH. USE A HYPER KEY, OR SET A DIFFERENT HOTKEY WITH `--hotkey`.
+
 cctop-bar runs on macOS only.
 
 To install: `cargo install --git https://github.com/timmattison/tools cctop-bar`
+
+See [src/cctop-bar/README.md](src/cctop-bar/README.md) for the tiles, the menu, the panel and its keys, the hotkey, and the start at login.

@@ -821,6 +821,35 @@ that finds no owner proves nothing.
 - `wn` - the read of the chain, and the write of the plan. `WN_NO_CLIPBOARD`
   stays
 
+## One Instance and the Background Start
+
+Every tool in this repository that keeps one copy of itself for each user, or
+starts itself in the background and returns to the shell, **must** do so
+through the `soleinstance` library crate at `src/soleinstance/`.
+
+### Why
+
+`glance` had the lock and the background start, and `cctop-bar` needed the
+same code. A second copy is the copy that drifts. `soleinstance` holds the one
+lock, the one stop of a running copy, and the one background start.
+
+- `instance` - a POSIX record lock on a file in the data directory of the
+  user. The kernel names the holder (`holder`), and it releases the lock when
+  the holder ends for any cause, `SIGKILL` included. A process never sees its
+  own lock, and a close of any descriptor of the file releases it. Thus the
+  holder never calls `holder`.
+- `launch` - a tool implements `Program`, and `launch::run` starts it here,
+  starts a copy in the background, or stops the copy that runs. The messages
+  name the tool through `Program::name`.
+- `testing` (feature) - `hold_in_child` holds a lock in a second process, for
+  a test that needs a holder other than itself.
+
+### Crates Currently Using soleinstance
+
+- `cctop` - `holder` of the lock of `cctop-bar`, before each notification
+- `cctop-bar` - its one status item and its background start
+- `glance` - one status item for each target, and its background start
+
 ## Version Information
 
 All tools in this repository **must** display version information including git hash and dirty status when `--version` or `-V` is used.
