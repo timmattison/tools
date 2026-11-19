@@ -464,9 +464,11 @@ impl App {
         self.fix_offset();
     }
 
-    /// Keep the selected row inside the rows that the list shows.
+    /// Keep the selected row inside the rows that the list shows. The list
+    /// shows a full page when it can.
     fn fix_offset(&mut self) {
         let rows = usize::from(self.list_rows);
+        self.list_offset = self.list_offset.min(self.hits.len().saturating_sub(rows));
         if self.selected < self.list_offset {
             self.list_offset = self.selected;
         } else if self.selected >= self.list_offset + rows {
