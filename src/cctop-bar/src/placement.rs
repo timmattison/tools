@@ -169,8 +169,10 @@ fn clamp_to_u16(value: f64) -> u16 {
 /// `primary_height` is the height of the frame of the first screen.
 #[must_use]
 pub fn flip_window_bounds(bounds: Rect, primary_height: f64) -> Rect {
-    let _ = primary_height;
-    bounds
+    Rect {
+        y: primary_height - (bounds.y + bounds.height),
+        ..bounds
+    }
 }
 
 #[cfg(test)]
