@@ -163,6 +163,7 @@ fn info_plist_text() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::MetadataExt;
 
     fn data_directory() -> tempfile::TempDir {
         tempfile::Builder::new()
@@ -237,5 +238,25 @@ mod tests {
             env!("CARGO_PKG_VERSION")
         );
         assert_eq!(object["LSUIElement"], true);
+    }
+
+    #[test]
+    fn a_second_call_with_the_same_source_writes_nothing() {
+        let data = data_directory();
+        let source = data.path().join("source-binary");
+        fs::write(&source, b"distinctive bytes of the source").expect("the source");
+        let bundle = Bundle::in_data_directory(data.path());
+        bundle.ensure(&source).expect("first ensure");
+        let executable = fs::metadata(bundle.executable()).expect("executable").ino();
+        let plist = fs::metadata(bundle.info_plist()).expect("plist").ino();
+        bundle.ensure(&source).expect("second ensure");
+        assert_eq!(
+            fs::metadata(bundle.executable()).expect("executable").ino(),
+            executable
+        );
+        assert_eq!(
+            fs::metadata(bundle.info_plist()).expect("plist").ino(),
+            plist
+        );
     }
 }
