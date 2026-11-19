@@ -133,11 +133,12 @@ const NONE_TEXT: &str = "—";
 /// handled mark.
 const MIN_STATE_WIDTH: u16 = 10;
 
-/// The width of the state column: the longest state text of `labels`, and at
-/// least [`MIN_STATE_WIDTH`].
-fn state_width<'a>(labels: impl Iterator<Item = &'a str>) -> u16 {
-    labels
-        .map(|label| u16::try_from(label.chars().count()).unwrap_or(u16::MAX))
+/// The width of the state column: the widest of `widths`, and at least
+/// [`MIN_STATE_WIDTH`]. Each width is the width of a drawn state line.
+fn state_width(widths: impl IntoIterator<Item = usize>) -> u16 {
+    widths
+        .into_iter()
+        .map(|width| u16::try_from(width).unwrap_or(u16::MAX))
         .fold(MIN_STATE_WIDTH, u16::max)
 }
 
@@ -160,9 +161,10 @@ fn frozen_flag() -> [Span<'static>; 2] {
     ]
 }
 
-/// The state cell of a row. It has the same text and the same order as
-/// [`Session::state_label`]. The state has no color, because the block has it.
-/// The word `frozen` is blue.
+/// The state cell of a row. The state has no color, because the block has it.
+/// The word `frozen` is blue. `draw_table` takes the width of the state column
+/// from this line, thus the width and the text cannot disagree. A test holds
+/// its text equal to [`Session::state_label`].
 fn state_line(session: &Session) -> Line<'static> {
     let mut spans = vec![Span::raw(session.state().label())];
     if session.is_handled() {
@@ -217,16 +219,16 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App, now: EpochMillis) {
     let sessions: Vec<_> = board
         .rows()
         .into_iter()
-        .map(|session| (session, session.state_label()))
+        .map(|session| (session, state_line(session)))
         .collect();
-    let state_width = state_width(sessions.iter().map(|(_, label)| label.as_str()));
+    let state_width = state_width(sessions.iter().map(|(_, line)| line.width()));
     let rows: Vec<Row> = sessions
         .into_iter()
-        .map(|(session, _)| {
+        .map(|(session, line)| {
             let state = session.state();
             Row::new([
                 Span::styled(STATE_BLOCK, Style::new().fg(state_color(state))).into(),
-                Text::from(state_line(session)),
+                Text::from(line),
                 Text::from(format_elapsed(now.saturating_since(session.since))),
                 Text::from(
                     session
@@ -309,6 +311,49 @@ mod tests {
     const MINUTE: u64 = 60 * SECOND;
     const HOUR: u64 = 60 * MINUTE;
     const DAY: u64 = 24 * HOUR;
+
+    #[test]
+    fn state_line_has_the_text_of_state_label() {
+        use PaneState::{Agents, Idle, NeedsYou, Shells, Working};
+        let pid = Pid::new(7);
+        for state in [Working, NeedsYou, Idle, Agents, Shells] {
+            let mut board = Board::new();
+            board.load(file(7, "dir", state, 500), None);
+            let live = board.get(pid).expect("the session is loaded");
+            let mut cases = vec![("live", live.state_label(), line_text(&state_line(live)))];
+            if live.takes_handled_mark() {
+                board.toggle_handled(pid);
+                let handled = board.get(pid).expect("the session is loaded");
+                assert!(handled.is_handled(), "{state:?}");
+                cases.push((
+                    "handled",
+                    handled.state_label(),
+                    line_text(&state_line(handled)),
+                ));
+            }
+            let mut frozen = Board::new();
+            frozen.load(file(7, "dir", state, 500), None);
+            frozen.set_run_status(pid, RunStatus::Stopped, EpochMillis::new(1_000));
+            let frozen = frozen.get(pid).expect("the session is loaded");
+            assert!(frozen.is_frozen(), "{state:?}");
+            cases.push((
+                "frozen",
+                frozen.state_label(),
+                line_text(&state_line(frozen)),
+            ));
+            for (kind, label, text) in cases {
+                assert_eq!(text, label, "{state:?} {kind}");
+            }
+        }
+    }
+
+    /// The text of a line: the content of its spans, joined.
+    fn line_text(line: &Line) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
 
     #[test]
     fn format_elapsed_uses_the_unit_that_fits() {

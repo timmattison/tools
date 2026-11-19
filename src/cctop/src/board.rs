@@ -146,7 +146,7 @@ impl Session {
         self.handled.is_some()
     }
 
-    /// The state of the session for the screen. A handled session adds
+    /// The plain text of the state cell of the row. A handled session adds
     /// [`HANDLED_SUFFIX`], for example `idle - handled`. A frozen session adds
     /// [`FLAG_SEPARATOR`] and [`FROZEN_LABEL`], for example
     /// `needs-you - frozen`.
