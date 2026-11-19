@@ -96,6 +96,12 @@ impl Bundle {
         self.0.join(CONTENTS_NAME).join(INFO_PLIST_NAME)
     }
 
+    /// Tells if `program` is the executable of this bundle. Not yet written.
+    #[must_use]
+    pub fn runs(&self, _program: &Path) -> bool {
+        false
+    }
+
     /// Makes sure that the bundle holds a copy of the file `source` as its
     /// executable, and the right `Info.plist`.
     ///
@@ -313,5 +319,15 @@ mod tests {
             plutil_json(&bundle.info_plist())["CFBundleIdentifier"],
             IDENTIFIER
         );
+    }
+
+    #[test]
+    fn the_executable_of_the_bundle_runs_from_the_bundle() {
+        let data = data_directory();
+        let source = data.path().join("source-binary");
+        fs::write(&source, b"distinctive bytes of the source").expect("the source");
+        let bundle = Bundle::in_data_directory(data.path());
+        bundle.ensure(&source).expect("ensure");
+        assert!(bundle.runs(&bundle.executable()));
     }
 }
