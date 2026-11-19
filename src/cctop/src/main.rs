@@ -7,14 +7,14 @@
 
 use std::io::IsTerminal;
 use std::process::ExitCode;
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cctop::controller::{AppEvent, Controller, Effect};
-use cctop::focus::{focus, FocusTarget, FocusTools};
+use cctop::focus::FocusTools;
+use cctop::jobs::{bar_lock_for_user, EventSink, Jobs, NotifyGate};
 use cctop::liveness::SystemClock;
-use cctop::notification;
 use cctop::paths::ClaudeDirs;
 use cctop::runner::{Runner, SystemRunner};
 use cctop::state::EpochMillis;
@@ -99,6 +99,11 @@ fn run(dirs: &ClaudeDirs, notify: bool) -> Result<(), String> {
         runner: Arc::clone(&runner),
         writer: Arc::new(DeviceWriter),
     };
+    let gate = bar_lock_for_user().map_or(NotifyGate::Always, NotifyGate::UnlessHeld);
+    let sink: EventSink = Arc::new(move |event| {
+        let _ = tx.send(event);
+    });
+    let jobs = Jobs::new(tools, gate, sink);
     // The session clears the screen, restores the terminal on every exit, and
     // installs a panic hook that restores it too.
     let mut session = altscreen::RatatuiSession::enter(altscreen::Options::default())
@@ -128,30 +133,9 @@ fn run(dirs: &ClaudeDirs, notify: bool) -> Result<(), String> {
         for effect in controller.handle(event, EpochMillis::now()) {
             match effect {
                 Effect::Quit => return Ok(()),
-                Effect::Focus(target) => spawn_focus(target, &tools, &tx),
-                Effect::Notify(message) => spawn_notify(message, &runner, &tx),
+                Effect::Focus(target) => jobs.spawn_focus(target),
+                Effect::Notify(message) => jobs.spawn_notify(message),
             }
         }
     }
-}
-
-/// Run a focus on its own thread, and send the report back.
-fn spawn_focus(target: FocusTarget, tools: &FocusTools, tx: &Sender<AppEvent>) {
-    let tools = tools.clone();
-    let tx = tx.clone();
-    std::thread::spawn(move || {
-        let report = focus(&target, &tools);
-        let _ = tx.send(AppEvent::FocusDone(report));
-    });
-}
-
-/// Send a notification on its own thread, and report a failure.
-fn spawn_notify(message: String, runner: &Arc<dyn Runner>, tx: &Sender<AppEvent>) {
-    let runner = Arc::clone(runner);
-    let tx = tx.clone();
-    std::thread::spawn(move || {
-        if let Err(error) = notification::send(&*runner, &message) {
-            let _ = tx.send(AppEvent::NotifyFailed(error));
-        }
-    });
 }

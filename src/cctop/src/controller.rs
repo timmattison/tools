@@ -77,6 +77,18 @@ impl Controller {
         self.app.set_page_size(ui::page_size(rows));
     }
 
+    /// Turn the notification on or off. Off stops the `Effect::Notify` of
+    /// later changes to `needs-you`. The jump of the selection does not change.
+    pub fn set_notify(&mut self, on: bool) {
+        self.notify = on;
+    }
+
+    /// Whether the controller asks for a notification.
+    #[must_use]
+    pub fn notify(&self) -> bool {
+        self.notify
+    }
+
     /// The app, for the draw.
     #[must_use]
     pub fn app(&self) -> &App {
@@ -256,6 +268,34 @@ mod tests {
         write(dir.path(), 100, "working", 10);
         let mut controller = controller(dir.path(), true);
         controller.start(NOW).unwrap();
+        write(dir.path(), 100, "needs-you", 20);
+        let effects = controller.handle(file_event(100), NOW);
+        assert_eq!(effects, vec![Effect::Notify("worktree needs you".into())]);
+    }
+
+    #[test]
+    fn set_notify_false_stops_the_notification_and_keeps_the_jump() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), 100, "idle", 10);
+        write(dir.path(), 200, "working", 10);
+        let mut controller = controller_of(dir.path(), &[100, 200], true);
+        controller.start(NOW).unwrap();
+        controller.set_notify(false);
+        assert!(!controller.notify());
+        write(dir.path(), 200, "needs-you", 20);
+        let effects = controller.handle(file_event(200), NOW);
+        assert_eq!(effects, vec![]);
+        assert_eq!(selected_pid(&controller), Pid::new(200));
+    }
+
+    #[test]
+    fn set_notify_true_starts_the_notification() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), 100, "working", 10);
+        let mut controller = controller(dir.path(), false);
+        controller.start(NOW).unwrap();
+        controller.set_notify(true);
+        assert!(controller.notify());
         write(dir.path(), 100, "needs-you", 20);
         let effects = controller.handle(file_event(100), NOW);
         assert_eq!(effects, vec![Effect::Notify("worktree needs you".into())]);

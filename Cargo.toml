@@ -213,6 +213,12 @@ objc2-core-foundation = { version = "0.3.2", default-features = false }
 objc2 = "0.6.5"
 objc2-app-kit = { version = "0.3.2", default-features = false }
 objc2-foundation = { version = "0.3.2", default-features = false }
+# Runs a closure on the main queue for cctop-bar. glance does not use it.
+dispatch2 = { version = "0.3.1", default-features = false }
+# The window list of Core Graphics for the placement of the panel of cctop-bar.
+objc2-core-graphics = { version = "0.3.2", default-features = false }
+# The global hotkey of cctop-bar through Carbon RegisterEventHotKey, which needs no Accessibility or Input Monitoring permission.
+global-hotkey = "0.10.0"
 windows-sys = { version = "0.60", features = [
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_Foundation",
@@ -223,6 +229,8 @@ windows-sys = { version = "0.60", features = [
 # Internal crates
 buildinfo = { path = "src/buildinfo" }
 childenv = { path = "src/childenv" }
+cctop = { path = "src/cctop" }
+soleinstance = { path = "src/soleinstance" }
 sysclip = { path = "src/sysclip" }
 claude-transcript = { path = "src/claude-transcript" }
 op-cache = { path = "src/op-cache" }

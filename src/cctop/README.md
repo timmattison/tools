@@ -137,6 +137,8 @@ When a live session changes to `needs-you`, cctop sends a macOS notification. It
 
 Use `--no-notify` to turn the notification off.
 
+When [`cctop-bar`](../cctop-bar/README.md) runs, the terminal cctop sends no notification. Before each notification, cctop asks the kernel for the holder of the lock of `cctop-bar`. The lock is the file `~/Library/Application Support/cctop-bar/cctop-bar.lock`. While a process holds it, cctop sends nothing, because `cctop-bar` sends the same notification. The jump of the selection does not change.
+
 ## The jump to a session that needs you
 
 When a live session changes to `needs-you`, cctop moves the selection to its row at once. A count in the title line is easy to miss, but you see the selection move. The jump only moves the selection. It does not focus the session. Press Enter to focus it.

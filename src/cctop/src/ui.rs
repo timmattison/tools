@@ -185,6 +185,15 @@ const TITLE_SEPARATOR: &str = " · ";
 /// It holds only live rows. The last count has one number, the number of
 /// frozen rows, because a frozen row takes no handled mark.
 fn table_title(board: &Board) -> String {
+    format!(" cctop{TITLE_SEPARATOR}{} ", title_counts(board))
+}
+
+/// The counts part of the title line, with no frame and no name: the number
+/// of sessions, the `unmarked/handled` count of each state, and the number of
+/// frozen rows. `table_title` puts it between its name and its last space,
+/// and the menu of `cctop-bar` shows it as it is.
+#[must_use]
+pub fn title_counts(board: &Board) -> String {
     let count = board.len();
     let noun = if count == 1 { "session" } else { "sessions" };
     let counts: Vec<String> = board
@@ -200,7 +209,7 @@ fn table_title(board: &Board) -> String {
         })
         .collect();
     format!(
-        " cctop{TITLE_SEPARATOR}{count} {noun}{TITLE_SEPARATOR}{}{TITLE_SEPARATOR}{} {FROZEN_MARKER} ",
+        "{count} {noun}{TITLE_SEPARATOR}{}{TITLE_SEPARATOR}{} {FROZEN_MARKER}",
         counts.join(TITLE_SEPARATOR),
         board.frozen_count()
     )
@@ -641,6 +650,30 @@ mod tests {
     /// The top line of the table, which holds the title.
     fn title(buffer: &Buffer) -> String {
         row_text(buffer, 0)
+    }
+
+    #[test]
+    fn title_counts_is_the_title_text_between_the_name_and_the_last_space() {
+        let mut app = App::new();
+        app.board_mut()
+            .load(file(1, "日本語", PaneState::NeedsYou, 100), None);
+        app.board_mut()
+            .load(file(2, "café", PaneState::NeedsYou, 100), None);
+        app.board_mut()
+            .load(file(3, "🎉", PaneState::Idle, 100), None);
+        app.board_mut()
+            .load(file(4, "d", PaneState::Working, 100), None);
+        app.board_mut().toggle_handled(Pid::new(2));
+        app.board_mut()
+            .set_run_status(Pid::new(4), RunStatus::Stopped, EpochMillis::new(1_000));
+        let full = table_title(app.board());
+        let inner = full
+            .strip_prefix(" cctop · ")
+            .and_then(|rest| rest.strip_suffix(' '))
+            .expect("the title has its frame");
+        assert_eq!(title_counts(app.board()), inner);
+        assert!(inner.starts_with("4 sessions · 1/1 ❗"), "{inner}");
+        assert!(inner.ends_with("1 🧊"), "{inner}");
     }
 
     #[test]
