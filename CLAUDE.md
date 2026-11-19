@@ -221,6 +221,7 @@ allowlist.
 
 ### Crates Currently Using testcolor
 
+- `cctop-bar` - the version, help, and usage-error tests of the binary
 - `cdva` - the long-help test of `--strict`
 - `crap` - the tests of the `--expand` notes
 - `cwt` - family render tests, and the end-to-end helpers that read the output

@@ -5914,3 +5914,20 @@ After Enter, `chf` replaces itself with the shell that runs `crap`. The exit sta
 ```bash
 cargo install --git https://github.com/timmattison/tools chf
 ```
+
+## cctop-bar (Claude Code top in the menu bar)
+
+cctop-bar shows the cctop board in the menu bar of macOS. The status item holds a mini-map with one tile for each Claude Code session. A tile has the color of the state of its session. The number of sessions that need you shows on an amber field. The menu lists the sessions that need you, and a click brings the terminal of a session to the front. The menu also holds the counts, the last error, and a switch for the notifications.
+
+Each user has one status item. Run `cctop-bar` to start it. It runs in the background, and the command returns when the status item is up. Run `cctop-bar` again to stop it. `cctop-bar -f` keeps the status item in the foreground, for example for a launch agent. When `cctop-bar` runs, it sends the notification that `cctop` otherwise sends, so you get one notification for each change.
+
+The flags:
+
+- `--no-notify` sends no notification when a session changes to needs-you.
+- `--hotkey <CHORD>` sets the global hotkey. The default is `ctrl+alt+shift+cmd+backspace`, which the menu shows as `⌃⌥⇧⌘⌫`. Join the parts with `+`. The modifiers are `ctrl`, `alt`, `shift`, and `cmd`. The keys are `a-z`, `0-9`, `f1-f20`, `backspace`, `space`, `escape`, `return`, `tab`, `up`, `down`, `left`, and `right`.
+- `--no-hotkey` registers no global hotkey.
+- `-f`, `--foreground` runs the status item in the process of the command.
+
+cctop-bar runs on macOS only.
+
+To install: `cargo install --git https://github.com/timmattison/tools cctop-bar`
