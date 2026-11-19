@@ -746,3 +746,30 @@ fn a_background_status_item_runs_from_the_bundle() {
         home.assert_runs_from_the_bundle(pid);
     }
 }
+
+/// A foreground run that does not run from the bundle replaces itself with
+/// the executable of the bundle. The PID stays the same across the `exec`.
+#[test]
+fn a_foreground_status_item_runs_from_the_bundle_and_keeps_its_pid() {
+    let mut home = Home::new();
+    for target in [Target::Local, Target::Host(BETA)] {
+        let mut args = target.args();
+        args.extend([FOREGROUND, "--exit-after", LIFE_BOUND]);
+        let mut child = home
+            .command(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the glance binary starts");
+        home.started.push(child.id());
+        let mut line = String::new();
+        BufReader::new(child.stdout.take().expect("the stdout of the status item"))
+            .read_line(&mut line)
+            .expect("read the stdout of the status item");
+        assert_eq!(line, target.ready_line(child.id()));
+        home.assert_runs_from_the_bundle(child.id());
+        home.assert_stops(target, &[], child.id());
+        let status = child.wait().expect("wait for the status item");
+        assert_eq!(status.code(), Some(0), "{status:?}");
+    }
+}
