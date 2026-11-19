@@ -1429,6 +1429,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "chf"
+version = "0.1.0"
+dependencies = [
+ "altscreen",
+ "blake3",
+ "buildinfo",
+ "childenv",
+ "chrono",
+ "clap",
+ "claude-transcript",
+ "crossterm",
+ "dirs",
+ "gitscratch",
+ "portable-pty",
+ "ratatui",
+ "rayon",
+ "regex",
+ "serde",
+ "serde_json",
+ "shellquote",
+ "tempfile",
+ "textfit",
+ "unicode-width",
+ "wait-timeout",
+]
+
+[[package]]
 name = "childenv"
 version = "0.1.0"
 
@@ -1512,6 +1539,14 @@ name = "clap_lex"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
+
+[[package]]
+name = "claude-transcript"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "clipboard-random"
@@ -1800,6 +1835,7 @@ dependencies = [
  "childenv",
  "chrono",
  "clap",
+ "claude-transcript",
  "colored",
  "comfy-table",
  "dirs",

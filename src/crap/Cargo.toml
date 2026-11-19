@@ -13,6 +13,7 @@ buildinfo.workspace = true
 childenv.workspace = true
 chrono.workspace = true
 clap.workspace = true
+claude-transcript.workspace = true
 colored.workspace = true
 comfy-table.workspace = true
 dirs.workspace = true

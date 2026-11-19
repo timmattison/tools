@@ -1,0 +1,13 @@
+[package]
+name = "claude-transcript"
+version = "0.1.0"
+edition.workspace = true
+description = "The one definition of session ids, the store location, and compactions for crap and chf"
+license = "MIT"
+
+[dependencies]
+serde.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
+
+[lints]
+workspace = true
