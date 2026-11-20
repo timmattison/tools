@@ -134,8 +134,9 @@ struct Cli {
     /// A preflight, not a description: it runs every check a real run runs —
     /// submodules, uncommitted changes, whether a recent commit names the
     /// branch, and under --safe whether the branch is merged — and exits with
-    /// the status that run would. A target that would
-    /// be refused is reported as a failure, with the same exit code.
+    /// the status that run would. A target that would be refused is reported
+    /// as a failure, with the same exit code. A dry run never asks the
+    /// question about the branch: it exits 10 where a real run asks.
     #[arg(short = 'n', long, verbatim_doc_comment)]
     dry_run: bool,
 
@@ -812,9 +813,10 @@ fn nuke(
 /// turn away — a false all-clear on a tool whose whole job is destruction.
 ///
 /// Only the branch is left to stand in for. The main-worktree, lock, submodule,
-/// dirty-worktree and branch-named gates are the caller's, since gitnuke raises those itself
-/// on both paths before either reaches this point — which is what leaves one
-/// message and one exit code per refusal instead of a dry-run copy to drift.
+/// dirty-worktree and branch-named gates are the caller's, since gitnuke raises
+/// those itself on both paths before either reaches this point — which is what
+/// leaves one message and one exit code per refusal instead of a dry-run copy to
+/// drift.
 ///
 /// The exit codes match the real refusals deliberately: `gitnuke -n x` failing
 /// has to mean `gitnuke x` fails the same way, or the preflight is decoration.
