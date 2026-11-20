@@ -13,7 +13,29 @@
 /// is a substring of `Branch: issue-704`, so a substring match lets that typo
 /// through.
 pub(crate) fn names_branch(message: &str, branch: &str) -> bool {
-    !branch.is_empty() && message.contains(branch)
+    if branch.is_empty() {
+        return false;
+    }
+    // `match_indices` gives offsets on char boundaries. `get` returns `None`
+    // instead of panicking if an offset is ever not on one.
+    message.match_indices(branch).any(|(start, _)| {
+        let before = message
+            .get(..start)
+            .and_then(|head| head.chars().next_back());
+        let after = message
+            .get(start + branch.len()..)
+            .and_then(|tail| tail.chars().next());
+        !before.is_some_and(is_name_char) && !after.is_some_and(is_name_char)
+    })
+}
+
+/// Tell whether `c` can be part of a branch name token.
+///
+/// The set is ASCII letters, ASCII digits, `.`, `_`, `/` and `-`. Any other
+/// character, such as a space, a bracket, `\r`, NUL or a non-ASCII character,
+/// ends a token.
+fn is_name_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '-')
 }
 
 #[cfg(test)]
