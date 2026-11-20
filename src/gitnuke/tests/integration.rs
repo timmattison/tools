@@ -53,11 +53,22 @@ fn git_allow_fail(dir: &Path, args: &[&str]) -> Output {
         .expect("failed to run git")
 }
 
-/// Run the real `gitnuke` binary in `dir` and capture its result.
-fn gitnuke(dir: &Path, args: &[&str]) -> Output {
+/// Build the real `gitnuke` binary's command, ready to run in `dir`.
+///
+/// The pty tests take this command and give it a terminal for standard input.
+/// [`gitnuke`] takes it and runs it with standard input on null.
+fn gitnuke_command(dir: &Path, args: &[&str]) -> Command {
     let mut cmd = childenv::fixture_command(env!("CARGO_BIN_EXE_gitnuke"));
     cmd.args(args).current_dir(dir);
-    pin_git_config(&mut cmd)
+    pin_git_config(&mut cmd);
+    cmd
+}
+
+/// Run the real `gitnuke` binary in `dir` and capture its result.
+///
+/// Standard input is null, so it is not a terminal and gitnuke cannot ask.
+fn gitnuke(dir: &Path, args: &[&str]) -> Output {
+    gitnuke_command(dir, args)
         .output()
         .expect("failed to run gitnuke")
 }
@@ -87,7 +98,13 @@ mod exit_codes {
     pub const BRANCH_NOT_DELETED: i32 = 7;
     pub const LOCKED_WORKTREE: i32 = 8;
     pub const DIRTY_WORKTREE: i32 = 9;
+    pub const BRANCH_NOT_NAMED: i32 = 10;
 }
+
+/// How many recent commits gitnuke reads to find a branch name.
+///
+/// Stated here and not imported, like the exit codes: it is a published rule.
+const RECENT_COMMIT_COUNT: usize = 10;
 
 /// The text git prints when *it* is the one refusing something.
 ///
@@ -155,6 +172,24 @@ impl Fixture {
 
     fn main_repo(&self) -> PathBuf {
         self.root.join("main")
+    }
+
+    /// Make an empty commit on `main` with a subject and a body.
+    ///
+    /// A squash merge names its branch on a `Branch: <branch>` line of the
+    /// body. An empty commit leaves the index and the files unchanged.
+    fn commit_on_main(&self, subject: &str, body: &str) {
+        git(
+            &self.main_repo(),
+            &["commit", "--allow-empty", "-q", "-m", subject, "-m", body],
+        );
+    }
+
+    /// Make `count` empty commits on `main` that name no branch.
+    fn unrelated_commits_on_main(&self, count: usize) {
+        for index in 0..count {
+            self.commit_on_main(&format!("unrelated {index}"), "nothing to see");
+        }
     }
 
     /// Create a `sub` repo and register it as a submodule at `sub/` in `main`.
@@ -1551,7 +1586,7 @@ fn refuses_to_run_outside_a_git_repository() {
 /// Stated here rather than derived from the binary for the same reason as
 /// `mod exit_codes` above: this is the contract users read, so the test has to
 /// spell it out independently.
-const HELP_EXIT_CODE_LINES: [&str; 10] = [
+const HELP_EXIT_CODE_LINES: [&str; 11] = [
     "- 0: Success",
     "- 1: Not in a git repository",
     "- 2: A git command failed",
@@ -1562,6 +1597,7 @@ const HELP_EXIT_CODE_LINES: [&str; 10] = [
     "- 7: The worktree was removed but its branch could not be deleted",
     "- 8: The worktree is locked, which `--force` does not override",
     "- 9: The worktree contains modified or untracked files and `--force` was not given",
+    "- 10: No recent commit names the branch, and nobody answered yes",
 ];
 
 /// The usage examples `gitnuke --help` publishes, as (command, trailing note).
@@ -1609,4 +1645,276 @@ fn long_help_renders_one_line_per_entry() {
             "usage example {command:?} should be a line of its own ending in {note:?}, got:\n{help}"
         );
     }
+}
+
+/// Assert the worktree and the branch are both still there.
+fn assert_kept(repo: &Path, worktree: &Path, branch: &str, context: &str) {
+    assert!(
+        worktree_registered(repo, worktree),
+        "{context}: the worktree was removed"
+    );
+    assert!(
+        branch_exists(repo, branch),
+        "{context}: the branch {branch} was deleted"
+    );
+}
+
+/// Assert the worktree and the branch are both gone.
+fn assert_nuked(repo: &Path, worktree: &Path, branch: &str, context: &str) {
+    assert!(
+        !worktree_registered(repo, worktree),
+        "{context}: the worktree is still there"
+    );
+    assert!(
+        !branch_exists(repo, branch),
+        "{context}: the branch {branch} is still there"
+    );
+}
+
+/// A near miss in the issue number is the typo this gate exists for.
+///
+/// Main names `issue-421`, the target is `issue-42`, and nobody can answer.
+/// The run must refuse. The two ways to skip the question must work after that.
+#[test]
+fn refuses_an_unnamed_branch_when_nobody_can_answer() {
+    let fixture = Fixture::new();
+    let main = fixture.main_repo();
+    fixture.commit_on_main("Squash (#1)", "Branch: issue-421");
+    let worktree = fixture.add_worktree("typo-wt", "issue-42");
+
+    let output = gitnuke(&main, &["issue-42"]);
+    assert_exit_code(
+        &output,
+        exit_codes::BRANCH_NOT_NAMED,
+        "unnamed branch, no terminal",
+    );
+    assert_kept(&main, &worktree, "issue-42", "unnamed branch, no terminal");
+    let text = combined(&output);
+    assert!(text.contains("git fetch"), "no fetch advice in: {text}");
+    assert!(text.contains("--yes"), "no --yes advice in: {text}");
+
+    let output = gitnuke(&main, &["-n", "-y", "issue-42"]);
+    assert_exit_code(&output, exit_codes::SUCCESS, "dry run with -y");
+    assert_kept(&main, &worktree, "issue-42", "dry run with -y");
+
+    let output = gitnuke(&main, &["--yes", "issue-42"]);
+    assert_exit_code(&output, exit_codes::SUCCESS, "run with --yes");
+    assert_nuked(&main, &worktree, "issue-42", "run with --yes");
+}
+
+/// `gh pr merge` in a worktree does not move the local `main`.
+///
+/// The squash commit that names the branch is on `origin/main` only. The gate
+/// must read the upstream of `main` too, or it asks about every normal merge.
+#[test]
+fn reads_the_upstream_of_the_main_branch_too() {
+    let fixture = Fixture::new();
+    let main = fixture.main_repo();
+    let remote = fixture.root.join("origin.git");
+    git(
+        &fixture.root,
+        &["init", "-q", "--bare", "-b", "main", "origin.git"],
+    );
+    git(
+        &main,
+        &[
+            "remote",
+            "add",
+            "origin",
+            remote.to_str().expect("utf-8 path"),
+        ],
+    );
+    git(&main, &["push", "-q", "-u", "origin", "main"]);
+    let worktree = fixture.add_worktree("feature-wt", "feature");
+
+    let control = gitnuke(&main, &["-n", "feature"]);
+    assert_exit_code(
+        &control,
+        exit_codes::BRANCH_NOT_NAMED,
+        "control: nothing names feature",
+    );
+
+    fixture.commit_on_main("Squash (#9)", "Branch: feature");
+    git(&main, &["push", "-q", "origin", "main"]);
+    git(&main, &["update-ref", "refs/heads/main", "HEAD~1"]);
+    let local_log = git(&main, &["log", "-n", "5", "--format=%B", "main"]);
+    assert!(
+        !String::from_utf8_lossy(&local_log.stdout).contains("Branch: feature"),
+        "the local main must not name the branch"
+    );
+
+    let output = gitnuke(&main, &["feature"]);
+    assert_exit_code(&output, exit_codes::SUCCESS, "named only upstream");
+    assert_nuked(&main, &worktree, "feature", "named only upstream");
+    assert!(
+        !combined(&output).contains("[y/N]"),
+        "gitnuke asked although the upstream names the branch"
+    );
+}
+
+/// Only the last `RECENT_COMMIT_COUNT` commits count.
+///
+/// The commit that names `old` is the 11th, so it does not count. The commit
+/// that names `edge` is the 10th, so it counts. This pins the off-by-one.
+#[test]
+fn reads_exactly_the_recent_commit_count() {
+    let fixture = Fixture::new();
+    let main = fixture.main_repo();
+    fixture.commit_on_main("Squash (#2)", "Branch: old");
+    fixture.unrelated_commits_on_main(RECENT_COMMIT_COUNT);
+    let worktree = fixture.add_worktree("old-wt", "old");
+
+    let output = gitnuke(&main, &["-n", "old"]);
+    assert_exit_code(
+        &output,
+        exit_codes::BRANCH_NOT_NAMED,
+        "11th commit names the branch",
+    );
+    assert_kept(&main, &worktree, "old", "11th commit names the branch");
+
+    let fixture = Fixture::new();
+    let main = fixture.main_repo();
+    fixture.commit_on_main("Squash (#3)", "Branch: edge");
+    fixture.unrelated_commits_on_main(RECENT_COMMIT_COUNT - 1);
+    fixture.add_worktree("edge-wt", "edge");
+
+    let output = gitnuke(&main, &["-n", "edge"]);
+    assert_exit_code(&output, exit_codes::SUCCESS, "10th commit names the branch");
+}
+
+/// `--force` overrides git's refusals about the content of a worktree.
+///
+/// It does not say which worktree the person meant, so it must not skip the
+/// question.
+#[test]
+fn force_does_not_skip_the_question() {
+    let fixture = Fixture::new();
+    let main = fixture.main_repo();
+    let worktree = fixture.add_worktree("forced-wt", "forced");
+
+    let output = gitnuke(&main, &["--force", "forced"]);
+    assert_exit_code(&output, exit_codes::BRANCH_NOT_NAMED, "--force alone");
+    assert_kept(&main, &worktree, "forced", "--force alone");
+}
+
+/// A dry run owes the verdict of the real run, and it never asks.
+#[test]
+fn dry_run_gives_the_verdict_without_asking() {
+    let fixture = Fixture::new();
+    let main = fixture.main_repo();
+    let worktree = fixture.add_worktree("dry-wt", "dry");
+
+    let output = gitnuke(&main, &["--dry-run", "dry"]);
+    assert_exit_code(
+        &output,
+        exit_codes::BRANCH_NOT_NAMED,
+        "dry run of an unnamed branch",
+    );
+    assert_kept(&main, &worktree, "dry", "dry run of an unnamed branch");
+    let text = combined(&output);
+    assert!(
+        text.contains("a real run asks"),
+        "no mention of the real run in: {text}"
+    );
+    assert!(!text.contains("[y/N]"), "a dry run asked: {text}");
+
+    let output = gitnuke(&main, &["--dry-run", "--yes", "dry"]);
+    assert_exit_code(&output, exit_codes::SUCCESS, "dry run with --yes");
+    assert_kept(&main, &worktree, "dry", "dry run with --yes");
+}
+
+/// A detached worktree has no branch to delete, so nothing can name a typo.
+#[test]
+fn a_detached_worktree_is_removed_without_a_question() {
+    let fixture = Fixture::new();
+    let main = fixture.main_repo();
+    let branched = fixture.add_worktree("branched-wt", "branched");
+    let control = gitnuke(&main, &["-n", "branched"]);
+    assert_exit_code(
+        &control,
+        exit_codes::BRANCH_NOT_NAMED,
+        "control: branched worktree",
+    );
+    assert_kept(&main, &branched, "branched", "control: branched worktree");
+
+    let detached = fixture.root.join("detached-wt");
+    git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            detached.to_str().expect("utf-8 path"),
+        ],
+    );
+    let output = gitnuke(&main, &["detached-wt"]);
+    assert_exit_code(&output, exit_codes::SUCCESS, "detached worktree");
+    assert!(
+        !worktree_registered(&main, &detached),
+        "the detached worktree is still there"
+    );
+    assert!(
+        !combined(&output).contains("[y/N]"),
+        "gitnuke asked about a detached worktree"
+    );
+}
+
+/// Each target gets its own verdict, and one refusal stops no other target.
+#[test]
+fn a_refused_target_does_not_stop_the_next_one() {
+    let fixture = Fixture::new();
+    let main = fixture.main_repo();
+    fixture.commit_on_main("Squash (#4)", "Branch: named");
+    let named = fixture.add_worktree("named-wt", "named");
+    let unnamed = fixture.add_worktree("unnamed-wt", "unnamed");
+
+    let output = gitnuke(&main, &["named", "unnamed"]);
+    assert_exit_code(&output, exit_codes::BRANCH_NOT_NAMED, "one named, one not");
+    assert_nuked(&main, &named, "named", "the named target");
+    assert_kept(&main, &unnamed, "unnamed", "the unnamed target");
+}
+
+/// A person at a terminal types `y` and the nuke goes ahead.
+#[cfg(unix)]
+#[test]
+fn removes_the_worktree_when_the_person_types_y() {
+    let fixture = Fixture::new();
+    let main = fixture.main_repo();
+    let worktree = fixture.add_worktree("yes-wt", "yes-branch");
+
+    let command = gitnuke_command(&main, &["yes-branch"]);
+    let output =
+        gitscratch::testing::pty::Pty::open(80).run_with_stdin_on_terminal(command, b"y\n");
+
+    let question = format!(
+        "Remove worktree {} and delete branch yes-branch? [y/N]",
+        worktree.display()
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(&question), "no question in: {stderr}");
+    assert_exit_code(&output, exit_codes::SUCCESS, "answer y");
+    assert_nuked(&main, &worktree, "yes-branch", "answer y");
+}
+
+/// A person at a terminal types `n` and nothing is removed.
+#[cfg(unix)]
+#[test]
+fn keeps_everything_when_the_person_types_n() {
+    let fixture = Fixture::new();
+    let main = fixture.main_repo();
+    let worktree = fixture.add_worktree("no-wt", "no-branch");
+
+    let command = gitnuke_command(&main, &["no-branch"]);
+    let output =
+        gitscratch::testing::pty::Pty::open(80).run_with_stdin_on_terminal(command, b"n\n");
+
+    let question = format!(
+        "Remove worktree {} and delete branch no-branch? [y/N]",
+        worktree.display()
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(&question), "no question in: {stderr}");
+    assert_exit_code(&output, exit_codes::BRANCH_NOT_NAMED, "answer n");
+    assert_kept(&main, &worktree, "no-branch", "answer n");
 }
