@@ -1,9 +1,188 @@
-//! Helpers that check whether a branch name is safe to delete.
+//! The gate that asks before gitnuke deletes a branch that no recent commit names.
 //!
-//! `names_branch` finds a branch name in a commit message as a whole token.
-//! `ask` puts a yes or no question to the person at the terminal.
+//! A squash merge names its branch on a `Branch: <branch>` line. So the recent
+//! commits of the main worktree's branch name each branch that is safe to nuke,
+//! and a typo gives a name they do not name. `confirm` is the entrance. It reads
+//! the last commits of the main branch and of its upstream, and it asks when none
+//! names the branch. `names_branch` finds a branch name in a message as a whole
+//! token. `ask` puts a yes or no question to the person at the terminal.
 
-use std::io::{BufRead, Write};
+use std::io::{BufRead, IsTerminal, Write};
+use std::process::Output;
+
+use colored::Colorize;
+
+use crate::{BranchName, ExitCode, NukeError, NukeOptions, Worktree};
+
+/// How many recent commits of each ref gitnuke reads to find a branch name.
+pub(crate) const RECENT_COMMIT_COUNT: usize = 10;
+
+/// A ref to read the recent commits of, and the name to show for it.
+struct RecentRef {
+    /// What git resolves, for example `main` or `main@{upstream}`.
+    reference: String,
+    /// What the messages show, for example `main` or `origin/main`.
+    label: String,
+}
+
+/// Decide whether a nuke of `worktree` may go on, asking the person if needed.
+///
+/// A detached worktree has no branch to delete, so nothing can be mistyped and
+/// this function returns `Ok`. So does `--yes`. Otherwise the branch must appear
+/// in the last [`RECENT_COMMIT_COUNT`] commits of the branch of `main` or of its
+/// upstream. The upstream matters because `gh pr merge` in a worktree does not
+/// move the local main branch. gitnuke does not fetch and uses no network.
+///
+/// A dry run never asks. It reports the refusal that a real run could give, so
+/// `gitnuke -n x` fails when `gitnuke x` can fail. A ref that git cannot read
+/// adds nothing, which is the safe direction because it leads to the question.
+pub(crate) fn confirm(
+    main: &Worktree,
+    worktree: &Worktree,
+    options: NukeOptions,
+) -> Result<(), NukeError> {
+    let Some(branch) = &worktree.branch else {
+        return Ok(());
+    };
+    if options.yes {
+        return Ok(());
+    }
+
+    let refs = recent_refs(main);
+    if refs
+        .iter()
+        .any(|recent| recent_commits_name(main, recent, branch))
+    {
+        return Ok(());
+    }
+
+    let labels = refs
+        .iter()
+        .map(|recent| recent.label.as_str())
+        .collect::<Vec<_>>()
+        .join(" or ");
+    let path = &worktree.path;
+    let not_named =
+        format!("no commit in the last {RECENT_COMMIT_COUNT} of {labels} names branch '{branch}'");
+    let fetch_advice = "If its PR merged moments ago, run git fetch and try again.";
+
+    if options.dry_run {
+        return Err(NukeError::new(
+            ExitCode::BranchNotNamed,
+            format!(
+                "{not_named}, so a real run asks before it removes worktree {path}.\n  \
+                 {fetch_advice} To skip the question, add --yes."
+            ),
+        ));
+    }
+
+    let question = format!(
+        "{} {not_named}.\n  If you typed the wrong name, answer n. {fetch_advice}\n  \
+         Remove worktree {path} and delete branch {branch}? [y/N] ",
+        "gitnuke:".yellow().bold(),
+    );
+    let answer = ask(
+        &question,
+        std::io::stdin().is_terminal(),
+        &mut std::io::stdin().lock(),
+        &mut std::io::stderr(),
+    )
+    .map_err(|error| {
+        NukeError::new(
+            ExitCode::BranchNotNamed,
+            format!("could not ask about branch '{branch}': {error}"),
+        )
+    })?;
+
+    match answer {
+        Answer::Yes => Ok(()),
+        Answer::No => Err(NukeError::new(
+            ExitCode::BranchNotNamed,
+            format!("kept worktree {path} and branch '{branch}', because the answer was not yes"),
+        )),
+        Answer::NoTerminal => Err(NukeError::new(
+            ExitCode::BranchNotNamed,
+            format!(
+                "{not_named}, and stdin is not a terminal, so gitnuke cannot ask.\n  \
+                 {fetch_advice} To nuke it anyway, add --yes."
+            ),
+        )),
+    }
+}
+
+/// List the refs whose recent commits can name a branch.
+///
+/// The branch of the main worktree comes first, then its upstream when it has
+/// one. A main worktree with a detached HEAD gives `HEAD` alone.
+fn recent_refs(main: &Worktree) -> Vec<RecentRef> {
+    let Some(branch) = &main.branch else {
+        return vec![RecentRef {
+            reference: "HEAD".to_string(),
+            label: "HEAD".to_string(),
+        }];
+    };
+    let mut refs = vec![RecentRef {
+        reference: branch.to_string(),
+        label: branch.to_string(),
+    }];
+    if let Some(upstream) = upstream_label(main, branch) {
+        refs.push(RecentRef {
+            reference: format!("{branch}@{{upstream}}"),
+            label: upstream,
+        });
+    }
+    refs
+}
+
+/// The short name of the upstream of `branch`, such as `origin/main`, if it has one.
+fn upstream_label(main: &Worktree, branch: &BranchName) -> Option<String> {
+    let output = childenv::command("git")
+        .args([
+            "rev-parse",
+            "--abbrev-ref",
+            &format!("{branch}@{{upstream}}"),
+        ])
+        .current_dir(main.path.as_path())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let label = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!label.is_empty()).then_some(label)
+}
+
+/// Tell whether a message of the recent commits of `recent` names `branch`.
+///
+/// A ref that git cannot read names nothing.
+fn recent_commits_name(main: &Worktree, recent: &RecentRef, branch: &BranchName) -> bool {
+    recent_messages(main, &recent.reference)
+        .is_some_and(|messages| names_branch(&messages, branch.as_str()))
+}
+
+/// Read the messages of the last [`RECENT_COMMIT_COUNT`] commits of `reference`.
+///
+/// `-z` ends each message with NUL, and `names_branch` takes NUL as a boundary,
+/// so one string holds all of them. Returns `None` when git fails.
+fn recent_messages(main: &Worktree, reference: &str) -> Option<String> {
+    let output: Output = childenv::command("git")
+        .args([
+            "log",
+            "-n",
+            &RECENT_COMMIT_COUNT.to_string(),
+            "-z",
+            "--format=%B",
+        ])
+        .arg(reference)
+        .arg("--")
+        .current_dir(main.path.as_path())
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
 
 /// Tell whether `message` names `branch` as a whole token.
 ///

@@ -425,7 +425,7 @@ fn dry_run_reports_the_plan_without_touching_anything() {
     let worktree = fixture.add_worktree("feature-wt", "feature");
     let main = fixture.main_repo();
 
-    let output = gitnuke(&main, &["--dry-run", "feature"]);
+    let output = gitnuke(&main, &["--yes", "--dry-run", "feature"]);
     let message = combined(&output);
 
     assert!(output.status.success(), "dry run should succeed: {message}");
@@ -637,7 +637,7 @@ fn dry_run_reports_an_unmerged_branch_refusal_under_safe() {
     git(&worktree, &["commit", "-qm", "unmerged commit"]);
     let main = fixture.main_repo();
 
-    let output = gitnuke(&main, &["--safe", "--dry-run", "feature"]);
+    let output = gitnuke(&main, &["--yes", "--safe", "--dry-run", "feature"]);
     let message = combined(&output);
 
     assert_exit_code(
@@ -669,7 +669,7 @@ fn dry_run_clears_a_merged_branch_under_safe() {
     let worktree = fixture.add_worktree("feature-wt", "feature");
     let main = fixture.main_repo();
 
-    let output = gitnuke(&main, &["--safe", "--dry-run", "feature"]);
+    let output = gitnuke(&main, &["--yes", "--safe", "--dry-run", "feature"]);
     let message = combined(&output);
 
     assert!(
@@ -704,7 +704,7 @@ fn dry_run_clears_a_branch_merged_only_into_its_upstream_under_safe() {
     // Now 'feature' is ahead of HEAD but identical to its upstream.
     git(&worktree, &["push", "-q", "-u", "origin", "feature"]);
 
-    let dry_run = gitnuke(&main, &["--safe", "--dry-run", "feature"]);
+    let dry_run = gitnuke(&main, &["--yes", "--safe", "--dry-run", "feature"]);
 
     assert!(
         dry_run.status.success(),
@@ -713,7 +713,7 @@ fn dry_run_clears_a_branch_merged_only_into_its_upstream_under_safe() {
         combined(&dry_run)
     );
 
-    let real_run = gitnuke(&main, &["--safe", "feature"]);
+    let real_run = gitnuke(&main, &["--yes", "--safe", "feature"]);
 
     assert!(
         real_run.status.success(),
@@ -795,7 +795,7 @@ fn safe_mode_removes_the_worktree_but_keeps_an_unmerged_branch() {
     git(&worktree, &["commit", "-qm", "unmerged commit"]);
     let main = fixture.main_repo();
 
-    let output = gitnuke(&main, &["--safe", "feature"]);
+    let output = gitnuke(&main, &["--yes", "--safe", "feature"]);
     let message = combined(&output);
 
     assert_exit_code(
@@ -820,7 +820,7 @@ fn safe_mode_deletes_a_merged_branch() {
     let worktree = fixture.add_worktree("feature-wt", "feature");
     let main = fixture.main_repo();
 
-    let output = gitnuke(&main, &["--safe", "feature"]);
+    let output = gitnuke(&main, &["--yes", "--safe", "feature"]);
 
     assert!(
         output.status.success(),
@@ -844,7 +844,7 @@ fn deletes_an_unmerged_branch_by_default() {
     git(&worktree, &["commit", "-qm", "unmerged commit"]);
     let main = fixture.main_repo();
 
-    let output = gitnuke(&main, &["feature"]);
+    let output = gitnuke(&main, &["--yes", "feature"]);
 
     assert!(
         output.status.success(),
@@ -915,7 +915,7 @@ fn nukes_a_submodule_worktree_with_force() {
     );
     let main = fixture.main_repo();
 
-    let output = gitnuke(&main, &["--force", "feature"]);
+    let output = gitnuke(&main, &["--yes", "--force", "feature"]);
 
     assert!(
         output.status.success(),
@@ -1114,7 +1114,7 @@ fn force_still_nukes_a_worktree_that_was_unlocked_again() {
     fixture.lock_worktree(&worktree, Some("briefly"));
     git(&main, &["worktree", "unlock", path]);
 
-    let output = gitnuke(&main, &["--force", "feature"]);
+    let output = gitnuke(&main, &["--yes", "--force", "feature"]);
 
     assert!(
         output.status.success(),
@@ -1167,7 +1167,7 @@ fn force_nukes_a_dirty_worktree() {
     std::fs::write(worktree.join("scratch.txt"), "untracked\n").expect("add untracked file");
     let main = fixture.main_repo();
 
-    let output = gitnuke(&main, &["--force", "feature"]);
+    let output = gitnuke(&main, &["--yes", "--force", "feature"]);
 
     assert!(
         output.status.success(),
@@ -1187,7 +1187,7 @@ fn nukes_a_worktree_given_its_path() {
     let worktree = fixture.add_worktree("feature-wt", "feature");
     let main = fixture.main_repo();
 
-    let output = gitnuke(&main, &[worktree.to_str().expect("utf-8 path")]);
+    let output = gitnuke(&main, &["--yes", worktree.to_str().expect("utf-8 path")]);
 
     assert!(
         output.status.success(),
@@ -1211,7 +1211,7 @@ fn nukes_a_worktree_given_its_branch_name() {
     let worktree = fixture.add_worktree("some-directory", "issue-42");
     let main = fixture.main_repo();
 
-    let output = gitnuke(&main, &["issue-42"]);
+    let output = gitnuke(&main, &["--yes", "issue-42"]);
 
     assert!(
         output.status.success(),
@@ -1231,7 +1231,7 @@ fn nukes_a_worktree_given_its_directory_name() {
     let worktree = fixture.add_worktree("absurd-rock", "feature/login");
     let main = fixture.main_repo();
 
-    let output = gitnuke(&main, &["absurd-rock"]);
+    let output = gitnuke(&main, &["--yes", "absurd-rock"]);
 
     assert!(
         output.status.success(),
@@ -1467,7 +1467,7 @@ fn nukes_every_target_it_can_and_reports_the_ones_it_cannot() {
     let second = fixture.add_worktree("second-wt", "second");
     let main = fixture.main_repo();
 
-    let output = gitnuke(&main, &["first", "no-such-thing", "second"]);
+    let output = gitnuke(&main, &["--yes", "first", "no-such-thing", "second"]);
     let message = combined(&output);
 
     // The run exits with the *first* failure's code; the only failing target here
@@ -1502,7 +1502,7 @@ fn nukes_a_repeated_target_once_and_still_succeeds() {
     let worktree = fixture.add_worktree("dup-wt", "dup");
     let main = fixture.main_repo();
 
-    let output = gitnuke(&main, &["dup", "dup"]);
+    let output = gitnuke(&main, &["--yes", "dup", "dup"]);
     let message = combined(&output);
 
     assert_exit_code(
@@ -1535,7 +1535,7 @@ fn nukes_a_worktree_with_multibyte_names_and_submodules() {
     fixture.populate_submodule(&worktree);
     let main = fixture.main_repo();
 
-    let output = gitnuke(&main, &["--force", "機能/ログイン-🎉"]);
+    let output = gitnuke(&main, &["--yes", "--force", "機能/ログイン-🎉"]);
 
     assert!(
         output.status.success(),
