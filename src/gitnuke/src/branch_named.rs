@@ -53,19 +53,38 @@ pub(crate) enum Answer {
 
 /// Tell whether `answer` is `y` or `yes`, in any case, after trimming.
 fn is_yes(answer: &str) -> bool {
-    let _ = answer;
-    true
+    let answer = answer.trim();
+    answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes")
 }
 
 /// Put `question` to the person and read one line of answer.
+///
+/// With no terminal, this function writes nothing, reads nothing, and returns
+/// `Answer::NoTerminal`. A caller that runs without a person, such as an agent,
+/// can type the wrong target too, so the caller must not continue silently.
+///
+/// With a terminal, it writes `question` to `output` as given, flushes, and
+/// reads one line. Only `y` or `yes` gives `Answer::Yes`. End of input gives
+/// `Answer::No`.
 pub(crate) fn ask(
     question: &str,
     terminal: bool,
     input: &mut impl BufRead,
     output: &mut impl Write,
 ) -> std::io::Result<Answer> {
-    let _ = (question, terminal, input, output);
-    Ok(Answer::Yes)
+    if !terminal {
+        return Ok(Answer::NoTerminal);
+    }
+    output.write_all(question.as_bytes())?;
+    output.flush()?;
+    let mut line = String::new();
+    // Zero bytes read is end of input, and `is_yes("")` is false.
+    input.read_line(&mut line)?;
+    Ok(if is_yes(&line) {
+        Answer::Yes
+    } else {
+        Answer::No
+    })
 }
 
 #[cfg(test)]
