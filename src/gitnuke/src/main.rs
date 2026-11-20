@@ -8,6 +8,8 @@ use clap::Parser;
 use colored::Colorize;
 use repowalker::find_git_repo;
 
+mod branch_named;
+
 /// The exit status gitnuke leaves behind, one variant per documented code.
 ///
 /// A closed set rather than loose `i32` constants: these numbers are a published
