@@ -8,6 +8,8 @@ use clap::Parser;
 use colored::Colorize;
 use repowalker::find_git_repo;
 
+mod branch_named;
+
 /// The exit status gitnuke leaves behind, one variant per documented code.
 ///
 /// A closed set rather than loose `i32` constants: these numbers are a published
@@ -35,6 +37,8 @@ enum ExitCode {
     LockedWorktree = 8,
     /// The worktree holds modified or untracked files and `--force` was absent.
     DirtyWorktree = 9,
+    /// No recent commit names the branch, and nobody answered yes.
+    BranchNotNamed = 10,
 }
 
 impl ExitCode {
@@ -82,6 +86,15 @@ const MAIN_WORKTREE_INDEX: usize = 0;
 /// - 7: The worktree was removed but its branch could not be deleted
 /// - 8: The worktree is locked, which `--force` does not override
 /// - 9: The worktree contains modified or untracked files and `--force` was not given
+/// - 10: No recent commit names the branch, and nobody answered yes
+///
+/// gitnuke asks before it deletes a branch that no message of the last 10
+/// commits of the main worktree's branch or its upstream names. A typo in a
+/// branch name gives such a branch. The check counts on a merge convention:
+/// each squash commit names its branch on a `Branch: <branch>` line. GitHub
+/// does not write that line. In a repository without the convention, gitnuke
+/// thus asks before each nuke, and --yes skips the question. gitnuke does not
+/// fetch, so run `git fetch` first if the pull request merged moments ago.
 #[derive(Parser)]
 #[command(verbatim_doc_comment)]
 #[command(name = "gitnuke")]
@@ -98,6 +111,10 @@ struct Cli {
     /// which git refuses outright, and one holding uncommitted changes. Both
     /// discard work that exists nowhere else — including anything uncommitted
     /// or unpushed inside the submodule checkouts.
+    ///
+    /// It does not skip the question about a branch that no recent commit
+    /// names. --force overrides git's refusals about the content of a worktree.
+    /// That question is about which worktree you named. Use --yes for it.
     ///
     /// It does not cover a *locked* worktree. A lock is a deliberate "leave
     /// this alone" marker, so gitnuke refuses one on its own terms and tells
@@ -116,11 +133,22 @@ struct Cli {
     /// Report what would happen without removing or deleting anything.
     ///
     /// A preflight, not a description: it runs every check a real run runs —
-    /// submodules, uncommitted changes, and under --safe whether the branch is
-    /// merged — and exits with the status that run would. A target that would
-    /// be refused is reported as a failure, with the same exit code.
+    /// submodules, uncommitted changes, whether a recent commit names the
+    /// branch, and under --safe whether the branch is merged — and exits with
+    /// the status that run would. A target that would be refused is reported
+    /// as a failure, with the same exit code. A dry run never asks the
+    /// question about the branch: it exits 10 where a real run asks.
     #[arg(short = 'n', long, verbatim_doc_comment)]
     dry_run: bool,
+
+    /// Skip the question about a branch that no recent commit names.
+    ///
+    /// gitnuke asks before it deletes a branch that no message of the last 10
+    /// commits of the main worktree's branch or its upstream names. Without a
+    /// terminal it cannot ask, so it refuses with exit code 10. With --yes it
+    /// neither asks nor refuses.
+    #[arg(short = 'y', long, verbatim_doc_comment)]
+    yes: bool,
 }
 
 /// How a nuke should behave, independent of which worktree it is aimed at.
@@ -132,6 +160,8 @@ struct NukeOptions {
     safe: bool,
     /// Check everything, change nothing.
     dry_run: bool,
+    /// Skip the question about a branch that no recent commit names.
+    yes: bool,
 }
 
 impl From<&Cli> for NukeOptions {
@@ -140,6 +170,7 @@ impl From<&Cli> for NukeOptions {
             force: cli.force,
             safe: cli.safe,
             dry_run: cli.dry_run,
+            yes: cli.yes,
         }
     }
 }
@@ -651,7 +682,12 @@ impl NukeError {
 ///
 /// The branch is only deleted once the removal has actually succeeded, so a
 /// refused removal never leaves the branch destroyed and the worktree standing.
-fn nuke(repo_root: &Path, worktree: &Worktree, options: NukeOptions) -> Result<(), NukeError> {
+fn nuke(
+    repo_root: &Path,
+    main: &Worktree,
+    worktree: &Worktree,
+    options: NukeOptions,
+) -> Result<(), NukeError> {
     // Before the submodule gate, because a lock is the refusal --force cannot
     // clear: reporting the overridable problem first would send the caller off
     // to re-run with a flag that then hits this anyway. Ahead of the dry-run
@@ -706,6 +742,11 @@ fn nuke(repo_root: &Path, worktree: &Worktree, options: NukeOptions) -> Result<(
             ),
         ));
     }
+
+    // Last of the gates, so a target that an earlier gate refuses gets that
+    // refusal and no question. Above the dry-run branch, because the two paths
+    // owe the same verdict: `gitnuke -n x` fails when `gitnuke x` can fail.
+    branch_named::confirm(main, worktree, options)?;
 
     if options.dry_run {
         preflight(repo_root, worktree, options)?;
@@ -772,10 +813,11 @@ fn nuke(repo_root: &Path, worktree: &Worktree, options: NukeOptions) -> Result<(
 /// so without a stand-in it reports "would remove" for targets git is going to
 /// turn away — a false all-clear on a tool whose whole job is destruction.
 ///
-/// Only the branch is left to stand in for. The main-worktree, lock, submodule
-/// and dirty-worktree gates are the caller's, since gitnuke raises those itself
-/// on both paths before either reaches this point — which is what leaves one
-/// message and one exit code per refusal instead of a dry-run copy to drift.
+/// Only the branch is left to stand in for. The main-worktree, lock, submodule,
+/// dirty-worktree and branch-named gates are the caller's, since gitnuke raises
+/// those itself on both paths before either reaches this point — which is what
+/// leaves one message and one exit code per refusal instead of a dry-run copy to
+/// drift.
 ///
 /// The exit codes match the real refusals deliberately: `gitnuke -n x` failing
 /// has to mean `gitnuke x` fails the same way, or the preflight is decoration.
@@ -972,7 +1014,12 @@ fn nuke_target(
                 ));
             }
 
-            nuke(repo_root, worktree, options)
+            nuke(
+                repo_root,
+                &worktrees[MAIN_WORKTREE_INDEX],
+                worktree,
+                options,
+            )
         }
         Resolution::Multiple(indices) => {
             let mut message =
