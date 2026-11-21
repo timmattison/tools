@@ -1,11 +1,14 @@
 //! The gate that asks before gitnuke deletes a branch that no recent commit names.
 //!
-//! A squash merge names its branch on a `Branch: <branch>` line. So the recent
-//! commits of the main worktree's branch name each branch that is safe to nuke,
-//! and a typo gives a name they do not name. `confirm` is the entrance. It reads
-//! the last commits of the main branch and of its upstream, and it asks when none
-//! names the branch. `names_branch` finds a branch name in a message as a whole
-//! token. `ask` puts a yes or no question to the person at the terminal.
+//! The gate counts on a merge convention: each squash commit names its branch
+//! on a `Branch: <branch>` line. GitHub does not write that line, so in a
+//! repository without the convention the gate asks before each nuke. Under the
+//! convention, the recent commits of the main worktree's branch name each
+//! branch that is safe to nuke, and a typo gives a name they do not name.
+//! `confirm` is the entrance. It reads the last commits of the main branch and
+//! of its upstream, and it asks when none names the branch. `names_branch`
+//! finds a branch name in a message as a whole token. `ask` puts a yes or no
+//! question to the person at the terminal.
 
 use std::io::{BufRead, IsTerminal, Write};
 use std::process::Output;

@@ -4324,9 +4324,15 @@ gitnuke wt-a wt-b wt-c        # nuke several; each is reported independently
 
 ### A branch that no recent commit names
 
-The normal flow is: the PR merges, then you nuke its branch. Each squash commit names its
-branch on a `Branch: <branch>` line. Thus the recent commits of the main branch name each
-branch that is safe to nuke, and a mistyped issue number gives a name that they do not name.
+The normal flow is: the PR merges, then you nuke its branch. gitnuke counts on a merge
+convention that this repository obeys: each squash commit names its branch on a
+`Branch: <branch>` line. Thus the recent commits of the main branch name each branch that is
+safe to nuke, and a mistyped issue number gives a name that they do not name.
+
+GitHub does not write that line. Its default squash message holds no branch name, and its
+default merge commit names `owner/branch`, which is not a whole-token match for `branch`. In
+a repository that does not obey the convention, no recent commit names a branch, so gitnuke
+asks before each nuke. Use `--yes` there.
 
 Before gitnuke removes a worktree that has a branch, it looks for the branch name in the
 messages of the last 10 commits of the main worktree's branch. It also reads the last 10

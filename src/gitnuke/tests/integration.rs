@@ -176,8 +176,9 @@ impl Fixture {
 
     /// Make an empty commit on `main` with a subject and a body.
     ///
-    /// A squash merge names its branch on a `Branch: <branch>` line of the
-    /// body. An empty commit leaves the index and the files unchanged.
+    /// A squash merge that obeys the `Branch:` convention names its branch on a
+    /// `Branch: <branch>` line of the body. An empty commit leaves the index
+    /// and the files unchanged.
     fn commit_on_main(&self, subject: &str, body: &str) {
         git(
             &self.main_repo(),

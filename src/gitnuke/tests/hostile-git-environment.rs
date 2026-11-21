@@ -40,9 +40,10 @@ fn branches(dir: &std::path::Path) -> String {
 #[test]
 fn nukes_the_worktree_of_the_repository_it_stands_in_under_a_hostile_environment() {
     let (fixture, fixture_worktree) = repo_with_linked_worktree();
-    // Only the fixture names the branch, as a squash merge would. The gate reads
-    // the log of the repository it stands in. A leaked `GIT_DIR` makes it read
-    // the log of the decoy, which names nothing, and the run then refuses.
+    // Only the fixture names the branch, as a squash merge under the `Branch:`
+    // convention would. The gate reads the log of the repository it stands in. A
+    // leaked `GIT_DIR` makes it read the log of the decoy, which names nothing,
+    // and the run then refuses.
     fixture.git(&[
         "commit",
         "--allow-empty",

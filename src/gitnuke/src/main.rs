@@ -88,12 +88,13 @@ const MAIN_WORKTREE_INDEX: usize = 0;
 /// - 9: The worktree contains modified or untracked files and `--force` was not given
 /// - 10: No recent commit names the branch, and nobody answered yes
 ///
-/// A squash merge names its branch on a `Branch: <branch>` line, so the branch
-/// of a merged pull request appears in the recent commits. gitnuke asks before
-/// it deletes a branch that no message of the last 10 commits of the main
-/// worktree's branch or its upstream names. A typo in a branch name gives such
-/// a branch. gitnuke does not fetch, so run `git fetch` first if the pull
-/// request merged moments ago.
+/// gitnuke asks before it deletes a branch that no message of the last 10
+/// commits of the main worktree's branch or its upstream names. A typo in a
+/// branch name gives such a branch. The check counts on a merge convention:
+/// each squash commit names its branch on a `Branch: <branch>` line. GitHub
+/// does not write that line. In a repository without the convention, gitnuke
+/// thus asks before each nuke, and --yes skips the question. gitnuke does not
+/// fetch, so run `git fetch` first if the pull request merged moments ago.
 #[derive(Parser)]
 #[command(verbatim_doc_comment)]
 #[command(name = "gitnuke")]
