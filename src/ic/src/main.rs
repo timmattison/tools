@@ -2827,6 +2827,24 @@ mod tests {
         assert!(result.is_err(), "a 40000x40000 frame must give an error");
     }
 
+    /// A frame size that does not fit in `usize` is `None`, not a wrapped
+    /// value.
+    #[test]
+    fn rgb_frame_bytes_is_none_when_the_frame_does_not_fit_in_usize() {
+        assert_eq!(rgb_frame_bytes(2, 3), Some(18));
+        assert_eq!(rgb_frame_bytes(u32::MAX, u32::MAX), None);
+    }
+
+    /// The error for a frame that is too large names its dimensions.
+    #[test]
+    fn rgb_frame_too_large_for_usize_names_its_dimensions() {
+        let error = require_rgb_frame_bytes(u32::MAX, u32::MAX).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "video dimensions 4294967295x4294967295 are too large"
+        );
+    }
+
     /// A mosh reads the caps off the session, and no other transport names a
     /// cap.
     ///
