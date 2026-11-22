@@ -226,6 +226,40 @@ mod tests {
         assert_eq!(matches[0].offset, 7);
     }
 
+    /// Removes its file when dropped, also when the test panics.
+    struct TempFile(std::path::PathBuf);
+
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_pattern_longer_than_the_file_finds_no_match() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let path = std::env::temp_dir().join(format!(
+            "hexfind-longer-pattern-{}-{nanos}.bin",
+            std::process::id()
+        ));
+        let guard = TempFile(path);
+        std::fs::write(&guard.0, [0x01, 0x02, 0x03]).unwrap();
+        let file = File::open(&guard.0).unwrap();
+        // SAFETY: the test owns the file, made it with a unique name, and nothing else writes to it while it is mapped.
+        let mmap = unsafe { Mmap::map(&file) }.unwrap();
+
+        let matches = find_pattern(&mmap, &[0x01, 0x02, 0x03, 0x04], 4, true);
+
+        assert!(
+            matches.is_empty(),
+            "a pattern longer than the file must find no match, got {} match(es)",
+            matches.len()
+        );
+    }
+
     fn find_pattern_in_slice(
         data: &[u8],
         pattern: &[u8],
