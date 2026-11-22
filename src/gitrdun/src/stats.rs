@@ -15,9 +15,13 @@ impl GitOpStats {
         }
     }
 
+    /// Record one operation that took `duration`.
+    ///
+    /// The count and the total stop at their largest values instead of
+    /// overflowing.
     pub fn record(&mut self, duration: Duration) {
-        self.count += 1;
-        self.total_duration += duration;
+        self.count = self.count.saturating_add(1);
+        self.total_duration = self.total_duration.saturating_add(duration);
     }
 
     /// Calculate the average duration per operation.
