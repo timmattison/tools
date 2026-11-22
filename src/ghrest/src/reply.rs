@@ -227,6 +227,18 @@ mod tests {
     }
 
     #[test]
+    fn a_reset_past_the_range_of_system_time_is_unstated() {
+        let response = reply(
+            "403 Forbidden",
+            "X-Ratelimit-Remaining: 0\r\nX-Ratelimit-Reset: 18446744073709551615",
+        );
+        assert_eq!(
+            response.rate_limit_wait(now()),
+            Some(RateLimitWait::Unstated)
+        );
+    }
+
+    #[test]
     fn retry_after_wins_over_the_reset_on_a_403() {
         let response = reply(
             "403 Forbidden",
