@@ -80,18 +80,28 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// Finds the places where `pattern` occurs in `haystack`.
+///
+/// Returns one `Match` for each occurrence, in order of offset, or only the
+/// first when `all_matches` is false. Each `Match` holds its offset and a copy
+/// of the matching bytes with up to `context_bytes` bytes on each side. A
+/// pattern longer than the haystack gives no match, so the result is empty.
 fn find_pattern(
-    mmap: &Mmap,
+    haystack: &[u8],
     pattern: &[u8],
     context_bytes: usize,
     all_matches: bool,
 ) -> Vec<Match> {
     let mut matches = Vec::new();
     let pattern_len = pattern.len();
-    let file_size = mmap.len();
+    let file_size = haystack.len();
+
+    if pattern_len > haystack.len() {
+        return matches;
+    }
 
     for i in 0..=file_size.saturating_sub(pattern_len) {
-        if &mmap[i..i + pattern_len] == pattern {
+        if &haystack[i..i + pattern_len] == pattern {
             let match_offset = i;
 
             // Calculate the start of the context
@@ -101,7 +111,7 @@ fn find_pattern(
             let context_end = (match_offset + pattern_len + context_bytes).min(file_size);
 
             // Create a copy of the data with context
-            let match_data = mmap[context_start..context_end].to_vec();
+            let match_data = haystack[context_start..context_end].to_vec();
 
             matches.push(Match {
                 offset: match_offset,
