@@ -84,8 +84,10 @@ fn main() -> Result<()> {
 ///
 /// Returns one `Match` for each occurrence, in order of offset, or only the
 /// first when `all_matches` is false. Each `Match` holds its offset and a copy
-/// of the matching bytes with up to `context_bytes` bytes on each side. A
-/// pattern longer than the haystack gives no match, so the result is empty.
+/// of the matching bytes with up to `context_bytes` bytes on each side. The
+/// context stops at the two ends of the haystack, also for the largest
+/// `usize`. A pattern longer than the haystack gives no match, so the result
+/// is empty.
 fn find_pattern(
     haystack: &[u8],
     pattern: &[u8],
@@ -108,7 +110,10 @@ fn find_pattern(
             let context_start = match_offset.saturating_sub(context_bytes);
 
             // Calculate the end of the context
-            let context_end = (match_offset + pattern_len + context_bytes).min(file_size);
+            // `context_bytes` comes from the command line, so the sum saturates.
+            let context_end = (match_offset + pattern_len)
+                .saturating_add(context_bytes)
+                .min(file_size);
 
             // Create a copy of the data with context
             let match_data = haystack[context_start..context_end].to_vec();
