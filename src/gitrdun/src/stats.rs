@@ -173,6 +173,15 @@ mod tests {
     }
 
     #[test]
+    fn git_op_stats_total_stops_at_max() {
+        let mut stats = GitOpStats::new();
+        stats.record(Duration::MAX);
+        stats.record(Duration::MAX);
+        assert_eq!(stats.count(), 2);
+        assert_eq!(stats.average(), Duration::MAX / 2);
+    }
+
+    #[test]
     fn git_op_stats_count() {
         let mut stats = GitOpStats::new();
         assert_eq!(stats.count(), 0);
