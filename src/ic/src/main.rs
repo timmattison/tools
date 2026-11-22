@@ -1366,6 +1366,8 @@ fn play_video_inner(
 
         // Start ffmpeg from current position
         let (video_width, video_height) = get_video_dimensions(file_path)?;
+        // Check the size before the spawn, so an error leaves no ffmpeg child.
+        let frame_size = require_rgb_frame_bytes(video_width, video_height)?;
 
         let mut ffmpeg_child = childenv::command("ffmpeg")
             .args([
@@ -1392,7 +1394,6 @@ fn play_video_inner(
             .context("Failed to get ffmpeg stdout")?;
 
         let mut reader = BufReader::new(stdout);
-        let frame_size = (video_width * video_height * 3) as usize;
         let mut frame_buffer = vec![0_u8; frame_size];
 
         // Read and display frames until paused, finished, or exit
@@ -1621,9 +1622,32 @@ fn play_video_inner(
     Ok(())
 }
 
+/// Bytes in one pixel of an `rgb24` frame.
+const RGB_BYTES_PER_PIXEL: usize = 3;
+
+/// The number of bytes in one `rgb24` frame of `width` x `height` pixels,
+/// or `None` when the product does not fit in `usize`.
+fn rgb_frame_bytes(width: u32, height: u32) -> Option<usize> {
+    usize::try_from(width)
+        .ok()?
+        .checked_mul(usize::try_from(height).ok()?)?
+        .checked_mul(RGB_BYTES_PER_PIXEL)
+}
+
+/// The same as `rgb_frame_bytes`, but an error that names the dimensions
+/// when the product does not fit in `usize`.
+///
+/// # Errors
+///
+/// Returns an error when the size of the frame does not fit in `usize`.
+fn require_rgb_frame_bytes(width: u32, height: u32) -> Result<usize> {
+    rgb_frame_bytes(width, height)
+        .with_context(|| format!("video dimensions {width}x{height} are too large"))
+}
+
 fn rgb_data_to_image(rgb_data: &[u8], width: u32, height: u32) -> Result<DynamicImage> {
     // Verify the data size matches expected dimensions
-    let expected_size = (width * height * 3) as usize;
+    let expected_size = require_rgb_frame_bytes(width, height)?;
     if rgb_data.len() != expected_size {
         anyhow::bail!(
             "RGB data size mismatch: expected {} bytes, got {} bytes",
