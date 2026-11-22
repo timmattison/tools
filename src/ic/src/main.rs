@@ -2795,6 +2795,14 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use termgfx::{AnsweredProtocol, PayloadBudget};
 
+    /// Dimensions whose frame size is more than `u32::MAX` bytes give an
+    /// error, not an overflow.
+    #[test]
+    fn rgb_data_to_image_refuses_dimensions_whose_frame_overflows_u32() {
+        let result = rgb_data_to_image(&[], 40_000, 40_000);
+        assert!(result.is_err(), "a 40000x40000 frame must give an error");
+    }
+
     /// A mosh reads the caps off the session, and no other transport names a
     /// cap.
     ///
