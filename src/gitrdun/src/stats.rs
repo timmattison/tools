@@ -23,23 +23,20 @@ impl GitOpStats {
     /// Calculate the average duration per operation.
     ///
     /// Uses nanosecond arithmetic to correctly handle counts exceeding `u32::MAX`.
-    ///
-    /// # Panics
-    ///
-    /// This function uses `expect()` internally but cannot actually panic because
-    /// the average of durations cannot exceed `Duration::MAX`, which fits in a `u64`.
+    /// This function does not panic, also for a total as large as `Duration::MAX`.
     pub fn average(&self) -> Duration {
+        const NANOS_PER_SECOND: u128 = 1_000_000_000;
         if self.count == 0 {
             Duration::ZERO
         } else {
             // Use nanoseconds to avoid u32 overflow issues with Duration::div
-            let total_nanos = self.total_duration.as_nanos();
-            let avg_nanos = total_nanos / u128::from(self.count);
-            // The average of durations cannot exceed the maximum individual duration,
-            // and Duration::MAX (about 584 years) fits in u64 nanoseconds.
-            Duration::from_nanos(u64::try_from(avg_nanos).expect(
-                "average duration cannot exceed Duration::MAX which fits in u64 nanoseconds",
-            ))
+            let average_nanos = self.total_duration.as_nanos() / u128::from(self.count);
+            // The average is not more than the total, and the total is not more than
+            // `Duration::MAX`, so the whole seconds fit in a `u64`.
+            let seconds = u64::try_from(average_nanos / NANOS_PER_SECOND).unwrap_or(u64::MAX);
+            // The remainder of a division by one billion is less than one billion.
+            let subsecond_nanos = u32::try_from(average_nanos % NANOS_PER_SECOND).unwrap_or(0);
+            Duration::new(seconds, subsecond_nanos)
         }
     }
 
