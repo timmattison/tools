@@ -76,6 +76,8 @@ impl Response {
     ///    epoch seconds gives `Stated` with the time from `now` to the reset.
     ///    A reset in the past gives a wait of zero.
     /// 4. `x-ratelimit-remaining: 0` with no usable reset gives `Unstated`.
+    ///    A reset that `SystemTime` cannot hold is not a usable reset, so it
+    ///    gives `Unstated` too.
     /// 5. Any other reply gives `None`. A `403` with no rate limit header is a
     ///    plain refusal, for example a missing permission.
     #[must_use]
@@ -96,10 +98,12 @@ impl Response {
             .header("x-ratelimit-reset")
             .and_then(|value| value.parse::<u64>().ok());
         Some(match reset {
-            Some(reset) => {
-                let reset = UNIX_EPOCH + Duration::from_secs(reset);
-                RateLimitWait::Stated(reset.duration_since(now).unwrap_or(Duration::ZERO))
-            }
+            Some(reset) => match UNIX_EPOCH.checked_add(Duration::from_secs(reset)) {
+                Some(reset) => {
+                    RateLimitWait::Stated(reset.duration_since(now).unwrap_or(Duration::ZERO))
+                }
+                None => RateLimitWait::Unstated,
+            },
             None => RateLimitWait::Unstated,
         })
     }
