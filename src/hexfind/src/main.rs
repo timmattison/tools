@@ -227,10 +227,8 @@ mod tests {
     fn test_pattern_search() {
         let data = b"Hello, World! This is a test.";
         let pattern = b"World";
-        let mmap_data = data.as_slice();
 
-        // Simulate a memory map by using a slice
-        let matches = find_pattern_in_slice(mmap_data, pattern, 4, false);
+        let matches = find_pattern(data, pattern, 4, false);
 
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].offset, 7);
@@ -268,35 +266,5 @@ mod tests {
             "a pattern longer than the file must find no match, got {} match(es)",
             matches.len()
         );
-    }
-
-    fn find_pattern_in_slice(
-        data: &[u8],
-        pattern: &[u8],
-        context_bytes: usize,
-        all_matches: bool,
-    ) -> Vec<Match> {
-        let mut matches = Vec::new();
-        let pattern_len = pattern.len();
-        let data_len = data.len();
-
-        for i in 0..=data_len.saturating_sub(pattern_len) {
-            if &data[i..i + pattern_len] == pattern {
-                let match_offset = i;
-                let context_start = match_offset.saturating_sub(context_bytes);
-                let context_end = (match_offset + pattern_len + context_bytes).min(data_len);
-
-                matches.push(Match {
-                    offset: match_offset,
-                    data: data[context_start..context_end].to_vec(),
-                });
-
-                if !all_matches {
-                    break;
-                }
-            }
-        }
-
-        matches
     }
 }
