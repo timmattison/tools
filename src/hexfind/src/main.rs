@@ -267,4 +267,16 @@ mod tests {
             matches.len()
         );
     }
+
+    /// `--context` comes from the command line, so the largest `usize` is a
+    /// value that a user can give. The context then stops at the two ends of
+    /// the haystack.
+    #[test]
+    fn a_context_of_the_largest_usize_stops_at_the_ends_of_the_haystack() {
+        let matches = find_pattern(b"abc", b"b", usize::MAX, false);
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].offset, 1);
+        assert_eq!(matches[0].data, b"abc");
+    }
 }
