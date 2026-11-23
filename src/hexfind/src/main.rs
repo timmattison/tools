@@ -297,4 +297,17 @@ mod tests {
             matches.len()
         );
     }
+
+    /// `all_matches` gives each occurrence in order of offset, overlaps
+    /// included, and each context stops at the ends of the haystack.
+    #[test]
+    fn all_matches_gives_each_occurrence_with_its_context() {
+        let matches = find_pattern(b"xaaay", b"aa", 1, true);
+
+        let found: Vec<(usize, &[u8])> = matches
+            .iter()
+            .map(|m| (m.offset, m.data.as_slice()))
+            .collect();
+        assert_eq!(found, [(1, b"xaaa".as_slice()), (2, b"aaay".as_slice())]);
+    }
 }
