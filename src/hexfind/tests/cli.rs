@@ -107,3 +107,49 @@ fn a_closed_standard_output_is_a_success_with_no_panic() {
         "a closed standard output must be a success, got stderr {stderr:?}"
     );
 }
+
+/// A write error that is not a broken pipe is a failure, and `hexfind` names
+/// it.
+///
+/// A file-size limit of zero makes each write to a regular file fail with
+/// `EFBIG`. The shell ignores `SIGXFSZ` before it starts `hexfind`, so the
+/// write gives that error instead of a stop by the signal. Standard error is a
+/// pipe, so the limit does not stop the report of the error.
+#[test]
+fn a_write_error_other_than_a_broken_pipe_is_reported() {
+    let file = TempFile::with("write-error", b"abc");
+    let report = TempFile::with("write-error-report", b"");
+    let stdout = std::fs::OpenOptions::new()
+        .write(true)
+        .open(report.path())
+        .expect("open the report file");
+
+    let output = childenv::fixture_command("/bin/sh")
+        .args([
+            "-c",
+            r#"ulimit -f 0 && trap '' XFSZ && exec "$@""#,
+            "sh",
+            env!("CARGO_BIN_EXE_hexfind"),
+            "62",
+        ])
+        .arg(file.path())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run hexfind under a file-size limit of zero");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !stderr.contains("panicked"),
+        "a write error must not panic, got stderr {stderr:?}"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a write error must be a failure, got stderr {stderr:?}"
+    );
+    assert!(
+        stderr.contains("Error writing to standard output"),
+        "a write error must name the write, got stderr {stderr:?}"
+    );
+}
