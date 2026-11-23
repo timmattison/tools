@@ -95,37 +95,33 @@ fn find_pattern(
     all_matches: bool,
 ) -> Vec<Match> {
     let mut matches = Vec::new();
-    let pattern_len = pattern.len();
-    let file_size = haystack.len();
 
-    if pattern.is_empty() || pattern_len > haystack.len() {
+    // `windows(0)` panics, so an empty pattern returns first.
+    if pattern.is_empty() {
         return matches;
     }
 
-    for i in 0..=file_size.saturating_sub(pattern_len) {
-        if &haystack[i..i + pattern_len] == pattern {
-            let match_offset = i;
+    // `windows` gives nothing when the pattern is longer than the haystack.
+    for (match_offset, window) in haystack.windows(pattern.len()).enumerate() {
+        if window != pattern {
+            continue;
+        }
 
-            // Calculate the start of the context
-            let context_start = match_offset.saturating_sub(context_bytes);
+        let context_start = match_offset.saturating_sub(context_bytes);
 
-            // Calculate the end of the context
-            // `context_bytes` comes from the command line, so the sum saturates.
-            let context_end = (match_offset + pattern_len)
-                .saturating_add(context_bytes)
-                .min(file_size);
+        // The window ends inside the haystack, so only the addition of
+        // `context_bytes`, which comes from the command line, can overflow.
+        let context_end = (match_offset + pattern.len())
+            .saturating_add(context_bytes)
+            .min(haystack.len());
 
-            // Create a copy of the data with context
-            let match_data = haystack[context_start..context_end].to_vec();
+        matches.push(Match {
+            offset: match_offset,
+            data: haystack[context_start..context_end].to_vec(),
+        });
 
-            matches.push(Match {
-                offset: match_offset,
-                data: match_data,
-            });
-
-            if !all_matches {
-                break;
-            }
+        if !all_matches {
+            break;
         }
     }
 
