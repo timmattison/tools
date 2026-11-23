@@ -186,6 +186,16 @@ mod tests {
     }
 
     #[test]
+    fn git_op_stats_count_stops_at_max() {
+        let mut stats = GitOpStats {
+            count: u64::MAX,
+            total_duration: Duration::ZERO,
+        };
+        stats.record(Duration::from_secs(1));
+        assert_eq!(stats.count(), u64::MAX);
+    }
+
+    #[test]
     fn git_op_stats_count() {
         let mut stats = GitOpStats::new();
         assert_eq!(stats.count(), 0);
