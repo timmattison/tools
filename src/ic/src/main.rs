@@ -2835,6 +2835,14 @@ mod tests {
         assert_eq!(rgb_frame_bytes(u32::MAX, u32::MAX), None);
     }
 
+    /// A frame above `u32::MAX` bytes fits in a 64-bit `usize`, so its size
+    /// is the exact product and not `None`.
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn rgb_frame_bytes_is_exact_above_u32_max_on_a_64_bit_target() {
+        assert_eq!(rgb_frame_bytes(40_000, 40_000), Some(4_800_000_000));
+    }
+
     /// The error for a frame that is too large names its dimensions.
     #[test]
     fn rgb_frame_too_large_for_usize_names_its_dimensions() {
