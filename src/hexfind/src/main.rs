@@ -3,7 +3,7 @@ use buildinfo::version_string;
 use clap::Parser;
 use memmap2::Mmap;
 use std::fs::File;
-use std::io::Write;
+use std::io::{self, Write};
 
 #[derive(Parser)]
 #[command(name = "hexfind")]
@@ -60,27 +60,55 @@ fn main() -> Result<()> {
     // Search for the pattern
     let matches = find_pattern(&mmap, &pattern, cli.context, cli.all);
 
+    let mut stdout = io::stdout().lock();
+    match print_matches(
+        &mut stdout,
+        hex_string,
+        &cli.file,
+        &matches,
+        cli.context,
+        pattern.len(),
+    ) {
+        // A reader that closed the pipe (`hexfind ... | head`) took what it
+        // wanted, so a broken pipe is a success. `println!` panics on it.
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        result => result.context("Error writing to standard output"),
+    }
+}
+
+/// Writes the report of a search to `out`: one line when nothing matched,
+/// else a header, then the offset and a hex dump of each match.
+///
+/// # Errors
+///
+/// Returns the first error of a write to `out`, for example a broken pipe.
+fn print_matches(
+    out: &mut impl Write,
+    hex_string: &str,
+    file: &str,
+    matches: &[Match],
+    context_bytes: usize,
+    pattern_len: usize,
+) -> io::Result<()> {
     if matches.is_empty() {
-        println!("Pattern '{}' not found in file '{}'", hex_string, cli.file);
-        return Ok(());
+        writeln!(out, "Pattern '{hex_string}' not found in file '{file}'")?;
+        return out.flush();
     }
 
-    // Display the matches
-    println!(
-        "Found {} match(es) for pattern '{}' in file '{}'\n",
-        matches.len(),
-        hex_string,
-        cli.file
-    );
+    writeln!(
+        out,
+        "Found {} match(es) for pattern '{hex_string}' in file '{file}'\n",
+        matches.len()
+    )?;
 
     for (i, m) in matches.iter().enumerate() {
-        println!("Match #{}:", i + 1);
-        println!("Offset: 0x{:08x} ({} decimal)", m.offset, m.offset);
-        display_hex_dump(&m.data, m.offset, cli.context, pattern.len());
-        println!();
+        writeln!(out, "Match #{}:", i + 1)?;
+        writeln!(out, "Offset: 0x{:08x} ({} decimal)", m.offset, m.offset)?;
+        display_hex_dump(out, &m.data, m.offset, context_bytes, pattern_len)?;
+        writeln!(out)?;
     }
 
-    Ok(())
+    out.flush()
 }
 
 /// Finds the places where `pattern` occurs in `haystack`.
@@ -131,7 +159,13 @@ fn find_pattern(
     matches
 }
 
-fn display_hex_dump(data: &[u8], file_offset: usize, context_bytes: usize, pattern_len: usize) {
+fn display_hex_dump(
+    out: &mut impl Write,
+    data: &[u8],
+    file_offset: usize,
+    context_bytes: usize,
+    pattern_len: usize,
+) -> io::Result<()> {
     // Calculate the actual offset of the first byte in the data relative to the file
     let data_start_offset = file_offset.saturating_sub(context_bytes);
 
@@ -144,9 +178,6 @@ fn display_hex_dump(data: &[u8], file_offset: usize, context_bytes: usize, patte
     // Calculate the position of the pattern in the data array
     let pattern_pos_in_data = file_offset - data_start_offset;
 
-    let stdout = std::io::stdout();
-    let mut handle = stdout.lock();
-
     // Display the hex dump
     for i in 0.. {
         let display_offset = display_start_offset + i * 16;
@@ -158,7 +189,7 @@ fn display_hex_dump(data: &[u8], file_offset: usize, context_bytes: usize, patte
         }
 
         // Print offset
-        write!(handle, "{:08x}: ", display_offset).unwrap();
+        write!(out, "{:08x}: ", display_offset)?;
 
         // Print hex values
         for j in 0..16 {
@@ -175,23 +206,23 @@ fn display_hex_dump(data: &[u8], file_offset: usize, context_bytes: usize, patte
 
                 if in_pattern {
                     // Red and bold for pattern bytes
-                    write!(handle, "\x1b[1;31m{:02x}\x1b[0m ", byte).unwrap();
+                    write!(out, "\x1b[1;31m{:02x}\x1b[0m ", byte)?;
                 } else {
-                    write!(handle, "{:02x} ", byte).unwrap();
+                    write!(out, "{:02x} ", byte)?;
                 }
             } else {
                 // This position doesn't exist in our data (due to alignment)
-                write!(handle, "   ").unwrap();
+                write!(out, "   ")?;
             }
 
             // Add extra space in the middle
             if j == 7 {
-                write!(handle, " ").unwrap();
+                write!(out, " ")?;
             }
         }
 
         // Print ASCII representation
-        write!(handle, " |").unwrap();
+        write!(out, " |")?;
         for j in 0..16 {
             let display_pos = i * 16 + j;
 
@@ -208,19 +239,19 @@ fn display_hex_dump(data: &[u8], file_offset: usize, context_bytes: usize, patte
                 };
 
                 if in_pattern {
-                    write!(handle, "\x1b[1;31m{}\x1b[0m", c).unwrap();
+                    write!(out, "\x1b[1;31m{}\x1b[0m", c)?;
                 } else {
-                    write!(handle, "{}", c).unwrap();
+                    write!(out, "{}", c)?;
                 }
             } else {
-                write!(handle, " ").unwrap();
+                write!(out, " ")?;
             }
         }
 
-        writeln!(handle, "|").unwrap();
+        writeln!(out, "|")?;
     }
 
-    handle.flush().unwrap();
+    Ok(())
 }
 
 #[cfg(test)]
