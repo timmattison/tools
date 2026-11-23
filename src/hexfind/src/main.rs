@@ -86,8 +86,8 @@ fn main() -> Result<()> {
 /// first when `all_matches` is false. Each `Match` holds its offset and a copy
 /// of the matching bytes with up to `context_bytes` bytes on each side. The
 /// context stops at the two ends of the haystack, also for the largest
-/// `usize`. A pattern longer than the haystack gives no match, so the result
-/// is empty.
+/// `usize`. An empty pattern and a pattern longer than the haystack give no
+/// match, so the result is empty.
 fn find_pattern(
     haystack: &[u8],
     pattern: &[u8],
@@ -98,7 +98,7 @@ fn find_pattern(
     let pattern_len = pattern.len();
     let file_size = haystack.len();
 
-    if pattern_len > haystack.len() {
+    if pattern.is_empty() || pattern_len > haystack.len() {
         return matches;
     }
 
