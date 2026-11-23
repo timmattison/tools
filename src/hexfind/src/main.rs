@@ -340,4 +340,46 @@ mod tests {
             .collect();
         assert_eq!(found, [(1, b"xaaa".as_slice()), (2, b"aaay".as_slice())]);
     }
+
+    /// A writer that takes `room` bytes, then fails each write with a broken
+    /// pipe, as a pipe does after its reader closes it.
+    struct ClosesAfter {
+        room: usize,
+    }
+
+    impl Write for ClosesAfter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if self.room == 0 {
+                return Err(io::ErrorKind::BrokenPipe.into());
+            }
+            let taken = buf.len().min(self.room);
+            self.room -= taken;
+            Ok(taken)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A reader can close the pipe at each byte of the report, the hex dump
+    /// included. Each such close gives the broken pipe back, and none panics.
+    #[test]
+    fn a_pipe_that_closes_at_any_byte_gives_the_broken_pipe_back() {
+        let haystack = b"0123456789abcdefghijklmnopqrstuvwxyz0123456789ab";
+        let matches = find_pattern(haystack, b"ab", 20, true);
+        let mut full = Vec::new();
+        print_matches(&mut full, "6162", "file", &matches, 20, 2).expect("write to a Vec");
+        assert_eq!(matches.len(), 2, "the report must hold two hex dumps");
+
+        for room in 0..full.len() {
+            let result = print_matches(&mut ClosesAfter { room }, "6162", "file", &matches, 20, 2);
+            assert_eq!(
+                result.map_err(|error| error.kind()),
+                Err(io::ErrorKind::BrokenPipe),
+                "a pipe that closes after {room} of {} bytes",
+                full.len()
+            );
+        }
+    }
 }
