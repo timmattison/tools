@@ -284,4 +284,17 @@ mod tests {
         assert_eq!(matches[0].offset, 1);
         assert_eq!(matches[0].data, b"abc");
     }
+
+    /// An empty pattern says nothing about the haystack, so it matches
+    /// nowhere.
+    #[test]
+    fn an_empty_pattern_finds_no_match() {
+        let matches = find_pattern(b"abc", b"", 4, true);
+
+        assert!(
+            matches.is_empty(),
+            "an empty pattern must find no match, got {} match(es)",
+            matches.len()
+        );
+    }
 }
