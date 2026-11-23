@@ -44,6 +44,9 @@ fn main() -> Result<()> {
 
     // Decode the hex string
     let pattern = hex::decode(hex_string).context("Error decoding hex string")?;
+    if pattern.is_empty() {
+        anyhow::bail!("The hex string is empty, so there is no pattern to search for");
+    }
 
     // Open and memory map the file
     let file = File::open(&cli.file).context("Error opening file")?;
