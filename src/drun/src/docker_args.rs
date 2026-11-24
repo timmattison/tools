@@ -1265,6 +1265,23 @@ mod tests {
     }
 
     #[test]
+    fn the_last_leave_and_the_last_help_of_create_win() {
+        for words in [
+            &["create", "--leave", "--leave=false"][..],
+            &["create", "--help", "--help=false"],
+            &["--help", "--help=false", "create"],
+        ] {
+            assert_eq!(buildx(words), Ok(placed(None)), "{words:?}");
+        }
+        for words in [
+            &["create", "--leave=false", "--leave"][..],
+            &["create", "--help=false", "--help"],
+        ] {
+            assert_eq!(buildx(words), Ok(BuildxArgs::Unchanged), "{words:?}");
+        }
+    }
+
+    #[test]
     fn create_accepts_the_flags_that_docker_hides() {
         assert_eq!(
             buildx(&["create", "--config", "./buildkitd.toml", "--name", "b"]),
