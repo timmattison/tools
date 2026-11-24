@@ -670,23 +670,33 @@ fn create_or_update_workspace(
         DocumentMut::new()
     };
 
-    // Ensure [workspace] section exists
     if doc.get("workspace").is_none() {
         doc["workspace"] = Item::Table(Table::new());
     }
 
-    // Get or create members array
-    let workspace = doc["workspace"]
-        .as_table_mut()
-        .ok_or_else(|| anyhow::anyhow!("Failed to create workspace table"))?;
+    // Cargo loads a workspace written as an inline table,
+    // `workspace = { members = [...] }`, as readily as a `[workspace]` table,
+    // so the run edits either one where it stands.
+    let workspace = doc["workspace"].as_table_like_mut().ok_or_else(|| {
+        anyhow::anyhow!("The workspace key in {} is not a table", output.display())
+    })?;
 
     if workspace.get("members").is_none() {
-        workspace["members"] = Item::Value(toml_edit::Value::Array(Array::new()));
+        workspace.insert(
+            "members",
+            Item::Value(toml_edit::Value::Array(Array::new())),
+        );
     }
 
-    let members_array = workspace["members"]
-        .as_array_mut()
-        .ok_or_else(|| anyhow::anyhow!("Failed to create members array"))?;
+    let members_array = workspace
+        .get_mut("members")
+        .and_then(Item::as_array_mut)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "The workspace.members key in {} is not an array",
+                output.display()
+            )
+        })?;
 
     // The members list is rewritten whole, so every member the scan did not
     // find goes. Name them first: a manifest that quietly loses a member reads
@@ -717,7 +727,7 @@ fn create_or_update_workspace(
 
     // Add common workspace configuration if not present
     if workspace.get("resolver").is_none() {
-        workspace["resolver"] = toml_edit::value("2");
+        workspace.insert("resolver", toml_edit::value("2"));
     }
 
     if dry_run {
