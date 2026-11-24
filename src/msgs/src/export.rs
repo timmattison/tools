@@ -252,4 +252,26 @@ mod tests {
             .expect_err("foreign id");
         assert!(error.to_string().contains(&foreign.to_string()));
     }
+
+    #[test]
+    fn export_writes_a_null_date_for_a_message_with_date_zero() {
+        let fx = ChatDbFixture::new();
+        let chat = fx.add_chat("chat-undated", None, 45);
+        let id = fx.add_message(MessageSpec {
+            text: Some("no date".to_string()),
+            date: 0,
+            chats: vec![chat],
+            ..MessageSpec::default()
+        });
+        let db = fx.open_db();
+        let export_dir = fx.dir().join("export-undated");
+
+        export_conversation_range(&db, chat, id, id, false, &export_dir).expect("export");
+
+        let json: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(export_dir.join("messages.json")).expect("read json"),
+        )
+        .expect("parse json");
+        assert_eq!(json["messages"][0]["date"], serde_json::Value::Null);
+    }
 }

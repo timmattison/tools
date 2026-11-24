@@ -984,4 +984,36 @@ mod tests {
             .collect();
         assert_eq!(found, ids);
     }
+
+    #[test]
+    fn a_message_with_date_zero_has_a_null_date() {
+        let fx = ChatDbFixture::new();
+        let chat = fx.add_chat("undated", None, 45);
+        fx.add_message(MessageSpec {
+            text: Some("no date".to_string()),
+            date: 0,
+            chats: vec![chat],
+            ..MessageSpec::default()
+        });
+
+        let messages = fx.open_db().get_messages(chat, 0, 10).expect("messages");
+        let json = serde_json::to_value(&messages[0]).expect("serialize");
+        assert_eq!(json["date"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn a_chat_whose_only_message_has_date_zero_has_a_null_last_message_date() {
+        let fx = ChatDbFixture::new();
+        let chat = fx.add_chat("undated-chat", None, 45);
+        fx.add_message(MessageSpec {
+            text: Some("no date".to_string()),
+            date: 0,
+            chats: vec![chat],
+            ..MessageSpec::default()
+        });
+
+        let list = fx.open_db().list_conversations(0, 10).expect("list");
+        let json = serde_json::to_value(&list[0]).expect("serialize");
+        assert_eq!(json["last_message_date"], serde_json::Value::Null);
+    }
 }
