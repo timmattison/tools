@@ -736,11 +736,18 @@ mod tests {
         );
     }
 
-    /// Gives the three samples of the tests above.
+    /// Gives the three samples of the tests above, one text for each sample.
+    fn three_sample_texts() -> [String; 3] {
+        [
+            sample("12:00:00", "10     9000000   \n"),
+            sample("12:00:03", "10     3         \n20     4000      \n"),
+            sample("12:00:06", "10     5         \n"),
+        ]
+    }
+
+    /// Gives the three samples of the tests above as one text.
     fn three_samples() -> String {
-        sample("12:00:00", "10     9000000   \n")
-            + &sample("12:00:03", "10     3         \n20     4000      \n")
-            + &sample("12:00:06", "10     5         \n")
+        three_sample_texts().concat()
     }
 
     /// A `Processes:` line that arrives in two reads is one line, and so is the
@@ -1224,30 +1231,55 @@ mod tests {
         assert_eq!(second.sample.rows, vec![row(10, 3), row(20, 4000)]);
     }
 
-    /// Each event has the time that the reader thread read it, and the sample
-    /// that a header finishes states its window. The sample ended before the
-    /// header that finished it arrived. The test depends on the order of the
-    /// times and not on their size.
+    /// The largest difference between the window of a sample, which the
+    /// monotonic clock measures, and the wall times of the two headers that
+    /// bound it. The reader reads both clocks at once for each header, so the
+    /// two differ only by a preemption between the two reads and by a slew of
+    /// the wall clock.
+    const CLOCK_TOLERANCE: Duration = Duration::from_millis(50);
+
+    /// The sample that a header finishes began at the header before the last
+    /// one, and it ended at the last one. The stub sleeps 0.3 s before the
+    /// second sample and 0.1 s before the third. Thus a window of zero, a
+    /// window between the second and the third header, and an end at the
+    /// third header each fail. The test compares the window with the wall
+    /// times of its own headers and not with the sleeps, so a reader thread
+    /// that wakes late under load does not fail it.
     #[test]
     fn a_finished_sample_states_its_window_and_the_time_that_it_ended() {
-        let started = SystemTime::now();
-        let mut stream = stub_printing("", &three_samples());
+        let [first, second, third] = three_sample_texts();
+        let before = format!(
+            "printf '%s' {}; sleep 0.3; printf '%s' {}; sleep 0.1;",
+            shellquote::shell_quote(&first),
+            shellquote::shell_quote(&second),
+        );
+        let mut stream = stub_printing(&before, &third);
 
         let events = events_until(&mut stream, headers_at_least(3));
 
-        let Some(StreamEvent::Header {
-            at,
-            finished: Some(timed),
-        }) = events.get(2)
-        else {
+        let headers: Vec<SystemTime> = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::Header { at, .. } => Some(*at),
+                _ => None,
+            })
+            .collect();
+        let (Some(first_at), Some(second_at)) = (headers.first(), headers.get(1)) else {
+            panic!("three headers: {events:?}");
+        };
+        let Some(Some(timed)) = finished_of(&events).get(2).cloned() else {
             panic!("the third header finishes the second sample: {events:?}");
         };
-        assert!(timed.ended_at <= *at, "the sample ended before its header");
-        assert!(
-            timed.ended_at >= started,
-            "the sample ended after the test began"
+        assert_eq!(
+            timed.ended_at, *second_at,
+            "the sample ended at the second header: {events:?}"
         );
-        assert!(timed.wall < BOUND, "the window is a time of this run");
+        let between = second_at.duration_since(*first_at).unwrap_or_default();
+        assert!(
+            timed.wall.abs_diff(between) <= CLOCK_TOLERANCE,
+            "the window {:?} is the time between the first two headers, {between:?}",
+            timed.wall
+        );
     }
 
     /// A sample with no rows is refused at the end of its own window: the
