@@ -45,15 +45,21 @@ event stream to the latest state.
   `status`, `subject`, `description`, `activeForm`, `addBlockedBy`,
   `addBlocks`, `owner`. Of 4,623 calls under `~/.claude/projects` on
   2026-11-24, 141 had no `status` and 24 changed the `subject`. Observed
-  statuses: `in_progress`, `completed`. `pending` is the implicit initial state
-  at creation. `TaskStop` may introduce a stopped/cancelled state; treat any
-  unrecognised status as an opaque pass-through string rather than failing.
+  statuses: `completed` (2,652), `in_progress` (1,808), `deleted` (20) and
+  `pending` (2). `pending` is also the initial state at creation. `deleted`
+  removes the task: the runtime answers `Updated task #1 deleted`. Treat any
+  other status as an opaque pass-through string rather than failing.
+  `TaskStop` is not part of the task list. Its input is the `task_id` of a
+  background task (`{"task_id":"bfhooctiw"}`), and the fold ignores it.
 - Reconstruction = **fold the stream**: seed task `N` (subject, `pending`) from
   each `TaskCreate` result line, and its detail from the `description` of that
   `TaskCreate` input. Then apply each `TaskUpdate` in order: `status` sets the
   status, `subject` sets the label, and `description` sets the detail. A field
   that the input omits keeps its old value. The fold ignores the other fields.
-  Tasks are ordered by ascending numeric id.
+  An update that sets `deleted` removes task `N` from the list. Thus the task
+  is not in the done/total count of the header or of `PROGRESS`, and a later
+  update of `N` is an update of an unknown id. Tasks are ordered by ascending
+  numeric id.
 
 Parsing the id from the `tool_result` text is the source of truth for the
 id→subject mapping (creation order also yields `1..N`, but the result text is
@@ -298,7 +304,9 @@ hardcoded paths (parallel-safe per CLAUDE.md):
 - `extract_tasks`: create-only (all pending), create+updates, out-of-order
   updates, update referencing unknown id (ignored), unknown status passes
   through, update with no `status` (status kept), update that changes the
-  `subject` or the `description`.
+  `subject` or the `description`, update that sets `deleted` (the task leaves
+  the list and the done/total count, thus the rest of a list with one deleted
+  task can show all done), update that sets `pending` again.
 - `extract_todowrite_latest`: single snapshot, multiple snapshots (last wins),
   empty list, multibyte content.
 - `extract_agent_list`: tasks-present prefers tasks, todos-only, neither →
