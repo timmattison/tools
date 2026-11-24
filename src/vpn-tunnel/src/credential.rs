@@ -579,15 +579,63 @@ mod tests {
         let err = find_running_tunnels_with(|args| {
             Ok(match args {
                 ["ps", ..] => ok_output("3fbc63216742aaaa\n"),
-                _ => failed_output(b"Error: No such object: 3fbc63216742aaaa"),
+                _ => failed_output(
+                    b"permission denied while trying to connect to the Docker daemon socket",
+                ),
             })
         })
         .expect_err("a failed docker inspect must not silently drop a container");
 
         assert!(
-            err.to_string().contains("No such object: 3fbc63216742aaaa"),
+            err.to_string().contains("permission denied"),
             "the error must carry the docker stderr: {err}"
         );
+    }
+
+    /// A docker whose `ps` lists `id-gone` and `id-wg`, and whose inspect
+    /// prints the line of `id-wg`, writes `stderr`, and exits 1. This is what
+    /// docker does when `id-gone` is removed between the two calls.
+    fn docker_that_lost_a_container(
+        stderr: &'static str,
+    ) -> impl Fn(&[&str]) -> io::Result<Output> {
+        move |args| {
+            Ok(match args {
+                ["ps", ..] => ok_output("id-gone\nid-wg\n"),
+                _ => Output {
+                    status: status(1),
+                    stdout: b"\"/wg-gluetun\"\t[\"WIREGUARD_PRIVATE_KEY=key-wg\"]\n".to_vec(),
+                    stderr: stderr.as_bytes().to_vec(),
+                },
+            })
+        }
+    }
+
+    #[test]
+    fn a_container_removed_before_the_inspect_is_skipped() {
+        // Docker 29 writes the error in lower case, and older clients do not.
+        for stderr in [
+            "error: no such object: id-gone\n",
+            "Error: No such object: id-gone\n",
+        ] {
+            let tunnels = find_running_tunnels_with(docker_that_lost_a_container(stderr))
+                .unwrap_or_else(|e| panic!("a removed container holds no key ({stderr:?}): {e}"));
+
+            assert_eq!(tunnels.len(), 1, "{stderr:?}: {tunnels:?}");
+            assert_eq!(tunnels[0].container_name, "wg-gluetun");
+            assert_eq!(tunnels[0].wireguard_key, "key-wg");
+        }
+    }
+
+    #[test]
+    fn an_inspect_error_that_is_not_a_removed_listed_container_is_still_an_error() {
+        for stderr in [
+            "error: no such object: id-gone\npermission denied\n",
+            "error: no such object: id-never-listed\n",
+        ] {
+            let result = find_running_tunnels_with(docker_that_lost_a_container(stderr));
+
+            assert!(result.is_err(), "{stderr:?} must stay an error: {result:?}");
+        }
     }
 
     #[test]
