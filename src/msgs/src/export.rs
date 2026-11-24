@@ -274,4 +274,47 @@ mod tests {
         .expect("parse json");
         assert_eq!(json["messages"][0]["date"], serde_json::Value::Null);
     }
+
+    #[test]
+    fn export_refuses_an_attachment_path_that_climbs_out_with_dot_dot() {
+        let fx = ChatDbFixture::new();
+        let chat = fx.add_chat("chat-traversal", None, 45);
+        let id = fx.add_message(MessageSpec {
+            text: Some("secret".to_string()),
+            date: apple_ns(BASE + 10, 0),
+            chats: vec![chat],
+            ..MessageSpec::default()
+        });
+        let outside = fx.dir().join("outside");
+        std::fs::create_dir_all(&outside).expect("outside dir");
+        let secret = outside.join("secret.txt");
+        std::fs::write(&secret, "top secret").expect("write secret");
+
+        let home = dirs::home_dir().expect("home directory");
+        let climbs = home.components().count() + 3 + 4;
+        let traversal = format!(
+            "~/Library/Messages/Attachments/{}{}",
+            "../".repeat(climbs),
+            secret.display().to_string().trim_start_matches('/')
+        );
+        // The path reaches the file when the shell resolves it.
+        assert_eq!(
+            std::fs::read_to_string(expand_tilde(&traversal))
+                .ok()
+                .as_deref(),
+            Some("top secret")
+        );
+        fx.add_attachment(id, &traversal, Some("secret.txt"));
+        let db = fx.open_db();
+        let export_dir = fx.dir().join("export-traversal");
+
+        let result =
+            export_conversation_range(&db, chat, id, id, true, &export_dir).expect("export");
+
+        assert_eq!(result.attachment_count, 0);
+        let copied = std::fs::read_dir(export_dir.join("attachments"))
+            .expect("attachments dir")
+            .count();
+        assert_eq!(copied, 0);
+    }
 }
