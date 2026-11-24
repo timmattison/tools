@@ -2,11 +2,13 @@
 //!
 //! This file holds exactly one `#[test]`. The global allocator below counts the
 //! live bytes of the whole process, so a second test that runs on another
-//! thread would add its own bytes to the count. Two worst cases run one after
+//! thread would add its own bytes to the count. Three worst cases run one after
 //! the other inside that one test, each on a new history.
 //!
-//! The sizes here are the sizes that the design states. They are no larger,
-//! because the Mac that runs this test is short of memory.
+//! The sizes of the first two cases are the sizes that the design states. They
+//! are no larger, because the Mac that runs this test is short of memory. The
+//! third case is a long run of frames with no row, so the list of the entries
+//! is the largest part of the history.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::BTreeSet;
@@ -74,6 +76,11 @@ const LONG_COMMAND_ROWS: usize = 500;
 /// The bytes of each command of the second worst case. It is over
 /// `STORED_COMMAND_BYTES`.
 const LONG_COMMAND_BYTES: usize = 32 * 1024;
+
+/// The count of frames of the third worst case. An entry takes more than 168
+/// bytes, so the entries of this many frames with no row are more than the
+/// budget.
+const SMALL_FRAMES: usize = 400_000;
 
 /// A character of two bytes, so that every cut must find a boundary.
 const TWO_BYTE_CHAR: char = 'é';
@@ -168,10 +175,15 @@ fn run_case(frames: usize, rows: usize, command_bytes: usize) -> usize {
     peak
 }
 
-/// The two worst cases of the design stay inside the budget.
+/// The three worst cases stay inside the budget: many rows, long commands,
+/// and a long run of frames with no row.
 #[test]
-fn worst_case_text_stays_inside_the_budget() {
+fn worst_cases_stay_inside_the_budget() {
     let many_rows = run_case(MANY_ROWS_FRAMES, MANY_ROWS, MANY_ROWS_COMMAND_BYTES);
     let long_commands = run_case(LONG_COMMAND_FRAMES, LONG_COMMAND_ROWS, LONG_COMMAND_BYTES);
-    eprintln!("peak live bytes: many rows {many_rows}, long commands {long_commands}");
+    let small_frames = run_case(SMALL_FRAMES, 0, 0);
+    eprintln!(
+        "peak live bytes: many rows {many_rows}, long commands {long_commands}, \
+         small frames {small_frames}"
+    );
 }
