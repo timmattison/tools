@@ -150,4 +150,17 @@ describe("global search", () => {
     expect(list().dataset.mode).not.toBe("search");
     expect(list().textContent).not.toContain("late result");
   });
+
+  it("does not search when Escape comes before the debounce ends", async () => {
+    const invoke = await mockInvoke([]);
+    const { initSearch } = await import("./search");
+    initSearch(() => {});
+
+    type("ab");
+    pressEscape();
+    vi.advanceTimersByTime(DEBOUNCE_MS);
+    await flush();
+
+    expect(searchCalls(invoke)).toBe(0);
+  });
 });

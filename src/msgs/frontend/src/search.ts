@@ -4,6 +4,8 @@ import { initConversations } from "./conversations";
 import { byId, escapeHtml, messageOf, showError, UNKNOWN_DATE_LABEL } from "./utils";
 
 let searchTimeout: number | null = null;
+// Numbers each search. A reply that is not for the latest number is dropped.
+let searchSequence = 0;
 let onNavigateCallback: ((chatId: number, messageId: number) => void) | null =
   null;
 
@@ -20,6 +22,9 @@ export function initSearch(
 
   input.addEventListener("keydown", (e: KeyboardEvent) => {
     if (e.key === "Escape") {
+      if (searchTimeout) clearTimeout(searchTimeout);
+      searchTimeout = null;
+      searchSequence += 1;
       input.value = "";
       hideSearchResults();
     }
@@ -27,6 +32,8 @@ export function initSearch(
 }
 
 async function performSearch(query: string): Promise<void> {
+  searchSequence += 1;
+  const sequence = searchSequence;
   if (query.length < 2) {
     hideSearchResults();
     return;
@@ -42,8 +49,10 @@ async function performSearch(query: string): Promise<void> {
       limit: 50,
     });
 
+    if (sequence !== searchSequence) return;
     showSearchResults(results);
   } catch (e) {
+    if (sequence !== searchSequence) return;
     showSearchError(String(e));
   }
 }
