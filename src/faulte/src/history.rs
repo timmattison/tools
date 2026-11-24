@@ -983,7 +983,11 @@ impl History {
         let limit = self.entry_at(position);
         (0..position)
             .rev()
-            .find(|earlier| self.entry_at(*earlier) + by <= limit)
+            .find(|earlier| {
+                self.entry_at(*earlier)
+                    .checked_add(by)
+                    .is_some_and(|reach| reach <= limit)
+            })
             .map(|earlier| self.id_at(earlier))
     }
 
@@ -992,7 +996,7 @@ impl History {
     #[must_use]
     pub fn forward_by(&self, id: EntryId, by: Duration) -> Option<EntryId> {
         let position = self.position(id)?;
-        let limit = self.entry_at(position) + by;
+        let limit = self.entry_at(position).checked_add(by)?;
         (position + 1..self.entries.len())
             .find(|later| self.entry_at(*later) >= limit)
             .map(|later| self.id_at(later))
@@ -1076,7 +1080,8 @@ impl History {
         while start > 0 {
             let earlier = start - 1;
             if let Some(reach) = width.reach() {
-                if self.entry_at(earlier) + reach <= end_at {
+                let ends = self.entry_at(earlier).checked_add(reach);
+                if ends.is_some_and(|ends| ends <= end_at) {
                     break;
                 }
             }
