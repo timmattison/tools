@@ -2383,6 +2383,7 @@ name = "drun"
 version = "0.1.0"
 dependencies = [
  "buildinfo",
+ "childenv",
  "names",
  "runlimit",
  "serde",

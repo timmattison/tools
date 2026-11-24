@@ -70,9 +70,10 @@ impl ContextName {
         &self.0
     }
 
-    /// Starts a `docker` command line that goes to this host.
+    /// Starts a `docker` command line that goes to this host. Through
+    /// [`childenv::command`], docker gets no `GIT_` variable of a hook.
     pub fn docker(&self) -> Command {
-        let mut command = Command::new(DOCKER);
+        let mut command = childenv::command(DOCKER);
         command.arg("--context").arg(&self.0);
         command
     }
@@ -86,9 +87,10 @@ impl fmt::Display for ContextName {
 
 /// Starts a `docker` command line for the docker of this computer. It names
 /// no context, so docker uses the current context of this computer, as for a
-/// docker command that a person types.
+/// docker command that a person types. Through [`childenv::command`], docker
+/// gets no `GIT_` variable of a hook.
 pub fn this_computer() -> Command {
-    Command::new(DOCKER)
+    childenv::command(DOCKER)
 }
 
 /// Why a host gave no usable answer.
@@ -170,7 +172,7 @@ pub fn ask(context: &ContextName, args: &[&str], limit: Duration) -> Result<Stri
 ///
 /// Returns a [`HostFailure`] for the same reasons as [`ask`].
 pub fn docker_help(subcommand: &str, limit: Duration) -> Result<String, HostFailure> {
-    let mut command = Command::new(DOCKER);
+    let mut command = childenv::command(DOCKER);
     for (name, _) in std::env::vars_os() {
         if name
             .to_string_lossy()
