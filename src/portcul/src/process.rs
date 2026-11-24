@@ -43,6 +43,7 @@ impl Pid {
     }
 
     /// Returns the value as `i32`, safe because construction validated the range.
+    #[cfg(unix)]
     pub fn as_i32(self) -> i32 {
         // Construction guarantees self.0 <= i32::MAX, so this never wraps.
         self.0.cast_signed()
@@ -194,7 +195,7 @@ pub fn kill_process(pid: Pid) -> anyhow::Result<()> {
     #[cfg(not(unix))]
     {
         Err(anyhow::anyhow!(
-            "killing processes is not supported on this platform"
+            "cannot send SIGTERM to PID {pid}: killing processes is not supported on this platform"
         ))
     }
 }
@@ -404,6 +405,7 @@ mod tests {
         assert!(error.to_string().contains("process group"), "{error}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_pid_accepts_i32_max() {
         let pid = Pid::try_from(i32::MAX as u32).unwrap();
@@ -411,6 +413,7 @@ mod tests {
         assert_eq!(pid.as_u32(), i32::MAX as u32);
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_pid_as_i32_matches_as_u32() {
         let pid = Pid::try_from(1234_u32).unwrap();
