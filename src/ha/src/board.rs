@@ -929,7 +929,9 @@ impl Board {
     /// index of a row is not the position of its item. The `job_sum` of each
     /// run row is the sum of the runner times of its last good jobs at `now`.
     /// The `cost` of each run row and of each job row is the list-price cost at
-    /// `now`, with the prices of the book from [`Board::set_prices`].
+    /// `now`, with the prices of the book from [`Board::set_prices`]. The method
+    /// builds one [`Estimates`] index for the frame from the shown runs and
+    /// their last good jobs. Each job row carries its time left from it.
     fn build_rows(&self, now: DateTime<Utc>) -> Vec<Row<'_>> {
         let selected = self.selected.as_ref();
         let mut rows = Vec::new();
@@ -937,6 +939,7 @@ impl Board {
         let has_queue = self.shows_merge_sections();
         let (entries, departures) = self.queue_sections(now);
         let (active, recent) = self.sections(now);
+        let estimates = self.estimates(&active, &recent, now);
         let view = JobView {
             jobs: &self.jobs,
             errors: &self.errors,
@@ -977,7 +980,15 @@ impl Board {
             jobs: self.active_job_counts(&active),
             runners: self.active_runner_names(&active),
         }));
-        push_runs(&mut rows, &active, Section::Active, first, selected, view);
+        push_runs(
+            &mut rows,
+            &active,
+            Section::Active,
+            first,
+            selected,
+            view,
+            &estimates,
+        );
         first += active.len();
         if has_queue {
             let count_of = |outcome: Outcome| {
@@ -1009,18 +1020,35 @@ impl Board {
             );
             first += departures.len();
         }
-        let count_of = |state: RunState| recent.iter().filter(|run| run.state == state).count();
-        rows.push(Row::Header(Header {
-            section: Section::Recent,
-            count: recent.len(),
-            passed: count_of(RunState::Passed),
-            failed: count_of(RunState::Failed),
-            cancelled: count_of(RunState::Cancelled),
-            jobs: JobCounts::default(),
-            runners: Vec::new(),
-        }));
-        push_runs(&mut rows, &recent, Section::Recent, first, selected, view);
+        rows.push(Row::Header(recent_header(&recent)));
+        push_runs(
+            &mut rows,
+            &recent,
+            Section::Recent,
+            first,
+            selected,
+            view,
+            &estimates,
+        );
         rows
+    }
+
+    /// The index of the estimates for one frame. It reads the shown runs, the
+    /// `active` and the `recent` ones, with the same last good jobs that the
+    /// job sum and the cost read.
+    fn estimates<'a>(
+        &'a self,
+        active: &[&'a Run],
+        recent: &[&'a Run],
+        now: DateTime<Utc>,
+    ) -> Estimates<'a> {
+        Estimates::new(
+            active
+                .iter()
+                .chain(recent.iter())
+                .map(|&run| (run, last_good_jobs(self.jobs.get(&run.id)))),
+            now,
+        )
     }
 
     /// The jobs of the `active` runs. This covers each run of the active list
@@ -1347,6 +1375,21 @@ fn scroll(
     offset.min(len.saturating_sub(height))
 }
 
+/// The header row of the section of the finished runs, with the count of each
+/// state in `recent`.
+fn recent_header<'a>(recent: &[&'a Run]) -> Header<'a> {
+    let count_of = |state: RunState| recent.iter().filter(|run| run.state == state).count();
+    Header {
+        section: Section::Recent,
+        count: recent.len(),
+        passed: count_of(RunState::Passed),
+        failed: count_of(RunState::Failed),
+        cancelled: count_of(RunState::Cancelled),
+        jobs: JobCounts::default(),
+        runners: Vec::new(),
+    }
+}
+
 /// The job data that the rows of the board read.
 #[derive(Clone, Copy)]
 struct JobView<'a> {
@@ -1386,7 +1429,8 @@ fn job_sum(jobs: &[Job], now: DateTime<Utc>) -> Option<Duration> {
 /// expanded or not. The `job_sum` of each run row is the sum of the runner
 /// times of the last good jobs at `view.now`, see `job_sum`. The `cost` of each
 /// run row is the list-price cost of the same jobs, see `run_cost`. The block of jobs
-/// of each run in `view.expanded` follows the row of that run.
+/// of each run in `view.expanded` follows the row of that run. `estimates` is
+/// the index of the frame, and each job row reads its time left from it.
 fn push_runs<'a>(
     rows: &mut Vec<Row<'a>>,
     runs: &[&'a Run],
@@ -1394,6 +1438,7 @@ fn push_runs<'a>(
     first: usize,
     selected: Option<&Selection>,
     view: JobView<'a>,
+    estimates: &Estimates<'_>,
 ) {
     if runs.is_empty() {
         rows.push(Row::Empty(section));
@@ -1425,6 +1470,7 @@ fn push_runs<'a>(
                 answer,
                 here.and_then(|selection| selection.job),
                 view,
+                estimates,
             );
         }
     }
@@ -1438,7 +1484,8 @@ fn push_runs<'a>(
 /// run. `None` gives the loading row. The job row at the position of
 /// `selected` gets the mark. The `cost` of each job row is the list-price cost
 /// of the job at `view.now`, with the billing prices of the owner of the run
-/// from `view.prices`.
+/// from `view.prices`. The `remaining` of each job row is its time left from
+/// `estimates`, at `view.now`.
 fn push_jobs<'a>(
     rows: &mut Vec<Row<'a>>,
     run: &'a Run,
@@ -1446,6 +1493,7 @@ fn push_jobs<'a>(
     answer: Option<&'a Jobs>,
     selected: Option<(JobId, usize)>,
     view: JobView<'a>,
+    estimates: &Estimates<'_>,
 ) {
     let prices = view.prices.of(run.repo.owner());
     let cost_of = |job: &Job| job_cost(job, run.visibility, prices, view.now);
@@ -1461,7 +1509,7 @@ fn push_jobs<'a>(
                 run,
                 run_ended,
                 cost: cost_of(job),
-                remaining: None,
+                remaining: estimates.remaining(run, job, view.now),
             }));
         }
         Some(Jobs::Failed { jobs, error }) => {
@@ -1472,7 +1520,7 @@ fn push_jobs<'a>(
                 run,
                 run_ended,
                 cost: cost_of(job),
-                remaining: None,
+                remaining: estimates.remaining(run, job, view.now),
             }));
             rows.push(Row::JobsError(error));
         }
