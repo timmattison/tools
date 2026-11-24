@@ -8,12 +8,25 @@ use crate::types::{
     apple_timestamp_to_datetime, truncate_preview, AttachmentInfo, Conversation, DbStatus, Message,
     SearchResult,
 };
+use crate::util::page_bounds;
 
 const CHAT_DB_PATH: &str = "Library/Messages/chat.db";
 const PREVIEW_MAX_CHARS: usize = 100;
 /// Messages that a search hit shows before and after itself.
 const CONTEXT_BEFORE_COUNT: i64 = 3;
 const CONTEXT_AFTER_COUNT: i64 = 3;
+
+/// Separates the handle ids that the participants subquery joins (ASCII unit separator).
+const PARTICIPANT_SEPARATOR: char = '\u{1f}';
+
+/// The preview of a last message: its text, else the text of its
+/// attributedBody, cut to `PREVIEW_MAX_CHARS`.
+fn preview_of(text: Option<String>, body: Option<&[u8]>) -> String {
+    let text = text
+        .or_else(|| body.and_then(extract_text_from_attributed_body))
+        .unwrap_or_default();
+    truncate_preview(&text, PREVIEW_MAX_CHARS)
+}
 
 /// The `FROM` and `JOIN` part and the column list of each message query.
 /// A query adds its own `WHERE` and `ORDER BY`. `MessageRow::from_row` reads
@@ -152,6 +165,7 @@ impl MessageDb {
         offset: i64,
         limit: i64,
     ) -> Result<Vec<Conversation>, MsgsError> {
+        let (offset, limit) = page_bounds(offset, limit);
         let mut stmt = self.conn.prepare(
             "SELECT
                 c.ROWID,
@@ -159,35 +173,62 @@ impl MessageDb {
                 c.display_name,
                 c.style,
                 MAX(cmj.message_date) as last_date,
-                COUNT(cmj.message_id) as msg_count
+                COUNT(cmj.message_id) as msg_count,
+                (SELECT GROUP_CONCAT(h.id, char(31))
+                   FROM chat_handle_join chj
+                   JOIN handle h ON h.ROWID = chj.handle_id
+                  WHERE chj.chat_id = c.ROWID) as participants,
+                lm.text,
+                lm.attributedBody
             FROM chat c
             JOIN chat_message_join cmj ON c.ROWID = cmj.chat_id
+            LEFT JOIN message lm ON lm.ROWID = (
+                SELECT j.message_id
+                  FROM chat_message_join j
+                  JOIN message m2 ON m2.ROWID = j.message_id
+                 WHERE j.chat_id = c.ROWID
+                 ORDER BY j.message_date DESC, j.message_id DESC
+                 LIMIT 1)
             GROUP BY c.ROWID
-            ORDER BY last_date DESC
+            ORDER BY last_date DESC, c.ROWID DESC
             LIMIT ?1 OFFSET ?2",
         )?;
 
         let rows = stmt.query_map([limit, offset], |row| {
             Ok((
-                row.get::<_, i64>(0)?,            // chat_id
-                row.get::<_, String>(1)?,         // chat_identifier
-                row.get::<_, Option<String>>(2)?, // display_name
-                row.get::<_, i64>(3)?,            // style
-                row.get::<_, i64>(4)?,            // last_date
-                row.get::<_, i64>(5)?,            // msg_count
+                row.get::<_, i64>(0)?,             // chat_id
+                row.get::<_, String>(1)?,          // chat_identifier
+                row.get::<_, Option<String>>(2)?,  // display_name
+                row.get::<_, i64>(3)?,             // style
+                row.get::<_, i64>(4)?,             // last_date
+                row.get::<_, i64>(5)?,             // msg_count
+                row.get::<_, Option<String>>(6)?,  // participants, joined
+                row.get::<_, Option<String>>(7)?,  // last message text
+                row.get::<_, Option<Vec<u8>>>(8)?, // last message attributedBody
             ))
         })?;
 
         let mut conversations = Vec::new();
         for row in rows {
-            let (chat_id, chat_identifier, display_name, style, last_date, msg_count) = row?;
-            let is_group = style == 43;
-
-            // Get participants
-            let participants = self.get_participants(chat_id)?;
-
-            // Get last message preview
-            let preview = self.get_last_message_preview(chat_id)?;
+            let (
+                chat_id,
+                chat_identifier,
+                display_name,
+                style,
+                last_date,
+                msg_count,
+                joined_participants,
+                preview_text,
+                preview_body,
+            ) = row?;
+            let participants = joined_participants
+                .map(|joined| {
+                    joined
+                        .split(PARTICIPANT_SEPARATOR)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
 
             let last_message_date = apple_timestamp_to_datetime(last_date)
                 .unwrap_or_else(|| chrono::Utc::now().fixed_offset());
@@ -200,10 +241,10 @@ impl MessageDb {
                 } else {
                     display_name
                 },
-                is_group,
+                is_group: style == 43,
                 participants,
                 last_message_date,
-                last_message_preview: preview,
+                last_message_preview: preview_of(preview_text, preview_body.as_deref()),
                 message_count: msg_count,
             });
         }
@@ -233,20 +274,16 @@ impl MessageDb {
                  FROM message m
                  JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
                  WHERE cmj.chat_id = ?1
-                 ORDER BY cmj.message_date DESC
+                 ORDER BY cmj.message_date DESC, m.ROWID DESC
                  LIMIT 1",
                 [chat_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .ok();
 
-        let text = result
-            .and_then(|(text, body)| {
-                text.or_else(|| body.as_deref().and_then(extract_text_from_attributed_body))
-            })
-            .unwrap_or_default();
-
-        Ok(truncate_preview(&text, PREVIEW_MAX_CHARS))
+        Ok(result.map_or_else(String::new, |(text, body)| {
+            preview_of(text, body.as_deref())
+        }))
     }
 
     /// Build a `Message` from raw query row fields.
@@ -323,11 +360,12 @@ impl MessageDb {
         offset: i64,
         limit: i64,
     ) -> Result<Vec<Message>, MsgsError> {
+        let (offset, limit) = page_bounds(offset, limit);
         self.query_messages(
             &format!(
                 "{MESSAGE_SELECT}
                 WHERE cmj.chat_id = ?1
-                ORDER BY cmj.message_date DESC
+                ORDER BY cmj.message_date DESC, m.ROWID DESC
                 LIMIT ?2 OFFSET ?3"
             ),
             [chat_id, limit, offset],
@@ -467,7 +505,7 @@ impl MessageDb {
             &format!(
                 "{MESSAGE_SELECT}
                 WHERE cmj.chat_id = ?1 AND cmj.message_date BETWEEN ?2 AND ?3
-                ORDER BY cmj.message_date ASC"
+                ORDER BY cmj.message_date ASC, m.ROWID ASC"
             ),
             [chat_id, start_date, end_date],
         )
@@ -881,5 +919,37 @@ mod tests {
             .collect();
         let expected: Vec<i64> = ids.iter().rev().copied().collect();
         assert_eq!(paged, expected);
+    }
+
+    #[test]
+    fn list_conversations_treats_a_negative_offset_as_zero() {
+        let fx = ChatDbFixture::new();
+        let chats: Vec<i64> = (0..3)
+            .map(|i| fx.add_chat(&format!("chat{i}"), None, 45))
+            .collect();
+        for (i, chat) in chats.iter().enumerate() {
+            let secs = i64::try_from(i).expect("small index") + 10;
+            fx.add_message(text_message("x", secs, 0, &[*chat]));
+        }
+        let list = fx.open_db().list_conversations(-5, 2).expect("list");
+        let ids: Vec<i64> = list.iter().map(|c| c.chat_id).collect();
+        assert_eq!(ids, vec![chats[2], chats[1]]);
+    }
+
+    #[test]
+    fn get_messages_in_date_range_orders_one_date_by_rowid() {
+        let fx = ChatDbFixture::new();
+        let chat = fx.add_chat("c", None, 45);
+        let ids: Vec<i64> = (0..4)
+            .map(|i| fx.add_message(text_message(&format!("m{i}"), 10, 0, &[chat])))
+            .collect();
+        let found: Vec<i64> = fx
+            .open_db()
+            .get_messages_in_date_range(chat, apple_ns(BASE, 0), apple_ns(BASE + 20, 0))
+            .expect("range")
+            .iter()
+            .map(|m| m.message_id)
+            .collect();
+        assert_eq!(found, ids);
     }
 }

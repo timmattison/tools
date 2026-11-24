@@ -4,6 +4,7 @@ use rusqlite::Connection;
 
 use crate::error::MsgsError;
 use crate::parser::extract_text_from_attributed_body;
+use crate::util::page_bounds;
 
 const CACHE_DB_NAME: &str = "text-cache.db";
 const CACHE_DIR_NAME: &str = "msgs";
@@ -247,6 +248,7 @@ impl TextCache {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<(i64, i64)>, MsgsError> {
+        let (offset, limit) = page_bounds(offset, limit);
         // FTS5 match syntax -- quote the query to handle special chars
         let fts_query = format!("\"{}\"", query.replace('"', "\"\""));
 
