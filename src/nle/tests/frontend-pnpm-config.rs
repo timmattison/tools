@@ -3,8 +3,8 @@
 //! `pnpm` refuses to install when a dependency has a build script that is neither
 //! approved nor rejected. It exits with `ERR_PNPM_IGNORED_BUILDS`, and every `pnpm`
 //! script in the package fails with it, because `pnpm run` does a dependency check
-//! first. That failure stops `pnpm dev`, which stops the Tauri `beforeDevCommand`,
-//! which stops `src/nle/scripts/dev.ts`.
+//! first. Thus `src/nle/scripts/dev.ts` stops at its own `pnpm install` step, and a
+//! plain `cargo tauri dev` stops at `pnpm dev`, its `beforeDevCommand`.
 //!
 //! `pnpm` writes the `allowBuilds` key with the placeholder text
 //! "set this to true or false" when it finds such a dependency. A person must then
