@@ -358,6 +358,14 @@ mod tests {
     }
 
     #[test]
+    fn test_pid_rejects_zero() {
+        // kill(0, sig) signals the whole process group of the caller, which
+        // holds portcul itself.
+        let error = Pid::try_from(0_u32).expect_err("PID 0 is not one process");
+        assert!(error.to_string().contains("process group"), "{error}");
+    }
+
+    #[test]
     fn test_pid_accepts_i32_max() {
         let pid = Pid::try_from(i32::MAX as u32).unwrap();
         assert_eq!(pid.as_i32(), i32::MAX);
