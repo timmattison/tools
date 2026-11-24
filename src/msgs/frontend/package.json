@@ -6,14 +6,19 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "check": "tsc --noEmit && vitest run"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2.6.0"
   },
   "devDependencies": {
+    "happy-dom": "21.0.4",
     "typescript": "^5.6",
-    "vite": "^6"
+    "vite": "^6",
+    "vitest": "5.1.0"
   }
 }

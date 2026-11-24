@@ -106,3 +106,15 @@ if [ "${rust_gate_ran:-}" != yes ] &&
     echo "pre-commit: running cargo test -p repo-guards --test tool_index_coverage"
     without_git_environment cargo test -p repo-guards --test tool_index_coverage
 fi
+
+# The msgs frontend is the one TypeScript package of this repository, and no
+# Rust gate reads it. A commit that stages a file under it, or under the
+# scripts of msgs, runs its type check and its tests. The install is frozen,
+# so the gate never changes the lockfile, and offline-first, so a warm store
+# needs no network.
+if git diff --cached --name-only --diff-filter=ACMRD | grep -qE '^src/msgs/(frontend|scripts)/'; then
+    msgs_frontend="$(dirname "$0")/../src/msgs/frontend"
+    echo "pre-commit: running the msgs frontend checks (tsc --noEmit, vitest run)"
+    without_git_environment pnpm --dir "$msgs_frontend" install --frozen-lockfile --prefer-offline
+    without_git_environment pnpm --dir "$msgs_frontend" run check
+fi
