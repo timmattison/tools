@@ -19,7 +19,13 @@ fn validate_path(path: &str) -> Result<PathBuf, NleError> {
 /// Load a recording from a file path, returning both the recording and its metadata.
 #[tauri::command]
 pub async fn load_recording(path: String) -> Result<LoadedRecording, NleError> {
-    let file_path = validate_path(&path)?;
+    load_recording_from(&path)
+}
+
+/// Load the recording at `path` and pair it with its metadata.
+/// The metadata holds the canonical path of the file.
+fn load_recording_from(path: &str) -> Result<LoadedRecording, NleError> {
+    let file_path = validate_path(path)?;
     let recording = Recording::load(&file_path)?;
     let display_path = file_path.to_string_lossy();
     let metadata = recording.metadata(&display_path);
@@ -38,7 +44,17 @@ pub async fn save_recording(
     recording: Recording,
     compress: Option<bool>,
 ) -> Result<(), NleError> {
-    let file_path = PathBuf::from(&path);
+    save_recording_to(&path, &recording, compress)
+}
+
+/// Save `recording` to `path` after it resolves the parent directory.
+/// An absent `compress` falls back to the `.gz` suffix of `path`.
+fn save_recording_to(
+    path: &str,
+    recording: &Recording,
+    compress: Option<bool>,
+) -> Result<(), NleError> {
+    let file_path = PathBuf::from(path);
     // Canonicalize the parent directory to prevent path traversal
     let parent = file_path.parent().ok_or_else(|| {
         NleError::SaveError(format!("Invalid path (no parent directory): {path}"))
@@ -67,7 +83,13 @@ pub async fn save_recording(
 /// Only considers files ending in `.json` or `.json.gz`.
 #[tauri::command]
 pub async fn list_recordings(directory: String) -> Result<Vec<RecordingMetadata>, NleError> {
-    let dir_path = PathBuf::from(&directory);
+    list_recordings_in(&directory)
+}
+
+/// Read the metadata of each loadable `.json` or `.json.gz` file in `directory`.
+/// The order of the result is not defined.
+fn list_recordings_in(directory: &str) -> Result<Vec<RecordingMetadata>, NleError> {
+    let dir_path = PathBuf::from(directory);
     if !dir_path.is_dir() {
         return Err(NleError::FileNotFound(format!(
             "Directory not found: {directory}"
@@ -113,29 +135,82 @@ fn validate_export_input(input_path: &str) -> Result<PathBuf, NleError> {
     })
 }
 
-/// Shell out to the `beta` CLI with the given subcommand and args.
-async fn run_beta_export(
-    app: &tauri::AppHandle,
+/// Build the arguments that all `beta export` runs share: the subcommand,
+/// the canonical input path, and the output path.
+fn base_export_args(
     subcommand: &str,
     input_path: &str,
     output_path: &str,
-    extra_args: Vec<String>,
-) -> Result<String, NleError> {
+) -> Result<Vec<String>, NleError> {
     let canonical_input = validate_export_input(input_path)?;
-
-    let mut args = vec![
+    Ok(vec![
         "export".to_string(),
         subcommand.to_string(),
         canonical_input.to_string_lossy().to_string(),
         "--output".to_string(),
         output_path.to_string(),
-    ];
-    args.extend(extra_args);
+    ])
+}
 
+/// Build the full `beta` argument list for a video export.
+/// It fails if the format is not Video or the input file is missing.
+fn video_export_args(options: &ExportOptions) -> Result<Vec<String>, NleError> {
+    if !matches!(options.format, ExportFormat::Video) {
+        return Err(NleError::ExportError(
+            "export_video requires Video format".into(),
+        ));
+    }
+
+    let mut args = base_export_args("video", &options.input_path, &options.output_path)?;
+    if let Some(theme) = &options.theme {
+        args.push("--theme".to_string());
+        args.push(theme.clone());
+    }
+    if let Some(fps) = options.fps {
+        args.push("--fps".to_string());
+        args.push(fps.to_string());
+    }
+    if let Some(resolution) = &options.resolution {
+        args.push("--resolution".to_string());
+        args.push(resolution.clone());
+    }
+    if options.optimize_web.unwrap_or(false) {
+        args.push("--optimize-web".to_string());
+    }
+    Ok(args)
+}
+
+/// Build the full `beta` argument list for a web export.
+/// It fails if the format is not Web or the input file is missing.
+fn web_export_args(options: &ExportOptions) -> Result<Vec<String>, NleError> {
+    if !matches!(options.format, ExportFormat::Web) {
+        return Err(NleError::ExportError(
+            "export_web requires Web format".into(),
+        ));
+    }
+
+    let mut args = base_export_args("web", &options.input_path, &options.output_path)?;
+    if let Some(theme) = &options.theme {
+        args.push("--theme".to_string());
+        args.push(theme.clone());
+    }
+    if options.compress.unwrap_or(false) {
+        args.push("--compress".to_string());
+    }
+    Ok(args)
+}
+
+/// Run the `beta` CLI with `args` through the shell plugin.
+/// Returns `output_path` when `beta` succeeds.
+async fn run_beta(
+    app: &tauri::AppHandle,
+    args: &[String],
+    output_path: &str,
+) -> Result<String, NleError> {
     let output = app
         .shell()
         .command("beta")
-        .args(&args)
+        .args(args)
         .output()
         .await
         .map_err(|e| {
@@ -160,63 +235,16 @@ pub async fn export_video(
     app: tauri::AppHandle,
     options: ExportOptions,
 ) -> Result<String, NleError> {
-    if !matches!(options.format, ExportFormat::Video) {
-        return Err(NleError::ExportError(
-            "export_video requires Video format".into(),
-        ));
-    }
-
-    let mut extra_args = Vec::new();
-    if let Some(theme) = &options.theme {
-        extra_args.push("--theme".to_string());
-        extra_args.push(theme.clone());
-    }
-    if let Some(fps) = options.fps {
-        extra_args.push("--fps".to_string());
-        extra_args.push(fps.to_string());
-    }
-    if let Some(resolution) = &options.resolution {
-        extra_args.push("--resolution".to_string());
-        extra_args.push(resolution.clone());
-    }
-    if options.optimize_web.unwrap_or(false) {
-        extra_args.push("--optimize-web".to_string());
-    }
-
-    run_beta_export(
-        &app,
-        "video",
-        &options.input_path,
-        &options.output_path,
-        extra_args,
-    )
-    .await
+    let args = video_export_args(&options)?;
+    run_beta(&app, &args, &options.output_path).await
 }
 
 /// Export a recording to web (HTML) format by shelling out to the beta CLI.
 #[tauri::command]
 pub async fn export_web(app: tauri::AppHandle, options: ExportOptions) -> Result<String, NleError> {
-    if !matches!(options.format, ExportFormat::Web) {
-        return Err(NleError::ExportError(
-            "export_web requires Web format".into(),
-        ));
-    }
-
-    let mut extra_args = Vec::new();
-    if let Some(theme) = &options.theme {
-        extra_args.push("--theme".to_string());
-        extra_args.push(theme.clone());
-    }
-    if options.compress.unwrap_or(false) {
-        extra_args.push("--compress".to_string());
-    }
-
-    run_beta_export(
-        &app,
-        "web",
-        &options.input_path,
-        &options.output_path,
-        extra_args,
-    )
-    .await
+    let args = web_export_args(&options)?;
+    run_beta(&app, &args, &options.output_path).await
 }
+
+#[cfg(test)]
+mod tests;
