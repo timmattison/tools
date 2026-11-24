@@ -2829,6 +2829,13 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
     processes, such as 176 Claude Code sessions, then count as one cause. It uses no language
     model. It supports macOS only. See below for the full entry.
   - To install: `cargo install --git https://github.com/timmattison/tools whyslow`
+- portcul (portcullis)
+  - Shows each process that listens on a port in a table in the terminal. Move with the arrow keys or `j`/`k`.
+    Press `d` or Enter to send SIGTERM to the selected process after a confirmation, and press `r` to read the
+    table again. The table refreshes each 2 s, and `--refresh <seconds>` changes the interval.
+  - `portcul list [port]` prints one line for each process and address. `portcul kill <port>` sends SIGTERM to
+    each process on the port after a confirmation, and `--yes` skips the confirmation.
+  - To install: `cargo install --git https://github.com/timmattison/tools portcul`
 
 ## dirhash
 
