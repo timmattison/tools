@@ -553,6 +553,46 @@ mod tests {
         assert!(state.table_state.selected().is_none());
     }
 
+    fn row(pid: u32, port: u16) -> ListeningProcess {
+        ListeningProcess {
+            pid: Pid::try_from(pid).unwrap(),
+            name: format!("proc-{pid}"),
+            port,
+            addresses: vec!["0.0.0.0".to_string()],
+        }
+    }
+
+    #[test]
+    fn test_refresh_keeps_the_second_port_of_one_pid() {
+        // One process that listens on two ports has two rows.
+        let rows = vec![row(100, 80), row(100, 443)];
+        let mut state = AppState::new(rows.clone());
+        state.select_next();
+        assert_eq!(state.selected_listener().unwrap().port, 443);
+
+        state.refresh(rows);
+        assert_eq!(state.table_state.selected(), Some(1));
+        assert_eq!(state.selected_listener().unwrap().port, 443);
+    }
+
+    #[test]
+    fn test_refresh_moves_to_the_nearest_row_when_the_selected_row_is_gone() {
+        let mut state = AppState::new(vec![row(1, 80), row(2, 443), row(3, 8080)]);
+        state.select_next(); // row(2, 443)
+
+        state.refresh(vec![row(1, 80), row(3, 8080)]);
+        assert_eq!(state.table_state.selected(), Some(1));
+    }
+
+    #[test]
+    fn test_refresh_clamps_when_the_last_row_is_gone() {
+        let mut state = AppState::new(vec![row(1, 80), row(2, 443), row(3, 8080)]);
+        state.select_previous(); // wraps to row(3, 8080)
+
+        state.refresh(vec![row(1, 80), row(2, 443)]);
+        assert_eq!(state.table_state.selected(), Some(1));
+    }
+
     #[test]
     fn test_refresh_preserves_selection_by_pid() {
         let listeners = vec![
