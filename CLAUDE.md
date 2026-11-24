@@ -290,6 +290,8 @@ full path, `shellquote::shell_quote(...)`, where the call site sits behind a
 - `sidecar` - the fixture root that the tests put into the fake `gh`
 - `swt` - the path of a `.swt-check` override, and the command lines it prints
   for a person to paste
+- `vpn-tunnel` - the `--op-path` value in the `op-cache invalidate` command that
+  the all-in-use error prints
 - `wdid` - the paths and the history rows that the tests put into stub scripts
 
 ## GitHub REST Through `gh`
@@ -1000,6 +1002,27 @@ tool's own entry would otherwise document a tool named `To`.
   test asks `cargo metadata` whether the guard's set of binaries is the set
   cargo actually builds, so a binary the guard never learned to discover shows
   up as a set difference instead of a clean report
+
+## Specs and Plans
+
+A spec **must** live in `specs/` and a plan **must** live in `plans/`, both at
+the repository root. A file in any other directory named `specs` or `plans` is
+in the wrong place.
+
+### Why
+
+The superpowers skills write specs and plans to `docs/superpowers/` by default.
+This repository took that default three times: #198 (`portplz`), #200
+(`kitchen-sync`), and #191 (`vpn-tunnel`). Nothing failed, so the files stayed
+there until a review of #191 found them.
+
+### Guards Enforcing This
+
+- `repo_guards::doc_placement` (`src/repo-guards/src/doc_placement.rs`) — every
+  file in a `specs` or `plans` directory below the repository root fails
+  `cargo test`. The walk does not enter a directory that holds a `.git` entry,
+  because that directory is another checkout, for example an agent worktree
+  in `.claude/worktrees/`
 
 ## UTF-8 String Safety
 

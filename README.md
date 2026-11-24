@@ -1054,14 +1054,21 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
   - To install: `cargo install --git https://github.com/timmattison/tools beta`
 - vpn-tunnel
   - Generates Docker-based VPN tunnels using gluetun + ProtonVPN + WireGuard. Produces a ready-to-run
-    `docker-compose.yml` plus helper scripts; pulls the WireGuard credential from 1Password via
-    op-cache. Supports per-city pinning or US-wide IP diversity and configurable container prefixes.
+    `docker-compose.yml` plus helper scripts. Reads the `credential*` fields of a 1Password item
+    through op-cache and picks the first WireGuard credential that no running tunnel holds. A
+    regenerated directory keeps the credential that its `.env` names, unless a tunnel of another
+    container name holds it. A directory whose `.env` names no credential, for example one generated
+    before that line existed, keeps the credential whose key its own running tunnel holds.
+    `generate` stops when docker cannot report the running tunnels.
+    Supports per-city pinning or US-wide IP diversity and configurable container prefixes.
   - To install: `cargo install --git https://github.com/timmattison/tools vpn-tunnel`
 - op-cache
   - 1Password credential cache with retry logic, atomic writes, and worktree support. Wraps `op read`
     so repeated calls don't re-hit 1Password (or trigger Touch ID) for every secret. Supports text and
     binary secrets, env-var overrides, cache invalidation, and includes worktree hooks for automatic
-    setup. Required by other tools in this repo (e.g. `vpn-tunnel`).
+    setup. Its `list-fields` subcommand lists the fields of a 1Password item whose label matches a
+    prefix, which is how `vpn-tunnel` finds the several WireGuard credentials that live on one item.
+    Required by other tools in this repo (e.g. `vpn-tunnel`).
   - The 1Password prompt names only the application above the caller. In a zellij pane, it names
     "zellij", whichever of the sessions asked. Thus, before each run of `op`, op-cache names the
     caller itself. A cache hit and an `--env-var` override run no `op`, thus they do neither step.
@@ -1083,13 +1090,14 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
   - op-cache writes an audit trail to `$XDG_STATE_HOME/op-cache/audit.jsonl`. When
     `XDG_STATE_HOME` is unset, empty, or relative, the file is `~/.local/state/op-cache/audit.jsonl`.
     The audit trail has no switch. Each line is one JSON record, of one of two kinds:
-    - `op_start`, before `op` runs: the time, the `request_id`, the attempt, the operation (`read` or
-      `read-binary`), the reference, the working directory, the cache file, the zellij session and
-      pane, `TERM_PROGRAM`, the Claude Code session, and the chain of ancestor processes (at most 32,
-      each command line cut to 1024 bytes). The Claude Code session is the nearest ancestor that has
-      a file `sessions/<pid>.json` in `$CLAUDE_CONFIG_DIR`, else in `~/.claude`. A file whose
-      `startedAt` is earlier than the start of that ancestor is skipped, because that PID now belongs
-      to a different process. The lookup then continues to the next ancestor.
+    - `op_start`, before `op` runs: the time, the `request_id`, the attempt, the operation (`read`,
+      `read-binary`, or `item-get` for `list-fields`), the reference, the working directory, the
+      cache file, the zellij session and pane, `TERM_PROGRAM`, the Claude Code session, and the chain
+      of ancestor processes (at most 32, each command line cut to 1024 bytes). The Claude Code
+      session is the nearest ancestor that has a file `sessions/<pid>.json` in `$CLAUDE_CONFIG_DIR`,
+      else in `~/.claude`. A file whose `startedAt` is earlier than the start of that ancestor is
+      skipped, because that PID now belongs to a different process. The lookup then continues to the
+      next ancestor.
     - `op_end`, after `op` returns, with the same `request_id`: the `outcome` (`ok`, `empty`,
       `failed`, or `spawn_error`), the `exit_code`, and the `duration_ms`. An `empty` outcome means
       `op` exited 0 but gave no value, and op-cache tries again as after a failure. An `empty` or a

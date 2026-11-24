@@ -65,6 +65,10 @@ const RETRY_DELAY_MS: u64 = 1000;
 /// Cache file name (must be gitignored by consuming projects).
 const CACHE_FILENAME: &str = ".op-cache.json";
 
+/// Sentinel path segment that separates an item path from the field prefix
+/// whose field list is cached under it.
+const ITEM_FIELDS_SENTINEL: &str = "__item_fields__";
+
 /// Errors that can occur during 1Password caching operations.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -79,6 +83,14 @@ pub enum Error {
     /// All retries exhausted when reading from 1Password.
     #[error("failed to read \"{0}\" from 1Password after {OP_MAX_RETRIES} attempts")]
     OpReadFailed(String),
+
+    /// No fields matching the given prefix were found in the 1Password item.
+    #[error("no fields matching prefix \"{prefix}\" found in 1Password item \"{item}\"")]
+    NoMatchingFields { prefix: String, item: String },
+
+    /// Failed to parse 1Password item JSON.
+    #[error("failed to parse 1Password item JSON: {0}")]
+    ItemJsonParse(String),
 
     /// Not inside a git repository.
     #[error("not inside a git repository — op-cache requires a git repo to locate the cache file")]
@@ -122,6 +134,20 @@ impl OpPath {
         }
         Ok(Self(path.to_string()))
     }
+
+    /// Extracts vault and item segments from an item-level path.
+    ///
+    /// For a path like `op://vault/item`, returns `("vault", "item")`.
+    /// Returns `None` if the path has too few or too many segments.
+    pub fn vault_and_item(&self) -> Option<(&str, &str)> {
+        let without_prefix = self.0.strip_prefix("op://")?;
+        let parts: Vec<&str> = without_prefix.splitn(3, '/').collect();
+        if parts.len() == 2 {
+            Some((parts[0], parts[1]))
+        } else {
+            None
+        }
+    }
 }
 
 impl AsRef<str> for OpPath {
@@ -136,6 +162,15 @@ impl fmt::Display for OpPath {
     }
 }
 
+/// A single field from a 1Password item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemField {
+    /// The field label (e.g., "credential", "credential-2")
+    pub label: String,
+    /// The field value
+    pub value: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct CacheEntry {
     value: String,
@@ -144,6 +179,19 @@ struct CacheEntry {
 }
 
 type CacheFile = HashMap<String, CacheEntry>;
+
+/// The cache key prefix that every field list of one item shares.
+///
+/// It keeps the trailing separator, so `op://Private/Foo` cannot match the
+/// keys of `op://Private/FooBar`.
+fn item_fields_key_prefix(op_path: &OpPath) -> String {
+    format!("{}/{ITEM_FIELDS_SENTINEL}/", op_path.as_ref())
+}
+
+/// The cache key holding the field list of one item and one field prefix.
+fn item_fields_cache_key(op_path: &OpPath, field_prefix: &str) -> String {
+    format!("{}{field_prefix}", item_fields_key_prefix(op_path))
+}
 
 /// 1Password credential cache manager.
 ///
@@ -259,16 +307,82 @@ impl OpCache {
         Ok(resolved)
     }
 
-    /// Removes a credential from the cache file.
+    /// Lists fields from a 1Password item that match a given prefix.
     ///
-    /// The next `read()` call for this path will re-fetch from 1Password.
+    /// Resolution order:
+    /// 1. If the item fields are in the cache, return cached values. An entry
+    ///    that does not parse is a miss, as a cache file that does not parse is
+    /// 2. Fetch from 1Password with `op item get --format json`, parse, cache, return
+    ///
+    /// A field matches if its label equals `field_prefix` exactly or starts with
+    /// `field_prefix-`. Results are sorted alphabetically by label.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the `op` CLI is not found, 1Password read fails,
+    /// no fields match the prefix, or there's a cache IO error.
+    pub fn read_item_fields(&self, op_path: &OpPath, field_prefix: &str) -> Result<Vec<ItemField>> {
+        // Cache key: item path + sentinel + prefix
+        let cache_key = item_fields_cache_key(op_path, field_prefix);
+
+        // Check cache first
+        let mut cache = self.read_cache();
+        if let Some(entry) = cache.get(&cache_key) {
+            match serde_json::from_str::<Vec<(String, String)>>(&entry.value) {
+                Ok(pairs) => {
+                    return Ok(pairs
+                        .into_iter()
+                        .map(|(label, value)| ItemField { label, value })
+                        .collect());
+                }
+                Err(e) => eprintln!(
+                    "warning: cached field list {cache_key} is corrupted ({}), re-fetching it",
+                    describe_json_error(&e)
+                ),
+            }
+        }
+
+        // Fetch from 1Password
+        let item_json = fetch_item_from_1password(op_path, &self.cache_path)?;
+        let fields = parse_item_fields(&item_json, field_prefix)?;
+
+        // Cache the result
+        let pairs: Vec<(&str, &str)> = fields
+            .iter()
+            .map(|f| (f.label.as_str(), f.value.as_str()))
+            .collect();
+        let serialized = serde_json::to_string(&pairs)
+            .map_err(|e| Error::ItemJsonParse(format!("failed to serialize fields: {e}")))?;
+        cache.insert(
+            cache_key,
+            CacheEntry {
+                value: serialized,
+                fetched_at: Utc::now().to_rfc3339(),
+            },
+        );
+        self.write_cache(&cache)?;
+
+        Ok(fields)
+    }
+
+    /// Removes everything the cache holds for a path: the credential itself
+    /// and every field list [`read_item_fields`](Self::read_item_fields) cached
+    /// for it, whatever field prefix each was fetched under.
+    ///
+    /// The next `read()` or `read_item_fields()` call for this path re-fetches
+    /// from 1Password, so a field added to the item in 1Password after the last
+    /// fetch becomes visible. Another item whose path merely starts with this
+    /// one (`op://Private/FooBar` beside `op://Private/Foo`) is left alone.
     ///
     /// # Errors
     ///
     /// Returns an error if there's a cache IO error.
     pub fn invalidate(&self, op_path: &OpPath) -> Result<()> {
         let mut cache = self.read_cache();
-        if cache.remove(op_path.as_ref()).is_some() {
+        let fields_prefix = item_fields_key_prefix(op_path);
+        let before = cache.len();
+        cache.retain(|key, _| key != op_path.as_ref() && !key.starts_with(&fields_prefix));
+        if cache.len() != before {
             self.write_cache(&cache)?;
         }
         Ok(())
@@ -312,7 +426,7 @@ impl OpCache {
                 Err(e) => {
                     eprintln!(
                         "warning: op-cache file is corrupted ({}), re-fetching credentials",
-                        e
+                        describe_json_error(&e)
                     );
                     CacheFile::new()
                 }
@@ -337,6 +451,20 @@ impl OpCache {
 
         Ok(())
     }
+}
+
+/// Describes a JSON error by its class and its position, never by its text.
+///
+/// serde_json quotes a string of the wrong type in the text of its error, so
+/// the text of an error from a parse of the cache can hold a cached secret.
+fn describe_json_error(error: &serde_json::Error) -> String {
+    let class = match error.classify() {
+        serde_json::error::Category::Io => "an I/O error",
+        serde_json::error::Category::Syntax => "a syntax error",
+        serde_json::error::Category::Data => "a value of the wrong shape",
+        serde_json::error::Category::Eof => "an early end of the input",
+    };
+    format!("{class} at line {} column {}", error.line(), error.column())
 }
 
 fn find_repo_root() -> Result<PathBuf> {
@@ -416,6 +544,102 @@ fn fetch_binary_from_1password(
     Err(Error::OpReadFailed(op_path.to_string()))
 }
 
+/// Runs `op item get --format json` for the item at `op_path` through
+/// [`OpRun`], so each attempt writes the audit trail and shows the
+/// notification, as a read does. Output that is not JSON is an error at once,
+/// and no further attempt runs.
+fn fetch_item_from_1password(op_path: &OpPath, cache_path: &Path) -> Result<serde_json::Value> {
+    ensure_op_available()?;
+
+    let (vault, item) = op_path.vault_and_item().ok_or_else(|| {
+        Error::InvalidOpPath(format!(
+            "{} (expected item-level path like op://vault/item)",
+            op_path
+        ))
+    })?;
+    let mut run = OpRun::new(
+        Operation::ItemGet { vault, item },
+        op_path,
+        cache_path,
+        OP_MAX_RETRIES,
+    );
+
+    for attempt in 1..=OP_MAX_RETRIES {
+        match run.attempt(attempt) {
+            Ok(output) if run.gave_value(&output) => {
+                let json_str = String::from_utf8_lossy(&output.stdout);
+                return serde_json::from_str(json_str.trim()).map_err(|e| {
+                    Error::ItemJsonParse(format!("invalid JSON from `op item get`: {e}"))
+                });
+            }
+            _ => {}
+        }
+
+        if attempt < OP_MAX_RETRIES {
+            eprintln!(
+                "Failed to get item from 1Password (attempt {attempt}/{OP_MAX_RETRIES}), retrying..."
+            );
+            std::thread::sleep(std::time::Duration::from_millis(
+                RETRY_DELAY_MS * u64::from(attempt),
+            ));
+        }
+    }
+
+    Err(Error::OpReadFailed(op_path.to_string()))
+}
+
+/// Parses `op item get --format json` output and returns fields matching a prefix.
+///
+/// A field matches if its label equals `prefix` exactly or starts with `prefix-`.
+/// Results are sorted alphabetically by label.
+///
+/// # Errors
+///
+/// Returns [`Error::NoMatchingFields`] if no fields match the prefix.
+/// Returns [`Error::ItemJsonParse`] if the JSON structure is unexpected.
+pub fn parse_item_fields(
+    item_json: &serde_json::Value,
+    field_prefix: &str,
+) -> Result<Vec<ItemField>> {
+    let fields = item_json
+        .get("fields")
+        .and_then(|f| f.as_array())
+        .ok_or_else(|| Error::ItemJsonParse("missing or invalid 'fields' array".to_string()))?;
+
+    let title = item_json
+        .get("title")
+        .and_then(|t| t.as_str())
+        .unwrap_or("unknown");
+
+    let dash_prefix = format!("{field_prefix}-");
+
+    let mut matched: Vec<ItemField> = fields
+        .iter()
+        .filter_map(|f| {
+            let label = f.get("label")?.as_str()?;
+            let value = f.get("value")?.as_str()?;
+            if label == field_prefix || label.starts_with(&dash_prefix) {
+                Some(ItemField {
+                    label: label.to_string(),
+                    value: value.to_string(),
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if matched.is_empty() {
+        return Err(Error::NoMatchingFields {
+            prefix: field_prefix.to_string(),
+            item: title.to_string(),
+        });
+    }
+
+    matched.sort_by(|a, b| a.label.cmp(&b.label));
+    Ok(matched)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -440,6 +664,19 @@ mod tests {
         assert!(OpPath::new("op://vault/item&background").is_err());
         assert!(OpPath::new("op://vault/item$var").is_err());
         assert!(OpPath::new("op://vault/item`cmd`").is_err());
+    }
+
+    #[test]
+    fn vault_and_item_parsing() {
+        let path = OpPath::new("op://Private/My Item").unwrap();
+        assert_eq!(path.vault_and_item(), Some(("Private", "My Item")));
+
+        let path = OpPath::new("op://Vault/Item With Spaces").unwrap();
+        assert_eq!(path.vault_and_item(), Some(("Vault", "Item With Spaces")));
+
+        // Three-segment path (field-level) should return None
+        let path = OpPath::new("op://Private/Item/field").unwrap();
+        assert_eq!(path.vault_and_item(), None);
     }
 
     #[test]
@@ -529,6 +766,104 @@ mod tests {
         assert!(cache.entries().unwrap().is_empty());
     }
 
+    /// Builds a cache entry with a fixed timestamp, for tests that only care
+    /// about which keys survive an operation.
+    fn test_entry(value: &str) -> CacheEntry {
+        CacheEntry {
+            value: value.to_string(),
+            fetched_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    /// Returns the keys the cache file holds, sorted.
+    fn cached_keys(cache: &OpCache) -> Vec<String> {
+        let mut keys: Vec<String> = cache
+            .entries()
+            .unwrap()
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+        keys.sort();
+        keys
+    }
+
+    #[test]
+    fn invalidate_removes_item_field_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = OpCache::with_path(dir.path().join(CACHE_FILENAME));
+
+        let item = OpPath::new("op://Private/ProtonVPN WireGuard key").unwrap();
+        let mut file: CacheFile = HashMap::new();
+        file.insert(item.as_ref().to_string(), test_entry("secret"));
+        file.insert(
+            item_fields_cache_key(&item, "credential"),
+            test_entry("[[\"credential\",\"key-1\"]]"),
+        );
+        file.insert(
+            item_fields_cache_key(&item, "username"),
+            test_entry("[[\"username\",\"user\"]]"),
+        );
+        cache.write_cache(&file).unwrap();
+        assert_eq!(cached_keys(&cache).len(), 3);
+
+        cache.invalidate(&item).unwrap();
+        assert!(
+            cached_keys(&cache).is_empty(),
+            "invalidate left entries behind: {:?}",
+            cached_keys(&cache)
+        );
+    }
+
+    #[test]
+    fn invalidate_removes_item_field_entries_without_a_plain_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = OpCache::with_path(dir.path().join(CACHE_FILENAME));
+
+        // A `list-fields` call caches only the field list — no plain entry.
+        let item = OpPath::new("op://Private/ProtonVPN WireGuard key").unwrap();
+        let mut file: CacheFile = HashMap::new();
+        file.insert(
+            item_fields_cache_key(&item, "credential"),
+            test_entry("[[\"credential\",\"key-1\"]]"),
+        );
+        cache.write_cache(&file).unwrap();
+
+        cache.invalidate(&item).unwrap();
+        assert!(
+            cached_keys(&cache).is_empty(),
+            "invalidate left entries behind: {:?}",
+            cached_keys(&cache)
+        );
+    }
+
+    #[test]
+    fn invalidate_leaves_another_item_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = OpCache::with_path(dir.path().join(CACHE_FILENAME));
+
+        let target = OpPath::new("op://Private/Foo").unwrap();
+        let neighbor = OpPath::new("op://Private/FooBar").unwrap();
+        let neighbor_fields = item_fields_cache_key(&neighbor, "credential");
+        let mut file: CacheFile = HashMap::new();
+        file.insert(target.as_ref().to_string(), test_entry("foo-secret"));
+        file.insert(
+            item_fields_cache_key(&target, "credential"),
+            test_entry("[[\"credential\",\"foo-key\"]]"),
+        );
+        file.insert(neighbor.as_ref().to_string(), test_entry("foobar-secret"));
+        file.insert(
+            neighbor_fields.clone(),
+            test_entry("[[\"credential\",\"foobar-key\"]]"),
+        );
+        cache.write_cache(&file).unwrap();
+
+        cache.invalidate(&target).unwrap();
+        assert_eq!(
+            cached_keys(&cache),
+            vec![neighbor.as_ref().to_string(), neighbor_fields]
+        );
+    }
+
     #[test]
     fn clear_removes_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -548,5 +883,125 @@ mod tests {
 
         cache.clear().unwrap();
         assert!(!cache_path.exists());
+    }
+
+    #[test]
+    fn parse_item_fields_single_credential() {
+        let json = serde_json::json!({
+            "id": "abc123",
+            "title": "ProtonVPN WireGuard key",
+            "fields": [
+                {"id": "username", "label": "username", "value": "user@example.com", "type": "STRING"},
+                {"id": "credential", "label": "credential", "value": "key-1-secret", "type": "CONCEALED"}
+            ]
+        });
+        let fields = parse_item_fields(&json, "credential").unwrap();
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].label, "credential");
+        assert_eq!(fields[0].value, "key-1-secret");
+    }
+
+    #[test]
+    fn parse_item_fields_multiple_credentials() {
+        let json = serde_json::json!({
+            "id": "abc123",
+            "title": "ProtonVPN WireGuard key",
+            "fields": [
+                {"id": "credential", "label": "credential", "value": "key-1-secret", "type": "CONCEALED"},
+                {"id": "cred2", "label": "credential-2", "value": "key-2-secret", "type": "CONCEALED"},
+                {"id": "username", "label": "username", "value": "user@example.com", "type": "STRING"},
+                {"id": "credback", "label": "credential-backup", "value": "key-3-secret", "type": "CONCEALED"}
+            ]
+        });
+        let fields = parse_item_fields(&json, "credential").unwrap();
+        assert_eq!(fields.len(), 3);
+        // Should be sorted alphabetically by label
+        assert_eq!(fields[0].label, "credential");
+        assert_eq!(fields[0].value, "key-1-secret");
+        assert_eq!(fields[1].label, "credential-2");
+        assert_eq!(fields[1].value, "key-2-secret");
+        assert_eq!(fields[2].label, "credential-backup");
+        assert_eq!(fields[2].value, "key-3-secret");
+    }
+
+    #[test]
+    fn parse_item_fields_missing_fields_array() {
+        let json = serde_json::json!({"id": "abc123", "title": "Bad item"});
+        let result = parse_item_fields(&json, "credential");
+        assert!(matches!(result.unwrap_err(), Error::ItemJsonParse(_)));
+    }
+
+    #[test]
+    fn parse_item_fields_fields_not_array() {
+        let json =
+            serde_json::json!({"id": "abc123", "title": "Bad item", "fields": "not-an-array"});
+        let result = parse_item_fields(&json, "credential");
+        assert!(matches!(result.unwrap_err(), Error::ItemJsonParse(_)));
+    }
+
+    #[test]
+    fn parse_item_fields_no_matching_fields() {
+        let json = serde_json::json!({
+            "id": "abc123",
+            "title": "ProtonVPN WireGuard key",
+            "fields": [
+                {"id": "username", "label": "username", "value": "user@example.com", "type": "STRING"},
+                {"id": "password", "label": "password", "value": "pass123", "type": "CONCEALED"}
+            ]
+        });
+        let result = parse_item_fields(&json, "credential");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            Error::NoMatchingFields { prefix, item } => {
+                assert_eq!(prefix, "credential");
+                assert_eq!(item, "ProtonVPN WireGuard key");
+            }
+            other => panic!("expected NoMatchingFields, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_item_fields_cache_hit() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = OpCache::with_path(dir.path().join(CACHE_FILENAME));
+
+        // Pre-populate cache using the same key format as read_item_fields
+        let op_path = OpPath::new("op://Private/TestItem").unwrap();
+        let cache_key = item_fields_cache_key(&op_path, "credential");
+        let pairs = vec![("credential", "key-1"), ("credential-2", "key-2")];
+        let serialized = serde_json::to_string(&pairs).unwrap();
+        let mut file: CacheFile = HashMap::new();
+        file.insert(
+            cache_key,
+            CacheEntry {
+                value: serialized,
+                fetched_at: "2026-01-01T00:00:00Z".to_string(),
+            },
+        );
+        cache.write_cache(&file).unwrap();
+
+        // Exercise the actual method through cache-hit path
+        let fields = cache.read_item_fields(&op_path, "credential").unwrap();
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].label, "credential");
+        assert_eq!(fields[0].value, "key-1");
+        assert_eq!(fields[1].label, "credential-2");
+        assert_eq!(fields[1].value, "key-2");
+    }
+
+    #[test]
+    fn parse_item_fields_excludes_partial_prefix_matches() {
+        let json = serde_json::json!({
+            "id": "abc123",
+            "title": "Test item",
+            "fields": [
+                {"id": "cred", "label": "credential", "value": "key-1", "type": "CONCEALED"},
+                {"id": "creds", "label": "credentials", "value": "key-2", "type": "CONCEALED"}
+            ]
+        });
+        // "credentials" should NOT match — only "credential" (exact) or "credential-*" (with dash)
+        let fields = parse_item_fields(&json, "credential").unwrap();
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].label, "credential");
     }
 }
