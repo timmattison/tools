@@ -49,3 +49,10 @@ export interface ExportResult {
   message_count: number;
   attachment_count: number;
 }
+
+/** The state of the search index, as the backend reports it. */
+export type CacheStatus =
+  | { state: "not_started" }
+  | { state: "building"; indexed: number; total: number }
+  | { state: "ready" }
+  | { state: "failed"; error: string };
