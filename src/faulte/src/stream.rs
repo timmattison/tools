@@ -1131,7 +1131,8 @@ mod tests {
     /// Starts a stub that runs `before`, prints `text`, and then lives on until
     /// its time limit.
     fn stub_printing(before: &str, text: &str) -> TopStream {
-        let script = format!("{before} printf '%s' '{text}'; {STUB_LIFETIME}");
+        let text = shellquote::shell_quote(text);
+        let script = format!("{before} printf '%s' {text}; {STUB_LIFETIME}");
         TopStream::spawn("/bin/sh", &shell(&script)).expect("the shell starts")
     }
 
@@ -1252,7 +1253,10 @@ mod tests {
     /// samples, waits for the first header, and gives the stream and the PID.
     fn stub_with_pid() -> (TopStream, u32) {
         let path = unique_path("pid");
-        let before = format!("echo $$ > '{}';", path.display());
+        let before = format!(
+            "echo $$ > {};",
+            shellquote::shell_quote(&path.display().to_string())
+        );
         let mut stream = stub_printing(&before, &three_samples());
         events_until(&mut stream, headers_at_least(1));
         let text = std::fs::read_to_string(&path).expect("the stub wrote its PID");

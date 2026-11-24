@@ -276,6 +276,8 @@ full path, `shellquote::shell_quote(...)`, where the call site sits behind a
   prints bare, because a person reads that output before they paste it
 - `crap` - the paths that the tests of the shell function put into the fake
   scripts
+- `faulte` - the text and the PID file path that the stream tests put into
+  the stub scripts
 - `gitscratch` - the log path, the path of the real git, and the subcommand
   names that the `git` shim of `testing::git_shim` puts into its script
 - `glance` - the remote binary in the command that `ssh` sends to the second

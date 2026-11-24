@@ -32,6 +32,7 @@ libc.workspace = true
 signal-hook.workspace = true
 
 [dev-dependencies]
+shellquote.workspace = true
 testcolor.workspace = true
 
 [lints]
