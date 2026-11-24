@@ -1,3 +1,4 @@
+use anyhow::Context;
 use std::fmt;
 
 /// A process ID, wrapping the raw `u32` from the `listeners` crate.
@@ -200,8 +201,36 @@ pub fn kill_process(pid: Pid) -> anyhow::Result<()> {
     }
 }
 
+/// Tells whether a process still listens on a port, by the list that was read
+/// last.
+///
+/// The OS can give the PID of a process that exited to a different process, so
+/// a row with the same PID but a different name or port is a different
+/// process, and a kill must not go to it.
+#[must_use]
+pub fn still_listening(fresh: &[ListeningProcess], pid: Pid, name: &str, port: u16) -> bool {
+    fresh
+        .iter()
+        .any(|l| l.pid == pid && l.port == port && l.name == name)
+}
+
+/// Formats the message for a process that no longer listens on its port.
+///
+/// For example, `server (PID 100) no longer listens on port 8080. Nothing was
+/// sent.`
+#[must_use]
+pub fn format_not_listening(name: &str, pid: Pid, port: u16) -> String {
+    format!("{name} (PID {pid}) no longer listens on port {port}. Nothing was sent.")
+}
+
 /// Sends SIGTERM to each target through `kill`, and prints one line for each
 /// result.
+///
+/// `fresh` is the list of listeners that the caller read just before the kill.
+/// A target gets `kill` only when `fresh` still has a row with the same PID,
+/// name, and port (see [`still_listening`]). Else the process exited, and the
+/// OS can give its PID to a different process, so the function prints one line
+/// to standard error and sends nothing.
 ///
 /// A success prints to standard output, and a failure prints to standard
 /// error. The function tries each target, also after a failure.
@@ -209,14 +238,22 @@ pub fn kill_process(pid: Pid) -> anyhow::Result<()> {
 /// # Errors
 ///
 /// Returns an error that counts the failed kills when one kill or more failed.
+/// A target that no longer listens counts as a failed kill.
 pub fn kill_targets(
     targets: &[&ListeningProcess],
     fresh: &[ListeningProcess],
     kill: impl Fn(Pid) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
-    let _ = fresh;
     let mut failed = 0_usize;
     for listener in targets {
+        if !still_listening(fresh, listener.pid, &listener.name, listener.port) {
+            eprintln!(
+                "{}",
+                format_not_listening(&listener.name, listener.pid, listener.port)
+            );
+            failed += 1;
+            continue;
+        }
         match kill(listener.pid) {
             Ok(()) => println!("{}", format_kill_result(listener)),
             Err(e) => {
@@ -234,11 +271,19 @@ pub fn kill_targets(
     Ok(())
 }
 
-/// Asks for no more than the answer: on `y` it sends SIGTERM to the targets.
+/// Sends SIGTERM to the targets after the user answered the prompt.
+///
+/// If `answer` is not `y` (any case, spaces around it ignored), the function
+/// prints `Cancelled.` to standard error and returns `Ok(())` without a read.
+/// Else it calls `read_listeners` to read the list again, because the user can
+/// leave the prompt open for any time, and then it calls [`kill_targets`] with
+/// that list. A target that the new list no longer holds with the same PID,
+/// name, and port gets no signal.
 ///
 /// # Errors
 ///
-/// Returns an error when a kill fails.
+/// Returns an error when `read_listeners` fails (no signal was sent), or when
+/// a kill failed or a target no longer listens.
 pub fn kill_after_confirmation(
     targets: &[&ListeningProcess],
     answer: &str,
@@ -249,9 +294,9 @@ pub fn kill_after_confirmation(
         eprintln!("Cancelled.");
         return Ok(());
     }
-    let _ = read_listeners;
-    let stale: Vec<ListeningProcess> = targets.iter().map(|t| (*t).clone()).collect();
-    kill_targets(targets, &stale, kill)
+    let fresh =
+        read_listeners().context("cannot read the listeners again, so no signal was sent")?;
+    kill_targets(targets, &fresh, kill)
 }
 
 /// Turns the OS error of a failed kill(2) into the error of [`kill_process`].
@@ -399,7 +444,7 @@ mod tests {
     #[test]
     fn test_kill_targets_succeeds_when_every_kill_succeeds() {
         let a = kill_target(100);
-        assert!(kill_targets(&[&a], &[a.clone()], |_| Ok(())).is_ok());
+        assert!(kill_targets(&[&a], std::slice::from_ref(&a), |_| Ok(())).is_ok());
     }
 
     #[test]

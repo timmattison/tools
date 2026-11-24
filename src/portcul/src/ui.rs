@@ -7,7 +7,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthChar;
 
-use crate::process::{ListeningProcess, Pid};
+use crate::process::{format_not_listening, still_listening, ListeningProcess, Pid};
 
 /// Whether a kill confirmation dialog is active.
 #[derive(Debug, Clone)]
@@ -108,15 +108,11 @@ impl AppState {
             return false;
         };
         let (pid, name, port) = (*pid, name.clone(), *port);
-        let still_listening = fresh
-            .iter()
-            .any(|l| l.pid == pid && l.port == port && l.name == name);
+        let listens = still_listening(&fresh, pid, &name, port);
         self.refresh(fresh);
-        if !still_listening {
+        if !listens {
             self.kill_confirm = KillConfirm::Result {
-                message: format!(
-                    "{name} (PID {pid}) no longer listens on port {port}. Nothing was sent."
-                ),
+                message: format_not_listening(&name, pid, port),
                 is_error: true,
             };
             return false;

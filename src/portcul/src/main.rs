@@ -111,6 +111,10 @@ fn cmd_tui(refresh: Duration) -> Result<()> {
 }
 
 /// Kills all processes on a given port (CLI mode).
+///
+/// After the confirmation, it reads the list again and sends SIGTERM only to
+/// each process that still listens on the port. With `--yes` there is no
+/// prompt, so it uses the list that it read at the start.
 fn cmd_kill(port: u16, yes: bool) -> Result<()> {
     let listeners = collect_listeners()?;
     let targets = filter_by_port(&listeners, port);

@@ -2834,8 +2834,10 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
     Press `d` or Enter to send SIGTERM to the selected process after a confirmation, and press `r` to read the
     table again. The table refreshes each 2 s, and `--refresh <seconds>` changes the interval (0.1 s or more).
   - `portcul list [port]` prints one line for each process and address. `portcul kill <port>` sends SIGTERM to
-    each process on the port after a confirmation, and `--yes` skips the confirmation. Both exit with status 1
-    when no process listens on the port, and `kill` also exits with status 1 when a kill fails.
+    each process on the port after a confirmation, and `--yes` skips the confirmation. After the confirmation,
+    `kill` reads the list again, and it sends nothing to a process that no longer listens on the port. `list`
+    and `kill` exit with status 1 when no process listens on the port, and `kill` also exits with status 1 when a
+    kill fails or a process no longer listens.
   - To install: `cargo install --git https://github.com/timmattison/tools portcul`
 
 ## dirhash
