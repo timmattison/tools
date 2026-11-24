@@ -418,8 +418,10 @@ fn selection_note(selected: &credential::SelectedCredential, output_dir: &Path) 
 /// Builds the error text for a run in which a running tunnel holds each credential.
 ///
 /// The text names the holder of each credential and the ways to go on.
-/// `_op_path` is the `--op-path` value of the run. It carries no color.
-fn all_in_use_message(err: &credential::AllCredentialsInUse, _op_path: &str) -> String {
+/// The `op-cache` tool keeps the list of credentials with no expiry. Thus the text
+/// names the `op-cache invalidate` command, with `op_path` quoted for a shell.
+/// `op_path` is the `--op-path` value of the run. The text carries no color.
+fn all_in_use_message(err: &credential::AllCredentialsInUse, op_path: &str) -> String {
     let mut msg = "every WireGuard credential is held by a running tunnel\n".to_string();
     for usage in &err.usage {
         msg.push_str(&format!(
@@ -427,8 +429,15 @@ fn all_in_use_message(err: &credential::AllCredentialsInUse, _op_path: &str) -> 
             usage.field_label, usage.container_name
         ));
     }
-    msg.push_str("\n\nAdd another credential in 1Password,");
-    msg.push_str("\nor stop an existing tunnel with: vpn-tunnel down --dir <path>");
+    msg.push_str("\n\nAdd another credential to the item in 1Password, then run");
+    msg.push_str(&format!(
+        "\n  op-cache invalidate {}",
+        shellquote::shell_quote(op_path)
+    ));
+    msg.push_str(
+        "\nand run vpn-tunnel generate again. op-cache keeps the old list of credentials until then.",
+    );
+    msg.push_str("\nOr stop an existing tunnel with: vpn-tunnel down --dir <path>");
     msg
 }
 
@@ -615,6 +624,32 @@ mod tests {
             text.lines()
                 .any(|line| line == "  op-cache invalidate 'op://Private/ProtonVPN WireGuard key'"),
             "the text names no invalidate command:\n{text}"
+        );
+    }
+
+    #[test]
+    fn the_all_in_use_error_quotes_a_single_quote_in_the_item_path() {
+        let text = all_in_use_message(&two_in_use(), "op://Private/Tim's key");
+        assert!(
+            text.lines()
+                .any(|line| line == "  op-cache invalidate 'op://Private/Tim'\\''s key'"),
+            "the path is not quoted:\n{text}"
+        );
+    }
+
+    #[test]
+    fn the_all_in_use_error_ends_with_the_steps_to_go_on() {
+        let text = all_in_use_message(&two_in_use(), "op://Private/ProtonVPN WireGuard key");
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines[4..],
+            [
+                "",
+                "Add another credential to the item in 1Password, then run",
+                "  op-cache invalidate 'op://Private/ProtonVPN WireGuard key'",
+                "and run vpn-tunnel generate again. op-cache keeps the old list of credentials until then.",
+                "Or stop an existing tunnel with: vpn-tunnel down --dir <path>",
+            ]
         );
     }
 }

@@ -57,8 +57,10 @@ The `generate` command flow becomes:
      credential    -> held by scraper-gluetun
      credential-2  -> held by vpn-gluetun
 
-   Add another credential to "ProtonVPN WireGuard key" in 1Password,
-   or stop an existing tunnel with: vpn-tunnel down --dir <path>
+   Add another credential to the item in 1Password, then run
+     op-cache invalidate 'op://Private/ProtonVPN WireGuard key'
+   and run vpn-tunnel generate again. op-cache keeps the old list of credentials until then.
+   Or stop an existing tunnel with: vpn-tunnel down --dir <path>
    ```
 8. **Generate:** Pass selected key + field name to the generator
 

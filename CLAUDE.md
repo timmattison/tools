@@ -290,6 +290,8 @@ full path, `shellquote::shell_quote(...)`, where the call site sits behind a
 - `sidecar` - the fixture root that the tests put into the fake `gh`
 - `swt` - the path of a `.swt-check` override, and the command lines it prints
   for a person to paste
+- `vpn-tunnel` - the `--op-path` value in the `op-cache invalidate` command that
+  the all-in-use error prints
 - `wdid` - the paths and the history rows that the tests put into stub scripts
 
 ## GitHub REST Through `gh`
