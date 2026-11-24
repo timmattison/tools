@@ -1334,6 +1334,64 @@ mod tests {
         );
     }
 
+    /// A move of the row with the detail view open shows another process. Its
+    /// command starts at its first line, and not at the scroll of the command
+    /// before it. A move that stays on the same process keeps the scroll.
+    #[test]
+    fn a_move_to_another_process_shows_its_command_from_the_first_line() {
+        let command = |prefix: &str| -> String {
+            (0..60)
+                .map(|word| format!("{prefix}{word:02}{}", "-".repeat(26)))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let (mut app, _) = app_with(vec![frame(
+            0,
+            vec![
+                RankedRow {
+                    command: command("ya"),
+                    ..row(10, 50)
+                },
+                RankedRow {
+                    command: command("zq"),
+                    ..row(11, 40)
+                },
+            ],
+        )]);
+        app.on_key(press(KeyCode::Down));
+        app.on_key(press(KeyCode::Enter));
+        paint(&mut app, 40, 20, 3);
+        app.on_key(press(KeyCode::PageDown));
+        paint(&mut app, 40, 20, 3);
+        assert!(app.detail_scroll() > 0, "the first command scrolls");
+
+        for (key, pid, prefix) in [
+            (KeyCode::Down, 11, "zq00"),
+            (KeyCode::Char('k'), 10, "ya00"),
+        ] {
+            app.on_key(press(KeyCode::PageDown));
+            paint(&mut app, 40, 20, 3);
+            app.on_key(press(key));
+            let lines = screen(&paint(&mut app, 40, 20, 3));
+            assert_eq!(app.row_key().map(|key| key.pid.get()), Some(pid));
+            assert_eq!(app.detail_scroll(), 0, "{key:?}: {lines:#?}");
+            assert!(
+                lines.iter().any(|line| line.starts_with(prefix)),
+                "{key:?}: the first line of the command is hidden: {lines:#?}"
+            );
+        }
+
+        app.on_key(press(KeyCode::PageDown));
+        paint(&mut app, 40, 20, 3);
+        let scroll = app.detail_scroll();
+        app.on_key(press(KeyCode::Up));
+        assert_eq!(
+            (app.row_key().map(|key| key.pid.get()), app.detail_scroll()),
+            (Some(10), scroll),
+            "a move at the first row stays on the process and keeps the scroll"
+        );
+    }
+
     /// A process states its own arguments, so a command line can hold a tab or
     /// an escape. The row stays aligned, and no such character reaches the
     /// screen.
