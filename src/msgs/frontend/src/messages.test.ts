@@ -288,4 +288,13 @@ describe("export run", () => {
 
     expect(byTestId("btn-export-confirm").hasAttribute("disabled")).toBe(true);
   });
+
+  it("disables the confirm button after a cancel", async () => {
+    await selectTwo();
+    expect(byTestId("btn-export-confirm").hasAttribute("disabled")).toBe(false);
+
+    byTestId("btn-export-cancel").click();
+
+    expect(byTestId("btn-export-confirm").hasAttribute("disabled")).toBe(true);
+  });
 });

@@ -7,6 +7,12 @@ let selectionMode = false;
 let startMessageEl: HTMLElement | null = null;
 let endMessageEl: HTMLElement | null = null;
 let currentExportChatId: number | null = null;
+/** True while an export runs. A second call of `performExport` returns at once. */
+let exporting = false;
+/** The id of the timer that ends selection mode after an export, or null. */
+let closeTimer: ReturnType<typeof setTimeout> | null = null;
+/** How long the result of an export stays on the bar. */
+const RESULT_DISPLAY_MS = 3000;
 
 let initialized = false;
 
@@ -32,7 +38,15 @@ export function initExport(chatId: number): void {
   });
 }
 
+function clearCloseTimer(): void {
+  if (closeTimer !== null) {
+    clearTimeout(closeTimer);
+    closeTimer = null;
+  }
+}
+
 function toggleSelectionMode(): void {
+  clearCloseTimer();
   selectionMode = !selectionMode;
   if (selectionMode) {
     document.getElementById("export-bar")?.classList.remove("hidden");
@@ -45,6 +59,8 @@ function toggleSelectionMode(): void {
 
 export function handleMessageClick(el: HTMLElement): void {
   if (!selectionMode) return;
+  // The user started a new selection: the timer must not end it
+  clearCloseTimer();
 
   if (!startMessageEl) {
     startMessageEl = el;
@@ -110,25 +126,36 @@ function updateExportBar(): void {
   } else {
     const count = document.querySelectorAll(".export-selected").length;
     status.textContent = `${count} messages selected`;
-    document.getElementById("btn-export-confirm")?.removeAttribute("disabled");
   }
+  setConfirmDisabled(!startMessageEl || !endMessageEl || exporting);
+}
+
+function setConfirmDisabled(disabled: boolean): void {
+  const confirmBtn = document.getElementById("btn-export-confirm");
+  if (disabled) confirmBtn?.setAttribute("disabled", "");
+  else confirmBtn?.removeAttribute("disabled");
 }
 
 async function performExport(): Promise<void> {
-  if (!startMessageEl || !endMessageEl || !currentExportChatId) return;
+  if (exporting) return;
+  const start = startMessageEl;
+  const end = endMessageEl;
+  if (!start || !end || !currentExportChatId) return;
 
-  const startId = startMessageEl.dataset.messageId;
-  const endId = endMessageEl.dataset.messageId;
+  const startId = start.dataset.messageId;
+  const endId = end.dataset.messageId;
   if (startId === undefined || endId === undefined) return;
 
-  const dir = await save({
-    title: "Choose export location",
-    defaultPath: `msgs-export-${new Date().toISOString().slice(0, 10)}`,
-  });
-
-  if (!dir) return;
-
+  exporting = true;
+  setConfirmDisabled(true);
+  let succeeded = false;
   try {
+    const dir = await save({
+      title: "Choose export location",
+      defaultPath: `msgs-export-${new Date().toISOString().slice(0, 10)}`,
+    });
+    if (!dir) return;
+
     const result = await invoke<ExportResult>("export_messages", {
       chatId: currentExportChatId,
       startMessageId: Number(startId),
@@ -136,14 +163,29 @@ async function performExport(): Promise<void> {
       includeAttachments: true,
       exportPath: dir,
     });
+    succeeded = true;
+
+    // The user left this selection while the export ran: say nothing
+    if (startMessageEl !== start || endMessageEl !== end) return;
 
     const status = byId("export-status", HTMLElement);
     status.textContent = `Exported ${result.message_count} messages and ${result.attachment_count} attachments to ${result.export_path}`;
 
-    setTimeout(cancelSelection, 3000);
+    clearCloseTimer();
+    closeTimer = setTimeout(() => {
+      closeTimer = null;
+      cancelSelection();
+    }, RESULT_DISPLAY_MS);
   } catch (e) {
-    const status = byId("export-status", HTMLElement);
-    status.textContent = `Export failed: ${e}`;
+    if (startMessageEl === start && endMessageEl === end) {
+      byId("export-status", HTMLElement).textContent = `Export failed: ${e}`;
+    }
+  } finally {
+    exporting = false;
+    // After a success the button stays disabled until the selection changes
+    if (!succeeded && startMessageEl === start && endMessageEl === end) {
+      setConfirmDisabled(false);
+    }
   }
 }
 
@@ -156,11 +198,12 @@ export function resetExport(): void {
 }
 
 function cancelSelection(): void {
+  clearCloseTimer();
   selectionMode = false;
   startMessageEl = null;
   endMessageEl = null;
   clearHighlights();
-  document.getElementById("btn-export-confirm")?.setAttribute("disabled", "");
+  setConfirmDisabled(true);
   document.getElementById("export-bar")?.classList.add("hidden");
   document.getElementById("message-area")?.classList.remove("selecting");
 }
