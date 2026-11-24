@@ -20,20 +20,26 @@
 **New method on `OpCache`:**
 
 ```rust
+pub struct ItemField {
+    pub label: String,
+    pub value: String,
+}
+
 pub fn read_item_fields(
     &self,
     op_path: &OpPath,
     field_prefix: &str,
-) -> Result<Vec<(String, String)>>
+) -> Result<Vec<ItemField>>
 ```
 
 **Behavior:**
-- Calls `op item get "<vault/item>" --format json` via the 1Password CLI
-- Parses the JSON response and filters fields whose `label` equals `field_prefix` or starts with `field_prefix-`
-- Returns `Vec<(field_label, field_value)>` sorted alphabetically by label (`credential` before `credential-2`, etc.)
-- Caches the full item field data in `.op-cache.json` under a synthetic key like `op://Private/ProtonVPN WireGuard key/__item_fields__` (the item-level path with `/__item_fields__` appended) to avoid repeated CLI calls. The cached value is the serialized list of `(label, value)` pairs.
-- Uses the same retry logic (3 attempts, exponential backoff) as existing `read()`
+- Runs `op item get <item> --vault <vault> --format json` through the 1Password CLI. The run goes through `OpRun`, the one entrance to `op`, as a read does. So each attempt writes an `op_start` and an `op_end` record with the operation `item-get` to the audit trail, and shows the notification that names the caller
+- Parses the JSON response and keeps the fields whose `label` equals `field_prefix` or starts with `field_prefix-`
+- Returns a `Vec<ItemField>` sorted alphabetically by label (`credential` before `credential-2`, etc.)
+- Caches only the matching fields in `.op-cache.json`, under the synthetic key `<item path>/__item_fields__/<field_prefix>`, for example `op://Private/ProtonVPN WireGuard key/__item_fields__/credential`. The cached value is the serialized list of `(label, value)` pairs. The entry has no expiry. `op-cache invalidate <item path>` removes it, with each other field list of that item, so that the next call reads a credential added in 1Password
+- Uses the same retry logic as `read()`: 3 attempts, with a linear wait of `RETRY_DELAY_MS * attempt` (1 s, then 2 s) between them. Output that is not JSON is an error at once, with no further attempt
 - Returns an error if no fields match the prefix
+- The `op-cache list-fields <item path> [--prefix credential]` subcommand prints the labels of the matching fields, and never their values
 
 **OpPath changes:**
 - `--op-path` now expects an item-level path: `op://vault/item` (no trailing field segment)
@@ -54,8 +60,8 @@ The `generate` command flow becomes:
    ```
    error: every WireGuard credential is held by a running tunnel
 
-     credential    -> held by scraper-gluetun
-     credential-2  -> held by vpn-gluetun
+     credential           -> held by scraper-gluetun
+     credential-2         -> held by vpn-gluetun
 
    Add another credential to the item in 1Password, then run
      op-cache invalidate 'op://Private/ProtonVPN WireGuard key'
@@ -66,9 +72,10 @@ The `generate` command flow becomes:
 
 ### 3. .env and Status Changes
 
-**.env file** gains a new variable:
+**.env file** gains a new variable, after a comment that says which commands read it:
 ```
 WIREGUARD_PRIVATE_KEY=<selected key>
+# Used by vpn-tunnel status and generate (not a Docker variable)
 CREDENTIAL_FIELD=credential-2
 ```
 
