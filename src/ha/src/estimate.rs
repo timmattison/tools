@@ -609,13 +609,23 @@ mod tests {
         ]
     }
 
-    fn run_remaining_of(history: &[(Run, Vec<Job>)], jobs: &[Job]) -> Option<Remaining> {
-        let current = run(99, REPO, "CI");
+    /// The estimate of a run of `state` with `jobs`, from `history`.
+    fn run_remaining_in(
+        state: RunState,
+        history: &[(Run, Vec<Job>)],
+        jobs: &[Job],
+    ) -> Option<Remaining> {
+        let current = run_in(99, state);
         let estimates = Estimates::new(
             history.iter().map(|(past, list)| (past, list.as_slice())),
             now(),
         );
         estimates.run_remaining(&current, jobs, now())
+    }
+
+    /// The estimate of a running run with `jobs`, from `history`.
+    fn run_remaining_of(history: &[(Run, Vec<Job>)], jobs: &[Job]) -> Option<Remaining> {
+        run_remaining_in(RunState::Running, history, jobs)
     }
 
     fn chain() -> Vec<(Run, Vec<Job>)> {
@@ -679,6 +689,20 @@ mod tests {
                 passed(2, "test", RUNNER, 600, 600),
             ],
         )]
+    }
+
+    #[test]
+    fn a_queued_run_gets_an_estimate() {
+        // GitHub reports a run as queued while one of its jobs waits.
+        let jobs = [
+            passed(10, "build", RUNNER, ago(30), 300),
+            job(11, "test", RunState::Queued, None, None, None),
+        ];
+        assert_text(
+            run_remaining_in(RunState::Queued, &chain(), &jobs),
+            Remaining::AtLeast(secs(720)),
+            ">12m",
+        );
     }
 
     #[test]
@@ -785,13 +809,8 @@ mod tests {
         for (label, jobs) in cases {
             assert_eq!(run_remaining_of(&history, &jobs), None, "{label}");
         }
-        let finished = run_in(99, RunState::Passed);
-        let estimates = Estimates::new(
-            history.iter().map(|(past, list)| (past, list.as_slice())),
-            now(),
-        );
         assert_eq!(
-            estimates.run_remaining(&finished, std::slice::from_ref(&build), now()),
+            run_remaining_in(RunState::Passed, &history, std::slice::from_ref(&build)),
             None
         );
     }
