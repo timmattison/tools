@@ -284,4 +284,3 @@ Any temp files used by integration-style tests must be keyed on
 - Watching/streaming todo changes live.
 - Editing or writing todo/task state — read-only.
 - Nested subagents beyond the flat `subagents/` directory.
-```
