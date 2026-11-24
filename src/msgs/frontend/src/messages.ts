@@ -1,13 +1,18 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { Message } from "./bindings";
-import { byId, UNKNOWN_DATE_LABEL } from "./utils";
+import { byId, messageOf, UNKNOWN_DATE_LABEL } from "./utils";
 import { handleMessageClick, initExport } from "./export";
 
 const PAGE_SIZE = 50;
 let currentChatId: number | null = null;
 let currentOffset = 0;
-let loading = false;
+/** Counts each call of `loadConversation`. A reply of an older generation is stale. */
+let loadGeneration = 0;
+/** The generation that has a page request in flight, or null. */
+let loadingGeneration: number | null = null;
 let allLoaded = false;
+/** True after a page request of the current generation failed. */
+let loadFailed = false;
 let isGroupChat = false;
 
 let messageScrollController: AbortController | null = null;
@@ -18,9 +23,11 @@ export async function loadConversation(
   identifier: string,
   group: boolean
 ): Promise<void> {
+  const generation = ++loadGeneration;
   currentChatId = chatId;
   currentOffset = 0;
   allLoaded = false;
+  loadFailed = false;
   isGroupChat = group;
 
   // Update header
@@ -38,6 +45,9 @@ export async function loadConversation(
   // Load first page
   await loadMoreMessages();
 
+  // A newer call took over while the page was in flight
+  if (generation !== loadGeneration) return;
+
   // Scroll to bottom (most recent)
   area.scrollTop = area.scrollHeight;
 
@@ -53,8 +63,11 @@ export async function loadConversation(
 }
 
 async function loadMoreMessages(): Promise<void> {
-  if (loading || allLoaded || currentChatId === null) return;
-  loading = true;
+  const generation = loadGeneration;
+  if (loadingGeneration === generation || allLoaded || loadFailed || currentChatId === null) {
+    return;
+  }
+  loadingGeneration = generation;
 
   try {
     const messages = await invoke<Message[]>("get_messages", {
@@ -62,6 +75,9 @@ async function loadMoreMessages(): Promise<void> {
       offset: currentOffset,
       limit: PAGE_SIZE,
     });
+
+    // The user opened another chat while this page was in flight
+    if (generation !== loadGeneration) return;
 
     if (messages.length < PAGE_SIZE) {
       allLoaded = true;
@@ -95,9 +111,22 @@ async function loadMoreMessages(): Promise<void> {
     }
 
     currentOffset += messages.length;
+  } catch (e) {
+    if (generation !== loadGeneration) return;
+    loadFailed = true;
+    showLoadError(messageOf(e));
   } finally {
-    loading = false;
+    if (loadingGeneration === generation) loadingGeneration = null;
   }
+}
+
+/** Show the text of a failed page request at the top of the message area. */
+function showLoadError(text: string): void {
+  const el = document.createElement("div");
+  el.className = "load-error";
+  el.textContent = text;
+  const area = byId("message-area", HTMLElement);
+  area.insertBefore(el, area.firstChild);
 }
 
 function createMessageElement(msg: Message): HTMLElement {
