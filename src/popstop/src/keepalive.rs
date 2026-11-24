@@ -91,9 +91,11 @@ fn wait_for_silence(stop: &StopHandle) {
 #[cfg(test)]
 mod tests {
     use super::Keepalive;
+    use crate::device_turn::DeviceTurn;
 
     #[test]
     fn a_stop_reaches_silence_before_it_stops_the_unit() {
+        let _turn = DeviceTurn::take();
         let keepalive = Keepalive::start().unwrap_or_else(|error| {
             panic!(
                 "the keepalive did not start: {error}. This test plays on the default output \

@@ -318,7 +318,6 @@ mod inherited_environment_tests {
     use crate::Args;
     use clap::{Arg, Command, CommandFactory};
     use std::collections::BTreeSet;
-    use std::process::Command as ChildProcess;
 
     /// Set in the child so its copy of this test does not fork forever.
     const CHILD_MARKER: &str = "UFA_INHERITED_ENVIRONMENT_CHILD";
@@ -414,7 +413,7 @@ mod inherited_environment_tests {
         }
 
         let binary = std::env::current_exe().expect("the test binary must be locatable");
-        let mut child = ChildProcess::new(&binary);
+        let mut child = childenv::fixture_command(&binary);
         child.env(CHILD_MARKER, "1");
         for (name, value) in hostile_environment(&Args::command()) {
             child.env(name, value);

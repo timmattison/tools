@@ -302,6 +302,9 @@ pub(crate) struct WorktreeList {
     /// The first row of the window at the last [`settle`](Self::settle).
     /// Always a row of `entries`.
     top: usize,
+    /// The height of the window at the last [`settle`](Self::settle), and 0
+    /// before the first settle.
+    rows: usize,
     /// The worktree where the user started gsw. The list marks its row.
     home: WorktreePath,
 }
@@ -339,6 +342,7 @@ impl WorktreeList {
             entries,
             cursor,
             top: 0,
+            rows: 0,
             home,
         })
     }
@@ -352,6 +356,30 @@ impl WorktreeList {
     /// Move the cursor down one row. Down on the bottom row does nothing.
     pub(crate) fn down(&mut self) {
         self.cursor = (self.cursor + 1).min(self.entries.len() - 1);
+    }
+
+    /// Move the cursor down one page. A page is one row less than the window
+    /// at the last [`settle`](Self::settle), and at least one row, so the row
+    /// at the edge of the old window stays in view. A list that no settle
+    /// reached moves one row. Page Down on the bottom row does nothing,
+    /// because the list does not wrap.
+    pub(crate) fn page_down(&mut self) {
+        self.cursor = (self.cursor + self.page()).min(self.entries.len() - 1);
+    }
+
+    /// Move the cursor up one page. A page is one row less than the window at
+    /// the last [`settle`](Self::settle), and at least one row, so the row at
+    /// the edge of the old window stays in view. A list that no settle
+    /// reached moves one row. Page Up on the top row does nothing, because
+    /// the list does not wrap.
+    pub(crate) fn page_up(&mut self) {
+        self.cursor = self.cursor.saturating_sub(self.page());
+    }
+
+    /// The rows that one page key moves: one row less than the window at the
+    /// last [`settle`](Self::settle), and at least one row.
+    fn page(&self) -> usize {
+        self.rows.saturating_sub(1).max(1)
     }
 
     /// The worktree under the cursor: the worktree that Enter goes to.
@@ -382,13 +410,15 @@ impl WorktreeList {
 
     /// Store the scroll offset that `window(rows)` uses, so the next move
     /// starts from the window that the user saw. The loop calls it before
-    /// each frame of the list.
+    /// each frame of the list. It also keeps the height of the window, so
+    /// that a page key moves one page of the window that the user saw.
     ///
     /// Minimal movement: the window moves only when the cursor leaves it, and
     /// then only as far as the cursor went. It never leaves empty rows at the
     /// bottom when the list is longer than the pane.
     pub(crate) fn settle(&mut self, rows: usize) {
         self.top = self.offset(rows);
+        self.rows = rows;
     }
 
     /// The first row of the window for a pane of `rows` rows: the stored
@@ -1327,6 +1357,69 @@ mod tests {
     fn settle_and_sketch(list: &mut WorktreeList, rows: usize) -> String {
         list.settle(rows);
         sketch(list, rows)
+    }
+
+    /// A list of ten rows in a pane of four rows. Page Down moves the cursor
+    /// one page, which is three rows, and stops on the bottom row. Page Up
+    /// does the same upward. The old edge row of the window stays in view
+    /// after each key.
+    #[test]
+    fn page_down_and_page_up_move_the_cursor_one_page_and_stop_at_the_ends() {
+        let all = entries(10);
+        let mut list = open_list(&all, 0, 0);
+
+        let mut frames = vec![settle_and_sketch(&mut list, 4)];
+        for _ in 0..4 {
+            list.page_down();
+            frames.push(settle_and_sketch(&mut list, 4));
+        }
+        for _ in 0..4 {
+            list.page_up();
+            frames.push(settle_and_sketch(&mut list, 4));
+        }
+
+        assert_eq!(
+            frames,
+            [
+                ">0⌂ 1 2 3",
+                "0⌂ 1 2 >3",
+                "3 4 5 >6",
+                "6 7 8 >9",
+                "6 7 8 >9",
+                ">6 7 8 9",
+                ">3 4 5 6",
+                ">0⌂ 1 2 3",
+                ">0⌂ 1 2 3",
+            ]
+        );
+    }
+
+    /// A pane of one row has a page of one row. A list that no settle reached
+    /// moves one row for each page key, because no window of it was on the
+    /// screen yet.
+    #[test]
+    fn a_page_is_at_least_one_row() {
+        let all = entries(10);
+
+        let mut list = open_list(&all, 0, 0);
+        list.settle(1);
+        list.page_down();
+        list.settle(1);
+        assert_eq!(list.selected(), &all[1], "pane of one row, Page Down");
+        list.page_down();
+        list.settle(1);
+        assert_eq!(list.selected(), &all[2], "pane of one row, Page Down");
+        list.page_up();
+        list.settle(1);
+        assert_eq!(list.selected(), &all[1], "pane of one row, Page Up");
+
+        let mut list = open_list(&all, 0, 0);
+        list.page_down();
+        assert_eq!(list.selected(), &all[1], "no settle, Page Down");
+        list.page_down();
+        assert_eq!(list.selected(), &all[2], "no settle, Page Down");
+        list.page_up();
+        assert_eq!(list.selected(), &all[1], "no settle, Page Up");
     }
 
     /// The list marks the row of the home worktree, which Up goes to, and the

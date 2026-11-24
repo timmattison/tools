@@ -178,10 +178,21 @@ pub fn did_not_report(log_path: &Path) -> String {
 #[must_use]
 pub fn did_not_report_within(bound: Duration, log_path: &Path) -> String {
     format!(
-        "{PREFIX}{NO_REPORT} within {} seconds\n{}",
-        bound.as_secs(),
+        "{PREFIX}{NO_REPORT} within {}\n{}",
+        seconds_text(bound),
         log_line(log_path)
     )
+}
+
+/// Gives a span of time as a count of whole seconds.
+///
+/// The text is "1 second" for a span of one second. It is "{n} seconds" for
+/// every other count, zero included.
+fn seconds_text(span: Duration) -> String {
+    match span.as_secs() {
+        1 => "1 second".to_owned(),
+        count => format!("{count} seconds"),
+    }
 }
 
 /// Gives the line that names the log of a background copy.
@@ -283,8 +294,8 @@ pub fn stopped(pid: u32) -> String {
 #[must_use]
 pub fn did_not_stop(pid: u32, bound: Duration) -> String {
     format!(
-        "{PREFIX}the copy did not stop within {} seconds (pid {pid})",
-        bound.as_secs()
+        "{PREFIX}the copy did not stop within {} (pid {pid})",
+        seconds_text(bound)
     )
 }
 
@@ -467,6 +478,19 @@ mod tests {
             status_lines_without_device_name_in(&background, &"the device gave no name", &Utc),
             "popstop: a copy runs (pid 5353, background, started 2026-09-18 10:00:00)\n\
              popstop: the name of the default output device cannot be read: the device gave no name"
+        );
+    }
+
+    #[test]
+    fn a_bound_of_one_second_is_one_second_in_the_text() {
+        assert_eq!(
+            did_not_report_within(Duration::from_secs(1), Path::new("/tmp/state/popstop.log")),
+            "popstop: the background copy did not report that it plays within 1 second\n\
+             popstop: the log of that copy says why: /tmp/state/popstop.log"
+        );
+        assert_eq!(
+            did_not_stop(4242, Duration::from_secs(1)),
+            "popstop: the copy did not stop within 1 second (pid 4242)"
         );
     }
 

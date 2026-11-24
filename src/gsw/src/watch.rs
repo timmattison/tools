@@ -18,16 +18,18 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::cursor::{Hide, MoveTo, Show};
+use crossterm::cursor::MoveTo;
 use crossterm::event::{self, Event as CtEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
-};
+use crossterm::terminal::{Clear, ClearType};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::conflicts::ConflictsWorker;
+use crate::pull::{
+    run_lookup, target_of, LookupRequest, PullHeader, PullIndicator, PullSettings, PullWatch,
+    LOOKUP_LIMIT,
+};
 use crate::push::{PushCommand, PushUi};
 use crate::render::Snapshot;
 use crate::repo::{LogStart, RepoHandle};
@@ -42,6 +44,12 @@ use termwindow::{
     effective_terminal_height, effective_terminal_width, DEFAULT_TERMINAL_HEIGHT,
     DEFAULT_TERMINAL_WIDTH,
 };
+
+mod arming;
+mod start_branch;
+
+use arming::Arming;
+use start_branch::StartBranch;
 
 /// Which rendering mode `gsw` is running in. The mode — not ambient env
 /// detection — decides where terminal dimensions come from (see
@@ -412,7 +420,7 @@ enum Walk {
 /// Fraction of one core git walks may occupy under sustained churn (1%). A walk
 /// costing `D` is followed by a cooldown of `D / BUDGET`, so the duty cycle
 /// settles at `BUDGET`. Hard-coded, not a user dial.
-#[allow(
+#[expect(
     dead_code,
     reason = "Names the 1% duty-cycle target for the docs and spec; `cooldown` \
               applies the exact integer reciprocal (100) to avoid float drift, so \
@@ -543,6 +551,17 @@ impl WalkSchedule {
             .map(|interval| walk_start + interval.max(cooldown));
     }
 
+    /// Whether the timed walk is due at `now`: a timed walk is armed and its
+    /// instant is not after `now`. A deferred change does not make it due, and
+    /// a schedule with no interval never makes it due.
+    ///
+    /// The loop asks it before [`Self::record`], which moves the timed walk on.
+    /// It tells a walk that a timed refresh caused from a walk that a
+    /// filesystem event caused, because only the first one asks GitHub again.
+    fn timed_due(&self, now: Instant) -> bool {
+        self.next_timed_at.is_some_and(|due| now >= due)
+    }
+
     /// The instant a pending deferred walk should fire — the cooldown's expiry —
     /// or `None` when no walk is owed. A change that arrives mid-cooldown is
     /// deferred (it sets the dirty flag) and registers exactly one coalesced
@@ -632,7 +651,8 @@ fn ceil_secs(remaining: Duration) -> Duration {
 /// Every input is already expressed as a duration from now, and a `None` from a
 /// source means that source imposes no deadline. Taking a slice rather than a
 /// fixed pair is what lets a new source (the timed refresh, the refresh clock's
-/// own cadence) join without every caller and test changing shape.
+/// own cadence, the end of a rate-limit block that holds a pull lookup) join
+/// without every caller and test changing shape.
 fn wait_window(deadlines: &[Option<Duration>]) -> Option<Duration> {
     deadlines.iter().flatten().min().copied()
 }
@@ -665,9 +685,14 @@ enum Event {
     /// The user asked to force an immediate refresh (`r`), bypassing the
     /// throttle cooldown.
     ForceRefresh,
-    /// The user asked to push (`p`) — show the confirmation, or say why there
-    /// is nothing to confirm.
-    PushRequested,
+    /// The user asked to push — show the confirmation, or say why there is
+    /// nothing to confirm.
+    ///
+    /// It carries the policy of the `pre-push` hook. `p` asks for a push that
+    /// runs the hook, and `P` asks for one that does not. One event for two
+    /// keys keeps them from drifting apart, for the same reason that
+    /// [`Event::BaseUpdateRequested`] gives.
+    PushRequested(crate::push::PushHooks),
     /// The user asked to bring the branch up to date with its base: `R` for a
     /// rebase onto it, `M` for a merge of it.
     ///
@@ -684,15 +709,16 @@ enum Event {
     /// name.
     ///
     /// One event for each key, because each key has a probe of its own and the
-    /// three probes answer in whatever order their shells finish. A key is
+    /// five probes answer in whatever order their shells finish. A key is
     /// unbound until its own answer arrives. A shell that says no, a shell
     /// that cannot be started, and a shell that never answers all send
     /// nothing, so that key stays unbound and silent.
     BaseUpdateCommandFound(crate::update::BaseUpdate, crate::shell::ShellCommand),
     /// The user said yes to the question on the row (`y` or Enter).
     ///
-    /// It names no act, because the row holds the question of three keys: a
-    /// push, a rebase onto the base, or a merge of the base. What the answer
+    /// It names no act, because the row holds the question of four keys: a
+    /// push (`p`, or `P` without the pre-push hook), a rebase onto the base, or a
+    /// merge of the base. What the answer
     /// starts is what the question described, and
     /// [`crate::push::PushUi::confirm`] is what says which of them that is.
     Confirmed,
@@ -701,9 +727,10 @@ enum Event {
     /// It names no act either, for the reason [`Event::Confirmed`] gives: the
     /// answer takes away whatever question stands, and nothing starts.
     Cancelled,
-    /// A run that the row owns wrote a line: a push, a rebase onto the base,
-    /// or a merge of the base. All three write through this one event, because
-    /// the window under the frame is the same window.
+    /// A run that the row owns wrote a line: a push, a rebase onto the base, a
+    /// merge of the base, or the `git switch` of the second Esc. All four
+    /// write through this one event, because the window under the frame is the
+    /// same window.
     ///
     /// Carried one line at a time rather than as a batch at the end, because
     /// the point of it is to arrive early: a pre-push hook can hold any of
@@ -736,10 +763,23 @@ enum Event {
     /// aborts that operation when the run ends. Only a walk puts the header
     /// right again.
     BaseUpdateFinished(crate::push::PushOutcome),
+    /// The `git switch` of the second Esc has finished, either way.
+    ///
+    /// It carries the outcome a push carries, and it arrives after the last
+    /// [`Event::RunOutput`] of the run, as [`Event::PushFinished`] does.
+    /// **Every outcome of this one walks the home worktree at once.** A switch
+    /// that worked moved HEAD, and one that git refused can have changed the
+    /// index before it did. Only a walk puts the header right again.
+    ReturnFinished(crate::push::PushOutcome),
     /// A key press with no other meaning. Clears a status message if one is on
     /// screen and does nothing otherwise, which is what keeps a push error up
     /// until the user has actually looked at the screen.
     Dismiss,
+    /// The user pressed Esc in the normal mode. When the name in the header is
+    /// red, the first press asks for a second one, and the second press goes
+    /// back to the start branch. Otherwise it does what [`Event::Dismiss`]
+    /// does.
+    ReturnRequested,
     /// The user asked to go to the home worktree (Up): the worktree where gsw
     /// started.
     GoHome,
@@ -757,29 +797,65 @@ enum Event {
     ListUp,
     /// The user moved the cursor of the open list one row down (Down).
     ListDown,
+    /// The user moved the cursor of the open list one page up (Page Up).
+    ListPageUp,
+    /// The user moved the cursor of the open list one page down (Page Down).
+    ListPageDown,
     /// The user chose the worktree under the cursor of the open list (Enter).
     ListGo,
     /// The user closed the open list (Esc or `q`). The watch stays on the
     /// worktree that it showed before the list opened.
     ListClose,
-    /// The user asked for the issue of the branch (`G`).
+    /// The user asked for the pull request or the issue of the branch (`G`).
     ///
     /// Only [`classify_input`] makes one, and it makes one only where the
     /// command exists — so the loop never receives a request it cannot serve.
     IssueRequested,
-    /// The probe found the command, and this is its name.
+    /// The probe of one page found its command, and this is the command.
     ///
     /// Sent only where the command exists. A shell that says no, a shell that
     /// cannot be started, and a shell that never answers all send nothing, so
     /// the key stays unbound and silent.
-    IssueCommandFound(crate::shell::ShellCommand),
-    /// A run of the issue command has finished, either way.
+    IssueCommandFound(crate::issue::Page, crate::shell::ShellCommand),
+    /// A press of `G` has finished, either way.
     IssueFinished {
         /// The generation that [`LoopHooks::start_issue`] was given for this
         /// run: the generation of the worktree where the run started.
         generation: Generation,
         /// What the run did.
         outcome: crate::issue::IssueOutcome,
+    },
+    /// One lookup of the pull requests of a branch has ended.
+    ///
+    /// It arrives on the channel of the loop, like every other answer of work
+    /// that runs off this thread. It names its target, so an answer for a
+    /// worktree that the frame no longer shows only fills the cache of
+    /// [`PullWatch`]. It never paints the header of another
+    /// worktree.
+    PullAnswered {
+        /// The target that the lookup asked about.
+        target: crate::pull::PullTarget,
+        /// What the lookup found.
+        outcome: crate::pull::LookupOutcome,
+    },
+    /// The user asked to run the tab-title command (`T`).
+    ///
+    /// Only [`classify_input`] makes one, and it makes one only where the
+    /// command exists — so the loop never receives a request it cannot serve.
+    TabRequested,
+    /// The probe of `T` found its command, and this is the command.
+    ///
+    /// Sent only where the command exists. A shell that says no, a shell that
+    /// cannot be started, and a shell that never answers all send nothing, so
+    /// the key stays unbound and silent.
+    TabCommandFound(crate::shell::ShellCommand),
+    /// A press of `T` has finished, either way.
+    TabFinished {
+        /// The generation that [`LoopHooks::start_tab`] was given for this
+        /// run: the generation of the worktree where the run started.
+        generation: Generation,
+        /// What the run did.
+        outcome: crate::tab::TabOutcome,
     },
     /// The user asked to measure a rebase and a merge against the default
     /// branch (`m`).
@@ -830,21 +906,24 @@ pub(crate) enum InputMode {
     /// of a push, of a rebase onto the base, or of a merge of the base. The
     /// arrow keys never answer it.
     Confirm,
-    /// A command of one of those three keys is running. `p`, `R`, and `M` are
-    /// all inert here, so no two of those runs overlap — a rebase and a push
-    /// of one branch least of all. The arrow keys are inert too, because the
-    /// window under the frame belongs to the worktree that runs the command,
-    /// and every run that ends walks that worktree again.
+    /// A command of one of those four keys is running, or the `git switch`
+    /// of the second Esc. `p`, `P`, `R`, and `M` are all inert here, so no two of
+    /// those runs overlap — a rebase and a push of one branch least of all.
+    /// The arrow keys are inert too, because the window under the frame
+    /// belongs to the worktree that runs the command, and every run that ends
+    /// walks that worktree again.
     ///
     /// It is named for what runs rather than for the key that started it: a
-    /// rebase and a merge run in it as a push does, and it is the mode that
-    /// `push::State::Running` gives. The [`RunKind`] changes one key: `m` acts
-    /// in a push and is inert in a rebase or a merge.
+    /// rebase, a merge, and the switch of the second Esc run in it as a push
+    /// does, and it is the mode that `push::State::Running` gives. The
+    /// [`RunKind`] changes one key: `m` acts in a push and is inert in the
+    /// three runs that move HEAD.
     Running(RunKind),
-    /// The list of the worktrees is open. Up and Down move its cursor, Enter
-    /// goes to the worktree under the cursor, and Esc and `q` close it. Every
-    /// other key does nothing at all, because the list takes the pane, and a
-    /// key that acts on the frame acts on a frame that the user cannot see.
+    /// The list of the worktrees is open. Up and Down move its cursor, Page Up
+    /// and Page Down move it one page, Enter goes to the worktree under the
+    /// cursor, and Esc and `q` close it. Every other key does nothing at all,
+    /// because the list takes the pane, and a key that acts on the frame acts
+    /// on a frame that the user cannot see.
     List,
 }
 
@@ -859,6 +938,10 @@ pub(crate) enum RunKind {
     /// A rebase onto the base or a merge of the base. It moves HEAD for the
     /// whole run.
     BaseUpdate,
+    /// The `git switch` of the second Esc, which takes the home worktree back
+    /// to the start branch. It moves HEAD, as a base update does, so `m` is
+    /// inert during it.
+    Return,
 }
 
 /// Whether one key has a command behind it.
@@ -876,22 +959,25 @@ pub(crate) enum Binding {
     Unbound,
 }
 
-/// Which of the three keys that run a command of the user have one behind
-/// them: `G`, `R`, and `M`.
+/// Which of the four keys that run a command of the user have one behind
+/// them: `G`, `R`, `M`, and `T`.
 ///
-/// One value rather than three parameters of [`classify_input`], because the
-/// three answers travel together and arrive together: each of the three probes
-/// answers on the loop's own channel, and the key table reads whatever has
-/// arrived by the press. A fourth such key then adds a field here and moves no
-/// call site.
+/// One value rather than four parameters of [`classify_input`], because the
+/// answers of the keys travel together and arrive together: each of the five
+/// probes answers on the loop's own channel, and the key table reads whatever
+/// has arrived by the press. A fifth such key then adds a field here and moves
+/// no call site.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct CommandKeys {
-    /// Whether `G`, which opens the issue of the branch, has a command.
+    /// Whether `G`, which opens the pull request or the issue of the branch,
+    /// has a command.
     issue: Binding,
     /// Whether `R`, which rebases the branch onto its base, has a command.
     rebase: Binding,
     /// Whether `M`, which merges the base into the branch, has a command.
     merge: Binding,
+    /// Whether `T`, which runs the tab-title command, has a command.
+    tab: Binding,
 }
 
 /// What one press of `G` does.
@@ -901,8 +987,8 @@ pub(crate) struct CommandKeys {
 /// arms of one match, and no second question decides between them.
 #[derive(Debug, PartialEq, Eq)]
 enum IssuePress {
-    /// Run this command.
-    Run(crate::shell::ShellCommand),
+    /// Run these commands.
+    Run(crate::issue::Steps),
     /// Put this under the frame, and wait for a second press.
     Ask(String),
     /// Nothing at all.
@@ -912,60 +998,61 @@ enum IssuePress {
 /// The `G` key's own state, for the life of one watch-mode run.
 ///
 /// Four facts, and they are one value because one key reads all of them: the
-/// command the probe found, whether a run of it is in flight, where the person
+/// command each probe found, whether a press of them is in flight, where the person
 /// who reads this screen sits, and whether a message that asks for a second
 /// press stands. None of them is an [`InputMode`], because each changes what
 /// this one key does and changes no other key.
 struct IssueRun {
-    /// The command the probe found. `None` until the probe answers, and
-    /// forever where it found none or where the feature is off.
-    command: Option<crate::shell::ShellCommand>,
+    /// The command the probe of the pull request found. `None` until the probe
+    /// answers, and forever where it found none or where the page is off.
+    pull_request: Option<crate::shell::ShellCommand>,
+    /// The command the probe of the issue found, on the same terms.
+    issue: Option<crate::shell::ShellCommand>,
     /// Whether a run is in flight. One run at a time: a browser opening twice
     /// is two tabs nobody asked for.
     running: bool,
     /// Where the person who reads this screen sits. Decided once, at start.
     session: crate::remote::Session,
-    /// When the message that asks for a second press took the row, or `None`
-    /// when no such message stands.
-    ///
-    /// The message on screen is the armed state, so this holds an instant and
-    /// not a flag: the message goes away by itself after
-    /// [`crate::push::STATUS_LIFETIME`], and the arming goes with it.
-    ///
-    /// **The instant is the one the message took the row at, and not the one
-    /// the key was pressed at.** The row is not always free — a question and a
-    /// push in flight own it, and [`crate::push::PushUi::post_notice`] holds a
-    /// message that arrives then. A held message is a message nobody has read,
-    /// so an arming that started at the press would offer a second press
-    /// against a warning still sitting in the queue. [`IssueRun::arm`] is
-    /// therefore called by [`absorb`] and only for the answer that says the
-    /// words reached the screen.
-    armed: Option<Instant>,
+    /// The arming of the message that asks for a second press. [`Arming`]
+    /// says why it holds the instant the message took the row, and
+    /// [`IssueRun::arm`] is the one door into it.
+    armed: Arming,
 }
 
 impl IssueRun {
     /// Nothing found yet, nothing running, and nothing asked.
     fn new(session: crate::remote::Session) -> Self {
         Self {
-            command: None,
+            pull_request: None,
+            issue: None,
             running: false,
             session,
-            armed: None,
+            armed: Arming::new(crate::push::STATUS_LIFETIME),
         }
     }
 
     /// Whether `G` has a command behind it.
+    ///
+    /// One command of the two is enough. A press with one command runs that
+    /// command alone.
     fn key(&self) -> Binding {
-        if self.command.is_some() {
+        if self.pull_request.is_some() || self.issue.is_some() {
             Binding::Bound
         } else {
             Binding::Unbound
         }
     }
 
-    /// Keep the command the probe found.
-    fn found(&mut self, command: crate::shell::ShellCommand) {
-        self.command = Some(command);
+    /// Keep the command the probe of `page` found.
+    ///
+    /// The arming goes too. An answer changes the steps, and the message on
+    /// the row named the old steps. The next press must ask again.
+    fn found(&mut self, page: crate::issue::Page, command: crate::shell::ShellCommand) {
+        match page {
+            crate::issue::Page::PullRequest => self.pull_request = Some(command),
+            crate::issue::Page::Issue => self.issue = Some(command),
+        }
+        self.armed.disarm();
     }
 
     /// What one press of `G` does now.
@@ -988,26 +1075,27 @@ impl IssueRun {
     /// **The asking and the arming are two halves, and this half only asks.**
     /// The message is the armed state, and whether the message reaches the
     /// screen is the row's answer rather than this one's — see
-    /// [`IssueRun::armed`]. So [`absorb`] posts the words, reads that answer,
+    /// [`Arming`]. So [`absorb`] posts the words, reads that answer,
     /// and calls [`IssueRun::arm`] for the answer that says the row took them.
     fn press(&mut self, now: Instant) -> IssuePress {
         if self.running {
             return IssuePress::Nothing;
         }
-        let Some(command) = self.command.clone() else {
+        let Some(steps) = crate::issue::Steps::new(self.pull_request.clone(), self.issue.clone())
+        else {
             return IssuePress::Nothing;
         };
-        if self.session == crate::remote::Session::Local || self.is_armed(now) {
+        if self.session == crate::remote::Session::Local || self.armed.is_armed(now) {
             // The arming goes as the run starts. An arming that outlived the
             // run it was given for would let the next press open a browser on
             // the wrong machine, with nobody asked a second time for it.
-            self.armed = None;
+            self.armed.disarm();
             self.running = true;
-            return IssuePress::Run(command);
+            return IssuePress::Run(steps);
         }
         IssuePress::Ask(format!(
             "remote shell — press G again to run {}",
-            command.name()
+            steps.describe()
         ))
     }
 
@@ -1015,27 +1103,10 @@ impl IssueRun {
     ///
     /// The one door into the armed state, and [`absorb`] is its one caller:
     /// the row answers whether the words are on the screen, and only that
-    /// answer arms the key. [`IssueRun::armed`] says why the instant is this
-    /// one and not the instant of the press.
+    /// answer arms the key. [`Arming`] says why the instant is this one and
+    /// not the instant of the press.
     fn arm(&mut self, now: Instant) {
-        self.armed = Some(now);
-    }
-
-    /// Whether the message that asks for a second press still stands.
-    ///
-    /// The message goes off the screen one [`crate::push::STATUS_LIFETIME`]
-    /// after it took the row, and [`IssueRun::armed`] holds that same instant,
-    /// so the arming ends at that same moment. The screen and the key then say
-    /// one thing: a `G` a minute later asks again.
-    ///
-    /// Saturating for the reason the age of a status message in
-    /// [`crate::push`] is: `now` comes from the loop's injected clock, and a
-    /// clock a test drives backwards reports the zero age it plainly has
-    /// rather than underflowing.
-    fn is_armed(&self, now: Instant) -> bool {
-        self.armed.is_some_and(|posted_at| {
-            now.saturating_duration_since(posted_at) < crate::push::STATUS_LIFETIME
-        })
+        self.armed.arm(now);
     }
 
     /// A key other than `G` takes the arming away.
@@ -1044,10 +1115,69 @@ impl IssueRun {
     /// armed state. The two go together, so a `G` after such a key is a first
     /// press again.
     fn disarm(&mut self) {
-        self.armed = None;
+        self.armed.disarm();
     }
 
     /// A run has ended, so `G` means something again.
+    fn finished(&mut self) {
+        self.running = false;
+    }
+}
+
+/// The `T` key's own state, for the life of one watch-mode run.
+///
+/// Two facts: the command the probe found, and whether a run is in flight. It
+/// is a value of its own, beside [`IssueRun`], because `T` changes no other
+/// key and no other key changes `T`.
+struct TabRun {
+    /// The command the probe found. `None` until the probe answers, and forever
+    /// where it found none or where the key is off.
+    command: Option<crate::shell::ShellCommand>,
+    /// Whether a run is in flight. One run at a time, because two runs of
+    /// `stp` race to rename one tab.
+    running: bool,
+}
+
+impl TabRun {
+    /// The probe has not answered, so `T` does not act.
+    const fn new() -> Self {
+        Self {
+            command: None,
+            running: false,
+        }
+    }
+
+    /// Whether `T` has a command behind it.
+    fn key(&self) -> Binding {
+        if self.command.is_some() {
+            Binding::Bound
+        } else {
+            Binding::Unbound
+        }
+    }
+
+    /// Keep the command the probe found.
+    fn found(&mut self, command: crate::shell::ShellCommand) {
+        self.command = Some(command);
+    }
+
+    /// Take the key for one run, and return the command to run.
+    ///
+    /// `None` where a run is in flight, and where no command exists: the
+    /// silence of an unbound key. `T` asks no question first, because `stp`
+    /// changes a tab title only and never the repository. It has no second
+    /// press on a remote shell, because the rename goes through the zellij
+    /// server and is correct for a remote client too.
+    fn press(&mut self) -> Option<crate::shell::ShellCommand> {
+        if self.running {
+            return None;
+        }
+        let command = self.command.clone()?;
+        self.running = true;
+        Some(command)
+    }
+
+    /// A run has ended, so `T` means something again.
     fn finished(&mut self) {
         self.running = false;
     }
@@ -1107,13 +1237,15 @@ impl BaseUpdateCommands {
         }
     }
 
-    /// Which of the three keys that run a command of the user have one, with
-    /// the answer for `G` from [`IssueRun::key`].
-    fn keys(&self, issue: Binding) -> CommandKeys {
+    /// Which of the four keys that run a command of the user have one, with
+    /// the answer for `G` from [`IssueRun::key`] and the answer for `T` from
+    /// [`TabRun::key`].
+    fn keys(&self, issue: Binding, tab: Binding) -> CommandKeys {
         CommandKeys {
             issue,
             rebase: self.binding(crate::update::BaseUpdate::Rebase),
             merge: self.binding(crate::update::BaseUpdate::Merge),
+            tab,
         }
     }
 }
@@ -1148,9 +1280,10 @@ enum ConflictsRun {
     /// A run is in flight. Set by the press that starts the run, and cleared
     /// by the outcome of that run.
     Measuring,
-    /// A run is in flight, and a rebase or a merge started after it. The run
-    /// started from the HEAD that the update moves, so its line describes a
-    /// branch that is gone. Cleared by the outcome of that run.
+    /// A run is in flight, and a rebase, a merge, or the `git switch` of the
+    /// second Esc started after it. The run started from the HEAD that the
+    /// update or the switch moves, so its line describes a branch that is
+    /// gone. Cleared by the outcome of that run.
     Overlapped,
 }
 
@@ -1175,7 +1308,8 @@ impl ConflictsRun {
         }
     }
 
-    /// A rebase or a merge started, so a run in flight is overlapped.
+    /// A rebase, a merge, or the `git switch` of the second Esc started. Each
+    /// of them moves HEAD, so a run in flight is overlapped.
     fn base_update_started(&mut self) {
         if matches!(self, Self::Measuring) {
             *self = Self::Overlapped;
@@ -1196,7 +1330,7 @@ impl ConflictsRun {
 /// How many times the loop has switched the worktree it watches: a stamp on
 /// the work that the loop starts.
 ///
-/// A run of `G` or `m` continues after a switch, in the worktree where it
+/// A run of `G`, `T`, or `m` continues after a switch, in the worktree where it
 /// started, so its outcome can arrive when the frame shows another worktree.
 /// A line under the frame must describe the worktree in the frame. So each run
 /// keeps the generation of its press, its events carry that generation back,
@@ -1381,7 +1515,7 @@ impl Watched {
     /// Walk the worktree, and put its badge on the snapshot. [`walk`] re-opens
     /// the repository, rebuilds the ignore matcher, and collects the snapshot.
     /// [`badged`] then reads the badge from the repository that the walk
-    /// re-opened. `home` is the worktree where the user started gsw, and
+    /// re-opened. `start` is where the user started gsw, and
     /// `log_limit` is the number of commits that the walk fetches for the log.
     ///
     /// # Errors
@@ -1390,19 +1524,49 @@ impl Watched {
     fn walk(
         &mut self,
         cfg: &RenderConfig,
-        home: &WorktreePath,
+        start: &StartPoint,
         log_limit: usize,
+        pulls: Option<&PullSettings>,
     ) -> Result<Snapshot> {
         let snapshot = walk(&mut self.handle, &self.ignore, cfg, log_limit)?;
-        Ok(badged(snapshot, self.handle.repo(), &self.path, home))
+        Ok(badged(
+            snapshot,
+            self.handle.repo(),
+            &self.path,
+            start,
+            pulls,
+        ))
     }
 }
 
+/// Where the user started gsw in watch mode: the home worktree and the start
+/// branch. The seed walk of [`run`] and every later walk read it, and nothing
+/// changes it while the watch runs.
+#[derive(Debug, Clone)]
+struct StartPoint {
+    /// The worktree where the user started gsw.
+    home: WorktreePath,
+    /// The branch of HEAD at the start, or the branch that a rebase at the
+    /// start rebases. `None` when HEAD was detached and no rebase named a
+    /// branch.
+    branch: Option<StartBranch>,
+}
+
 /// Put the badge of the worktree at `path` on `snapshot`, which a walk of
-/// `repo` collected. `home` is the worktree where the user started gsw.
+/// `repo` collected. `start` is where the user started gsw.
+///
+/// This is where every walk of watch mode gets what only watch mode adds. With
+/// `pulls`, a branch that maps to a GitHub repository gets a pull header with
+/// no answer yet, so the frame shows `PR ?` until a lookup answers. Without
+/// `pulls`, or on a branch that maps to no GitHub repository, the snapshot has
+/// no pull header and the header row stays as it is today.
 ///
 /// The seed walk of [`run`] and every walk of a [`Watched`] go through here, so
 /// the first frame and every later frame name the worktree in the same way.
+/// The same place sets `off_start_branch`, which is true when the start branch
+/// exists and the frame does not show it. A session that started on a
+/// detached HEAD outside a rebase has no start branch, so the flag stays
+/// false in it.
 ///
 /// The paths come from [`worktree_paths`], which reads no HEAD and opens no
 /// linked worktree. Every walk pays for this call, and the cooldown after a
@@ -1415,16 +1579,27 @@ fn badged(
     mut snapshot: Snapshot,
     repo: &gix::Repository,
     path: &WorktreePath,
-    home: &WorktreePath,
+    start: &StartPoint,
+    pulls: Option<&PullSettings>,
 ) -> Snapshot {
+    snapshot.pull = pulls
+        .and_then(|settings| target_of(repo, settings.extra_host()))
+        .map(|target| PullHeader {
+            target,
+            indicator: PullIndicator::Unknown,
+        });
     snapshot.worktree =
-        crate::worktrees::badge(&worktree_paths(repo), path, home, head_label(repo));
+        crate::worktrees::badge(&worktree_paths(repo), path, &start.home, head_label(repo));
+    snapshot.off_start_branch = start
+        .branch
+        .as_ref()
+        .is_some_and(|branch| !branch.is_shown_by(&snapshot, repo));
     snapshot
 }
 
 /// Switch the watch to the worktree at `target` as one step, and give the first
 /// frame of that worktree. The watcher of the new worktree sends its events on
-/// `tx`, and `home` is the worktree where the user started gsw. The walk of the
+/// `tx`, and `start` is where the user started gsw. The walk of the
 /// new worktree fetches `log_limit` commits for the log.
 ///
 /// 1. Open a candidate [`Watched`] on `target`. That starts its watcher.
@@ -1448,12 +1623,13 @@ fn switch_watched(
     target: &WorktreePath,
     tx: Sender<Event>,
     cfg: &RenderConfig,
-    home: &WorktreePath,
+    start: &StartPoint,
     log_limit: usize,
+    pulls: Option<&PullSettings>,
 ) -> Result<Snapshot, String> {
     let mut candidate = Watched::open(target, tx)?;
     let snapshot = candidate
-        .walk(cfg, home, log_limit)
+        .walk(cfg, start, log_limit, pulls)
         .map_err(|error| format!("{WALK_FAILED}: {}: {error:#}", target.as_path().display()))?;
     // The old worktree goes here, and the drop of its watcher stops its events.
     drop(watched.replace(candidate));
@@ -1499,7 +1675,7 @@ fn listed_paths(watched: &RefCell<Watched>) -> Vec<WorktreePath> {
 /// started from ([`Snapshot::log_start`]), and never from the live HEAD. The
 /// resize reads nothing when the cached log is complete
 /// ([`Snapshot::log_complete`]) or has no start.
-/// The [`TerminalGuard`] restores the main screen and cursor on every exit path.
+/// The `altscreen` session restores the main screen and cursor on every exit path.
 ///
 /// Takes the [`RepoHandle`] **by value**: watch mode owns the repository for
 /// the rest of the process. The handle moves into the [`Watched`] of the home
@@ -1513,12 +1689,19 @@ fn listed_paths(watched: &RefCell<Watched>) -> Vec<WorktreePath> {
 /// `worktrees` and `worktree_paths` hooks read the worktrees of its repository
 /// through [`listed`] and [`listed_paths`], and the `switch` hook replaces it
 /// through [`switch_watched`].
-pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
-    // Before the guard takes the screen, so a refusal prints on the screen the
-    // user started from, and not on the alternate screen that the guard
+pub(crate) fn run(
+    handle: RepoHandle,
+    cfg: &RenderConfig,
+    pulls: Option<PullSettings>,
+) -> Result<()> {
+    // Before the session takes the screen, so a refusal prints on the screen the
+    // user started from, and not on the alternate screen that the session
     // clears when it goes.
-    let home = resolve_home(&handle)?;
-    let _guard = TerminalGuard::enter()?;
+    let start = StartPoint {
+        home: resolve_home(&handle)?,
+        branch: StartBranch::read(handle.repo()),
+    };
+    let _session = altscreen::Session::enter(altscreen::Options::default())?;
 
     // Seed the cache with one git walk and paint the first frame at offset 0,
     // byte-identical to a one-shot render of the same state. That frame's
@@ -1540,8 +1723,9 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
     let snapshot = badged(
         collect_snapshot(handle.repo(), cfg, cfg.log.fetch_limit(dims.height))?,
         handle.repo(),
-        &home,
-        &home,
+        &start.home,
+        &start,
+        pulls.as_ref(),
     );
     // The seed walk pays into the duty-cycle budget like every walk after it,
     // so its cost is what the schedule's first timed walk is gated on. The seed
@@ -1582,10 +1766,16 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
     // the command, and both must ask the same shell.
     let shell = crate::shell::user_shell();
     let issue_tx = tx.clone();
+    let tab_tx = tx.clone();
     // The environment is read here, once, and the values go on from there. The
     // handles are dropped, which detaches the threads: the loop waits for no
     // probe.
-    spawn_command_probes(&CommandValues::read(), &shell, &tx);
+    spawn_command_probes(
+        &CommandValues::read(),
+        &shell,
+        crate::shell::PROBE_DEADLINE,
+        &tx,
+    );
 
     // The worker that measures for `m`. It reports on the channel of the loop,
     // as the push and the issue key do. The quit below waits for it, because a
@@ -1606,8 +1796,9 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
     // second discovery. The hooks below share it, and its drop at the end of
     // this function stops the watcher.
     let switch_tx = tx.clone();
-    let watched =
-        RefCell::new(Watched::from_handle(handle, home.clone(), tx).map_err(anyhow::Error::msg)?);
+    let watched = RefCell::new(
+        Watched::from_handle(handle, start.home.clone(), tx).map_err(anyhow::Error::msg)?,
+    );
 
     let result = event_loop(
         &rx,
@@ -1619,8 +1810,14 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
             schedule,
             ui: PushUi::new(cfg.truecolor),
             session,
-            home: home.clone(),
+            home: start.home.clone(),
             log: cfg.log,
+            start_branch: start.branch.clone(),
+            pulls: if pulls.is_some() {
+                PullWatch::enabled()
+            } else {
+                PullWatch::disabled()
+            },
         },
         LoopHooks {
             // The loop passes the worktree on the screen. The loop moves to a
@@ -1639,7 +1836,7 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
                     current, &watched.path,
                     "the loop and the watch must be on the same worktree",
                 );
-                watched.walk(cfg, &home, log_limit)
+                watched.walk(cfg, &start, log_limit, pulls.as_ref())
             },
             // A resize reads the log alone when the pane outgrows the log of
             // the cache, and that log is not complete. The read starts from
@@ -1670,7 +1867,7 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
             paint: |output: &str| paint_output(output),
             clock: Instant::now,
             next_tick: |freshest: Option<Duration>| freshest.and_then(next_tick),
-            start_issue: |command: crate::shell::ShellCommand,
+            start_issue: |steps: crate::issue::Steps,
                           current: &WorktreePath,
                           generation: Generation| {
                 // The run keeps the generation of its press and sends it back
@@ -1680,8 +1877,25 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
                 let finish_tx = issue_tx.clone();
                 let shell = shell.clone();
                 thread::spawn(move || {
-                    let outcome = crate::issue::run(&shell, &command, &workdir);
+                    let outcome = crate::issue::run(&shell, &steps, &workdir);
                     let _ = finish_tx.send(Event::IssueFinished {
+                        generation,
+                        outcome,
+                    });
+                });
+            },
+            start_tab: |command: crate::shell::ShellCommand,
+                        current: &WorktreePath,
+                        generation: Generation| {
+                // The run keeps the generation of its press and sends it back
+                // with the outcome, so the loop knows an outcome that arrives
+                // after a switch.
+                let workdir = current.as_path().to_path_buf();
+                let finish_tx = tab_tx.clone();
+                let shell = shell.clone();
+                thread::spawn(move || {
+                    let outcome = crate::tab::run(&shell, &command, &workdir);
+                    let _ = finish_tx.send(Event::TabFinished {
                         generation,
                         outcome,
                     });
@@ -1749,7 +1963,58 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
             // channel of the loop. The first walk of the new worktree fetches
             // as many commits as the loop passes, as `collect` does.
             switch: |target: &WorktreePath, log_limit: usize| {
-                switch_watched(&watched, target, switch_tx.clone(), cfg, &home, log_limit)
+                switch_watched(
+                    &watched,
+                    target,
+                    switch_tx.clone(),
+                    cfg,
+                    &start,
+                    log_limit,
+                    pulls.as_ref(),
+                )
+            },
+            on_start_branch: worktree_on_start_branch,
+            // One thread for each lookup, and nobody joins it. The loop never
+            // waits for the network. `run_lookup` kills a `gh` that runs past
+            // `LOOKUP_LIMIT`, so the thread ends. A quit drops the receiver of
+            // the loop, and a late answer then goes nowhere. The hook is
+            // called only when `pulls` is enabled, so the settings exist.
+            start_pull: |request: LookupRequest| {
+                let Some(program) = pulls.as_ref().map(|settings| settings.program().to_owned())
+                else {
+                    return;
+                };
+                let answer_tx = switch_tx.clone();
+                thread::spawn(move || {
+                    let outcome = run_lookup(
+                        program.as_os_str(),
+                        &request.target,
+                        request.cached.as_ref(),
+                        LOOKUP_LIMIT,
+                    );
+                    // A send error means the loop quit. The answer has no reader.
+                    let _ = answer_tx.send(Event::PullAnswered {
+                        target: request.target,
+                        outcome,
+                    });
+                });
+            },
+            start_return: |child: std::process::Command| {
+                // Two senders on the one channel, as the push has. The lines
+                // are the push's own event, because the window under the frame
+                // is the same window.
+                let line_tx = push_tx.clone();
+                let finish_tx = push_tx.clone();
+                crate::push::spawn_streamed(
+                    child,
+                    RETURN_RUN_NAME.to_string(),
+                    move |line| {
+                        let _ = line_tx.send(Event::RunOutput(line));
+                    },
+                    move |outcome| {
+                        let _ = finish_tx.send(Event::ReturnFinished(outcome));
+                    },
+                );
             },
         },
     );
@@ -1765,6 +2030,17 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
     });
 
     result
+}
+
+/// Whether the work tree at `path` is on `branch`: the question of the second
+/// press of Esc, for each worktree in turn.
+///
+/// It opens the work tree with `gix::open`, and never with `gix::discover`,
+/// for the reason that [`crate::repo::held_operation`] states: a path that is
+/// no longer a work tree must not lead the search to a parent repository. A
+/// work tree that cannot be opened is not on the branch.
+fn worktree_on_start_branch(branch: &StartBranch, path: &WorktreePath) -> bool {
+    gix::open(path.as_path()).is_ok_and(|repo| branch.is_checked_out_in(&repo))
 }
 
 /// Why watch mode does not start: no directory is at the root of the work tree
@@ -1793,6 +2069,14 @@ const WATCHER_FAILED: &str = "gsw cannot watch the worktree for changes";
 /// the worktree that went away: `<path> no longer exists — back to the home
 /// worktree`. See [`LoopState::return_home_if_gone`].
 const WORKTREE_GONE: &str = "no longer exists — back to the home worktree";
+
+/// The name of the program of the `git switch` of the second Esc, for the line
+/// that gsw writes when it cannot run it.
+const RETURN_RUN_NAME: &str = "git switch";
+
+/// What gsw says when the `git switch` of the second Esc worked. The last line
+/// that git wrote goes under it.
+const RETURN_SUCCESS: &str = "Went back to the start branch";
 
 /// The home worktree: the root of the work tree that `handle` opened, in the
 /// one spelling that every comparison of the loop uses.
@@ -1829,21 +2113,35 @@ fn resolve_home(handle: &RepoHandle) -> Result<WorktreePath> {
 /// the default name of that key. A field of an empty value turns its own key
 /// off, and [`crate::shell::ShellCommand::new`] is where that rule lives.
 struct CommandValues {
-    /// What [`crate::issue::ISSUE_COMMAND_ENV`] says `G` runs.
+    /// What [`crate::issue::PR_COMMAND_ENV`] says `G` runs first.
+    pull_request: Option<String>,
+    /// What [`crate::issue::ISSUE_COMMAND_ENV`] says `G` runs after it.
     issue: Option<String>,
     /// What [`crate::update::REBASE_COMMAND_ENV`] says `R` runs.
     rebase: Option<String>,
     /// What [`crate::update::MERGE_COMMAND_ENV`] says `M` runs.
     merge: Option<String>,
+    /// What [`crate::tab::TAB_COMMAND_ENV`] says `T` runs.
+    tab: Option<String>,
 }
 
 impl CommandValues {
     /// What the environment of this process says.
     fn read() -> Self {
         Self {
-            issue: read_value(crate::issue::ISSUE_COMMAND_ENV),
+            pull_request: read_value(crate::issue::Page::PullRequest.env()),
+            issue: read_value(crate::issue::Page::Issue.env()),
             rebase: read_value(crate::update::BaseUpdate::Rebase.env()),
             merge: read_value(crate::update::BaseUpdate::Merge.env()),
+            tab: read_value(crate::tab::TAB_COMMAND_ENV),
+        }
+    }
+
+    /// What the variable of `page` says `G` runs for it.
+    fn page(&self, page: crate::issue::Page) -> Option<&str> {
+        match page {
+            crate::issue::Page::PullRequest => self.pull_request.as_deref(),
+            crate::issue::Page::Issue => self.issue.as_deref(),
         }
     }
 
@@ -1868,11 +2166,12 @@ fn read_value(name: &str) -> Option<String> {
 /// Ask the shell, once, whether the command of every key that runs one exists,
 /// and report each answer on the loop's own channel.
 ///
-/// **One thread and one shell for each key.** A shell that answered for several
-/// names at once would need its standard output parsed, and an rc file can
-/// print to that output — so the answer of such a shell says as much about the
-/// banner of the user as about the commands. Exit status carries one answer,
-/// which is why each name gets a shell of its own.
+/// **One thread and one shell for each command.** `G` has two commands, so the
+/// four keys that run commands have five probes. A shell that answered for
+/// several names at once would need its standard output parsed, and an rc file
+/// can print to that output — so the answer of such a shell says as much about
+/// the banner of the user as about the commands. Exit status carries one
+/// answer, which is why each name gets a shell of its own.
 ///
 /// On threads of their own, because an interactive shell reads an rc file and
 /// an rc file is somebody else's code: it can take a second, and it can take
@@ -1887,20 +2186,32 @@ fn read_value(name: &str) -> Option<String> {
 /// threads: the loop waits for no probe, and it quits without one. A test waits
 /// for them, because a test that read the record of the shells before they had
 /// run would report a probe that works as a probe that starts nothing.
+///
+/// Each shell gets `deadline` to answer. Production gives
+/// [`crate::shell::PROBE_DEADLINE`], and a test gives a bound of its own, for
+/// the reason [`crate::shell::resolve`] gives.
 fn spawn_command_probes(
     values: &CommandValues,
     shell: &OsStr,
+    deadline: Duration,
     tx: &Sender<Event>,
 ) -> Vec<thread::JoinHandle<()>> {
-    let issue_tx = tx.clone();
-    let mut probes = vec![spawn_probe(
-        shell,
-        values.issue.as_deref(),
-        crate::issue::DEFAULT_ISSUE_COMMAND,
-        move |command| {
-            let _ = issue_tx.send(Event::IssueCommandFound(command));
-        },
-    )];
+    // Over the pages, as over the acts below: `G` has two commands, and every
+    // difference between them is a method of `Page`.
+    let mut probes: Vec<_> = crate::issue::Page::ALL
+        .map(|page| {
+            let page_tx = tx.clone();
+            spawn_probe(
+                shell,
+                values.page(page),
+                page.default_command(),
+                deadline,
+                move |command| {
+                    let _ = page_tx.send(Event::IssueCommandFound(page, command));
+                },
+            )
+        })
+        .into();
     // Over the acts rather than over two names, so a third act would be probed
     // here without an edit: every difference between the two is a method of
     // `BaseUpdate`, the variable and the default name among them.
@@ -1910,24 +2221,38 @@ fn spawn_command_probes(
             shell,
             values.base_update(update),
             update.default_command(),
+            deadline,
             move |command| {
                 let _ = update_tx.send(Event::BaseUpdateCommandFound(update, command));
             },
         )
     }));
+    // `T` has one command, so it has one probe and no iteration.
+    let tab_tx = tx.clone();
+    probes.push(spawn_probe(
+        shell,
+        values.tab.as_deref(),
+        crate::tab::DEFAULT_TAB_COMMAND,
+        deadline,
+        move |command| {
+            let _ = tab_tx.send(Event::TabCommandFound(command));
+        },
+    ));
     probes
 }
 
 /// Ask `shell` on a thread of its own about the command that `value` names,
 /// falling back on `default`, and hand a command it has to `found`.
 ///
-/// `found` runs on that thread and only where the shell said yes. A value that
-/// turns the key off starts no shell at all, which is what keeps a public
-/// repository from asking every user's shell about one person's function.
+/// `found` runs on that thread and only where the shell said yes within
+/// `deadline`. A value that turns the key off starts no shell at all, which is
+/// what keeps a public repository from asking every user's shell about one
+/// person's function.
 fn spawn_probe<Found>(
     shell: &OsStr,
     value: Option<&str>,
     default: &'static str,
+    deadline: Duration,
     found: Found,
 ) -> thread::JoinHandle<()>
 where
@@ -1936,7 +2261,7 @@ where
     let shell = shell.to_os_string();
     let value = value.map(str::to_string);
     thread::spawn(move || {
-        if let Some(command) = crate::shell::resolve(value.as_deref(), default, &shell) {
+        if let Some(command) = crate::shell::resolve(value.as_deref(), default, &shell, deadline) {
             found(command);
         }
     })
@@ -1945,7 +2270,7 @@ where
 #[cfg(all(test, unix))]
 mod probe_tests {
     use super::*;
-    use crate::shell::stub_shell::StubShell;
+    use crate::shell::stub_shell::{StubShell, ANSWER_DEADLINE};
     use crate::update::BaseUpdate;
 
     /// What a probe puts in front of the word it asks the shell about.
@@ -1954,18 +2279,26 @@ mod probe_tests {
     /// the question the shell was really asked and never on a count of runs.
     const PROBE_PREFIX: &str = "command -v ";
 
-    /// The values of the three variables, as a test states them.
+    /// The values of the five variables, as a test states them.
     ///
     /// `None` is a variable the environment does not set, which is the case
     /// that takes the default name of that key. No test of this module sets a
     /// variable: `cargo test` runs the tests of one binary on many threads, so
     /// a test that set `GSW_REBASE_COMMAND` would change what every sibling
     /// test reads.
-    fn values(issue: Option<&str>, rebase: Option<&str>, merge: Option<&str>) -> CommandValues {
+    fn values(
+        pull_request: Option<&str>,
+        issue: Option<&str>,
+        rebase: Option<&str>,
+        merge: Option<&str>,
+        tab: Option<&str>,
+    ) -> CommandValues {
         CommandValues {
+            pull_request: pull_request.map(str::to_string),
             issue: issue.map(str::to_string),
             rebase: rebase.map(str::to_string),
             merge: merge.map(str::to_string),
+            tab: tab.map(str::to_string),
         }
     }
 
@@ -1976,14 +2309,16 @@ mod probe_tests {
     /// record as it runs, so a read before the shells had run would report a
     /// probe that works as a probe that starts nothing. The wait is bounded by
     /// the deadline of the probe itself, which kills a shell that never
-    /// answers.
+    /// answers. That deadline is [`ANSWER_DEADLINE`], a bound of the tests,
+    /// because each test here is about which key an answer reaches, and never
+    /// about how fast this machine starts a shell.
     ///
-    /// Sorted, because three shells answer in whatever order they finish. What
+    /// Sorted, because the shells answer in whatever order they finish. What
     /// each test here is about is which questions were asked, and never which
     /// of them was asked first.
     fn probed(values: &CommandValues, stub: &StubShell) -> (Vec<String>, Vec<String>) {
         let (tx, rx) = mpsc::channel();
-        for handle in spawn_command_probes(values, stub.as_shell(), &tx) {
+        for handle in spawn_command_probes(values, stub.as_shell(), ANSWER_DEADLINE, &tx) {
             handle.join().expect("a probe thread must not panic");
         }
         // The spawn holds a sender for each key, and each of those goes with
@@ -2007,31 +2342,94 @@ mod probe_tests {
     /// The key rather than the name of the variant, because the question each
     /// test asks is whether an answer reached the key it belongs to. An answer
     /// that reached the other key would bind `M` to the command that rebases.
+    /// An answer for `G` also names its page, because an answer that reached
+    /// the wrong page would run `ggs` first.
     fn answer(event: &Event) -> String {
         match event {
-            Event::IssueCommandFound(command) => format!("G {}", command.name()),
+            Event::IssueCommandFound(page, command) => {
+                format!("G {page:?} {}", command.name())
+            }
             Event::BaseUpdateCommandFound(update, command) => {
                 format!("{} {}", update.key(), command.name())
             }
+            Event::TabCommandFound(command) => format!("T {}", command.name()),
             _ => "another event".to_string(),
         }
     }
 
     #[test]
     fn an_unset_variable_probes_the_default_command_of_its_own_key() {
-        // Three keys, three shells, three questions. A key whose variable the
+        // Five probes, five shells, five questions. A key whose variable the
         // environment never names still asks about the name it falls back on,
         // because that name is what the key runs.
         let stub = StubShell::answering(0);
-        let (words, _) = probed(&values(None, None, None), &stub);
+        let (words, _) = probed(&values(None, None, None, None, None), &stub);
         assert_eq!(
             words,
             [
                 crate::issue::DEFAULT_ISSUE_COMMAND,
+                crate::issue::DEFAULT_PR_COMMAND,
                 BaseUpdate::Merge.default_command(),
                 BaseUpdate::Rebase.default_command(),
+                crate::tab::DEFAULT_TAB_COMMAND,
             ],
             "each key must ask the shell about its own default command",
+        );
+    }
+
+    #[test]
+    fn an_unset_pr_variable_probes_ggsp_for_the_first_step_of_g() {
+        // `G` has two probes. The first one asks about the command that runs
+        // first, and its answer must reach the page of the pull request.
+        let stub = StubShell::answering(0);
+        let (words, answers) = probed(
+            &values(None, Some("myissue"), Some(""), Some(""), Some("")),
+            &stub,
+        );
+        assert_eq!(
+            words,
+            [crate::issue::DEFAULT_PR_COMMAND, "myissue"],
+            "an unset GSW_PR_COMMAND must ask about the default command of the pull request",
+        );
+        assert_eq!(
+            answers,
+            ["G Issue myissue", "G PullRequest ggsp"],
+            "the answer for ggsp must reach the page of the pull request",
+        );
+    }
+
+    #[test]
+    fn an_empty_pr_variable_starts_no_shell_for_it_and_g_keeps_the_issue_command() {
+        let stub = StubShell::answering(0);
+        let (words, answers) = probed(&values(Some(""), None, Some(""), Some(""), Some("")), &stub);
+        assert_eq!(
+            words,
+            [crate::issue::DEFAULT_ISSUE_COMMAND],
+            "an empty GSW_PR_COMMAND must start no shell for ggsp",
+        );
+        assert_eq!(
+            answers,
+            ["G Issue ggs"],
+            "G must keep the issue command, and the pull request page must send no answer",
+        );
+    }
+
+    #[test]
+    fn a_pr_variable_with_a_name_in_it_probes_that_command() {
+        let stub = StubShell::answering(0);
+        let (words, answers) = probed(
+            &values(Some("myprs"), None, Some(""), Some(""), Some("")),
+            &stub,
+        );
+        assert_eq!(
+            words,
+            [crate::issue::DEFAULT_ISSUE_COMMAND, "myprs"],
+            "GSW_PR_COMMAND must name the command that the first step of G asks about",
+        );
+        assert_eq!(
+            answers,
+            ["G Issue ggs", "G PullRequest myprs"],
+            "the answer for myprs must reach the page of the pull request",
         );
     }
 
@@ -2042,18 +2440,19 @@ mod probe_tests {
         // nothing at all — no shell, and so no rc file read — and it must turn
         // off the one key it names and no other.
         let stub = StubShell::answering(0);
-        let (words, answers) = probed(&values(None, Some(""), None), &stub);
+        let (words, answers) = probed(&values(None, None, Some(""), None, Some("")), &stub);
         assert_eq!(
             words,
             [
                 crate::issue::DEFAULT_ISSUE_COMMAND,
+                crate::issue::DEFAULT_PR_COMMAND,
                 BaseUpdate::Merge.default_command(),
             ],
             "an empty GSW_REBASE_COMMAND must start no shell for R, and leave G and M probing",
         );
         assert_eq!(
             answers,
-            ["G ggs", "M gmp"],
+            ["G Issue ggs", "G PullRequest ggsp", "M gmp"],
             "a key that started no shell must send no answer",
         );
     }
@@ -2064,11 +2463,12 @@ mod probe_tests {
         // person's rc file gives it, and a user who calls it something else
         // must have gsw ask about the name they chose.
         let stub = StubShell::answering(0);
-        let (words, answers) = probed(&values(None, None, Some("mymerge")), &stub);
+        let (words, answers) = probed(&values(None, None, None, Some("mymerge"), Some("")), &stub);
         assert_eq!(
             words,
             [
                 crate::issue::DEFAULT_ISSUE_COMMAND,
+                crate::issue::DEFAULT_PR_COMMAND,
                 BaseUpdate::Rebase.default_command(),
                 "mymerge",
             ],
@@ -2076,22 +2476,112 @@ mod probe_tests {
         );
         assert_eq!(
             answers,
-            ["G ggs", "M mymerge", "R grp"],
+            ["G Issue ggs", "G PullRequest ggsp", "M mymerge", "R grp"],
             "the answer of M must carry the command the user named",
         );
     }
 
     #[test]
     fn each_answer_arrives_as_the_event_of_its_own_key() {
-        // Three answers on one channel, and each must reach the key it belongs
+        // Five answers on one channel, and each must reach the key it belongs
         // to. An answer that reached the other key would bind `M` to the
         // command that rebases the branch and force-pushes it.
         let stub = StubShell::answering(0);
-        let (_, answers) = probed(&values(None, None, None), &stub);
+        let (_, answers) = probed(&values(None, None, None, None, None), &stub);
         assert_eq!(
             answers,
-            ["G ggs", "M gmp", "R grp"],
+            [
+                "G Issue ggs",
+                "G PullRequest ggsp",
+                "M gmp",
+                "R grp",
+                "T stp"
+            ],
             "each key must be bound by the answer of its own probe",
+        );
+    }
+
+    #[test]
+    fn an_unset_tab_variable_probes_stp_for_t() {
+        // `T` has one command. An unset variable takes the default name, as it
+        // does for the other keys.
+        let stub = StubShell::answering(0);
+        let (words, answers) = probed(&values(Some(""), Some(""), Some(""), Some(""), None), &stub);
+        assert_eq!(
+            words,
+            [crate::tab::DEFAULT_TAB_COMMAND],
+            "an unset GSW_TAB_COMMAND must ask about the default command of T",
+        );
+        assert_eq!(
+            answers,
+            ["T stp"],
+            "the answer for stp must reach the key T",
+        );
+    }
+
+    #[test]
+    fn an_empty_tab_variable_starts_no_shell_for_t_and_leaves_the_other_keys_probing() {
+        // The empty value is the one way to turn `T` off. It must cost no
+        // shell, and so no rc file read, and it must turn off no other key.
+        let stub = StubShell::answering(0);
+        let (words, answers) = probed(&values(None, None, None, None, Some("")), &stub);
+        assert_eq!(
+            words,
+            [
+                crate::issue::DEFAULT_ISSUE_COMMAND,
+                crate::issue::DEFAULT_PR_COMMAND,
+                BaseUpdate::Merge.default_command(),
+                BaseUpdate::Rebase.default_command(),
+            ],
+            "an empty GSW_TAB_COMMAND must start no shell for T, and leave the other keys probing",
+        );
+        assert_eq!(
+            answers,
+            ["G Issue ggs", "G PullRequest ggsp", "M gmp", "R grp"],
+            "a key that started no shell must send no answer",
+        );
+    }
+
+    #[test]
+    fn a_tab_variable_with_a_name_in_it_probes_that_command() {
+        // The probe asks about the first word. The answer carries the whole
+        // line, because the whole line is what `T` runs.
+        let stub = StubShell::answering(0);
+        let (words, answers) = probed(
+            &values(Some(""), Some(""), Some(""), Some(""), Some("mytab --here")),
+            &stub,
+        );
+        assert_eq!(
+            words,
+            ["mytab"],
+            "GSW_TAB_COMMAND must name the command that T asks about",
+        );
+        assert_eq!(
+            answers,
+            ["T mytab --here"],
+            "the answer of T must carry the whole line the user wrote",
+        );
+    }
+
+    #[test]
+    fn an_answer_after_the_bound_of_a_user_still_reaches_its_key() {
+        // The tests here are about which key each answer reaches, and never
+        // about how fast a shell answers. A busy machine can hold a stub that
+        // exits at once for longer than the bound of a user: a hook run of
+        // 2026-10-14 sent no answer at all, and the stubs it started had
+        // recorded all four questions.
+        //
+        // The stub answers one second after the bound of a user, on a machine
+        // of any speed. So this test fails wherever the probes of this module
+        // wait only for the bound of a user.
+        let late = crate::shell::PROBE_DEADLINE + Duration::from_secs(1);
+        let stub = StubShell::new(&format!("sleep {}; exit 0", late.as_secs()));
+        let (_, answers) = probed(&values(None, None, None, None, Some("")), &stub);
+        assert_eq!(
+            answers,
+            ["G Issue ggs", "G PullRequest ggsp", "M gmp", "R grp"],
+            "a slow answer must still reach its key. The probes of these tests must wait for a \
+             bound of their own, and not for the bound of a user",
         );
     }
 }
@@ -2327,6 +2817,13 @@ struct LoopStart {
     /// switch, and each read of the log on a resize. So the loop is the one
     /// place that decides how many commits a read of the log gets.
     log: LogDemand,
+    /// The branch where the user started gsw, when HEAD named one. The two
+    /// presses of Esc go back to it. `None` leaves Esc with no return.
+    start_branch: Option<StartBranch>,
+    /// What decides when a lookup of the pull requests starts and what the
+    /// indicator of the header shows. [`PullWatch::disabled`]
+    /// leaves the header as it was before the indicator.
+    pulls: PullWatch,
 }
 
 /// Everything the loop changes while it runs.
@@ -2335,8 +2832,9 @@ struct LoopStart {
 /// of them through the one function [`absorb`], and because a switch of the
 /// worktree changes most of this in one step: the cache takes the snapshot of
 /// the new worktree, the schedule starts the refresh clock again, the row under
-/// the frame empties, and the `G` key loses its arming. An argument for each
-/// part would give [`absorb`] more arguments than a reader can hold.
+/// the frame empties, and the `G` key loses its arming. The second press of
+/// Esc loses its hint with the row. An argument for each part would give
+/// [`absorb`] more arguments than a reader can hold.
 struct LoopState {
     /// The snapshot a re-render can use without walking git again.
     cache: SnapshotCache,
@@ -2346,19 +2844,25 @@ struct LoopState {
     ui: PushUi,
     /// The state of the `G` key.
     issue: IssueRun,
+    /// The state of the `T` key.
+    tab: TabRun,
     /// The commands behind the `R` and `M` keys.
     base_updates: BaseUpdateCommands,
     /// The state of the `m` key.
     conflicts: ConflictsRun,
     /// The worktree where the user started gsw.
     home: WorktreePath,
-    /// The worktree that the frame shows. The walk, `p`, `R`, `M`, `G`, and
-    /// `m` act on it. It starts at [`LoopState::home`].
+    /// The worktree that the frame shows. The walk, `p`, `P`, `R`, `M`, `G`,
+    /// `T`, and `m` act on it. It starts at [`LoopState::home`].
     current: WorktreePath,
     /// How many switches the loop has made. See [`Generation`].
     generation: Generation,
     /// How many recent commits the log asks for. See [`LoopStart::log`].
     log: LogDemand,
+    /// The branch where the user started gsw. See [`LoopStart::start_branch`].
+    start_branch: Option<StartBranch>,
+    /// The pull-request lookups. See [`LoopStart::pulls`].
+    pulls: PullWatch,
 }
 
 impl LoopState {
@@ -2371,7 +2875,7 @@ impl LoopState {
     /// about a key the user pressed.
     ///
     /// [`absorb`] calls it when it reads the key, and not at the next frame. So
-    /// a `p`, `G`, or `m` later in the same burst acts on the new worktree, as
+    /// a `p`, `P`, `G`, or `m` later in the same burst acts on the new worktree, as
     /// a `y` after a `p` in one burst reads the new mode.
     fn switch_to(
         &mut self,
@@ -2402,7 +2906,8 @@ impl LoopState {
     ///    run that started before the switch is known as stale. Every message
     ///    under the frame goes, and the list closes, because each one
     ///    describes the worktree the frame showed before. The `G` key loses
-    ///    its arming with the message that armed it.
+    ///    its arming with the message that armed it. The second press of Esc
+    ///    needs no call, because its hint is one of those messages.
     /// 3. On `Err`, nothing changes, and the reason comes back. The caller
     ///    decides whether the reason goes on the row.
     fn enter(
@@ -2521,10 +3026,14 @@ struct LoopHooks<
     StartPush,
     StartBaseUpdate,
     StartIssue,
+    StartTab,
     StartConflicts,
     Worktrees,
     Paths,
     Switch,
+    OnStartBranch,
+    StartPull,
+    StartReturn,
 > {
     /// Walk the worktree that the loop passes, which is the worktree the frame
     /// shows, into a fresh [`Snapshot`] (the expensive git work). The walk
@@ -2569,12 +3078,18 @@ struct LoopHooks<
     /// [`Event::BaseUpdateFinished`]; tests record the command and decide for
     /// themselves when, or whether, the outcome arrives.
     start_base_update: StartBaseUpdate,
-    /// Start a run of the issue command in the worktree on the screen at the
-    /// press. Production spawns a thread that runs it and sends the outcome
+    /// Start the steps of a press of `G` in the worktree on the screen at the
+    /// press. Production spawns a thread that runs them and sends the outcome
     /// back as [`Event::IssueFinished`], with the [`Generation`] it was given;
     /// tests record the command and decide for themselves when the outcome
     /// arrives.
     start_issue: StartIssue,
+    /// Start the tab-title command of a press of `T` in the worktree on the
+    /// screen at the press. Production spawns a thread that runs it and sends
+    /// the outcome back as [`Event::TabFinished`], with the [`Generation`] it
+    /// was given. Tests record the command and decide for themselves when the
+    /// outcome arrives.
+    start_tab: StartTab,
     /// Start a measurement of a rebase and a merge against the default branch,
     /// in the worktree on the screen at the press. Production starts it on a
     /// thread of its own, which sends the branch back as
@@ -2611,11 +3126,36 @@ struct LoopHooks<
     /// of that worktree. `Err` carries the reason for a fading line, and then
     /// nothing changes: the loop stays on the worktree it shows.
     switch: Switch,
+    /// Whether the worktree at the path is on the start branch. The second
+    /// press of Esc asks it of each worktree, to find the one that holds the
+    /// start branch. Production opens the worktree and reads its HEAD through
+    /// [`StartBranch::is_checked_out_in`], so a rebase of the start branch
+    /// counts.
+    on_start_branch: OnStartBranch,
+    /// Start one lookup of the pull requests of a branch, given the
+    /// [`LookupRequest`] that [`PullWatch`] made: the
+    /// target, and the cache entry to send as `If-None-Match`. Production
+    /// spawns a thread that runs the lookup and sends the answer back as
+    /// [`Event::PullAnswered`]; tests record the request and decide for
+    /// themselves when, or whether, the answer arrives. The loop never waits
+    /// for the network, because the thread answers on the channel of the loop.
+    start_pull: StartPull,
+    /// Start the `git switch` of the second Esc, given the child that
+    /// [`StartBranch::switch_child`] built: `git switch --no-guess` and the
+    /// start branch, to run in the home worktree. Production spawns a thread
+    /// that runs it, sends each line it writes back as [`Event::RunOutput`],
+    /// and sends the outcome as [`Event::ReturnFinished`]; tests record the
+    /// child and decide for themselves when, or whether, the outcome arrives.
+    start_return: StartReturn,
 }
 
 /// The triggers one wake collected, before the render decides what to do with
 /// them. A burst can carry several at once, and they are not exclusive: a walk
 /// forced by `r` and a resize can arrive together.
+///
+/// The pull lookups need no flag of their own here. `r` is `force`, and the
+/// other causes show in the target of the cached snapshot, which the loop
+/// compares after the walk. A filesystem event starts no lookup.
 #[derive(Default)]
 struct Pending {
     /// A relevant filesystem path changed.
@@ -2666,14 +3206,15 @@ enum Flow {
 ///
 /// `state` is everything the loop changes, in one value. Its cache comes whole,
 /// and not as its snapshot and its pane, because the two always come from the
-/// one cache. Its `issue` and `conflicts` are the state of the two keys that
-/// start work off this thread, one run of each at a time. Its current worktree
-/// is where the push, the issue key, and `m` do their work.
+/// one cache. Its `issue`, `tab`, and `conflicts` are the state of the three
+/// keys that start work off this thread (`G`, `T`, and `m`), one run of each
+/// at a time. Its current worktree is where the push, `G`, `T`, and `m` do
+/// their work.
 #[expect(
     clippy::type_complexity,
-    reason = "the loop takes one generic for each of its fifteen hooks, so each hook stays \
+    reason = "the loop takes one generic for each of its nineteen hooks, so each hook stays \
               a plain closure that a test replaces with a fake. A type alias spells the same \
-              fifteen generics, and the borrow of the whole value keeps every call of \
+              nineteen generics, and the borrow of the whole value keeps every call of \
               absorb the same"
 )]
 fn absorb<
@@ -2688,10 +3229,14 @@ fn absorb<
     StartPush,
     StartBaseUpdate,
     StartIssue,
+    StartTab,
     StartConflicts,
     Worktrees,
     Paths,
     Switch,
+    OnStartBranch,
+    StartPull,
+    StartReturn,
 >(
     event: Event,
     pending: &mut Pending,
@@ -2708,30 +3253,45 @@ fn absorb<
         StartPush,
         StartBaseUpdate,
         StartIssue,
+        StartTab,
         StartConflicts,
         Worktrees,
         Paths,
         Switch,
+        OnStartBranch,
+        StartPull,
+        StartReturn,
     >,
 ) -> Flow
 where
     Clock: Fn() -> Instant,
     StartPush: FnMut(PushCommand, &WorktreePath),
     StartBaseUpdate: FnMut(crate::update::BaseUpdateCommand, &WorktreePath),
-    StartIssue: FnMut(crate::shell::ShellCommand, &WorktreePath, Generation),
+    StartIssue: FnMut(crate::issue::Steps, &WorktreePath, Generation),
+    StartTab: FnMut(crate::shell::ShellCommand, &WorktreePath, Generation),
     StartConflicts: FnMut(&WorktreePath, Generation),
     Worktrees: FnMut() -> Vec<WorktreeEntry>,
     Paths: FnMut() -> Vec<WorktreePath>,
     Switch: FnMut(&WorktreePath, usize) -> Result<Snapshot, String>,
+    OnStartBranch: FnMut(&StartBranch, &WorktreePath) -> bool,
+    StartPull: FnMut(LookupRequest),
+    StartReturn: FnMut(std::process::Command),
 {
     let clock = &hooks.clock;
     match event {
         Event::Quit => return Flow::Quit,
         Event::FsChanged => pending.fs = true,
         Event::Resize => pending.resize = true,
+        // The answer goes into the cache of its own target, whatever the
+        // frame shows now. A lookup that waited for this one starts here.
+        Event::PullAnswered { target, outcome } => {
+            if let Some(request) = state.pulls.answered(target, outcome, clock()) {
+                (hooks.start_pull)(request);
+            }
+        }
         Event::ForceRefresh => pending.force = true,
         Event::Key(key) => {
-            let keys = state.base_updates.keys(state.issue.key());
+            let keys = state.base_updates.keys(state.issue.key(), state.tab.key());
             if let Some(action) = classify_input(key, state.ui.mode(), keys) {
                 // Every key but `G` takes the arming away. The message that
                 // asks for the second press is the armed state, and this key
@@ -2739,13 +3299,19 @@ where
                 if !matches!(action, Event::IssueRequested) {
                     state.issue.disarm();
                 }
+                // Every key but Esc takes the hint away, for the same reason.
+                // The hint is the armed state of the second Esc, and this key
+                // is not the second press.
+                if !matches!(action, Event::ReturnRequested) {
+                    state.ui.withdraw_hint();
+                }
                 return absorb(action, pending, state, hooks);
             }
         }
-        Event::PushRequested => {
+        Event::PushRequested(policy) => {
             state
                 .ui
-                .request(&state.cache.snapshot, state.cache.dims, clock());
+                .request(&state.cache.snapshot, state.cache.dims, clock(), policy);
         }
         // The question describes the command of the act, so the press reads
         // that command here and the row takes it. The key table makes no
@@ -2784,6 +3350,86 @@ where
         Event::RunOutput(line) => state.ui.output_line(line),
         Event::Cancelled => state.ui.cancel(),
         Event::Dismiss => state.ui.dismiss(),
+        // Esc in the normal mode. It goes back to the start branch on its
+        // second press, and only where the name in the header is red.
+        //
+        // The hint on the row is the only armed state. The second press is
+        // the press that finds the hint on the row, and no other state says
+        // so. A message that takes the row from the hint, a key, a switch,
+        // and the clock each remove the hint, and with it the arming.
+        //
+        // One read of the clock for the whole press, so the hint is posted
+        // and judged at the same instant.
+        Event::ReturnRequested => {
+            let now = clock();
+            let Some(branch) = state
+                .start_branch
+                .clone()
+                .filter(|_| state.cache.snapshot.off_start_branch)
+            else {
+                // The name is not red, or the session has no start branch.
+                // Esc does what it did before the two presses existed.
+                state.ui.dismiss();
+                return Flow::Continue;
+            };
+            if state.ui.shows_hint(now) {
+                // The second press. The hint leaves the row, so a press that
+                // finds no worktree to go to leaves no hint that asks for a
+                // press that already happened.
+                state.ui.withdraw_hint();
+                // Rule 1: home is on the start branch. The watch moves home,
+                // as Up does. Rule 2: another worktree is on it, and the watch
+                // moves there. No git command runs for either. Home is probed
+                // first, and then each other worktree in the order of the
+                // listing, so the first one that is on the branch wins.
+                let home = state.home.clone();
+                let paths = (hooks.worktree_paths)();
+                let target = std::iter::once(&home)
+                    .chain(paths.iter().filter(|path| **path != home))
+                    .find(|path| (hooks.on_start_branch)(&branch, path))
+                    .cloned();
+                match target {
+                    Some(target) if target != state.current => {
+                        state.switch_to(target, clock, &mut hooks.switch);
+                    }
+                    // The probe finds the worktree that the frame shows, so the
+                    // frame is stale: the branch moved since the last walk. The
+                    // next frame walks, and its header tells the truth.
+                    Some(_) => pending.force = true,
+                    // Rule 3: no worktree is on the start branch. gsw runs
+                    // `git switch --no-guess` in the home worktree, as a run
+                    // of the row, and it shows the command while it runs. The
+                    // switch moves HEAD, so a measurement of `m` in flight is
+                    // overlapped, as it is by a rebase. A row that is busy
+                    // refuses the run, and then nothing starts.
+                    None => {
+                        // The run is in the home worktree, so the watch goes
+                        // there first. A move that fails puts its reason on
+                        // the row, and then no git command runs.
+                        if state.current != home {
+                            state.switch_to(home.clone(), clock, &mut hooks.switch);
+                            if state.current != home {
+                                return Flow::Continue;
+                            }
+                        }
+                        let child = branch.switch_child(state.home.as_path());
+                        let notice = format!("{}…", crate::child::command_line(&child));
+                        let success = crate::push::SuccessReport::WithLastLine {
+                            sentence: RETURN_SUCCESS.to_string(),
+                        };
+                        if state.ui.start_run(notice, success, RunKind::Return, now) {
+                            state.conflicts.base_update_started();
+                            (hooks.start_return)(child);
+                        }
+                    }
+                }
+            } else {
+                // The first press. The hint is the arming. A question or a
+                // run owns the row, and the hint then goes nowhere, so the
+                // press arms nothing and the next Esc is a first press too.
+                let _ = state.ui.post_hint(branch.return_hint(), now);
+            }
+        }
         // Left and Right read the paths of the worktrees again at each press,
         // because `nwt` and `swt` add and remove worktrees while gsw runs.
         // They read no label, because they show none. Where no other worktree
@@ -2838,6 +3484,16 @@ where
                 list.down();
             }
         }
+        Event::ListPageUp => {
+            if let Some(list) = state.ui.list_mut() {
+                list.page_up();
+            }
+        }
+        Event::ListPageDown => {
+            if let Some(list) = state.ui.list_mut() {
+                list.page_down();
+            }
+        }
         // Enter closes the list before the switch, so a switch that fails
         // puts its reason on a free row. Enter on the worktree that the frame
         // shows opens nothing, because the frame shows it already.
@@ -2880,19 +3536,28 @@ where
                 IssuePress::Nothing => {}
             }
         }
-        Event::IssueCommandFound(command) => state.issue.found(command),
+        Event::IssueCommandFound(page, command) => state.issue.found(page, command),
+        Event::TabCommandFound(command) => state.tab.found(command),
+        // `T` asks nothing first: a tab title is not the repository. The
+        // check and the start are one step on the thread of the loop, so a
+        // burst of presses starts one run.
+        Event::TabRequested => {
+            if let Some(command) = state.tab.press() {
+                (hooks.start_tab)(command, &state.current, state.generation);
+            }
+        }
         // The check and the start are one step on the thread of the loop, so
         // a burst of presses starts one run. See [`ConflictsRun`].
         Event::ConflictsRequested => match state.conflicts.press() {
             ConflictsPress::Start => (hooks.start_conflicts)(&state.current, state.generation),
             ConflictsPress::Nothing => {}
         },
-        // A run continues after a switch, in the worktree where it started. An
-        // event of such a run describes a worktree that the frame no longer
-        // shows, and a line under the frame must describe the worktree in the
-        // frame. So it posts nothing. An outcome still frees its key, because
-        // one run at a time is a rule for the whole process, and that run has
-        // ended.
+        // A run of `G`, `T`, or `m` continues after a switch, in the worktree
+        // where it started. An event of such a run describes a worktree that
+        // the frame no longer shows, and a line under the frame must describe
+        // the worktree in the frame. So it posts nothing. An outcome still
+        // frees its key, because one run at a time is a rule for the whole
+        // process, and that run has ended.
         Event::ConflictsStarted { generation, .. } if state.is_stale(generation) => {}
         Event::ConflictsFinished { generation, .. } if state.is_stale(generation) => {
             state.conflicts.finished();
@@ -2900,10 +3565,14 @@ where
         Event::IssueFinished { generation, .. } if state.is_stale(generation) => {
             state.issue.finished();
         }
-        // A run that a rebase or a merge overlapped measured the branch before
-        // the update moved HEAD. Its line reaches the row after the update, and
-        // then reads as a measurement of the new branch. So it posts nothing,
-        // and its outcome still frees the key. See [`ConflictsRun::Overlapped`].
+        Event::TabFinished { generation, .. } if state.is_stale(generation) => {
+            state.tab.finished();
+        }
+        // A run that a rebase, a merge, or the `git switch` of the second Esc
+        // overlapped measured the branch before HEAD moved. Its line reaches
+        // the row after the run, and then reads as a measurement of the new
+        // branch. So it posts nothing, and its outcome still frees the key. See
+        // [`ConflictsRun::Overlapped`].
         Event::ConflictsStarted { .. } if state.conflicts.overlapped() => {}
         Event::ConflictsFinished { .. } if state.conflicts.overlapped() => {
             state.conflicts.finished();
@@ -2933,6 +3602,20 @@ where
                 state.ui.post_error(message.to_string());
             }
         }
+        Event::TabFinished { outcome, .. } => {
+            state.tab.finished();
+            // A run that worked can say what it did, and that is gsw's report
+            // of a key the user pressed, so it fades. A run that failed says
+            // why in the words of another program, so it waits for a key the
+            // way the error text of git does.
+            match outcome {
+                crate::tab::TabOutcome::Worked(Some(line)) => {
+                    let _ = state.ui.post_notice(line, clock());
+                }
+                crate::tab::TabOutcome::Worked(None) => {}
+                crate::tab::TabOutcome::Failed(line) => state.ui.post_error(line),
+            }
+        }
         // **A walk on every outcome, and not on success alone.** A command
         // that failed can have changed the branch before it failed. A walk
         // during the run can have drawn the `⚠` row of an operation that the
@@ -2942,6 +3625,14 @@ where
         // every commit and pushed them, so every count in the header is stale
         // as well.
         Event::BaseUpdateFinished(outcome) => {
+            state.ui.finished(outcome, clock());
+            pending.force = true;
+        }
+        // **A walk on every outcome**, for the reason of the rebase above: the
+        // header must show the bold name with no wait after a switch that
+        // worked, and a switch that git refused can have left the index
+        // changed.
+        Event::ReturnFinished(outcome) => {
             state.ui.finished(outcome, clock());
             pending.force = true;
         }
@@ -2986,7 +3677,7 @@ where
 /// displayed (see [`Event::Key`] for why the reader thread must not).
 ///
 /// The loop watches one worktree at a time, the current worktree, and it starts
-/// on `start.home`. The walk, `p`, `R`, `M`, `G`, and `m` act on the current
+/// on `start.home`. The walk, `p`, `P`, `R`, `M`, `G`, and `m` act on the current
 /// worktree. The arrow keys change it through [`LoopState::switch_to`], inside
 /// [`absorb`], so the next key of the same burst already acts on the new
 /// worktree.
@@ -2997,7 +3688,8 @@ where
 /// last ([`LoopState::log_limit`]).
 ///
 /// `hooks` bundles the side effects (collect, read of the log, render,
-/// terminal-size query, paint, clock, tick cadence) so the loop is one function
+/// terminal-size query, paint, clock, tick cadence, the starts of the runs, the
+/// switch, and the probe of the start branch) so the loop is one function
 /// testable without a TTY or real time: a test feeds a pre-loaded channel, a
 /// controllable clock, and counters, then asserts which hooks ran and with what
 /// age offset. The contracts verified there:
@@ -3026,6 +3718,15 @@ where
 /// - while the list of the worktrees is open, the frame is the frame of the
 ///   list (`render_list` in `hooks`), and every other frame is the status
 ///   frame (`render`);
+/// - the loop starts a pull lookup ([`LoopHooks::start_pull`]) through
+///   [`PullWatch`], and only on these triggers: the start of the loop (after
+///   the first frame is on the screen), a timed refresh, `r`, a change of the
+///   worktree or the branch on the screen, and the end of a rate-limit block
+///   that held a lookup (a wake of its own, [`PullWatch::wake_at`]). A
+///   filesystem event starts none, so a build that writes many files sends no
+///   many requests. The answer arrives as [`Event::PullAnswered`] on the same
+///   channel, so the loop never waits for the network. Each frame takes its
+///   indicator from the cache of its own target ([`show_pull_indicator`]);
 /// - [`Event::Quit`] ends the loop, as does every sender hanging up.
 ///
 /// A failed collect is absorbed rather than propagated because the failures are
@@ -3047,9 +3748,9 @@ where
 /// loop goes back to the home worktree ([`LoopState::return_home_if_gone`]).
 #[expect(
     clippy::type_complexity,
-    reason = "the loop takes one generic for each of its fifteen hooks, so each hook stays \
+    reason = "the loop takes one generic for each of its nineteen hooks, so each hook stays \
               a plain closure that a test replaces with a fake. A type alias spells the same \
-              fifteen generics, as the expectation on absorb says"
+              nineteen generics, as the expectation on absorb says"
 )]
 fn event_loop<
     Collect,
@@ -3063,10 +3764,14 @@ fn event_loop<
     StartPush,
     StartBaseUpdate,
     StartIssue,
+    StartTab,
     StartConflicts,
     Worktrees,
     Paths,
     Switch,
+    OnStartBranch,
+    StartPull,
+    StartReturn,
 >(
     rx: &Receiver<Event>,
     debounce: Duration,
@@ -3084,10 +3789,14 @@ fn event_loop<
         StartPush,
         StartBaseUpdate,
         StartIssue,
+        StartTab,
         StartConflicts,
         Worktrees,
         Paths,
         Switch,
+        OnStartBranch,
+        StartPull,
+        StartReturn,
     >,
 ) -> Result<()>
 where
@@ -3101,11 +3810,15 @@ where
     Tick: Fn(Option<Duration>) -> Option<Duration>,
     StartPush: FnMut(PushCommand, &WorktreePath),
     StartBaseUpdate: FnMut(crate::update::BaseUpdateCommand, &WorktreePath),
-    StartIssue: FnMut(crate::shell::ShellCommand, &WorktreePath, Generation),
+    StartIssue: FnMut(crate::issue::Steps, &WorktreePath, Generation),
+    StartTab: FnMut(crate::shell::ShellCommand, &WorktreePath, Generation),
     StartConflicts: FnMut(&WorktreePath, Generation),
     Worktrees: FnMut() -> Vec<WorktreeEntry>,
     Paths: FnMut() -> Vec<WorktreePath>,
     Switch: FnMut(&WorktreePath, usize) -> Result<Snapshot, String>,
+    OnStartBranch: FnMut(&StartBranch, &WorktreePath) -> bool,
+    StartPull: FnMut(LookupRequest),
+    StartReturn: FnMut(std::process::Command),
 {
     let LoopStart {
         cache,
@@ -3115,6 +3828,8 @@ where
         session,
         home,
         log,
+        start_branch,
+        pulls,
     } = start;
     let mut state = LoopState {
         cache,
@@ -3123,6 +3838,8 @@ where
         // The probe answers on the loop's own channel, so the key is unbound
         // until it does and the loop never waits for it.
         issue: IssueRun::new(session),
+        // `T` answers on the same channel, on the same terms.
+        tab: TabRun::new(),
         // One probe for each of the two keys, on the same terms.
         base_updates: BaseUpdateCommands::new(),
         // The loop owns the state of `m`, and the thread that measures never
@@ -3133,7 +3850,19 @@ where
         home,
         generation: Generation::default(),
         log,
+        start_branch,
+        pulls,
     };
+    // The lookup of the first frame. The first frame is on the screen already,
+    // so the lookup delays nothing. The instant is the start of the walk that
+    // seeded the cache, and no clock is read for it.
+    if let Some(request) = state.pulls.refresh(
+        pull_target(&state.cache.snapshot),
+        false,
+        state.cache.collected_at,
+    ) {
+        (hooks.start_pull)(request);
+    }
     loop {
         // Wait for the first event, or — when the decay timer is enabled — wake
         // after `interval` of quiet for a tick.
@@ -3150,11 +3879,18 @@ where
             .schedule
             .next_walk_at()
             .map(|at| at.saturating_duration_since((hooks.clock)()));
+        // A lookup that waited for the end of a rate-limit block is the other
+        // source of a wake. The clock is read only when such a lookup waits.
+        let pull_wait = state
+            .pulls
+            .wake_at()
+            .map(|at| at.saturating_duration_since((hooks.clock)()));
         let wait = wait_window(&[
             (hooks.next_tick)(freshest),
             walk_wait,
+            pull_wait,
             state.schedule.interval.map(|_| CLOCK_CADENCE),
-            state.ui.next_tick(),
+            state.ui.next_tick(&hooks.clock),
         ]);
         let woke_for_timeout = match wait {
             Some(interval) => match rx.recv_timeout(interval) {
@@ -3255,6 +3991,12 @@ where
             false
         };
 
+        // Does this walk follow a timed refresh? It is asked before the walk
+        // records itself, because the record moves the timed deadline on. A walk
+        // that a filesystem event caused is not a timed refresh, so it asks
+        // GitHub again only when the target changed.
+        let timed_refresh = walk_now && state.schedule.timed_due(now);
+
         // Re-measure the pane before rendering, on the same two triggers as
         // before: a walk and a resize. Hoisted out of the branches so the frame
         // height below is computed from dimensions that are already current.
@@ -3353,12 +4095,25 @@ where
         if saw_resize {
             let limit = state.log_limit();
             let cached = &state.cache.snapshot;
-            if let Some(start) = cached.log_start {
+            if let Some(start) = cached.log_start.clone() {
                 if cached.log.len() < limit && !cached.log_complete {
                     let fetched = (hooks.fetch_log)(&state.current, start, limit);
                     state.cache.take_fetched_log(fetched, now);
                 }
             }
+        }
+
+        // One call decides every lookup of this wake. The target of the cached
+        // snapshot is the target on the screen, so the call sees a switch that
+        // `absorb` made, a branch that the walk found, a timed refresh, `r`, and
+        // the end of a rate-limit block. It starts none for a filesystem event
+        // that left the target as it was.
+        if let Some(request) = state.pulls.refresh(
+            pull_target(&state.cache.snapshot),
+            saw_force || timed_refresh,
+            now,
+        ) {
+            (hooks.start_pull)(request);
         }
 
         // The open list takes the rows under the head of the frame. A pane
@@ -3420,6 +4175,7 @@ where
             &state.schedule,
             now,
         );
+        show_pull_indicator(&mut state.cache.snapshot, &state.pulls, now);
         // The open list of the worktrees takes the pane, so its frame replaces
         // the status frame for as long as it is open.
         let render = match state.ui.list() {
@@ -3445,6 +4201,30 @@ where
         }
     }
     Ok(())
+}
+
+/// The pull target that the snapshot asks about, or `None` when the indicator
+/// does not apply to it.
+fn pull_target(snapshot: &Snapshot) -> Option<&crate::pull::PullTarget> {
+    snapshot.pull.as_ref().map(|header| &header.target)
+}
+
+/// Put into the header of `snapshot` what `pulls` shows for its target at `now`.
+///
+/// The walk gives a header with an unknown indicator, and the cache of the
+/// answers is the truth. So each frame takes its indicator from the cache of
+/// its own target, and an answer for another worktree never reaches it. When
+/// the watch shows nothing any more, as after a `gh` that went missing, the
+/// header goes away and the frame is the frame of a watch with no indicator.
+/// The loop calls this once for each frame, just before the render.
+fn show_pull_indicator(snapshot: &mut Snapshot, pulls: &PullWatch, now: Instant) {
+    let Some(header) = snapshot.pull.as_mut() else {
+        return;
+    };
+    match pulls.indicator(&header.target, now) {
+        Some(indicator) => header.indicator = indicator,
+        None => snapshot.pull = None,
+    }
 }
 
 /// Join a frame and the push overlay into the one string that gets painted.
@@ -3521,34 +4301,40 @@ fn forward_input(event: CtEvent) -> Option<Event> {
 ///   cannot be quit while it waits on the network is a monitor that has to be
 ///   killed from another pane.
 /// - [`InputMode::Normal`]: `q` quits, `r` forces a refresh, `p` asks to push,
-///   `G` asks for the issue of the branch, `R` asks to rebase the branch onto
-///   its base, `M` asks to merge the base into the branch, and `m` asks to
+///   `P` asks to push without the `pre-push` hook, `G` asks for the issue of
+///   the branch, `T` runs the tab-title command, `R` asks to rebase the branch
+///   onto its base, `M` asks to merge the base into the branch, and `m` asks to
 ///   measure a rebase and a merge against the default branch. Up goes to the
 ///   home worktree, Left to the previous worktree, Right to the next worktree,
-///   and Down opens the list of the worktrees.
+///   and Down opens the list of the worktrees. Esc is
+///   [`Event::ReturnRequested`]. Where the name in the header is red, its first
+///   press asks for a second one, and the second press goes back to the start
+///   branch: it moves the watch to the worktree that is on it, or else it runs
+///   `git switch --no-guess` in the home worktree. Where the name is not red,
+///   Esc only clears the row.
 /// - [`InputMode::Confirm`]: `y` and Enter carry out whatever the question on
 ///   the row asks about — a push, a rebase, or a merge — and `n`, Esc, and `q`
 ///   cancel it. Nothing else acts: with a question on screen, `q` is the answer
-///   "no", not "quit", `r` is not a refresh, `R` and `M` do not ask a second
-///   question, and an arrow key is no answer at all. That is why the mode
-///   exists.
-/// - [`InputMode::Running`]: `q` quits, `r` refreshes, and `G` still asks for
-///   the issue — a browser conflicts with nothing any of these runs does. `m`
-///   still asks to measure during a push, because a measurement is read-only
-///   for the repository. A rebase or a merge moves HEAD, and a measurement
-///   starts from HEAD, so `m` is inert during those two runs. `p`, `R`, and
-///   `M` are inert, so an impatient second press cannot start an overlapping
-///   run: a rebase and a push must not overlap, and a base update that runs
-///   puts the loop in this same mode. The arrow keys
-///   are inert too: the window under the frame belongs to the worktree that the
-///   command runs in, so the watch stays on that worktree.
-/// - [`InputMode::List`]: Up and Down move the cursor, Enter goes to the
-///   worktree under it, and Esc and `q` close the list. Every other key gives
-///   `None` and does nothing at all: `r` does not walk, `p` does not ask, `G`,
-///   `R`, `M`, and `m` start nothing, and no line leaves the row. The list
-///   takes the pane, so the frame that such a key acts on is not on the
-///   screen.
-/// - `G`, `R`, and `M` act only where `keys` says each one has a command
+///   "no", not "quit", `r` is not a refresh, `P` is not an answer, `R` and `M`
+///   do not ask a second question, and an arrow key is no answer at all. That
+///   is why the mode exists.
+/// - [`InputMode::Running`]: `q` quits, `r` refreshes, and `G` and `T` still act
+///   — a browser and a tab title conflict with nothing any of these runs does.
+///   `m` still asks to measure during a push, because a measurement is read-only
+///   for the repository. A rebase, a merge, and the `git switch` of the second
+///   Esc move HEAD, and a measurement starts from HEAD, so `m` is inert during
+///   those three runs. `p`, `P`, `R`, and `M` are inert, so an impatient second
+///   press cannot start an overlapping run: a rebase and a push must not
+///   overlap, and a base update that runs puts the loop in this same mode. The
+///   arrow keys are inert too: the window under the frame belongs to the
+///   worktree that the command runs in, so the watch stays on that worktree.
+/// - [`InputMode::List`]: Up and Down move the cursor, Page Up and Page Down
+///   move it one page, Enter goes to the worktree under it, and Esc and `q`
+///   close the list. Every other key gives `None` and does nothing at all:
+///   `r` does not walk, `p` and `P` do not ask, `G`, `R`, `M`, `T`, and `m` start
+///   nothing, and no line leaves the row. The list takes the pane, so the
+///   frame that such a key acts on is not on the screen.
+/// - `G`, `R`, `M`, and `T` act only where `keys` says each one has a command
 ///   behind it. Where one does not, that key does what any other unbound key
 ///   does, which is the one silent case this feature has.
 /// - Every other press in the three other modes is [`Event::Dismiss`], which
@@ -3577,11 +4363,24 @@ fn classify_input(key: KeyEvent, mode: InputMode, keys: CommandKeys) -> Option<E
             KeyCode::Char('r') => Event::ForceRefresh,
             // A push already running makes a second request meaningless
             // rather than harmless.
-            KeyCode::Char('p') if mode == InputMode::Normal => Event::PushRequested,
+            KeyCode::Char('p') if mode == InputMode::Normal => {
+                Event::PushRequested(crate::push::PushHooks::Run)
+            }
+            // Matched on the character alone. Some terminals report `P` with
+            // no `SHIFT` modifier, as they do for `G`, `R`, and `M`. It acts
+            // in the normal mode alone, as `p` does.
+            KeyCode::Char('P') if mode == InputMode::Normal => {
+                Event::PushRequested(crate::push::PushHooks::Skip)
+            }
             // A browser opens beside the monitor, so a push in flight is no
             // reason to refuse. With no command behind it the key falls
             // through to `Dismiss`, which is what every unbound key gives.
             KeyCode::Char('G') if keys.issue == Binding::Bound => Event::IssueRequested,
+            // A tab title changes nothing in the repository, so a run in
+            // flight is no reason to refuse it, as it is none for `G`. With no
+            // command behind it the key falls through to `Dismiss`, which is
+            // what every unbound key gives.
+            KeyCode::Char('T') if keys.tab == Binding::Bound => Event::TabRequested,
             // A rebase and a push must not overlap, and a base update that
             // runs puts the loop in `Running` — so these two keys act in the
             // normal mode alone, as `p` does. With no command behind one of
@@ -3595,7 +4394,8 @@ fn classify_input(key: KeyEvent, mode: InputMode, keys: CommandKeys) -> Option<E
             }
             // A measurement is read-only for the repository of the user, so a
             // push in flight is no reason to refuse it. It starts from HEAD,
-            // and a rebase or a merge moves HEAD, so those two runs refuse it.
+            // and a rebase, a merge, or the switch of the second Esc moves
+            // HEAD, so those three runs refuse it.
             KeyCode::Char('m')
                 if matches!(mode, InputMode::Normal | InputMode::Running(RunKind::Push)) =>
             {
@@ -3611,6 +4411,10 @@ fn classify_input(key: KeyEvent, mode: InputMode, keys: CommandKeys) -> Option<E
             // and the window of a running push belongs to the worktree that
             // pushes, so it opens in the normal mode only.
             KeyCode::Down if mode == InputMode::Normal => Event::OpenList,
+            // Esc in the normal mode is the key of the return to the start
+            // branch. In a run it keeps its old meaning, because the window
+            // under the frame belongs to the run.
+            KeyCode::Esc if mode == InputMode::Normal => Event::ReturnRequested,
             _ => Event::Dismiss,
         },
         InputMode::Confirm => match code {
@@ -3621,6 +4425,8 @@ fn classify_input(key: KeyEvent, mode: InputMode, keys: CommandKeys) -> Option<E
         InputMode::List => match code {
             KeyCode::Up => Event::ListUp,
             KeyCode::Down => Event::ListDown,
+            KeyCode::PageUp => Event::ListPageUp,
+            KeyCode::PageDown => Event::ListPageDown,
             KeyCode::Enter => Event::ListGo,
             // `q` closes the list, as it answers "no" to the push question.
             KeyCode::Esc | KeyCode::Char('q') => Event::ListClose,
@@ -3651,66 +4457,10 @@ fn spawn_event_reader(tx: Sender<Event>) {
     });
 }
 
-/// A panic hook, matching what [`std::panic::take_hook`] returns. Held in an
-/// [`Arc`] so the installed wrapper and [`TerminalGuard::drop`] can both reach
-/// the same pre-watch hook — the wrapper to chain to it, `Drop` to reinstate it.
-type PanicHook = Arc<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send>;
-
-/// RAII guard for the alternate screen, hidden cursor, and raw mode. Restores
-/// the main screen and cursor on drop *and* via a panic hook, so no exit path
-/// — normal return, propagated error, or panic — can leave the terminal in a
-/// wedged state. The panic hook restores *before* the default handler prints,
-/// so the panic message lands on the main screen rather than the torn-down
-/// alternate one. On drop the pre-watch panic hook is reinstated, so our
-/// terminal-restoring wrapper never lingers as global process state once the
-/// guard is gone.
-struct TerminalGuard {
-    /// The panic hook in effect before [`TerminalGuard::enter`] wrapped it,
-    /// reinstated on drop. `Option` only so `Drop` can move it back out.
-    previous_hook: Option<PanicHook>,
-}
-
-impl TerminalGuard {
-    fn enter() -> Result<Self> {
-        enable_raw_mode()?;
-        execute!(io::stdout(), EnterAlternateScreen, Hide)?;
-
-        let previous: PanicHook = Arc::from(std::panic::take_hook());
-        let chained = Arc::clone(&previous);
-        std::panic::set_hook(Box::new(move |info| {
-            restore_terminal();
-            (*chained)(info);
-        }));
-
-        Ok(TerminalGuard {
-            previous_hook: Some(previous),
-        })
-    }
-}
-
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
-        restore_terminal();
-        // Reinstate the pre-watch panic hook so our terminal-restoring wrapper
-        // doesn't outlive the guard as global process state.
-        if let Some(previous) = self.previous_hook.take() {
-            std::panic::set_hook(Box::new(move |info| (*previous)(info)));
-        }
-    }
-}
-
-/// Best-effort restore of the terminal to its pre-watch state. Idempotent and
-/// failure-tolerant: both the panic hook and `Drop` may call it (a panic runs
-/// the hook, then unwinding runs `Drop`), and a partially-entered terminal
-/// must still be cleaned up, so every step is independently ignored on error.
-fn restore_terminal() {
-    let _ = disable_raw_mode();
-    let _ = execute!(io::stdout(), Show, LeaveAlternateScreen);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::push::PushHooks;
     use crate::render::LogEntry;
     use crate::repo::LogStart;
     use crate::testrepo;
@@ -4388,6 +5138,30 @@ mod tests {
     }
 
     #[test]
+    fn the_timed_walk_is_due_from_its_instant_and_a_deferred_change_does_not_make_it_due() {
+        let t0 = Instant::now();
+        let mut schedule = WalkSchedule::new(Some(TEST_INTERVAL), t0, Duration::ZERO);
+        let due = t0 + TEST_INTERVAL;
+        assert!(!schedule.timed_due(due - Duration::from_millis(1)));
+        assert!(schedule.timed_due(due), "the instant itself is due");
+        assert!(schedule.timed_due(due + Duration::from_secs(1)));
+        // A walk moves the timed walk on a whole interval.
+        schedule.record(due, CHEAP);
+        assert!(!schedule.timed_due(due + Duration::from_secs(1)));
+        // A deferred change owes a walk at the end of its cooldown. That walk
+        // is not the timed one.
+        assert_eq!(
+            schedule.on_change(due + Duration::from_secs(1)),
+            Walk::Defer
+        );
+        assert!(!schedule.timed_due(due + CHEAP));
+        // No interval, no timed walk, at any instant.
+        let mut unscheduled = WalkSchedule::unscheduled();
+        unscheduled.record(t0, CHEAP);
+        assert!(!unscheduled.timed_due(t0 + Duration::from_secs(3600)));
+    }
+
+    #[test]
     fn a_disabled_interval_shows_no_countdown_even_with_a_walk_owed() {
         // `--refresh-interval 0` takes the clock away. A change deferred through
         // a cooldown still owes a walk — the loop must fire it — but printing a
@@ -4569,32 +5343,46 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
-    /// One combination of the three bindings, as [`classify_input`] reads it.
-    const fn bindings(issue: Binding, rebase: Binding, merge: Binding) -> CommandKeys {
+    /// One combination of the four bindings, as [`classify_input`] reads it.
+    const fn bindings(
+        issue: Binding,
+        rebase: Binding,
+        merge: Binding,
+        tab: Binding,
+    ) -> CommandKeys {
         CommandKeys {
             issue,
             rebase,
             merge,
+            tab,
         }
     }
 
-    /// Every combination of the three bindings, all eight of them.
+    /// Every combination of the four bindings, all sixteen of them.
     ///
     /// Every old key means the same thing under each of them: a new key must
-    /// move no old one. Three keys read this value and each reads one field of
+    /// move no old one. Four keys read this value and each reads one field of
     /// it, so a combination left out here is a pair of keys nobody holds
     /// against each other.
-    const EVERY_BINDING_COMBINATION: [CommandKeys; 8] = {
+    const EVERY_BINDING_COMBINATION: [CommandKeys; 16] = {
         use Binding::{Bound, Unbound};
         [
-            bindings(Unbound, Unbound, Unbound),
-            bindings(Unbound, Unbound, Bound),
-            bindings(Unbound, Bound, Unbound),
-            bindings(Unbound, Bound, Bound),
-            bindings(Bound, Unbound, Unbound),
-            bindings(Bound, Unbound, Bound),
-            bindings(Bound, Bound, Unbound),
-            bindings(Bound, Bound, Bound),
+            bindings(Unbound, Unbound, Unbound, Unbound),
+            bindings(Unbound, Unbound, Unbound, Bound),
+            bindings(Unbound, Unbound, Bound, Unbound),
+            bindings(Unbound, Unbound, Bound, Bound),
+            bindings(Unbound, Bound, Unbound, Unbound),
+            bindings(Unbound, Bound, Unbound, Bound),
+            bindings(Unbound, Bound, Bound, Unbound),
+            bindings(Unbound, Bound, Bound, Bound),
+            bindings(Bound, Unbound, Unbound, Unbound),
+            bindings(Bound, Unbound, Unbound, Bound),
+            bindings(Bound, Unbound, Bound, Unbound),
+            bindings(Bound, Unbound, Bound, Bound),
+            bindings(Bound, Bound, Unbound, Unbound),
+            bindings(Bound, Bound, Unbound, Bound),
+            bindings(Bound, Bound, Bound, Unbound),
+            bindings(Bound, Bound, Bound, Bound),
         ]
     };
 
@@ -4612,19 +5400,35 @@ mod tests {
             .filter(|keys| keys.issue == Binding::Unbound)
     }
 
+    /// The combinations in which `T` has a command behind it.
+    fn tab_bound() -> impl Iterator<Item = CommandKeys> {
+        EVERY_BINDING_COMBINATION
+            .into_iter()
+            .filter(|keys| keys.tab == Binding::Bound)
+    }
+
+    /// The combinations in which `T` has none.
+    fn tab_unbound() -> impl Iterator<Item = CommandKeys> {
+        EVERY_BINDING_COMBINATION
+            .into_iter()
+            .filter(|keys| keys.tab == Binding::Unbound)
+    }
+
     /// Every mode a key can arrive in.
-    const EVERY_MODE: [InputMode; 5] = [
+    const EVERY_MODE: [InputMode; 6] = [
         InputMode::Normal,
         InputMode::Confirm,
         InputMode::Running(RunKind::Push),
         InputMode::Running(RunKind::BaseUpdate),
+        InputMode::Running(RunKind::Return),
         InputMode::List,
     ];
 
-    /// Both modes of a run in flight.
-    const EVERY_RUN: [InputMode; 2] = [
+    /// Every mode of a run in flight.
+    const EVERY_RUN: [InputMode; 3] = [
         InputMode::Running(RunKind::Push),
         InputMode::Running(RunKind::BaseUpdate),
+        InputMode::Running(RunKind::Return),
     ];
 
     /// What a key with no meaning gives in `mode`, as [`meaning`] names it.
@@ -4716,7 +5520,7 @@ mod tests {
         for keys in EVERY_BINDING_COMBINATION {
             assert!(matches!(
                 classify_input(press(KeyCode::Char('p')), InputMode::Normal, keys),
-                Some(Event::PushRequested),
+                Some(Event::PushRequested(PushHooks::Run)),
             ));
             for mode in EVERY_RUN {
                 assert!(matches!(
@@ -4728,6 +5532,36 @@ mod tests {
     }
 
     #[test]
+    fn shift_p_asks_to_push_without_the_hook_only_when_nothing_else_is_happening() {
+        // The key that skips the `pre-push` hook. It acts in the normal mode
+        // alone, as `p` does. Some terminals report `P` with no modifier, so
+        // both spellings must give the same event.
+        for keys in EVERY_BINDING_COMBINATION {
+            for modifiers in [KeyModifiers::NONE, KeyModifiers::SHIFT] {
+                let shifted = KeyEvent::new(KeyCode::Char('P'), modifiers);
+                assert!(
+                    matches!(
+                        classify_input(shifted, InputMode::Normal, keys),
+                        Some(Event::PushRequested(PushHooks::Skip)),
+                    ),
+                    "`P` with {modifiers:?} must ask to push without the hook",
+                );
+            }
+            for mode in EVERY_RUN {
+                assert!(matches!(
+                    classify_input(press(KeyCode::Char('P')), mode, keys),
+                    Some(Event::Dismiss),
+                ));
+            }
+            assert!(matches!(
+                classify_input(press(KeyCode::Char('P')), InputMode::Confirm, keys),
+                Some(Event::Dismiss),
+            ));
+            assert!(classify_input(press(KeyCode::Char('P')), InputMode::List, keys).is_none(),);
+        }
+    }
+
+    #[test]
     fn g_asks_for_the_issue_while_the_monitor_and_a_push_run() {
         // The issue key. A browser opens beside the monitor, which conflicts
         // with nothing a push does — so it acts in both of those modes.
@@ -4735,6 +5569,7 @@ mod tests {
             InputMode::Normal,
             InputMode::Running(RunKind::Push),
             InputMode::Running(RunKind::BaseUpdate),
+            InputMode::Running(RunKind::Return),
         ] {
             for keys in issue_bound() {
                 assert!(
@@ -4811,6 +5646,133 @@ mod tests {
     }
 
     #[test]
+    fn t_asks_for_the_tab_title_while_the_monitor_and_every_run_run() {
+        // The tab-title key. A tab title changes nothing in the repository, so
+        // no run in flight is a reason to refuse it. Some terminals report the
+        // shift of a capital letter, so both spellings must act.
+        for mode in [InputMode::Normal].into_iter().chain(EVERY_RUN) {
+            for keys in tab_bound() {
+                for modifiers in [KeyModifiers::NONE, KeyModifiers::SHIFT] {
+                    assert_eq!(
+                        meaning(classify_input(
+                            KeyEvent::new(KeyCode::Char('T'), modifiers),
+                            mode,
+                            keys
+                        )),
+                        "TabRequested",
+                        "`T` must ask for the tab title in {mode:?} with {keys:?} and {modifiers:?}",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn t_does_nothing_while_the_confirmation_is_up() {
+        // That mode owns the answer to a question. No new key may trap the
+        // user in it.
+        for keys in tab_bound() {
+            assert_eq!(
+                meaning(classify_input(
+                    press(KeyCode::Char('T')),
+                    InputMode::Confirm,
+                    keys
+                )),
+                "Dismiss",
+                "`T` must not answer the question with {keys:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn t_does_nothing_while_the_list_is_open() {
+        // The list takes the pane, so a key that starts a run has no frame to
+        // act on.
+        for keys in tab_bound() {
+            assert_eq!(
+                meaning(classify_input(
+                    press(KeyCode::Char('T')),
+                    InputMode::List,
+                    keys
+                )),
+                "nothing",
+                "`T` must start nothing in the list with {keys:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn t_does_nothing_where_the_command_does_not_exist() {
+        // Silence belongs to this case only, and it is the silence of an
+        // unbound key rather than a code path of its own.
+        for mode in EVERY_MODE {
+            for keys in tab_unbound() {
+                assert_eq!(
+                    meaning(classify_input(press(KeyCode::Char('T')), mode, keys)),
+                    unbound(mode),
+                    "`T` must do nothing in {mode:?} with no command behind it, with {keys:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lowercase_t_stays_unbound() {
+        // The user asked for `T`. A shifted key and an unshifted one are two
+        // keys, and only one of them was asked for.
+        for mode in EVERY_MODE {
+            for keys in EVERY_BINDING_COMBINATION {
+                assert_eq!(
+                    meaning(classify_input(press(KeyCode::Char('t')), mode, keys)),
+                    unbound(mode),
+                    "`t` must stay unbound in {mode:?} with {keys:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_release_of_t_is_ignored() {
+        // Only a press acts, and the new key is no exception.
+        let t_release = KeyEvent {
+            kind: KeyEventKind::Release,
+            ..press(KeyCode::Char('T'))
+        };
+        for mode in EVERY_MODE {
+            for keys in EVERY_BINDING_COMBINATION {
+                assert!(
+                    classify_input(t_release, mode, keys).is_none(),
+                    "a release of `T` must be ignored in {mode:?} with {keys:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn t_moves_no_other_key() {
+        // A new key must move no old one. Flip only the binding of `T`, and
+        // every other key must mean what it meant before.
+        for mode in EVERY_MODE {
+            for keys in EVERY_BINDING_COMBINATION {
+                let flipped = CommandKeys {
+                    tab: match keys.tab {
+                        Binding::Bound => Binding::Unbound,
+                        Binding::Unbound => Binding::Bound,
+                    },
+                    ..keys
+                };
+                for c in ['G', 'R', 'M', 'p', 'P', 'm', 'q', 'r'] {
+                    assert_eq!(
+                        meaning(classify_input(press(KeyCode::Char(c)), mode, keys)),
+                        meaning(classify_input(press(KeyCode::Char(c)), mode, flipped)),
+                        "`{c}` must mean the same in {mode:?} whether `T` is bound or not, with {keys:?}",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn m_measures_while_the_monitor_and_a_push_run_and_never_answers_the_question() {
         // A measurement is read-only for the repository of the user, so a
         // push in flight is no reason to refuse it. A rebase or a merge moves
@@ -4830,9 +5792,9 @@ mod tests {
                         matches!(m, Some(Event::ConflictsRequested)),
                         "`m` must ask to measure in {mode:?} with {keys:?}",
                     ),
-                    InputMode::Running(RunKind::BaseUpdate) => assert!(
+                    InputMode::Running(RunKind::BaseUpdate | RunKind::Return) => assert!(
                         matches!(m, Some(Event::Dismiss)),
-                        "`m` must not measure during a rebase or a merge with {keys:?}",
+                        "`m` must not measure during a rebase, a merge, or a return with {keys:?}",
                     ),
                     InputMode::Confirm => assert!(
                         matches!(m, Some(Event::Dismiss)),
@@ -4918,6 +5880,7 @@ mod tests {
                     InputMode::Confirm,
                     InputMode::Running(RunKind::Push),
                     InputMode::Running(RunKind::BaseUpdate),
+                    InputMode::Running(RunKind::Return),
                     InputMode::List,
                 ] {
                     assert_eq!(
@@ -5071,13 +6034,17 @@ mod tests {
             Some(Event::OpenList) => "OpenList",
             Some(Event::ListUp) => "ListUp",
             Some(Event::ListDown) => "ListDown",
+            Some(Event::ListPageUp) => "ListPageUp",
+            Some(Event::ListPageDown) => "ListPageDown",
             Some(Event::ListGo) => "ListGo",
             Some(Event::ListClose) => "ListClose",
             Some(Event::Quit) => "Quit",
             Some(Event::Dismiss) => "Dismiss",
+            Some(Event::ReturnRequested) => "ReturnRequested",
             Some(Event::Confirmed) => "Confirmed",
             Some(Event::Cancelled) => "Cancelled",
             Some(Event::BaseUpdateRequested(update)) => asks_for(update),
+            Some(Event::TabRequested) => "TabRequested",
             Some(_) => "another event",
             None => "nothing",
         }
@@ -5122,7 +6089,7 @@ mod tests {
         // arrow key there does nothing. In the list, Up and Down move the
         // cursor, Enter goes, Esc closes, and Left and Right do nothing at
         // all.
-        let table: [(InputMode, [&str; 6]); 5] = [
+        let table: [(InputMode, [&str; 6]); 6] = [
             (
                 InputMode::Normal,
                 [
@@ -5131,7 +6098,7 @@ mod tests {
                     "GoPrevious",
                     "GoNext",
                     "Dismiss",
-                    "Dismiss",
+                    "ReturnRequested",
                 ],
             ),
             (
@@ -5147,6 +6114,7 @@ mod tests {
             ),
             (InputMode::Running(RunKind::Push), ["Dismiss"; 6]),
             (InputMode::Running(RunKind::BaseUpdate), ["Dismiss"; 6]),
+            (InputMode::Running(RunKind::Return), ["Dismiss"; 6]),
             (
                 InputMode::List,
                 [
@@ -5173,6 +6141,29 @@ mod tests {
                         "{code:?} in {mode:?} with {keys:?}",
                     );
                 }
+            }
+        }
+    }
+
+    /// Esc in the normal mode is the key of the return to the start branch.
+    /// In every other mode it keeps the meaning it had: a run drops the line
+    /// on the row, the question is cancelled, and the list closes.
+    #[test]
+    fn esc_asks_for_the_return_in_the_normal_mode_only() {
+        for keys in EVERY_BINDING_COMBINATION {
+            for (mode, expected) in [
+                (InputMode::Normal, "ReturnRequested"),
+                (InputMode::Confirm, "Cancelled"),
+                (InputMode::Running(RunKind::Push), "Dismiss"),
+                (InputMode::Running(RunKind::BaseUpdate), "Dismiss"),
+                (InputMode::Running(RunKind::Return), "Dismiss"),
+                (InputMode::List, "ListClose"),
+            ] {
+                assert_eq!(
+                    meaning(classify_input(press(KeyCode::Esc), mode, keys)),
+                    expected,
+                    "Esc in {mode:?} with {keys:?}",
+                );
             }
         }
     }
@@ -5205,7 +6196,6 @@ mod tests {
                 KeyCode::Char('x'),
                 KeyCode::Tab,
                 KeyCode::Backspace,
-                KeyCode::PageDown,
             ] {
                 assert_eq!(
                     meaning(classify_input(press(code), InputMode::List, keys)),
@@ -5222,6 +6212,31 @@ mod tests {
     }
 
     #[test]
+    fn the_page_keys_move_the_list_one_page_and_mean_dismiss_in_every_other_mode() {
+        // The page keys act only in the list. Outside the list they keep the
+        // meaning of today, which is to dismiss the line on the row.
+        for keys in EVERY_BINDING_COMBINATION {
+            for mode in EVERY_MODE {
+                for (code, in_the_list) in [
+                    (KeyCode::PageUp, "ListPageUp"),
+                    (KeyCode::PageDown, "ListPageDown"),
+                ] {
+                    let expected = if mode == InputMode::List {
+                        in_the_list
+                    } else {
+                        "Dismiss"
+                    };
+                    assert_eq!(
+                        meaning(classify_input(press(code), mode, keys)),
+                        expected,
+                        "{code:?} in {mode:?} with {keys:?}",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn the_arrow_keys_never_answer_the_push_question_and_do_nothing_while_a_push_runs() {
         // A question on the screen owns its answer, so an arrow key there does
         // what an unbound key does, and never pushes or cancels. A push in
@@ -5233,6 +6248,7 @@ mod tests {
                 InputMode::Confirm,
                 InputMode::Running(RunKind::Push),
                 InputMode::Running(RunKind::BaseUpdate),
+                InputMode::Running(RunKind::Return),
             ] {
                 for code in ARROWS {
                     assert_eq!(
@@ -5411,6 +6427,28 @@ mod tests {
         Err("this loop test watches one worktree".to_string())
     }
 
+    /// An `on_start_branch` hook for the loop tests that never press Esc
+    /// twice. It says that no worktree is on the start branch.
+    pub(super) fn no_start_branch(_branch: &StartBranch, _path: &WorktreePath) -> bool {
+        false
+    }
+
+    /// A `start_return` hook for the loop tests that never press Esc twice
+    /// with no worktree on the start branch. It starts nothing.
+    pub(super) fn no_return(_child: std::process::Command) {}
+
+    /// A `start_pull` hook for the loop tests that run with a disabled
+    /// [`PullWatch`], so the loop never asks for a lookup. It starts nothing.
+    pub(super) fn no_pull(_request: LookupRequest) {}
+
+    /// A `start_tab` hook for a test that presses no `T`.
+    pub(super) fn no_tab(
+        _command: crate::shell::ShellCommand,
+        _current: &WorktreePath,
+        _generation: Generation,
+    ) {
+    }
+
     /// A `fetch_log` hook for the loop tests whose log is off. The limit of
     /// such a pane is zero, and no cached log holds fewer commits than zero,
     /// so the loop never calls it. It gives no commit, and a fetch with no
@@ -5460,6 +6498,8 @@ mod tests {
             operation: None,
             push_remote: None,
             worktree: None,
+            off_start_branch: false,
+            pull: None,
         }
     }
 
@@ -5523,6 +6563,8 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -5545,13 +6587,17 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_tab: no_tab,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
+                start_pull: no_pull,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -5590,6 +6636,8 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| Ok(empty_snapshot()),
@@ -5605,13 +6653,17 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_tab: no_tab,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
+                start_pull: no_pull,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -5650,6 +6702,8 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -5668,13 +6722,17 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_tab: no_tab,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
+                start_pull: no_pull,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -5716,6 +6774,8 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -5733,13 +6793,17 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_tab: no_tab,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
+                start_pull: no_pull,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -5775,6 +6839,8 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -5794,13 +6860,17 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_tab: no_tab,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
+                start_pull: no_pull,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -5835,6 +6905,8 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -5852,13 +6924,17 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_tab: no_tab,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
+                start_pull: no_pull,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -5891,6 +6967,8 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| Ok(empty_snapshot()),
@@ -5912,13 +6990,17 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_tab: no_tab,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
+                start_pull: no_pull,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -5954,6 +7036,8 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| Ok(empty_snapshot()),
@@ -5972,13 +7056,17 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_tab: no_tab,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
+                start_pull: no_pull,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -6014,6 +7102,8 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -6033,13 +7123,17 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_tab: no_tab,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
+                start_pull: no_pull,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -6083,6 +7177,8 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -6100,13 +7196,17 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_tab: no_tab,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
+                start_pull: no_pull,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -6146,6 +7246,20 @@ mod tests {
                         + Duration::from_secs(60)
                             * u32::try_from(n).expect("a test history is short"),
                 ),
+                on_branch: false,
+            })
+            .collect()
+    }
+
+    /// `history` with the mark of a branch commit ([`LogEntry::on_branch`]) on
+    /// each row whose index `marked` holds, and on no other row.
+    fn with_marks(history: Vec<LogEntry>, marked: &[usize]) -> Vec<LogEntry> {
+        history
+            .into_iter()
+            .enumerate()
+            .map(|(row, entry)| LogEntry {
+                on_branch: marked.contains(&row),
+                ..entry
             })
             .collect()
     }
@@ -6220,13 +7334,13 @@ mod tests {
 
         /// A read from `start` with the limit `limit` ([`read_of`]).
         fn read(&self, start: LogStart, limit: usize) -> FetchedLog {
-            read_of(start, self.history(start), limit)
+            read_of(start.clone(), self.history(start), limit)
         }
 
         /// The snapshot of a walk with the log limit `limit`. The walk reads
         /// from the start that HEAD names, and it records that start.
         fn walk(&self, limit: usize) -> Snapshot {
-            let read = self.read(self.head, limit);
+            let read = self.read(self.head.clone(), limit);
             Snapshot {
                 log: read.entries,
                 log_complete: read.complete,
@@ -6280,6 +7394,12 @@ mod tests {
         fn commit_rows(&self) -> usize {
             commit_rows(&self.glyphs)
         }
+    }
+
+    /// Whether `line`, one row of a frame, is the log row of `commit`: the
+    /// hash of the commit follows the gutter of the row.
+    fn starts_with_commit(line: &str, commit: &LogEntry) -> bool {
+        crate::render::after_log_gutter(line).is_some_and(|row| row.starts_with(&commit.hash))
     }
 
     /// How many commit rows `glyphs`, the glyphs of one frame, shows.
@@ -6370,6 +7490,8 @@ mod tests {
                     session: crate::remote::Session::Local,
                     home: loop_home(),
                     log: cfg.log,
+                    start_branch: None,
+                    pulls: PullWatch::disabled(),
                 },
                 LoopHooks {
                     collect: |_current: &WorktreePath, limit: usize| {
@@ -6405,13 +7527,17 @@ mod tests {
                     start_push: |_command: PushCommand, _current: &WorktreePath| {},
                     start_base_update:
                         |_command: crate::update::BaseUpdateCommand, _current: &WorktreePath| {},
-                    start_issue: |_command: crate::shell::ShellCommand,
+                    start_tab: no_tab,
+                    start_issue: |_steps: crate::issue::Steps,
                                   _current: &WorktreePath,
                                   _generation: Generation| {},
                     start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                     worktrees: Vec::new,
                     worktree_paths: Vec::new,
                     switch: no_switch,
+                    on_start_branch: no_start_branch,
+                    start_pull: no_pull,
+                    start_return: no_return,
                     render_list: no_list,
                 },
             )
@@ -6553,7 +7679,7 @@ mod tests {
             let row = run
                 .glyphs
                 .lines()
-                .find(|line| line.starts_with(&commit.hash))
+                .find(|line| starts_with_commit(line, &commit))
                 .unwrap_or_else(|| panic!("no row for {}:\n{}", commit.hash, run.glyphs));
             let true_age = crate::age::format_age_detailed(
                 commit
@@ -6729,7 +7855,7 @@ mod tests {
 
     /// Whether `glyphs`, the glyphs of one frame, hold a row of `commit`.
     fn shows(glyphs: &str, commit: &LogEntry) -> bool {
-        glyphs.lines().any(|line| line.starts_with(&commit.hash))
+        glyphs.lines().any(|line| starts_with_commit(line, commit))
     }
 
     #[test]
@@ -6784,6 +7910,53 @@ mod tests {
                 !shows(&run.glyphs, commit),
                 "the frame shows {} of the history that HEAD moved to, under the header of \
                  the walk:\n{}",
+                commit.hash,
+                run.glyphs,
+            );
+        }
+    }
+
+    #[test]
+    fn a_resize_that_reads_more_commits_keeps_the_marks_of_the_cached_rows() {
+        // Issue #541: the log row of a commit that is only on the branch
+        // starts with the mark, and every other log row starts with a blank.
+        // Here the branch merged its base, so a commit of the base sits
+        // between commits of the branch: rows 0, 1 and 3 are on the branch,
+        // and rows 2, 4 and 5 are not.
+        //
+        // The walk filled a pane of 4 rows: 2 commits under the header and
+        // the separator. The pane then grows to 20 rows, and the resize reads
+        // the 6 commits of the history. The frame keeps the marks of the 2
+        // cached rows, and it marks row 3 of the read. No other row shows the
+        // mark.
+        const MARKED: [usize; 3] = [0, 1, 3];
+        let now = Instant::now();
+        let history = with_marks(fake_history(6, Duration::from_secs(100)), &MARKED);
+        let cache = SnapshotCache {
+            snapshot: walked(newest(&history, 2)),
+            collected_at: now,
+            dims: pane(4),
+        };
+
+        let run = run_resize(cache, 20, now, &FakeRepo::at(&history));
+
+        assert_eq!(run.fetches, 1, "the grown pane reads the log once");
+        assert_eq!(
+            run.commit_rows(),
+            6,
+            "the frame shows every commit of the history:\n{}",
+            run.glyphs,
+        );
+        for commit in &history {
+            let row = run
+                .glyphs
+                .lines()
+                .find(|line| starts_with_commit(line, commit))
+                .unwrap_or_else(|| panic!("no row for {}:\n{}", commit.hash, run.glyphs));
+            assert_eq!(
+                row.starts_with(crate::render::BRANCH_MARK),
+                commit.on_branch,
+                "the row of {} shows the mark only when the commit is on the branch:\n{}",
                 commit.hash,
                 run.glyphs,
             );
@@ -6889,6 +8062,8 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Fill,
+                start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, limit: usize| {
@@ -6904,13 +8079,17 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_tab: no_tab,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
+                start_pull: no_pull,
+                start_return: no_return,
                 render_list: no_list,
             },
         )
@@ -6958,6 +8137,8 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Fill,
+                start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| Ok(empty_snapshot()),
@@ -6972,7 +8153,8 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_tab: no_tab,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -6984,6 +8166,9 @@ mod tests {
                     switches.push((target.clone(), limit));
                     Ok(empty_snapshot())
                 },
+                on_start_branch: no_start_branch,
+                start_pull: no_pull,
+                start_return: no_return,
                 render_list: no_list,
             },
         )
@@ -7027,6 +8212,8 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| Ok(empty_snapshot()),
@@ -7050,13 +8237,17 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_tab: no_tab,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
+                start_pull: no_pull,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -7119,6 +8310,8 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -7147,13 +8340,17 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_tab: no_tab,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
+                start_pull: no_pull,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -7210,6 +8407,8 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -7248,13 +8447,17 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_tab: no_tab,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
+                start_pull: no_pull,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -7298,6 +8501,8 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -7330,13 +8535,17 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_tab: no_tab,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
+                start_pull: no_pull,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -7387,6 +8596,8 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -7419,13 +8630,17 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_tab: no_tab,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
+                start_pull: no_pull,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -7476,6 +8691,8 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -7507,13 +8724,17 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_tab: no_tab,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
+                start_pull: no_pull,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -7554,6 +8775,8 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -7575,13 +8798,17 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_tab: no_tab,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
+                start_pull: no_pull,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -7635,6 +8862,8 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -7656,13 +8885,17 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_tab: no_tab,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
+                start_pull: no_pull,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -7733,6 +8966,8 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -7761,13 +8996,17 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_tab: no_tab,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
+                start_pull: no_pull,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -7841,6 +9080,8 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -7890,13 +9131,17 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_tab: no_tab,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
+                start_pull: no_pull,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -8054,12 +9299,14 @@ mod tests {
 #[cfg(test)]
 mod push_loop_tests {
     use super::tests::{
-        frame, loop_home, no_fetch, no_list, no_switch, stepping_clock, timer_off, TEST_DEBOUNCE,
-        TEST_DIMS,
+        frame, loop_home, no_fetch, no_list, no_pull, no_return, no_start_branch, no_switch,
+        no_tab, stepping_clock, timer_off, TEST_DEBOUNCE, TEST_DIMS,
     };
     use super::*;
     use crate::conflicts::ConflictsOutcome;
+    use crate::push::PushHooks;
     use crate::push::PushOutcome;
+    use colored::Colorize;
     use crossterm::event::{KeyCode, KeyModifiers};
     use std::cell::RefCell;
     use std::collections::VecDeque;
@@ -8082,6 +9329,8 @@ mod push_loop_tests {
             operation: None,
             push_remote: Some("origin".into()),
             worktree: None,
+            off_start_branch: false,
+            pull: None,
         }
     }
 
@@ -8105,7 +9354,7 @@ mod push_loop_tests {
     /// behind — the state the loop has to take back off the screen by itself.
     fn pushed_ui(at: Instant) -> PushUi {
         let mut ui = PushUi::new(false);
-        ui.request(&pushable_snapshot(), TEST_DIMS, at);
+        ui.request(&pushable_snapshot(), TEST_DIMS, at, PushHooks::Run);
         ui.confirm(at);
         ui.finished(
             crate::push::PushOutcome {
@@ -8130,8 +9379,9 @@ mod push_loop_tests {
         /// right thing once at the end and a loop that paints it as it happens
         /// leave the same final screen behind.
         paints: Vec<String>,
-        /// Every issue command the loop started a run of, in order.
-        issue_runs: Vec<crate::shell::ShellCommand>,
+        /// The steps of every press of `G` that the loop started a run of, in
+        /// order.
+        issue_runs: Vec<crate::issue::Steps>,
         /// How many measurements the loop started with `m`.
         conflict_runs: usize,
         /// Every worktree the `switch` hook was asked to open, in order,
@@ -8153,13 +9403,28 @@ mod push_loop_tests {
         /// The worktree each of those started in, in the order of
         /// [`Seen::base_updates`].
         base_update_paths: Vec<WorktreePath>,
-        /// The worktree and the generation of each run of the issue command,
+        /// The worktree and the generation of each press of `G`,
         /// in the order of [`Seen::issue_runs`].
         issue_paths: Vec<(WorktreePath, Generation)>,
+        /// The command of every press of `T` that the loop started a run of,
+        /// in order.
+        tab_runs: Vec<crate::shell::ShellCommand>,
+        /// The worktree and the generation of each press of `T`, in the order
+        /// of [`Seen::tab_runs`].
+        tab_paths: Vec<(WorktreePath, Generation)>,
         /// The worktree and the generation of each run of `m`, in order.
         conflict_paths: Vec<(WorktreePath, Generation)>,
         /// The timing of each frame the loop rendered, in order.
         timings: Vec<FrameTiming>,
+        /// Every worktree the `on_start_branch` hook was asked about, in
+        /// order.
+        start_branch_probes: Vec<WorktreePath>,
+        /// The program, the arguments, and the current directory of each
+        /// child the `start_return` hook was given, in order.
+        returns: Vec<(String, Vec<String>, Option<std::path::PathBuf>)>,
+        /// Every lookup of the pull requests that the loop started, in
+        /// order.
+        pull_lookups: Vec<LookupRequest>,
     }
 
     /// Run the loop over a pre-loaded event queue and report what it did.
@@ -8264,6 +9529,8 @@ mod push_loop_tests {
                 session,
                 schedule: no_timed_refresh_for_push(),
                 world: World::alone(),
+                start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             clock,
         )
@@ -8324,6 +9591,13 @@ mod push_loop_tests {
         schedule: WalkSchedule,
         /// The worktrees, and how each switch comes out.
         world: World,
+        /// The start branch of the session. `None` for every test that does
+        /// not press Esc twice: no worktree is then ever off the start
+        /// branch, and Esc has no return.
+        start_branch: Option<StartBranch>,
+        /// The pull-request lookups the loop starts from. A disabled watch
+        /// for every test that does not look at the indicator.
+        pulls: PullWatch,
     }
 
     /// The name of the one worktree of [`World::alone`]. Its snapshot is
@@ -8357,6 +9631,30 @@ mod push_loop_tests {
         Snapshot {
             branch: name.to_string(),
             ..pushable_snapshot()
+        }
+    }
+
+    /// The pull target of the branch `branch`: the repository that every
+    /// worktree of the fake world shares, and the branch as the head.
+    fn pull_target_named(branch: &str) -> crate::pull::PullTarget {
+        crate::pull::PullTarget::new(
+            ghrest::GithubRepo::from_remote_url("git@github.com:owner/name.git", None)
+                .expect("a GitHub remote"),
+            branch,
+        )
+    }
+
+    /// The pull target of the worktree at `path`: the head is the branch that
+    /// [`snapshot_of`] gives it, which is the name of the worktree.
+    fn pull_target_of(path: &WorktreePath) -> crate::pull::PullTarget {
+        pull_target_named(&snapshot_of(path).branch)
+    }
+
+    /// The header of the pull request for `branch`, before any answer.
+    fn pull_header_of(branch: &str) -> crate::pull::PullHeader {
+        crate::pull::PullHeader {
+            target: pull_target_named(branch),
+            indicator: crate::pull::PullIndicator::Unknown,
         }
     }
 
@@ -8407,6 +9705,23 @@ mod push_loop_tests {
         /// whole reason they exist — so a test of those keys sets this
         /// instead of moving the snapshot the push tests read.
         behind: u32,
+        /// The worktrees that are on the start branch. A snapshot of a
+        /// worktree that this list does not hold has `off_start_branch` set,
+        /// when the session has a start branch.
+        on_start_branch: Vec<WorktreePath>,
+        /// The worktrees whose first frame is stale: the cache of the loop
+        /// says the name is red, as it does when `git switch` ran in another
+        /// pane since the last walk. Every later walk tells the truth. The
+        /// probe tells the truth too.
+        reddened: Vec<WorktreePath>,
+        /// Whether each snapshot carries a pull target, as the walk of a
+        /// worktree on a GitHub remote gives. See [`pull_target_of`].
+        pull_targets: bool,
+        /// The worktrees whose branch another pane switched, with the new
+        /// branch. Each walk of such a worktree finds the new branch. The
+        /// first frame and a switch to the worktree show the old branch,
+        /// because they come before that walk.
+        branch_switched: Vec<(WorktreePath, String)>,
     }
 
     impl World {
@@ -8438,6 +9753,10 @@ mod push_loop_tests {
                 unreadable: Vec::new(),
                 list_cost: Duration::ZERO,
                 behind: 0,
+                on_start_branch: Vec::new(),
+                reddened: Vec::new(),
+                pull_targets: false,
+                branch_switched: Vec::new(),
             }
         }
 
@@ -8499,6 +9818,35 @@ mod push_loop_tests {
             self.behind = commits;
             self
         }
+
+        /// This world, where the worktree `name` is on the start branch. See
+        /// [`World::on_start_branch`].
+        fn on_start_branch(mut self, name: &str) -> Self {
+            self.on_start_branch.push(worktree(name));
+            self
+        }
+
+        /// This world, where the first frame of the worktree `name` is stale.
+        /// See [`World::reddened`].
+        fn reddened(mut self, name: &str) -> Self {
+            self.reddened.push(worktree(name));
+            self
+        }
+
+        /// This world, where each snapshot carries a pull target. See
+        /// [`World::pull_targets`].
+        fn with_pull_targets(mut self) -> Self {
+            self.pull_targets = true;
+            self
+        }
+
+        /// This world, where another pane switched the worktree `name` to the
+        /// branch `branch`. See [`World::branch_switched`].
+        fn switching_branch(mut self, name: &str, branch: &str) -> Self {
+            self.branch_switched
+                .push((worktree(name), branch.to_string()));
+            self
+        }
     }
 
     /// The shared body of every helper above: pre-load the queue, run the loop
@@ -8536,6 +9884,8 @@ mod push_loop_tests {
             session,
             schedule,
             world,
+            start_branch,
+            pulls,
         } = setup;
         let (tx, rx) = mpsc::channel();
         let mut bursts = VecDeque::from(bursts);
@@ -8568,9 +9918,24 @@ mod push_loop_tests {
         // Every branch of the world stands the same distance behind its base,
         // so one number describes them all. See [`World::behind`].
         let behind = world.behind;
+        let has_start_branch = start_branch.is_some();
+        let on_start_branch = world.on_start_branch.clone();
+        let pull_targets = world.pull_targets;
         let snapshot_here = move |path: &WorktreePath| Snapshot {
             commits_behind: behind,
+            off_start_branch: has_start_branch && !on_start_branch.contains(path),
+            pull: pull_targets.then(|| pull_header_of(&snapshot_of(path).branch)),
             ..snapshot_of(path)
+        };
+        // What a walk finds: the snapshot of the worktree, on the branch that
+        // another pane switched it to, when a test says so.
+        let snapshot_walked = |path: &WorktreePath| {
+            let mut snapshot = snapshot_here(path);
+            if let Some((_, branch)) = world.branch_switched.iter().find(|(p, _)| p == path) {
+                snapshot.branch.clone_from(branch);
+                snapshot.pull = pull_targets.then(|| pull_header_of(branch));
+            }
+            snapshot
         };
 
         event_loop(
@@ -8579,7 +9944,12 @@ mod push_loop_tests {
             &mut displayed,
             LoopStart {
                 cache: SnapshotCache {
-                    snapshot: snapshot_here(&world.home),
+                    snapshot: Snapshot {
+                        off_start_branch: has_start_branch
+                            && (world.reddened.contains(&world.home)
+                                || !world.on_start_branch.contains(&world.home)),
+                        ..snapshot_here(&world.home)
+                    },
                     collected_at: base,
                     dims,
                 },
@@ -8589,6 +9959,8 @@ mod push_loop_tests {
                 session,
                 home: world.home.clone(),
                 log: LogDemand::Off,
+                start_branch,
+                pulls,
             },
             LoopHooks {
                 collect: |current: &WorktreePath, _limit: usize| {
@@ -8598,7 +9970,7 @@ mod push_loop_tests {
                     if removed.borrow().contains(current) || world.unreadable.contains(current) {
                         anyhow::bail!("{UNWALKABLE}: {}", current.as_path().display());
                     }
-                    Ok(snapshot_here(current))
+                    Ok(snapshot_walked(current))
                 },
                 fetch_log: no_fetch,
                 render: |snap: &Snapshot, frame_dims: Dimensions, timing: FrameTiming| {
@@ -8633,11 +10005,18 @@ mod push_loop_tests {
                     seen.base_updates.push(command);
                     seen.base_update_paths.push(current.clone());
                 },
-                start_issue: |command: crate::shell::ShellCommand,
+                start_tab: |command: crate::shell::ShellCommand,
+                            current: &WorktreePath,
+                            generation: Generation| {
+                    let mut seen = seen.borrow_mut();
+                    seen.tab_runs.push(command);
+                    seen.tab_paths.push((current.clone(), generation));
+                },
+                start_issue: |steps: crate::issue::Steps,
                               current: &WorktreePath,
                               generation: Generation| {
                     let mut seen = seen.borrow_mut();
-                    seen.issue_runs.push(command);
+                    seen.issue_runs.push(steps);
                     seen.issue_paths.push((current.clone(), generation));
                 },
                 start_conflicts: |current: &WorktreePath, generation: Generation| {
@@ -8679,6 +10058,23 @@ mod push_loop_tests {
                     }
                     Ok(snapshot_here(target))
                 },
+                on_start_branch: |_branch: &StartBranch, path: &WorktreePath| {
+                    seen.borrow_mut().start_branch_probes.push(path.clone());
+                    world.on_start_branch.contains(path)
+                },
+                start_pull: |request: LookupRequest| {
+                    seen.borrow_mut().pull_lookups.push(request);
+                },
+                start_return: |child: std::process::Command| {
+                    seen.borrow_mut().returns.push((
+                        child.get_program().to_string_lossy().into_owned(),
+                        child
+                            .get_args()
+                            .map(|arg| arg.to_string_lossy().into_owned())
+                            .collect(),
+                        child.get_current_dir().map(std::path::Path::to_path_buf),
+                    ));
+                },
             },
         )
         .expect("loop");
@@ -8710,9 +10106,31 @@ mod push_loop_tests {
             .expect("the default names a command")
     }
 
+    /// The steps of a press whose probe found [`found_command`] alone.
+    fn found_steps() -> crate::issue::Steps {
+        crate::issue::Steps::new(None, Some(found_command())).expect("one command is a step")
+    }
+
+    /// The command the probe of the pull request found.
+    fn found_pr_command() -> crate::shell::ShellCommand {
+        crate::shell::ShellCommand::new(None, crate::issue::DEFAULT_PR_COMMAND)
+            .expect("the default names a command")
+    }
+
+    /// The steps of a press whose probes found both commands.
+    fn both_steps() -> crate::issue::Steps {
+        crate::issue::Steps::new(Some(found_pr_command()), Some(found_command()))
+            .expect("two commands are steps")
+    }
+
     /// The probe's answer, as the loop receives it.
     fn probe_answered() -> Event {
-        Event::IssueCommandFound(found_command())
+        Event::IssueCommandFound(crate::issue::Page::Issue, found_command())
+    }
+
+    /// The answer of the probe of the pull request, as the loop receives it.
+    fn pr_probe_answered() -> Event {
+        Event::IssueCommandFound(crate::issue::Page::PullRequest, found_pr_command())
     }
 
     /// One press of `G`.
@@ -8723,7 +10141,7 @@ mod push_loop_tests {
     /// An [`IssueRun`] in `session`, whose probe has answered.
     fn issue_run_in(session: crate::remote::Session) -> IssueRun {
         let mut issue = IssueRun::new(session);
-        issue.found(found_command());
+        issue.found(crate::issue::Page::Issue, found_command());
         issue
     }
 
@@ -8746,8 +10164,19 @@ mod push_loop_tests {
         let mut issue = issue_run_in(crate::remote::Session::Local);
         assert_eq!(
             issue.press(Instant::now()),
-            IssuePress::Run(found_command()),
+            IssuePress::Run(found_steps()),
             "a local shell must run the command on the first press",
+        );
+    }
+
+    #[test]
+    fn a_press_that_found_both_commands_runs_the_pull_request_command_first() {
+        let mut issue = issue_run_in(crate::remote::Session::Local);
+        issue.found(crate::issue::Page::PullRequest, found_pr_command());
+        assert_eq!(
+            issue.press(Instant::now()),
+            IssuePress::Run(both_steps()),
+            "a press must try the pull request command first and the issue command after it",
         );
     }
 
@@ -8763,6 +10192,17 @@ mod push_loop_tests {
     }
 
     #[test]
+    fn a_first_press_on_a_remote_shell_names_both_commands() {
+        let mut issue = issue_run_in(crate::remote::Session::Remote);
+        issue.found(crate::issue::Page::PullRequest, found_pr_command());
+        assert_eq!(
+            issue.press(Instant::now()),
+            IssuePress::Ask("remote shell — press G again to run ggsp, then ggs".to_string()),
+            "the message must name each command the second press can run, in order",
+        );
+    }
+
+    #[test]
     fn a_second_press_on_a_remote_shell_runs_the_command() {
         // The caller arms, because only the row knows whether the words it
         // returned reached the screen. `absorb` makes this pair of calls.
@@ -8772,7 +10212,7 @@ mod push_loop_tests {
         issue.arm(now);
         assert_eq!(
             issue.press(now + Duration::from_secs(1)),
-            IssuePress::Run(found_command()),
+            IssuePress::Run(found_steps()),
             "the second press must run the command the message named",
         );
     }
@@ -8808,6 +10248,22 @@ mod push_loop_tests {
             issue.press(now),
             IssuePress::Ask(SECOND_PRESS_NOTICE.to_string()),
             "a key other than `G` must leave the next press asking",
+        );
+    }
+
+    #[test]
+    fn an_answer_between_two_presses_takes_the_arming_away() {
+        // The message named the steps of the first press. An answer changes
+        // the steps, so the next press must ask again with the new names.
+        let now = Instant::now();
+        let mut issue = issue_run_in(crate::remote::Session::Remote);
+        issue.press(now);
+        issue.arm(now);
+        issue.found(crate::issue::Page::PullRequest, found_pr_command());
+        assert_eq!(
+            issue.press(now + Duration::from_secs(1)),
+            IssuePress::Ask("remote shell — press G again to run ggsp, then ggs".to_string()),
+            "an answer between two presses must leave the next press asking",
         );
     }
 
@@ -8904,12 +10360,52 @@ mod push_loop_tests {
     }
 
     #[test]
+    fn a_second_g_on_a_remote_shell_runs_both_steps() {
+        let (screen, seen) = run_loop_remote(vec![
+            pr_probe_answered(),
+            probe_answered(),
+            press_g(),
+            press_g(),
+            Event::Quit,
+        ]);
+        assert!(
+            strip_ansi(&screen).contains("remote shell — press G again to run ggsp, then ggs"),
+            "the first press must name both commands on the screen, got {screen:?}",
+        );
+        assert_eq!(
+            seen.issue_runs,
+            vec![both_steps()],
+            "the second press must run both steps",
+        );
+    }
+
+    #[test]
+    fn a_probe_answer_between_two_presses_makes_the_second_press_ask_again() {
+        let (screen, seen) = run_loop_remote(vec![
+            probe_answered(),
+            press_g(),
+            pr_probe_answered(),
+            press_g(),
+            Event::Quit,
+        ]);
+        assert!(
+            seen.issue_runs.is_empty(),
+            "the second press must not run a command the notice did not name, got {:?}",
+            seen.issue_runs,
+        );
+        assert!(
+            strip_ansi(&screen).contains("remote shell — press G again to run ggsp, then ggs"),
+            "the second press must ask again with both names, got {screen:?}",
+        );
+    }
+
+    #[test]
     fn a_second_g_on_a_remote_shell_starts_the_run() {
         let (_screen, seen) =
             run_loop_remote(vec![probe_answered(), press_g(), press_g(), Event::Quit]);
         assert_eq!(
             seen.issue_runs,
-            vec![found_command()],
+            vec![found_steps()],
             "the second press must run the command",
         );
     }
@@ -8950,7 +10446,7 @@ mod push_loop_tests {
         );
         assert_eq!(
             seen.issue_runs,
-            vec![found_command()],
+            vec![found_steps()],
             "each press must read the clock once, so the second press runs the command",
         );
     }
@@ -8965,7 +10461,7 @@ mod push_loop_tests {
         // for it — which is the exact harm this feature exists to stop.
         let (screen, seen) = run_loop_remote(vec![
             probe_answered(),
-            Event::PushRequested,
+            Event::PushRequested(PushHooks::Run),
             Event::Confirmed,
             press_g(),
             press_g(),
@@ -9024,8 +10520,34 @@ mod push_loop_tests {
         let (_screen, seen) = run_loop(vec![probe_answered(), press_g(), Event::Quit]);
         assert_eq!(
             seen.issue_runs,
-            vec![found_command()],
+            vec![found_steps()],
             "the key must run the command the probe found",
+        );
+    }
+
+    #[test]
+    fn g_with_only_the_pull_request_command_runs_it_alone() {
+        let (_screen, seen) = run_loop(vec![pr_probe_answered(), press_g(), Event::Quit]);
+        assert_eq!(
+            seen.issue_runs,
+            vec![crate::issue::Steps::new(Some(found_pr_command()), None)
+                .expect("one command is a step")],
+            "a key whose only command is the pull request command must run it alone",
+        );
+    }
+
+    #[test]
+    fn g_with_both_commands_runs_both_steps_in_order() {
+        let (_screen, seen) = run_loop(vec![
+            pr_probe_answered(),
+            probe_answered(),
+            press_g(),
+            Event::Quit,
+        ]);
+        assert_eq!(
+            seen.issue_runs,
+            vec![both_steps()],
+            "a key with both commands must run the pull request command, then the issue command",
         );
     }
 
@@ -9049,7 +10571,7 @@ mod push_loop_tests {
             press_g(),
             Event::IssueFinished {
                 generation: Generation::default(),
-                outcome: crate::issue::IssueOutcome::new("ggs", true, &[], "exit status: 0"),
+                outcome: crate::issue::IssueOutcome::opened(),
             },
             press_g(),
             Event::Quit,
@@ -9071,9 +10593,8 @@ mod push_loop_tests {
             press_g(),
             Event::IssueFinished {
                 generation: Generation::default(),
-                outcome: crate::issue::IssueOutcome::new(
+                outcome: crate::issue::IssueOutcome::failed(
                     "ggs",
-                    false,
                     &["branch main names no issue".to_string()],
                     "exit status: 2",
                 ),
@@ -9094,13 +10615,292 @@ mod push_loop_tests {
             press_g(),
             Event::IssueFinished {
                 generation: Generation::default(),
-                outcome: crate::issue::IssueOutcome::new("ggs", true, &[], "exit status: 0"),
+                outcome: crate::issue::IssueOutcome::opened(),
             },
             Event::Quit,
         ]);
         assert_eq!(
             screen, "FRAME",
             "a run that worked must cost the frame no row, got {screen:?}",
+        );
+    }
+
+    /// The command that the probe of `T` found, as the tests spell it.
+    fn stp() -> crate::shell::ShellCommand {
+        crate::shell::ShellCommand::new(None, crate::tab::DEFAULT_TAB_COMMAND)
+            .expect("the default names a command")
+    }
+
+    /// The answer of the probe of `T`, as the loop receives it.
+    fn tab_probe_answered() -> Event {
+        Event::TabCommandFound(stp())
+    }
+
+    /// One press of `T`.
+    fn press_t() -> Event {
+        key(KeyCode::Char('T'))
+    }
+
+    /// The end of a run of `T` that started in the first worktree.
+    fn tab_finished(outcome: crate::tab::TabOutcome) -> Event {
+        tab_finished_in(Generation::default(), outcome)
+    }
+
+    /// The end of a run of `T` that started at `generation`.
+    fn tab_finished_in(generation: Generation, outcome: crate::tab::TabOutcome) -> Event {
+        Event::TabFinished {
+            generation,
+            outcome,
+        }
+    }
+
+    #[test]
+    fn t_starts_nothing_until_the_probe_has_answered() {
+        // A key with no command behind it stays silent, as `G` does.
+        let (_screen, seen) = run_loop(vec![press_t(), Event::Quit]);
+        assert!(
+            seen.tab_runs.is_empty(),
+            "`T` must start nothing before the probe answers, got {:?}",
+            seen.tab_runs,
+        );
+    }
+
+    #[test]
+    fn t_runs_the_command_the_probe_found_in_the_worktree_on_the_screen() {
+        // The tab title belongs to the worktree in the frame, so the run must
+        // start there and carry the generation of the press.
+        let (_screen, seen) = run_in(
+            World::three(),
+            vec![
+                tab_probe_answered(),
+                key(KeyCode::Right),
+                press_t(),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(seen.tab_runs, vec![stp()], "`T` must run the found command");
+        assert_eq!(
+            seen.tab_paths,
+            vec![(worktree(CHARLIE), after_one_switch())],
+            "the run must start in the worktree on the screen",
+        );
+    }
+
+    #[test]
+    fn a_second_t_while_a_run_is_in_flight_starts_nothing() {
+        // Two runs of `stp` race to rename one tab, so one run at a time.
+        let (_screen, seen) = run_loop(vec![
+            tab_probe_answered(),
+            press_t(),
+            press_t(),
+            Event::Quit,
+        ]);
+        assert_eq!(
+            seen.tab_runs.len(),
+            1,
+            "a burst of presses must start one run, got {:?}",
+            seen.tab_runs,
+        );
+    }
+
+    #[test]
+    fn t_starts_another_run_once_the_first_has_ended() {
+        // The outcome gives the key back.
+        let (_screen, seen) = run_loop(vec![
+            tab_probe_answered(),
+            press_t(),
+            tab_finished(crate::tab::TabOutcome::Worked(None)),
+            press_t(),
+            Event::Quit,
+        ]);
+        assert_eq!(
+            seen.tab_runs.len(),
+            2,
+            "the outcome must free the key, got {:?}",
+            seen.tab_runs,
+        );
+    }
+
+    #[test]
+    fn t_runs_while_a_push_runs() {
+        // A tab title is not the repository, so a push in flight does not
+        // stop it.
+        let (_screen, seen) = run_loop(vec![
+            Event::PushRequested(PushHooks::Run),
+            Event::Confirmed,
+            tab_probe_answered(),
+            press_t(),
+            Event::Quit,
+        ]);
+        assert_eq!(
+            seen.tab_runs.len(),
+            1,
+            "`T` must run during a push, got {:?}",
+            seen.tab_runs,
+        );
+    }
+
+    #[test]
+    fn t_asks_no_second_press_on_a_remote_shell() {
+        // The rename goes through the zellij server, so it is correct for a
+        // remote client too. `G` asks, and `T` does not.
+        let (_screen, seen) = run_loop_remote(vec![tab_probe_answered(), press_t(), Event::Quit]);
+        assert_eq!(
+            seen.tab_runs.len(),
+            1,
+            "`T` must run on the first press on a remote shell, got {:?}",
+            seen.tab_runs,
+        );
+    }
+
+    #[test]
+    fn a_run_that_worked_shows_its_last_line_on_a_line_that_fades() {
+        // The line is the report of a key the user pressed, so it fades. The
+        // age after the line shows that it does.
+        let (screen, _seen) = run_loop(vec![
+            tab_probe_answered(),
+            press_t(),
+            tab_finished(crate::tab::TabOutcome::Worked(Some(
+                "stp: the tab already starts with 57".to_string(),
+            ))),
+            Event::Quit,
+        ]);
+        assert_eq!(
+            strip_ansi(&screen),
+            "FRAME\nstp: the tab already starts with 57 (0s ago)",
+            "the line of the run must fade under the frame",
+        );
+    }
+
+    #[test]
+    fn a_run_that_worked_and_wrote_nothing_puts_nothing_under_the_frame() {
+        // The tab title is the answer.
+        let (screen, _seen) = run_loop(vec![
+            tab_probe_answered(),
+            press_t(),
+            tab_finished(crate::tab::TabOutcome::Worked(None)),
+            Event::Quit,
+        ]);
+        assert_eq!(
+            screen, "FRAME",
+            "a run that wrote nothing must cost the frame no row, got {screen:?}",
+        );
+    }
+
+    #[test]
+    fn a_run_that_failed_shows_its_line_in_red_until_a_key() {
+        // The line is the words of another program, so it waits for a key and
+        // shows no age.
+        const LINE: &str = "stp: no open pull request for issue-620";
+        let failed = || tab_finished(crate::tab::TabOutcome::Failed(LINE.to_string()));
+        let (screen, _seen) = testcolor::with_forced_ansi(|| {
+            run_loop(vec![tab_probe_answered(), press_t(), failed(), Event::Quit])
+        });
+        let red = testcolor::with_forced_ansi(|| LINE.red().to_string());
+        assert!(
+            screen.contains(&red),
+            "the line of the failure must be red, got {screen:?}",
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME\n{LINE}"),
+            "the line must not fade",
+        );
+
+        // A key takes it away.
+        let (screen, _seen) = run_loop(vec![
+            tab_probe_answered(),
+            press_t(),
+            failed(),
+            key(KeyCode::Char('x')),
+            Event::Quit,
+        ]);
+        assert_eq!(
+            strip_ansi(&screen),
+            "FRAME",
+            "the next key must remove the line",
+        );
+    }
+
+    #[test]
+    fn a_press_past_the_deadline_says_so_and_gives_the_key_back() {
+        // A run past its deadline is a failure like any other, and its
+        // outcome frees the key.
+        let line = format!(
+            "stp has not finished after {}s",
+            crate::tab::RUN_DEADLINE.as_secs()
+        );
+        let (screen, seen) = run_loop(vec![
+            tab_probe_answered(),
+            press_t(),
+            tab_finished(crate::tab::TabOutcome::Failed(line)),
+            press_t(),
+            Event::Quit,
+        ]);
+        assert!(
+            screen.contains("stp has not finished after 60s"),
+            "the deadline must reach the screen, got {screen:?}",
+        );
+        assert_eq!(
+            seen.tab_runs.len(),
+            2,
+            "the outcome must give the key back, got {:?}",
+            seen.tab_runs,
+        );
+    }
+
+    #[test]
+    fn a_t_outcome_from_before_a_switch_is_dropped_and_t_works_again() {
+        // A line under the frame must describe the worktree in the frame, so
+        // the error of the run in bravo must not reach the row of charlie.
+        let (screen, seen) = run_in(
+            World::three(),
+            vec![
+                tab_probe_answered(),
+                press_t(),
+                key(KeyCode::Right),
+                tab_finished_in(
+                    before_the_switch(),
+                    crate::tab::TabOutcome::Failed("stp: no open pull request".to_string()),
+                ),
+                press_t(),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME {CHARLIE}"),
+            "the error of the run in bravo must not reach the row of charlie",
+        );
+        assert_eq!(
+            seen.tab_paths,
+            vec![
+                (worktree(BRAVO), before_the_switch()),
+                (worktree(CHARLIE), after_one_switch()),
+            ],
+            "the outcome must free the key, and the next run must carry the new generation",
+        );
+    }
+
+    #[test]
+    fn the_one_run_rule_of_t_spans_a_switch() {
+        // A run continues after a switch, and the rule of one run at a time
+        // holds for the whole process.
+        let (_screen, seen) = run_in(
+            World::three(),
+            vec![
+                tab_probe_answered(),
+                press_t(),
+                key(KeyCode::Right),
+                press_t(),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            seen.tab_runs.len(),
+            1,
+            "a run of `T` in flight must refuse a second run after a switch, got {:?}",
+            seen.tab_runs,
         );
     }
 
@@ -9220,7 +11020,7 @@ mod push_loop_tests {
     /// A push in flight, and a whole run of `m` inside it.
     fn a_run_during_a_push() -> Vec<Event> {
         vec![
-            Event::PushRequested,
+            Event::PushRequested(PushHooks::Run),
             Event::Confirmed,
             press_m(),
             started_against_main(),
@@ -9449,6 +11249,8 @@ mod push_loop_tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| Ok(pushable_snapshot()),
@@ -9475,13 +11277,17 @@ mod push_loop_tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_tab: no_tab,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
+                start_pull: no_pull,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -9557,6 +11363,40 @@ mod push_loop_tests {
         assert_eq!(command.args(), ["push", "-u", "origin", "gsw-push"]);
         // The branch travels with the arguments all the way through the loop:
         // the runner checks it against the checkout before git sees it.
+        assert_eq!(command.branch(), "gsw-push");
+    }
+
+    #[test]
+    fn pressing_shift_p_puts_the_question_without_the_hook_under_the_frame() {
+        // The policy has to reach the question through the loop: the person
+        // reads that the hook is skipped before the person answers.
+        let (displayed, _) = run_loop(vec![key(KeyCode::Char('P')), Event::Quit]);
+        assert!(
+            displayed
+                .contains("Create new remote branch origin/gsw-push without the pre-push hook?"),
+            "the question must name the skipped hook, got {displayed:?}",
+        );
+    }
+
+    #[test]
+    fn confirming_shift_p_starts_the_push_without_the_hook() {
+        // `P` then `y` must run the command the confirmation named, and that
+        // command carries `--no-verify`.
+        let (_, seen) = run_loop(vec![
+            key(KeyCode::Char('P')),
+            key(KeyCode::Char('y')),
+            Event::Quit,
+        ]);
+        let [command] = seen.pushes.as_slice() else {
+            panic!(
+                "one confirmed push must reach the runner, got {:?}",
+                seen.pushes
+            );
+        };
+        assert_eq!(
+            command.args(),
+            ["push", "--no-verify", "-u", "origin", "gsw-push"],
+        );
         assert_eq!(command.branch(), "gsw-push");
     }
 
@@ -10304,6 +12144,8 @@ mod push_loop_tests {
                     session: crate::remote::Session::Local,
                     home: loop_home(),
                     log: LogDemand::Off,
+                    start_branch: None,
+                    pulls: PullWatch::disabled(),
                 },
                 LoopHooks {
                     collect: |_current: &WorktreePath, _limit: usize| Ok(pushable_snapshot()),
@@ -10321,10 +12163,11 @@ mod push_loop_tests {
                         |command: crate::update::BaseUpdateCommand, _current: &WorktreePath| {
                             seen.borrow_mut().base_updates.push(command)
                         },
-                    start_issue: |command: crate::shell::ShellCommand,
+                    start_tab: no_tab,
+                    start_issue: |steps: crate::issue::Steps,
                                   _current: &WorktreePath,
                                   _generation: Generation| {
-                        seen.borrow_mut().issue_runs.push(command);
+                        seen.borrow_mut().issue_runs.push(steps);
                     },
                     start_conflicts: |_current: &WorktreePath, _generation: Generation| {
                         seen.borrow_mut().conflict_runs += 1
@@ -10332,6 +12175,9 @@ mod push_loop_tests {
                     worktrees: Vec::new,
                     worktree_paths: Vec::new,
                     switch: no_switch,
+                    on_start_branch: no_start_branch,
+                    start_pull: no_pull,
+                    start_return: no_return,
                     fetch_log: no_fetch,
                     render_list: no_list,
                 },
@@ -10364,6 +12210,8 @@ mod push_loop_tests {
             session: crate::remote::Session::Local,
             schedule: no_timed_refresh_for_push(),
             world,
+            start_branch: None,
+            pulls: PullWatch::disabled(),
         }
     }
 
@@ -10720,15 +12568,14 @@ mod push_loop_tests {
     /// The last line that [`issue_failed_in`] reports.
     const ISSUE_REFUSAL: &str = "branch main names no issue";
 
-    /// The outcome of a run of the issue command that failed, with the
+    /// The outcome of a press of `G` that failed, with the
     /// generation `generation`, as the loop receives it. Its line waits for a
     /// key.
     fn issue_failed_in(generation: Generation) -> Event {
         Event::IssueFinished {
             generation,
-            outcome: crate::issue::IssueOutcome::new(
+            outcome: crate::issue::IssueOutcome::failed(
                 "ggs",
-                false,
                 &[ISSUE_REFUSAL.to_string()],
                 "exit status: 2",
             ),
@@ -10897,14 +12744,20 @@ mod push_loop_tests {
             schedule: no_timed_refresh_for_push(),
             ui: PushUi::new(false),
             issue,
+            tab: TabRun::new(),
             base_updates: BaseUpdateCommands::new(),
             conflicts: ConflictsRun::new(),
             home: worktree(BRAVO),
             current: worktree(BRAVO),
             generation: Generation::default(),
             log: LogDemand::Off,
+            start_branch: None,
+            pulls: PullWatch::disabled(),
         };
-        assert!(state.issue.is_armed(now), "the fixture must start armed");
+        assert!(
+            state.issue.armed.is_armed(now),
+            "the fixture must start armed"
+        );
 
         state.switch_to(
             worktree(CHARLIE),
@@ -10918,8 +12771,55 @@ mod push_loop_tests {
             "the switch must reach charlie"
         );
         assert!(
-            !state.issue.is_armed(now),
+            !state.issue.armed.is_armed(now),
             "a switch must take the arming of `G` away",
+        );
+    }
+
+    #[test]
+    fn a_switch_takes_the_arming_of_esc_away_whatever_made_it() {
+        // The hint of the second Esc is on the row, and it is the armed
+        // state. A switch takes every message off the row. A switch that no
+        // key made, as the return after a worktree went away, must take the
+        // hint away, and the arming with it.
+        let now = Instant::now();
+        let mut ui = PushUi::new(false);
+        let _ = ui.post_hint(RETURN_HINT_LINE.to_string(), now);
+        let mut state = LoopState {
+            cache: SnapshotCache {
+                snapshot: snapshot_of(&worktree(BRAVO)),
+                collected_at: now,
+                dims: TEST_DIMS,
+            },
+            schedule: no_timed_refresh_for_push(),
+            ui,
+            issue: issue_run_in(crate::remote::Session::Local),
+            tab: TabRun::new(),
+            base_updates: BaseUpdateCommands::new(),
+            conflicts: ConflictsRun::new(),
+            home: worktree(BRAVO),
+            current: worktree(BRAVO),
+            generation: Generation::default(),
+            log: LogDemand::Off,
+            start_branch: Some(StartBranch::fake(TOPIC)),
+            pulls: PullWatch::disabled(),
+        };
+        assert!(state.ui.shows_hint(now), "the fixture must start armed");
+
+        state.switch_to(
+            worktree(CHARLIE),
+            &|| now,
+            &mut |target: &WorktreePath, _limit: usize| Ok(snapshot_of(target)),
+        );
+
+        assert_eq!(
+            state.current,
+            worktree(CHARLIE),
+            "the switch must reach charlie"
+        );
+        assert!(
+            !state.ui.shows_hint(now),
+            "a switch must take the arming of Esc away",
         );
     }
 
@@ -11868,6 +13768,13 @@ mod push_loop_tests {
         height: 5,
     };
 
+    /// A pane with room for the head of a frame, four rows of the list, and
+    /// the hint.
+    const FOUR_ROWS_FOR_THE_LIST: Dimensions = Dimensions {
+        width: 80,
+        height: 7,
+    };
+
     #[test]
     fn a_list_longer_than_the_pane_scrolls_only_as_far_as_the_cursor_needs() {
         // Six worktrees in a pane of two list rows. The window follows the
@@ -11939,6 +13846,1073 @@ mod push_loop_tests {
             "only the Down that opens the list reads it",
         );
     }
+
+    #[test]
+    fn page_down_and_page_up_move_the_cursor_one_page_and_enter_goes_to_the_row_under_it() {
+        // The frame does not change while the cursor moves. A page is one row
+        // less than the window that the user saw. The cursor stops on the
+        // bottom row of the list, and Enter goes to the row under the cursor.
+        let names = [ALPHA, BRAVO, CHARLIE, "delta", "echo", "foxtrot"];
+        let (paints, seen) = paints_of(
+            Setup {
+                dims: FOUR_ROWS_FOR_THE_LIST,
+                measured: FOUR_ROWS_FOR_THE_LIST,
+                ..in_world(World::of(&names, ALPHA))
+            },
+            vec![
+                vec![key(KeyCode::Down)],
+                vec![key(KeyCode::PageDown)],
+                vec![key(KeyCode::PageDown)],
+                vec![key(KeyCode::PageDown)],
+                vec![key(KeyCode::PageUp)],
+                vec![key(KeyCode::Enter), Event::Quit],
+            ],
+        );
+        assert_eq!(
+            paints,
+            [
+                format!("LIST {ALPHA}: >{ALPHA}⌂ {BRAVO} {CHARLIE} delta"),
+                format!("LIST {ALPHA}: {ALPHA}⌂ {BRAVO} {CHARLIE} >delta"),
+                format!("LIST {ALPHA}: {CHARLIE} delta echo >foxtrot"),
+                format!("LIST {ALPHA}: >{CHARLIE} delta echo foxtrot"),
+                format!("FRAME {CHARLIE}"),
+            ],
+        );
+        assert_eq!(
+            seen.switches,
+            vec![worktree(CHARLIE)],
+            "Enter after a page key goes to the worktree under the cursor",
+        );
+        assert_eq!(
+            seen.listings, 1,
+            "only the Down that opens the list reads it",
+        );
+    }
+
+    // The two presses of Esc that go back to the start branch.
+
+    /// The name of the start branch in the tests of the two presses of Esc.
+    const TOPIC: &str = "topic";
+
+    /// The hint that the first press of Esc puts on the row, for [`TOPIC`].
+    const RETURN_HINT_LINE: &str = "Hit Escape again to go back to topic";
+
+    /// The setup of the tests of Esc: `world`, and a session that started on
+    /// [`TOPIC`]. A worktree of `world` that is not in
+    /// [`World::on_start_branch`] is off the start branch, so the name in its
+    /// header is red.
+    fn returning(world: World) -> Setup {
+        Setup {
+            start_branch: Some(StartBranch::fake(TOPIC)),
+            ..in_world(world)
+        }
+    }
+
+    /// Run the loop over `events` in `setup` on a frozen clock.
+    fn run_setup(setup: Setup, events: Vec<Event>) -> (String, Seen) {
+        let base = Instant::now();
+        drive(events, setup, move || base)
+    }
+
+    #[test]
+    fn the_first_esc_off_the_start_branch_puts_the_hint_on_the_row_and_does_nothing_else() {
+        // The name in the header is red, so the first Esc asks for a second
+        // one. The line has no age and it fades by no rule of its own. The
+        // press asks no worktree whether it is on the start branch, and
+        // moves nowhere.
+        let (screen, seen) = run_setup(
+            returning(World::three()),
+            vec![key(KeyCode::Esc), Event::Quit],
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME {BRAVO}\n{RETURN_HINT_LINE}"),
+            "the first Esc must put the hint on the row, with no age",
+        );
+        assert!(
+            seen.start_branch_probes.is_empty(),
+            "the first press must probe nothing, got {:?}",
+            seen.start_branch_probes,
+        );
+        assert!(
+            seen.switches.is_empty(),
+            "the first press must switch nothing, got {:?}",
+            seen.switches,
+        );
+        assert!(
+            seen.returns.is_empty(),
+            "the first press must start no git command, got {:?}",
+            seen.returns,
+        );
+    }
+
+    #[test]
+    fn esc_on_the_start_branch_does_what_dismiss_does_and_posts_no_hint() {
+        // The name is not red, so Esc takes the fading line off the row, as it
+        // did before the two presses existed.
+        let base = Instant::now();
+        let (screen, seen) = drive(
+            vec![key(KeyCode::Esc), Event::Quit],
+            Setup {
+                ui: pushed_ui(base),
+                ..returning(World::three().on_start_branch(BRAVO))
+            },
+            move || base,
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME {BRAVO}"),
+            "Esc on the start branch must dismiss the line and post no hint",
+        );
+        assert!(seen.start_branch_probes.is_empty());
+        assert!(seen.switches.is_empty());
+    }
+
+    #[test]
+    fn esc_in_a_session_with_no_start_branch_does_what_dismiss_does_and_posts_no_hint() {
+        let base = Instant::now();
+        let (screen, seen) = drive(
+            vec![key(KeyCode::Esc), Event::Quit],
+            Setup {
+                ui: pushed_ui(base),
+                ..in_world(World::three())
+            },
+            move || base,
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME {BRAVO}"),
+            "with no start branch, Esc must dismiss the line and post no hint",
+        );
+        assert!(seen.start_branch_probes.is_empty());
+        assert!(seen.switches.is_empty());
+    }
+
+    #[test]
+    fn the_second_esc_goes_home_when_home_is_on_the_start_branch() {
+        // Rule 1. Right moves the watch to `charlie`, which is off the start
+        // branch. The first Esc posts the hint and the second Esc moves the
+        // watch to home, as Up does, because home is on the start branch. The
+        // probe asks home first, and it asks nothing else.
+        let (screen, seen) = run_setup(
+            returning(World::three().on_start_branch(BRAVO)),
+            vec![
+                key(KeyCode::Right),
+                key(KeyCode::Esc),
+                key(KeyCode::Esc),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            seen.switches,
+            vec![worktree(CHARLIE), worktree(BRAVO)],
+            "the second Esc must move the watch to home",
+        );
+        assert_eq!(
+            seen.start_branch_probes,
+            vec![worktree(BRAVO)],
+            "the probe must ask home first and stop at the first worktree that is on the branch",
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME {BRAVO}"),
+            "the frame of home must show no hint",
+        );
+    }
+
+    #[test]
+    fn the_second_esc_goes_to_the_worktree_that_is_on_the_start_branch() {
+        // Rule 2. Home is off the start branch and `alpha` is on it, so the
+        // second Esc moves the watch to `alpha`. The probe asks home first and
+        // then each other worktree in the order of the listing, and it stops
+        // at the first one that is on the branch. `charlie` is on it too, and
+        // is never asked.
+        let (screen, seen) = run_setup(
+            returning(
+                World::three()
+                    .on_start_branch(ALPHA)
+                    .on_start_branch(CHARLIE),
+            ),
+            vec![key(KeyCode::Esc), key(KeyCode::Esc), Event::Quit],
+        );
+        assert_eq!(
+            seen.start_branch_probes,
+            vec![worktree(BRAVO), worktree(ALPHA)],
+            "the probe must ask home first, then the others in the order of the list",
+        );
+        assert_eq!(
+            seen.switches,
+            vec![worktree(ALPHA)],
+            "the second Esc must move the watch to the worktree on the start branch",
+        );
+        assert_eq!(strip_ansi(&screen), format!("FRAME {ALPHA}"));
+    }
+
+    #[test]
+    fn the_second_esc_moves_nowhere_when_the_watch_is_on_the_only_worktree_on_the_start_branch() {
+        // The frame says the name is red, and the probe finds the worktree
+        // that the frame shows. That happens when the snapshot is stale: the
+        // branch moved since the last walk. The loop then walks at once, so
+        // the next frame is right, and it switches nowhere.
+        let (screen, seen) = run_setup(
+            returning(World::three().on_start_branch(BRAVO).reddened(BRAVO)),
+            vec![key(KeyCode::Esc), key(KeyCode::Esc), Event::Quit],
+        );
+        assert!(
+            seen.switches.is_empty(),
+            "the watch is on the worktree already, got {:?}",
+            seen.switches,
+        );
+        assert_eq!(
+            seen.collects, 1,
+            "a stale frame must make the next frame walk",
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME {BRAVO}"),
+            "the walk shows the name right and no hint",
+        );
+    }
+
+    /// What the screen shows when the second Esc has not been taken for a
+    /// second press: the hint, under the frame of `name`, with no switch.
+    fn hint_under(name: &str) -> String {
+        format!("FRAME {name}\n{RETURN_HINT_LINE}")
+    }
+
+    #[test]
+    fn a_key_between_two_presses_of_esc_makes_the_second_one_a_first_press() {
+        // Every key but Esc takes the hint away, and the hint is the arming. `r`, `m`, and
+        // Left are three kinds of key: one that walks, one that starts work,
+        // and one that moves the watch. `alpha` is on the start branch, so a
+        // second press would move the watch there, and none of these may.
+        for between in [KeyCode::Char('r'), KeyCode::Char('m')] {
+            let (screen, seen) = run_setup(
+                returning(World::three().on_start_branch(ALPHA)),
+                vec![
+                    key(KeyCode::Esc),
+                    key(between),
+                    key(KeyCode::Esc),
+                    Event::Quit,
+                ],
+            );
+            assert!(
+                seen.switches.is_empty(),
+                "{between:?} between the presses must leave the third press a first press, got {:?}",
+                seen.switches,
+            );
+            assert_eq!(
+                strip_ansi(&screen),
+                hint_under(BRAVO),
+                "{between:?} between the presses: the hint must be on the row again",
+            );
+        }
+
+        let (screen, seen) = run_setup(
+            returning(World::three().on_start_branch(CHARLIE)),
+            vec![
+                key(KeyCode::Esc),
+                key(KeyCode::Left),
+                key(KeyCode::Esc),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            seen.switches,
+            vec![worktree(ALPHA)],
+            "only Left may switch: the second Esc is a first press",
+        );
+        assert_eq!(strip_ansi(&screen), hint_under(ALPHA));
+    }
+
+    #[test]
+    fn an_event_that_no_key_made_leaves_the_hint_alone() {
+        // A change on the disk is not the user. The hint stays on the row, and
+        // the second press still goes back.
+        let (screen, seen) = run_setup(
+            returning(World::three().on_start_branch(ALPHA)),
+            vec![
+                key(KeyCode::Esc),
+                Event::FsChanged,
+                key(KeyCode::Esc),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(seen.switches, vec![worktree(ALPHA)]);
+        assert_eq!(strip_ansi(&screen), format!("FRAME {ALPHA}"));
+    }
+
+    #[test]
+    fn a_message_that_takes_the_row_from_the_hint_takes_the_arming_of_esc_too() {
+        // The hint is the armed state. The name is red and `alpha` is on the
+        // start branch, so a second press would move the watch there. Each
+        // message below takes the row from the hint in normal mode, with no
+        // key. The next Esc then finds no hint, so it is a first press: it
+        // moves nowhere, and the hint stands on the row again. The Esc after
+        // that one finds the new hint, and it goes back.
+        type Between = fn() -> Vec<Event>;
+        let messages: [(&str, Between); 3] = [
+            // post_progress: a measurement starts.
+            ("ConflictsStarted", || vec![started_against_main()]),
+            // post_notice: a measurement ends.
+            ("ConflictsFinished", || {
+                vec![started_against_main(), finished(measured_clean())]
+            }),
+            // post_error: the command of `G` fails.
+            ("IssueFinished", || {
+                vec![issue_failed_in(Generation::default())]
+            }),
+        ];
+        for (name, between) in messages {
+            let run = |third_esc: bool| {
+                let mut bursts = vec![vec![press_m()], vec![key(KeyCode::Esc)], between()];
+                bursts.push(vec![key(KeyCode::Esc)]);
+                if third_esc {
+                    bursts.push(vec![key(KeyCode::Esc)]);
+                }
+                bursts.push(vec![Event::Quit]);
+                let base = Instant::now();
+                drive_bursts(
+                    bursts,
+                    returning(World::three().on_start_branch(ALPHA)),
+                    move || base,
+                )
+            };
+
+            let (screen, seen) = run(false);
+            assert!(
+                seen.switches.is_empty(),
+                "{name}: the Esc after the message must be a first press, got {:?}",
+                seen.switches,
+            );
+            assert!(
+                seen.returns.is_empty(),
+                "{name}: the Esc after the message must start no git command, got {:?}",
+                seen.returns,
+            );
+            assert_eq!(
+                strip_ansi(&screen),
+                hint_under(BRAVO),
+                "{name}: the hint must stand on the row again",
+            );
+
+            let (screen, seen) = run(true);
+            assert_eq!(
+                seen.switches,
+                vec![worktree(ALPHA)],
+                "{name}: the Esc after the new hint must go back",
+            );
+            assert_eq!(strip_ansi(&screen), format!("FRAME {ALPHA}"));
+        }
+    }
+
+    #[test]
+    fn a_hint_that_lived_its_lifetime_is_off_the_row_and_the_next_esc_is_a_first_press() {
+        // The hint leaves the row `RETURN_HINT_LIFETIME` after it came, and
+        // the arming is the hint, so it ends at the same instant. The render hook
+        // moves the clock on by that much, once, after the first frame. The
+        // frame between the two presses shows no hint, and the second press
+        // asks again.
+        let moved = std::rc::Rc::new(std::cell::Cell::new(Duration::ZERO));
+        let base = Instant::now();
+        let clock_offset = std::rc::Rc::clone(&moved);
+        let render_offset = std::rc::Rc::clone(&moved);
+        let (_screen, seen) = drive_bursts(
+            vec![
+                vec![key(KeyCode::Esc)],
+                vec![Event::FsChanged],
+                vec![key(KeyCode::Esc), Event::Quit],
+            ],
+            Setup {
+                render: Box::new(move |snapshot: &Snapshot, dims: Dimensions| {
+                    let text = frame_of(snapshot, dims);
+                    // After the first frame, one lifetime has passed.
+                    render_offset.set(crate::push::RETURN_HINT_LIFETIME);
+                    text
+                }),
+                ..returning(World::three().on_start_branch(ALPHA))
+            },
+            move || base + clock_offset.get(),
+        );
+        let painted: Vec<String> = seen.paints.iter().map(|text| strip_ansi(text)).collect();
+        assert_eq!(
+            painted,
+            vec![
+                hint_under(BRAVO),
+                format!("FRAME {BRAVO}"),
+                hint_under(BRAVO)
+            ],
+            "the hint must leave after its lifetime, and the Esc after it must ask again",
+        );
+        assert!(
+            seen.switches.is_empty(),
+            "the Esc after the lifetime must not switch, got {:?}",
+            seen.switches,
+        );
+    }
+
+    #[test]
+    fn an_esc_that_cancels_the_question_arms_nothing() {
+        // `p` asks the question, and Esc answers no. That Esc is the answer,
+        // and not a press of the two. The next Esc is a first press: the hint
+        // goes on the row, and nothing switches.
+        let (screen, seen) = run_setup(
+            returning(World::three().on_start_branch(ALPHA)),
+            vec![
+                key(KeyCode::Char('p')),
+                key(KeyCode::Esc),
+                key(KeyCode::Esc),
+                Event::Quit,
+            ],
+        );
+        assert!(
+            seen.switches.is_empty(),
+            "the Esc after the answer must be a first press, got {:?}",
+            seen.switches,
+        );
+        assert_eq!(strip_ansi(&screen), hint_under(BRAVO));
+    }
+
+    // Rule 3: no worktree is on the start branch, so the second Esc runs
+    // `git switch --no-guess` in the home worktree.
+
+    /// The command line of the `git switch` of the second Esc, as the row
+    /// shows it while the run is in flight.
+    const SWITCH_NOTICE: &str = "git switch --no-guess topic…";
+
+    #[test]
+    fn the_second_esc_runs_git_switch_in_home_when_no_worktree_is_on_the_start_branch() {
+        // Nothing is on the start branch, so there is no worktree to go to.
+        // The loop is on home already, so it switches nowhere. It starts the
+        // `git switch` once, in the work tree of home, and the row shows the
+        // command while it runs.
+        let (screen, seen) = run_setup(
+            returning(World::three()),
+            vec![key(KeyCode::Esc), key(KeyCode::Esc), Event::Quit],
+        );
+        assert_eq!(
+            seen.returns,
+            vec![(
+                "git".to_string(),
+                vec![
+                    "switch".to_string(),
+                    "--no-guess".to_string(),
+                    TOPIC.to_string()
+                ],
+                Some(worktree(BRAVO).as_path().to_path_buf()),
+            )],
+            "the second Esc must start `git switch --no-guess topic` in home, once",
+        );
+        assert!(
+            seen.switches.is_empty(),
+            "the loop is on home, so it must switch nowhere, got {:?}",
+            seen.switches,
+        );
+        let painted = strip_ansi(&screen);
+        assert!(
+            painted.starts_with(&format!("FRAME {BRAVO}\n{SWITCH_NOTICE}")),
+            "the row must show the command while it runs, got {painted:?}",
+        );
+    }
+
+    #[test]
+    fn the_second_esc_goes_home_before_it_runs_git_switch() {
+        // The watch is on `charlie`, and no worktree is on the start branch.
+        // The switch runs in home, so the watch moves home first, and then the
+        // run starts in the work tree of home.
+        let (screen, seen) = run_setup(
+            returning(World::three()),
+            vec![
+                key(KeyCode::Right),
+                key(KeyCode::Esc),
+                key(KeyCode::Esc),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            seen.switches,
+            vec![worktree(CHARLIE), worktree(BRAVO)],
+            "the second Esc must move the watch home before it starts the run",
+        );
+        assert_eq!(
+            seen.returns
+                .iter()
+                .map(|(_, _, dir)| dir.clone())
+                .collect::<Vec<_>>(),
+            vec![Some(worktree(BRAVO).as_path().to_path_buf())],
+            "the run must start once, in home",
+        );
+        let painted = strip_ansi(&screen);
+        assert!(
+            painted.starts_with(&format!("FRAME {BRAVO}\n{SWITCH_NOTICE}")),
+            "the row must show the command while it runs, got {painted:?}",
+        );
+    }
+
+    #[test]
+    fn the_second_esc_runs_no_git_when_the_move_home_is_refused() {
+        // Home cannot be opened. The reason of the refused move goes on the
+        // row, as the reason of each refused move does, and nothing else
+        // happens: no run starts.
+        let (screen, seen) = run_setup(
+            returning(World::three().refusing(BRAVO)),
+            vec![
+                key(KeyCode::Right),
+                key(KeyCode::Esc),
+                key(KeyCode::Esc),
+                Event::Quit,
+            ],
+        );
+        assert!(
+            seen.returns.is_empty(),
+            "a refused move home must start no run, got {:?}",
+            seen.returns,
+        );
+        let painted = strip_ansi(&screen);
+        assert!(
+            painted.contains(&format!(
+                "{REFUSED}: {}",
+                worktree(BRAVO).as_path().display()
+            )),
+            "the reason of the refused move must be on the row, got {painted:?}",
+        );
+        assert!(
+            !painted.contains(SWITCH_NOTICE),
+            "no run may show on the row, got {painted:?}",
+        );
+    }
+
+    /// What git writes when the switch of the second Esc worked.
+    const SWITCHED: &str = "Switched to branch 'topic'";
+
+    /// What git writes when a local change stands in the way of the switch.
+    ///
+    /// Short enough to fit one row of the test pane, so the row does not cut
+    /// it.
+    const WOULD_BE_OVERWRITTEN: &str = "error: local changes would be overwritten";
+
+    /// The events that end at the start of the `git switch` of the second Esc.
+    fn return_started() -> Vec<Event> {
+        vec![key(KeyCode::Esc), key(KeyCode::Esc)]
+    }
+
+    #[test]
+    fn a_switch_that_worked_walks_and_says_so_with_the_last_line_of_git() {
+        // The switch moved HEAD of home, so every outcome walks at once. The
+        // row says what gsw did, and under it goes the last line of git.
+        let mut events = return_started();
+        events.extend([
+            Event::ReturnFinished(PushOutcome {
+                success: true,
+                output: format!("{SWITCHED}\n"),
+            }),
+            Event::Quit,
+        ]);
+        let (screen, seen) = run_setup(returning(World::three()), events);
+        assert_eq!(
+            seen.collects, 1,
+            "the outcome must make the loop walk home once",
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME {BRAVO}\nWent back to the start branch (0s ago)\n  {SWITCHED}"),
+            "the row must say that the switch worked, with the last line of git under it",
+        );
+    }
+
+    #[test]
+    fn a_switch_that_git_refused_shows_the_words_of_git_in_red_until_a_key() {
+        // The words of git are the whole reason, so they stay in red until the
+        // user presses a key. The refusal moved nothing, but it walks all the
+        // same, as every outcome of this run does.
+        let refusal = PushOutcome {
+            success: false,
+            output: format!("{WOULD_BE_OVERWRITTEN}\n\tsrc/lib.rs\nAborting\n"),
+        };
+        let mut events = return_started();
+        events.extend([Event::ReturnFinished(refusal.clone()), Event::Quit]);
+        let (screen, seen) =
+            testcolor::with_forced_ansi(|| run_setup(returning(World::three()), events));
+        assert_eq!(seen.collects, 1, "a refusal must walk home too");
+        let red = testcolor::with_forced_ansi(|| WOULD_BE_OVERWRITTEN.red().to_string());
+        assert!(
+            screen.contains(&red),
+            "the words of git must be red on the row, got {screen:?}",
+        );
+
+        // A key takes them away.
+        let mut events = return_started();
+        events.extend([
+            Event::ReturnFinished(refusal),
+            key(KeyCode::Char('x')),
+            Event::Quit,
+        ]);
+        let (screen, _seen) = run_setup(returning(World::three()), events);
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME {BRAVO}"),
+            "the next key must remove the words of git",
+        );
+    }
+
+    #[test]
+    fn no_key_but_g_starts_anything_while_the_switch_of_the_second_esc_runs() {
+        // The run owns the row and moves HEAD of home. Esc, the arrows, `p`,
+        // `R`, `M`, and `m` start nothing: no second switch, no push, no base
+        // update, no measurement, and the watch stays where it is. Both probes
+        // of the base updates have answered, so `R` and `M` are bound keys,
+        // and they still start nothing.
+        for pressed in [
+            KeyCode::Esc,
+            KeyCode::Left,
+            KeyCode::Right,
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Char('p'),
+            KeyCode::Char('R'),
+            KeyCode::Char('M'),
+            KeyCode::Char('m'),
+        ] {
+            let mut events = vec![
+                base_update_probe_answered(crate::update::BaseUpdate::Rebase),
+                base_update_probe_answered(crate::update::BaseUpdate::Merge),
+            ];
+            events.extend(return_started());
+            events.extend([key(pressed), key(pressed), Event::Quit]);
+            let (screen, seen) = run_setup(returning(World::three()), events);
+            assert_eq!(
+                seen.returns.len(),
+                1,
+                "{pressed:?} during the run must start no second switch, got {:?}",
+                seen.returns,
+            );
+            assert!(
+                seen.pushes.is_empty() && seen.base_updates.is_empty(),
+                "{pressed:?} during the run must start no push and no base update",
+            );
+            assert_eq!(
+                seen.conflict_runs, 0,
+                "{pressed:?} during the run must start no measurement",
+            );
+            assert!(
+                seen.switches.is_empty(),
+                "{pressed:?} during the run must move the watch nowhere, got {:?}",
+                seen.switches,
+            );
+            assert!(
+                strip_ansi(&screen).contains(SWITCH_NOTICE),
+                "{pressed:?} during the run must leave the run on the row, got {screen:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_measurement_that_the_switch_of_the_second_esc_overlapped_says_nothing_and_frees_m() {
+        // `m` started a measurement of the branch that HEAD of home names. The
+        // switch moves HEAD, so the line of that measurement would describe a
+        // branch that is gone. It says nothing, and its outcome frees `m`.
+        let bursts = vec![
+            vec![press_m(), key(KeyCode::Esc), key(KeyCode::Esc)],
+            vec![
+                Event::ConflictsStarted {
+                    generation: Generation::default(),
+                    branch: OVERLAPPED_BASE.to_string(),
+                },
+                finished(ConflictsOutcome::Measured {
+                    branch: OVERLAPPED_BASE.to_string(),
+                    rebase: Ok(gitscratch::Conflicts::nothing_replayed()),
+                    merge: Ok(gitscratch::Conflicts::nothing_replayed()),
+                    dirty: false,
+                }),
+            ],
+            vec![Event::ReturnFinished(PushOutcome {
+                success: true,
+                output: format!("{SWITCHED}\n"),
+            })],
+            // A key takes the report of the switch off the row, so the row is
+            // free for a line that waited.
+            vec![key(KeyCode::Char('x'))],
+            vec![
+                press_m(),
+                started_against_main(),
+                finished(measured_clean()),
+                Event::Quit,
+            ],
+        ];
+        let base = Instant::now();
+        let (displayed, seen) = drive_bursts(bursts, returning(World::three()), move || base);
+        assert_eq!(
+            seen.conflict_runs, 2,
+            "the outcome of the overlapped measurement must free `m`",
+        );
+        assert!(
+            !seen
+                .paints
+                .iter()
+                .any(|paint| strip_ansi(paint).contains(OVERLAPPED_BASE)),
+            "a line of the overlapped measurement must never reach the row, got {:?}",
+            seen.paints,
+        );
+        assert!(
+            strip_ansi(&displayed).contains(MEASURED_CLEAN),
+            "the next measurement must report, got {displayed:?}",
+        );
+    }
+
+    // ---- The pull-request lookups ----
+
+    /// The frame text of the pull-request tests: the branch of the snapshot,
+    /// then the text of its indicator, or `-` when the snapshot has none. A
+    /// frame then says which worktree it shows and what its header says.
+    fn pull_frame(snapshot: &Snapshot, _frame_dims: Dimensions) -> String {
+        format!(
+            "{} {}",
+            snapshot.branch,
+            snapshot
+                .pull
+                .as_ref()
+                .map_or("-".to_string(), |header| header.indicator.text()),
+        )
+    }
+
+    /// The setup of the pull-request tests: `world` with a pull target on each
+    /// snapshot, an enabled watch, and [`pull_frame`].
+    fn pull_setup(world: World) -> Setup {
+        Setup {
+            pulls: PullWatch::enabled(),
+            render: Box::new(pull_frame),
+            ..in_world(world.with_pull_targets())
+        }
+    }
+
+    /// The answer of a lookup of the worktree `name`, as the loop receives it.
+    fn pull_answer(name: &str, outcome: crate::pull::LookupOutcome) -> Event {
+        Event::PullAnswered {
+            target: pull_target_of(&worktree(name)),
+            outcome,
+        }
+    }
+
+    /// An answer that says the worktree `name` has the open pull request 690.
+    fn open_pull_answer(name: &str) -> Event {
+        pull_answer(
+            name,
+            crate::pull::LookupOutcome::Answered {
+                numbers: vec![ghrest::PullNumber::new(690)],
+                entry: None,
+            },
+        )
+    }
+
+    /// An answer that says the worktree `name` has no open pull request.
+    fn empty_pull_answer(name: &str) -> Event {
+        pull_answer(
+            name,
+            crate::pull::LookupOutcome::Answered {
+                numbers: Vec::new(),
+                entry: None,
+            },
+        )
+    }
+
+    /// The targets of the lookups that the loop started, in order.
+    fn lookup_targets(seen: &Seen) -> Vec<crate::pull::PullTarget> {
+        seen.pull_lookups
+            .iter()
+            .map(|request| request.target.clone())
+            .collect()
+    }
+
+    /// Run the loop over `bursts` in `setup` on a frozen clock. Gives what
+    /// the hooks saw.
+    fn pull_run(setup: Setup, bursts: Vec<Vec<Event>>) -> Seen {
+        let base = Instant::now();
+        drive_bursts(bursts, setup, move || base).1
+    }
+
+    #[test]
+    fn the_first_lookup_starts_before_any_event_and_the_first_frame_says_unknown() {
+        // The first lookup starts when the loop starts, which is after the
+        // first frame is on the screen. A run that quits at once still
+        // started it, with no cache entry to send.
+        let seen = pull_run(pull_setup(World::alone()), vec![vec![Event::Quit]]);
+        assert_eq!(
+            seen.pull_lookups,
+            vec![LookupRequest {
+                target: pull_target_of(&worktree(ALONE)),
+                cached: None,
+            }],
+            "the loop must start one lookup for the home target",
+        );
+        let (paints, _seen) = paints_of(
+            pull_setup(World::alone()),
+            vec![vec![Event::Resize], vec![Event::Quit]],
+        );
+        assert_eq!(
+            paints,
+            vec![format!("{ALONE} PR ?")],
+            "the header says unknown until the answer comes",
+        );
+    }
+
+    #[test]
+    fn a_filesystem_event_starts_no_lookup() {
+        // A build that writes many files must not send many requests. The
+        // event walks git, and the walk finds the same target.
+        let seen = pull_run(
+            pull_setup(World::alone()),
+            vec![
+                vec![empty_pull_answer(ALONE)],
+                vec![Event::FsChanged],
+                vec![Event::Quit],
+            ],
+        );
+        assert_eq!(seen.collects, 1, "the filesystem event must walk");
+        assert_eq!(seen.pull_lookups.len(), 1, "and it must start no lookup");
+    }
+
+    #[test]
+    fn r_starts_a_lookup() {
+        let seen = pull_run(
+            pull_setup(World::alone()),
+            vec![
+                vec![empty_pull_answer(ALONE)],
+                vec![Event::ForceRefresh],
+                vec![Event::Quit],
+            ],
+        );
+        assert_eq!(seen.collects, 1, "r must walk");
+        assert_eq!(seen.pull_lookups.len(), 2, "r must start one lookup");
+    }
+
+    #[test]
+    fn a_timed_refresh_starts_a_lookup() {
+        // The clock steps a second on each read, so the loop crosses the
+        // deadline of the timed refresh, which is 200 ms after the seed
+        // walk. The wake has no event behind it.
+        let base = Instant::now();
+        let setup = Setup {
+            schedule: WalkSchedule::new(Some(Duration::from_millis(200)), base, Duration::ZERO),
+            ..pull_setup(World::alone())
+        };
+        let (_screen, seen) = drive_bursts(
+            vec![vec![empty_pull_answer(ALONE)], vec![], vec![Event::Quit]],
+            setup,
+            stepping_clock(base, Duration::from_secs(1)),
+        );
+        assert!(seen.collects >= 1, "the timed refresh must walk");
+        assert_eq!(
+            seen.pull_lookups.len(),
+            2,
+            "the timed refresh must start one lookup",
+        );
+    }
+
+    #[test]
+    fn with_no_interval_a_late_clock_starts_no_timed_lookup() {
+        // `--refresh-interval 0` leaves no timed refresh. The clock stands
+        // far past any deadline, and a walk that a filesystem event causes
+        // finds nothing to look up again.
+        let base = Instant::now();
+        let setup = Setup {
+            schedule: WalkSchedule::new(None, base, Duration::ZERO),
+            ..pull_setup(World::alone())
+        };
+        let (_screen, seen) = drive_bursts(
+            vec![
+                vec![empty_pull_answer(ALONE)],
+                vec![Event::FsChanged],
+                vec![Event::Quit],
+            ],
+            setup,
+            stepping_clock(base, Duration::from_secs(3600)),
+        );
+        assert!(seen.collects >= 1, "the event must walk");
+        assert_eq!(seen.pull_lookups.len(), 1, "no interval, no timed lookup");
+    }
+
+    #[test]
+    fn a_move_to_another_worktree_starts_a_lookup_for_it() {
+        let seen = pull_run(
+            pull_setup(World::three()),
+            vec![
+                vec![empty_pull_answer(BRAVO)],
+                vec![key(KeyCode::Right)],
+                vec![Event::Quit],
+            ],
+        );
+        assert_eq!(
+            lookup_targets(&seen),
+            vec![
+                pull_target_of(&worktree(BRAVO)),
+                pull_target_of(&worktree(CHARLIE)),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_branch_that_a_walk_finds_starts_a_lookup_for_the_new_branch() {
+        // `git switch` in another pane moves the branch of the worktree. The
+        // walk that the filesystem event causes finds it, and the target of
+        // the header changes.
+        let world = World::alone().switching_branch(ALONE, "other-topic");
+        let (paints, seen) = paints_of(
+            pull_setup(world),
+            vec![
+                vec![empty_pull_answer(ALONE)],
+                vec![Event::FsChanged],
+                vec![Event::Quit],
+            ],
+        );
+        assert_eq!(
+            lookup_targets(&seen),
+            vec![
+                pull_target_of(&worktree(ALONE)),
+                pull_target_named("other-topic"),
+            ],
+        );
+        assert_eq!(
+            paints.last().map(String::as_str),
+            Some("other-topic PR ?"),
+            "the new branch has no answer yet",
+        );
+    }
+
+    #[test]
+    fn two_triggers_while_a_lookup_is_in_flight_start_one_more_lookup() {
+        let seen = pull_run(
+            pull_setup(World::alone()),
+            vec![
+                vec![Event::ForceRefresh, Event::ForceRefresh],
+                vec![Event::ForceRefresh],
+                vec![empty_pull_answer(ALONE)],
+                vec![Event::Quit],
+            ],
+        );
+        assert_eq!(
+            seen.pull_lookups.len(),
+            2,
+            "the first lookup, and one for all the triggers that waited",
+        );
+    }
+
+    #[test]
+    fn an_answer_after_a_move_never_paints_the_header_of_the_new_worktree() {
+        // The lookup of bravo is in flight when the user moves to charlie.
+        // Its answer fills the cache of bravo. The header of charlie says
+        // unknown, and the move back to bravo shows the answer at once.
+        let (paints, seen) = paints_of(
+            pull_setup(World::three()),
+            vec![
+                vec![key(KeyCode::Right)],
+                vec![open_pull_answer(BRAVO)],
+                vec![key(KeyCode::Left)],
+                vec![Event::Quit],
+            ],
+        );
+        assert_eq!(
+            paints,
+            vec![
+                format!("{CHARLIE} PR ?"),
+                // The answer changes nothing on the screen, so burst 2
+                // paints nothing.
+                format!("{BRAVO} PR #690"),
+            ],
+        );
+        assert_eq!(
+            lookup_targets(&seen),
+            vec![
+                pull_target_of(&worktree(BRAVO)),
+                pull_target_of(&worktree(CHARLIE)),
+            ],
+            "the answer of bravo releases the lookup that waited for charlie",
+        );
+    }
+
+    #[test]
+    fn a_rate_limit_holds_the_lookups_and_the_header_says_unknown() {
+        let seen_paints = paints_of(
+            pull_setup(World::alone()),
+            vec![
+                vec![pull_answer(
+                    ALONE,
+                    crate::pull::LookupOutcome::RateLimited(Duration::from_secs(60)),
+                )],
+                vec![Event::ForceRefresh],
+                vec![Event::Quit],
+            ],
+        );
+        let (paints, seen) = seen_paints;
+        assert_eq!(
+            seen.pull_lookups.len(),
+            1,
+            "the block holds the lookup of r"
+        );
+        assert_eq!(paints, vec![format!("{ALONE} PR ?")]);
+    }
+
+    #[test]
+    fn the_pending_lookup_goes_out_by_itself_at_the_end_of_a_rate_limit() {
+        // The block lasts 200 ms of the real clock. The lookup that `r`
+        // left pending goes out when the loop wakes at the end of the block,
+        // with no event behind the wake. The empty burst keeps the loop
+        // waiting for that wake.
+        //
+        // A loop that never wakes by itself waits on its channel for ever, so
+        // the loop runs on a thread of its own and the test waits for it
+        // with a bound. A missing wake then fails this test instead of
+        // hanging the suite. The thread of such a failure stays blocked
+        // until the test process ends.
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let (_screen, seen) = drive_bursts(
+                vec![
+                    vec![pull_answer(
+                        ALONE,
+                        crate::pull::LookupOutcome::RateLimited(Duration::from_millis(200)),
+                    )],
+                    vec![Event::ForceRefresh],
+                    vec![],
+                    vec![Event::Quit],
+                ],
+                pull_setup(World::alone()),
+                Instant::now,
+            );
+            let _ = done_tx.send(seen.pull_lookups.len());
+        });
+        let lookups = done_rx
+            .recv_timeout(RESCUE_AFTER)
+            .expect("the loop must wake by itself at the end of the block and quit");
+        assert_eq!(lookups, 2);
+    }
+
+    #[test]
+    fn a_missing_gh_turns_the_indicator_off_and_starts_no_more_lookups() {
+        let (paints, seen) = paints_of(
+            pull_setup(World::alone()),
+            vec![
+                vec![pull_answer(ALONE, crate::pull::LookupOutcome::NotInstalled)],
+                vec![Event::ForceRefresh],
+                vec![Event::Quit],
+            ],
+        );
+        assert_eq!(paints, vec![format!("{ALONE} -")], "no indicator any more");
+        assert_eq!(seen.pull_lookups.len(), 1, "r starts no lookup");
+    }
+
+    #[test]
+    fn a_disabled_watch_starts_no_lookup_and_draws_no_indicator() {
+        let setup = Setup {
+            pulls: PullWatch::disabled(),
+            ..pull_setup(World::alone())
+        };
+        let (paints, seen) = paints_of(setup, vec![vec![Event::ForceRefresh], vec![Event::Quit]]);
+        assert!(
+            seen.pull_lookups.is_empty(),
+            "a disabled watch looks up nothing"
+        );
+        assert_eq!(paints, vec![format!("{ALONE} -")]);
+    }
 }
 
 /// The tests of [`Watched`] and of the production switch, against real
@@ -11956,13 +14930,24 @@ mod watched_tests {
 
     use tempfile::TempDir;
 
-    use super::tests::{walk_config, WALK_LOG_LIMIT};
-    use super::{
-        listed, listed_paths, switch_watched, Event, Watched, DIRECTORY_GONE, NOT_A_WORK_TREE,
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use super::tests::{
+        frame, no_fetch, no_list, no_pull, no_tab, timer_off, walk_config, TEST_DEBOUNCE,
+        TEST_DIMS, WALK_LOG_LIMIT,
     };
-    use crate::render::Snapshot;
-    use crate::repo::RepoHandle;
-    use crate::testrepo::{git, git_stdout, init_repo, init_repo_at, init_repo_with_worktree};
+    use super::{
+        event_loop, listed, listed_paths, switch_watched, worktree_on_start_branch, Dimensions,
+        Event, FrameTiming, Generation, LogDemand, LoopHooks, LoopStart, PullWatch, PushCommand,
+        PushUi, SnapshotCache, StartBranch, StartPoint, WalkSchedule, Watched, DIRECTORY_GONE,
+        NOT_A_WORK_TREE,
+    };
+    use crate::render::{Operation, Snapshot};
+    use crate::repo::{RepoHandle, DETACHED_HEAD};
+    use crate::testrepo::{
+        diverged_repo, git, git_allowing_failure, git_stdout, init_repo, init_repo_at,
+        init_repo_with_worktree,
+    };
     use crate::worktrees::{WorktreeBadge, WorktreeEntry, WorktreePath};
 
     /// The main worktree of [`siblings`], on branch `main`. Its path sorts
@@ -12031,6 +15016,18 @@ mod watched_tests {
         Watched::from_handle(handle, resolved(path), tx).expect("watch the fixture")
     }
 
+    /// The [`StartPoint`] of a session that starts in the worktree at `path`:
+    /// that worktree is home, and the branch of its HEAD is the start branch.
+    /// It is built as [`super::run`] builds it, from a handle that is open on
+    /// the worktree.
+    fn start_at(path: &Path) -> StartPoint {
+        let handle = RepoHandle::discover(path).expect("the fixture is a work tree");
+        StartPoint {
+            home: resolved(path),
+            branch: StartBranch::read(handle.repo()),
+        }
+    }
+
     /// A walk puts the badge of its worktree on the snapshot: the position of
     /// the worktree among the worktrees in path order, their count, whether it
     /// is the home worktree, and its label. The label of a detached worktree is
@@ -12042,7 +15039,7 @@ mod watched_tests {
     #[test]
     fn a_walk_puts_the_badge_of_its_worktree_on_the_snapshot() {
         let dir = siblings();
-        let home = resolved(&dir.path().join(LINKED));
+        let home = start_at(&dir.path().join(LINKED));
         let expected = [
             (
                 DETACHED,
@@ -12077,7 +15074,7 @@ mod watched_tests {
         for (name, badge) in expected {
             let mut watched = seeded(&dir.path().join(name), tx.clone());
             let snapshot = watched
-                .walk(&walk_config(), &home, WALK_LOG_LIMIT)
+                .walk(&walk_config(), &home, WALK_LOG_LIMIT, None)
                 .expect("walk the fixture");
             assert_eq!(
                 snapshot.worktree,
@@ -12092,15 +15089,257 @@ mod watched_tests {
     #[test]
     fn a_walk_of_a_repository_with_one_worktree_puts_no_badge_on_the_snapshot() {
         let dir = init_repo();
-        let home = resolved(dir.path());
+        let home = start_at(dir.path());
         let (tx, _rx) = mpsc::channel();
 
         let mut watched = seeded(dir.path(), tx);
         let snapshot = watched
-            .walk(&walk_config(), &home, WALK_LOG_LIMIT)
+            .walk(&walk_config(), &home, WALK_LOG_LIMIT, None)
             .expect("walk the fixture");
 
         assert_eq!(snapshot.worktree, None);
+    }
+
+    /// Walk `watched` once, with the config and the log limit of the tests.
+    fn walked_off_start(watched: &mut Watched, start: &StartPoint) -> bool {
+        watched
+            .walk(&walk_config(), start, WALK_LOG_LIMIT, None)
+            .expect("walk the fixture")
+            .off_start_branch
+    }
+
+    /// After each walk, the snapshot says whether the frame is off the start
+    /// branch. A switch to another branch in the watched worktree makes it
+    /// true on the next walk, and a switch back makes it false.
+    #[test]
+    fn a_walk_says_whether_the_worktree_left_the_start_branch() {
+        let dir = init_repo();
+        let p = dir.path();
+        git(p, &["switch", "-q", "-c", "topic"]);
+        let (tx, _rx) = mpsc::channel();
+        let mut watched = seeded(p, tx);
+        let start = start_at(p);
+
+        git(p, &["switch", "-q", "main"]);
+        assert!(
+            walked_off_start(&mut watched, &start),
+            "on main after a start on topic",
+        );
+
+        git(p, &["switch", "-q", "topic"]);
+        assert!(
+            !walked_off_start(&mut watched, &start),
+            "back on topic, the start branch",
+        );
+    }
+
+    /// A move to a worktree on another branch, or to a detached worktree, sets
+    /// the flag. A move back to the home worktree clears it.
+    #[test]
+    fn a_move_to_another_branch_sets_the_flag_and_a_move_home_clears_it() {
+        let dir = siblings();
+        let main = dir.path().join(MAIN);
+        let start = start_at(&main);
+        let cfg = walk_config();
+        let (tx, _rx) = mpsc::channel();
+        let watched = RefCell::new(seeded(&main, tx.clone()));
+
+        for (name, expected) in [(LINKED, true), (DETACHED, true), (MAIN, false)] {
+            let snapshot = switch_watched(
+                &watched,
+                &resolved(&dir.path().join(name)),
+                tx.clone(),
+                &cfg,
+                &start,
+                WALK_LOG_LIMIT,
+                None,
+            )
+            .unwrap_or_else(|reason| panic!("the switch to {name} must work: {reason}"));
+            assert_eq!(
+                snapshot.off_start_branch, expected,
+                "after the move to {name}"
+            );
+        }
+    }
+
+    /// A session that starts on a detached HEAD has no start branch, so the
+    /// flag is never true in it, on a branch or detached.
+    #[test]
+    fn a_session_that_starts_detached_never_sets_the_flag() {
+        let dir = init_repo();
+        let p = dir.path();
+        git(p, &["branch", "topic"]);
+        git(p, &["switch", "-q", "--detach"]);
+        let (tx, _rx) = mpsc::channel();
+        let mut watched = seeded(p, tx);
+        let start = start_at(p);
+        assert!(
+            start.branch.is_none(),
+            "a detached start has no start branch"
+        );
+
+        git(p, &["switch", "-q", "topic"]);
+        assert!(!walked_off_start(&mut watched, &start), "on topic");
+
+        git(p, &["switch", "-q", "--detach"]);
+        assert!(!walked_off_start(&mut watched, &start), "detached again");
+    }
+
+    /// A HEAD that detaches after the start is off the start branch.
+    #[test]
+    fn a_head_that_detaches_later_sets_the_flag() {
+        let dir = init_repo();
+        let p = dir.path();
+        git(p, &["switch", "-q", "-c", "topic"]);
+        let (tx, _rx) = mpsc::channel();
+        let mut watched = seeded(p, tx);
+        let start = start_at(p);
+
+        git(p, &["switch", "-q", "--detach"]);
+        assert!(walked_off_start(&mut watched, &start));
+    }
+
+    /// A rebase of the start branch keeps the frame on the start branch,
+    /// although git detaches HEAD for the whole rebase. The `R` key of gsw
+    /// makes such a rebase, so the flag must stay false in it.
+    #[test]
+    fn a_rebase_of_the_start_branch_does_not_set_the_flag() {
+        let dir = diverged_repo();
+        let p = dir.path();
+        let (tx, _rx) = mpsc::channel();
+        let mut watched = seeded(p, tx);
+        let start = start_at(p);
+
+        git_allowing_failure(p, &["rebase", "main"]);
+        let snapshot = watched
+            .walk(&walk_config(), &start, WALK_LOG_LIMIT, None)
+            .expect("walk the fixture");
+
+        assert!(
+            matches!(snapshot.operation, Some(Operation::Rebase { .. })),
+            "the fixture must stop in a rebase, got {:?}",
+            snapshot.operation,
+        );
+        assert_eq!(
+            snapshot.branch, DETACHED_HEAD,
+            "git detaches HEAD in a rebase"
+        );
+        assert!(!snapshot.off_start_branch);
+    }
+
+    /// A rebase of another branch than the start branch sets the flag.
+    #[test]
+    fn a_rebase_of_another_branch_sets_the_flag() {
+        let dir = diverged_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "main"]);
+        let (tx, _rx) = mpsc::channel();
+        let mut watched = seeded(p, tx);
+        let start = start_at(p);
+
+        git(p, &["checkout", "-q", "feature"]);
+        git_allowing_failure(p, &["rebase", "main"]);
+        let snapshot = watched
+            .walk(&walk_config(), &start, WALK_LOG_LIMIT, None)
+            .expect("walk the fixture");
+
+        assert!(
+            matches!(snapshot.operation, Some(Operation::Rebase { .. })),
+            "the fixture must stop in a rebase, got {:?}",
+            snapshot.operation,
+        );
+        assert!(snapshot.off_start_branch);
+    }
+
+    /// A session that starts while a rebase of the start branch is stopped
+    /// takes the branch of that rebase as its start branch. Git detaches HEAD
+    /// for the whole rebase, so the name comes from `head-name`. After the
+    /// rebase, a move to another branch sets the flag.
+    #[test]
+    fn a_session_that_starts_in_a_rebase_takes_the_rebased_branch_as_its_start_branch() {
+        let dir = diverged_repo();
+        let p = dir.path();
+        git_allowing_failure(p, &["rebase", "main"]);
+        let (tx, _rx) = mpsc::channel();
+        let mut watched = seeded(p, tx);
+        let start = start_at(p);
+
+        let snapshot = watched
+            .walk(&walk_config(), &start, WALK_LOG_LIMIT, None)
+            .expect("walk the fixture");
+        assert!(
+            matches!(snapshot.operation, Some(Operation::Rebase { .. })),
+            "the fixture must stop in a rebase, got {:?}",
+            snapshot.operation,
+        );
+        assert!(!snapshot.off_start_branch, "in the rebase of feature");
+
+        git(p, &["rebase", "--abort"]);
+        assert!(
+            !walked_off_start(&mut watched, &start),
+            "back on feature after the abort"
+        );
+
+        git(p, &["switch", "-q", "main"]);
+        assert!(
+            walked_off_start(&mut watched, &start),
+            "on main after a start in a rebase of feature"
+        );
+    }
+
+    /// A start in a rebase that began on a detached HEAD has no start branch,
+    /// because `head-name` names no branch. This test guards the boundary of
+    /// the test above. It is not red-first and passes before the fix.
+    #[test]
+    fn a_session_that_starts_in_a_rebase_of_a_detached_head_has_no_start_branch() {
+        let dir = diverged_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "--detach"]);
+        git_allowing_failure(p, &["rebase", "main"]);
+        let (tx, _rx) = mpsc::channel();
+        let mut watched = seeded(p, tx);
+        let start = start_at(p);
+
+        let snapshot = watched
+            .walk(&walk_config(), &start, WALK_LOG_LIMIT, None)
+            .expect("walk the fixture");
+        assert!(
+            matches!(snapshot.operation, Some(Operation::Rebase { .. })),
+            "the fixture must stop in a rebase, got {:?}",
+            snapshot.operation,
+        );
+        assert!(
+            start.branch.is_none(),
+            "a rebase of a detached HEAD has no start branch"
+        );
+
+        git(p, &["rebase", "--abort"]);
+        git(p, &["switch", "-q", "main"]);
+        assert!(!walked_off_start(&mut watched, &start), "on main");
+    }
+
+    /// A merge in progress leaves HEAD on its branch, so the flag follows the
+    /// branch as it does with no operation.
+    #[test]
+    fn a_merge_in_progress_keeps_the_start_branch() {
+        let dir = diverged_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "main"]);
+        let (tx, _rx) = mpsc::channel();
+        let mut watched = seeded(p, tx);
+        let start = start_at(p);
+
+        git_allowing_failure(p, &["merge", "feature"]);
+        let snapshot = watched
+            .walk(&walk_config(), &start, WALK_LOG_LIMIT, None)
+            .expect("walk the fixture");
+
+        assert!(
+            matches!(snapshot.operation, Some(Operation::Merge { .. })),
+            "the fixture must stop in a merge, got {:?}",
+            snapshot.operation,
+        );
+        assert!(!snapshot.off_start_branch);
     }
 
     /// The name of the file that a test changes in a worktree, to learn which
@@ -12131,7 +15370,7 @@ mod watched_tests {
     /// Assert that the watch is still on the worktree at `dir`, on `branch`:
     /// the path of `watched` is `dir`, and a walk reads a file that changes in
     /// `dir`.
-    fn assert_still_on(watched: &RefCell<Watched>, dir: &Path, branch: &str, home: &WorktreePath) {
+    fn assert_still_on(watched: &RefCell<Watched>, dir: &Path, branch: &str, home: &StartPoint) {
         assert_eq!(
             watched.borrow().path,
             resolved(dir),
@@ -12140,7 +15379,7 @@ mod watched_tests {
         std::fs::write(dir.join(CHANGED), "changed\n").expect("write in the old worktree");
         let later = watched
             .borrow_mut()
-            .walk(&walk_config(), home, WALK_LOG_LIMIT)
+            .walk(&walk_config(), home, WALK_LOG_LIMIT, None)
             .expect("walk the old worktree");
         assert_eq!(
             later.branch, branch,
@@ -12201,7 +15440,7 @@ mod watched_tests {
         let dir = siblings();
         let main = dir.path().join(MAIN);
         let linked = dir.path().join(LINKED);
-        let home = resolved(&main);
+        let home = start_at(&main);
         let cfg = walk_config();
         let (tx, _rx) = mpsc::channel();
         let watched = RefCell::new(seeded(&main, tx.clone()));
@@ -12213,6 +15452,7 @@ mod watched_tests {
             &cfg,
             &home,
             WALK_LOG_LIMIT,
+            None,
         )
         .unwrap_or_else(|reason| panic!("the switch to {LINKED} must work: {reason}"));
         assert_eq!(
@@ -12224,7 +15464,7 @@ mod watched_tests {
         std::fs::write(linked.join(CHANGED), "changed\n").expect("write in the new worktree");
         let later = watched
             .borrow_mut()
-            .walk(&cfg, &home, WALK_LOG_LIMIT)
+            .walk(&cfg, &home, WALK_LOG_LIMIT, None)
             .expect("walk the new worktree");
 
         assert_eq!(later.branch, LINKED);
@@ -12252,14 +15492,22 @@ mod watched_tests {
         let dir = siblings();
         let main = dir.path().join(MAIN);
         let linked = dir.path().join(LINKED);
-        let home = resolved(&main);
+        let home = start_at(&main);
         let target = resolved(&linked);
         std::fs::remove_dir_all(&linked).expect("delete the directory of the linked worktree");
         let (tx, _rx) = mpsc::channel();
         let watched = RefCell::new(seeded(&main, tx.clone()));
 
-        let reason = switch_watched(&watched, &target, tx, &walk_config(), &home, WALK_LOG_LIMIT)
-            .expect_err("a directory that is gone must refuse the switch");
+        let reason = switch_watched(
+            &watched,
+            &target,
+            tx,
+            &walk_config(),
+            &home,
+            WALK_LOG_LIMIT,
+            None,
+        )
+        .expect_err("a directory that is gone must refuse the switch");
 
         assert_still_on(&watched, &main, MAIN, &home);
         assert!(
@@ -12288,7 +15536,7 @@ mod watched_tests {
         let dir = siblings();
         let main = dir.path().join(MAIN);
         let linked = dir.path().join(LINKED);
-        let home = resolved(&main);
+        let home = start_at(&main);
         let target = resolved(&linked);
         let index = git_stdout(
             &linked,
@@ -12298,8 +15546,16 @@ mod watched_tests {
         let (tx, _rx) = mpsc::channel();
         let watched = RefCell::new(seeded(&main, tx.clone()));
 
-        let reason = switch_watched(&watched, &target, tx, &walk_config(), &home, WALK_LOG_LIMIT)
-            .expect_err("a worktree whose walk fails must refuse the switch");
+        let reason = switch_watched(
+            &watched,
+            &target,
+            tx,
+            &walk_config(),
+            &home,
+            WALK_LOG_LIMIT,
+            None,
+        )
+        .expect_err("a worktree whose walk fails must refuse the switch");
 
         assert_still_on(&watched, &main, MAIN, &home);
         assert!(
@@ -12333,7 +15589,7 @@ mod watched_tests {
         let dir = siblings();
         let main = dir.path().join(MAIN);
         let linked = dir.path().join(LINKED);
-        let home = resolved(&main);
+        let home = start_at(&main);
         let (old_tx, old_rx) = mpsc::channel();
         let watched = RefCell::new(seeded(&main, old_tx));
         let (new_tx, new_rx) = mpsc::channel();
@@ -12345,6 +15601,7 @@ mod watched_tests {
             &walk_config(),
             &home,
             WALK_LOG_LIMIT,
+            None,
         )
         .unwrap_or_else(|reason| panic!("the switch to {LINKED} must work: {reason}"));
 
@@ -12428,7 +15685,12 @@ mod watched_tests {
 
         assert_eq!(watched.path, linked);
         let snapshot = watched
-            .walk(&walk_config(), &linked, WALK_LOG_LIMIT)
+            .walk(
+                &walk_config(),
+                &start_at(linked.as_path()),
+                WALK_LOG_LIMIT,
+                None,
+            )
             .expect("walk the linked worktree");
         assert_eq!(snapshot.branch, LINKED);
     }
@@ -12497,5 +15759,526 @@ mod watched_tests {
             reason,
             format!("{NOT_A_WORK_TREE}: {}", target.as_path().display()),
         );
+    }
+
+    // The two presses of Esc, against real repositories.
+
+    /// The name of the start branch in the tests of the two presses of Esc.
+    const TOPIC: &str = "topic";
+
+    /// What the render hook of [`drive_real`] saw in one frame: the parts of
+    /// the snapshot that say where the watch is and whether the name is red.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Shown {
+        /// The branch in the header.
+        branch: String,
+        /// Whether the name in the header is red.
+        off_start_branch: bool,
+        /// The badge of the worktree, as the walk put it.
+        worktree: Option<WorktreeBadge>,
+    }
+
+    /// A key press, as the reader thread sends it.
+    fn press(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    /// Run the real [`event_loop`] on the repository at `home`, with the hooks
+    /// that [`super::run`] builds, and give every frame it rendered, in order.
+    ///
+    /// The hooks that touch git are the real ones: the walk, the switch, the
+    /// listing of the worktrees, and the probe of the start branch. A real
+    /// filesystem watcher is live in each [`Watched`], so a change that the
+    /// test or the loop makes can wake the loop at any time. So the events
+    /// come in bursts, as [`super::push_loop_tests`] queues them: the first
+    /// burst before the loop starts, and each frame queues the next one. A
+    /// wake that a filesystem change causes takes a burst too, which only
+    /// moves that burst earlier. The last burst must end with
+    /// [`Event::Quit`].
+    ///
+    /// The clock is frozen and no timed refresh is scheduled, so only the
+    /// events decide when the loop walks. The hooks that start work (push,
+    /// base update, issue, conflicts) do nothing. The `git switch` of the
+    /// second Esc is the exception: it runs for real, and `drive_real_painted`
+    /// explains how.
+    ///
+    /// `start` must come from [`start_at`] before the test moves HEAD, as the
+    /// start of a session does. The seed walk of `home` fills the cache, so
+    /// the first frame shows the repository as it is when the loop starts.
+    fn drive_real(home: &Path, start: &StartPoint, bursts: Vec<Vec<Event>>) -> Vec<Shown> {
+        drive_real_painted(home, start, bursts).0
+    }
+
+    /// [`drive_real`], and every text the loop painted, in order.
+    ///
+    /// The text of a paint holds the rows under the frame, so a test reads in
+    /// it what the row said. The `start_return` hook runs the `git switch` to
+    /// the end on the thread of the loop, and queues each line it wrote as
+    /// [`Event::RunOutput`] and its outcome as [`Event::ReturnFinished`] on
+    /// the channel of the loop. Production does the same from a thread of its
+    /// own. The run ends inside the wake that started it, so the walk that
+    /// follows the outcome belongs to that wake. A burst that holds the second
+    /// Esc must not hold [`Event::Quit`]: the events of the run queue behind
+    /// it.
+    fn drive_real_painted(
+        home: &Path,
+        start: &StartPoint,
+        bursts: Vec<Vec<Event>>,
+    ) -> (Vec<Shown>, Vec<String>) {
+        let cfg = walk_config();
+        let (tx, rx) = mpsc::channel();
+        let watched = RefCell::new(seeded(home, tx.clone()));
+        let base = Instant::now();
+        let seed = watched
+            .borrow_mut()
+            .walk(&cfg, start, WALK_LOG_LIMIT, None)
+            .expect("walk the fixture");
+        let mut bursts = std::collections::VecDeque::from(bursts);
+        for event in bursts.pop_front().unwrap_or_default() {
+            tx.send(event).expect("queue event");
+        }
+        let later = RefCell::new(bursts);
+        let shown = RefCell::new(Vec::<Shown>::new());
+        let painted = RefCell::new(Vec::<String>::new());
+        let mut displayed = String::new();
+
+        event_loop(
+            &rx,
+            TEST_DEBOUNCE,
+            &mut displayed,
+            LoopStart {
+                cache: SnapshotCache {
+                    snapshot: seed,
+                    collected_at: base,
+                    dims: TEST_DIMS,
+                },
+                freshest: None,
+                schedule: WalkSchedule::unscheduled(),
+                ui: PushUi::new(false),
+                session: crate::remote::Session::Local,
+                home: start.home.clone(),
+                log: LogDemand::Off,
+                start_branch: start.branch.clone(),
+                pulls: PullWatch::disabled(),
+            },
+            LoopHooks {
+                collect: |_current: &WorktreePath, limit: usize| {
+                    watched.borrow_mut().walk(&cfg, start, limit, None)
+                },
+                fetch_log: no_fetch,
+                render: |snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
+                    shown.borrow_mut().push(Shown {
+                        branch: snap.branch.clone(),
+                        off_start_branch: snap.off_start_branch,
+                        worktree: snap.worktree.clone(),
+                    });
+                    if let Some(burst) = later.borrow_mut().pop_front() {
+                        for event in burst {
+                            tx.send(event).expect("queue event");
+                        }
+                    }
+                    frame(&format!("FRAME {}", snap.branch))
+                },
+                render_list: no_list,
+                dimensions: || TEST_DIMS,
+                paint: |output: &str| {
+                    painted.borrow_mut().push(output.to_string());
+                    Ok(())
+                },
+                clock: move || base,
+                next_tick: timer_off,
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
+                start_tab: no_tab,
+                start_issue: |_steps: crate::issue::Steps,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: || listed(&watched),
+                worktree_paths: || listed_paths(&watched),
+                switch: |target: &WorktreePath, limit: usize| {
+                    switch_watched(&watched, target, tx.clone(), &cfg, start, limit, None)
+                },
+                on_start_branch: worktree_on_start_branch,
+                start_pull: no_pull,
+                start_return: |child: std::process::Command| {
+                    let outcome =
+                        crate::push::run_streamed(child, super::RETURN_RUN_NAME, &|line| {
+                            tx.send(Event::RunOutput(line)).expect("queue the line");
+                        });
+                    tx.send(Event::ReturnFinished(outcome))
+                        .expect("queue the outcome");
+                },
+            },
+        )
+        .expect("loop");
+
+        (shown.into_inner(), painted.into_inner())
+    }
+
+    /// The branch that HEAD names in the work tree at `dir`.
+    fn head_of(dir: &Path) -> String {
+        git_stdout(dir, &["rev-parse", "--abbrev-ref", "HEAD"])
+    }
+
+    /// Rule 1, against real repositories. Home is on the start branch and a
+    /// second worktree is on `main`. Right moves the watch to the second
+    /// worktree, where the name is red, and Esc, Esc moves it home. The last
+    /// frame shows home with a name that is not red.
+    #[test]
+    fn two_presses_of_esc_go_home_when_home_is_on_the_start_branch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().join("home");
+        let second = dir.path().join("second");
+        init_repo_at(&home);
+        git(&home, &["switch", "-q", "-c", TOPIC]);
+        git(
+            &home,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                second.to_str().expect("utf-8 path"),
+                "main",
+            ],
+        );
+        let start = start_at(&home);
+
+        let frames = drive_real(
+            &home,
+            &start,
+            vec![
+                vec![press(KeyCode::Right)],
+                vec![press(KeyCode::Esc), press(KeyCode::Esc), Event::Quit],
+            ],
+        );
+
+        let last = frames.last().expect("the loop rendered a frame");
+        assert!(
+            frames
+                .iter()
+                .any(|shown| shown.branch == "main" && shown.off_start_branch),
+            "Right must show the second worktree with a red name, got {frames:?}",
+        );
+        assert_eq!(
+            last.branch, TOPIC,
+            "the last frame must show home, got {frames:?}"
+        );
+        assert!(
+            !last.off_start_branch,
+            "the name must not be red in the last frame"
+        );
+        assert!(
+            last.worktree.as_ref().is_some_and(|badge| badge.home),
+            "the badge of the last frame must say home, got {last:?}",
+        );
+        assert_eq!(
+            head_of(&home),
+            TOPIC,
+            "no git command may move HEAD of home"
+        );
+    }
+
+    /// Rule 2, against real repositories. The session starts on `topic` in
+    /// home, then `git switch main` moves home off the branch, and a second
+    /// worktree takes `topic`. Esc, Esc moves the watch to the second
+    /// worktree, and HEAD of home stays on `main`: no git command ran.
+    #[test]
+    fn two_presses_of_esc_go_to_the_worktree_that_holds_the_start_branch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().join("home");
+        let second = dir.path().join("second");
+        init_repo_at(&home);
+        git(&home, &["switch", "-q", "-c", TOPIC]);
+        let start = start_at(&home);
+        git(&home, &["switch", "-q", "main"]);
+        git(
+            &home,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                second.to_str().expect("utf-8 path"),
+                TOPIC,
+            ],
+        );
+
+        let frames = drive_real(
+            &home,
+            &start,
+            vec![
+                vec![press(KeyCode::Esc)],
+                vec![press(KeyCode::Esc), Event::Quit],
+            ],
+        );
+
+        let first = frames.first().expect("the loop rendered a frame");
+        assert_eq!(first.branch, "main");
+        let last = frames.last().expect("the loop rendered a frame");
+        assert_eq!(
+            last.branch, TOPIC,
+            "the last frame must show the second worktree, got {frames:?}"
+        );
+        assert!(
+            !last.off_start_branch,
+            "the name must not be red in the last frame"
+        );
+        assert!(
+            last.worktree.as_ref().is_some_and(|badge| !badge.home),
+            "the badge of the last frame must not say home, got {last:?}",
+        );
+        assert_eq!(
+            head_of(&home),
+            "main",
+            "no git command may move HEAD of home"
+        );
+    }
+
+    /// The words of git, when a local change stands in the way of a switch,
+    /// that reach the row. Git writes four lines: `error: Your local changes
+    /// to the following files would be overwritten by checkout:`, the file,
+    /// this advice, and `Aborting`. The row keeps the last three lines of a
+    /// failed run ([`crate::push`]), so the first line is not on it.
+    const COMMIT_OR_STASH: &str = "Please commit your changes or stash them";
+
+    /// The text that git writes when the branch of `git switch --no-guess` is
+    /// not a local branch.
+    const INVALID_REFERENCE: &str = "invalid reference";
+
+    /// Whether the repository at `dir` holds the local branch `name`.
+    fn has_local_branch(dir: &Path, name: &str) -> bool {
+        !git_stdout(
+            dir,
+            &[
+                "for-each-ref",
+                "--format=%(refname)",
+                &format!("refs/heads/{name}"),
+            ],
+        )
+        .is_empty()
+    }
+
+    /// Rule 3, against real repositories. The session starts on `topic` in
+    /// home, then `git switch main` moves home off the branch. No worktree is
+    /// on `topic`, so Esc, Esc runs `git switch --no-guess topic` in home.
+    /// HEAD of home is `topic` after it, and the last frame has a name that is
+    /// not red.
+    #[test]
+    fn two_presses_of_esc_switch_home_to_the_start_branch_when_no_worktree_holds_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().join("home");
+        init_repo_at(&home);
+        git(&home, &["switch", "-q", "-c", TOPIC]);
+        let start = start_at(&home);
+        git(&home, &["switch", "-q", "main"]);
+
+        let (frames, painted) = drive_real_painted(
+            &home,
+            &start,
+            vec![
+                vec![press(KeyCode::Esc)],
+                vec![press(KeyCode::Esc)],
+                vec![Event::Quit],
+            ],
+        );
+
+        let first = frames.first().expect("the loop rendered a frame");
+        assert!(
+            first.off_start_branch,
+            "the first frame must show a red name, got {frames:?}",
+        );
+        assert_eq!(head_of(&home), TOPIC, "the run must switch home to topic");
+        let last = frames.last().expect("the loop rendered a frame");
+        assert_eq!(
+            last.branch, TOPIC,
+            "the last frame must show topic, got {frames:?}"
+        );
+        assert!(
+            !last.off_start_branch,
+            "the name must not be red in the last frame, got {frames:?}",
+        );
+        assert!(
+            painted
+                .iter()
+                .any(|text| testcolor::strip_ansi(text).contains("Went back to the start branch")),
+            "the row must say that the switch worked, got {painted:?}",
+        );
+    }
+
+    /// A local change in home that the switch would overwrite. Git refuses,
+    /// gsw never forces, and the words of git are on the row. HEAD of home
+    /// stays on `main`, and the name stays red.
+    #[test]
+    fn a_local_change_that_the_switch_would_overwrite_stops_it_and_git_says_why() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().join("home");
+        init_repo_at(&home);
+        git(&home, &["switch", "-q", "-c", TOPIC]);
+        std::fs::write(home.join("a.txt"), "on topic\n").expect("write a.txt");
+        git(
+            &home,
+            &["commit", "-q", "-a", "-m", "change a.txt on topic"],
+        );
+        let start = start_at(&home);
+        git(&home, &["switch", "-q", "main"]);
+        std::fs::write(home.join("a.txt"), "local change\n").expect("write a.txt");
+
+        let (frames, painted) = drive_real_painted(
+            &home,
+            &start,
+            vec![
+                vec![press(KeyCode::Esc)],
+                vec![press(KeyCode::Esc)],
+                vec![Event::Quit],
+            ],
+        );
+
+        assert_eq!(
+            head_of(&home),
+            "main",
+            "a refused switch must not move HEAD"
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.join("a.txt")).expect("read a.txt"),
+            "local change\n",
+            "a refused switch must keep the local change",
+        );
+        let last = frames.last().expect("the loop rendered a frame");
+        assert!(
+            last.off_start_branch,
+            "the name must stay red, got {frames:?}"
+        );
+        let last_paint = painted.last().expect("the loop painted");
+        assert!(
+            testcolor::strip_ansi(last_paint).contains(COMMIT_OR_STASH),
+            "the words of git must be on the row, got {last_paint:?}",
+        );
+    }
+
+    /// The start branch is gone, and only `origin/topic` is left. The fixture
+    /// adds the remote `origin`, because git guesses a branch only when the
+    /// remote exists. Plain `git switch topic` then makes a new `topic` from
+    /// `origin/topic`, and that branch is not the start branch. `--no-guess`
+    /// refuses, and no local `topic` appears.
+    #[test]
+    fn a_start_branch_that_only_origin_holds_is_not_made_again() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().join("home");
+        init_repo_at(&home);
+        git(&home, &["switch", "-q", "-c", TOPIC]);
+        let start = start_at(&home);
+        git(&home, &["switch", "-q", "main"]);
+        let sha = git_stdout(&home, &["rev-parse", TOPIC]);
+        git(
+            &home,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/none.git",
+            ],
+        );
+        git(&home, &["update-ref", "refs/remotes/origin/topic", &sha]);
+        git(&home, &["branch", "-q", "-D", TOPIC]);
+        assert!(!has_local_branch(&home, TOPIC), "the fixture deleted topic");
+
+        let (frames, painted) = drive_real_painted(
+            &home,
+            &start,
+            vec![
+                vec![press(KeyCode::Esc)],
+                vec![press(KeyCode::Esc)],
+                vec![Event::Quit],
+            ],
+        );
+
+        assert!(
+            !has_local_branch(&home, TOPIC),
+            "the switch must not make a new topic from origin/topic",
+        );
+        assert_eq!(
+            head_of(&home),
+            "main",
+            "a refused switch must not move HEAD"
+        );
+        let last = frames.last().expect("the loop rendered a frame");
+        assert!(
+            last.off_start_branch,
+            "the name must stay red, got {frames:?}"
+        );
+        let last_paint = painted.last().expect("the loop painted");
+        assert!(
+            testcolor::strip_ansi(last_paint).contains(INVALID_REFERENCE),
+            "the words of git must be on the row, got {last_paint:?}",
+        );
+    }
+
+    /// A directory that holds an executable `gh` stub, and the settings that
+    /// find it. The directory must outlive the settings.
+    fn pull_settings() -> (TempDir, crate::pull::PullSettings) {
+        let bin = crate::pull::dir_with_gh(0o755);
+        let path = std::env::join_paths([bin.path()]).expect("join the path");
+        let settings = crate::pull::PullSettings::from_environment(false, Some(&path), None)
+            .expect("the stub is on the path");
+        (bin, settings)
+    }
+
+    /// A repository on branch `main` that tracks `origin/main`, where `origin`
+    /// is `url`.
+    fn tracking_repo(url: &str) -> TempDir {
+        let dir = init_repo();
+        git(dir.path(), &["remote", "add", "origin", url]);
+        git(dir.path(), &["config", "branch.main.remote", "origin"]);
+        git(
+            dir.path(),
+            &["config", "branch.main.merge", "refs/heads/main"],
+        );
+        dir
+    }
+
+    /// The pull header of one walk of `dir`, with `pulls` as the settings.
+    fn pull_of_walk(
+        dir: &Path,
+        pulls: Option<&crate::pull::PullSettings>,
+    ) -> Option<crate::pull::PullHeader> {
+        let (tx, _rx) = mpsc::channel();
+        let mut watched = seeded(dir, tx);
+        watched
+            .walk(&walk_config(), &start_at(dir), WALK_LOG_LIMIT, pulls)
+            .expect("walk the fixture")
+            .pull
+    }
+
+    /// With settings, a walk of a branch on GitHub puts the target of the
+    /// branch on the snapshot, with no answer yet.
+    #[test]
+    fn a_walk_with_settings_marks_a_github_branch_as_unknown() {
+        let dir = tracking_repo("git@github.com:owner/name.git");
+        let (_bin, settings) = pull_settings();
+
+        let header = pull_of_walk(dir.path(), Some(&settings)).expect("a pull header");
+
+        assert_eq!(header.target.repo().to_string(), "github.com/owner/name");
+        assert_eq!(header.target.head(), "main");
+        assert_eq!(header.indicator, crate::pull::PullIndicator::Unknown);
+    }
+
+    /// With no settings, a walk puts no pull header on the snapshot, whatever
+    /// the remote is.
+    #[test]
+    fn a_walk_without_settings_puts_no_pull_header_on_the_snapshot() {
+        let dir = tracking_repo("git@github.com:owner/name.git");
+
+        assert_eq!(pull_of_walk(dir.path(), None), None);
+    }
+
+    /// A remote that is not on GitHub gets no pull header, with settings.
+    #[test]
+    fn a_walk_of_a_gitlab_branch_puts_no_pull_header_on_the_snapshot() {
+        let dir = tracking_repo("git@gitlab.com:owner/name.git");
+        let (_bin, settings) = pull_settings();
+
+        assert_eq!(pull_of_walk(dir.path(), Some(&settings)), None);
     }
 }

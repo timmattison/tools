@@ -9,6 +9,7 @@ name = "pk"
 path = "src/main.rs"
 
 [dependencies]
+childenv.workspace = true
 sysinfo.workspace = true
 clap.workspace = true
 anyhow.workspace = true

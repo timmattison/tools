@@ -41,7 +41,7 @@
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 use tempfile::TempDir;
 
@@ -143,7 +143,7 @@ const PLAIN_FILE: &str = "plain-file";
 /// inherited this one would carry whatever the terminal exported into a test
 /// that never mentioned it.
 fn run_in(working_dir: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_symfix"))
+    childenv::fixture_command(env!("CARGO_BIN_EXE_symfix"))
         .env_clear()
         .current_dir(working_dir)
         .args(args)

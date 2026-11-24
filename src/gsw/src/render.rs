@@ -60,6 +60,11 @@ pub struct Snapshot {
     /// never changes, so that read extends the log of the walk, and it never
     /// puts the commits of another branch under the header of this snapshot.
     /// A snapshot with no start gives a resize no log to read.
+    ///
+    /// The start also keeps the set of the commits that only the branch has,
+    /// from the one walk of the snapshot. The header counts the size of that
+    /// set, and the read on a resize marks its rows from it. The set lives as
+    /// long as the snapshot, and a clone of the snapshot shares it.
     pub log_start: Option<LogStart>,
     /// Upstream tracking branch status (ahead/behind). `None` when the
     /// current branch has no configured upstream.
@@ -78,6 +83,19 @@ pub struct Snapshot {
     /// worktrees. It is `None` in one-shot mode, and `None` for a repository
     /// with one worktree, so the header of such a frame stays as it was.
     pub worktree: Option<WorktreeBadge>,
+    /// The header shows a name that is not the branch where the watch started.
+    ///
+    /// Only watch mode sets it, after each walk. `build_snapshot` and one-shot
+    /// mode leave it `false`: one-shot mode draws one frame, so no frame comes
+    /// after the start. The header paints the name red when it is set.
+    pub off_start_branch: bool,
+    /// The pull-request indicator for the header, or `None` when it does not apply.
+    ///
+    /// Only watch mode sets it. The watch loop puts the target in after each
+    /// walk and the indicator in before each render. One-shot mode leaves it
+    /// `None`, so the header of such a frame is byte for byte what it was
+    /// before the indicator.
+    pub pull: Option<crate::pull::PullHeader>,
 }
 
 /// State of the local branch relative to its upstream tracking ref.
@@ -131,6 +149,15 @@ pub struct LogEntry {
     /// [`UNKNOWN_AGE`] rather than a number, because every number available
     /// here is a lie — `0s` in particular claims the commit landed this second.
     pub age: Option<Duration>,
+    /// The commit is only on the current branch: the start of the log reaches
+    /// it, and the base does not. These are the commits that the ahead count
+    /// of the header counts ([`Snapshot::commits_ahead`]).
+    ///
+    /// It is `false` for every commit when HEAD is on the base, or when the
+    /// base does not resolve. The header then counts zero too.
+    ///
+    /// The log row of such a commit shows [`BRANCH_MARK`] in its gutter.
+    pub on_branch: bool,
 }
 
 /// One file row in the frame.
@@ -219,30 +246,107 @@ pub fn render(snapshot: &Snapshot, opts: &RenderOptions) -> String {
 /// Every frame of gsw starts with these lines. One function draws them, so no
 /// two frames draw them differently. The row budget of a frame counts exactly
 /// these lines as its header chrome (`header_chrome` in `main.rs`).
+///
+/// The whole header is bold. The behind segment is also yellow. When
+/// `snapshot.off_start_branch` is set, the name of HEAD is also red, and
+/// nothing else is: not the lead, the separators, the ahead clause, the behind
+/// segment, or the upstream field. A hard cut that removed the name leaves no
+/// red span. With the flag clear, the header is byte-for-byte what it was
+/// before the name had a color of its own.
+///
+/// When `snapshot.pull` is set, the indicator ends the header row. The row is
+/// then exactly `width` columns wide, with at least [`PULL_GAP`] plain spaces
+/// between the header and the indicator. The header must fit in the columns
+/// that the indicator leaves, through the ladder of [`header_segments`] with no
+/// hard cut. If it does not fit, the row has no indicator and the header takes
+/// the full width. The name of the branch outranks the indicator. With
+/// `pull` unset, the row is what it was before the indicator, byte for byte.
 pub(crate) fn render_head(
     snapshot: &Snapshot,
     width: usize,
     refresh: Option<&RefreshStatus>,
 ) -> Vec<String> {
-    let HeaderSegments {
-        prefix,
-        behind,
-        suffix,
-    } = header_segments(snapshot, width);
-    // The whole header is bold as before; the optional behind segment is
-    // additionally warning-colored (yellow) to flag that the branch needs a
-    // rebase. When `behind` is `None` the prefix+suffix reproduce today's
-    // line byte-for-byte.
-    let header_line = match behind {
-        Some(seg) => format!("{}{}{}", prefix.bold(), seg.yellow().bold(), suffix.bold()),
-        None => format!("{prefix}{suffix}").bold().to_string(),
-    };
+    let header_line = header_row(snapshot, width);
     let mut lines = vec![header_line];
     if let Some(op) = &snapshot.operation {
         lines.push(render_operation_line(op, width));
     }
     lines.push(render_separator(width, refresh));
     lines
+}
+
+/// The header row: the painted header, and the pull-request indicator at the
+/// right end when both fit.
+///
+/// The indicator needs its own width and [`PULL_GAP`] columns. The header must
+/// fit in the rest through the ladder alone, with no hard cut. When it does,
+/// plain spaces fill the row up to the indicator, so the last column of the
+/// row is the last column of the indicator. Otherwise the row has no
+/// indicator and the header takes the full width. The name of the branch
+/// outranks the indicator.
+fn header_row(snapshot: &Snapshot, width: usize) -> String {
+    let paint = |segments| paint_header(segments, snapshot.off_start_branch);
+    let Some(pull) = &snapshot.pull else {
+        return paint(header_segments(snapshot, width));
+    };
+    let text_width = UnicodeWidthStr::width(pull.indicator.text().as_str());
+    let fitted = width
+        .checked_sub(text_width + PULL_GAP)
+        .and_then(|room| fit_header(snapshot, room));
+    match fitted {
+        Some(segments) => {
+            let gap = width - text_width - segments.width();
+            format!(
+                "{}{}{}",
+                paint(segments),
+                " ".repeat(gap),
+                pull.indicator.paint()
+            )
+        }
+        None => paint(header_segments(snapshot, width)),
+    }
+}
+
+/// Paints the segments of the header: the whole header bold, the name red when
+/// `off_start_branch` is set, and the behind segment yellow.
+fn paint_header(segments: HeaderSegments, off_start_branch: bool) -> String {
+    let HeaderSegments {
+        lead,
+        name,
+        rest,
+        behind,
+        suffix,
+    } = segments;
+    // The whole header is bold as before; the optional behind segment is
+    // additionally warning-colored (yellow) to flag that the branch needs a
+    // rebase.
+    if off_start_branch {
+        // The name is red as well as bold, as the behind segment is yellow as
+        // well as bold. A cut that removed the name leaves it empty, and an
+        // empty name gets no span at all, so the line has no red code.
+        let name = if name.is_empty() {
+            String::new()
+        } else {
+            name.red().bold().to_string()
+        };
+        let behind = behind
+            .map(|seg| seg.yellow().bold().to_string())
+            .unwrap_or_default();
+        format!(
+            "{}{name}{}{behind}{}",
+            lead.bold(),
+            rest.bold(),
+            suffix.bold()
+        )
+    } else {
+        // The name keeps the style of the text around it. When `behind` is
+        // `None` the prefix and the suffix reproduce the line byte-for-byte.
+        let prefix = format!("{lead}{name}{rest}");
+        match behind {
+            Some(seg) => format!("{}{}{}", prefix.bold(), seg.yellow().bold(), suffix.bold()),
+            None => format!("{prefix}{suffix}").bold().to_string(),
+        }
+    }
 }
 
 /// Produce the colored, multi-line frame with every displayed age advanced
@@ -322,7 +426,39 @@ pub(crate) fn render_with_offset(
 /// Visible gap between the short hash and the subject in a log row.
 const LOG_HASH_SUBJECT_SEP: &str = "  ";
 
+/// The mark of a log row whose commit is only on the current branch
+/// ([`LogEntry::on_branch`]). The ahead count of the header counts these
+/// commits, so the mark shows which rows that count holds.
+///
+/// The mark sits in a gutter of one column at the left of the row, before the
+/// hash. Every other log row shows a blank in that gutter. The gutter is on
+/// every log row, also when no row has the mark. So the hash column does not
+/// move when the first commit lands on a new branch.
+///
+/// The mark is a glyph and not only a color. So it stays visible with no
+/// color: in 8-color mode and in piped output with no escape codes.
+pub(crate) const BRANCH_MARK: char = '▎';
+
+/// The gutter of a log row whose commit is not only on the current branch.
+/// It is as wide as [`BRANCH_MARK`], so every hash starts in one column.
+const LOG_GUTTER_BLANK: char = ' ';
+
+/// The glyphs of the log row `row` after its gutter, or `None` when `row`
+/// does not start with a gutter. The tests use it to find a log row by the
+/// hash at its start.
+#[cfg(test)]
+pub(crate) fn after_log_gutter(row: &str) -> Option<&str> {
+    row.strip_prefix(BRANCH_MARK)
+        .or_else(|| row.strip_prefix(LOG_GUTTER_BLANK))
+}
+
 /// Render one commit-log row.
+///
+/// The row starts with a gutter of one column: [`BRANCH_MARK`] when the
+/// commit is only on the current branch ([`LogEntry::on_branch`]), and a blank
+/// on every other row. The gutter takes its column from the subject, so the
+/// row is never wider than `width`, and the age column stays in line with the
+/// age column of the file rows.
 ///
 /// `age_offset` is added (saturating) to the commit's age before it is
 /// formatted and used to drive the hash/subject/age fades, so the whole row
@@ -331,16 +467,20 @@ const LOG_HASH_SUBJECT_SEP: &str = "  ";
 /// give us ([`LogEntry::age`] of `None`) stays unknown whatever the offset —
 /// advancing a duration gsw never had produces a number it still cannot back.
 fn render_log_row(entry: &LogEntry, width: usize, truecolor: bool, age_offset: Duration) -> String {
-    // Layout: `{hash}  {subject…}   {age}` — the rightmost AGE_FIELD cells
-    // hold the right-aligned age, matching the file-row age column exactly.
-    // The subject is padded to fill the gap so the age column lines up.
+    // Layout: `{mark}{hash}  {subject…}   {age}` — the first cell is the
+    // gutter, which holds BRANCH_MARK or a blank, so every hash starts in the
+    // same column. The rightmost AGE_FIELD cells hold the right-aligned age,
+    // matching the file-row age column exactly. The subject is padded to fill
+    // the gap so the age column lines up.
     let effective_age = entry.age.map(|age| age.saturating_add(age_offset));
+    let gutter = colorize_log_gutter(entry.on_branch, truecolor);
+    let gutter_width = UnicodeWidthStr::width(gutter.input.as_str());
     let hash_width = UnicodeWidthStr::width(entry.hash.as_str());
     let hash_sep_width = LOG_HASH_SUBJECT_SEP.chars().count();
     let sep_to_age = " ".repeat(SEP_DELS_AGE);
 
     let subject_budget = width
-        .saturating_sub(hash_width + hash_sep_width + SEP_DELS_AGE + AGE_FIELD)
+        .saturating_sub(gutter_width + hash_width + hash_sep_width + SEP_DELS_AGE + AGE_FIELD)
         .max(1);
     let subject_truncated = truncate_right(&entry.subject, subject_budget);
     let subject_padded = pad_right(&subject_truncated, subject_budget);
@@ -351,7 +491,7 @@ fn render_log_row(entry: &LogEntry, width: usize, truecolor: bool, age_offset: D
     let hash_str = colorize_log_hash(&entry.hash, effective_age, truecolor);
     let subject_str = colorize_log_subject(&subject_padded, effective_age, truecolor);
     let age_str = colorize_log_age(&age_field, effective_age, truecolor);
-    format!("{hash_str}{LOG_HASH_SUBJECT_SEP}{subject_str}{sep_to_age}{age_str}")
+    format!("{gutter}{hash_str}{LOG_HASH_SUBJECT_SEP}{subject_str}{sep_to_age}{age_str}")
 }
 
 /// Total width of everything to the right of the path column: the bar plus
@@ -370,13 +510,30 @@ fn compute_path_width(opts: &RenderOptions) -> usize {
 
 /// The header split into independently-styleable pieces.
 ///
-/// `render` paints `prefix` and `suffix` bold (as the whole header has always
-/// been) and, when present, paints `behind` yellow + bold as a rebase warning.
-/// `behind` is `None` exactly when the branch is up to date with its base, in
-/// which case `prefix` + `suffix` concatenate to today's header byte-for-byte.
+/// The pieces carry no pull-request indicator. [`render_head`] adds it after
+/// the pieces, when the header fits in the columns that the indicator leaves.
+///
+/// `render` paints `lead`, `rest` and `suffix` bold (as the whole header has
+/// always been) and, when present, paints `behind` yellow + bold as a rebase
+/// warning. `behind` is `None` exactly when the branch is up to date with its
+/// base. When `behind` is `None`, `lead` + `name` + `rest` + `suffix`
+/// concatenate to the header byte-for-byte. When `behind` is `Some`, it goes
+/// between `rest` and `suffix`.
+///
+/// `name` is split out so `render_head` can paint it red + bold when the
+/// snapshot is off its start branch. With the flag clear, `render_head` joins
+/// the three pieces again and paints them as one bold run.
 struct HeaderSegments {
-    /// Up to and including `ahead of {base}`.
-    prefix: String,
+    /// The text before the name, with the ` • ` after the lead, for example
+    /// `gsw ⌂ 1/4 • `.
+    lead: String,
+    /// The name as the header draws it, shaved or whole. Empty when a hard cut
+    /// removed it.
+    name: String,
+    /// The text after the name, up to and including `ahead of {base}`, for
+    /// example ` • 3 commits ahead of main`. A hard cut puts its `…` at the
+    /// end of this piece, so the mark is never red.
+    rest: String,
     /// `, {m} behind` — present only when `commits_behind > 0`.
     behind: Option<String>,
     /// The upstream field. Empty when the branch tracks nothing.
@@ -386,7 +543,9 @@ struct HeaderSegments {
 impl HeaderSegments {
     /// Display width of the assembled line.
     fn width(&self) -> usize {
-        UnicodeWidthStr::width(self.prefix.as_str())
+        UnicodeWidthStr::width(self.lead.as_str())
+            + UnicodeWidthStr::width(self.name.as_str())
+            + UnicodeWidthStr::width(self.rest.as_str())
             + self.behind.as_deref().map_or(0, UnicodeWidthStr::width)
             + UnicodeWidthStr::width(self.suffix.as_str())
     }
@@ -402,11 +561,32 @@ impl HeaderSegments {
     /// clause — because by the time the ladder reaches here it has already
     /// decided the upstream field earns its columns. Only a terminal too
     /// narrow for that field alone cuts into the field itself.
+    ///
+    /// The lead, the name and the rest are cut as one line, so the cut falls
+    /// where it fell before the name was split out. The kept text goes back
+    /// over the three pieces in order. The `…` of the cut goes at the end of
+    /// `rest`, so it keeps the bold style and is never red, even when the cut
+    /// lands inside the name. A cut that removes the name leaves `name` empty.
     fn clamp(self, width: usize) -> Self {
         let suffix = truncate_to_budget(&self.suffix, width);
         let identity_budget = width - UnicodeWidthStr::width(suffix.as_str());
-        let prefix = truncate_to_budget(&self.prefix, identity_budget);
-        let left = identity_budget - UnicodeWidthStr::width(prefix.as_str());
+        let identity = format!("{}{}{}", self.lead, self.name, self.rest);
+        let cut = truncate_to_budget(&identity, identity_budget);
+        let left = identity_budget - UnicodeWidthStr::width(cut.as_str());
+        let (lead, name, rest) = if cut == identity {
+            (self.lead, self.name, self.rest)
+        } else {
+            // A cut line is the kept characters, then one `…` (or nothing for
+            // a budget of zero).
+            let mut kept: Vec<char> = cut.chars().collect();
+            let mark = kept.pop();
+            let mut kept = kept.into_iter();
+            let lead: String = kept.by_ref().take(self.lead.chars().count()).collect();
+            let name: String = kept.by_ref().take(self.name.chars().count()).collect();
+            let mut rest: String = kept.collect();
+            rest.extend(mark);
+            (lead, name, rest)
+        };
         // A cut prefix ends mid-phrase, and `, 87 behind` hanging off an
         // ellipsis reads as nonsense — so the segment survives whole or not
         // at all.
@@ -414,7 +594,9 @@ impl HeaderSegments {
             .behind
             .filter(|seg| UnicodeWidthStr::width(seg.as_str()) <= left);
         Self {
-            prefix,
+            lead,
+            name,
+            rest,
             behind,
             suffix,
         }
@@ -449,6 +631,10 @@ const HEADER_NAME_FLOOR: usize = 10;
 /// names shaved toward [`HEADER_NAME_FLOOR`] longest-first, then the upstream
 /// field entirely, then a hard cut.
 ///
+/// The pull-request indicator has no part in this ladder. The caller that
+/// shows it asks [`fit_header`] for a width smaller by the indicator and
+/// [`PULL_GAP`], so the indicator never takes a rung from the header.
+///
 /// The header carries no age. Every age on the frame belongs to a row that
 /// names what it is aging — a file or a commit — and the newest commit's age
 /// sits on the first log row, directly beneath this line.
@@ -460,30 +646,53 @@ const HEADER_NAME_FLOOR: usize = 10;
 /// shaves the branch. The hard cut takes text from the right, so the badge is
 /// the last text to go.
 fn header_segments(snap: &Snapshot, width: usize) -> HeaderSegments {
+    ladder(snap, width).unwrap_or_else(|bare| bare.clamp(width))
+}
+
+/// Runs the ladder of [`header_segments`] and returns the first rung that
+/// fits in `width` columns: the full header, the header with the counts of the
+/// upstream only, the header with shaved names, and the header with no
+/// upstream field. Returns `None` when even the last rung is too wide, so the
+/// hard cut does not apply here.
+///
+/// The watch header calls this to learn if the header and the pull-request
+/// indicator fit in one row.
+fn fit_header(snap: &Snapshot, width: usize) -> Option<HeaderSegments> {
+    ladder(snap, width).ok()
+}
+
+/// The ladder itself. `Ok` holds the rung that fits. `Err` holds the last
+/// rung, which does not fit, for the hard cut.
+fn ladder(snap: &Snapshot, width: usize) -> Result<HeaderSegments, HeaderSegments> {
     let name = header_name(snap);
     let compose =
         |name: &str, base: &str, detail: UpstreamDetail| compose_header(snap, name, base, detail);
 
     let full = compose(name, &snap.base, UpstreamDetail::Full);
     if full.width() <= width {
-        return full;
+        return Ok(full);
     }
     let counts_only = compose(name, &snap.base, UpstreamDetail::CountsOnly);
     if counts_only.width() <= width {
-        return counts_only;
+        return Ok(counts_only);
     }
 
     let (name, base) = shave_names(name, &snap.base, counts_only.width().saturating_sub(width));
     let shaved = compose(&name, &base, UpstreamDetail::CountsOnly);
     if shaved.width() <= width {
-        return shaved;
+        return Ok(shaved);
     }
     let bare = compose(&name, &base, UpstreamDetail::Omitted);
     if bare.width() <= width {
-        return bare;
+        Ok(bare)
+    } else {
+        Err(bare)
     }
-    bare.clamp(width)
 }
+
+/// The least number of spaces between the header text and the pull-request
+/// indicator.
+const PULL_GAP: usize = 2;
 
 /// The name of the tool, where every header starts.
 const HEADER_TOOL: &str = "gsw";
@@ -546,16 +755,18 @@ fn compose_header(
             UpstreamDetail::Omitted => String::new(),
         })
         .unwrap_or_default();
-    let prefix = format!(
-        "{lead} • {name} • {n} {word} ahead of {base}",
-        lead = header_lead(snap.worktree.as_ref()),
+    let lead = format!("{} • ", header_lead(snap.worktree.as_ref()));
+    let rest = format!(
+        " • {n} {word} ahead of {base}",
         n = snap.commits_ahead,
         word = commit_word,
     );
     let behind = (snap.commits_behind > 0).then(|| format!(", {} behind", snap.commits_behind));
     let suffix = upstream_field;
     HeaderSegments {
-        prefix,
+        lead,
+        name: name.to_string(),
+        rest,
         behind,
         suffix,
     }
@@ -1001,6 +1212,16 @@ const LOG_HASH_BASE_RGB: (u8, u8, u8) = (255, 215, 0);
 const LOG_SUBJECT_BASE_RGB: (u8, u8, u8) = (220, 220, 220);
 /// Base RGB for the commit-log age column.
 const LOG_AGE_BASE_RGB: (u8, u8, u8) = (190, 190, 190);
+/// RGB of [`BRANCH_MARK`] in truecolor mode: a medium blue.
+///
+/// No other part of gsw paints blue. Red tells of a conflict or a deletion,
+/// green of a staged or added file, yellow of a hash or an unstaged file,
+/// cyan of an untracked file or a bar, and magenta of a rename. So the mark
+/// tells of no problem and of no file status. The contrast of this blue is
+/// about 6.5:1 on black and 3.2:1 on white, so the mark is visible on a dark
+/// theme and on a light theme. The mark does not fade with age, because it
+/// tells which set a commit is in, and not how old the commit is.
+const BRANCH_MARK_RGB: (u8, u8, u8) = (70, 140, 255);
 
 // --- File-row truecolor base palette ---------------------------------------
 //
@@ -1080,6 +1301,24 @@ fn colorize_log_subject(subject: &str, age: Option<Duration>, truecolor: bool) -
             Some(AgeDim::Fresh | AgeDim::Recent) => subject.normal(),
             Some(AgeDim::Aging | AgeDim::Stale) | None => subject.dimmed(),
         }
+    }
+}
+
+/// The gutter of a commit-log row, painted.
+///
+/// A commit that is only on the current branch gets [`BRANCH_MARK`] in blue.
+/// With `truecolor`, the blue is [`BRANCH_MARK_RGB`]. Without, it is bright
+/// blue, because plain blue is too dark to read on many dark themes. See
+/// [`BRANCH_MARK_RGB`] for why the mark is blue. Every other row gets
+/// [`LOG_GUTTER_BLANK`] with no paint.
+fn colorize_log_gutter(on_branch: bool, truecolor: bool) -> ColoredString {
+    match (on_branch, truecolor) {
+        (false, _) => LOG_GUTTER_BLANK.to_string().normal(),
+        (true, true) => {
+            let (r, g, b) = BRANCH_MARK_RGB;
+            BRANCH_MARK.to_string().truecolor(r, g, b)
+        }
+        (true, false) => BRANCH_MARK.to_string().bright_blue(),
     }
 }
 
@@ -1195,6 +1434,8 @@ mod tests {
             operation: None,
             push_remote: None,
             worktree: None,
+            off_start_branch: false,
+            pull: None,
         }
     }
 
@@ -1464,6 +1705,7 @@ mod tests {
             hash: "52ef922".into(),
             subject: "an old commit that has been sitting here for a very long time".into(),
             age: Some(ancient()),
+            on_branch: false,
         }];
         let mut o = opts();
         o.log_lines = 5;
@@ -1704,6 +1946,403 @@ mod tests {
             .iter()
             .map(|frame| strip_ansi(frame.lines().next().unwrap_or_default()))
             .collect()
+    }
+
+    /// The first line of the frame of `snap` in a pane of `width` columns,
+    /// with the escape codes forced on and left in.
+    fn forced_header_line(snap: &Snapshot, width: usize) -> String {
+        testcolor::with_forced_ansi(|| {
+            let mut o = opts();
+            o.terminal_width = width;
+            render(snap, &o)
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        })
+    }
+
+    /// The overlong header with a badge, a behind segment and an upstream,
+    /// so every rung of the ladder has something to cut.
+    fn snap_with_everything() -> Snapshot {
+        let mut snap = snap_with_overlong_header();
+        snap.commits_behind = 4;
+        snap.worktree = Some(worktree_badge(1, 4, true, LONG_BRANCH));
+        snap
+    }
+
+    const GOLDEN_PLAIN: &str = "\x1b[1mgsw • gsv • 3 commits ahead of main\x1b[0m";
+    const GOLDEN_HOME: &str = "\x1b[1mgsw ⌂ 1/4 • gsv • 3 commits ahead of main\x1b[0m";
+    const GOLDEN_AWAY: &str = "\x1b[1mgsw 3/4 • gsv • 3 commits ahead of main\x1b[0m";
+    const GOLDEN_BEHIND: &str =
+        "\x1b[1mgsw • gsv • 3 commits ahead of main\x1b[0m\x1b[1;33m, 4 behind\x1b[0m\x1b[1m\x1b[0m";
+    const GOLDEN_UPSTREAM: &str =
+        "\x1b[1mgsw • gsv • 3 commits ahead of main • ↑2 ↓1 origin/gsv\x1b[0m";
+    const GOLDEN_FULL: &str =
+        "\x1b[1mgsw ⌂ 1/4 • feature/really-long-branch-name-that-goes-on-forever • 3 commits ahead of main\x1b[0m\x1b[1;33m, 4 behind\x1b[0m\x1b[1m • ↑2 ↓0 origin/feature/really-long-branch-name-that-goes-on-forever\x1b[0m";
+    const GOLDEN_COUNTS: &str =
+        "\x1b[1mgsw ⌂ 1/4 • feature/really-long-branch-name-that-goes-on-forever • 3 commits ahead of main\x1b[0m\x1b[1;33m, 4 behind\x1b[0m\x1b[1m • ↑2 ↓0\x1b[0m";
+    const GOLDEN_SHAVED: &str =
+        "\x1b[1mgsw ⌂ 1/4 • feature/really…es-on-forever • 3 commits ahead of main\x1b[0m\x1b[1;33m, 4 behind\x1b[0m\x1b[1m • ↑2 ↓0\x1b[0m";
+    const GOLDEN_BARE: &str = "\x1b[1mgsw ⌂ 1/4 • featu…ever • 3 commits ahead of main\x1b[0m";
+    const GOLDEN_CUT: &str = "\x1b[1mgsw ⌂ 1/4 • featu…ever • 3 commits ahead of…\x1b[0m";
+    const GOLDEN_CUT_LEAD: &str = "\x1b[1mgsw ⌂ 1/4 •…\x1b[0m";
+    const GOLDEN_CUT_NAME: &str = "\x1b[1mgsw ⌂ 1/4 • featu…e…\x1b[0m";
+
+    #[test]
+    fn the_painted_header_bytes_are_locked_at_every_rung_of_the_ladder() {
+        // A guard, not red-first. It passes before and after the name gets its
+        // own color, because a header whose branch is the start branch must be
+        // byte-for-byte what it was. The goldens were recorded from the code
+        // before the change.
+        let mut behind = snap_with_overlong_header();
+        behind.branch = "gsv".into();
+        behind.commits_behind = 4;
+        behind.upstream = None;
+        let mut with_upstream = snap_with_overlong_header();
+        with_upstream.branch = "gsv".into();
+        with_upstream.upstream = Some(UpstreamStatus {
+            name: "origin/gsv".into(),
+            ahead: 2,
+            behind: 1,
+        });
+        let mut away = snap_with(vec![]);
+        away.worktree = Some(worktree_badge(3, 4, false, "gsv"));
+        let mut home = snap_with(vec![]);
+        home.worktree = Some(worktree_badge(1, 4, true, "gsv"));
+
+        let cases: Vec<(&str, Snapshot, usize, &str)> = vec![
+            ("no badge", snap_with(vec![]), 80, GOLDEN_PLAIN),
+            ("home badge", home, 80, GOLDEN_HOME),
+            ("badge elsewhere", away, 80, GOLDEN_AWAY),
+            ("behind", behind, 80, GOLDEN_BEHIND),
+            ("upstream", with_upstream, 80, GOLDEN_UPSTREAM),
+            ("full", snap_with_everything(), 300, GOLDEN_FULL),
+            ("counts only", snap_with_everything(), 164, GOLDEN_COUNTS),
+            ("shaved", snap_with_everything(), 84, GOLDEN_SHAVED),
+            ("bare", snap_with_everything(), 52, GOLDEN_BARE),
+            ("hard cut", snap_with_everything(), 44, GOLDEN_CUT),
+            (
+                "hard cut into the name",
+                snap_with_everything(),
+                20,
+                GOLDEN_CUT_NAME,
+            ),
+            (
+                "hard cut into the lead",
+                snap_with_everything(),
+                12,
+                GOLDEN_CUT_LEAD,
+            ),
+        ];
+        for (label, snap, width, golden) in cases {
+            let got = forced_header_line(&snap, width);
+            assert_eq!(got, golden, "{label} at {width} columns:\n  {got:?}");
+        }
+    }
+
+    /// The foreground code of red, as `colored` writes it for a bold span.
+    const RED_FG: &str = "31m";
+
+    #[test]
+    fn an_off_start_branch_name_is_painted_red_and_nothing_else_is() {
+        let mut snap = snap_with(vec![]);
+        snap.worktree = Some(worktree_badge(1, 4, true, "gsv"));
+        snap.off_start_branch = true;
+        let got = forced_header_line(&snap, 80);
+        let expected = testcolor::with_forced_ansi(|| {
+            format!(
+                "{}{}{}{}",
+                "gsw ⌂ 1/4 • ".bold(),
+                "gsv".red().bold(),
+                " • 3 commits ahead of main".bold(),
+                // The empty upstream field is an empty bold span, as before.
+                "".bold(),
+            )
+        });
+        assert_eq!(got, expected, "header: {got:?}");
+        assert_eq!(got.matches(RED_FG).count(), 1, "header: {got:?}");
+    }
+
+    /// A pull target for the tests of the indicator.
+    fn pull_target() -> crate::pull::PullTarget {
+        crate::pull::PullTarget::new(
+            ghrest::GithubRepo::from_remote_url("git@github.com:owner/name.git", None).unwrap(),
+            "gsv",
+        )
+    }
+
+    /// The four states of the indicator that the table of the issue names.
+    fn pull_states() -> Vec<crate::pull::PullIndicator> {
+        use crate::pull::PullIndicator;
+        let open = |others| PullIndicator::Open {
+            lowest: ghrest::PullNumber::new(690),
+            others,
+        };
+        vec![
+            open(0),
+            open(1),
+            PullIndicator::NoPull,
+            PullIndicator::Unknown,
+        ]
+    }
+
+    fn with_pull(mut snap: Snapshot, indicator: crate::pull::PullIndicator) -> Snapshot {
+        snap.pull = Some(crate::pull::PullHeader {
+            target: pull_target(),
+            indicator,
+        });
+        snap
+    }
+
+    #[test]
+    fn each_state_of_the_indicator_ends_the_header_row_in_its_style() {
+        use crate::pull::PullIndicator;
+        let open = PullIndicator::Open {
+            lowest: ghrest::PullNumber::new(690),
+            others: 0,
+        };
+        let cases: Vec<(PullIndicator, &str)> = vec![
+            (open, "PR #690"),
+            (PullIndicator::NoPull, "no PR"),
+            (PullIndicator::Unknown, "PR ?"),
+        ];
+        let header = "gsw • gsv • 3 commits ahead of main";
+        for (indicator, text) in cases {
+            let snap = with_pull(snap_with(vec![]), indicator.clone());
+            let got = forced_header_line(&snap, 80);
+            let gap = " ".repeat(80 - text.len() - UnicodeWidthStr::width(header));
+            let expected = testcolor::with_forced_ansi(|| {
+                let painted = match indicator {
+                    PullIndicator::Open { .. } => text.green().bold().to_string(),
+                    _ => text.dimmed().to_string(),
+                };
+                format!("{}{gap}{painted}", header.bold())
+            });
+            assert_eq!(got, expected, "header: {got:?}");
+            let glyphs = strip_ansi(&got);
+            assert_eq!(
+                UnicodeWidthStr::width(glyphs.as_str()),
+                80,
+                "row: {glyphs:?}"
+            );
+            assert!(glyphs.ends_with(text), "row: {glyphs:?}");
+        }
+    }
+
+    #[test]
+    fn the_indicator_with_more_pull_requests_shows_the_count_of_the_others() {
+        let snap = with_pull(
+            snap_with(vec![]),
+            crate::pull::PullIndicator::Open {
+                lowest: ghrest::PullNumber::new(690),
+                others: 1,
+            },
+        );
+        let row = painted_header(&snap, 80);
+        assert!(row.ends_with("PR #690 +1"), "row: {row:?}");
+        assert_eq!(UnicodeWidthStr::width(row.as_str()), 80);
+    }
+
+    #[test]
+    fn the_indicator_keeps_the_red_name_and_the_yellow_behind_segment() {
+        let mut snap = with_pull(
+            snap_with(vec![]),
+            crate::pull::PullIndicator::Open {
+                lowest: ghrest::PullNumber::new(690),
+                others: 0,
+            },
+        );
+        snap.worktree = Some(worktree_badge(1, 4, true, "gsv"));
+        snap.off_start_branch = true;
+        snap.commits_behind = 4;
+        let got = forced_header_line(&snap, 80);
+        let head = "gsw ⌂ 1/4 • gsv • 3 commits ahead of main, 4 behind";
+        let gap = " ".repeat(80 - "PR #690".len() - UnicodeWidthStr::width(head));
+        let expected = testcolor::with_forced_ansi(|| {
+            format!(
+                "{}{}{}{}{}{gap}{}",
+                "gsw ⌂ 1/4 • ".bold(),
+                "gsv".red().bold(),
+                " • 3 commits ahead of main".bold(),
+                ", 4 behind".yellow().bold(),
+                "".bold(),
+                "PR #690".green().bold(),
+            )
+        });
+        assert_eq!(got, expected, "header: {got:?}");
+        assert_eq!(got.matches(RED_FG).count(), 1, "header: {got:?}");
+    }
+
+    #[test]
+    fn the_indicator_never_wraps_and_drops_when_the_header_needs_the_room() {
+        let long_mix = "日本語/🎉/café/".repeat(6);
+        let names = [
+            "gsv",
+            "日本語",
+            "🎉",
+            "café",
+            long_mix.as_str(),
+            LONG_BRANCH,
+        ];
+        for indicator in pull_states() {
+            let text = indicator.text();
+            let w = UnicodeWidthStr::width(text.as_str());
+            for name in names {
+                for badge in [None, Some(worktree_badge(2, 3, false, name))] {
+                    let mut plain = snap_with_everything();
+                    plain.branch = name.into();
+                    plain.worktree = badge;
+                    for upstream in [true, false] {
+                        for behind in [0, 4] {
+                            if !upstream {
+                                plain.upstream = None;
+                            }
+                            plain.commits_behind = behind;
+                            let snap = with_pull(plain.clone(), indicator.clone());
+                            for width in 1..=200 {
+                                let frame = testcolor::with_forced_ansi(|| {
+                                    let mut o = opts();
+                                    o.terminal_width = width;
+                                    render(&snap, &o)
+                                });
+                                let rows: Vec<String> = frame.lines().map(strip_ansi).collect();
+                                for row in &rows {
+                                    assert!(
+                                        UnicodeWidthStr::width(row.as_str()) <= width,
+                                        "width {width}, name {name:?}, row {row:?}"
+                                    );
+                                }
+                                let row = &rows[0];
+                                let fits = width >= w + PULL_GAP
+                                    && fit_header(&snap, width - w - PULL_GAP).is_some();
+                                if fits {
+                                    assert_eq!(
+                                        UnicodeWidthStr::width(row.as_str()),
+                                        width,
+                                        "width {width}, name {name:?}, row {row:?}"
+                                    );
+                                    let head = row.strip_suffix(text.as_str());
+                                    assert!(
+                                        head.is_some_and(|h| h.ends_with(&" ".repeat(PULL_GAP))),
+                                        "width {width}, name {name:?}, row {row:?}"
+                                    );
+                                } else {
+                                    let mut bare = snap.clone();
+                                    bare.pull = None;
+                                    let expected = painted_header(&bare, width);
+                                    assert_eq!(
+                                        row, &expected,
+                                        "width {width}, name {name:?}, row {row:?}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_header_with_no_pull_is_the_painted_ladder_at_every_width() {
+        // The goldens lock the bytes at each rung. This test also locks every
+        // width from 1 to 200 against `header_segments` painted by the same
+        // helper that `render_head` uses, so no painting code repeats here.
+        for off in [false, true] {
+            let mut snap = snap_with_everything();
+            snap.off_start_branch = off;
+            for width in 1..=200 {
+                let got = forced_header_line(&snap, width);
+                let expected = testcolor::with_forced_ansi(|| {
+                    paint_header(header_segments(&snap, width), off)
+                });
+                assert_eq!(got, expected, "width {width}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_flag_changes_the_color_of_the_header_and_never_its_glyphs() {
+        let long_mix = "日本語/🎉/café/".repeat(6);
+        let names = [
+            "gsv",
+            "日本語",
+            "🎉",
+            "café",
+            long_mix.as_str(),
+            LONG_BRANCH,
+        ];
+        for name in names {
+            for badge in [None, Some(worktree_badge(2, 3, false, name))] {
+                let mut snap = snap_with_overlong_header();
+                snap.branch = name.into();
+                snap.commits_behind = 4;
+                snap.worktree = badge;
+                let mut off = snap.clone();
+                off.off_start_branch = true;
+                for width in 1..=260 {
+                    let plain = strip_ansi(&forced_header_line(&snap, width));
+                    let marked = strip_ansi(&forced_header_line(&off, width));
+                    assert_eq!(plain, marked, "{name:?} at {width} columns");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_hard_cut_into_the_name_keeps_the_rest_of_the_name_red_and_the_mark_plain() {
+        let mut snap = snap_with_everything();
+        snap.off_start_branch = true;
+        // At 20 columns the shaved name `featu…ever` is cut again, after its
+        // seventh character.
+        let got = forced_header_line(&snap, 20);
+        let expected = testcolor::with_forced_ansi(|| {
+            format!(
+                "{}{}{}{}",
+                "gsw ⌂ 1/4 • ".bold(),
+                "featu…e".red().bold(),
+                "…".bold(),
+                "".bold(),
+            )
+        });
+        assert_eq!(got, expected, "header: {got:?}");
+    }
+
+    #[test]
+    fn a_hard_cut_that_removes_the_name_leaves_no_red_in_the_header() {
+        let mut snap = snap_with_everything();
+        snap.off_start_branch = true;
+        for width in 1..=12 {
+            let got = forced_header_line(&snap, width);
+            assert!(!got.contains(RED_FG), "{width} columns: {got:?}");
+        }
+        // The cut at 12 columns ends inside the lead, not at the name.
+        assert_eq!(strip_ansi(&forced_header_line(&snap, 12)), "gsw ⌂ 1/4 •…");
+    }
+
+    #[test]
+    fn the_red_name_and_the_yellow_behind_segment_show_together() {
+        let mut snap = snap_with(vec![]);
+        snap.commits_behind = 4;
+        snap.upstream = Some(UpstreamStatus {
+            name: "origin/gsv".into(),
+            ahead: 2,
+            behind: 1,
+        });
+        snap.off_start_branch = true;
+        let got = forced_header_line(&snap, 80);
+        let expected = testcolor::with_forced_ansi(|| {
+            format!(
+                "{}{}{}{}{}",
+                "gsw • ".bold(),
+                "gsv".red().bold(),
+                " • 3 commits ahead of main".bold(),
+                ", 4 behind".yellow().bold(),
+                " • ↑2 ↓1 origin/gsv".bold(),
+            )
+        });
+        assert_eq!(got, expected, "header: {got:?}");
     }
 
     #[test]
@@ -2352,6 +2991,7 @@ mod tests {
             hash: hash.into(),
             subject: subject.into(),
             age: Some(Duration::from_secs(age_secs)),
+            on_branch: false,
         }
     }
 
@@ -2361,6 +3001,7 @@ mod tests {
             hash: hash.into(),
             subject: subject.into(),
             age: None,
+            on_branch: false,
         }
     }
 
@@ -2472,6 +3113,7 @@ mod tests {
                 hash: format!("h{i:06}"),
                 subject: format!("subj {i}"),
                 age: Some(Duration::from_secs(i * 60)),
+                on_branch: false,
             })
             .collect();
         let mut o = opts();
@@ -2505,6 +3147,7 @@ mod tests {
             hash: "abc1234".into(),
             subject: "really long subject ".repeat(20),
             age: Some(Duration::from_secs(30)),
+            on_branch: false,
         }];
         let mut o = opts();
         o.log_lines = 1;
@@ -2723,6 +3366,194 @@ mod tests {
         );
     }
 
+    // --- the mark of a branch commit -------------------------------------
+    //
+    // Issue #541: the header counts the commits that are only on the current
+    // branch. The log row of each such commit shows `BRANCH_MARK` in a gutter
+    // at its left. Every other log row shows a blank there.
+
+    /// The hash of the commit on the branch in the tests of the mark.
+    const BRANCH_HASH: &str = "abc1234";
+    /// The hash of the commit on the base in the tests of the mark.
+    const BASE_HASH: &str = "def5678";
+
+    /// A log row of a commit that is only on the current branch.
+    fn branch_log_entry(hash: &str, subject: &str, age_secs: u64) -> LogEntry {
+        LogEntry {
+            on_branch: true,
+            ..log_entry(hash, subject, age_secs)
+        }
+    }
+
+    /// A snapshot whose log holds one row of a branch commit with the subject
+    /// `subject`, and one row of a base commit.
+    fn snap_with_a_branch_row(subject: &str) -> Snapshot {
+        let mut snap = snap_with(vec![]);
+        snap.log = vec![
+            branch_log_entry(BRANCH_HASH, subject, 30),
+            log_entry(BASE_HASH, "a commit on the base", 60),
+        ];
+        snap
+    }
+
+    /// The glyphs of the frame of `snap`. The frame is painted with the escape
+    /// codes forced on, and then the codes are taken out.
+    fn painted_glyphs(snap: &Snapshot, o: &RenderOptions) -> String {
+        strip_ansi(&testcolor::with_forced_ansi(|| render(snap, o)))
+    }
+
+    /// The row of `glyphs` that holds `hash`.
+    fn row_with<'a>(glyphs: &'a str, hash: &str) -> &'a str {
+        glyphs
+            .lines()
+            .find(|line| line.contains(hash))
+            .unwrap_or_else(|| panic!("no row holds {hash}:\n{glyphs}"))
+    }
+
+    #[test]
+    fn a_log_row_of_a_branch_commit_shows_the_mark_and_a_row_of_the_base_shows_a_blank() {
+        // Issue #541: the row of a commit that is only on the branch shows
+        // `BRANCH_MARK` in its first column. The row of a base commit shows a
+        // blank there. The glyphs hold no escape code, so the mark stays
+        // visible with no color: in 8-color mode and in piped output.
+        for truecolor in [false, true] {
+            let mut o = opts();
+            o.log_lines = 5;
+            o.truecolor = truecolor;
+
+            let glyphs = painted_glyphs(&snap_with_a_branch_row("a commit on the branch"), &o);
+
+            let marked = row_with(&glyphs, BRANCH_HASH);
+            assert!(
+                marked.starts_with(&format!("{BRANCH_MARK}{BRANCH_HASH}")),
+                "truecolor={truecolor}: the row of a branch commit starts with the mark: \
+                 {marked:?}",
+            );
+            let blank = row_with(&glyphs, BASE_HASH);
+            assert!(
+                blank.starts_with(&format!(" {BASE_HASH}")),
+                "truecolor={truecolor}: the row of a base commit starts with a blank: {blank:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_log_row_with_the_mark_and_a_row_with_a_blank_have_one_width_and_one_hash_column() {
+        // Issue #541: the mark does not move a row. The row with the mark and
+        // the row with a blank have the same width, and their hashes start in
+        // the same column. So no column moves when a commit lands on the
+        // branch.
+        let mut o = opts();
+        o.log_lines = 5;
+
+        let glyphs = painted_glyphs(&snap_with_a_branch_row("a commit on the branch"), &o);
+
+        let marked = row_with(&glyphs, BRANCH_HASH);
+        let blank = row_with(&glyphs, BASE_HASH);
+        assert_eq!(
+            UnicodeWidthStr::width(marked),
+            UnicodeWidthStr::width(blank),
+            "the two log rows have the same width:\n  mark:  {marked:?}\n  blank: {blank:?}",
+        );
+        let hash_column = |row: &str, hash: &str| {
+            row.split_once(hash)
+                .map(|(before, _)| UnicodeWidthStr::width(before))
+        };
+        assert_eq!(
+            hash_column(marked, BRANCH_HASH),
+            hash_column(blank, BASE_HASH),
+            "the two hashes start in the same column:\n  mark:  {marked:?}\n  blank: {blank:?}",
+        );
+    }
+
+    #[test]
+    fn a_long_subject_on_a_log_row_with_the_mark_fits_the_terminal_width() {
+        // Issue #541: the gutter takes its column from the subject. So a row
+        // with the mark and a long subject is never wider than the terminal,
+        // and its subject ends with `…`. The subject holds characters of two
+        // columns and of more than one byte. An odd width puts the cut next
+        // to a character of two columns.
+        let subject = "a long subject 日本語テスト 🎉 café ".repeat(10);
+        for width in [40, 41, 80] {
+            let mut o = opts();
+            o.log_lines = 5;
+            o.terminal_width = width;
+
+            let glyphs = painted_glyphs(&snap_with_a_branch_row(&subject), &o);
+
+            let marked = row_with(&glyphs, BRANCH_HASH);
+            assert!(
+                marked.starts_with(BRANCH_MARK),
+                "width={width}: the row shows the mark: {marked:?}",
+            );
+            assert!(
+                UnicodeWidthStr::width(marked) <= width,
+                "width={width}: the row is {} columns wide: {marked:?}",
+                UnicodeWidthStr::width(marked),
+            );
+            let before_age = marked
+                .trim_end()
+                .rsplit_once(' ')
+                .map(|(head, _)| head.trim_end());
+            assert!(
+                before_age.is_some_and(|head| head.ends_with('…')),
+                "width={width}: the subject ends with an ellipsis: {marked:?}",
+            );
+        }
+    }
+
+    /// The escape codes at the start of `line`, before its first glyph.
+    fn leading_codes(line: &str) -> &str {
+        let mut rest = line;
+        while let Some((_, tail)) = rest
+            .strip_prefix("\x1b[")
+            .and_then(|codes| codes.split_once('m'))
+        {
+            rest = tail;
+        }
+        line.strip_suffix(rest).unwrap_or_default()
+    }
+
+    #[test]
+    fn the_mark_is_painted_blue_and_the_blank_takes_none() {
+        // Issue #541: the mark is blue, a color that no other part of gsw
+        // paints, so it tells of no problem and of no file status. Truecolor
+        // mode paints `BRANCH_MARK_RGB`. 8-color mode paints bright blue,
+        // because plain blue is too dark to read on many dark themes. The
+        // blank of a row of a base commit takes no paint. The codes are
+        // forced on, so the test reads the paint whether it writes to a
+        // terminal or not.
+        let (r, g, b) = BRANCH_MARK_RGB;
+        for (truecolor, mark_codes) in [
+            (false, "\x1b[94m".to_string()),
+            (true, format!("{}{r};{g};{b}m", testcolor::TRUECOLOR_FG)),
+        ] {
+            let mut o = opts();
+            o.log_lines = 5;
+            o.truecolor = truecolor;
+
+            let painted = testcolor::with_forced_ansi(|| {
+                render(&snap_with_a_branch_row("a commit on the branch"), &o)
+            });
+
+            let marked = row_with(&painted, BRANCH_HASH);
+            assert_eq!(
+                leading_codes(marked),
+                mark_codes,
+                "truecolor={truecolor}: the mark is blue: {marked:?}",
+            );
+            assert!(
+                marked.starts_with(&format!("{mark_codes}{BRANCH_MARK}")),
+                "truecolor={truecolor}: the codes paint the mark: {marked:?}",
+            );
+            let blank = row_with(&painted, BASE_HASH);
+            assert!(
+                blank.starts_with(LOG_GUTTER_BLANK),
+                "truecolor={truecolor}: the blank gutter takes no paint: {blank:?}",
+            );
+        }
+    }
+
     // --- truecolor commit-log fade ---------------------------------------
     //
     // These tests inspect the `ColoredString::fgcolor` field directly rather
@@ -2799,7 +3630,7 @@ mod tests {
         // FADE_FLOOR fraction") rather than hardcoding numbers tied to
         // today's choice of LOG_HASH_BASE_RGB. If the base later gains
         // a non-zero blue, the test still checks the right bound.
-        #[allow(
+        #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
             reason = "u8 × FADE_FLOOR ∈ [0, 1] stays in [0, 255]"
@@ -3032,7 +3863,7 @@ mod tests {
         let Some(Color::TrueColor { r, g, b }) = cs.fgcolor else {
             panic!("expected TrueColor under truecolor=true");
         };
-        #[allow(
+        #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
             reason = "u8 × FADE_FLOOR ∈ [0, 1] stays in [0, 255]"
@@ -3300,7 +4131,7 @@ mod tests {
         // conservative upper bound for any column, plus a small slack for
         // rounding. Any row column emitting a channel above this means a
         // colorize_* fn forgot to apply the fade.
-        #[allow(
+        #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
             reason = "255.0 × FADE_FLOOR ∈ [0, 255]"
@@ -3522,6 +4353,7 @@ mod tests {
             hash: "abc1234".into(),
             subject: "test".into(),
             age: Some(Duration::from_secs(100)),
+            on_branch: false,
         }]; // log: "1m40s"
         let mut o = opts();
         o.log_lines = 5; // so the log section renders
@@ -3559,6 +4391,7 @@ mod tests {
                 hash: "abc1234".into(),
                 subject: "test".into(),
                 age: Some(Duration::from_secs(100)),
+                on_branch: false,
             }];
             let mut o = opts();
             o.log_lines = 5;

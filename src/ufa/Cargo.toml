@@ -39,6 +39,9 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-feature
 # mode has to state the umask rather than inherit whatever the developer's
 # shell set. `umask` is a system call, and no crate in the workspace wraps it.
 libc.workspace = true
+# A test that starts a child process starts it through the one entrance, so the
+# child sheds the GIT_ variables that a hook exports.
+childenv.workspace = true
 
 [lints]
 workspace = true

@@ -8,7 +8,6 @@
 //! which works correctly in both regular repositories and git worktrees.
 
 use std::path::PathBuf;
-use std::process::Command;
 
 // Share the rerun-path selection logic with the library's test suite so it can
 // be unit tested (a build script cannot be tested directly).
@@ -38,7 +37,7 @@ fn main() {
 }
 
 fn get_git_hash() -> Option<String> {
-    let output = Command::new("git")
+    let output = childenv::command("git")
         .args(["rev-parse", "--short=7", "HEAD"])
         .output()
         .ok()?;
@@ -52,7 +51,7 @@ fn get_git_hash() -> Option<String> {
 
 fn get_git_dirty() -> Option<String> {
     // Check for unstaged changes
-    let unstaged = Command::new("git")
+    let unstaged = childenv::command("git")
         .args(["diff", "--quiet"])
         .output()
         .ok()?;
@@ -62,7 +61,7 @@ fn get_git_dirty() -> Option<String> {
     }
 
     // Also check for staged changes
-    let staged = Command::new("git")
+    let staged = childenv::command("git")
         .args(["diff", "--quiet", "--cached"])
         .output()
         .ok()?;
@@ -83,7 +82,7 @@ fn get_git_common_dir() -> Option<PathBuf> {
 }
 
 fn git_rev_parse(args: &[&str]) -> Option<PathBuf> {
-    let output = Command::new("git").args(args).output().ok()?;
+    let output = childenv::command("git").args(args).output().ok()?;
 
     if output.status.success() {
         let path = String::from_utf8_lossy(&output.stdout).trim().to_string();

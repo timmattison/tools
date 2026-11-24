@@ -280,7 +280,7 @@ fn start_time(fields: [&str; 5]) -> Result<u64, RowFault> {
 
 /// Reads the value `token` of the numeric column `column`.
 fn number<T: FromStr>(column: &'static str, token: &str) -> Result<T, RowFault> {
-    unsigned(token).ok_or(RowFault::MalformedNumber(column))
+    parse_ps_number(token).ok_or(RowFault::MalformedNumber(column))
 }
 
 /// Splits the first `N` tokens off `line`, and gives them with the rest of the
@@ -291,7 +291,10 @@ fn number<T: FromStr>(column: &'static str, token: &str) -> Result<T, RowFault> 
 /// The function splits only where `split_once` finds a separator, so it never
 /// cuts a multi-byte character. `None` means that `line` holds fewer than `N`
 /// tokens.
-fn split_fields<const N: usize>(line: &str) -> Option<([&str; N], &str)> {
+///
+/// `whyslow` splits the rows of its own `ps` table through this function.
+#[must_use]
+pub fn split_fields<const N: usize>(line: &str) -> Option<([&str; N], &str)> {
     let mut fields = [""; N];
     let mut rest = line;
     for field in &mut fields {
@@ -311,13 +314,16 @@ fn split_fields<const N: usize>(line: &str) -> Option<([&str; N], &str)> {
 /// The sign that `ps` prints before a negative UID.
 const MINUS: char = '-';
 
-/// Reads the UID `token`.
+/// Reads the UID `token`, as the column `uid` of `ps` prints it.
 ///
 /// `ps` prints the UID as a signed 32-bit number, so the UID of `nobody`,
 /// 4294967294, prints as `-2`. A minus and ASCII digits give the UID with the
 /// same 32 bits as that negative value. ASCII digits alone give the UID
 /// itself. `-0` is not a UID, because `ps` never prints it.
-fn parse_uid(token: &str) -> Result<Uid, RowFault> {
+///
+/// `whyslow` reads the UIDs of its own `ps` table through this function.
+#[must_use]
+pub fn parse_ps_uid(token: &str) -> Option<Uid> {
     let value = match token.strip_prefix(MINUS) {
         // The check of the digits comes first, because the parse of an `i32`
         // also accepts a sign after the minus.
@@ -326,11 +332,14 @@ fn parse_uid(token: &str) -> Result<Uid, RowFault> {
             .flatten()
             .filter(|value| value.is_negative())
             .map(i32::cast_unsigned),
-        None => unsigned(token),
+        None => parse_ps_number(token),
     };
-    value
-        .map(Uid::new)
-        .ok_or(RowFault::MalformedNumber(UID_COLUMN))
+    value.map(Uid::new)
+}
+
+/// Reads the UID `token` of a row.
+fn parse_uid(token: &str) -> Result<Uid, RowFault> {
+    parse_ps_uid(token).ok_or(RowFault::MalformedNumber(UID_COLUMN))
 }
 
 /// Tells whether `text` holds ASCII digits only.
@@ -343,7 +352,11 @@ fn ascii_digits(text: &str) -> bool {
 
 /// Reads a number of ASCII digits from `token`. An empty text fails the
 /// parse, and so does a value too large for `T`.
-fn unsigned<T: FromStr>(token: &str) -> Option<T> {
+///
+/// `whyslow` reads the numeric columns of its own `ps` table through this
+/// function, so the two tools refuse the same tokens.
+#[must_use]
+pub fn parse_ps_number<T: FromStr>(token: &str) -> Option<T> {
     ascii_digits(token).then(|| token.parse().ok()).flatten()
 }
 

@@ -278,13 +278,13 @@ fn main() -> ExitCode {
     let no_color_env = std::env::var_os("NO_COLOR").is_some();
 
     if cli.no_color || no_color_env {
-        #[allow(
+        #[expect(
             clippy::disallowed_methods,
             reason = "this process decides its own color output at startup; the ban covers the tests, which must go through testcolor::with_forced_ansi"
         )]
         colored::control::set_override(false);
     } else if should_force_colors(stdout_is_tty, columns_env.is_some(), no_color_env) {
-        #[allow(
+        #[expect(
             clippy::disallowed_methods,
             reason = "this process decides its own color output at startup; the ban covers the tests, which must go through testcolor::with_forced_ansi"
         )]

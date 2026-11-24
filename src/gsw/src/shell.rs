@@ -12,9 +12,13 @@
 //! the first word alone. The run carries the whole line, because the rest of it
 //! is the user's own arguments.
 //!
-//! What belongs to one key stays with that key: its variable, its default name,
-//! its deadline, and the words it leaves under the frame. `G` keeps those in
-//! [`crate::issue`].
+//! The words that report a run that cannot start, and a run that failed and
+//! wrote nothing, are the same for every key, so they live here. So do the
+//! words of `G` and `T` for a run that failed after it wrote, and for a run
+//! past its deadline. Each key keeps its variable, its default name, its
+//! deadline where it has one, and the rest of its words. `G` keeps those in
+//! [`crate::issue`], `T` keeps them in [`crate::tab`], and `R` and `M` keep
+//! them in [`crate::update`].
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
@@ -314,13 +318,13 @@ pub(crate) fn user_shell() -> OsString {
 /// finds a repository at all, and `GIT_CONFIG_PARAMETERS` sets any key it
 /// likes. A list that named all of those today would still be a list, and it
 /// strips nothing new the day git adds a variable. So this calls
-/// [`gitscratch::shed_inherited_git_environment_keeping_user_intent`], which
+/// [`childenv::command`], which
 /// enumerates [`std::env::vars_os`] and removes every name that starts with
 /// `GIT_`, except six. That rule is written once, in the crate that states it,
 /// and it is tested there.
 ///
 /// **The sweep keeps the six names of
-/// [`gitscratch::USER_INTENT_GIT_ENVIRONMENT`], because this child acts for the
+/// [`childenv::USER_INTENT_GIT_ENVIRONMENT`], because this child acts for the
 /// user.** A `gsw` started from inside a pre-commit hook holds `GIT_DIR`,
 /// `GIT_INDEX_FILE`, `GIT_PREFIX` and `GIT_CONFIG_PARAMETERS`, and the user
 /// asked for none of them. But a user also exports `GIT_SSH_COMMAND` or
@@ -329,9 +333,8 @@ pub(crate) fn user_shell() -> OsString {
 /// and `M` pushes, so a child without them fails to authenticate, or rebases
 /// under the wrong identity.
 pub(crate) fn shell_child(shell: &OsStr, script: String) -> Command {
-    let mut command = Command::new(shell);
+    let mut command = childenv::command(shell);
     command.arg("-ic").arg(script);
-    gitscratch::shed_inherited_git_environment_keeping_user_intent(&mut command);
     detach_from_terminal(&mut command);
     command
 }
@@ -454,15 +457,25 @@ fn probe_with_deadline(shell: &OsStr, command: &ShellCommand, deadline: Duration
 /// `value` is the value of the key's own variable and `default` is the name it
 /// carries where that variable is unset.
 ///
-/// Blocking: it starts a shell and waits for it. The caller runs it on a
-/// thread of its own.
+/// Blocking: it starts a shell and waits for it, for no longer than
+/// `deadline`. The caller runs it on a thread of its own.
+///
+/// **The caller gives the deadline.** gsw gives [`PROBE_DEADLINE`]. A test
+/// gives a bound of its own, because a stub that answers at once can still
+/// take longer than [`PROBE_DEADLINE`] on a busy machine, and the test is about
+/// the answer, not about the speed of the machine.
 ///
 /// A value that turns the feature off starts no shell at all, which is what
 /// keeps a public repository from asking every user's shell about one person's
 /// function.
-pub(crate) fn resolve(value: Option<&str>, default: &str, shell: &OsStr) -> Option<ShellCommand> {
+pub(crate) fn resolve(
+    value: Option<&str>,
+    default: &str,
+    shell: &OsStr,
+    deadline: Duration,
+) -> Option<ShellCommand> {
     let command = ShellCommand::new(value, default)?;
-    probe_with_deadline(shell, &command, PROBE_DEADLINE).then_some(command)
+    probe_with_deadline(shell, &command, deadline).then_some(command)
 }
 
 /// The last line of `lines` that has text in it, with the space after it
@@ -642,6 +655,143 @@ impl RunInFlight {
     }
 }
 
+/// How a run that [`run_until`] waited for ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Ended {
+    /// The command exited with this status.
+    Exited(ExitStatus),
+    /// The command was still running at the deadline. A thread of its own waits for it.
+    StillRunning,
+}
+
+/// What [`run_until`] gives back: how the run ended, and every line the command wrote.
+#[derive(Debug)]
+pub(crate) struct Ran {
+    /// How the run ended.
+    pub(crate) ended: Ended,
+    /// Every line the command wrote: standard output first, then standard
+    /// error, whatever order the lines arrived in.
+    pub(crate) lines: Vec<String>,
+}
+
+/// Run `command` in `workdir`, with the two files of the run in `scratch`, and
+/// stop waiting after `wait`.
+///
+/// `G` and `T` start their runs here, because a run of each key has a
+/// deadline. The rules of such a run are thus written once. Each key keeps the
+/// words it leaves under the frame. `R` and `M` have no deadline, and they show
+/// each line as it arrives, so they call [`start_run`] themselves.
+///
+/// The directory is a parameter so a test can watch it. Production passes
+/// [`std::env::temp_dir`].
+///
+/// **At the deadline gsw stops waiting, and it kills nothing.** This is the one
+/// place where a run and the probe part company, and the reason is whose
+/// process it is. The probe's child is gsw's own question, so gsw ends that
+/// child and the whole process group under it. This child is the user's own
+/// command, and a command that holds a browser in the foreground is the shape
+/// this deadline exists for. `xdg-open`, which the `G` key runs, does it. To
+/// kill that process group is to close the page the user asked gsw to open.
+///
+/// The user's rc file is bounded already, one layer up: the probe runs
+/// `$SHELL -ic 'command -v <name>'`, which loads that same rc file under
+/// [`PROBE_DEADLINE`]. So a run that hangs hangs in the command, and the
+/// command is the user's to end.
+///
+/// The child still has to be reaped. A dropped [`std::process::Child`] is
+/// neither killed nor waited for, and a child nobody waits for stays as a
+/// defunct entry for the life of the session, which is the cost this deadline
+/// exists to avoid. So the child goes to a thread that waits for it. That
+/// thread ends when the child ends, so the child is what bounds it.
+///
+/// # Errors
+///
+/// The shell cannot start, there is nowhere to put what it writes, or the
+/// child cannot be asked about. Every other failure is the child's own words.
+pub(crate) fn run_until(
+    shell: &OsStr,
+    command: &ShellCommand,
+    workdir: &Path,
+    scratch: &Path,
+    wait: Duration,
+) -> std::io::Result<Ran> {
+    let run = start_run(run_command(shell, command, workdir), scratch)?;
+
+    // Standard output first, then standard error, whatever order the lines
+    // arrived in. That is the order a refusal reads in: a command says what it
+    // did on one stream and why it stopped on the other.
+    let mut lines = Vec::new();
+    let mut reasons = Vec::new();
+    let end = run.wait(Some(wait), &mut |stream, line| match stream {
+        OutputStream::Stdout => lines.push(line),
+        OutputStream::Stderr => reasons.push(line),
+    })?;
+    lines.append(&mut reasons);
+
+    let ended = match end {
+        RunEnd::Exited(status) => Ended::Exited(status),
+        RunEnd::StillRunning(mut child) => {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            Ended::StillRunning
+        }
+    };
+    Ok(Ran { ended, lines })
+}
+
+/// The line to put under the frame for a run of `name` that failed. The run
+/// wrote `lines` and ended the way `status` reads.
+///
+/// A failure says the last line that has text in it. That text comes from
+/// another program: `ggs` refuses with exit status 2 on a branch that names no
+/// issue, and that refusal is the whole reason the key did nothing. A failure
+/// that wrote nothing gets [`failed_in_silence_line`].
+pub(crate) fn failure_line(name: &str, lines: &[String], status: &str) -> String {
+    last_with_text(lines.iter().map(String::as_str))
+        .unwrap_or_else(|| failed_in_silence_line(name, status))
+}
+
+/// The line to put under the frame for a run of `name` that failed and wrote
+/// nothing. The run ended the way `status` reads.
+///
+/// A blank row under the frame would read as success, so the status is all
+/// there is left to report. `name` is the whole command line and not its
+/// first word, because a line that named `grp` alone would hide the
+/// arguments of a run of `grp --fork-point`.
+pub(crate) fn failed_in_silence_line(name: &str, status: &str) -> String {
+    format!("{name} failed ({status})")
+}
+
+/// The line to put under the frame for a run of `name` that `lines` came from
+/// and that was still running at `deadline`.
+///
+/// The line names the timeout every time, because the timeout is the thing the
+/// user cannot see: the run goes on, the key is free again, and the command did
+/// not finish. A row that said only what the command wrote would read as a run
+/// that stopped.
+///
+/// A command that said why before it stopped answering keeps its words, after
+/// the timeout. `gh` reports a login it needs and then waits for an answer
+/// nobody can give it, and that report is the whole reason the run went
+/// nowhere.
+pub(crate) fn unfinished_line(name: &str, lines: &[String], deadline: Duration) -> String {
+    let waited = format!("{name} has not finished after {}s", deadline.as_secs());
+    match last_with_text(lines.iter().map(String::as_str)) {
+        Some(said) => format!("{waited}: {said}"),
+        None => waited,
+    }
+}
+
+/// The line to put under the frame for a run of `name` that could not start.
+///
+/// The shell is gone, it cannot be started, there is nowhere to put what it
+/// writes, or it cannot be asked about. That is rare, and worth saying
+/// plainly: every other failure is the child's own words.
+pub(crate) fn cannot_run_line(name: &str, error: &std::io::Error) -> String {
+    format!("cannot run {name}: {error}")
+}
+
 /// One stream of a run: the file the child writes to, and the handle gsw reads
 /// it through.
 ///
@@ -759,7 +909,7 @@ mod run_tests {
         TTY_REFUSED,
     };
     use super::*;
-    use crate::issue::{run, DEFAULT_ISSUE_COMMAND};
+    use crate::issue::{run, Steps, DEFAULT_ISSUE_COMMAND, DEFAULT_PR_COMMAND};
     use std::path::PathBuf;
     use std::sync::mpsc::channel;
 
@@ -777,6 +927,12 @@ mod run_tests {
         ShellCommand::new(None, DEFAULT_ISSUE_COMMAND).expect("the default names a command")
     }
 
+    /// A press that found `command` alone, which is the press that each run
+    /// here makes.
+    fn one_step(command: ShellCommand) -> Steps {
+        Steps::new(None, Some(command)).expect("one command is a step")
+    }
+
     #[test]
     fn the_run_names_the_command_with_no_quoting_around_it() {
         // Quoting the word stops a shell from expanding an alias, and an alias
@@ -784,7 +940,7 @@ mod run_tests {
         let stub = StubShell::answering(0);
         let workdir = tempfile::tempdir().expect("tempdir");
         let command = ShellCommand::new(Some("myfunc"), DEFAULT_ISSUE_COMMAND).expect("a name");
-        let _ = run(stub.as_shell(), &command, workdir.path());
+        let _ = run(stub.as_shell(), &one_step(command), workdir.path());
         let runs = stub.runs();
         assert!(
             runs.lines().any(|line| line == "myfunc"),
@@ -801,7 +957,7 @@ mod run_tests {
         let workdir = tempfile::tempdir().expect("tempdir");
         let command =
             ShellCommand::new(Some("gh issue view --web"), DEFAULT_ISSUE_COMMAND).expect("a name");
-        let _ = run(stub.as_shell(), &command, workdir.path());
+        let _ = run(stub.as_shell(), &one_step(command), workdir.path());
         let runs = stub.runs();
         assert!(
             runs.lines().any(|line| line == "gh issue view --web"),
@@ -820,7 +976,11 @@ mod run_tests {
         // its own row.
         let stub = StubShell::new("printf 'partial'\nprintf 'reason\\n' >&2\nexit 2");
         let workdir = tempfile::tempdir().expect("tempdir");
-        let outcome = run(stub.as_shell(), &default_command(), workdir.path());
+        let outcome = run(
+            stub.as_shell(),
+            &one_step(default_command()),
+            workdir.path(),
+        );
         assert_eq!(
             outcome.message(),
             Some("reason"),
@@ -837,7 +997,11 @@ mod run_tests {
         // of its own, where it costs the reason nothing.
         let stub = StubShell::new("printf '\\346\\227'\nprintf 'reason\\n' >&2\nexit 2");
         let workdir = tempfile::tempdir().expect("tempdir");
-        let outcome = run(stub.as_shell(), &default_command(), workdir.path());
+        let outcome = run(
+            stub.as_shell(),
+            &one_step(default_command()),
+            workdir.path(),
+        );
         let message = outcome.message();
         assert_eq!(
             message,
@@ -871,7 +1035,11 @@ mod run_tests {
 
         let stub = StubShell::probing_the_terminal();
         let workdir = tempfile::tempdir().expect("tempdir");
-        let outcome = run(stub.as_shell(), &default_command(), workdir.path());
+        let outcome = run(
+            stub.as_shell(),
+            &one_step(default_command()),
+            workdir.path(),
+        );
         assert_eq!(
             outcome.message(),
             None,
@@ -891,7 +1059,11 @@ mod run_tests {
         // remote of the directory it runs in.
         let stub = StubShell::answering(0);
         let workdir = tempfile::tempdir().expect("tempdir");
-        let _ = run(stub.as_shell(), &default_command(), workdir.path());
+        let _ = run(
+            stub.as_shell(),
+            &one_step(default_command()),
+            workdir.path(),
+        );
         assert_eq!(resolved(&stub.cwd()), resolved(workdir.path()));
     }
 
@@ -912,7 +1084,7 @@ mod run_tests {
         let dir = workdir.path().to_path_buf();
         let (tx, rx) = channel();
         std::thread::spawn(move || {
-            let outcome = run(&shell, &default_command(), &dir);
+            let outcome = run(&shell, &one_step(default_command()), &dir);
             let _ = tx.send(outcome);
         });
         let outcome = rx
@@ -976,7 +1148,7 @@ mod run_tests {
                  assertion below is measured against nothing",
             );
         }
-        for name in gitscratch::USER_INTENT_GIT_ENVIRONMENT {
+        for name in childenv::USER_INTENT_GIT_ENVIRONMENT {
             assert_eq!(
                 std::env::var(name).ok(),
                 Some(user_intent_value(name)),
@@ -985,18 +1157,40 @@ mod run_tests {
         }
 
         let probe_stub = StubShell::answering(0);
-        let run_stub = StubShell::answering(0);
+        // The run is a press of two steps, so it starts two children: ggsp
+        // fails and hands the press to ggs.
+        let run_stub = StubShell::new("case \"$2\" in\n  ggsp) exit 1 ;;\n  *) exit 0 ;;\nesac");
         let workdir = tempfile::tempdir().expect("tempdir");
         assert!(
             probe_with_deadline(probe_stub.as_shell(), &default_command(), ANSWER_DEADLINE),
             "the stub answers 0, so the probe must report the command present",
         );
-        let outcome = run(run_stub.as_shell(), &default_command(), workdir.path());
+        let pull_request =
+            ShellCommand::new(None, DEFAULT_PR_COMMAND).expect("the default names a command");
+        let steps = Steps::new(Some(pull_request), Some(default_command()))
+            .expect("two commands are steps");
+        let outcome = run(run_stub.as_shell(), &steps, workdir.path());
         assert_eq!(
             outcome.message(),
             None,
-            "the stub exits 0, so the run must report nothing",
+            "the issue command exits 0, so the run must report nothing",
         );
+        let runs = run_stub.runs();
+        for step in [DEFAULT_PR_COMMAND, DEFAULT_ISSUE_COMMAND] {
+            assert!(
+                runs.lines().any(|line| line == step),
+                "both steps must start a child, and {step} did not: {runs:?}",
+            );
+        }
+        let run_environment = run_stub.environment();
+        for name in childenv::USER_INTENT_GIT_ENVIRONMENT {
+            let kept = format!("{name}={}", user_intent_value(name));
+            let held = run_environment.lines().filter(|line| *line == kept).count();
+            assert_eq!(
+                held, 2,
+                "each of the two run children must hold {name}, and {held} did",
+            );
+        }
 
         for (child, stub) in [("probe", &probe_stub), ("run", &run_stub)] {
             let environment = stub.environment();
@@ -1034,11 +1228,15 @@ pub(crate) mod stub_shell {
 
     /// The deadline for a stub that answers.
     ///
-    /// It is the production deadline, and it costs nothing: a probe returns as
-    /// soon as the shell exits. A shorter one would measure how fast this
-    /// machine starts a process rather than what the probe does with the
-    /// answer — the first start of a freshly written script took 600 ms here.
-    pub(crate) const ANSWER_DEADLINE: Duration = PROBE_DEADLINE;
+    /// **It is a bound of the tests, and not [`PROBE_DEADLINE`].** A test that
+    /// uses the bound of a user measures how fast this machine starts a
+    /// process, and not what the probe does with the answer. A hook run of
+    /// 2026-10-14 held three stubs that exit at once for longer than 5
+    /// seconds, and the test failed for that reason alone.
+    ///
+    /// The long bound costs nothing: a probe returns as soon as the shell
+    /// exits. It is 60 seconds, as the bound of the child in `testrepo.rs` is.
+    pub(crate) const ANSWER_DEADLINE: Duration = Duration::from_secs(60);
 
     /// The deadline for the stub that hangs.
     ///
@@ -1206,7 +1404,7 @@ pub(crate) mod stub_shell {
         /// Start the script once, so the test that follows does not pay for
         /// the first start of it.
         pub(crate) fn warm(&self) {
-            let status = Command::new(&self.path)
+            let status = childenv::fixture_command(&self.path)
                 .env(WARMUP_VAR, "1")
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
@@ -1423,6 +1621,16 @@ pub(crate) mod stub_shell {
             PathBuf::from(recorded.trim_end())
         }
 
+        /// The directory of each run, in the order the runs happened, as the
+        /// shell reported them.
+        pub(crate) fn cwds(&self) -> Vec<PathBuf> {
+            std::fs::read_to_string(&self.cwd)
+                .unwrap_or_default()
+                .lines()
+                .map(PathBuf::from)
+                .collect()
+        }
+
         /// What the stub found when it reached for the controlling terminal.
         ///
         /// The read fails where the file is absent, and an absent file means
@@ -1487,6 +1695,124 @@ pub(crate) mod stub_shell {
         names
     }
 
+    /// The variable that names the directory of the recording git to the
+    /// child that finds it first on its `PATH`.
+    ///
+    /// The name carries no `GIT_` prefix, so no sweep of gsw takes it away.
+    pub(crate) const RECORDING_GIT_VAR: &str = "GSW_RECORDING_GIT";
+
+    /// One call of the recording git.
+    pub(crate) struct RecordedCall {
+        /// Each argument of the call, in order.
+        pub(crate) arguments: Vec<String>,
+        /// The directory of the call, with every symbolic link in it resolved.
+        pub(crate) cwd: PathBuf,
+        /// The environment of the call, one `NAME=value` line for each
+        /// variable.
+        pub(crate) environment: String,
+        /// [`TTY_OPENED`] where the call could open the controlling terminal,
+        /// and [`TTY_REFUSED`] where it could not.
+        pub(crate) terminal: String,
+    }
+
+    /// Run `test` in a child of this test binary whose `PATH` finds a
+    /// recording git first, and fail where that child fails.
+    ///
+    /// **The recording git is how a test reads the environment of a git child
+    /// of gsw itself.** gsw starts git by name, so the first `git` on the
+    /// `PATH` is the process that gsw starts. That program writes down its
+    /// arguments, its directory and its environment, and it tries to open the
+    /// controlling terminal, as [`StubShell::probing_the_terminal`] does. Then
+    /// it puts back the `PATH` of this process and gives the call to the real
+    /// git, so the run does all of its real work.
+    ///
+    /// A read of the removals off the [`Command`] proves less. It reads the
+    /// command that a function builds, and not the process that the run
+    /// starts. A change that a caller makes to the command after its builder
+    /// built it does not show in that read, and neither does a second builder
+    /// that the run uses in place of the first. A git
+    /// hook proves less too. git adds variables of its own to the environment
+    /// of a hook, so a record from a hook cannot use the rule of the `GIT_`
+    /// prefix.
+    ///
+    /// **The `PATH` goes on the child, and never on this process**, for the
+    /// reason [`a_child_of_this_test_passes_with`] gives. This process writes
+    /// the program into a temporary directory of its own, and holds that
+    /// directory until the child ends.
+    ///
+    /// # Panics
+    ///
+    /// Panics where the program cannot be written, and where
+    /// [`a_child_of_this_test_passes_with`] panics.
+    pub(crate) fn a_child_with_a_recording_git_passes(test: &str) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let own_path = std::env::var_os("PATH").unwrap_or_default();
+        let program = dir.path().join("git");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\n\
+                 call=$(mktemp -d {dir}/call.XXXXXX) || exit 1\n\
+                 printf '%s\\n' \"$@\" > \"$call/arguments\"\n\
+                 pwd -P > \"$call/cwd\"\n\
+                 env > \"$call/environment\"\n\
+                 if ( exec 3<>/dev/tty ) 2>/dev/null; then\n\
+                 \tprintf '{TTY_OPENED}' > \"$call/terminal\"\n\
+                 else\n\
+                 \tprintf '{TTY_REFUSED}' > \"$call/terminal\"\n\
+                 fi\n\
+                 PATH={own_path}\n\
+                 export PATH\n\
+                 exec git \"$@\"\n",
+                dir = shell_quote(&dir.path().display().to_string()),
+                own_path = shell_quote(&own_path.to_string_lossy()),
+            ),
+        )
+        .expect("write the recording git");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+            .expect("make the recording git executable");
+        let path = std::env::join_paths(
+            std::iter::once(dir.path().to_path_buf()).chain(std::env::split_paths(&own_path)),
+        )
+        .expect("a PATH that holds the recording git");
+        a_child_of_this_test_passes_with(
+            test,
+            &[
+                ("PATH", path.as_os_str()),
+                (RECORDING_GIT_VAR, dir.path().as_os_str()),
+            ],
+        );
+    }
+
+    /// Each call that the recording git of this child recorded, in no order.
+    ///
+    /// # Panics
+    ///
+    /// Panics where [`a_child_with_a_recording_git_passes`] did not start this
+    /// process, and where a record cannot be read.
+    pub(crate) fn recorded_git_calls() -> Vec<RecordedCall> {
+        let dir = PathBuf::from(
+            std::env::var_os(RECORDING_GIT_VAR).expect("the parent must name the recording git"),
+        );
+        let read = |call: &Path, name: &str| {
+            std::fs::read_to_string(call.join(name)).expect("read a record of the call")
+        };
+        std::fs::read_dir(&dir)
+            .expect("read the records of the recording git")
+            .map(|entry| entry.expect("an entry of the records").path())
+            .filter(|path| path.is_dir())
+            .map(|call| RecordedCall {
+                arguments: read(&call, "arguments")
+                    .lines()
+                    .map(str::to_string)
+                    .collect(),
+                cwd: PathBuf::from(read(&call, "cwd").trim_end_matches('\n')),
+                environment: read(&call, "environment"),
+                terminal: read(&call, "terminal"),
+            })
+            .collect()
+    }
+
     /// The prefix that makes a variable git's.
     ///
     /// The rule the children hold is this prefix, and never a list of names, so
@@ -1511,10 +1837,33 @@ pub(crate) mod stub_shell {
 
     /// How long the parent waits for the child.
     ///
-    /// The stub shell answers at once, so a healthy child takes milliseconds.
     /// The bound is here for the child that hangs: a test that waits for such a
-    /// child holds the run for the life of the session.
-    const CHILD_DEADLINE: Duration = Duration::from_secs(30);
+    /// child holds the run for the life of the session. **A slow child is not
+    /// one.** Alone, a healthy child takes 0.3 to 2 seconds, but a hook run of
+    /// 2026-10-14 held two of them for more than 30 seconds on a busy machine.
+    /// A compile-time assertion below holds this bound above that.
+    ///
+    /// The parent waits for the longest series of bounds that one child holds,
+    /// and for one [`ANSWER_DEADLINE`] more. The child
+    /// `each_child_sheds_the_git_variables_of_gsw_and_keeps_those_of_the_user`
+    /// waits for a probe under [`ANSWER_DEADLINE`] and then for a run under
+    /// `RUN_DEADLINE`. A parent that gives up sooner kills a child that is still
+    /// inside a bound of its own. Its message then replaces the more specific
+    /// message of the child. The last [`ANSWER_DEADLINE`] is for the start of the
+    /// child itself, which a busy machine stalls as it stalls the start of a stub.
+    const CHILD_DEADLINE: Duration = ANSWER_DEADLINE
+        .saturating_add(crate::issue::RUN_DEADLINE)
+        .saturating_add(ANSWER_DEADLINE);
+
+    // The child with the longest series of bounds waits for a probe, then for a run.
+    // The parent must wait for longer than that series.
+    const _: () = assert!(
+        CHILD_DEADLINE.as_nanos()
+            > ANSWER_DEADLINE
+                .saturating_add(crate::issue::RUN_DEADLINE)
+                .as_nanos(),
+        "the parent gives up while a child is still inside its own bounds",
+    );
 
     /// A hostile environment: every variable that aims git, or configures it,
     /// or stops it from finding a repository at all, and that no user states
@@ -1533,7 +1882,7 @@ pub(crate) mod stub_shell {
     /// `GIT_CONFIG_PARAMETERS` sets any key at all.
     ///
     /// The child also holds each name of
-    /// [`gitscratch::USER_INTENT_GIT_ENVIRONMENT`], with the value
+    /// [`childenv::USER_INTENT_GIT_ENVIRONMENT`], with the value
     /// [`user_intent_value`] gives it. Those names come from the constant and
     /// not from this table, so a name gitscratch adds is tested here too.
     pub(crate) const HOSTILE_GIT_ENVIRONMENT: [(&str, &str); 7] = [
@@ -1550,7 +1899,7 @@ pub(crate) mod stub_shell {
     ];
 
     /// The value the hostile environment gives `name`, a name of
-    /// [`gitscratch::USER_INTENT_GIT_ENVIRONMENT`].
+    /// [`childenv::USER_INTENT_GIT_ENVIRONMENT`].
     ///
     /// Each value holds its own name, so a child that kept the name with
     /// another value fails as surely as a child that lost it. The value is not
@@ -1566,7 +1915,7 @@ pub(crate) mod stub_shell {
     /// user states on purpose.
     ///
     /// The rule is the [`GIT_PREFIX`] with the names of
-    /// [`gitscratch::USER_INTENT_GIT_ENVIRONMENT`] taken out, which is the rule
+    /// [`childenv::USER_INTENT_GIT_ENVIRONMENT`] taken out, which is the rule
     /// the children hold.
     pub(crate) fn shed_git_lines(environment: &str) -> Vec<&str> {
         environment
@@ -1574,17 +1923,17 @@ pub(crate) mod stub_shell {
             .filter(|line| {
                 line.split_once('=').is_some_and(|(key, _)| {
                     key.starts_with(GIT_PREFIX)
-                        && !gitscratch::USER_INTENT_GIT_ENVIRONMENT.contains(&key)
+                        && !childenv::USER_INTENT_GIT_ENVIRONMENT.contains(&key)
                 })
             })
             .collect()
     }
 
-    /// The names of [`gitscratch::USER_INTENT_GIT_ENVIRONMENT`] that
+    /// The names of [`childenv::USER_INTENT_GIT_ENVIRONMENT`] that
     /// `environment` does not hold with the value [`user_intent_value`] gives
     /// them, `except` left out.
     pub(crate) fn user_intent_lost(environment: &str, except: Option<&str>) -> Vec<&'static str> {
-        gitscratch::USER_INTENT_GIT_ENVIRONMENT
+        childenv::USER_INTENT_GIT_ENVIRONMENT
             .iter()
             .copied()
             .filter(|name| Some(*name) != except)
@@ -1641,7 +1990,8 @@ pub(crate) mod stub_shell {
         let workdir = tempfile::tempdir().expect("tempdir");
         let stdout = NamedTempFile::new().expect("a file for what the child says");
         let stderr = NamedTempFile::new().expect("a file for why the child stopped");
-        let mut command = Command::new(std::env::current_exe().expect("the path of this binary"));
+        let mut command =
+            childenv::fixture_command(std::env::current_exe().expect("the path of this binary"));
         command
             .args(["--exact", "--nocapture", test])
             .current_dir(workdir.path())
@@ -1656,7 +2006,7 @@ pub(crate) mod stub_shell {
         for (name, value) in HOSTILE_GIT_ENVIRONMENT {
             command.env(name, value);
         }
-        for name in gitscratch::USER_INTENT_GIT_ENVIRONMENT {
+        for name in childenv::USER_INTENT_GIT_ENVIRONMENT {
             command.env(name, user_intent_value(name));
         }
         for (name, value) in extra {
@@ -1719,6 +2069,23 @@ pub(crate) mod stub_shell {
         // touches no memory of this process.
         unsafe { libc::kill(pid, libc::SIGKILL) };
     }
+
+    /// The bound of the parent until 2026-10-14.
+    ///
+    /// A hook run of 2026-10-14 held two healthy children of
+    /// [`a_child_of_this_test_passes`] for longer, and the parent killed them
+    /// at this bound. How long the machine really held them is unknown. This
+    /// is the least that it held them, not the most. The assertion below is a
+    /// floor, not a measure: a bound just above 30 seconds still passes it,
+    /// and such a bound can still fail a hook run on such a machine.
+    const CROSSED_BY_A_BUSY_MACHINE: Duration = Duration::from_secs(30);
+
+    // The parent outwaits the bound that a busy machine crossed on 2026-10-14.
+    // This check replaces a test that slept 31 seconds in a child.
+    const _: () = assert!(
+        CHILD_DEADLINE.as_nanos() > CROSSED_BY_A_BUSY_MACHINE.as_nanos(),
+        "the bound of the parent must be above the bound that a busy machine crossed",
+    );
 }
 
 #[cfg(all(test, unix))]
@@ -1835,7 +2202,12 @@ mod probe_tests {
     fn a_value_that_turns_the_feature_off_starts_no_shell() {
         let stub = StubShell::answering(0);
         assert_eq!(
-            resolve(Some(""), DEFAULT_ISSUE_COMMAND, stub.as_shell()),
+            resolve(
+                Some(""),
+                DEFAULT_ISSUE_COMMAND,
+                stub.as_shell(),
+                ANSWER_DEADLINE
+            ),
             None,
             "an empty value must turn the feature off",
         );

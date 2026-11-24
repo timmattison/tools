@@ -1749,7 +1749,7 @@ fn shape_that_costs_least<P: Payload>(
 /// [`None`] when the arithmetic asks for a size that is not smaller than the
 /// one it got, which is what a picture at one pixel by one gives. That answer
 /// ends the loop, so a budget that no size reaches cannot spin.
-#[allow(
+#[expect(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,

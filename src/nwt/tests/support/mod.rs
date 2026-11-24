@@ -1,25 +1,21 @@
 //! Shared test-support for `nwt`'s integration tests.
 //!
 //! Every integration test that drives the real `nwt` binary goes through this
-//! module instead of building a [`Command`] by hand. Centralising the spawn is
-//! what closes issue #283: `nwt` renames the *current* zellij tab whenever
-//! `ZELLIJ` is present, so a test that inherits that variable (because the
-//! suite was launched from inside zellij) would hijack the user's real tab.
-//! [`nwt_command`] removes `ZELLIJ` so the spawned binary never believes it is
-//! inside zellij, and [`FakeMultiplexer`] lets the dedicated tab-rename tests
-//! *simulate* zellij with a recording fake so they can assert exactly when a
-//! rename does and does not fire.
+//! module instead of building a [`Command`] by hand. A spawned binary that gets
+//! the full environment of the test can go out of its fixture and act on the
+//! real session of the developer. One entrance keeps each spawned binary in its
+//! fixture, and [`nwt_command`] is that entrance.
 //!
-//! The same class of escape exists for git, and
-//! [`gitscratch::shed_inherited_git_environment`] is the single answer to it:
+//! The first escape is git, and
+//! [`childenv::fixture_command`] is the single answer to it:
 //! every `git` child this module spawns — the fixture's own commands and the
 //! real `nwt` binary alike — has the entire inherited `GIT_*` family removed, so
 //! it can only act on the directory it was handed. The rule is the prefix, never
-//! a list of names, and it lives in `gitscratch` because every git-spawning
+//! a list of names, and it lives in `childenv` because every git-spawning
 //! caller in this repository is broken the same way by the same environment.
 //! That function explains why a list is the bug.
 //!
-//! The third escape is the home directory. `nwt` reads `~/.nwt.toml`, and its
+//! The second escape is the home directory. `nwt` reads `~/.nwt.toml`, and its
 //! git children read `~/.gitconfig`. A host file with `quiet = true` removes
 //! each stderr line that a test reads, and a host file with `checkout = ...`
 //! sends each run through `-c`. [`nwt_command`] gives the child a home
@@ -41,7 +37,6 @@ use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use gitscratch::shed_inherited_git_environment;
 use tempfile::TempDir;
 
 /// What one path of a [`Snapshot`] holds.
@@ -166,7 +161,7 @@ pub fn difference(before: &Snapshot, after: &Snapshot) -> Vec<String> {
 /// `bacon` loop alongside the pre-commit hook's own run) don't interleave noise.
 ///
 /// Sheds the whole inherited `GIT_*` family through
-/// [`gitscratch::shed_inherited_git_environment`], which is what makes `dir` the
+/// [`childenv::fixture_command`], which is what makes `dir` the
 /// repo git operates on. `current_dir(dir)` alone is not enough: when the suite
 /// runs from inside a git hook, git exports its own variables into the hook's
 /// environment, `cargo test` inherits them, and `GIT_DIR` overrides cwd-based
@@ -192,8 +187,7 @@ pub fn difference(before: &Snapshot, after: &Snapshot) -> Vec<String> {
 /// That is true of the git of the fixture only. [`nwt_command`] gives the `nwt`
 /// child a private home, so the git children of `nwt` read no `~/.gitconfig`.
 pub fn run_git(dir: &Path, args: &[&str]) -> bool {
-    let mut cmd = Command::new("git");
-    shed_inherited_git_environment(&mut cmd);
+    let mut cmd = childenv::fixture_command("git");
     cmd.args(args)
         .current_dir(dir)
         .stdin(Stdio::null())
@@ -209,7 +203,7 @@ pub fn run_git(dir: &Path, args: &[&str]) -> bool {
 /// [`run_git`] nulls every stream, so a test that has to *read* an answer out of
 /// git — `git worktree list --porcelain`, say — needs this one instead. The two
 /// share the one rule that matters: the whole inherited `GIT_*` family is shed
-/// through [`gitscratch::shed_inherited_git_environment`], so `dir` is the only
+/// through [`childenv::fixture_command`], so `dir` is the only
 /// repository the command can reach. See [`run_git`] for why a list of names is
 /// the bug and the prefix is the rule.
 ///
@@ -218,8 +212,7 @@ pub fn run_git(dir: &Path, args: &[&str]) -> bool {
 /// Panics if git cannot be spawned or exits non-zero. The panic message carries
 /// the command, its standard output and its standard error.
 pub fn git_stdout(dir: &Path, args: &[&str]) -> String {
-    let mut cmd = Command::new("git");
-    shed_inherited_git_environment(&mut cmd);
+    let mut cmd = childenv::fixture_command("git");
 
     let output = cmd
         .args(args)
@@ -245,7 +238,7 @@ pub fn git_stdout(dir: &Path, args: &[&str]) -> String {
 /// A test that expects `nwt` to repeat an error of git takes the text from the
 /// same failed command, and does not copy a message that changes between
 /// versions of git. The command sheds the whole inherited `GIT_*` family
-/// through [`gitscratch::shed_inherited_git_environment`], as [`run_git`] and
+/// through [`childenv::fixture_command`], as [`run_git`] and
 /// [`git_stdout`] do.
 ///
 /// # Panics
@@ -253,8 +246,7 @@ pub fn git_stdout(dir: &Path, args: &[&str]) -> String {
 /// Panics if git cannot be spawned or exits zero. The panic message carries
 /// the command and its standard output.
 pub fn git_failure_stderr(dir: &Path, args: &[&str]) -> String {
-    let mut cmd = Command::new("git");
-    shed_inherited_git_environment(&mut cmd);
+    let mut cmd = childenv::fixture_command("git");
 
     let output = cmd
         .args(args)
@@ -571,23 +563,16 @@ fn private_home() -> &'static Path {
 /// Builds a [`Command`] that runs the real `nwt` binary against `repo`.
 ///
 /// This is the single, mandatory entrance every integration test uses to spawn
-/// `nwt`. It sets the working directory to `repo` and nulls stdin (so an
-/// unexpected prompt can't hang the suite), and — crucially for issue #283 — it
-/// removes `ZELLIJ` from the child so a suite launched from inside zellij can
-/// never hijack the user's real tab.
+/// `nwt`. It sets the working directory to `repo`, and it gives the child a
+/// null stdin, so that a prompt cannot stop the suite.
 ///
-/// It likewise sheds the whole inherited `GIT_*` family via
-/// [`gitscratch::shed_inherited_git_environment`], so the spawned `nwt` — which
+/// It sheds the whole inherited `GIT_*` family via
+/// [`childenv::fixture_command`], so the spawned `nwt` — which
 /// shells out to `git worktree add` — operates on
 /// `repo` and not on whatever repo an inherited `GIT_DIR` names, writes its
 /// objects into `repo`'s own store, and reads no config the launching
-/// environment injected. Both scrubs guard the same class of bug: a fixture
-/// reaching out and acting on the developer's real session.
-///
-/// `ZELLIJ` stays named because it is one name, not a prefix family: `nwt`
-/// reads that one variable to decide whether it runs inside zellij. The git
-/// variables are a family, which is why they get the prefix rule instead of a
-/// list.
+/// environment injected. This scrub and the home scrub below guard the same
+/// class of bug: a fixture that acts on the real session of the developer.
 ///
 /// It also points `HOME` at [`private_home`], and removes `XDG_CONFIG_HOME`.
 /// The same class of bug comes in through the home: `nwt` reads `~/.nwt.toml`,
@@ -600,26 +585,17 @@ fn private_home() -> &'static Path {
 /// `tests/private-home.rs` holds this rule, also with a run of the binary under
 /// a hostile home.
 ///
-/// Tests that deliberately *exercise* the tab rename (see [`FakeMultiplexer`])
-/// re-add `ZELLIJ` on the returned command; because that `.env(...)` call runs
-/// after the scrub here, it wins for that child. A test that needs a home of
-/// its own sets `HOME` on the returned command in the same way, and wins for
-/// the same reason (`tests/worktrees-dir-override.rs`).
+/// A test that needs a home of its own sets `HOME` on the returned command
+/// (`tests/worktrees-dir-override.rs`). That `.env(...)` call runs after the
+/// scrub here, so it wins for that child.
 pub fn nwt_command(repo: &Path) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_nwt"));
-    cmd.current_dir(repo)
-        .stdin(Stdio::null())
-        // Issue #283: strip ZELLIJ so a suite launched from inside zellij
-        // can't make the spawned nwt rename the user's real tab. Tests that
-        // deliberately exercise the tab rename re-add ZELLIJ after calling
-        // this (a later `.env(..)` wins).
-        .env_remove("ZELLIJ");
-    // Same idea for git: a hook exports these, `cargo test` inherits them, and
+    let mut cmd = childenv::fixture_command(env!("CARGO_BIN_EXE_nwt"));
+    cmd.current_dir(repo).stdin(Stdio::null());
+    // A git hook exports GIT_* variables, `cargo test` inherits them, and
     // GIT_DIR beats `current_dir`. Left in place, the spawned nwt would add its
     // worktree to the real repo, write objects into it, or run under config the
     // launching shell injected. Shed by prefix, never by name — see `run_git`
-    // above, and `gitscratch::shed_inherited_git_environment` for the rule.
-    shed_inherited_git_environment(&mut cmd);
+    // above, and `childenv::fixture_command` for the rule.
     // Same idea for the home: nwt reads ~/.nwt.toml, and its git children read
     // ~/.gitconfig and $XDG_CONFIG_HOME/git/config. See `private_home` above.
     cmd.env("HOME", private_home())
@@ -627,27 +603,24 @@ pub fn nwt_command(repo: &Path) -> Command {
     cmd
 }
 
-/// A fake `zellij` executable that records every invocation instead of
-/// touching the real multiplexer.
+/// A fake `zellij` executable that records each call, and does not touch the
+/// real multiplexer.
 ///
-/// The dedicated tab-rename tests need to answer "did `nwt` try to rename the
-/// tab?" without actually renaming the tester's real tab — which matters
-/// because the suite is frequently run *from inside* a live zellij session
-/// (that is the very bug). [`FakeMultiplexer`] writes a throwaway `zellij`
-/// script into a temp dir; a test prepends [`path_env`](Self::path_env) to the
-/// child's `PATH` so `nwt`'s `Command::new("zellij")` resolves to the fake. The
-/// fake appends its argv to a recorder file and exits `0`, so the real socket
-/// is never contacted and [`recorded`](Self::recorded) reports exactly what
-/// `nwt` attempted.
+/// `tests/no-zellij.rs` uses it to prove that `nwt` runs no `zellij` command
+/// (issue #633). [`FakeMultiplexer`] writes a `zellij` script into a temporary
+/// directory. A test puts [`path_env`](Self::path_env) on the `PATH` of the
+/// child, so a `zellij` call of the child runs the fake. The fake writes its
+/// arguments into a record and exits `0`. It never reaches a real zellij
+/// session, and [`recorded`](Self::recorded) shows each call.
 ///
-/// Unix-only: the fake is a POSIX `sh` script marked executable via the Unix
-/// permission bits. zellij is Unix-only anyway, so the tab-hijack this guards
-/// against can only occur there.
+/// Unix only: the fake is a POSIX `sh` script, and the Unix permission bits
+/// make it executable. zellij runs only on Unix.
 #[cfg(unix)]
 pub struct FakeMultiplexer {
     /// Owns the temp dir; dropping it deletes the fakes and the recorder.
     _dir: TempDir,
     bin_dir: PathBuf,
+    program: PathBuf,
     recorder: PathBuf,
 }
 
@@ -664,10 +637,10 @@ impl FakeMultiplexer {
 
         let tool = "zellij";
         let script_path = bin_dir.join(tool);
-        // POSIX sh that appends `<tool> <args>` to the recorder, then exits 0
-        // so the spawning `nwt` believes the zellij command succeeded.
-        // `"$*"` joins the args with spaces, which is all the substring-based
-        // assertions need (tab names never contain spaces).
+        // POSIX sh that appends `<tool> <args>` to the recorder, then exits 0,
+        // so a caller finds that the zellij command succeeded. `"$*"` joins
+        // the args with spaces. A test reads the record to find out if it is
+        // empty, and shows it in a failure message.
         let script = format!(
             "#!/bin/sh\nprintf '%s %s\\n' '{tool}' \"$*\" >> '{recorder}'\nexit 0\n",
             recorder = recorder.display()
@@ -683,8 +656,18 @@ impl FakeMultiplexer {
         Self {
             _dir: dir,
             bin_dir,
+            program: script_path,
             recorder,
         }
+    }
+
+    /// The path of the fake `zellij` script.
+    ///
+    /// A test compares this path with the program that `zellij` resolves to on
+    /// [`path_env`](Self::path_env). An empty [`recorded`](Self::recorded) is
+    /// evidence only when the child can find the fake.
+    pub fn program(&self) -> &Path {
+        &self.program
     }
 
     /// A `PATH` value with the fake bin dir prepended to the inherited `PATH`, so

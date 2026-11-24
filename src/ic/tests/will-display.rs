@@ -102,7 +102,7 @@ const EXIT_BUDGET: Duration = Duration::from_secs(10);
 
 /// Invoke the freshly-built `ic` binary in a known-empty environment.
 fn ic(term: &str) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ic"));
+    let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_ic"));
     command.env_clear();
     command.env("PATH", unreachable_path_dir(TARGET_NAME));
     command.env("TERM", term);

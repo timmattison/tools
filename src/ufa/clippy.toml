@@ -77,5 +77,22 @@ disallowed-methods = [
     { path = "colored::control::ShouldColorize::unset_override", reason = "the singleton reaches the same global state as the free function; testcolor::with_forced_ansi puts the override back on its own" },
     { path = "crossterm::terminal::size", reason = "call termsize::controlling_size or termsize::controlling_columns instead; a terminal that carries no window answers this call with Ok((0, 0)), and zero columns is not a width" },
     { path = "terminal_size::terminal_size", reason = "call termsize::stdout_size or termsize::stdout_columns instead; this call hands a zero back on Windows, and zero columns is not a width" },
-    { path = "libc::ioctl", reason = "call termsize::drawing_window instead; a raw TIOCGWINSZ on one file descriptor is the bypass that termgfx held, and GitHub issue #350 reports what it cost. An ioctl of another request says so at its call site with an #[allow]" },
+    { path = "libc::ioctl", reason = "call termsize::drawing_window instead; a raw TIOCGWINSZ on one file descriptor is the bypass that termgfx held, and GitHub issue #350 reports what it cost. An ioctl of another request says so at its call site with an #[expect]" },
+    { path = "std::process::Command::new", reason = "call childenv::command in production code or childenv::fixture_command in test code; a raw spawn inherits the GIT_ variables of a hook, and git obeys them before the directory of the command" },
+    { path = "tokio::process::Command::new", reason = "build the command with tokio::process::Command::from(childenv::command(program)); a raw spawn inherits the GIT_ variables of a hook" },
+    { path = "portable_pty::CommandBuilder::new", reason = "remove each name that childenv::inherited_git_variables gives, then state the exemption with an #[expect] at this site; a raw spawn inherits the GIT_ variables of a hook" },
+    { path = "ratatui::init", reason = "enter the alternate screen through altscreen::Session::enter or altscreen::RatatuiSession::enter; they erase the screen in the same write, and mosh ignores mode 1049" },
+    { path = "ratatui::try_init", reason = "enter the alternate screen through altscreen::Session::enter or altscreen::RatatuiSession::enter; they erase the screen in the same write, and mosh ignores mode 1049" },
+    { path = "ratatui::run", reason = "enter the alternate screen through altscreen::Session::enter or altscreen::RatatuiSession::enter; they erase the screen in the same write, and mosh ignores mode 1049" },
+    { path = "termion::screen::IntoAlternateScreen::into_alternate_screen", reason = "enter the alternate screen through altscreen::Session::enter; it erases the screen in the same write, and mosh ignores mode 1049" },
+    { path = "arboard::Clipboard::new", reason = "open the clipboard through sysclip::Clipboard::open, or sysclip::Clipboard::open_native for a poll; sysclip keeps the mosh-rs shims and the order rule" },
+]
+
+# Restated from the workspace clippy.toml, which this file shadows. See the
+# comments above `disallowed-types` in that file for the reasoning.
+disallowed-types = [
+    { path = "crossterm::terminal::EnterAlternateScreen", reason = "enter the alternate screen through altscreen::Session::enter or altscreen::RatatuiSession::enter; they erase the screen in the same write, and mosh ignores mode 1049" },
+    { path = "termion::screen::ToAlternateScreen", reason = "enter the alternate screen through altscreen::Session::enter; it erases the screen in the same write, and mosh ignores mode 1049" },
+    { path = "termion::screen::AlternateScreen", reason = "enter the alternate screen through altscreen::Session::enter; it erases the screen in the same write, and mosh ignores mode 1049" },
+    { path = "arboard::Clipboard", reason = "hold the clipboard through sysclip::Clipboard, or open one with sysclip::Clipboard::open_native for a poll; sysclip keeps the mosh-rs shims and the order rule" },
 ]

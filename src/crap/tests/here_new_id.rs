@@ -9,7 +9,7 @@
 mod common;
 
 use std::fs;
-use std::process::{Command, Output};
+use std::process::Output;
 
 /// A resolvable original session id, created in every throwaway `HOME`.
 const ORIG: &str = "11111111-2222-3333-4444-555555555555";
@@ -69,8 +69,7 @@ fn run_here_planting(tag: &str, extra_args: &[&str], also_plant: &[&str]) -> Out
     let mut args = vec!["--here", ORIG];
     args.extend_from_slice(extra_args);
 
-    Command::new(env!("CARGO_BIN_EXE_crap"))
-        .env("HOME", &home)
+    common::crap_command(&home)
         .current_dir(&work)
         .args(&args)
         .output()

@@ -196,7 +196,7 @@ fn kill_process(pid: u32, signal: i32) -> std::result::Result<(), String> {
 /// has the necessary permissions.
 #[cfg(unix)]
 fn kill_process_via_bin_kill(pid: u32, signal: i32) -> std::result::Result<(), String> {
-    let output = std::process::Command::new("/bin/kill")
+    let output = childenv::command("/bin/kill")
         .arg(format!("-{signal}"))
         .arg(pid.to_string())
         .output()

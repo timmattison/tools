@@ -25,7 +25,7 @@ A Rust command-line utility that generates random data or text with diacritics (
 ## Prerequisites
 
 - Rust (for building from source)
-- A graphical environment for clipboard access (not required for dry-run mode)
+- A graphical session or a mosh-rs session for clipboard access. In a mosh-rs session, the tool writes through the `pbcopy` shim. The `--dry-run` flag needs neither.
 
 ## Building
 
@@ -64,20 +64,29 @@ clipboard-random text [OPTIONS] <CHARS>
 ```
 
 **Arguments:**
-- `<CHARS>` - Number of characters of text to generate (must be greater than 0)
+- `<CHARS>` - Number of letters and spaces of text to generate. Combining marks are not counted (must be greater than 0)
 
 **Options:**
 - `-p, --probability <PROBABILITY>` - Probability (0.0-1.0) that each character will have diacritics (default: 0.5)
 - `--min-diacritics <MIN_DIACRITICS>` - Minimum number of diacritics per character (default: 1)
 - `--max-diacritics <MAX_DIACRITICS>` - Maximum number of diacritics per character (default: 3)
-- `--min-word-length <MIN_WORD_LENGTH>` - Minimum number of characters between spaces (default: 3)
-- `--max-word-length <MAX_WORD_LENGTH>` - Maximum number of characters between spaces (default: 8)
+- `--min-word-length <MIN_WORD_LENGTH>` - Minimum number of letters between spaces (default: 3)
+- `--max-word-length <MAX_WORD_LENGTH>` - Maximum number of letters between spaces (default: 8)
 - `--preset <PRESET>` - Use a preset configuration:
   - `mild` - Mild diacritics effect (30% probability, 1-2 diacritics)
   - `scary` - Moderate diacritics effect (60% probability, 1-4 diacritics)
   - `insane` - Heavy diacritics effect (80% probability, 2-6 diacritics)
   - `zalgo` - Extreme diacritics effect (90% probability, 3-8 diacritics)
   - `doom` - Apocalyptic diacritics effect (100% probability, 5-12 diacritics)
+
+**Output:** After the tool copies the text, it prints the length of the text in two units:
+
+```text
+Text length: 84 characters (158 bytes)
+```
+
+- `characters` is the count of Unicode scalar values, the same count as `pbpaste | wc -m` in a UTF-8 locale (Terminal sets one by default). Each combining mark counts as one character. Thus this count is larger than `<CHARS>` when the text has diacritics, because `<CHARS>` counts only the letters and the spaces.
+- `bytes` is the length of the UTF-8 encoding of the text that the tool gives to the clipboard, the same count as `pbpaste | wc -c` in a UTF-8 locale. Each combining mark is 2 bytes.
 
 ### Global Options
 
@@ -143,9 +152,9 @@ Test text generation without clipboard:
 This utility is designed to work on:
 
 - **macOS** - Primary target platform
-- **Linux** - Requires X11 or Wayland display server
+- **Linux** - Requires an X11 or Wayland display server, a mosh-rs session, or a `pbcopy` command on `PATH`. The `pbcopy` command is the fallback when the native clipboard fails.
 - **Windows** - Should work out of the box
 
 ## Note
 
-The clipboard functionality requires a graphical environment. If you're running in a headless environment (like CI/CD), use the `--dry-run` flag to test the functionality without clipboard access.
+The clipboard needs a graphical session or a mosh-rs session. In a mosh-rs session (`MOSH_OPEN_SOCKET` is set), the tool writes through the `pbcopy` shim and never opens the native clipboard. Outside a mosh-rs session, the tool uses the native clipboard first. If the native clipboard fails, the tool runs `pbcopy` from `PATH`. A headless environment, such as CI, has none of these routes. In that case, use the `--dry-run` flag.
