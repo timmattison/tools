@@ -6025,12 +6025,13 @@ The search index is a copy of the text of each message, in `~/Library/Applicatio
 src/msgs/scripts/dev.ts
 ```
 
-The script installs the frontend dependencies, gets a free port from `portplz`, and starts the app on that port. Tauri starts Vite on the same port through `beforeDevCommand`, and the script does not change `tauri.conf.json`. A plain `cargo tauri dev` from the root of the repository starts Vite on port 1420.
+The script installs the frontend dependencies, gets a free port from `portplz`, and starts the app on that port. Tauri starts Vite on the same port through `beforeDevCommand`, and the script does not change `tauri.conf.json`. A plain `cargo tauri dev` from the root of the repository starts Vite on port 1420. It does not install the frontend dependencies, thus run `pnpm --dir src/msgs/frontend install` before it.
 
 ### Build it
 
-Run this command from the root of the repository:
+Run these commands from the root of the repository. The build does not install the frontend dependencies, thus the first command installs them:
 
 ```bash
+pnpm --dir src/msgs/frontend install
 cargo tauri build --no-bundle   # the binary is target/release/msgs
 ```
