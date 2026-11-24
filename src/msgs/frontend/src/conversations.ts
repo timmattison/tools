@@ -136,6 +136,12 @@ function highlightConversation(chatId: number, el: HTMLElement): void {
   selectedChatId = chatId;
 }
 
+/** Mark the sidebar item of a chat as active. Does nothing when the sidebar has no such item. */
+export function highlightConversationById(chatId: number): void {
+  const el = document.querySelector<HTMLElement>(`.conversation-item[data-chat-id="${chatId}"]`);
+  if (el !== null) highlightConversation(chatId, el);
+}
+
 export function selectConversation(chatId: number, el: HTMLElement): void {
   highlightConversation(chatId, el);
   onSelectCallback?.(chatId);

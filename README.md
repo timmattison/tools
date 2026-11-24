@@ -6006,7 +6006,7 @@ Browse, search, and export your iMessage conversations. `msgs` is a desktop app 
 
 - **Conversations.** The left panel lists the conversations, newest first. The arrow keys move the selection, and Enter opens the conversation.
 - **Messages.** The right panel shows the messages of the conversation as chat bubbles. Older messages load when you scroll up. An attachment shows as a line with its name and size.
-- **Search.** The search box finds the text of all messages. After each start, `msgs` makes a full-text index of the message text in the background, and the search box shows the progress. Click a result to open its conversation.
+- **Search.** The search box finds the text of all messages. After each start, `msgs` makes a full-text index of the message text in the background, and the search box shows the progress. Click a result to open its conversation at that message and highlight it.
 - **Export.** Click **Export Selection**, click the first and the last message of a range, then click **Export JSON**. `msgs` writes `messages.json` and an `attachments/` folder to the location that you choose. Each attachment file gets the name `<attachment id>-<file name>`, and `messages.json` gives that path in `exported_file`.
 
 The search index is a copy of the text of each message, in `~/Library/Application Support/msgs/text-cache.db`. To remove the copy, stop `msgs` and delete that file. `msgs` makes it again at the next start.

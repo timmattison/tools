@@ -376,6 +376,8 @@ describe("openConversationAt", () => {
       expect.objectContaining({ chatId: 1, offset: 45, limit: PAGE_SIZE })
     );
     await vi.waitFor(() => expect(texts()).toContain("m955"));
+    // One day, one separator, also where the newer page joins.
+    expect(document.querySelectorAll(".date-separator")).toHaveLength(1);
     // The newer messages sit below the older ones.
     const order = messageEls().map((el) => Number(el.dataset.messageId));
     expect(order.indexOf(955)).toBeGreaterThan(order.indexOf(880));

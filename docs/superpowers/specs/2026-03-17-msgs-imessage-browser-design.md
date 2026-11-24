@@ -314,7 +314,7 @@ Each stage produces a working application.
 - `search_messages` command — FTS5 search with optional chat_id filter
 - `get_cache_status` command and `cache-status` events — progress of the background build
 - Global search: a list of matching messages, each with its conversation name
-- Click a search result to navigate to that message in context
+- Click a search result to open its chat around that message and highlight it. The chat need not be in the loaded part of the sidebar. The window of messages grows both ways from the hit
 - Debounced search input
 - `Cmd+F` keyboard shortcut
 

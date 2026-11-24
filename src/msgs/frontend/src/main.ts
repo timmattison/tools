@@ -1,11 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { DbStatus } from "./bindings";
+import type { Conversation, DbStatus, SearchResult } from "./bindings";
 import {
   initConversations,
   onConversationSelect,
   getConversationById,
+  highlightConversationById,
 } from "./conversations";
-import { loadConversation } from "./messages";
+import { loadConversation, openConversationAt } from "./messages";
 import { initCacheStatus } from "./cache-status";
 import { initSearch } from "./search";
 import { messageOf, showError } from "./utils";
@@ -27,26 +28,28 @@ export async function init(): Promise<void> {
   }
 }
 
-async function handleSearchNavigate(chatId: number, messageId: number): Promise<void> {
-  await handleConversationSelect(chatId);
+/** Open the chat of a search result around the hit. Needs no sidebar item for the chat. */
+async function handleSearchNavigate(result: SearchResult): Promise<void> {
+  const conv = result.conversation;
+  highlightConversationById(conv.chat_id);
+  await openConversationAt(
+    conv.chat_id,
+    titleOf(conv),
+    conv.chat_identifier,
+    conv.is_group,
+    result.message.message_id
+  );
+}
 
-  // Scroll to and highlight the matched message
-  requestAnimationFrame(() => {
-    const msgEl = document.querySelector(`[data-message-id="${messageId}"]`);
-    if (msgEl) {
-      msgEl.scrollIntoView({ block: "center", behavior: "smooth" });
-      msgEl.classList.add("search-highlight");
-      setTimeout(() => msgEl.classList.remove("search-highlight"), 2000);
-    }
-  });
+function titleOf(conv: Conversation): string {
+  return conv.display_name ?? conv.participants[0] ?? conv.chat_identifier;
 }
 
 async function handleConversationSelect(chatId: number): Promise<void> {
   const conv = getConversationById(chatId);
   if (!conv) return;
 
-  const displayName = conv.display_name ?? conv.participants[0] ?? conv.chat_identifier;
-  await loadConversation(chatId, displayName, conv.chat_identifier, conv.is_group);
+  await loadConversation(chatId, titleOf(conv), conv.chat_identifier, conv.is_group);
 }
 
 document.addEventListener("keydown", (e: KeyboardEvent) => {

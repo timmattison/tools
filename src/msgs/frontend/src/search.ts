@@ -6,12 +6,9 @@ import { byId, escapeHtml, messageOf, showError, UNKNOWN_DATE_LABEL } from "./ut
 let searchTimeout: number | null = null;
 // Numbers each search. A reply that is not for the latest number is dropped.
 let searchSequence = 0;
-let onNavigateCallback: ((chatId: number, messageId: number) => void) | null =
-  null;
+let onNavigateCallback: ((result: SearchResult) => void) | null = null;
 
-export function initSearch(
-  onNavigate: (chatId: number, messageId: number) => void
-): void {
+export function initSearch(onNavigate: (result: SearchResult) => void): void {
   onNavigateCallback = onNavigate;
 
   const input = byId("global-search", HTMLInputElement);
@@ -97,10 +94,7 @@ function showSearchResults(results: SearchResult[]): void {
     `;
 
     el.addEventListener("click", () => {
-      onNavigateCallback?.(
-        result.conversation.chat_id,
-        result.message.message_id
-      );
+      onNavigateCallback?.(result);
     });
 
     list.appendChild(el);
