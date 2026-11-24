@@ -182,16 +182,14 @@ impl OutputManifest {
 /// matching in `find_cargo_tomls` carried, in the same place: a filter meant to
 /// judge what is under the root ended up judging the root.
 ///
-/// A `.git` *directory* is a repository of its own rather than a worktree. A
-/// package under one is a package nothing else holds, so it is listed, and the
-/// walk stops there: what lies above a repository says nothing about what is
-/// inside it.
-///
-/// A submodule's `.git` is a file too, but it links no worktree (see
-/// [`links_a_worktree`]), and the walk goes on past it. A submodule belongs to
-/// the checkout of its superproject, so the checkout above it decides: a
-/// package in a submodule of the main checkout is listed, and a package in a
-/// submodule of a linked worktree is left out with that worktree.
+/// The walk stops at the first checkout that decides, and goes on past a
+/// submodule (see [`Checkout`]). A repository of its own decides that its
+/// package is listed: what lies above a repository says nothing about what is
+/// inside it. A linked worktree decides that its package is left out. A
+/// submodule belongs to the checkout of its superproject, so the checkout
+/// above it decides: a package in a submodule of the main checkout is listed,
+/// and a package in a submodule of a linked worktree is left out with that
+/// worktree.
 fn is_in_worktree(manifest: &Path, root: &SearchRoot) -> bool {
     let Some(package) = manifest.parent() else {
         return false;
@@ -215,43 +213,98 @@ fn is_in_worktree(manifest: &Path, root: &SearchRoot) -> bool {
             return false;
         }
 
-        let git_path = directory.join(".git");
-        if git_path.is_file() && links_a_worktree(&git_path) {
-            return true;
-        }
-        if git_path.is_dir() {
-            return false; // A repository of its own, not a worktree.
+        match Checkout::at(directory) {
+            Some(Checkout::Worktree) => return true,
+            Some(Checkout::Repository) => return false,
+            Some(Checkout::Submodule) | None => {}
         }
     }
 
     false
 }
 
-/// Whether the `.git` file at `git_file` links a linked worktree.
+/// The kind of git checkout whose top is one directory, as the worktree filter
+/// sees it.
 ///
-/// A `.git` file names a git directory kept elsewhere. A linked worktree's lies
-/// under `.git/worktrees/<name>` and holds a `commondir` file that names the
-/// repository it borrows. A submodule's lies under `.git/modules/<name>`, or
-/// under `.git/worktrees/<wt>/modules/<name>` in a linked worktree, and holds
-/// no `commondir`. A submodule thus links no worktree of its own, and the
-/// checkout that holds it decides.
+/// A `.git` directory makes a repository of its own. A `.git` file names a git
+/// directory kept elsewhere, and where that git directory lies tells three
+/// kinds apart:
 ///
-/// A relative git directory is resolved against the directory that holds the
-/// `.git` file. A file that cannot be read, or that does not start with
-/// `gitdir:`, links nothing.
-fn links_a_worktree(git_file: &Path) -> bool {
-    let Ok(content) = fs::read_to_string(git_file) else {
-        return false;
-    };
-    let Some(named) = content.trim().strip_prefix("gitdir:") else {
-        return false;
-    };
-    let named = Path::new(named.trim());
-    let gitdir = match git_file.parent() {
-        Some(holder) => holder.join(named),
-        None => named.to_path_buf(),
-    };
-    gitdir.join("commondir").is_file()
+/// - A linked worktree's lies under `.git/worktrees/<name>` and holds a
+///   `commondir` file that names the repository it borrows.
+/// - A submodule's lies in the `modules` directory of the git directory of its
+///   superproject: `.git/modules/<name>`, or `.git/worktrees/<wt>/modules/<name>`
+///   in a linked worktree. A submodule name can hold a `/`, and a submodule of
+///   a submodule nests one `modules` directory in the next.
+/// - Any other git directory is a repository of its own. `git init
+///   --separate-git-dir` and `git clone --separate-git-dir` make one, with a
+///   `.git` file and a git directory outside the checkout.
+///
+/// A `.git` file that cannot be read, that does not start with `gitdir:`, or
+/// that names no directory makes a repository of its own too. Git itself stops
+/// at such a file ("invalid gitfile format"), and does not put the directory
+/// in the checkout above it.
+#[derive(Debug, Clone, Copy)]
+enum Checkout {
+    /// A repository of its own: the packages in it are nobody's second copy.
+    Repository,
+    /// A linked worktree: a second checkout of a repository kept elsewhere.
+    Worktree,
+    /// A submodule: part of the checkout of its superproject.
+    Submodule,
+}
+
+impl Checkout {
+    /// The checkout whose top is `directory`, or `None` when `directory` holds
+    /// no `.git`.
+    ///
+    /// A relative git directory is resolved against `directory`, which holds
+    /// the `.git` file.
+    fn at(directory: &Path) -> Option<Self> {
+        let git_path = directory.join(".git");
+        if git_path.is_dir() {
+            return Some(Self::Repository);
+        }
+        if !git_path.is_file() {
+            return None;
+        }
+
+        let Ok(content) = fs::read_to_string(&git_path) else {
+            return Some(Self::Repository);
+        };
+        let Some(named) = content.trim().strip_prefix("gitdir:") else {
+            return Some(Self::Repository);
+        };
+        // Resolved through the file system, so that the walk up the git
+        // directory below meets real directories and not `..` components.
+        let Ok(gitdir) = directory.join(named.trim()).canonicalize() else {
+            return Some(Self::Repository);
+        };
+
+        if gitdir.join("commondir").is_file() {
+            Some(Self::Worktree)
+        } else if lies_in_a_modules_directory(&gitdir) {
+            Some(Self::Submodule)
+        } else {
+            Some(Self::Repository)
+        }
+    }
+}
+
+/// Whether `gitdir` lies in the `modules` directory of another git directory,
+/// which is where git keeps the git directory of a submodule.
+///
+/// A git directory always holds a `HEAD` file, so a `modules` directory beside
+/// a `HEAD` file is the one git made. A directory named `modules` anywhere else
+/// on the path, such as `/srv/modules/project.git`, is no reason to call a
+/// repository a submodule.
+fn lies_in_a_modules_directory(gitdir: &Path) -> bool {
+    gitdir.ancestors().skip(1).any(|ancestor| {
+        ancestor.file_name().is_some_and(|name| name == "modules")
+            && ancestor
+                .parent()
+                .is_some_and(|holder| holder.join("HEAD").is_file())
+    })
 }
 
 /// What one walk of the tree found.

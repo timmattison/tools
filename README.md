@@ -1610,7 +1610,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     sits is never matched, so a run from inside a worktree still finds every package under it, and
     a run that found packages and then filtered every one of them out says so and names
     `--include-worktrees`. A package under a nested repository of its own is not a second checkout
-    and stays in. A package in a submodule goes with the checkout that holds the submodule: it
+    and stays in, also when its git directory lies elsewhere, as after
+    `git init --separate-git-dir`, and also when its `.git` file names no git directory, at
+    which git itself stops. A package in a submodule goes with the checkout that holds the submodule: it
     stays in under the main checkout, and it is left out under a worktree below the search path. An exclusion names a whole directory below the search path, so
     `targets` and `node_modules_backup` stay in, and the search path itself is never matched
     against the list — `workit --path ~/code/target/myproj` searches that tree like any other. An
