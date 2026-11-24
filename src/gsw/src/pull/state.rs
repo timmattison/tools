@@ -192,7 +192,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::pull::lookup::pulls_path;
+    use crate::pull::lookup::{pulls_path, RATE_LIMIT_FALLBACK};
     use ghrest::{parse_response, GithubRepo};
 
     fn target(branch: &str) -> PullTarget {
@@ -332,6 +332,21 @@ mod tests {
         assert_eq!(watch.wake_at(), None);
         assert_eq!(watch.refresh(Some(&a), true, at(61)), None);
         assert_eq!(watch.indicator(&a, at(61)), Some(PullIndicator::Unknown));
+    }
+
+    /// A `Retry-After` of the largest `u64` gives a wait that no `Instant` can
+    /// hold. The watch blocks for the fallback time, and does not panic.
+    #[test]
+    fn a_rate_limit_past_the_range_of_instant_blocks_for_the_fallback() {
+        let t0 = Instant::now();
+        let a = target("a");
+        let mut watch = PullWatch::enabled();
+        watch.refresh(Some(&a), false, t0);
+        let next = watch.answered(a.clone(), LookupOutcome::RateLimited(Duration::MAX), t0);
+        assert_eq!(next, None);
+        assert_eq!(watch.indicator(&a, t0), Some(PullIndicator::Unknown));
+        assert_eq!(watch.refresh(Some(&a), true, t0), None);
+        assert_eq!(watch.wake_at(), Some(t0 + RATE_LIMIT_FALLBACK));
     }
 
     #[test]
