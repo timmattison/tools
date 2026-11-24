@@ -208,7 +208,7 @@ subagent · general-purpose · "Slice 3: usePanelActive hook"
 ### `--verbose`
 
 Appends each task's full `description` text under its line (indented, wrapped to
-terminal width). Todos have no separate description, so `--verbose` is a no-op
+the terminal width that `termbar::TerminalWidth` reads). Todos have no separate description, so `--verbose` is a no-op
 for todo lists. In JSON, `--verbose` populates `items[].detail`.
 
 ## JSON output (`crap todos <uuid> --json`)
@@ -294,7 +294,11 @@ hardcoded paths (parallel-safe per CLAUDE.md):
   table, with both fork shapes), and a shellcheck pass on the emitted
   `SHELL_CODE`.
 - Display + JSON formatters: golden-string assertions for a representative
-  `SessionTodos` (with and without `--verbose`).
+  `SessionTodos` (with and without `--verbose`). A display golden compares
+  `testcolor::strip_ansi(&testcolor::with_forced_ansi(...))`, because the
+  pre-commit hook runs `cargo test` with `CLICOLOR_FORCE=1`. The wrap takes
+  the width as a parameter, and an end-to-end test of `--verbose` states
+  `COLUMNS` on the command it starts.
 
 Any temp files used by integration-style tests must be keyed on
 `std::process::id()` + nanos.
