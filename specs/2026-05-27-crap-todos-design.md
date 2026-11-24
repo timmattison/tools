@@ -200,8 +200,10 @@ subagent · general-purpose · "Slice 3: usePanelActive hook"
   never silently dropped.
 - Header summary counts completed/total across the **main** thread's list
   (with `(N active)` when any are in_progress).
-- Long labels are truncated with the UTF-8-safe `chars()` approach (per repo
-  rule), with the full text always available via `--verbose`.
+- Long labels are cut to a budget of terminal columns with
+  `textfit::truncate_to_budget`, and `textfit::pad_right` aligns the status
+  column. A `chars()` count is not a width: `日本語` is 3 chars and 6 columns.
+  The full text is always available via `--verbose`.
 
 ### `--verbose`
 
@@ -286,8 +288,8 @@ hardcoded paths (parallel-safe per CLAUDE.md):
   empty list, multibyte content.
 - `extract_agent_list`: tasks-present prefers tasks, todos-only, neither →
   `None`.
-- Label truncation: Japanese / emoji / accented inputs (no panic, correct
-  width).
+- Label truncation: Japanese / emoji / accented inputs (no panic, and the
+  `UnicodeWidthStr::width` of the cut label with its `…` is at most the budget).
 - Subcommand routing parser used by the shell function (Rust-level decision
   table, with both fork shapes), and a shellcheck pass on the emitted
   `SHELL_CODE`.
