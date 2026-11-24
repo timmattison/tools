@@ -45,6 +45,9 @@ pub const LOCAL: &str = "@local";
 ///   `DOCKER_` variables of that call, sorted, one for each line.
 /// - `stdin-<host>`: written by the fake on `docker login --password-stdin`.
 ///   It holds what the call read from stdin.
+/// - `git-env-<host>`: written by the fake on each call, a help call
+///   included. It holds the `GIT_` variables of the last call to that host,
+///   sorted, one for each line.
 ///
 /// A call to [`LOCAL`] whose command is a command of `drun`, as `run` or
 /// `ps`, stops with exit status 97. `drun` sends those commands to a host,
@@ -58,6 +61,7 @@ if [ "$1" = "--context" ]; then
 else
     context=@local
 fi
+env | grep '^GIT_' | sort > "$dir/git-env-$context" || true
 separator=$(printf '\037')
 line=
 last=
@@ -275,6 +279,12 @@ impl Fixture {
     /// call.
     pub fn help_environment(&self, command: &str) -> String {
         std::fs::read_to_string(self.path().join(format!("help-env-{command}"))).unwrap_or_default()
+    }
+
+    /// The `GIT_` variables of the last call to `host`, sorted, one for each
+    /// line. The text is empty when the fake has no record of a call.
+    pub fn git_environment(&self, host: &str) -> String {
+        std::fs::read_to_string(self.path().join(format!("git-env-{host}"))).unwrap_or_default()
     }
 
     fn write(&self, name: &str, text: &str) {
