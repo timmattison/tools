@@ -242,6 +242,23 @@ mod verdict_tests {
         );
     }
 
+    /// On a platform with no reader, `wl` did not try a read, so the line must
+    /// not say that a read failed.
+    #[test]
+    fn no_reader_line_names_the_platforms_that_have_one() {
+        assert_eq!(
+            verdict(8080, None).line,
+            "Cannot tell whether port 8080 is in use: wl reads the kernel's list of listening sockets on macOS and Linux only."
+        );
+    }
+
+    /// `wl` named no process and cannot show that the port is free, so a hidden
+    /// listener can explain the answer.
+    #[test]
+    fn no_reader_earns_the_privilege_note() {
+        assert!(verdict(8080, None).hidden_listener_possible);
+    }
+
     /// A listener exists, and the user cannot see its owner.
     #[test]
     fn in_use_earns_the_privilege_note() {
