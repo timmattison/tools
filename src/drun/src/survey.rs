@@ -319,12 +319,31 @@ SwapFree:        2097148 kB";
     fn a_probe_output_with_a_wrong_number_is_refused() {
         for (loadavg, nproc) in [
             ("high 0.5 0.5 1/2 3", "4"),
+            ("nan 0.5 0.5 1/2 3", "4"),
+            ("inf 0.5 0.5 1/2 3", "4"),
+            ("-1 0.5 0.5 1/2 3", "4"),
             ("0.5 0.5 0.5 1/2 3", "0"),
+            ("0.5 0.5 0.5 1/2 3", ""),
             ("", "4"),
         ] {
             assert!(
                 Load::parse(&probe_output(MEMINFO, loadavg, nproc)).is_err(),
                 "{loadavg:?} {nproc:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_probe_output_with_a_wrong_memory_number_is_refused() {
+        for (meminfo, key) in [
+            ("MemTotal: 0 kB\nMemAvailable: 0 kB", "MemTotal"),
+            ("MemTotal: x kB\nMemAvailable: 100 kB", "MemTotal"),
+            ("MemTotal: 1000 kB\nMemAvailable: x kB", "MemAvailable"),
+        ] {
+            let result = Load::parse(&probe_output(meminfo, "0.52 0.58 0.59 1/389 12345", "4"));
+            assert!(
+                result.as_ref().is_err_and(|error| error.contains(key)),
+                "{meminfo:?} must be refused for {key}: {result:?}"
             );
         }
     }
