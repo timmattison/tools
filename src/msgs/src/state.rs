@@ -153,7 +153,9 @@ fn run_build_catching_panics(
         return;
     }
     {
-        let mut guard = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut guard = slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !matches!(*guard, CacheSlot::Building { .. }) {
             return;
         }
