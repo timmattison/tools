@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { SearchResult } from "./bindings";
-import { escapeHtml, UNKNOWN_DATE_LABEL } from "./utils";
+import { byId, escapeHtml, UNKNOWN_DATE_LABEL } from "./utils";
 
 let searchTimeout: number | null = null;
 let onNavigateCallback: ((chatId: number, messageId: number) => void) | null =
@@ -11,7 +11,7 @@ export function initSearch(
 ): void {
   onNavigateCallback = onNavigate;
 
-  const input = document.getElementById("global-search") as HTMLInputElement;
+  const input = byId("global-search", HTMLInputElement);
   input.addEventListener("input", () => {
     if (searchTimeout) clearTimeout(searchTimeout);
     searchTimeout = window.setTimeout(() => performSearch(input.value), 300);
@@ -48,19 +48,19 @@ async function performSearch(query: string): Promise<void> {
 }
 
 function showSearchLoading(query: string): void {
-  const list = document.getElementById("conversation-list")!;
+  const list = byId("conversation-list", HTMLElement);
   list.dataset.mode = "search";
   list.innerHTML = `<div class="search-loading"><div class="search-spinner"></div>Searching for "${escapeHtml(query)}"...</div>`;
 }
 
 function showSearchError(message: string): void {
-  const list = document.getElementById("conversation-list")!;
+  const list = byId("conversation-list", HTMLElement);
   list.dataset.mode = "search";
   list.innerHTML = `<div class="search-empty">Search failed: ${escapeHtml(message)}</div>`;
 }
 
 function showSearchResults(results: SearchResult[]): void {
-  const list = document.getElementById("conversation-list")!;
+  const list = byId("conversation-list", HTMLElement);
   // Replace conversation list with search results temporarily
   list.dataset.mode = "search";
 
@@ -98,7 +98,7 @@ function showSearchResults(results: SearchResult[]): void {
 }
 
 function hideSearchResults(): void {
-  const list = document.getElementById("conversation-list")!;
+  const list = byId("conversation-list", HTMLElement);
   if (list.dataset.mode === "search") {
     list.dataset.mode = "";
     // Re-initialize conversation list without losing app state

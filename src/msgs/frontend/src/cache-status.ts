@@ -24,8 +24,8 @@ function placeholderFor(status: CacheStatus): string {
 }
 
 function apply(status: CacheStatus): void {
-  const input = document.getElementById(SEARCH_INPUT_ID) as HTMLInputElement | null;
-  if (input) input.placeholder = placeholderFor(status);
+  const input = document.getElementById(SEARCH_INPUT_ID);
+  if (input instanceof HTMLInputElement) input.placeholder = placeholderFor(status);
 }
 
 /**

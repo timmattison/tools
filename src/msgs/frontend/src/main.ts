@@ -8,6 +8,7 @@ import {
 import { loadConversation } from "./messages";
 import { initCacheStatus } from "./cache-status";
 import { initSearch } from "./search";
+import { showError } from "./utils";
 
 async function init(): Promise<void> {
   const status = await invoke<DbStatus>("check_db_access");
@@ -42,12 +43,6 @@ async function handleConversationSelect(chatId: number): Promise<void> {
 
   const displayName = conv.display_name ?? conv.participants[0] ?? conv.chat_identifier;
   await loadConversation(chatId, displayName, conv.chat_identifier, conv.is_group);
-}
-
-function showError(message: string): void {
-  const overlay = document.getElementById("error-overlay")!;
-  overlay.textContent = message;
-  overlay.classList.remove("hidden");
 }
 
 document.addEventListener("keydown", (e: KeyboardEvent) => {

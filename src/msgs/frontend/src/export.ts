@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import type { ExportResult } from "./bindings";
+import { byId } from "./utils";
 
 let selectionMode = false;
 let startMessageEl: HTMLElement | null = null;
@@ -14,7 +15,7 @@ export function initExport(chatId: number): void {
   if (initialized) return;
   initialized = true;
 
-  const exportBtn = document.getElementById("btn-export")!;
+  const exportBtn = byId("btn-export", HTMLElement);
   exportBtn.addEventListener("click", toggleSelectionMode);
 
   const cancelBtn = document.getElementById("btn-export-cancel");
@@ -100,7 +101,7 @@ function clearHighlights(): void {
 }
 
 function updateExportBar(): void {
-  const status = document.getElementById("export-status")!;
+  const status = byId("export-status", HTMLElement);
 
   if (!startMessageEl) {
     status.textContent = "Click a message to set the start of the export range";
@@ -116,6 +117,10 @@ function updateExportBar(): void {
 async function performExport(): Promise<void> {
   if (!startMessageEl || !endMessageEl || !currentExportChatId) return;
 
+  const startId = startMessageEl.dataset.messageId;
+  const endId = endMessageEl.dataset.messageId;
+  if (startId === undefined || endId === undefined) return;
+
   const dir = await save({
     title: "Choose export location",
     defaultPath: `msgs-export-${new Date().toISOString().slice(0, 10)}`,
@@ -126,18 +131,18 @@ async function performExport(): Promise<void> {
   try {
     const result = await invoke<ExportResult>("export_messages", {
       chatId: currentExportChatId,
-      startMessageId: Number(startMessageEl.dataset.messageId),
-      endMessageId: Number(endMessageEl.dataset.messageId),
+      startMessageId: Number(startId),
+      endMessageId: Number(endId),
       includeAttachments: true,
       exportPath: dir,
     });
 
-    const status = document.getElementById("export-status")!;
+    const status = byId("export-status", HTMLElement);
     status.textContent = `Exported ${result.message_count} messages and ${result.attachment_count} attachments to ${result.export_path}`;
 
     setTimeout(cancelSelection, 3000);
   } catch (e) {
-    const status = document.getElementById("export-status")!;
+    const status = byId("export-status", HTMLElement);
     status.textContent = `Export failed: ${e}`;
   }
 }

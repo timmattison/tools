@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { Message } from "./bindings";
-import { UNKNOWN_DATE_LABEL } from "./utils";
+import { byId, UNKNOWN_DATE_LABEL } from "./utils";
 import { handleMessageClick, initExport } from "./export";
 
 const PAGE_SIZE = 50;
@@ -24,15 +24,15 @@ export async function loadConversation(
   isGroupChat = group;
 
   // Update header
-  document.getElementById("chat-name")!.textContent = displayName;
-  document.getElementById("chat-identifier")!.textContent = identifier;
+  byId("chat-name", HTMLElement).textContent = displayName;
+  byId("chat-identifier", HTMLElement).textContent = identifier;
 
   // Show message view, hide empty state
-  document.getElementById("empty-state")!.classList.add("hidden");
-  document.getElementById("message-view")!.classList.remove("hidden");
+  byId("empty-state", HTMLElement).classList.add("hidden");
+  byId("message-view", HTMLElement).classList.remove("hidden");
 
   // Clear messages
-  const area = document.getElementById("message-area")!;
+  const area = byId("message-area", HTMLElement);
   area.innerHTML = "";
 
   // Load first page
@@ -67,7 +67,7 @@ async function loadMoreMessages(): Promise<void> {
       allLoaded = true;
     }
 
-    const area = document.getElementById("message-area")!;
+    const area = byId("message-area", HTMLElement);
     const previousScrollHeight = area.scrollHeight;
 
     // Messages come in reverse chronological order; reverse for display
@@ -161,7 +161,8 @@ function createDateSeparator(dateStr: string): HTMLElement {
 }
 
 function handleMessageScroll(e: Event): void {
-  const target = e.target as HTMLElement;
+  if (!(e.target instanceof HTMLElement)) return;
+  const target = e.target;
   // Load more when scrolling near the top
   if (target.scrollTop < 200) {
     loadMoreMessages().catch(console.error);

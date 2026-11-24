@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { Conversation } from "./bindings";
-import { escapeHtml } from "./utils";
+import { byId, escapeHtml } from "./utils";
 
 const PAGE_SIZE = 50;
 let currentOffset = 0;
@@ -22,7 +22,7 @@ export function onConversationSelect(callback: (chatId: number) => void): void {
 }
 
 export async function initConversations(): Promise<void> {
-  const list = document.getElementById("conversation-list")!;
+  const list = byId("conversation-list", HTMLElement);
 
   if (!conversationsInitialized) {
     conversationsInitialized = true;
@@ -53,17 +53,16 @@ export async function initConversations(): Promise<void> {
         }
 
         const newEl = items[newIndex];
-        const chatId = Number(newEl.dataset.chatId);
-        highlightConversation(chatId, newEl);
+        const newId = newEl?.dataset.chatId;
+        if (newEl === undefined || newId === undefined) return;
+        highlightConversation(Number(newId), newEl);
         newEl.scrollIntoView({ block: "nearest" });
       }
 
       if (e.key === "Enter") {
         const activeEl = document.querySelector<HTMLElement>(".conversation-item.active");
-        if (activeEl) {
-          const chatId = Number(activeEl.dataset.chatId);
-          onSelectCallback?.(chatId);
-        }
+        const activeId = activeEl?.dataset.chatId;
+        if (activeId !== undefined) onSelectCallback?.(Number(activeId));
       }
     });
   }
@@ -83,7 +82,7 @@ async function loadMore(): Promise<void> {
       offset: currentOffset,
       limit: PAGE_SIZE,
     });
-    const list = document.getElementById("conversation-list")!;
+    const list = byId("conversation-list", HTMLElement);
     for (const conv of conversations) {
       conversationCache.set(conv.chat_id, conv);
       list.appendChild(createConversationElement(conv));
@@ -128,7 +127,8 @@ export function selectConversation(chatId: number, el: HTMLElement): void {
 }
 
 function handleScroll(e: Event): void {
-  const target = e.target as HTMLElement;
+  if (!(e.target instanceof HTMLElement)) return;
+  const target = e.target;
   if (target.scrollTop + target.clientHeight >= target.scrollHeight - 100) {
     loadMore().catch(console.error);
   }
