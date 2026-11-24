@@ -366,9 +366,9 @@ fn read_binary_writes_a_pair_with_operation_read_binary() {
 fn list_fields_writes_a_pair_with_operation_item_get_and_never_a_value() {
     let fixture = Fixture::new();
     let value = unique_token("field");
-    // Called as: op item get <item> --vault <vault> --format json
+    // Called as: op item get --vault <vault> --format json -- <item>
     fixture.install_fake_op(&format!(
-        r#"[ "$1 $2 $3 $4 $5" = "item get Item --vault Private" ] || exit 9
+        r#"[ "$*" = "item get --vault Private --format json -- Item" ] || exit 9
 printf '%s' '{{"title":"Item","fields":[{{"label":"credential","value":"{value}"}}]}}'"#
     ));
 

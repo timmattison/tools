@@ -33,7 +33,7 @@ pub fn read_item_fields(
 ```
 
 **Behavior:**
-- Runs `op item get <item> --vault <vault> --format json` through the 1Password CLI. The run goes through `OpRun`, the one entrance to `op`, as a read does. So each attempt writes an `op_start` and an `op_end` record with the operation `item-get` to the audit trail, and shows the notification that names the caller
+- Runs `op item get --vault <vault> --format json -- <item>` through the 1Password CLI. The run goes through `OpRun`, the one entrance to `op`, as a read does. So each attempt writes an `op_start` and an `op_end` record with the operation `item-get` to the audit trail, and shows the notification that names the caller. The item comes after `--`, so op never reads a title that starts with `-` as a flag
 - Parses the JSON response and keeps the fields whose `label` equals `field_prefix` or starts with `field_prefix-`
 - Returns a `Vec<ItemField>` sorted alphabetically by label (`credential` before `credential-2`, etc.)
 - Caches only the matching fields in `.op-cache.json`, under the synthetic key `<item path>/__item_fields__/<field_prefix>`, for example `op://Private/ProtonVPN WireGuard key/__item_fields__/credential`. The cached value is the serialized list of `(label, value)` pairs. The entry has no expiry. `op-cache invalidate <item path>` removes it, with each other field list of that item, so that the next call reads a credential added in 1Password

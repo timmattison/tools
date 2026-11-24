@@ -19,8 +19,9 @@ pub(crate) enum Operation<'a> {
     Read,
     /// `op read --out-file <output_path> <reference>`
     ReadBinary { output_path: &'a Path },
-    /// `op item get <item> --vault <vault> --format json`. The reference of
-    /// the run is the item path, `op://<vault>/<item>`.
+    /// `op item get --vault <vault> --format json -- <item>`. The reference of
+    /// the run is the item path, `op://<vault>/<item>`. The item comes after
+    /// `--`, so op never reads a title that starts with `-` as a flag.
     ItemGet { vault: &'a str, item: &'a str },
 }
 
@@ -47,11 +48,12 @@ impl Operation<'_> {
             Self::ItemGet { vault, item } => vec![
                 "item".to_owned(),
                 "get".to_owned(),
-                (*item).to_owned(),
                 "--vault".to_owned(),
                 (*vault).to_owned(),
                 "--format".to_owned(),
                 "json".to_owned(),
+                "--".to_owned(),
+                (*item).to_owned(),
             ],
         }
     }
