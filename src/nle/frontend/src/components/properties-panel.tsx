@@ -1,4 +1,5 @@
 import type { RecordingMetadata } from "../bindings";
+import { formatDuration } from "../format-duration";
 
 interface PropertiesPanelProps {
   metadata: RecordingMetadata | null;
@@ -29,7 +30,9 @@ export function PropertiesPanel({ metadata }: PropertiesPanelProps) {
       </div>
       <div className="metadata-item">
         <span className="metadata-label">Duration</span>
-        <span className="metadata-value">{metadata.duration.toFixed(1)}s</span>
+        <span className="metadata-value">
+          {formatDuration(metadata.duration)}
+        </span>
       </div>
       <div className="metadata-item">
         <span className="metadata-label">Events</span>
