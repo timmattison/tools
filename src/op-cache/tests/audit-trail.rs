@@ -474,15 +474,13 @@ fn list_fields_fetches_again_when_the_cached_field_list_cannot_be_read() {
 /// a warning that prints that text prints a cached secret.
 #[test]
 fn list_fields_never_prints_a_value_of_a_cached_field_list_that_cannot_be_read() {
-    let shapes: [(&str, fn(&str) -> String); 2] = [
-        ("a JSON string", |token| serde_json::json!(token).to_string()),
-        ("a list of strings", |token| {
-            serde_json::json!([token]).to_string()
-        }),
+    let token = unique_token("cached-field-secret");
+    let shapes = [
+        ("a JSON string", serde_json::json!(token)),
+        ("a list of strings", serde_json::json!([token])),
     ];
-    for (shape, entry_for) in shapes {
+    for (shape, entry) in shapes {
         let fixture = Fixture::new();
-        let token = unique_token("cached-field-secret");
         fixture.install_fake_op(
             r#"printf '%s' '{"title":"Item","fields":[{"label":"credential","value":"fresh"}]}'"#,
         );
@@ -490,7 +488,7 @@ fn list_fields_never_prints_a_value_of_a_cached_field_list_that_cannot_be_read()
         cache.insert(
             "op://Private/Item/__item_fields__/credential".to_owned(),
             serde_json::json!({
-                "value": entry_for(&token),
+                "value": entry.to_string(),
                 "fetchedAt": "2026-01-01T00:00:00Z",
             }),
         );
