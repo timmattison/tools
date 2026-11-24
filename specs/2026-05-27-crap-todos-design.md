@@ -41,13 +41,19 @@ event stream to the latest state.
   "activeForm": str }`. The task **id is not in the input** — it is assigned by
   the runtime and returned in the following `tool_result`, whose text reads
   `"Task #<N> created successfully: <subject>"`.
-- `TaskUpdate` `tool_use` input: `{ "taskId": str, "status": str }`. Observed
+- `TaskUpdate` `tool_use` input: `{ "taskId": str }` plus optional fields:
+  `status`, `subject`, `description`, `activeForm`, `addBlockedBy`,
+  `addBlocks`, `owner`. Of 4,623 calls under `~/.claude/projects` on
+  2026-11-24, 141 had no `status` and 24 changed the `subject`. Observed
   statuses: `in_progress`, `completed`. `pending` is the implicit initial state
   at creation. `TaskStop` may introduce a stopped/cancelled state; treat any
   unrecognised status as an opaque pass-through string rather than failing.
 - Reconstruction = **fold the stream**: seed task `N` (subject, `pending`) from
-  each `TaskCreate` result line, then apply each `TaskUpdate` in order to mutate
-  status. Tasks are ordered by ascending numeric id.
+  each `TaskCreate` result line, and its detail from the `description` of that
+  `TaskCreate` input. Then apply each `TaskUpdate` in order: `status` sets the
+  status, `subject` sets the label, and `description` sets the detail. A field
+  that the input omits keeps its old value. The fold ignores the other fields.
+  Tasks are ordered by ascending numeric id.
 
 Parsing the id from the `tool_result` text is the source of truth for the
 id→subject mapping (creation order also yields `1..N`, but the result text is
@@ -274,7 +280,8 @@ hardcoded paths (parallel-safe per CLAUDE.md):
   `:` and `#`, multibyte subject.
 - `extract_tasks`: create-only (all pending), create+updates, out-of-order
   updates, update referencing unknown id (ignored), unknown status passes
-  through.
+  through, update with no `status` (status kept), update that changes the
+  `subject` or the `description`.
 - `extract_todowrite_latest`: single snapshot, multiple snapshots (last wins),
   empty list, multibyte content.
 - `extract_agent_list`: tasks-present prefers tasks, todos-only, neither →
