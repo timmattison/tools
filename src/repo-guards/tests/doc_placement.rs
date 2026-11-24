@@ -121,6 +121,22 @@ fn build_output_installed_packages_and_git_metadata_are_not_walked() {
 }
 
 #[test]
+fn a_nested_checkout_is_not_walked() {
+    // `.claude/worktrees/<name>/` is a linked worktree, whose `.git` is a
+    // file. A clone or a submodule holds a `.git` directory.
+    assert_eq!(
+        misplaced_in(&[
+            ".claude/worktrees/probe/.git",
+            ".claude/worktrees/probe/specs/x.md",
+            "vendor/clone/.git/HEAD",
+            "vendor/clone/plans/x.md",
+            CONTROL,
+        ]),
+        paths(&[CONTROL])
+    );
+}
+
+#[test]
 fn a_file_named_specs_or_plans_is_not_flagged() {
     assert_eq!(
         misplaced_in(&["a/b/specs", "a/plans", CONTROL]),
