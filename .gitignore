@@ -12,3 +12,5 @@ node_modules
 .swt-check
 src/nle/frontend/dist/
 src/nle/gen/
+# A cdva test plants build output here for one run. A killed run leaves it behind.
+src/cdva/tests/planted-*/
