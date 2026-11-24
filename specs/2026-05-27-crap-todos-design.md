@@ -208,8 +208,9 @@ subagent · general-purpose · "Slice 3: usePanelActive hook"
 ### `--verbose`
 
 Appends each task's full `description` text under its line (indented, wrapped to
-the terminal width that `termbar::TerminalWidth` reads). Todos have no separate description, so `--verbose` is a no-op
-for todo lists. In JSON, `--verbose` populates `items[].detail`.
+the terminal width that `termbar::TerminalWidth` reads). Todos have no separate
+description, so `--verbose` is a no-op for todo lists. In JSON, `--verbose`
+populates `items[].detail`.
 
 ## JSON output (`crap todos <uuid> --json`)
 
