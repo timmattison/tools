@@ -38,7 +38,6 @@ fn main() {
             commands::list_conversations,
             commands::get_messages,
             commands::get_message_position,
-            commands::get_version,
             commands::search_messages,
             commands::export_messages,
         ])

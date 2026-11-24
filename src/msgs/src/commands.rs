@@ -51,11 +51,6 @@ pub fn get_message_position(
 }
 
 #[tauri::command(async)]
-pub fn get_version() -> String {
-    buildinfo::version_string!().to_string()
-}
-
-#[tauri::command(async)]
 pub fn search_messages(
     state: State<'_, AppState>,
     query: String,

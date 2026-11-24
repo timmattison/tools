@@ -50,3 +50,11 @@ The design of `msgs` described these features, and the first version does not ha
 - **The service (iMessage or SMS) in the chat header.** The header shows the name and the
   identifier of the chat. The `chat` table holds the service, and a command has to pass it
   to the frontend.
+- **An About window.** The version shows only for `msgs --version`. A native menu with an
+  About window shows the version string with the git hash and the dirty status.
+- **A list of the skipped attachments in the export summary.** The export skips an attachment
+  whose file is missing or outside the attachments root, and the summary counts only the
+  copied files. A list of the skipped names in the export bar tells the user what is missing.
+- **A placeholder for a message whose text cannot be read.** The parser returns no text for
+  an unknown blob format, and the bubble then shows no text. A placeholder such as
+  "[unable to read message]" shows that the message has content that msgs cannot read.

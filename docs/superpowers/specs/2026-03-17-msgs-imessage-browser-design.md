@@ -60,10 +60,10 @@ All business logic lives in Rust:
 - **DB Layer**: Read-only SQLite connection to `~/Library/Messages/chat.db` via `rusqlite` with `SQLITE_OPEN_READ_ONLY`. Requires Full Disk Access granted to the app.
 - **attributedBody Parser**: Extracts plain text from NSKeyedArchiver/streamtyped blobs. 99.9% of messages (235k of 237k) store text in `attributedBody`, not the `text` column. See [attributedBody Parsing](#attributedbody-parsing) section for details. The parser is a distinct module with fallback handling for unrecognized blob formats.
 - **Date Conversion**: Apple Core Data timestamps are nanoseconds since 2001-01-01. Convert via `date / 1_000_000_000 + 978_307_200` to Unix epoch. Serialized as ISO 8601 with timezone offset (e.g., `2025-01-15T10:30:22-05:00`).
-- **Text Cache**: After launch, the backend extracts text from all `attributedBody` blobs and caches in a local SQLite database (`~/.local/share/msgs/text-cache.db`) with an FTS5 virtual table. The build runs in the background, thus the window and the conversation views work while it runs, and search answers that the index is still building. This enables fast full-text search without modifying `chat.db`. The cache is rebuilt when the source fingerprint of `chat.db` changes (the count of joined message rows, the highest message ROWID, and the latest edit date).
+- **Text Cache**: After launch, the backend extracts text from all `attributedBody` blobs and caches in a local SQLite database (`text-cache.db` in the `msgs` folder of the local data directory, `~/Library/Application Support/msgs/text-cache.db` on macOS) with an FTS5 virtual table. The build runs in the background, thus the window and the conversation views work while it runs, and search answers that the index is still building. This enables fast full-text search without modifying `chat.db`. The cache is rebuilt at the start of the app when the source fingerprint of `chat.db` changes (the count of joined message rows, the highest message ROWID, and the latest edit date). A failed build is tried again at the next call of `check_db_access`. A manual refresh is not built (see `WISHLIST.md`).
 - **Query Builder**: Constructs SQL against Apple's schema (`message`, `chat`, `handle`, `attachment`, and their join tables).
 - **Export Engine**: Serializes message ranges to JSON and copies attachment files to an export folder.
-- **Search Engine**: FTS5 queries against the text cache, optionally filtered to a specific chat_id. Falls back to in-memory search if cache is stale.
+- **Search Engine**: FTS5 queries against the text cache, optionally filtered to a specific chat_id. While the index builds or after a failed build, the command returns a `CacheError` and the search box shows it. There is no in-memory fallback.
 
 ### Frontend (Vanilla TypeScript + Vite)
 
@@ -79,7 +79,7 @@ All frontend-to-backend communication via typed Tauri commands. Every command re
 
 ### Version Information
 
-Uses `buildinfo::version_string!()` macro like all other tools in the repo. Version (including git hash and dirty status) is exposed via the native About window and a `get_version` Tauri command.
+Uses `buildinfo::version_string!()` macro like all other tools in the repo. The version (including git hash and dirty status) is printed by `msgs --version` and `msgs -V`. The app has no About window and no menu (see `WISHLIST.md`).
 
 ## attributedBody Parsing
 
@@ -208,7 +208,6 @@ All commands return `Result<T, MsgsError>`.
 | `get_message_position` | chat_id, message_id | `i64` | The count of messages that come before the message in the newest-first order of `get_messages`, so `get_messages(chat_id, position, 1)` returns it. A click on a search result uses it to open the chat around the hit and highlight it. Fails when the message is not in the chat |
 | `search_messages` | query, chat_id (optional), offset, limit | `Vec<SearchResult>` | FTS5 search. The first version of the UI searches all chats |
 | `export_messages` | chat_id, start_message_id, end_message_id, include_attachments, export_path | `ExportResult` | Export the messages between two messages to JSON + attachment folder |
-| `get_version` | (none) | `String` | Version string with git hash and dirty status |
 
 ### Attachments
 
@@ -237,7 +236,7 @@ Two-panel layout:
 - Click a message to set start point (amber highlight)
 - Click another message to set end point (amber range)
 - Bottom bar shows selection count with Cancel and "Export JSON" buttons
-- "Export JSON" opens native file picker for destination folder
+- "Export JSON" opens the native save dialog. The default name is `msgs-export-<date>`. The path that the user picks is the export folder, and the backend creates it
 
 **Styling:** Plain CSS with CSS custom properties for theming. Dark theme only (matches typical developer preference and Messages.app dark mode). No CSS framework.
 
@@ -250,8 +249,10 @@ Two-panel layout:
 
 ## Export Format
 
+The export folder has the name that the user gives in the save dialog (the default is `msgs-export-<date>`):
+
 ```
-export_2026-03-17_+19145551234/
+msgs-export-2026-03-17/
 ├── messages.json
 └── attachments/
     ├── 101-IMG_1234.heic
@@ -319,10 +320,10 @@ Each stage produces a working application.
 - `Cmd+F` keyboard shortcut
 
 ### Stage 4: Export
-- `export_messages` command — date-range-based export with attachment copying
+- `export_messages` command — export by message ids, with attachment copying
 - Export selection mode: click start message, click end message
 - Amber highlight on selected range
-- Native file picker for export destination
+- Native save dialog for the export folder
 - JSON output with conversation metadata + messages + attachment files
 - Progress events pushed to frontend for large exports (on the wishlist, not built)
 - Escape to cancel selection mode
@@ -331,13 +332,15 @@ Each stage produces a working application.
 
 All Tauri commands return `Result<T, MsgsError>`. The frontend maps error variants to user-facing messages:
 
-- **NoFullDiskAccess**: Shown on app launch with step-by-step instructions to enable FDA
-- **DatabaseNotFound**: Explanation that Messages may not be configured on this machine
-- **DatabaseError**: Generic database access failures with technical detail
-- **ParseError**: Logged as warning, message shown with "[unable to read message]" placeholder
-- **ExportError**: Shown inline in the export bar with option to retry
-- **AttachmentNotFound**: Metadata included in export JSON, file copy skipped, noted in export summary
-- **CacheError**: Search degrades gracefully, and the search box shows the failure
+A command that fails rejects the invoke with the message of the error, and the frontend shows that text. `check_db_access` does not reject for a database that cannot be opened. It returns `DbStatus` with `accessible: false` and the message in `error`, and `main.ts` shows it in the error overlay. Any other failure at start shows `msgs could not start: <message>`.
+
+- **NoFullDiskAccess**: The message names the System Settings path (Privacy & Security > Full Disk Access). The overlay shows it when `check_db_access` cannot open `chat.db`. There are no step-by-step instructions.
+- **DatabaseNotFound**: The message says that `chat.db` is not at `~/Library/Messages/chat.db` and asks if Messages is configured. The overlay shows it.
+- **DatabaseError**: The message holds the technical detail.
+- **ParseError**: Not used. The parser returns `None` for a blob that it cannot read and logs a warning. The message then has no text, and the bubble shows no text. A placeholder is on the wishlist (`WISHLIST.md`).
+- **ExportError**: The export bar shows `Export failed: <message>`. The confirm button is enabled again, thus the user can start the export again. There is no separate retry button.
+- **AttachmentNotFound**: Not used. The export skips an attachment whose path is missing, outside the root, or not copyable, logs a warning, and writes `exported_file: null` in `messages.json`. The export summary counts only the copied files. A list of the skipped files is on the wishlist (`WISHLIST.md`).
+- **CacheError**: Search has no fallback. The search box shows `Search unavailable: <error>` when the build fails, and the result list shows `Search failed: <message>` when a search call fails. There is no rebuild prompt (see `WISHLIST.md`).
 
 ## Testing Strategy
 
@@ -353,4 +356,4 @@ All Tauri commands return `Result<T, MsgsError>`. The frontend maps error varian
 - Attachment file paths validated to be within `~/Library/Messages/Attachments/` after `..` and symlinks resolve (both the path and the root are canonicalized before the comparison) and before the export copies them (path traversal prevention)
 - CSP configured to prevent loading external resources
 - Tauri v2 capabilities restricted to `core:default` and `dialog:default` (the save dialog of the export). The app has no file-system plugin and no asset protocol
-- Text cache database stored in `~/.local/share/msgs/` with no sensitive data beyond message text
+- The text cache file (`~/Library/Application Support/msgs/text-cache.db` on macOS) holds a copy of the text of each message. The copy lies outside the TCC protection of `~/Library/Messages`, and each process of the same user can read it. Deleting the file removes the copy, and msgs makes it again at the next start
