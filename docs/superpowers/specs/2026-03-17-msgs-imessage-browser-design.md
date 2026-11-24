@@ -347,7 +347,7 @@ All Tauri commands return `Result<T, MsgsError>`. The frontend maps error varian
 
 - Read-only database access (SQLite `SQLITE_OPEN_READ_ONLY`)
 - No network access needed
-- Attachment file paths validated to be within `~/Library/Messages/Attachments/` before the export copies them (path traversal prevention)
+- Attachment file paths validated to be within `~/Library/Messages/Attachments/` after `..` and symlinks resolve (both the path and the root are canonicalized before the comparison) and before the export copies them (path traversal prevention)
 - CSP configured to prevent loading external resources
 - Tauri v2 capabilities restricted to `core:default` and `dialog:default` (the save dialog of the export). The app has no file-system plugin and no asset protocol
 - Text cache database stored in `~/.local/share/msgs/` with no sensitive data beyond message text

@@ -159,6 +159,8 @@ pub fn export_messages(
     ))?;
 
     let export_dir = std::path::Path::new(&export_path);
+    // Without a home directory there is no root, and the export copies no attachment.
+    let attachments_root = crate::util::default_attachments_root().unwrap_or_default();
     export_conversation_range(
         db,
         chat_id,
@@ -166,5 +168,6 @@ pub fn export_messages(
         end_message_id,
         include_attachments,
         export_dir,
+        &attachments_root,
     )
 }

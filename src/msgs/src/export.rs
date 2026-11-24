@@ -3,11 +3,14 @@ use std::path::Path;
 use crate::db::MessageDb;
 use crate::error::MsgsError;
 use crate::types::ExportResult;
-use crate::util::expand_tilde;
+use crate::util::resolve_attachment;
 
 /// Export a range of messages from a conversation to JSON + attachments.
 /// The range runs from the start message to the end message, both included,
 /// in either order.
+///
+/// An attachment is copied only when its path, after `..` and symlinks
+/// resolve, lies inside `attachments_root`.
 ///
 /// # Errors
 ///
@@ -19,6 +22,7 @@ pub fn export_conversation_range(
     end_message_id: i64,
     include_attachments: bool,
     export_dir: &Path,
+    attachments_root: &Path,
 ) -> Result<ExportResult, MsgsError> {
     // Create export directory
     std::fs::create_dir_all(export_dir)
@@ -38,36 +42,23 @@ pub fn export_conversation_range(
         std::fs::create_dir_all(&att_dir)
             .map_err(|e| MsgsError::ExportError(format!("Cannot create attachments dir: {e}")))?;
 
-        let allowed_prefix = dirs::home_dir()
-            .map(|h| h.join("Library/Messages/Attachments"))
-            .unwrap_or_default();
-
         for msg in &messages {
             for att in &msg.attachments {
                 if let Some(ref filename) = att.filename {
-                    let source = expand_tilde(filename);
-                    // Path traversal prevention: only copy from Messages/Attachments
-                    if !source.starts_with(&allowed_prefix) {
-                        log::warn!(
-                            "Attachment path outside allowed directory: {}",
-                            source.display()
-                        );
+                    let Some(source) = resolve_attachment(filename, attachments_root) else {
+                        log::warn!("Attachment path not allowed or not found: {filename}");
                         continue;
-                    }
-                    if source.exists() {
-                        let dest_name = source
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .to_string();
-                        let dest = att_dir.join(&dest_name);
-                        if let Err(e) = std::fs::copy(&source, &dest) {
-                            log::warn!("Cannot copy attachment {}: {e}", source.display());
-                        } else {
-                            attachment_count += 1;
-                        }
+                    };
+                    let dest_name = source
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    let dest = att_dir.join(&dest_name);
+                    if let Err(e) = std::fs::copy(&source, &dest) {
+                        log::warn!("Cannot copy attachment {}: {e}", source.display());
                     } else {
-                        log::warn!("Attachment file not found: {}", source.display());
+                        attachment_count += 1;
                     }
                 }
             }
@@ -112,8 +103,14 @@ pub fn export_conversation_range(
 mod tests {
     use super::*;
     use crate::test_fixture::{apple_ns, ChatDbFixture, MessageSpec};
+    use crate::util::expand_tilde;
 
     const BASE: i64 = 1_700_000_000;
+
+    /// A root for a test that copies no attachment.
+    fn no_root() -> &'static Path {
+        Path::new("/nonexistent-attachments-root")
+    }
 
     #[test]
     fn export_without_attachments_writes_messages_json() {
@@ -142,9 +139,16 @@ mod tests {
         let db = fx.open_db();
         let export_dir = fx.dir().join("export").join("nested");
 
-        let result =
-            export_conversation_range(&db, chat, ids["first"], ids["second"], false, &export_dir)
-                .expect("export");
+        let result = export_conversation_range(
+            &db,
+            chat,
+            ids["first"],
+            ids["second"],
+            false,
+            &export_dir,
+            no_root(),
+        )
+        .expect("export");
 
         assert_eq!(result.message_count, 2);
         assert_eq!(result.attachment_count, 0);
@@ -194,7 +198,8 @@ mod tests {
         let db = fx.open_db();
         let export_dir = fx.dir().join("export-subsecond");
 
-        export_conversation_range(&db, chat, ids[0], ids[3], false, &export_dir).expect("export");
+        export_conversation_range(&db, chat, ids[0], ids[3], false, &export_dir, no_root())
+            .expect("export");
 
         let json: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(export_dir.join("messages.json")).expect("read json"),
@@ -232,7 +237,7 @@ mod tests {
 
         let ids_of = |name: &str, a: i64, b: i64| -> Vec<i64> {
             let dir = fx.dir().join(name);
-            export_conversation_range(&db, chat, a, b, false, &dir).expect("export");
+            export_conversation_range(&db, chat, a, b, false, &dir, no_root()).expect("export");
             let json: serde_json::Value = serde_json::from_str(
                 &std::fs::read_to_string(dir.join("messages.json")).expect("read json"),
             )
@@ -248,7 +253,7 @@ mod tests {
         assert_eq!(ids_of("reverse", last, first), vec![first, middle, last]);
 
         let dir = fx.dir().join("foreign");
-        let error = export_conversation_range(&db, chat, first, foreign, false, &dir)
+        let error = export_conversation_range(&db, chat, first, foreign, false, &dir, no_root())
             .expect_err("foreign id");
         assert!(error.to_string().contains(&foreign.to_string()));
     }
@@ -266,7 +271,8 @@ mod tests {
         let db = fx.open_db();
         let export_dir = fx.dir().join("export-undated");
 
-        export_conversation_range(&db, chat, id, id, false, &export_dir).expect("export");
+        export_conversation_range(&db, chat, id, id, false, &export_dir, no_root())
+            .expect("export");
 
         let json: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(export_dir.join("messages.json")).expect("read json"),
@@ -307,9 +313,10 @@ mod tests {
         fx.add_attachment(id, &traversal, Some("secret.txt"));
         let db = fx.open_db();
         let export_dir = fx.dir().join("export-traversal");
+        let root = home.join("Library/Messages/Attachments");
 
         let result =
-            export_conversation_range(&db, chat, id, id, true, &export_dir).expect("export");
+            export_conversation_range(&db, chat, id, id, true, &export_dir, &root).expect("export");
 
         assert_eq!(result.attachment_count, 0);
         let copied = std::fs::read_dir(export_dir.join("attachments"))
