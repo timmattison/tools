@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Conversation } from "./bindings";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -73,6 +73,23 @@ async function mockInvoke() {
   return mock;
 }
 
+// The module adds its keydown handler to the document, and a reset of the
+// modules does not remove it. Take each handler out after its test.
+const added: EventListenerOrEventListenerObject[] = [];
+
+beforeEach(() => {
+  const original = document.addEventListener.bind(document);
+  vi.spyOn(document, "addEventListener").mockImplementation((type, listener, options) => {
+    if (type === "keydown" && listener !== null) added.push(listener);
+    original(type, listener, options);
+  });
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  for (const listener of added.splice(0)) document.removeEventListener("keydown", listener);
+});
+
 describe("conversation list scrolling", () => {
   beforeEach(() => {
     vi.resetModules();
@@ -130,5 +147,57 @@ describe("conversation list scrolling", () => {
     await flush();
 
     expect(itemIds()).toEqual(["101", "102", "103"]);
+  });
+});
+
+describe("conversation keyboard handler", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    document.body.innerHTML = MARKUP;
+  });
+
+  /** Load three conversations and make the first one active. Returns the select callback. */
+  async function setUp() {
+    const invoke = await mockInvoke();
+    invoke.mockResolvedValue(page(1, 3));
+    const { initConversations, onConversationSelect } = await import("./conversations");
+    const onSelect = vi.fn();
+    onConversationSelect(onSelect);
+    await initConversations();
+    document.querySelector<HTMLElement>(".conversation-item")?.click();
+    onSelect.mockClear();
+    return onSelect;
+  }
+
+  function activeId(): string | undefined {
+    return document.querySelector<HTMLElement>(".conversation-item.active")?.dataset.chatId;
+  }
+
+  function press(target: EventTarget, key: string): KeyboardEvent {
+    const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+    target.dispatchEvent(event);
+    return event;
+  }
+
+  it("ignores Enter on a focused button", async () => {
+    const onSelect = await setUp();
+    const button = document.getElementById("btn-export");
+    if (button === null) throw new Error("no button in the test markup");
+    button.focus();
+
+    press(button, "Enter");
+
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it("leaves the arrow keys of the message area to the browser", async () => {
+    await setUp();
+    const area = document.getElementById("message-area");
+    if (area === null) throw new Error("no message area in the test markup");
+
+    const event = press(area, "ArrowDown");
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(activeId()).toBe("1");
   });
 });
