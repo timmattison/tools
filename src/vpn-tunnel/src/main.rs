@@ -42,7 +42,8 @@ enum Commands {
         #[arg(long, default_value = DEFAULT_CONTAINER_PREFIX)]
         container_prefix: String,
 
-        /// 1Password path for WireGuard private key
+        /// 1Password item that holds the WireGuard credentials in fields named
+        /// credential, credential-2, and so on (op://vault/item)
         #[arg(long, default_value = DEFAULT_OP_PATH)]
         op_path: String,
 
