@@ -1480,6 +1480,8 @@ mod tests {
     }
 
     /// The oldest entry leaves first, and `contains` says which ones are left.
+    /// The time of each kept name is the time of its own frame, so an
+    /// eviction of the newest entry fails here too.
     #[test]
     fn the_oldest_entry_leaves_first() {
         let mut history = History::with_budget(8_000);
@@ -1503,6 +1505,9 @@ mod tests {
         );
         assert!(history.contains(ids[99]));
         assert_eq!(history.oldest(), Some(ids[first_kept]));
+        let first_kept_secs = u64::try_from(first_kept).expect("an index fits in a u64") * 2;
+        assert_eq!(history.at(ids[first_kept]), Some(time(first_kept_secs)));
+        assert_eq!(history.at(ids[99]), Some(time(198)));
     }
 
     /// A PID that returns with a new start time is a new process: the span
@@ -1680,7 +1685,8 @@ mod tests {
     }
 
     /// A later frame gives the newest directory to the process. A frame with
-    /// no directory does not erase the one that is known.
+    /// no directory does not erase the one that is known. The frame with no
+    /// directory comes last, so nothing after it can put a directory back.
     #[test]
     fn an_absent_detail_never_erases_a_known_one() {
         let mut history = History::new();
@@ -1694,15 +1700,15 @@ mod tests {
         ));
         history.add(frame(
             12,
-            vec![claude_row(1, 5, session(SessionState::Busy, None))],
-        ));
-        history.add(frame(
-            14,
             vec![claude_row(
                 1,
                 5,
                 session(SessionState::Busy, Some("/work/b")),
             )],
+        ));
+        history.add(frame(
+            14,
+            vec![claude_row(1, 5, session(SessionState::Busy, None))],
         ));
 
         let reading = history.frame(first).expect("the frame is there");
