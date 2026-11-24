@@ -470,6 +470,89 @@ fn list_fields_fetches_again_when_the_cached_field_list_cannot_be_read() {
     assert_eq!(pairs, vec![("credential".to_owned(), value)]);
 }
 
+/// serde_json quotes a string of the wrong type in the text of its error, so
+/// a warning that prints that text prints a cached secret.
+#[test]
+fn list_fields_never_prints_a_value_of_a_cached_field_list_that_cannot_be_read() {
+    let shapes: [(&str, fn(&str) -> String); 2] = [
+        ("a JSON string", |token| serde_json::json!(token).to_string()),
+        ("a list of strings", |token| {
+            serde_json::json!([token]).to_string()
+        }),
+    ];
+    for (shape, entry_for) in shapes {
+        let fixture = Fixture::new();
+        let token = unique_token("cached-field-secret");
+        fixture.install_fake_op(
+            r#"printf '%s' '{"title":"Item","fields":[{"label":"credential","value":"fresh"}]}'"#,
+        );
+        let mut cache = serde_json::Map::new();
+        cache.insert(
+            "op://Private/Item/__item_fields__/credential".to_owned(),
+            serde_json::json!({
+                "value": entry_for(&token),
+                "fetchedAt": "2026-01-01T00:00:00Z",
+            }),
+        );
+        fs::write(
+            fixture.path("repo").join(".op-cache.json"),
+            serde_json::Value::Object(cache).to_string(),
+        )
+        .expect("write cache");
+
+        let output = fixture
+            .command()
+            .args(["list-fields", "op://Private/Item"])
+            .output()
+            .expect("run op-cache");
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "a cached field list that holds {shape} stopped list-fields: {stderr}"
+        );
+        assert!(
+            stderr.contains("cached field list"),
+            "no warning for a cached field list that holds {shape}: {stderr}"
+        );
+        assert!(
+            !stderr.contains(&token),
+            "the warning for a cached field list that holds {shape} printed its value: {stderr}"
+        );
+    }
+}
+
+/// The same leak through the parse of the whole cache file.
+#[test]
+fn read_never_prints_a_value_of_a_cache_file_that_cannot_be_read() {
+    let fixture = Fixture::new();
+    let token = unique_token("cache-file-secret");
+    fixture.install_fake_op("printf '%s' fresh");
+    let mut cache = serde_json::Map::new();
+    cache.insert(REFERENCE.to_owned(), serde_json::json!(token));
+    fs::write(
+        fixture.path("repo").join(".op-cache.json"),
+        serde_json::Value::Object(cache).to_string(),
+    )
+    .expect("write cache");
+
+    let output = fixture.read(REFERENCE);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "a cache file that cannot be read stopped read: {stderr}"
+    );
+    assert!(
+        stderr.contains("op-cache file is corrupted"),
+        "no warning for a cache file that cannot be read: {stderr}"
+    );
+    assert!(
+        !stderr.contains(&token),
+        "the warning for a cache file that cannot be read printed a value: {stderr}"
+    );
+}
+
 #[test]
 fn list_fields_caches_the_field_list_so_a_second_call_runs_no_op() {
     let fixture = Fixture::new();
