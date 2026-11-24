@@ -336,7 +336,8 @@ impl OpCache {
                         .collect());
                 }
                 Err(e) => eprintln!(
-                    "warning: cached field list {cache_key} is corrupted ({e}), re-fetching it"
+                    "warning: cached field list {cache_key} is corrupted ({}), re-fetching it",
+                    describe_json_error(&e)
                 ),
             }
         }
@@ -425,7 +426,7 @@ impl OpCache {
                 Err(e) => {
                     eprintln!(
                         "warning: op-cache file is corrupted ({}), re-fetching credentials",
-                        e
+                        describe_json_error(&e)
                     );
                     CacheFile::new()
                 }
@@ -450,6 +451,20 @@ impl OpCache {
 
         Ok(())
     }
+}
+
+/// Describes a JSON error by its class and its position, never by its text.
+///
+/// serde_json quotes a string of the wrong type in the text of its error, so
+/// the text of an error from a parse of the cache can hold a cached secret.
+fn describe_json_error(error: &serde_json::Error) -> String {
+    let class = match error.classify() {
+        serde_json::error::Category::Io => "an I/O error",
+        serde_json::error::Category::Syntax => "a syntax error",
+        serde_json::error::Category::Data => "a value of the wrong shape",
+        serde_json::error::Category::Eof => "an early end of the input",
+    };
+    format!("{class} at line {} column {}", error.line(), error.column())
 }
 
 fn find_repo_root() -> Result<PathBuf> {
