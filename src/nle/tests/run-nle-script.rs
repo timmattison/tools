@@ -55,8 +55,12 @@ impl Shims {
         self
     }
 
-    /// Write the `cargo` shim, and the `portplz` shim unless `portplz` is dropped.
+    /// Write the `cargo` and `pnpm` shims, and the `portplz` shim unless `portplz` is dropped.
+    ///
+    /// The script installs the frontend dependencies when `frontend/node_modules`
+    /// is missing, which it is in a fresh checkout, so `pnpm` must answer too.
     fn install(&self, install_portplz: bool) {
+        write_executable(&self.dir.join("pnpm"), "#!/bin/sh\nexit 0\n");
         let tauri_branch = if self.tauri_installed {
             "echo \"tauri-cli 2.0.0\"; exit 0"
         } else {
