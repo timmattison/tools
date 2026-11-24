@@ -397,6 +397,55 @@ printf '%s' '{{"title":"Item","fields":[{{"label":"credential","value":"{value}"
 }
 
 #[test]
+fn list_fields_fetches_again_when_the_cached_field_list_cannot_be_read() {
+    let fixture = Fixture::new();
+    let value = unique_token("refetched-field");
+    fixture.install_fake_op(&format!(
+        r#"printf '%s' '{{"title":"Item","fields":[{{"label":"credential","value":"{value}"}}]}}'"#
+    ));
+    // An entry of another shape, as a hand edit or an earlier build can leave.
+    let key = "op://Private/Item/__item_fields__/credential";
+    let cache_path = fixture.path("repo").join(".op-cache.json");
+    let mut cache = serde_json::Map::new();
+    cache.insert(
+        key.to_owned(),
+        serde_json::json!({
+            "value": r#"{"credential":"old shape"}"#,
+            "fetchedAt": "2026-01-01T00:00:00Z",
+        }),
+    );
+    fs::write(&cache_path, serde_json::Value::Object(cache).to_string()).expect("write cache");
+
+    let output = fixture
+        .command()
+        .args(["list-fields", "op://Private/Item"])
+        .output()
+        .expect("run op-cache");
+
+    assert!(
+        output.status.success(),
+        "a cached field list that cannot be read stopped list-fields: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "  credential\n");
+    let text = audit_text(&fixture);
+    assert_eq!(
+        records(&text).len(),
+        2,
+        "the field list must come from op again: {text}"
+    );
+    let cache: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&cache_path).expect("read cache"))
+            .expect("the cache is JSON");
+    let entry = cache[key]["value"]
+        .as_str()
+        .expect("the entry holds a string");
+    let pairs: Vec<(String, String)> =
+        serde_json::from_str(entry).expect("the new entry is a list of pairs");
+    assert_eq!(pairs, vec![("credential".to_owned(), value)]);
+}
+
+#[test]
 fn list_fields_caches_the_field_list_so_a_second_call_runs_no_op() {
     let fixture = Fixture::new();
     let value = unique_token("cached-field");
