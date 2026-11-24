@@ -53,6 +53,34 @@ fn current_euid() -> u32 {
     0
 }
 
+/// What `wl` says about a port for which it named no process.
+#[derive(Debug, PartialEq, Eq)]
+struct Verdict {
+    /// The line for standard output.
+    line: String,
+    /// Whether a process that the current user cannot see can explain the
+    /// answer. The privilege note applies exactly when this is true.
+    hidden_listener_possible: bool,
+}
+
+/// The answer for `port` when `wl` named no process on it, from what the
+/// kernel's socket table says about the port.
+fn verdict(port: u16, status: PortStatus) -> Verdict {
+    let line = match status {
+        PortStatus::InUse => format!(
+            "Port {port} is in use, but no owning process is visible to the current user."
+        ),
+        PortStatus::Free => format!("No processes listening on port {port}"),
+        PortStatus::Unknown => format!(
+            "Cannot tell whether port {port} is in use: wl could not read the kernel's list of listening sockets."
+        ),
+    };
+    Verdict {
+        line,
+        hidden_listener_possible: true,
+    }
+}
+
 /// Print the privilege note, when this run has earned one.
 ///
 /// The note applies exactly when `wl` named no listening process. A process
@@ -121,21 +149,11 @@ fn main() -> Result<()> {
             }
 
             if !found_matches {
-                match socket_table::port_status(args.port) {
-                    PortStatus::InUse => println!(
-                        "Port {} is in use, but no owning process is visible to the current user.",
-                        args.port
-                    ),
-                    PortStatus::Free => {
-                        println!("No processes listening on port {}", args.port);
-                    }
-                    PortStatus::Unknown => println!(
-                        "Cannot tell whether port {} is in use: wl could not read the kernel's list of listening sockets.",
-                        args.port
-                    ),
+                let answer = verdict(args.port, socket_table::port_status(args.port));
+                println!("{}", answer.line);
+                if answer.hidden_listener_possible {
+                    print_privilege_note(privilege_note);
                 }
-
-                print_privilege_note(privilege_note);
             }
         }
         Err(e) => {
@@ -183,6 +201,38 @@ mod tests {
             "wl reads no environment variable, so `sudo -E` adds nothing and a \
              sudoers policy without the SETENV tag refuses it; the note should \
              name the plain command, got: {note}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod verdict_tests {
+    use super::*;
+
+    /// The line tells the user that a listener exists but its owner is hidden.
+    #[test]
+    fn in_use_line_says_the_owner_is_hidden() {
+        assert_eq!(
+            verdict(8080, PortStatus::InUse).line,
+            "Port 8080 is in use, but no owning process is visible to the current user."
+        );
+    }
+
+    /// The line tells the user that no process listens on the port.
+    #[test]
+    fn free_line_says_no_process_listens() {
+        assert_eq!(
+            verdict(8080, PortStatus::Free).line,
+            "No processes listening on port 8080"
+        );
+    }
+
+    /// The line tells the user that `wl` could not read the socket table.
+    #[test]
+    fn unknown_line_says_wl_cannot_tell() {
+        assert_eq!(
+            verdict(8080, PortStatus::Unknown).line,
+            "Cannot tell whether port 8080 is in use: wl could not read the kernel's list of listening sockets."
         );
     }
 }
