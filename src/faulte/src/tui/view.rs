@@ -505,6 +505,16 @@ fn past_gap(app: &App) -> Option<&Gap> {
     }
 }
 
+/// Gives the first part of a past banner: `PAST`, and then the notice of the
+/// view, if any. The notice comes first, because the banner is cut at the
+/// width of the screen.
+fn past_label(app: &App) -> String {
+    match app.notice() {
+        Some(notice) => format!("{PAST}{SEPARATOR}{notice}"),
+        None => PAST.to_string(),
+    }
+}
+
 /// Gives the text of the banner.
 fn banner<Tz: TimeZone>(app: &App, context: &ViewContext<'_, Tz>) -> String
 where
@@ -513,7 +523,8 @@ where
     let history = app.history();
     if let Some(gap) = past_gap(app) {
         return format!(
-            "{PAST}{SEPARATOR}{GAP}{SEPARATOR}{} ({} ago){SEPARATOR}{MEASURED_NOTHING}{}: {}",
+            "{}{SEPARATOR}{GAP}{SEPARATOR}{} ({} ago){SEPARATOR}{MEASURED_NOTHING}{}: {}",
+            past_label(app),
             clock(gap.at, context.tz),
             age(gap.at, context.now),
             render::seconds(gap.lost),
@@ -536,7 +547,8 @@ where
     );
     if let Selection::Past(_) = app.selection() {
         return format!(
-            "{PAST}{SEPARATOR}{NOT_LIVE}{SEPARATOR}{frame_text}{SEPARATOR}{END_RETURNS}"
+            "{}{SEPARATOR}{NOT_LIVE}{SEPARATOR}{frame_text}{SEPARATOR}{END_RETURNS}",
+            past_label(app),
         );
     }
     let mut text = format!("{LIVE}{SEPARATOR}{frame_text}");
