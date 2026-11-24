@@ -24,7 +24,7 @@
 //!     present".
 
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use tempfile::TempDir;
 
@@ -46,7 +46,7 @@ const SKIP_NOTICE: &str = "Skipping hook bootstrap";
 
 /// Returns true if `pnpm --version` runs, i.e. pnpm is installed.
 fn pnpm_available() -> bool {
-    Command::new("pnpm")
+    childenv::fixture_command("pnpm")
         .arg("--version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())

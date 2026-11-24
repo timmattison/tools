@@ -2,16 +2,22 @@
 //!
 //! These tests open the default output device and play silence or the
 //! inaudible keepalive signal. They do not skip when the machine has no
-//! output device. They fail with a message that says so.
+//! output device. They fail with a message that says so. Each test first
+//! takes the turn at the device (see `shared/device-turn.rs`), thus one test
+//! at a time opens it.
 
 // Core Audio exists on macOS only.
 #![cfg(target_os = "macos")]
+
+#[path = "shared/device-turn.rs"]
+mod device_turn;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use device_turn::DeviceTurn;
 use popstop::output::{default_output_device_name, default_output_sample_rate, OutputUnit, Render};
 use popstop::signal::{KeepaliveSignal, SampleRate, RAMP_DURATION};
 
@@ -95,6 +101,7 @@ fn wait_within(bound: Duration, condition: impl Fn() -> bool) -> bool {
 
 #[test]
 fn a_started_unit_calls_the_renderer_until_it_stops() {
+    let _turn = DeviceTurn::take();
     let calls = Arc::new(AtomicUsize::new(0));
     let unit = start(CountingSilence {
         calls: Arc::clone(&calls),
@@ -120,6 +127,7 @@ fn a_started_unit_calls_the_renderer_until_it_stops() {
 
 #[test]
 fn the_default_output_device_has_a_name() {
+    let _turn = DeviceTurn::take();
     let name = default_output_device_name().unwrap_or_else(|error| {
         panic!(
             "the name of the default output device is not known: {error}. This test reads the \
@@ -134,6 +142,7 @@ fn the_default_output_device_has_a_name() {
 
 #[test]
 fn the_default_output_device_has_a_nominal_rate_in_the_range_of_real_devices() {
+    let _turn = DeviceTurn::take();
     let rate = default_output_sample_rate().unwrap_or_else(|error| {
         panic!(
             "the nominal sample rate of the default output device is not known: {error}. This \
@@ -155,6 +164,7 @@ fn the_default_output_device_has_a_nominal_rate_in_the_range_of_real_devices() {
 
 #[test]
 fn a_stop_frees_the_renderer() {
+    let _turn = DeviceTurn::take();
     let calls = Arc::new(AtomicUsize::new(0));
     let unit = start(CountingSilence {
         calls: Arc::clone(&calls),
@@ -179,6 +189,7 @@ fn a_stop_frees_the_renderer() {
 
 #[test]
 fn a_drop_without_a_stop_stops_the_unit_and_frees_the_renderer() {
+    let _turn = DeviceTurn::take();
     let calls = Arc::new(AtomicUsize::new(0));
     let unit = start(CountingSilence {
         calls: Arc::clone(&calls),
@@ -205,6 +216,7 @@ fn a_drop_without_a_stop_stops_the_unit_and_frees_the_renderer() {
 
 #[test]
 fn a_start_that_fails_names_the_call_and_frees_the_renderer() {
+    let _turn = DeviceTurn::take();
     let calls = Arc::new(AtomicUsize::new(0));
     let rate = SampleRate::new(REFUSED_RATE_HZ).expect("1 THz is a valid sample rate");
 
@@ -245,6 +257,7 @@ fn a_start_that_fails_names_the_call_and_frees_the_renderer() {
 
 #[test]
 fn the_audio_thread_plays_the_keepalive_signal_through_its_ramp_down() {
+    let _turn = DeviceTurn::take();
     let rate = SampleRate::new(RATE_HZ).expect("48000 Hz is a valid sample rate");
     let (signal, stop) = KeepaliveSignal::new(rate);
     let unit = start(signal);

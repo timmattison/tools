@@ -388,7 +388,7 @@ fn is_ignored(entry: &DirEntry) -> bool {
 }
 
 /// Scan a path for git repositories
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "internal helper called from a single site; refactoring to a context struct is tracked separately"
 )]

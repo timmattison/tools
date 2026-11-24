@@ -6,7 +6,7 @@
 //! in a wide window and another answer in a narrow one. A test therefore opens
 //! a pseudo-terminal of a size it chose, and gives it to the child.
 //!
-//! A test gives the terminal to the child in one of two shapes.
+//! A test gives the terminal to the child in one of four shapes.
 //!
 //! - [`Pty::give_as_controlling_terminal`] makes the pseudo-terminal the
 //!   controlling terminal of the child. `/dev/tty` in the child then resolves
@@ -16,6 +16,14 @@
 //!   standard output of the child on the pseudo-terminal and reads back what
 //!   the child wrote there. A test of a tool that decides color by whether
 //!   standard output is a terminal needs this shape.
+//! - [`Pty::run_with_output_on_terminal`] does the same as the second shape,
+//!   and also puts standard error of the child on the pseudo-terminal. A test
+//!   of a tool that draws a display on standard error only when that stream is
+//!   a terminal needs this shape.
+//! - [`Pty::run_with_stdin_on_terminal`] does the same as the first shape, and
+//!   also puts standard input of the child on the pseudo-terminal and types an
+//!   answer into it. A test of a tool that asks a question only when a person
+//!   can answer it needs this shape.
 //!
 //! A pseudo-terminal that nobody sized reports zero columns, and the
 //! `TIOCGWINSZ` ioctl succeeds on it. Every terminal here therefore arrives
@@ -27,7 +35,7 @@
 //! copies part company on the day one of them changes.
 
 use std::fs::File;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Output, Stdio};
@@ -215,7 +223,7 @@ impl Pty {
                     return Err(io::Error::last_os_error());
                 }
 
-                #[allow(
+                #[expect(
                     clippy::disallowed_methods,
                     reason = "the ban covers the read of a window, and `TIOCSCTTY` reads none. It claims the pseudo-terminal as the controlling terminal of the child, and termsize offers no call for that"
                 )]
@@ -273,23 +281,40 @@ impl Pty {
     /// Panics when the system gives no copy of the slave end, when the child
     /// does not start, when a read of the master end fails for a reason other
     /// than the end of the output, or when the wait for the child fails.
-    pub fn run_with_stdout_on_terminal(self, mut command: Command) -> Output {
+    pub fn run_with_stdout_on_terminal(self, command: Command) -> Output {
+        self.run_on_terminal(command, false)
+    }
+
+    /// The one body of the two runs that put standard output on the terminal.
+    ///
+    /// `stderr_on_terminal` picks where standard error goes: to the terminal
+    /// when it is true, and to a pipe that the method reads when it is false.
+    /// One body keeps the spawn, the reader thread, and the close order the
+    /// same in both runs.
+    fn run_on_terminal(self, mut command: Command, stderr_on_terminal: bool) -> Output {
         self.give_as_controlling_terminal(&mut command);
         let stdout = self
             .slave
             .try_clone()
             .expect("the system must give a copy of the slave end for standard output");
-        command
-            .stdin(Stdio::null())
-            .stdout(stdout)
-            .stderr(Stdio::piped());
+        let stderr = if stderr_on_terminal {
+            Stdio::from(
+                self.slave
+                    .try_clone()
+                    .expect("the system must give a copy of the slave end for standard error"),
+            )
+        } else {
+            Stdio::piped()
+        };
+        command.stdin(Stdio::null()).stdout(stdout).stderr(stderr);
 
         let Pty { master, slave } = self;
         let reader = std::thread::spawn(move || read_until_hangup(master));
         let child = command.spawn();
 
         // Every copy of the slave end that this process holds closes here: the
-        // copy that the command holds for standard output, and the copy that
+        // copies that the command holds for standard output and, when
+        // `stderr_on_terminal` is true, for standard error, and the copy that
         // the terminal opened with. The child holds the rest. They close before
         // the result of the spawn is read, so a child that did not start still
         // ends the read, and the reader ends with it.
@@ -308,6 +333,105 @@ impl Pty {
             });
 
         Output { stdout, ..finished }
+    }
+
+    /// Run `command` with its standard output and its standard error on this
+    /// terminal, and give back what the child wrote there.
+    ///
+    /// A tool that draws a display on standard error only when that stream is a
+    /// terminal needs this shape. A person at a terminal sees both streams in
+    /// one place, in the order that the child wrote them. So the bytes of both
+    /// streams come back together from the master end, and the `stderr` of the
+    /// result is empty.
+    ///
+    /// # Arguments
+    /// * `command` - The command to start the child from. This method sets its
+    ///   three standard streams, and the caller sets every other part of it.
+    ///
+    /// # Returns
+    /// The exit status of the child, and every byte it wrote to the terminal
+    /// in `stdout`, in the shape that [`Command::output`] gives.
+    ///
+    /// # Panics
+    /// Panics in the same cases as [`Pty::run_with_stdout_on_terminal`].
+    pub fn run_with_output_on_terminal(self, command: Command) -> Output {
+        self.run_on_terminal(command, true)
+    }
+
+    /// Run `command` with its standard input on this terminal, and type
+    /// `typed` into the terminal.
+    ///
+    /// A tool that asks a question only when a person can answer it looks for
+    /// a terminal on standard input. A test of that question needs this shape
+    /// of run. Standard output and standard error of the child are pipes, so a
+    /// test reads what the tool said in the shape that [`Command::output`]
+    /// gives. The terminal is also the controlling terminal of the child, as
+    /// [`Pty::give_as_controlling_terminal`] makes it.
+    ///
+    /// The bytes go into the terminal after the child starts and before this
+    /// process closes its own copy of the slave end. The terminal thus always
+    /// takes them, also from a child that ends at once. The terminal keeps
+    /// them until the child reads standard input. A child that never reads
+    /// them still ends, and the bytes go away with the terminal. The terminal
+    /// is in its default modes, so the child reads one line at a time.
+    /// Give a short answer that ends in a newline, the same as a person types.
+    ///
+    /// The terminal echoes each byte back to the master end. A thread reads
+    /// the master end until the child closes the terminal, so neither the
+    /// echo nor a write of the child to `/dev/tty` can fill the terminal and
+    /// stop the child. That thread discards what it reads.
+    ///
+    /// # Arguments
+    /// * `command` - The command to start the child from. This method sets its
+    ///   three standard streams, and the caller sets every other part of it.
+    /// * `typed` - The bytes that a person types into the terminal, for
+    ///   example `b"y\n"`.
+    ///
+    /// # Returns
+    /// The exit status of the child, and every byte it wrote to standard
+    /// output and to standard error, in the shape that [`Command::output`]
+    /// gives.
+    ///
+    /// # Panics
+    /// Panics when the system gives no copy of the slave end, when the child
+    /// does not start, when the terminal does not take the typed bytes, when a
+    /// read of the master end fails for a reason other than the end of the
+    /// output, or when the wait for the child fails.
+    pub fn run_with_stdin_on_terminal(self, mut command: Command, typed: &[u8]) -> Output {
+        self.give_as_controlling_terminal(&mut command);
+        let stdin = self
+            .slave
+            .try_clone()
+            .expect("the system must give a copy of the slave end for standard input");
+        command
+            .stdin(stdin)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let Pty { master, slave } = self;
+        let child = command.spawn();
+        // The copy of the slave end that the command holds for standard input
+        // closes here. The copy that the terminal opened with stays open until
+        // the typed bytes are in, so the write cannot meet a closed terminal.
+        drop(command);
+        let child = child.unwrap_or_else(|error| panic!("the child must start: {error}"));
+
+        let mut master = File::from(master);
+        master
+            .write_all(typed)
+            .unwrap_or_else(|error| panic!("the terminal must take the typed bytes: {error}"));
+        let reader = std::thread::spawn(move || read_until_hangup(OwnedFd::from(master)));
+        drop(slave);
+
+        let finished = child
+            .wait_with_output()
+            .unwrap_or_else(|error| panic!("the wait for the child must succeed: {error}"));
+        reader
+            .join()
+            .expect("the reader of the master end must not panic")
+            .unwrap_or_else(|error| panic!("the master end must give back the echo: {error}"));
+
+        finished
     }
 }
 

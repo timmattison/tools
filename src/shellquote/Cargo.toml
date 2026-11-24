@@ -5,5 +5,8 @@ edition.workspace = true
 description = "One single-quote shell quoter for every tool in this workspace"
 license = "MIT"
 
+[dev-dependencies]
+childenv.workspace = true
+
 [lints]
 workspace = true

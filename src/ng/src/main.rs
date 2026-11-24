@@ -5,7 +5,6 @@ use colored::Colorize;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -81,7 +80,7 @@ fn run_pnpm_script(script: &str) {
     );
     println!();
 
-    let status = Command::new("pnpm").arg(script).status();
+    let status = childenv::command("pnpm").arg(script).status();
 
     println!();
     match status {

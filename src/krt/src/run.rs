@@ -996,7 +996,7 @@ mod tests {
 
         /// The number of whole records that reached the sink. Every record ends
         /// with one newline.
-        #[allow(
+        #[expect(
             clippy::naive_bytecount,
             reason = "the sink of a test holds a few hundred bytes, which is no reason to take the bytecount crate as a dependency"
         )]

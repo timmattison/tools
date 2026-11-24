@@ -1,0 +1,29 @@
+//! `ha` (hot actions) shows the GitHub Actions runs of many repositories
+//! and owners in one self-refreshing terminal view.
+
+// Stricter than the inherited `[workspace.lints]` set; see "Lint Configuration" in CLAUDE.md.
+#![deny(unsafe_code)]
+#![warn(clippy::pedantic)]
+#![allow(
+    clippy::module_name_repetitions,
+    reason = "types such as run::RunState repeat the module name on purpose"
+)]
+pub mod action;
+pub mod app;
+pub mod billing;
+pub mod board;
+pub mod browser;
+pub mod cost;
+pub mod estimate;
+pub mod first_cycle;
+pub mod github;
+pub mod job;
+pub mod money;
+pub mod queue;
+pub mod render;
+pub mod run;
+pub mod settings;
+pub mod status;
+pub mod suspect;
+pub mod target;
+pub mod worker;

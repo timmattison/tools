@@ -1,0 +1,13 @@
+[package]
+name = "childenv"
+version = "0.1.0"
+edition.workspace = true
+description = "The one entrance for every child process of this workspace: it sheds the inherited GIT_ environment"
+license.workspace = true
+
+# No dependencies, on purpose. The build script of `buildinfo` takes this crate
+# as a build-dependency, and every tool builds `buildinfo`. A dependency here
+# would reach every build of the workspace.
+
+[lints]
+workspace = true

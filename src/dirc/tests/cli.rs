@@ -11,13 +11,17 @@
 //!
 //! The clipboard is one shared resource of the whole machine. A test that
 //! writes it destroys what the person at the keyboard copied, and two such
-//! tests at the same time destroy each other. So every child gets
-//! [`CLIPBOARD_FILE_ENV`], which names a file in the temporary directory of the
-//! one test that made it.
+//! tests at the same time destroy each other. So no child of this file reaches
+//! it.
 //!
-//! One helper, [`run_in`], starts every child of this file, and it always names
-//! that file. The rule is thus a mechanism and not something each test must
-//! remember: a test that forgot it would have to start a child of its own.
+//! Two helpers start children. [`run_in`] gives the child
+//! [`CLIPBOARD_FILE_ENV`], which names a file in the temporary directory of the
+//! one test that made it. [`run_through_shims`] sets `MOSH_OPEN_SOCKET` and puts
+//! the fake `pbcopy` and `pbpaste` of `sysclip::testing::FakeShims` first on
+//! `PATH`. In that route `sysclip` never opens the clipboard of the machine, and
+//! the fake commands keep the text in a file of the test. Each rule is thus a mechanism and not something each
+//! test must remember: a test that forgot it would have to start a child of its
+//! own.
 //!
 //! # The environment of a child is built from nothing
 //!
@@ -39,7 +43,8 @@ use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
+use sysclip::testing::FakeShims;
 
 /// The name of the file that stands in for the clipboard of the machine.
 ///
@@ -89,6 +94,13 @@ const COPIED: &str = "Copied to clipboard: ";
 /// every child the first one as well, so a `dirc` that read the wrong one is a
 /// `dirc` these tests catch.
 const LOGICAL_DIRECTORY_ENV: &str = "PWD";
+
+/// What the refusing `pbpaste` writes on standard error, the way the shim of a
+/// client that allows no paste does.
+const REFUSED_PASTE: &str = "mosh-open: did not paste: the client allows no paste";
+
+/// The directory of the fake commands, inside the temporary directory of a test.
+const SHIMS_DIRECTORY: &str = "shims";
 
 /// The status of a run that refused the clipboard it was given.
 const REFUSED: i32 = 1;
@@ -265,9 +277,28 @@ impl Scratch {
 /// that read it in place of `getcwd` would pass under an environment that
 /// carried none, and would put the wrong path on the clipboard for every user.
 fn run_in(scratch: &Scratch, working_dir: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_dirc"))
+    childenv::fixture_command(env!("CARGO_BIN_EXE_dirc"))
         .env_clear()
         .env(CLIPBOARD_FILE_ENV, scratch.clipboard())
+        .env(LOGICAL_DIRECTORY_ENV, working_dir)
+        .current_dir(working_dir)
+        .args(args)
+        .output()
+        .expect("the built binary starts")
+}
+
+/// Runs the built `dirc` in `working_dir`, in a mosh-rs session.
+///
+/// `MOSH_OPEN_SOCKET` is set and the fake commands of `shims` come first on
+/// `PATH`, so `sysclip` runs them and never opens the clipboard of the
+/// machine. No `DIRC_CLIPBOARD_FILE` is set, because that variable would take
+/// the clipboard away from `sysclip` and the test would prove nothing. The
+/// environment is built from nothing, like the one of [`run_in`].
+fn run_through_shims(working_dir: &Path, shims: &FakeShims, args: &[&str]) -> Output {
+    let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_dirc"));
+    command.env_clear();
+    shims
+        .enter_session(&mut command)
         .env(LOGICAL_DIRECTORY_ENV, working_dir)
         .current_dir(working_dir)
         .args(args)
@@ -457,6 +488,57 @@ fn copy_mode_copies_a_name_of_multi_byte_characters_whole() {
 }
 
 #[test]
+fn copy_mode_in_a_mosh_session_writes_through_pbcopy() {
+    let scratch = Scratch::new();
+    let shims = FakeShims::install(&scratch.path().join(SHIMS_DIRECTORY));
+
+    let output = run_through_shims(scratch.path(), &shims, &[]);
+
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let copied = resolved(scratch.path());
+    assert_eq!(stdout(&output), format!("{COPIED}{copied}\n"));
+    assert_eq!(shims.held(), copied);
+}
+
+#[test]
+fn paste_mode_in_a_mosh_session_reads_through_pbpaste() {
+    let scratch = Scratch::new();
+    let shims = FakeShims::install(&scratch.path().join(SHIMS_DIRECTORY));
+    let child = scratch.directory("plain");
+    shims.hold(text(&child));
+
+    let output = run_through_shims(scratch.path(), &shims, &[PASTE]);
+
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), format!("cd '{}'\n", quoteless(&child)));
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
+fn a_refused_paste_in_a_mosh_session_names_the_shim() {
+    let scratch = Scratch::new();
+    let shims = FakeShims::install(&scratch.path().join(SHIMS_DIRECTORY));
+    shims.refuse_paste(REFUSED_PASTE);
+
+    let output = run_through_shims(scratch.path(), &shims, &[PASTE]);
+
+    assert_eq!(
+        output.status.code(),
+        Some(REFUSED),
+        "stderr: {}",
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "", "eval would run this");
+    let said = stderr(&output);
+    assert!(
+        said.contains(&format!(
+            "{UNREACHABLE}mosh-open: did not paste: the client allows no paste"
+        )),
+        "{said}"
+    );
+}
+
+#[test]
 fn paste_mode_writes_the_cd_line_for_the_directory_the_clipboard_names() {
     let scratch = Scratch::new();
     let child = scratch.directory("plain");
@@ -526,7 +608,7 @@ fn the_shell_runs_the_cd_line_of_a_name_that_holds_a_quote() {
     let written = stdout(&printed);
     let line = written.trim_end();
 
-    let landed = Command::new(SHELL)
+    let landed = childenv::fixture_command(SHELL)
         .env_clear()
         // The shell starts in the temporary directory, so a line the shell
         // refused leaves it here and this test then reads a directory that is
@@ -568,7 +650,7 @@ fn the_shell_runs_the_idiom_the_help_teaches_into_a_name_that_holds_a_tab() {
     let (idiom, _alias) = invocations(&help_page(), BASH_LABEL);
     let script = format!("{}{REPORT_WHERE}", with_built_binary(&idiom));
 
-    let landed = Command::new(SHELL)
+    let landed = childenv::fixture_command(SHELL)
         .env_clear()
         // The children of this shell read the clipboard of this test. No child
         // of this file reaches the clipboard of the machine.

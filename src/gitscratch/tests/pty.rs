@@ -24,7 +24,7 @@ const COLUMNS: u16 = 97;
 
 /// A `sh -c` command that runs `script`.
 fn shell(script: &str) -> Command {
-    let mut command = Command::new("sh");
+    let mut command = childenv::fixture_command("sh");
     command.arg("-c").arg(script);
     command
 }
@@ -124,6 +124,55 @@ fn output_far_bigger_than_any_buffer_comes_back_whole_on_both_streams() {
     }
 }
 
+/// A script that reads one line from standard input when standard input is a
+/// terminal, and prints what it read. It prints `pipe` when standard input is
+/// not a terminal.
+const READ_A_LINE_FROM_A_TERMINAL: &str =
+    r#"if [ -t 0 ]; then read answer; printf 'read %s' "$answer"; else printf pipe; fi"#;
+
+/// A child whose standard input is on the terminal reads the line that the
+/// test typed.
+///
+/// A tool that asks a question only when a person can answer it looks for a
+/// terminal on standard input, and then reads the answer from there. So a test
+/// of the question needs a child that sees a terminal on standard input, and
+/// an answer that arrives through that terminal.
+#[test]
+fn a_child_whose_stdin_is_on_the_terminal_reads_the_typed_line() {
+    let output =
+        Pty::open(COLUMNS).run_with_stdin_on_terminal(shell(READ_A_LINE_FROM_A_TERMINAL), b"n\n");
+
+    assert_eq!(
+        output.stdout,
+        b"read n",
+        "the child must read the typed line from a terminal on standard input\n{}",
+        described(&output)
+    );
+}
+
+/// A child that reads nothing still ends, and its standard output and its
+/// standard error come back on pipes.
+///
+/// A tool that decides not to ask a question never reads the typed line. The
+/// run must end all the same. The test also reads both streams of the child,
+/// because a test of the question asserts on what the tool said there.
+#[test]
+fn a_child_that_reads_nothing_ends_and_gives_back_both_streams() {
+    let output = Pty::open(COLUMNS).run_with_stdin_on_terminal(
+        shell("if [ -t 1 ]; then printf terminal; else printf pipe; fi; printf said >&2"),
+        b"y\n",
+    );
+
+    assert!(output.status.success(), "{}", described(&output));
+    assert_eq!(
+        output.stdout,
+        b"pipe",
+        "standard output of the child must be a pipe\n{}",
+        described(&output)
+    );
+    assert_eq!(output.stderr, b"said", "{}", described(&output));
+}
+
 /// The terminal is the controlling terminal of the child, at the size it was
 /// opened with.
 ///
@@ -140,6 +189,31 @@ fn the_controlling_terminal_of_the_child_is_the_terminal_at_its_opened_size() {
         output.stdout,
         format!("{} {COLUMNS}\n", Pty::ROWS).as_bytes(),
         "the child must measure this terminal through /dev/tty\n{}",
+        described(&output)
+    );
+}
+
+/// A child whose two output streams are on the terminal gives back both of
+/// them through the terminal.
+///
+/// A tool that draws a display on standard error only when that stream is a
+/// terminal needs a run where both streams reach one terminal, as they do for
+/// a person. The `stderr` of the result is then empty, because nothing went
+/// to a pipe.
+#[test]
+fn a_child_whose_stdout_and_stderr_are_on_the_terminal_gives_back_both_there() {
+    let output =
+        Pty::open(COLUMNS).run_with_output_on_terminal(shell("printf out; printf err >&2"));
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains("out") && text.contains("err"),
+        "the terminal must carry both streams\n{}",
+        described(&output)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "no stream may go to a pipe\n{}",
         described(&output)
     );
 }

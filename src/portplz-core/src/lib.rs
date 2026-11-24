@@ -849,8 +849,7 @@ mod tests {
         // files. The sweep comes first so the pins win, and it is a prefix
         // rather than the three names this fixture used to list: a list
         // strips nothing new the day git adds a variable.
-        let mut command = std::process::Command::new("git");
-        gitscratch::shed_inherited_git_environment(&mut command);
+        let mut command = childenv::fixture_command("git");
 
         let status = command
             .args(args)

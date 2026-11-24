@@ -134,7 +134,7 @@ fn add_logo_to_qr(
     let scaled = f64::from(max_logo_size) * logo_size_percent / 100.0;
     // `scaled` is in [0, max_logo_size] (a u32 magnitude), so the as-cast is
     // representable in u32 and non-negative.
-    #[allow(
+    #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         reason = "scaled is bounded to [0, max_logo_size] where max_logo_size is a u32 by construction"

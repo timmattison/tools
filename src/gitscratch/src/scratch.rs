@@ -54,6 +54,7 @@ use tempfile::TempDir;
 use crate::diffs::{HaltDiff, HaltDiffs};
 use crate::git::Git;
 use crate::metrics::{Files, Hunks, Stops};
+use crate::progress::{Phase, RebaseWatch, ReplayObserver, ReplayProgress};
 
 /// Upper bound on the rounds one replay may spend advancing a halted rebase, so
 /// a git state we failed to anticipate stalls the run instead of spinning
@@ -155,9 +156,22 @@ pub struct Scratch {
     /// so a path that cannot be spelled for git has to fail the run, not
     /// degrade into one. [`Git::new`] refuses the empty value outright.
     hooks: String,
+    /// The receiver of progress reports, when the caller asked for one.
+    observer: Option<Box<dyn ReplayObserver>>,
 }
 
 impl Scratch {
+    /// Send a report to the observer, when the caller gave one.
+    ///
+    /// A scratch worktree built by [`Repo::scratch`](crate::Repo::scratch) has
+    /// no observer, and then this method does nothing. A report never changes
+    /// the answer of a replay.
+    fn report(&self, progress: ReplayProgress) {
+        if let Some(observer) = &self.observer {
+            observer.report(progress);
+        }
+    }
+
     /// Add a detached worktree at `at` in a private temporary directory.
     ///
     /// Crate-private on purpose, and for the same reason [`Git::new`] is:
@@ -174,7 +188,11 @@ impl Scratch {
     /// Returns an error if the temporary directory cannot be created, if its
     /// path cannot be spelled for git as UTF-8, or if git refuses to add the
     /// worktree - most commonly because `at` does not name a commit.
-    pub(crate) fn create(repo: &Path, at: &str) -> Result<Self> {
+    pub(crate) fn create(
+        repo: &Path,
+        at: &str,
+        observer: Option<Box<dyn ReplayObserver>>,
+    ) -> Result<Self> {
         let dir = TempDir::new().context("could not create a scratch directory")?;
         let worktree = dir.path().join("worktree");
         let hooks_dir = dir.path().join("hooks");
@@ -189,7 +207,12 @@ impl Scratch {
             dir,
             worktree,
             hooks,
+            observer,
         };
+
+        // The report comes before the call, so a caller sees the phase while
+        // git works and not after it ends.
+        scratch.report(ReplayProgress::Phase(Phase::CreateScratch));
 
         // `--end-of-options` ahead of both positionals, because `at` arrives
         // from a caller and a caller can spell a revision that starts with a
@@ -298,6 +321,158 @@ impl Scratch {
         Ok(())
     }
 
+    /// Apply the patch in the file `patch` to the scratch worktree.
+    ///
+    /// Gives `true` when the patch applies. Gives `false` when git refuses
+    /// it. Then git has changed nothing, because `git apply` is all or
+    /// nothing. A refused patch is an answer and not an error, because a
+    /// caller that searches over many commits expects some of them to refuse.
+    ///
+    /// `--whitespace=nowarn` stands in the call. Without it, a user setting
+    /// such as `apply.whitespace=error` refuses a patch that git committed
+    /// without complaint.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git cannot start, or if `patch` is not valid
+    /// UTF-8 and so cannot be given to git.
+    pub fn apply_patch(&self, patch: &Path) -> Result<bool> {
+        let patch = patch
+            .to_str()
+            .with_context(|| format!("the patch path {} is not UTF-8", patch.display()))?;
+
+        let output = self
+            .git()
+            .try_run("apply", &["--whitespace=nowarn", patch])
+            .context("could not start git apply")?;
+
+        Ok(output.success)
+    }
+
+    /// Apply `patch` with a three-way merge.
+    ///
+    /// This runs `git apply --3way --whitespace=nowarn`. It has the contract of
+    /// [`Scratch::apply_patch`]: `Ok(false)` when git refuses the patch, and an
+    /// error only when git cannot start or the path is not UTF-8.
+    ///
+    /// A three-way apply needs the blobs that the patch names on its `index`
+    /// lines. `Repo::patch_of` uses `--full-index`, so those ids are complete
+    /// and git finds the blobs in the object store.
+    ///
+    /// A conflict leaves conflict markers in the tree and unmerged entries in
+    /// the index. [`Scratch::restore`] removes both.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git cannot start, or if `patch` is not valid UTF-8
+    /// and so cannot be given to git.
+    pub fn apply_patch_three_way(&self, patch: &Path) -> Result<bool> {
+        let patch = patch
+            .to_str()
+            .with_context(|| format!("the patch path {} is not UTF-8", patch.display()))?;
+
+        let output = self
+            .git()
+            .try_run("apply", &["--3way", "--whitespace=nowarn", patch])
+            .context("could not start git apply --3way")?;
+
+        Ok(output.success)
+    }
+
+    /// Put the scratch worktree back to the state of its checked-out commit.
+    ///
+    /// This runs `git reset --hard -q`, then `git clean -f -d -q`. The reset
+    /// puts back each tracked file that a step changed and clears the index.
+    /// The clean removes the untracked files, for example a file that the
+    /// patch added.
+    ///
+    /// It is not `git apply -R`. A reverse apply fails when the build changed
+    /// a tracked file, and after a `--3way` apply that failed half way. The
+    /// reset and the clean work from the commit, so they need no knowledge of
+    /// what the step did.
+    ///
+    /// The clean never passes `-x`, so ignored files stay. Build output that a
+    /// `.gitignore` names thus survives between two steps of a search, and a
+    /// rebuild stays cheap.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git could not be spawned, or if git refused the
+    /// reset or the clean.
+    pub fn restore(&self) -> Result<()> {
+        self.git()
+            .run("reset", &["--hard", "-q"])
+            .context("could not reset the tracked files of the scratch worktree")?;
+        self.git()
+            .run("clean", &["-f", "-d", "-q"])
+            .context("could not remove the untracked files of the scratch worktree")?;
+
+        Ok(())
+    }
+
+    /// List the commits that a bisection between `bad` and `goods` can test.
+    ///
+    /// The list holds `bad` and each commit that is reachable from `bad` and
+    /// not from any of `goods`. Git sorts it by how well a commit halves the
+    /// range, best first. Each line of git's answer can carry a decoration,
+    /// for example `<id> (HEAD -> main, dist=0)`. This method keeps only the
+    /// first field, the full commit id.
+    ///
+    /// Each good is spelled `^<good>`, an exclusion, and all revisions stand
+    /// after `--end-of-options`. A plain `--not` would be read there as a
+    /// revision name.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git could not be spawned, or if git refused the
+    /// call. The usual cause is a revision that does not name a commit.
+    pub fn bisect_all(&self, bad: &str, goods: &[&str]) -> Result<Vec<String>> {
+        let output = self
+            .git()
+            .run(
+                "rev-list",
+                &as_str_slice(&bisect_arguments("--bisect-all", bad, goods)),
+            )
+            .with_context(|| format!("could not list the commits to test below '{bad}'"))?;
+
+        Ok(output
+            .lines()
+            .filter_map(|line| line.split_whitespace().next())
+            .map(str::to_string)
+            .collect())
+    }
+
+    /// Count the steps that a bisection between `bad` and `goods` still needs.
+    ///
+    /// This is the value of `bisect_steps=` in the answer of
+    /// `git rev-list --bisect-vars`, the number that `git bisect` prints as
+    /// "roughly N steps". A range with only `bad` in it gives 0. The revisions
+    /// are spelled as in [`Scratch::bisect_all`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git could not be spawned, if git refused the call,
+    /// or if the answer of git has no `bisect_steps=` line with a number.
+    pub fn bisect_steps(&self, bad: &str, goods: &[&str]) -> Result<u32> {
+        let output = self
+            .git()
+            .run(
+                "rev-list",
+                &as_str_slice(&bisect_arguments("--bisect-vars", bad, goods)),
+            )
+            .with_context(|| format!("could not count the steps to test below '{bad}'"))?;
+
+        let value = output
+            .lines()
+            .find_map(|line| line.strip_prefix("bisect_steps="))
+            .context("git gave no bisect_steps line")?;
+
+        value
+            .trim()
+            .parse()
+            .with_context(|| format!("git gave '{value}' as bisect_steps"))
+    }
+
     /// The id of the tree the scratch worktree's HEAD points at.
     ///
     /// The content of a commit without its ancestry, which is what a caller
@@ -339,8 +514,14 @@ impl Scratch {
             .with_context(|| format!("could not write a commit holding the tree {tree}"))
     }
 
-    /// Rebase the checked-out HEAD onto `onto`, walking the whole rebase and
+    /// Rebase the checked-out HEAD onto `upstream`, walking the whole rebase and
     /// auto-resolving conflicts by staging markers verbatim.
+    ///
+    /// `upstream` is the name git gives the one revision of
+    /// `git rebase <upstream>`. It sets which commits git replays, which are
+    /// the commits of `upstream..HEAD`, and it is also the new base where they
+    /// land. [`Scratch::replay_rebase_onto`] gives the two roles to two
+    /// revisions.
     ///
     /// Every stop is measured before it is resolved, so the returned
     /// [`Conflicts`] describes what a human would have had to hand-merge to get
@@ -357,8 +538,8 @@ impl Scratch {
     /// which leaves the rebase unfinished however many times it is asked again,
     /// or if the rebase is still unfinished once `MAX_RESOLUTION_ROUNDS` rounds
     /// have been spent trying to advance it.
-    pub fn replay_rebase(&self, onto: &str) -> Result<Conflicts> {
-        self.replay_rebase_within(onto, MAX_RESOLUTION_ROUNDS, Capture::Nothing)
+    pub fn replay_rebase(&self, upstream: &str) -> Result<Conflicts> {
+        self.replay_rebase_within(None, upstream, MAX_RESOLUTION_ROUNDS, Capture::Nothing)
             .map(|(conflicts, _)| conflicts)
     }
 
@@ -395,8 +576,56 @@ impl Scratch {
     ///
     /// Returns an error in each case [`Scratch::replay_rebase`] does, and in no
     /// other.
-    pub fn replay_rebase_with_diffs(&self, onto: &str) -> Result<(Conflicts, HaltDiffs)> {
-        self.replay_rebase_within(onto, MAX_RESOLUTION_ROUNDS, Capture::Diffs)
+    pub fn replay_rebase_with_diffs(&self, upstream: &str) -> Result<(Conflicts, HaltDiffs)> {
+        self.replay_rebase_within(None, upstream, MAX_RESOLUTION_ROUNDS, Capture::Diffs)
+    }
+
+    /// Rebase the checked-out HEAD as `git rebase --onto new_base upstream`
+    /// does: replay the commits of `upstream..HEAD` and put them on `new_base`.
+    ///
+    /// The one-revision [`Scratch::replay_rebase`] uses its revision as both
+    /// values. The two-revision form matters for a stacked branch whose parent
+    /// got a squash merge. A plain rebase onto the target replays the commits
+    /// of the parent too, and reports false conflicts. With the parent as
+    /// `upstream`, the replay holds only the commits of the branch itself.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error in each case [`Scratch::replay_rebase`] does, and when
+    /// `new_base` does not name a commit.
+    pub fn replay_rebase_onto(&self, new_base: &str, upstream: &str) -> Result<Conflicts> {
+        self.replay_rebase_within(
+            Some(new_base),
+            upstream,
+            MAX_RESOLUTION_ROUNDS,
+            Capture::Nothing,
+        )
+        .map(|(conflicts, _)| conflicts)
+    }
+
+    /// [`Scratch::replay_rebase_onto`], and the halt diff of each stop beside
+    /// the counts.
+    ///
+    /// This entrance is to [`Scratch::replay_rebase_onto`] what
+    /// [`Scratch::replay_rebase_with_diffs`] is to [`Scratch::replay_rebase`].
+    /// It runs the same loop with the capture turned on, so the two entrances
+    /// count the same stops the same way.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error in each case [`Scratch::replay_rebase_onto`] does, and
+    /// in no other.
+    pub fn replay_rebase_onto_with_diffs(
+        &self,
+        new_base: &str,
+        upstream: &str,
+    ) -> Result<(Conflicts, HaltDiffs)> {
+        self.replay_rebase_within(
+            Some(new_base),
+            upstream,
+            MAX_RESOLUTION_ROUNDS,
+            Capture::Diffs,
+        )
     }
 
     /// [`Scratch::replay_rebase`] with the round budget named rather than baked
@@ -413,26 +642,57 @@ impl Scratch {
     /// plain entrance and the entrance that captures share this one loop, so
     /// they count the same stops the same way. The plain entrance gets back an
     /// empty [`HaltDiffs`] and drops it.
+    ///
+    /// `new_base` is the value of `--onto`. `None` gives the one-revision
+    /// rebase, where `upstream` is also the new base, and its argv is the argv
+    /// the replay had before the two-revision form existed.
     fn replay_rebase_within(
         &self,
-        onto: &str,
+        new_base: Option<&str>,
+        upstream: &str,
         max_rounds: usize,
         capture: Capture,
     ) -> Result<(Conflicts, HaltDiffs)> {
         let git = self.git();
         let worktree = self.path();
 
+        self.report(ReplayProgress::Phase(Phase::Replay));
+        // Resolved once, before the rebase starts, because a start of
+        // `git rev-parse` in each poll is slow on a loaded machine. It is
+        // resolved only when an observer listens, because a replay with no
+        // observer (`gsw`, `grist`) must start no more git processes. Git gives
+        // the path also when the directory does not exist yet. A path that does
+        // not resolve costs the display and never the replay.
+        let watch = self.observer.as_deref().and_then(|observer| {
+            git.path("rev-parse", &["--git-path", "rebase-merge"])
+                .ok()
+                .map(|path| RebaseWatch::new(observer, worktree.join(path)))
+        });
+
         let mut cost = Conflicts::nothing_replayed();
         let mut halt_diffs = HaltDiffs::nothing_captured();
-        // `--end-of-options` ahead of `onto`, because `onto` arrives from a
-        // caller and git knows `--root` as an option of `rebase`. Without it a
+        // `--end-of-options` ahead of `upstream`, because `upstream` arrives
+        // from a caller and git knows `--root` as an option of `rebase`. Without it a
         // replay onto `--root` rebases the whole history onto nothing, finishes
         // without a single conflict, and reports a cost of zero for a revision
         // that names no commit. Zero is what a genuinely free replay reports
         // too, so nothing downstream tells the two apart. With it git refuses
         // the upstream by name. Pinned by
         // `refuses_an_upstream_that_starts_with_a_dash_rather_than_replaying_onto_the_root`.
-        let mut outcome = git.try_run("rebase", &["--end-of-options", onto])?;
+        //
+        // `--onto=` is joined to its value, so the value binds to the option
+        // whatever its first character is. Pinned by
+        // `refuses_a_new_base_that_names_no_commit_rather_than_replaying_onto_it`.
+        let onto_option = new_base.map(|base| format!("--onto={base}"));
+        let mut rebase_args: Vec<&str> = onto_option.as_deref().into_iter().collect();
+        rebase_args.extend(["--end-of-options", upstream]);
+        // Each `git rebase` call goes through here, so the poll covers the first
+        // rebase, each `--continue`, and each `--skip`.
+        let run_rebase = |args: &[&str]| match &watch {
+            Some(watch) => watch.watch(|| git.try_run("rebase", args)),
+            None => git.try_run("rebase", args),
+        };
+        let mut outcome = run_rebase(&rebase_args)?;
         let mut rounds = 0;
 
         loop {
@@ -443,7 +703,16 @@ impl Scratch {
                     outcome.stdout,
                     outcome.stderr
                 );
+                if let Some(watch) = &watch {
+                    watch.finish(|| landed_commits(&git, new_base.unwrap_or(upstream)));
+                }
                 return Ok((cost, halt_diffs));
+            }
+
+            // The halt reads its own position, so the report does not depend on
+            // the timing of a poll.
+            if let Some(watch) = &watch {
+                watch.poll();
             }
 
             anyhow::ensure!(
@@ -478,13 +747,12 @@ impl Scratch {
                     }
 
                     git.run("add", &["-A"])?;
-                    outcome = git.try_run("rebase", &["--continue"])?;
+                    outcome = run_rebase(&["--continue"])?;
                 }
                 Halt::EmptyCommit { stopped } => {
                     // Nothing for a human to resolve and nothing lost by
                     // dropping it, so it costs nothing.
-                    outcome = git
-                        .try_run("rebase", &["--skip"])
+                    outcome = run_rebase(&["--skip"])
                         .with_context(|| format!("could not skip the empty commit {stopped}"))?;
 
                     // Read here, before the loop can come round again, because
@@ -584,6 +852,7 @@ impl Scratch {
         let git = self.git();
         let worktree = self.path();
 
+        self.report(ReplayProgress::Phase(Phase::Replay));
         // `--no-ff`, because git takes a merge whose branch is strictly ahead
         // as a fast-forward, and a fast-forward merges no trees at all: it
         // moves HEAD to the other tip and stops. The verdict is the same
@@ -626,6 +895,10 @@ impl Scratch {
         if outcome.success {
             return Ok((cost, halt_diffs));
         }
+
+        // A clean merge returned above, so only a halted merge reports this
+        // phase. The read of the conflicted files is what it names.
+        self.report(ReplayProgress::Phase(Phase::CountHunks));
 
         // The same two readers the rebase replay takes, because a conflicted
         // path costs the same to mis-read whichever operation produced it.
@@ -685,6 +958,25 @@ impl Scratch {
     fn repo_git(&self) -> Git {
         Git::new(&self.repo, self.hooks.as_str())
     }
+}
+
+/// The arguments of a `git rev-list` bisection call over `bad` and `goods`.
+///
+/// `mode` is `--bisect-all` or `--bisect-vars`. Every revision stands after
+/// `--end-of-options`, and each good is an exclusion spelled `^<good>`.
+fn bisect_arguments(mode: &str, bad: &str, goods: &[&str]) -> Vec<String> {
+    let mut arguments = vec![
+        mode.to_string(),
+        "--end-of-options".to_string(),
+        bad.to_string(),
+    ];
+    arguments.extend(goods.iter().map(|good| format!("^{good}")));
+    arguments
+}
+
+/// Borrow each owned argument, in the shape that the git runner takes.
+fn as_str_slice(arguments: &[String]) -> Vec<&str> {
+    arguments.iter().map(String::as_str).collect()
 }
 
 impl Drop for Scratch {
@@ -1271,6 +1563,21 @@ fn rebase_in_progress(git: &Git, worktree: &Path) -> Result<bool> {
     Ok(false)
 }
 
+/// How many commits the replay put on `base`, or `None` when git cannot say.
+///
+/// This is the fallback of [`RebaseWatch::finish`], for a rebase that no read
+/// of the state files saw. It never fails the replay, because a failed count
+/// costs one report and nothing else.
+fn landed_commits(git: &Git, base: &str) -> Option<usize> {
+    git.run(
+        "rev-list",
+        &["--count", "--end-of-options", &format!("{base}..HEAD")],
+    )
+    .ok()?
+    .parse()
+    .ok()
+}
+
 /// How many brackets git writes in a conflict marker.
 ///
 /// Exactly seven, opening and closing alike. A run of eight is a run git never
@@ -1355,7 +1662,7 @@ mod tests {
     use crate::git::Git;
     use crate::metrics::{Hunks, Stops};
     use crate::repo::PREFLIGHT_HOOKS_PATH;
-    use crate::testing::{contested_region_repo, TestRepo};
+    use crate::testing::{contested_region_repo, squash_merged_parent_repo, TestRepo};
 
     /// How many rounds replaying `iterated` onto `single` spends.
     ///
@@ -1380,7 +1687,7 @@ mod tests {
             .run("checkout", &["-q", "--detach", "iterated"])
             .expect("check out the branch detached in the scratch worktree");
         scratch
-            .replay_rebase_within("single", max_rounds, Capture::Nothing)
+            .replay_rebase_within(None, "single", max_rounds, Capture::Nothing)
             .map(|(conflicts, _)| conflicts)
     }
 
@@ -1814,6 +2121,62 @@ mod tests {
             control.stops(),
             Stops::new(CONTESTED_ROUNDS),
             "the fixture has to cost something, or the refusal above proves only that this \
+             replay answers nothing at all"
+        );
+    }
+
+    /// A new base that names no commit stops the `--onto` replay, whatever its
+    /// first character is.
+    ///
+    /// Both entrances are public, so a caller can reach them without the
+    /// pre-flight `Repo::resolve` that `grind` runs. `--onto=` is joined to its
+    /// value, so `--root` arrives as a value and not as the `--root` option of
+    /// `git rebase`. Git refuses a value that names no commit, and the refusal
+    /// names that value.
+    ///
+    /// The control replays a revision that does name a commit, on the same
+    /// scratch worktree, because an entrance that refused every new base would
+    /// pass the assertions above it and answer nothing at all.
+    #[test]
+    fn refuses_a_new_base_that_names_no_commit_rather_than_replaying_onto_it() {
+        const BAD_NEW_BASES: [&str; 2] = ["--root", "nope"];
+        const STOPS_ONTO_MAIN: usize = 1;
+
+        let repo = squash_merged_parent_repo();
+        let scratch = repo.scratch("main");
+        scratch
+            .git()
+            .run("checkout", &["-q", "--detach", "contested-child"])
+            .expect("check out the branch detached in the scratch worktree");
+
+        for new_base in BAD_NEW_BASES {
+            let plain = scratch
+                .replay_rebase_onto(new_base, "parent")
+                .map(|conflicts| format!("{conflicts:?}"))
+                .expect_err("a new base that names no commit has to stop the plain replay");
+            assert!(
+                format!("{plain:#}").contains(new_base),
+                "the refusal of the plain entrance has to name `{new_base}`: {plain:#}"
+            );
+
+            let capturing = scratch
+                .replay_rebase_onto_with_diffs(new_base, "parent")
+                .map(|(conflicts, _)| format!("{conflicts:?}"))
+                .expect_err("a new base that names no commit has to stop the capturing replay");
+            assert!(
+                format!("{capturing:#}").contains(new_base),
+                "the refusal of the capturing entrance has to name `{new_base}`: {capturing:#}"
+            );
+        }
+
+        let control = scratch
+            .replay_rebase_onto("main", "parent")
+            .expect("replay onto a revision the fixture really has");
+
+        assert_eq!(
+            control.stops(),
+            Stops::new(STOPS_ONTO_MAIN),
+            "the fixture has to cost something, or the refusals above prove only that this \
              replay answers nothing at all"
         );
     }

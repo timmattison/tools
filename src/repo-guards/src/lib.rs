@@ -16,6 +16,9 @@
 // summary in the module list. Adding an outer `///` summary here as well would
 // move module-doc link resolution to the crate root, silently breaking every
 // intra-doc link inside those headers.
+pub mod alternate_screen;
+pub mod arboard_wall;
+mod cargo;
 pub mod doc_links;
 pub mod doc_placement;
 pub mod git_env_sweep;

@@ -5,12 +5,10 @@
 //! blocking server (which would hang the suite). `--version` exits early via
 //! clap; the duplicate-basename collision errors out before any bind/serve.
 
-use std::process::Command;
-
 /// `sirn --version` exits successfully and prints the buildinfo version string.
 #[test]
 fn version_flag_prints_buildinfo_string() {
-    let output = Command::new(env!("CARGO_BIN_EXE_sirn"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_sirn"))
         .arg("--version")
         .output()
         .expect("spawning sirn --version should succeed");
@@ -44,7 +42,7 @@ fn version_flag_prints_buildinfo_string() {
 /// Asserts case-insensitively on "director" to cover "directory"/"directories".
 #[test]
 fn help_documents_directory_mode() {
-    let output = Command::new(env!("CARGO_BIN_EXE_sirn"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_sirn"))
         .arg("--help")
         .output()
         .expect("spawning sirn --help should succeed");
@@ -73,7 +71,7 @@ fn help_documents_directory_mode() {
 #[test]
 fn duplicate_basename_aborts_startup() {
     // Paths need not exist: build_routes only inspects basenames.
-    let output = Command::new(env!("CARGO_BIN_EXE_sirn"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_sirn"))
         .args(["/some/dir1/dup.txt", "/other/dir2/dup.txt"])
         .output()
         .expect("spawning sirn with colliding basenames should succeed");
@@ -104,7 +102,7 @@ fn directory_mixed_with_files_aborts_startup() {
     let subdir = dir.path().join("sub");
     std::fs::create_dir(&subdir).expect("create sub dir");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_sirn"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_sirn"))
         .args([&file, &subdir])
         .output()
         .expect("spawning sirn with a file and a directory should succeed");
@@ -131,7 +129,7 @@ fn malformed_uid_reports_helpful_message() {
     // A single (non-existent) file forces Files mode; build_routes inspects only
     // basenames, so the path need not exist. Port derivation then calls
     // UserSalt::current(), which errors on the malformed PORTPLZ_UID before any bind.
-    let output = Command::new(env!("CARGO_BIN_EXE_sirn"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_sirn"))
         .env("PORTPLZ_UID", "abc")
         .arg("/some/dir/file.txt")
         .output()

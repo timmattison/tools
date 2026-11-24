@@ -12,7 +12,7 @@
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::process::{Command, Output};
+use std::process::Output;
 
 /// A response that holds two resources gr8 can read and one that it cannot.
 ///
@@ -96,7 +96,7 @@ fn run_gr8_against(response: &str) -> Output {
     fs::set_permissions(&stub, fs::Permissions::from_mode(0o755))
         .expect("the stub gh must be executable");
 
-    Command::new(env!("CARGO_BIN_EXE_gr8"))
+    childenv::fixture_command(env!("CARGO_BIN_EXE_gr8"))
         .env_clear()
         .env("PATH", directory.path())
         .output()

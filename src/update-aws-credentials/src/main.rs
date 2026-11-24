@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use arboard::Clipboard;
 use aws_config::meta::region::RegionProviderChain;
 use aws_credential_types::Credentials;
 use aws_sdk_sts::Client as StsClient;
@@ -84,10 +83,10 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let mut clipboard = Clipboard::new().context("Failed to initialize clipboard")?;
-    let clipboard_data = clipboard
-        .get_text()
-        .context("Failed to read from clipboard")?;
+    // In a mosh-rs session `sysclip` reads the clipboard of the client through
+    // the `pbpaste` shim, which is where the person copied the credentials.
+    let mut clipboard = sysclip::Clipboard::open().context("Failed to initialize clipboard")?;
+    let clipboard_data = clipboard.read().context("Failed to read from clipboard")?;
 
     let clipboard_strings: Vec<String> = clipboard_data.lines().map(String::from).collect();
 

@@ -9,7 +9,6 @@ use colored::Colorize;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 const DEFAULT_OP_PATH: &str = "op://Private/ProtonVPN WireGuard key";
 const DEFAULT_GLUETUN_VERSION: &str = "v3.40";
@@ -282,7 +281,7 @@ fn ensure_compose_exists(dir: &Path) -> Result<()> {
 }
 
 fn docker_compose(dir: &Path, args: &[&str]) -> Result<()> {
-    let status = Command::new("docker")
+    let status = childenv::command("docker")
         .arg("compose")
         .args(args)
         .current_dir(dir)
@@ -297,7 +296,7 @@ fn docker_compose(dir: &Path, args: &[&str]) -> Result<()> {
 
 fn wait_for_healthy(dir: &Path) -> Result<()> {
     // Find the gluetun container name from running containers
-    let output = Command::new("docker")
+    let output = childenv::command("docker")
         .args(["compose", "ps", "--format", "{{.Name}}"])
         .current_dir(dir)
         .output()
@@ -310,7 +309,7 @@ fn wait_for_healthy(dir: &Path) -> Result<()> {
         .unwrap_or("gluetun");
 
     for i in 0..30 {
-        let health = Command::new("docker")
+        let health = childenv::command("docker")
             .args([
                 "inspect",
                 "--format",
@@ -339,7 +338,7 @@ fn wait_for_healthy(dir: &Path) -> Result<()> {
 }
 
 fn show_vpn_ip(dir: &Path) -> Result<()> {
-    let output = Command::new("docker")
+    let output = childenv::command("docker")
         .args(["compose", "ps", "--format", "{{.Name}}"])
         .current_dir(dir)
         .output()?;
@@ -350,7 +349,7 @@ fn show_vpn_ip(dir: &Path) -> Result<()> {
         .find(|l| l.contains("gluetun"))
         .unwrap_or("gluetun");
 
-    let ip_output = Command::new("docker")
+    let ip_output = childenv::command("docker")
         .args(["exec", gluetun_name, "wget", "-qO-", "icanhazip.com"])
         .output();
 

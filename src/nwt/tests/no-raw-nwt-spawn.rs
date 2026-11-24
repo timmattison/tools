@@ -1,10 +1,11 @@
-//! Enforces issue #283's "safe by construction" guarantee: every integration
-//! test that spawns the real `nwt` binary must go through `support::nwt_command`,
-//! which scrubs `ZELLIJ` from the child. A test that reaches for the raw
-//! `CARGO_BIN_EXE_nwt` path bypasses that scrub and — when the suite is run from
-//! inside zellij — could hijack the user's tab. This guard fails if any
-//! sibling test file references the raw binary path, so the bypass can't creep
-//! back in.
+//! Makes sure that every integration test that spawns the real `nwt` binary
+//! goes through `support::nwt_command`. That builder removes the inherited
+//! `GIT_*` family from the child, and it gives the child a private home. A test
+//! that uses the raw `CARGO_BIN_EXE_nwt` path gets neither scrub. When the suite
+//! runs in a git hook, the child of such a test can add a worktree to the real
+//! repository. It can also read the `~/.nwt.toml` of the developer. This guard
+//! fails if a sibling test file names the raw binary path, so the bypass cannot
+//! come back.
 //!
 //! `support/mod.rs` (the shared builder) and this guard file are the sole
 //! sanctioned homes of the raw path (see `SANCTIONED_TOKEN_HOMES`); the
@@ -97,7 +98,7 @@ fn scanner_recurses_into_test_subdirectories() {
     // A raw spawn can hide in a helper module pulled in from a subdirectory of
     // `tests/` (e.g. `tests/nested/sneaky.rs`). The scanner must descend into
     // those subdirectories, not just read top-level `.rs` files, or such a spawn
-    // would bypass the ZELLIJ scrub undetected.
+    // would bypass the scrubs of the builder undetected.
     let temp = tempfile::TempDir::new().expect("create temp tests dir");
     let nested = temp.path().join("nested");
     fs::create_dir(&nested).expect("create nested subdir");
@@ -125,7 +126,7 @@ fn no_integration_test_spawns_the_raw_nwt_binary() {
     assert!(
         offenders.is_empty(),
         "these integration tests spawn the raw nwt binary directly instead of \
-         going through support::nwt_command, bypassing the ZELLIJ scrub \
-         (issue #283): {offenders:?}"
+         going through support::nwt_command, bypassing its scrubs of the git \
+         environment and the home: {offenders:?}"
     );
 }

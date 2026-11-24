@@ -17,6 +17,10 @@
 //! - `occ` reads the Claude Code role of each process and the registry record
 //!   of each session. It is the one reader of the registry in this workspace.
 //!
+//! `whyslow` reads the same counters and runs the same `ps`, so [`run`],
+//! [`vm_counters`], [`swap_usage`] and [`read_sysctl`] are public. One reader
+//! of each fact keeps the two tools in agreement.
+//!
 //! Nothing here is a pure function, so no unit test covers this module. The
 //! one test that reads this Mac runs the built binary and holds the shape of
 //! the output. Every rule that this module feeds is a pure function with tests
@@ -28,7 +32,6 @@ use std::ffi::{CStr, CString};
 use std::io;
 use std::mem::{size_of, MaybeUninit};
 use std::path::PathBuf;
-use std::process::Command;
 use std::ptr;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -200,22 +203,11 @@ impl Machine for Mac {
     }
 
     fn vm_counters(&self) -> Result<VmCounters, MachineError> {
-        let statistics = read_vm_statistics()?;
-        Ok(VmCounters {
-            swapins: statistics.swapins,
-            swapouts: statistics.swapouts,
-            compressor_pages: u64::from(statistics.compressor_page_count),
-        })
+        vm_counters()
     }
 
     fn swap_usage(&self) -> Result<SwapUsage, MachineError> {
-        // SAFETY: `vm.swapusage` is one `xsw_usage`, which holds three 64-bit
-        // counts and two 32-bit numbers. It holds no pointer.
-        let usage: libc::xsw_usage = unsafe { read_sysctl(SWAP_USAGE) }?;
-        Ok(SwapUsage {
-            total_bytes: usage.xsu_total,
-            used_bytes: usage.xsu_used,
-        })
+        swap_usage()
     }
 
     fn page_size(&self) -> u64 {
@@ -265,18 +257,63 @@ impl Machine for Mac {
     }
 }
 
+/// Reads the counters of the virtual memory system of this Mac, from
+/// `host_statistics64(HOST_VM_INFO64)`.
+///
+/// [`Mac`] calls this function, and so does `whyslow`. One reader of the
+/// counters keeps the two tools in agreement on what a swap-out is.
+///
+/// # Errors
+///
+/// Gives [`MachineError::KernelRead`] when the kernel refuses the read.
+pub fn vm_counters() -> Result<VmCounters, MachineError> {
+    let statistics = read_vm_statistics()?;
+    Ok(VmCounters {
+        swapins: statistics.swapins,
+        swapouts: statistics.swapouts,
+        compressor_pages: u64::from(statistics.compressor_page_count),
+    })
+}
+
+/// Reads the size of the swap file of this Mac and how much of it is in use,
+/// from `vm.swapusage`.
+///
+/// [`Mac`] calls this function, and so does `whyslow`.
+///
+/// # Errors
+///
+/// Gives [`MachineError::KernelRead`] when the kernel refuses the read.
+pub fn swap_usage() -> Result<SwapUsage, MachineError> {
+    // SAFETY: `vm.swapusage` is one `xsw_usage`, which holds three 64-bit
+    // counts and two 32-bit numbers. It holds no pointer.
+    let usage: libc::xsw_usage = unsafe { read_sysctl(SWAP_USAGE) }?;
+    Ok(SwapUsage {
+        total_bytes: usage.xsu_total,
+        used_bytes: usage.xsu_used,
+    })
+}
+
 /// Runs `program` and gives what it wrote on its standard output.
 ///
 /// A command that does not start and a command that fails are two different
 /// errors, because the repair of each one is different. A `top` that is not
 /// there is a Mac that lost a file of the system. A `top` that fails names the
 /// argument that it refused.
-fn run(
+///
+/// The child starts through `childenv::command`, so it sheds the inherited git
+/// environment. `whyslow` runs its `ps` through this function too.
+///
+/// # Errors
+///
+/// Gives [`MachineError::CommandDidNotStart`] when the command does not start,
+/// and [`MachineError::CommandFailed`] when it ends with a status that is not
+/// success.
+pub fn run(
     program: &str,
     arguments: &[String],
     environment: &[(&str, &str)],
 ) -> Result<String, MachineError> {
-    let output = Command::new(program)
+    let output = childenv::command(program)
         .args(arguments)
         .envs(environment.iter().copied())
         .output()
@@ -319,7 +356,7 @@ fn read_vm_statistics() -> Result<libc::vm_statistics64, MachineError> {
     // the kernel does not fill reads as zero and never as memory of this
     // process that nobody wrote.
     let mut statistics = MaybeUninit::<libc::vm_statistics64>::zeroed();
-    #[allow(
+    #[expect(
         deprecated,
         reason = "libc asks for the mach2 crate, which this workspace does not take. The call is the one entrance to the counters of the virtual memory system"
     )]
@@ -348,12 +385,22 @@ fn read_vm_statistics() -> Result<libc::vm_statistics64, MachineError> {
 
 /// Reads the value of the `sysctl` `name`.
 ///
+/// `whyslow` reads `kern.memorystatus_vm_pressure_level` and `hw.ncpu` through
+/// this function, so the check of the size that the kernel wrote has one
+/// home.
+///
+/// # Errors
+///
+/// Gives [`MachineError::KernelRead`] when the name holds a zero byte, when
+/// the kernel refuses the read, and when the kernel writes a value of a size
+/// that is not the size of `T`.
+///
 /// # Safety
 ///
 /// `T` must be the type that the kernel writes for `name`. It must hold no
 /// pointer and no padding, because the call writes raw bytes over it. A value
 /// of `T` that is all zeros must be a valid value of `T`.
-unsafe fn read_sysctl<T>(name: &str) -> Result<T, MachineError> {
+pub unsafe fn read_sysctl<T>(name: &str) -> Result<T, MachineError> {
     let key = CString::new(name).map_err(|_| MachineError::KernelRead {
         call: name.to_owned(),
         reason: "the name of the sysctl holds a zero byte".to_owned(),

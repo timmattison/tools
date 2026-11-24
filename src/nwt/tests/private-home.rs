@@ -28,7 +28,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use gitscratch::shed_inherited_git_environment;
 use support::{init_repo, nanos, nwt_command, run_git};
 use tempfile::TempDir;
 
@@ -222,8 +221,8 @@ fn a_hostile_home_of_the_host_reaches_no_nwt_run() {
     // The helper runs git through `nwt`, so it sheds the inherited git
     // environment like each other git-running child of this suite. The
     // hostile values go on the child only.
-    let mut helper = Command::new(env::current_exe().expect("the path of this test binary"));
-    shed_inherited_git_environment(&mut helper);
+    let mut helper =
+        childenv::fixture_command(env::current_exe().expect("the path of this test binary"));
     let output = helper
         .args(["--exact", HELPER_TEST_NAME, "--ignored"])
         .env(HOME, hostile.path())
