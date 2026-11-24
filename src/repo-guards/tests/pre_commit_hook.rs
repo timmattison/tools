@@ -281,35 +281,41 @@ fn staged_tool_index_alone_triggers_the_index_guard() {
     }
 }
 
-/// What a fake `cargo` recorded. Each call appends its environment, then one
+/// What a fake program recorded. Each call appends its environment, then one
 /// separator line that holds its arguments.
-struct CargoRecording {
-    /// The recording file, which lives inside the fake directory.
+struct FakeRecording {
+    /// The recording file, which lives inside the fixture directory.
     log: PathBuf,
-    /// The directory that holds the fake `cargo`. It goes first on `PATH`.
+    /// The directory that holds the fake program. It goes first on `PATH`.
     bin_dir: PathBuf,
 }
 
-/// Prefix of the separator line that a fake `cargo` writes after each call.
-const CARGO_CALL_MARKER: &str = "--- cargo call: ";
+/// Prefix of the separator line that a fake program writes after each call.
+const CALL_MARKER: &str = "--- call: ";
 
-/// Make a fake `cargo` in a new directory. It records its environment and its
-/// arguments, then exits zero. It exits zero for `cargo install` too, so the
-/// `cargo-machete` branch of the hook cannot reach the network.
-fn install_fake_cargo(dir: &Path) -> CargoRecording {
+/// Make a fake `program` in a new directory. It records its environment and its
+/// arguments, then exits zero.
+fn install_fake_program(dir: &Path, program: &str) -> FakeRecording {
     use std::os::unix::fs::PermissionsExt;
 
     let bin_dir = dir.join("fake-bin");
     fs::create_dir_all(&bin_dir).expect("create fake bin dir");
-    let log = dir.join("cargo-recording.txt");
+    let log = dir.join(format!("{program}-recording.txt"));
     let script = format!(
-        "#!/bin/sh\nenv >> '{log}'\necho '{CARGO_CALL_MARKER}'\"$*\" >> '{log}'\nexit 0\n",
+        "#!/bin/sh\nenv >> '{log}'\necho '{CALL_MARKER}'\"$*\" >> '{log}'\nexit 0\n",
         log = log.display()
     );
-    let cargo = bin_dir.join("cargo");
-    fs::write(&cargo, script).expect("write fake cargo");
-    fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755)).expect("chmod fake cargo");
-    CargoRecording { log, bin_dir }
+    let fake = bin_dir.join(program);
+    fs::write(&fake, script).unwrap_or_else(|e| panic!("write fake {program}: {e}"));
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755))
+        .unwrap_or_else(|e| panic!("chmod fake {program}: {e}"));
+    FakeRecording { log, bin_dir }
+}
+
+/// Make a fake `cargo`. It exits zero for `cargo install` too, so the
+/// `cargo-machete` branch of the hook cannot reach the network.
+fn install_fake_cargo(dir: &Path) -> FakeRecording {
+    install_fake_program(dir, "cargo")
 }
 
 /// The `PATH` for a child: the fake directory first, the real `PATH` after it.
@@ -321,29 +327,29 @@ fn path_with_fake_first(bin_dir: &Path) -> std::ffi::OsString {
     std::env::join_paths(paths).expect("join PATH")
 }
 
-/// Give `command` the fake `cargo` and three `GIT_` variables, after the sweep.
+/// Give `command` the fake program and three `GIT_` variables, after the sweep.
 /// One variable is a name that git has never invented.
-fn plant_fake_cargo_and_git_variables(command: &mut std::process::Command, cargo: &CargoRecording) {
+fn plant_fake_and_git_variables(command: &mut std::process::Command, fake: &FakeRecording) {
     command
-        .env("PATH", path_with_fake_first(&cargo.bin_dir))
+        .env("PATH", path_with_fake_first(&fake.bin_dir))
         .env("GIT_CONFIG_PARAMETERS", "'hook.envleakprobe=leaked'")
         .env("GIT_AUTHOR_NAME", "Leaked Author")
         .env("GIT_SOMETHING_GIT_INVENTS_LATER", "leaked");
 }
 
-/// The recorded cargo calls, as the arguments of each, and the lines of the
+/// The recorded calls, as the arguments of each, and the lines of the
 /// recording that start with `GIT_`.
 struct RecordedCalls {
     arguments: Vec<String>,
     git_lines: Vec<String>,
 }
 
-/// Read what the fake `cargo` recorded.
-fn read_recording(cargo: &CargoRecording) -> RecordedCalls {
-    let text = fs::read_to_string(&cargo.log).unwrap_or_default();
+/// Read what the fake program recorded.
+fn read_recording(fake: &FakeRecording) -> RecordedCalls {
+    let text = fs::read_to_string(&fake.log).unwrap_or_default();
     let arguments = text
         .lines()
-        .filter_map(|line| line.strip_prefix(CARGO_CALL_MARKER))
+        .filter_map(|line| line.strip_prefix(CALL_MARKER))
         .map(str::to_owned)
         .collect();
     let git_lines = text
@@ -357,10 +363,10 @@ fn read_recording(cargo: &CargoRecording) -> RecordedCalls {
     }
 }
 
-/// Run the real hook in `dir` with the fake `cargo` and the planted variables.
-fn run_hook_with_planted_git_variables(dir: &Path, cargo: &CargoRecording) -> HookRun {
+/// Run the real hook in `dir` with the fake program and the planted variables.
+fn run_hook_with_planted_git_variables(dir: &Path, fake: &FakeRecording) -> HookRun {
     run_hook_configured(dir, |command| {
-        plant_fake_cargo_and_git_variables(command, cargo);
+        plant_fake_and_git_variables(command, fake);
     })
 }
 
@@ -426,7 +432,7 @@ fn test_sh_runs_cargo_without_git_variables() {
         .expect("canonicalize test.sh");
 
     let mut command = childenv::fixture_command("bash");
-    plant_fake_cargo_and_git_variables(&mut command, &cargo);
+    plant_fake_and_git_variables(&mut command, &cargo);
     let completed = command
         .arg(&script)
         .current_dir(&dir)
@@ -441,4 +447,59 @@ fn test_sh_runs_cargo_without_git_variables() {
         String::from_utf8_lossy(&completed.stderr)
     );
     assert_clean_recording(&calls, &["test"], "test.sh");
+}
+
+/// The file of the plugin that the plugin fixtures stage.
+const FIXTURE_PLUGIN_FILE: &str = "plugins/fixture/README.md";
+
+/// The marketplace file at the root of the repository.
+const MARKETPLACE_FILE: &str = ".claude-plugin/marketplace.json";
+
+/// Write one plugin and the marketplace file into `dir`. The fake `claude`
+/// reads neither, so their text does not matter.
+fn write_fixture_plugin(dir: &Path) {
+    for file in [FIXTURE_PLUGIN_FILE, MARKETPLACE_FILE] {
+        let path = dir.join(file);
+        fs::create_dir_all(path.parent().expect("a fixture file has a parent"))
+            .unwrap_or_else(|e| panic!("create the directory of {file}: {e}"));
+        fs::write(&path, "{}\n").unwrap_or_else(|e| panic!("write {file}: {e}"));
+    }
+}
+
+/// The `claude` calls of the plugin block for the one fixture plugin, in order.
+const EXPECTED_CLAUDE_CALLS: [&str; 3] = [
+    "plugin validate .",
+    "plugin validate plugins/fixture/",
+    "plugin test plugins/fixture/",
+];
+
+/// A staged file of a plugin, or the staged marketplace file alone, must run
+/// the checks of the claude CLI, and each `claude` command must run with no
+/// `GIT_` variable, also a name that git has never invented.
+#[test]
+fn plugin_block_runs_claude_without_git_variables() {
+    for staged in [FIXTURE_PLUGIN_FILE, MARKETPLACE_FILE] {
+        let dir = unique_fixture_dir();
+        write_fixture_plugin(&dir);
+        git_init_and_stage(&dir, &[staged]);
+        let claude = install_fake_program(&dir, "claude");
+
+        let HookRun { passed, output } = run_hook_with_planted_git_variables(&dir, &claude);
+        let calls = read_recording(&claude);
+        cleanup(&dir);
+
+        assert!(
+            passed,
+            "the hook must pass with a fake claude ({staged}): {output}"
+        );
+        assert_eq!(
+            calls.arguments, EXPECTED_CLAUDE_CALLS,
+            "staging {staged} must run each check of the plugin block: {output}"
+        );
+        assert!(
+            calls.git_lines.is_empty(),
+            "a claude command saw GIT_ variables ({staged}): {:?}",
+            calls.git_lines
+        );
+    }
 }
