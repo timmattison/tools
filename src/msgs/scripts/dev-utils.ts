@@ -46,8 +46,11 @@ export interface ChildLike {
  * Each exit calls `exit` with the exit code, and a stop by a signal is the code 1.
  */
 export function superviseChild(
-  _child: ChildLike,
-  _name: string,
-  _exit: (code: number) => void,
-  _fail: (message: string) => void,
-): void {}
+  child: ChildLike,
+  name: string,
+  exit: (code: number) => void,
+  fail: (message: string) => void,
+): void {
+  child.on("error", (error) => fail(`Failed to start ${name}: ${error.message}`));
+  child.on("exit", (code) => exit(code ?? 1));
+}

@@ -7,7 +7,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildTauriDevArgs, parsePort } from "./dev-utils.ts";
+import { buildTauriDevArgs, parsePort, superviseChild } from "./dev-utils.ts";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PACKAGE_DIR = path.dirname(SCRIPT_DIR);
@@ -37,5 +37,9 @@ const tauri = spawn("cargo", buildTauriDevArgs(port, process.argv.slice(2)), {
   cwd: REPO_ROOT,
   stdio: "inherit",
 });
-tauri.on("error", (error) => fail(`Failed to start cargo tauri dev: ${error.message}`));
-tauri.on("exit", (code) => process.exit(code ?? 1));
+superviseChild(tauri, "cargo tauri dev", (code) => process.exit(code), fail);
+
+// Pass a stop signal to cargo. Tauri then stops Vite, which it started itself.
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.on(signal, () => tauri.kill(signal));
+}
