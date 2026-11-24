@@ -96,8 +96,9 @@ async function loadMore(): Promise<void> {
       offset: currentOffset,
       limit: PAGE_SIZE,
     });
-    if (generation !== listGeneration) return;
     const list = byId("conversation-list", HTMLElement);
+    // A reset or a search replaced the list while the page was in flight
+    if (generation !== listGeneration || showsSearch(list)) return;
     for (const conv of conversations) {
       conversationCache.set(conv.chat_id, conv);
       list.appendChild(createConversationElement(conv));
@@ -147,10 +148,15 @@ export function selectConversation(chatId: number, el: HTMLElement): void {
   onSelectCallback?.(chatId);
 }
 
+/** Whether the list shows search results in place of the conversations. */
+function showsSearch(list: HTMLElement): boolean {
+  return list.dataset.mode === "search";
+}
+
 function handleScroll(e: Event): void {
   if (!(e.target instanceof HTMLElement)) return;
   const target = e.target;
-  if (target.dataset.mode === "search") return;
+  if (showsSearch(target)) return;
   if (target.scrollTop + target.clientHeight >= target.scrollHeight - 100) {
     loadMore().catch(console.error);
   }
