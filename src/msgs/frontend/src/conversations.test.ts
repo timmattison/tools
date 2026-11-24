@@ -96,4 +96,39 @@ describe("conversation list scrolling", () => {
     expect(invoke).toHaveBeenCalledTimes(1);
     expect(document.querySelectorAll(".conversation-item")).toHaveLength(0);
   });
+
+  it("drops the late reply of a page that a reset made stale", async () => {
+    const invoke = await mockInvoke();
+    const first = page(1, PAGE_SIZE);
+    const oldPage = deferred<Conversation[]>();
+    const newPage = deferred<Conversation[]>();
+    invoke.mockResolvedValueOnce(first);
+    const { initConversations } = await import("./conversations");
+    await initConversations();
+
+    invoke.mockReturnValueOnce(oldPage.promise);
+    const el = list();
+    scrollToBottom(el);
+    el.dispatchEvent(new Event("scroll"));
+    await flush();
+    expect(invoke).toHaveBeenLastCalledWith("list_conversations", {
+      offset: PAGE_SIZE,
+      limit: PAGE_SIZE,
+    });
+
+    invoke.mockReturnValueOnce(newPage.promise);
+    const reset = initConversations();
+    await flush();
+    expect(invoke).toHaveBeenLastCalledWith("list_conversations", {
+      offset: 0,
+      limit: PAGE_SIZE,
+    });
+
+    newPage.resolve(page(101, 3));
+    await reset;
+    oldPage.resolve(page(51, PAGE_SIZE));
+    await flush();
+
+    expect(itemIds()).toEqual(["101", "102", "103"]);
+  });
 });
