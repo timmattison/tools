@@ -136,6 +136,34 @@ fn run_build(paths: &DataPaths, slot: &Mutex<CacheSlot>, on_status: &dyn Fn(Cach
     }
 }
 
+/// The error of a build whose thread panicked.
+const BUILD_PANICKED: &str = "The build of the search index stopped unexpectedly";
+
+/// Run `run_build`, and turn a panic of it into a failed build. A build that
+/// panics after it stored a result keeps that result.
+fn run_build_catching_panics(
+    paths: &DataPaths,
+    slot: &Mutex<CacheSlot>,
+    on_status: &dyn Fn(CacheStatus),
+) {
+    let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_build(paths, slot, on_status);
+    }));
+    if built.is_ok() {
+        return;
+    }
+    {
+        let mut guard = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !matches!(*guard, CacheSlot::Building { .. }) {
+            return;
+        }
+        *guard = CacheSlot::Failed(BUILD_PANICKED.to_string());
+    }
+    on_status(CacheStatus::Failed {
+        error: BUILD_PANICKED.to_string(),
+    });
+}
+
 impl AppState {
     /// Make the state. `paths` is an error text when the home directory is
     /// unknown, and the first `open` reports it.
@@ -156,7 +184,8 @@ impl AppState {
     ///
     /// Returns `MsgsError` when the access check fails. A chat.db that cannot
     /// open gives `Ok` with `accessible: false`. A failed build is a
-    /// `CacheStatus::Failed`, not an error.
+    /// `CacheStatus::Failed`, not an error. A build that panics is a failed
+    /// build too.
     pub fn open(
         &self,
         on_status: impl Fn(CacheStatus) + Send + 'static,
@@ -212,7 +241,7 @@ impl AppState {
         }
         let paths = paths.clone();
         let slot = Arc::clone(&self.cache);
-        std::thread::spawn(move || run_build(&paths, &slot, &on_status));
+        std::thread::spawn(move || run_build_catching_panics(&paths, &slot, &on_status));
         Ok(())
     }
 
