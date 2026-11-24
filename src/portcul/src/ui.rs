@@ -90,21 +90,29 @@ impl AppState {
         self.table_state.select(Some(i));
     }
 
-    /// Refreshes the listener list, preserving selection position where possible.
+    /// Refreshes the listener list, and keeps the selection on the same row.
+    ///
+    /// A row is the same row when it has the same PID and port, because one
+    /// process can listen on more than one port. When the selected row is
+    /// gone, the selection stays at the same index, or moves to the last row
+    /// when the list is now shorter.
     pub fn refresh(&mut self, new_listeners: Vec<ListeningProcess>) {
-        let selected_pid = self.selected_listener().map(|l| l.pid);
+        let old_index = self.table_state.selected();
+        let selected_row = self.selected_listener().map(|l| (l.pid, l.port));
         self.listeners = new_listeners;
 
-        if self.listeners.is_empty() {
+        let Some(last) = self.listeners.len().checked_sub(1) else {
             self.table_state.select(None);
-        } else {
-            // Try to re-select the same PID
-            let new_index = selected_pid
-                .and_then(|pid| self.listeners.iter().position(|l| l.pid == pid))
-                .unwrap_or(0)
-                .min(self.listeners.len() - 1);
-            self.table_state.select(Some(new_index));
-        }
+            return;
+        };
+        let new_index = selected_row
+            .and_then(|(pid, port)| {
+                self.listeners
+                    .iter()
+                    .position(|l| l.pid == pid && l.port == port)
+            })
+            .unwrap_or_else(|| old_index.unwrap_or(0).min(last));
+        self.table_state.select(Some(new_index));
     }
 }
 
