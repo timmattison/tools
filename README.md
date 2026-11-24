@@ -2411,8 +2411,10 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
         that `needs:` a job that still runs.
       - A failed, cancelled, or skipped job of the active run does not change the estimate.
       - The run row keeps its sum when a running job shows a blank cell on its job row, when a
-        waiting job has no passed match on any runner, and when a job name has no tail. It also
-        keeps its sum before its jobs load, and after the run finishes.
+        waiting job has no passed match on any runner, and when a job name has no tail. It keeps
+        its sum when no job passed, runs, or waits, for example when each job failed, was
+        cancelled, or was skipped. It also keeps its sum before its jobs load, and after the run
+        finishes.
       - A past run on a different branch can skip jobs that this run does not skip. Its tails
         then mix two shapes of the run. In the estimate, a job that waits starts now, because
         `ha` does not estimate when a runner gets free.

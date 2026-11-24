@@ -213,8 +213,9 @@ impl<'a> Estimates<'a> {
     /// `jobs` are the jobs of `run`. The result is `None` for a run that is not
     /// active, and for a run with no jobs. A job that passed, runs, or waits
     /// gives one term. A job in any other state gives no term. The result is
-    /// `None` when one job that gives a term has no estimate, so the run never
-    /// claims more than its job rows.
+    /// `None` when no job gives a term, and when one job that gives a term has
+    /// no estimate. Thus the run row shows no estimate when one of its running
+    /// jobs shows a blank cell.
     ///
     /// The term of a job that passed is its end time plus the tail of its name.
     /// The term of a job that runs is its time left plus the tail. A job past
