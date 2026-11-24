@@ -5324,7 +5324,7 @@ The view is one sample behind the clock. A sample is complete when the header of
 | `Home` | Move to the oldest frame |
 | `End` | Return to the live view |
 | `Esc` | Close the detail view. With no detail view open, return to the live view |
-| `↑` or `k`, `↓` or `j` | Select the row above, or the row below |
+| `↑` or `k`, `↓` or `j` | Select the row above, or the row below. In the detail view, show the command of the new process from its first line |
 | `PageUp`, `PageDown` | Move the selection by one screen. In the detail view, scroll the command line |
 | `w` | Change the span of the table: one frame, 1 m, 5 m, 15 m, the whole history |
 | `Enter` | Open the detail view of the selected process |

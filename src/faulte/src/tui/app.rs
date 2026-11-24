@@ -136,7 +136,8 @@ impl App {
     }
 
     /// Moves the row selection by `by` rows. The first move selects the first
-    /// row. A move stops at each end.
+    /// row. A move stops at each end. A move that selects another process
+    /// scrolls the detail text back to its first line.
     fn move_row(&mut self, way: Way, by: usize) {
         let Some(reading) = &self.reading else {
             return;
@@ -150,6 +151,9 @@ impl App {
             }
         };
         if let Some(view) = reading.row(target) {
+            if self.row_key() != Some(view.key) {
+                self.detail_scroll = 0;
+            }
             self.row = Some(RowSelection {
                 key: view.key,
                 index: target,
