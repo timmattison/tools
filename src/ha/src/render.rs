@@ -702,7 +702,7 @@ where
 /// `remaining`, and is blank when `remaining` is `None`.
 #[expect(
     clippy::too_many_arguments,
-    reason = "each argument is a distinct fact of the run row or of the view; a parameter struct would only rename them"
+    reason = "each argument is a distinct fact of the job row or of the view; a parameter struct would only rename them"
 )]
 fn job_line<Tz: TimeZone>(
     job: &Job,
