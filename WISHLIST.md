@@ -41,3 +41,12 @@ The design of `msgs` described these features, and the first version does not ha
 - **A manual rebuild of the search index.** The index rebuilds when the fingerprint of
   chat.db changes, and there is no way to force it. A command and a button make a rebuild
   possible after a failed build, with the same `cache-status` events.
+- **Search in one chat.** The `search_messages` command takes a chat id, and the UI always
+  sends none. A scope control in the chat header and the `Cmd+Shift+F` shortcut make a
+  search inside the open conversation possible.
+- **Search results grouped by conversation.** The results are one flat list of messages.
+  A view that groups them under the conversation name, with the surrounding messages,
+  helps a reader who looks for one thread.
+- **The service (iMessage or SMS) in the chat header.** The header shows the name and the
+  identifier of the chat. The `chat` table holds the service, and a command has to pass it
+  to the frontend.

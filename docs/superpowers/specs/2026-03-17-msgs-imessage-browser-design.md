@@ -205,7 +205,7 @@ All commands return `Result<T, MsgsError>`.
 | `get_cache_status` | (none) | `CacheStatus` | State of the search index: `not_started`, `building` (`indexed`, `total`), `ready`, or `failed` (`error`) |
 | `list_conversations` | offset, limit, sort_by | `Vec<Conversation>` | Paginated conversation list, sorted by recent |
 | `get_messages` | chat_id, offset, limit | `Vec<Message>` | Paginated messages for a conversation |
-| `search_messages` | query, chat_id (optional), offset, limit | `Vec<SearchResult>` | FTS5 search, global or per-chat |
+| `search_messages` | query, chat_id (optional), offset, limit | `Vec<SearchResult>` | FTS5 search. The first version of the UI searches all chats |
 | `export_messages` | chat_id, start_message_id, end_message_id, include_attachments, export_path | `ExportResult` | Export the messages between two messages to JSON + attachment folder |
 | `get_version` | (none) | `String` | Version string with git hash and dirty status |
 
@@ -227,7 +227,7 @@ Two-panel layout:
 - Active conversation highlighted with accent border
 
 **Right panel (flex):**
-- Chat header: contact name, identifier, service type, "Search in chat" button, "Export Selection" button
+- Chat header: contact name, identifier, "Export Selection" button
 - Message area: chat bubbles (sent right/blue, received left/gray), timestamps, date separators, sender names for group chats, attachment indicators
 - Scroll-to-load-more for pagination (loads older messages upward)
 
@@ -243,7 +243,6 @@ Two-panel layout:
 ### Keyboard Shortcuts
 
 - `Cmd+F` — focus global search bar
-- `Cmd+Shift+F` — focus in-chat search (when a conversation is open)
 - `Up/Down` — navigate conversation list
 - `Escape` — cancel export selection mode, clear search
 - `Enter` — open selected conversation
@@ -313,11 +312,10 @@ Each stage produces a working application.
 - Text cache builder — extract all `attributedBody` text into local FTS5 database on launch
 - `search_messages` command — FTS5 search with optional chat_id filter
 - `get_cache_status` command and `cache-status` events — progress of the background build
-- Global search: results grouped by conversation with surrounding context
-- In-chat search: filter within current conversation, highlight matches
+- Global search: a list of matching messages, each with its conversation name
 - Click a search result to navigate to that message in context
 - Debounced search input
-- `Cmd+F` / `Cmd+Shift+F` keyboard shortcuts
+- `Cmd+F` keyboard shortcut
 
 ### Stage 4: Export
 - `export_messages` command — date-range-based export with attachment copying

@@ -51,14 +51,9 @@ async function handleConversationSelect(chatId: number): Promise<void> {
 
 document.addEventListener("keydown", (e: KeyboardEvent) => {
   // Cmd+F — focus global search
-  if (e.metaKey && !e.shiftKey && e.key === "f") {
+  if (e.metaKey && !e.shiftKey && e.key.toLowerCase() === "f") {
     e.preventDefault();
     document.getElementById("global-search")?.focus();
-  }
-  // Cmd+Shift+F — focus in-chat search (Stage 3)
-  if (e.metaKey && e.shiftKey && e.key === "f") {
-    e.preventDefault();
-    document.getElementById("btn-search-in-chat")?.click();
   }
 });
 
