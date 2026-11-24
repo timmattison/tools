@@ -475,6 +475,23 @@ mod tests {
     }
 
     #[test]
+    fn test_kill_targets_sends_nothing_when_the_pid_listens_on_a_different_port() {
+        let a = kill_target(100);
+        let moved = ListeningProcess {
+            port: 9090,
+            ..kill_target(100)
+        };
+        let calls = std::cell::RefCell::new(Vec::new());
+        let result = kill_targets(&[&a], &[moved], |pid| {
+            calls.borrow_mut().push(pid);
+            Ok(())
+        });
+        assert!(calls.borrow().is_empty(), "no signal may go out");
+        let error = result.expect_err("a target on a different port must give an error");
+        assert!(error.to_string().contains("1 of 1"), "{error}");
+    }
+
+    #[test]
     fn test_kill_targets_sends_only_to_the_targets_that_still_listen() {
         let a = kill_target(100);
         let b = kill_target(200);
