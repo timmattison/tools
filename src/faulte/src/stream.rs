@@ -41,6 +41,13 @@ pub enum ParsedEvent {
         /// Why the parser refused the output.
         reason: String,
     },
+    /// The sample that the next header ends holds no rows. `reason` is the
+    /// text of a `MachineError::TopOutput`. The parser finds it when the next
+    /// header arrives, but the window of the sample ended at its own header.
+    Empty {
+        /// Why the parser refused the sample.
+        reason: String,
+    },
 }
 
 /// The byte that ends a line.
@@ -246,7 +253,7 @@ impl StreamParser {
 
     /// Ends the sample that the parser reads. Gives the sample when it is
     /// usable. The first sample of a child, a refused sample, and a sample with
-    /// no rows give `None`. A sample with no rows also adds a `Refused` event.
+    /// no rows give `None`. A sample with no rows also adds an `Empty` event.
     fn finish(&mut self, events: &mut Vec<ParsedEvent>) -> Option<TopSample> {
         let current = self.current.take()?;
         let before = std::mem::replace(&mut self.previous_clock, current.clock);
@@ -256,7 +263,9 @@ impl StreamParser {
             return None;
         }
         if current.rows.is_empty() {
-            events.push(refused(TopParseError::NoRows));
+            events.push(ParsedEvent::Empty {
+                reason: MachineError::from(TopParseError::NoRows).to_string(),
+            });
             return None;
         }
         if first {
@@ -317,7 +326,9 @@ pub enum StreamEvent {
     /// Output that is not a sample. `reason` is the text of a
     /// `MachineError::TopOutput`.
     Refused {
-        /// When the reader thread read the output.
+        /// When the reader thread read the output. For a sample with no rows,
+        /// the time that the header of that sample arrived: the end of its
+        /// window.
         at: SystemTime,
         /// Why the parser refused the output.
         reason: String,
@@ -536,6 +547,11 @@ impl HeaderStamps {
             finished: timed,
         }
     }
+
+    /// Gives the wall time of the header that arrived last, if any.
+    fn last_wall(&self) -> Option<SystemTime> {
+        self.previous.map(|stamp| stamp.wall)
+    }
 }
 
 /// The status that an end states when the owner stopped the child, so nobody
@@ -581,6 +597,10 @@ fn read_stream(
                 ParsedEvent::Header { finished } => stamps.header(at, finished),
                 ParsedEvent::Refused { reason } => StreamEvent::Refused {
                     at: at.wall,
+                    reason,
+                },
+                ParsedEvent::Empty { reason } => StreamEvent::Refused {
+                    at: stamps.last_wall().unwrap_or(at.wall),
                     reason,
                 },
             };
@@ -854,7 +874,7 @@ mod tests {
         );
     }
 
-    /// A sample with no rows gives a `Refused` when the next header ends it,
+    /// A sample with no rows gives an `Empty` when the next header ends it,
     /// then the `Header` event of that next sample.
     #[test]
     fn a_sample_with_no_rows_is_refused_when_the_next_header_ends_it() {
@@ -870,7 +890,9 @@ mod tests {
             [
                 header_only(),
                 header_only(),
-                refused(TopParseError::NoRows),
+                ParsedEvent::Empty {
+                    reason: MachineError::from(TopParseError::NoRows).to_string(),
+                },
                 header_only(),
                 header_after(vec![row(10, 5)], 3),
             ]
