@@ -10,11 +10,14 @@
 //! A member path is relative to the directory that holds the manifest, because
 //! that is the directory cargo resolves it against. Both sides of that
 //! subtraction are canonical, so the `./` a relative `--path` used to leave on
-//! every member is gone, and `--prefix src/` writes `src/crate-a` rather than
-//! `src/./crate-a`. A package in the manifest directory itself is the member
-//! cargo calls `.`, and a prefix stays off that one: the subtraction leaves
-//! nothing there, so the manifest used to hold an empty member and the run
-//! printed a bullet with nothing behind it.
+//! every member is gone. A package in the manifest directory itself is the
+//! member cargo calls `.`: the subtraction leaves nothing there, so the
+//! manifest used to hold an empty member and the run printed a bullet with
+//! nothing behind it.
+//!
+//! There is no `--prefix`: a member is already the exact path from the manifest
+//! to its package, so a prefix named a directory that holds no package. An
+//! `--output` above the scanned tree writes the path that a prefix used to add.
 //!
 //! Cargo holds a member only where the manifest that lists it sits above that
 //! member on the file system. It refuses every other member, an absolute path
@@ -213,20 +216,6 @@ fn a_prefix_is_refused_because_each_member_already_names_its_package() {
 }
 
 #[test]
-fn a_prefix_lands_directly_on_the_member() {
-    let (_temp, root) = fixture();
-    package_at(&root, "crate-a", "workit-fixture-prefix-crate-a");
-
-    workit(&root, &["--prefix", "src/"]);
-
-    assert_eq!(
-        members_of(&root.join("Cargo.toml")),
-        vec!["src/crate-a".to_string()],
-        "`--prefix src/` names `src/crate-a`, not `src/./crate-a`"
-    );
-}
-
-#[test]
 fn an_explicit_output_roots_the_members_at_its_own_directory() {
     let (_temp, root) = fixture();
     let scanned = directory_at(&root, "workspace");
@@ -275,38 +264,6 @@ fn the_manifest_directory_itself_is_named_as_a_member_rather_than_as_nothing() {
         vec![".".to_string()],
         "the manifest directory itself is the member cargo calls `.`, and an empty \
          member says nothing to the reader"
-    );
-    assert!(
-        lists_member(&output, "."),
-        "the printed list and the manifest name the same member; stdout was {:?}",
-        stdout_of(&output)
-    );
-}
-
-#[test]
-fn a_prefix_does_not_reach_the_member_that_names_the_manifest_directory() {
-    let (_temp, root) = fixture();
-    let scanned = directory_at(&root, "tree");
-    let package = package_at(&scanned, "sub", "workit-fixture-dot-member-prefix-sub");
-
-    let manifest = package.join("workspace-manifest.toml");
-    let output = workit(
-        &root,
-        &[
-            "--path",
-            &scanned.to_string_lossy(),
-            "--output",
-            &manifest.to_string_lossy(),
-            "--prefix",
-            "src/",
-        ],
-    );
-
-    assert_eq!(
-        members_of(&manifest),
-        vec![".".to_string()],
-        "a prefix names a directory below the manifest, and `.` is the manifest \
-         directory itself, so `src/.` would name a directory nothing holds"
     );
     assert!(
         lists_member(&output, "."),

@@ -41,13 +41,6 @@ struct Args {
     exclude: Vec<String>,
 
     #[arg(
-        short = 'P',
-        long,
-        help = "Prefix to add to member paths (e.g., 'src/'); it names a directory below the manifest, so it applies to every member below the manifest. The manifest directory itself is the member '.', and it takes no prefix"
-    )]
-    prefix: Option<String>,
-
-    #[arg(
         long,
         help = "Include packages in a git worktree below the search path (excluded by default; where the search path itself sits is never matched)"
     )]
@@ -553,10 +546,7 @@ fn manifest_directory(output: &Path) -> Result<PathBuf> {
 /// A package in the manifest directory itself is the member cargo calls `.`,
 /// and cargo loads a workspace that lists it. The subtraction leaves nothing
 /// there, so the member used to read as an empty string: the manifest held
-/// `members = [""]` and the run printed a bullet with nothing behind it. A
-/// prefix stays off that one member, because a prefix names a directory below
-/// the manifest and this member is the manifest directory itself, so `src/.`
-/// would name a directory nothing holds.
+/// `members = [""]` and the run printed a bullet with nothing behind it.
 ///
 /// Cargo holds a member only where the manifest that lists it sits above that
 /// member on the file system. It refuses every other member with `workspace
@@ -578,11 +568,7 @@ fn manifest_directory(output: &Path) -> Result<PathBuf> {
 /// # Errors
 ///
 /// Answers the failure to resolve a package directory, and the refusal above.
-fn member_paths(
-    manifests: &[PathBuf],
-    manifest_directory: &Path,
-    prefix: Option<&str>,
-) -> Result<Vec<String>> {
+fn member_paths(manifests: &[PathBuf], manifest_directory: &Path) -> Result<Vec<String>> {
     let mut members = Vec::new();
     let mut outside = Vec::new();
 
@@ -600,15 +586,10 @@ fn member_paths(
                 members.push(if member.is_empty() {
                     // The manifest directory holds a package of its own, so the
                     // subtraction leaves nothing. Cargo names that directory
-                    // `.`, and a prefix stays off it: a prefix names a
-                    // directory below the manifest, and this member is the
-                    // manifest directory itself.
+                    // `.`.
                     ".".to_string()
                 } else {
-                    match prefix {
-                        Some(prefix) => format!("{prefix}{member}"),
-                        None => member,
-                    }
+                    member
                 });
             }
             Err(_) => outside.push(package),
@@ -840,7 +821,7 @@ fn main() -> Result<()> {
     // before the walk. A tree this manifest cannot hold is refused here, so the
     // members reach the reader only when every one of them is a member cargo
     // accepts.
-    let members = member_paths(&named, output.directory(), args.prefix.as_deref())?;
+    let members = member_paths(&named, output.directory())?;
 
     // The count states the members, and the bullets below name them. It used to
     // state what the walk found, above the duplicate report, and it counted

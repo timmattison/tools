@@ -1594,9 +1594,7 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     the run was started from; `--output` names a file of its own instead. A member is written
     relative to the directory that holds the manifest, because that is the directory cargo resolves
     a member against, so `--output` decides what the members read. A package in that directory
-    itself is written as `.`, which is what cargo calls it, and `--prefix` stays off that one
-    member — a prefix names a directory below the manifest, and `.` is the manifest directory
-    itself. Cargo holds a member only where
+    itself is written as `.`, which is what cargo calls it. Cargo holds a member only where
     that manifest sits above the member on the file system, and it refuses an absolute path and a
     `../` path alike, so `--output` has to name a file at or above the tree that was scanned. A run
     that meets a package the manifest directory does not hold refuses, names every such package,
@@ -1626,7 +1624,7 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     `workit --path packages --output Cargo.toml` (scans `packages/` and writes the manifest above
     it, so every member reads `packages/<name>`),
     `workit --dry-run` (prints the manifest it would write and touches nothing),
-    `workit --exclude vendor`, `workit --prefix src/`, `workit --include-worktrees`,
+    `workit --exclude vendor`, `workit --include-worktrees`,
     `workit --no-default-excludes`.
   - To install: `cargo install --git https://github.com/timmattison/tools workit`
 
