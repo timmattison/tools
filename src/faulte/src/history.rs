@@ -2268,4 +2268,28 @@ mod tests {
             format!("日{}", render::MORE)
         );
     }
+
+    /// A frame with no row is small, so the entries alone fill the budget of
+    /// 64 MiB. The deque of the entries doubles its capacity as it grows, and
+    /// its capacity never gets smaller. One doubling must not make every
+    /// frame but the newest leave: each add to a full history makes one
+    /// frame leave.
+    #[test]
+    fn a_full_history_of_small_frames_keeps_more_than_one_frame() {
+        let mut history = History::new();
+        let first = history.add(frame(0, Vec::new()));
+        let mut secs = 0;
+        while history.contains(first) {
+            secs += WINDOW_SECS;
+            history.add(frame(secs, Vec::new()));
+        }
+        let full = history.extent().frames;
+
+        history.add(frame(secs + WINDOW_SECS, Vec::new()));
+
+        let kept = history.extent().frames;
+        assert!(full > 1, "the add that filled the history kept {full} frames");
+        assert!(kept > 1, "the next add kept {kept} frames");
+        assert_eq!(kept, full, "one add to a full history makes one frame leave");
+    }
 }
