@@ -11,6 +11,9 @@ use crate::types::{
 
 const CHAT_DB_PATH: &str = "Library/Messages/chat.db";
 const PREVIEW_MAX_CHARS: usize = 100;
+/// Messages that a search hit shows before and after itself.
+const CONTEXT_BEFORE_COUNT: i64 = 3;
+const CONTEXT_AFTER_COUNT: i64 = 3;
 
 /// The `FROM` and `JOIN` part and the column list of each message query.
 /// A query adds its own `WHERE` and `ORDER BY`. `MessageRow::from_row` reads
@@ -449,38 +452,6 @@ impl MessageDb {
         })
     }
 
-    /// Get messages around a specific date in a conversation (for search context).
-    ///
-    /// # Errors
-    ///
-    /// Returns `MsgsError::DatabaseError` on query failure.
-    pub fn get_messages_around(
-        &self,
-        chat_id: i64,
-        target_date: i64,
-        before_count: i64,
-        after_count: i64,
-    ) -> Result<Vec<Message>, MsgsError> {
-        // Get `before_count` messages before the target date + the target + `after_count` after
-        let mut before = self.get_messages_by_date_query(
-            chat_id,
-            "cmj.message_date <= ?2 ORDER BY cmj.message_date DESC LIMIT ?3",
-            target_date,
-            before_count + 1, // +1 to include the target itself
-        )?;
-        before.reverse(); // Put in chronological order
-
-        let after = self.get_messages_by_date_query(
-            chat_id,
-            "cmj.message_date > ?2 ORDER BY cmj.message_date ASC LIMIT ?3",
-            target_date,
-            after_count,
-        )?;
-
-        before.extend(after);
-        Ok(before)
-    }
-
     /// Get all messages in a date range for a conversation (for export).
     ///
     /// # Errors
@@ -502,20 +473,6 @@ impl MessageDb {
         )
     }
 
-    /// Helper for date-based message queries.
-    fn get_messages_by_date_query(
-        &self,
-        chat_id: i64,
-        where_order: &str,
-        date_param: i64,
-        limit: i64,
-    ) -> Result<Vec<Message>, MsgsError> {
-        self.query_messages(
-            &format!("{MESSAGE_SELECT} WHERE cmj.chat_id = ?1 AND {where_order}"),
-            [chat_id, date_param, limit],
-        )
-    }
-
     /// Get a message with surrounding context for search results.
     ///
     /// # Errors
@@ -526,30 +483,48 @@ impl MessageDb {
         message_id: i64,
         chat_id: i64,
     ) -> Result<SearchResult, MsgsError> {
-        // Get the target message's date
-        let msg_date: i64 = self.conn.query_row(
-            "SELECT cmj.message_date FROM chat_message_join cmj
-             WHERE cmj.message_id = ?1 AND cmj.chat_id = ?2",
-            [message_id, chat_id],
+        let target_row = self
+            .conn
+            .query_row(
+                &format!("{MESSAGE_SELECT} WHERE cmj.chat_id = ?1 AND m.ROWID = ?2"),
+                [chat_id, message_id],
+                MessageRow::from_row,
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => MsgsError::DatabaseError(format!(
+                    "Message {message_id} is not in chat {chat_id}"
+                )),
+                other => MsgsError::from(other),
+            })?;
+        let target = self.build_message(target_row)?;
+        // The context orders by the date of the join row, as the list does.
+        let target_date: i64 = self.conn.query_row(
+            "SELECT message_date FROM chat_message_join WHERE chat_id = ?1 AND message_id = ?2",
+            [chat_id, message_id],
             |row| row.get(0),
         )?;
 
-        // Get the target message with surrounding context
-        let messages = self.get_messages_around(chat_id, msg_date, 3, 3)?;
-
-        // Find the target in results
-        let target_idx = messages
-            .iter()
-            .position(|m| m.message_id == message_id)
-            .unwrap_or(0);
-
-        let context_before = messages[..target_idx].to_vec();
-        let target = messages[target_idx].clone();
-        let context_after = if target_idx + 1 < messages.len() {
-            messages[target_idx + 1..].to_vec()
-        } else {
-            Vec::new()
-        };
+        // Row-value comparison orders by date, then by ROWID, so messages
+        // that share one date keep a stable order around the hit.
+        let mut context_before = self.query_messages(
+            &format!(
+                "{MESSAGE_SELECT}
+                WHERE cmj.chat_id = ?1 AND (cmj.message_date, m.ROWID) < (?2, ?3)
+                ORDER BY cmj.message_date DESC, m.ROWID DESC
+                LIMIT ?4"
+            ),
+            [chat_id, target_date, message_id, CONTEXT_BEFORE_COUNT],
+        )?;
+        context_before.reverse();
+        let context_after = self.query_messages(
+            &format!(
+                "{MESSAGE_SELECT}
+                WHERE cmj.chat_id = ?1 AND (cmj.message_date, m.ROWID) > (?2, ?3)
+                ORDER BY cmj.message_date ASC, m.ROWID ASC
+                LIMIT ?4"
+            ),
+            [chat_id, target_date, message_id, CONTEXT_AFTER_COUNT],
+        )?;
 
         // Get conversation info
         let conversation = self.get_conversation(chat_id)?;
@@ -839,5 +814,19 @@ mod tests {
         let after: Vec<i64> = result.context_after.iter().map(|m| m.message_id).collect();
         assert_eq!(before, ids[1..4].to_vec());
         assert_eq!(after, ids[5..8].to_vec());
+    }
+
+    #[test]
+    fn get_message_with_context_errors_when_the_message_is_not_in_the_chat() {
+        let fx = ChatDbFixture::new();
+        let chat = fx.add_chat("c", None, 45);
+        let other = fx.add_chat("other", None, 45);
+        fx.add_message(text_message("here", 10, 0, &[chat]));
+        let elsewhere = fx.add_message(text_message("there", 20, 0, &[other]));
+
+        let result = fx.open_db().get_message_with_context(elsewhere, chat);
+        assert!(matches!(result, Err(MsgsError::DatabaseError(_))));
+        let missing = fx.open_db().get_message_with_context(9_999, chat);
+        assert!(matches!(missing, Err(MsgsError::DatabaseError(_))));
     }
 }
