@@ -1240,7 +1240,7 @@ mod tests {
 
     /// Tells whether the process `pid` exists, as `ps` sees it.
     fn process_exists(pid: u32) -> bool {
-        std::process::Command::new("/bin/ps")
+        childenv::fixture_command("/bin/ps")
             .args(["-p", &pid.to_string()])
             .output()
             .expect("ps runs")
