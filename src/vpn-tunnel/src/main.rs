@@ -160,7 +160,10 @@ fn run(cli: Cli) -> Result<()> {
             // selection can hand this directory the key of a directory that
             // nobody has started. The exception is a running tunnel of another
             // name that holds the key. Then `select_credential` selects a free
-            // credential and names that tunnel.
+            // credential and names that tunnel. A directory that was generated
+            // before the `CREDENTIAL_FIELD` line existed names no credential.
+            // Then `select_credential` keeps the credential whose key the
+            // running tunnel of this directory holds.
             let existing_field = read_credential_field(&output_dir);
             let gluetun_name = generator::gluetun_container_name(&container_prefix);
 
@@ -395,8 +398,10 @@ fn read_credential_field(dir: &Path) -> Option<String> {
 /// The line that says how `generate` came to the credential it selected.
 ///
 /// A run that keeps the credential that the `.env` names says so. A run that
-/// does not keep it names the running tunnel that holds its key. For a run
-/// under the ordinary rule, this function returns [`None`].
+/// does not keep it names the running tunnel that holds its key. A run that
+/// keeps the key of the own running tunnel, because the `.env` names no
+/// credential, names that tunnel. For a run under the ordinary rule
+/// ([`credential::Selection::FirstFree`]), this function returns [`None`].
 ///
 /// The text carries no color, so a test of it does not depend on the terminal.
 fn selection_note(selected: &credential::SelectedCredential, output_dir: &Path) -> Option<String> {
@@ -412,6 +417,10 @@ fn selection_note(selected: &credential::SelectedCredential, output_dir: &Path) 
             "The .env in {} names {named_label}, but the running tunnel {holder} holds its key. \
              This run selected {}.",
             output_dir.display(),
+            selected.field_label
+        )),
+        credential::Selection::OwnTunnel { holder } => Some(format!(
+            "Kept {}, because the running tunnel {holder} already holds its key.",
             selected.field_label
         )),
         credential::Selection::FirstFree => None,
@@ -520,6 +529,20 @@ mod tests {
         assert_eq!(
             note.as_deref(),
             Some("Reused the credential that the .env in ./vpn already names.")
+        );
+    }
+
+    #[test]
+    fn an_own_tunnel_credential_says_that_the_running_tunnel_holds_its_key() {
+        let selection = credential::Selection::OwnTunnel {
+            holder: "vpn-gluetun".to_string(),
+        };
+        let note = selection_note(&selected("credential-2", selection), Path::new("./vpn"));
+        assert_eq!(
+            note.as_deref(),
+            Some(
+                "Kept credential-2, because the running tunnel vpn-gluetun already holds its key."
+            )
         );
     }
 

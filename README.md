@@ -1046,7 +1046,9 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
     `docker-compose.yml` plus helper scripts. Reads the `credential*` fields of a 1Password item
     through op-cache and picks the first WireGuard credential that no running tunnel holds. A
     regenerated directory keeps the credential that its `.env` names, unless a tunnel of another
-    container name holds it. `generate` stops when docker cannot report the running tunnels.
+    container name holds it. A directory whose `.env` names no credential, for example one generated
+    before that line existed, keeps the credential whose key its own running tunnel holds.
+    `generate` stops when docker cannot report the running tunnels.
     Supports per-city pinning or US-wide IP diversity and configurable container prefixes.
   - To install: `cargo install --git https://github.com/timmattison/tools vpn-tunnel`
 - op-cache

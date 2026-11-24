@@ -34,6 +34,15 @@ pub enum Selection {
     FirstFree,
     /// The credential that the existing `.env` names.
     Reused,
+    /// The credential whose key the running tunnel of this directory holds,
+    /// because the existing `.env` names no credential. A directory that was
+    /// generated before the `CREDENTIAL_FIELD` line existed is such a
+    /// directory. A label that no credential carries any more is another.
+    OwnTunnel {
+        /// The name of the running tunnel that holds the key. It is the name
+        /// of the gluetun container that this run writes.
+        holder: String,
+    },
     /// The first free credential, because a running tunnel of another name
     /// holds the key of the credential that the existing `.env` names.
     Replaced {
@@ -75,20 +84,29 @@ pub struct AllCredentialsInUse {
 /// does not keep the named credential. It uses the ordinary rule, and
 /// [`Selection::Replaced`] names the holder.
 ///
+/// No label can name a credential. That is the case when `existing_label` is
+/// [`None`], and when no credential carries it any more because the credential
+/// is no longer in 1Password. A directory that was generated before the
+/// `CREDENTIAL_FIELD` line existed has no label. In this case, this function
+/// keeps the credential whose key a running tunnel of `own_container` holds,
+/// when no running tunnel of another name holds that key. The argument is the
+/// same one: Docker refuses two containers of one name. So the tunnel of this
+/// directory does not move to another key. [`Selection::OwnTunnel`] names the
+/// tunnel. This rule does not apply when a credential carries
+/// `existing_label`.
+///
 /// The ordinary rule selects the first credential whose key no running tunnel
-/// holds. A call with an `existing_label` of [`None`] also uses it. So does a
-/// label that no credential carries any more, because the credential is no
-/// longer in 1Password.
+/// holds. This function uses it when no other rule applies.
 ///
 /// `total` counts the available credentials and `in_use` counts the ones a
-/// running tunnel holds, under either rule.
+/// running tunnel holds, under each rule.
 ///
 /// # Errors
 ///
 /// Returns `AllCredentialsInUse` when a running tunnel holds every credential
-/// and this function does not keep the named credential. That happens when no
-/// credential carries `existing_label`, or when a running tunnel of another
-/// name holds the named key.
+/// and no rule above keeps one. That happens when no credential carries
+/// `existing_label` and no tunnel of `own_container` holds a credential alone,
+/// or when a running tunnel of another name holds the named key.
 pub fn select_credential(
     available: &[ItemField],
     running: &[RunningTunnel],
@@ -99,6 +117,9 @@ pub fn select_credential(
     // another name that holds its key.
     let mut named: Option<(&ItemField, Option<&RunningTunnel>)> = None;
     let mut first_free: Option<&ItemField> = None;
+    // The first credential whose key a tunnel of `own_container` holds, and
+    // no tunnel of another name holds.
+    let mut own_only: Option<&ItemField> = None;
     let mut in_use_count = 0_usize;
 
     for field in available {
@@ -110,6 +131,15 @@ pub fn select_credential(
         }
         if running.iter().any(|r| r.wireguard_key == field.value) {
             in_use_count += 1;
+            let held_by_own = running
+                .iter()
+                .any(|r| r.wireguard_key == field.value && r.container_name == own_container);
+            let held_by_other = running
+                .iter()
+                .any(|r| r.wireguard_key == field.value && r.container_name != own_container);
+            if own_only.is_none() && held_by_own && !held_by_other {
+                own_only = Some(field);
+            }
         } else if first_free.is_none() {
             first_free = Some(field);
         }
@@ -124,6 +154,14 @@ pub fn select_credential(
                 holder: holder.container_name.clone(),
             },
         )),
+        (None, _) if own_only.is_some() => own_only.map(|field| {
+            (
+                field,
+                Selection::OwnTunnel {
+                    holder: own_container.to_string(),
+                },
+            )
+        }),
         (None, Some(free)) => Some((free, Selection::FirstFree)),
         (_, None) => None,
     };
@@ -618,7 +656,7 @@ mod tests {
             tunnel("scraper-gluetun", "key-1"),
             tunnel("vpn-gluetun", "key-2"),
         ];
-        let err = select_credential(&available, &running, None, "vpn-gluetun").unwrap_err();
+        let err = select_credential(&available, &running, None, "c-gluetun").unwrap_err();
         assert_eq!(err.usage.len(), 2);
         assert_eq!(
             err.usage[0],
@@ -817,8 +855,8 @@ mod tests {
             tunnel("scraper-gluetun", "key-1"),
             tunnel("vpn-gluetun", "key-2"),
         ];
-        let err = select_credential(&available, &running, Some("credential-9"), "vpn-gluetun")
-            .unwrap_err();
+        let err =
+            select_credential(&available, &running, Some("credential-9"), "c-gluetun").unwrap_err();
         assert_eq!(err.usage.len(), 2);
     }
 
@@ -832,6 +870,62 @@ mod tests {
         assert_eq!(result.key, "key-1");
         assert_eq!(result.total, 1);
         assert_eq!(result.in_use, 1);
+        assert_eq!(
+            result.selection,
+            Selection::OwnTunnel {
+                holder: "vpn-gluetun".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn an_own_tunnel_on_the_second_key_stays_there_when_the_label_is_none() {
+        let available = vec![field("credential", "key-1"), field("credential-2", "key-2")];
+        let running = vec![tunnel("vpn-gluetun", "key-2")];
+        let result = select_credential(&available, &running, None, "vpn-gluetun").unwrap();
+        assert_eq!(result.field_label, "credential-2");
+        assert_eq!(result.key, "key-2");
+        assert_eq!(result.in_use, 1);
+        assert_eq!(
+            result.selection,
+            Selection::OwnTunnel {
+                holder: "vpn-gluetun".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn an_own_tunnel_stays_on_its_key_when_the_label_is_stale() {
+        let available = vec![field("credential", "key-1"), field("credential-2", "key-2")];
+        let running = vec![tunnel("vpn-gluetun", "key-2")];
+        let result =
+            select_credential(&available, &running, Some("credential-9"), "vpn-gluetun").unwrap();
+        assert_eq!(result.field_label, "credential-2");
+        assert_eq!(
+            result.selection,
+            Selection::OwnTunnel {
+                holder: "vpn-gluetun".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn a_key_that_another_tunnel_also_holds_is_not_kept_for_the_own_tunnel() {
+        let available = vec![field("credential", "key-1"), field("credential-2", "key-2")];
+        let running = vec![tunnel("vpn-gluetun", "key-1"), tunnel("a-gluetun", "key-1")];
+        let result = select_credential(&available, &running, None, "vpn-gluetun").unwrap();
+        assert_eq!(result.field_label, "credential-2");
+        assert_eq!(result.selection, Selection::FirstFree);
+    }
+
+    #[test]
+    fn a_label_that_a_credential_carries_beats_the_own_tunnel_rule() {
+        let available = vec![field("credential", "key-1"), field("credential-2", "key-2")];
+        let running = vec![tunnel("vpn-gluetun", "key-2")];
+        let result =
+            select_credential(&available, &running, Some("credential"), "vpn-gluetun").unwrap();
+        assert_eq!(result.field_label, "credential");
+        assert_eq!(result.selection, Selection::Reused);
     }
 
     #[test]
