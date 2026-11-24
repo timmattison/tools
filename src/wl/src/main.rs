@@ -65,14 +65,14 @@ struct Verdict {
 
 /// The answer for `port` when `wl` named no process on it, from what the
 /// kernel's socket table says about the port.
-fn verdict(port: u16, status: PortStatus) -> Verdict {
+fn verdict(port: u16, status: Option<PortStatus>) -> Verdict {
     let (line, hidden_listener_possible) = match status {
-        PortStatus::InUse => (
+        Some(PortStatus::InUse) => (
             format!("Port {port} is in use, but no owning process is visible to the current user."),
             true,
         ),
-        PortStatus::Free => (format!("No processes listening on port {port}"), false),
-        PortStatus::Unknown => (
+        Some(PortStatus::Free) => (format!("No processes listening on port {port}"), false),
+        Some(PortStatus::Unknown) | None => (
             format!(
                 "Cannot tell whether port {port} is in use: wl could not read the kernel's list of listening sockets."
             ),
@@ -219,7 +219,7 @@ mod verdict_tests {
     #[test]
     fn in_use_line_says_the_owner_is_hidden() {
         assert_eq!(
-            verdict(8080, PortStatus::InUse).line,
+            verdict(8080, Some(PortStatus::InUse)).line,
             "Port 8080 is in use, but no owning process is visible to the current user."
         );
     }
@@ -228,7 +228,7 @@ mod verdict_tests {
     #[test]
     fn free_line_says_no_process_listens() {
         assert_eq!(
-            verdict(8080, PortStatus::Free).line,
+            verdict(8080, Some(PortStatus::Free)).line,
             "No processes listening on port 8080"
         );
     }
@@ -237,7 +237,7 @@ mod verdict_tests {
     #[test]
     fn unknown_line_says_wl_cannot_tell() {
         assert_eq!(
-            verdict(8080, PortStatus::Unknown).line,
+            verdict(8080, Some(PortStatus::Unknown)).line,
             "Cannot tell whether port 8080 is in use: wl could not read the kernel's list of listening sockets."
         );
     }
@@ -245,20 +245,20 @@ mod verdict_tests {
     /// A listener exists, and the user cannot see its owner.
     #[test]
     fn in_use_earns_the_privilege_note() {
-        assert!(verdict(8080, PortStatus::InUse).hidden_listener_possible);
+        assert!(verdict(8080, Some(PortStatus::InUse)).hidden_listener_possible);
     }
 
     /// The read did not complete, so a hidden listener can explain the answer.
     #[test]
     fn unknown_earns_the_privilege_note() {
-        assert!(verdict(8080, PortStatus::Unknown).hidden_listener_possible);
+        assert!(verdict(8080, Some(PortStatus::Unknown)).hidden_listener_possible);
     }
 
     /// Free is the answer of a complete read of the socket table.
     #[test]
     fn free_earns_no_privilege_note() {
         assert!(
-            !verdict(8080, PortStatus::Free).hidden_listener_possible,
+            !verdict(8080, Some(PortStatus::Free)).hidden_listener_possible,
             "a complete read of the kernel's socket table lists the sockets of \
              every user, so after Free no hidden process exists, and the note is false"
         );

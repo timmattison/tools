@@ -46,36 +46,25 @@ pub enum PortStatus {
     /// Nothing holds the port. A complete reading of the kernel's socket table
     /// found no listener on it.
     Free,
-    /// This module could not find out. Either this platform has no reader here,
-    /// or a reading stopped short of the end, so a listener may be hiding
-    /// behind the failure. Never the answer of a reading that completed.
+    /// This module could not find out. A reading stopped short of the end, so
+    /// a listener can hide behind the failure. Never the answer of a reading
+    /// that completed.
     Unknown,
 }
+
+/// The reader of the kernel's socket table on this platform, if there is one.
+#[cfg(target_os = "macos")]
+const READER: Option<fn(u16) -> PortStatus> = Some(macos::port_status);
+#[cfg(target_os = "linux")]
+const READER: Option<fn(u16) -> PortStatus> = Some(linux::port_status);
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+const READER: Option<fn(u16) -> PortStatus> = None;
 
 /// Say whether anything is listening on `port` on this host.
 ///
 /// On macOS and Linux this reads the kernel's list of TCP sockets, which needs
-/// no privileges and holds no port. Every other platform answers
-/// [`PortStatus::Unknown`] — see the module documentation.
-#[cfg_attr(
-    not(any(target_os = "macos", target_os = "linux")),
-    expect(
-        unused_variables,
-        reason = "a platform with no socket-table reader answers Unknown without \
-                  ever looking at the port"
-    )
-)]
-pub fn port_status(port: u16) -> PortStatus {
-    #[cfg(target_os = "macos")]
-    {
-        macos::port_status(port)
-    }
-    #[cfg(target_os = "linux")]
-    {
-        linux::port_status(port)
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        PortStatus::Unknown
-    }
+/// no privileges and holds no port. Every other platform has no reader and
+/// gets `None`.
+pub fn port_status(port: u16) -> Option<PortStatus> {
+    READER.map(|read| read(port))
 }
