@@ -1,31 +1,35 @@
-#!/usr/bin/env npx tsx
+#!/usr/bin/env -S pnpx tsx
 
-import { execSync, spawn, type ChildProcess } from "child_process";
+import { spawn, spawnSync, type ChildProcess } from "child_process";
 import { readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { fileURLToPath } from "url";
 import { dirname } from "path";
+import { parsePort, type Port } from "./dev-utils.ts";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_DIR = join(SCRIPT_DIR, "..");
 const FRONTEND_DIR = join(PACKAGE_DIR, "frontend");
 const TAURI_CONF_PATH = join(PACKAGE_DIR, "tauri.conf.json");
 
-function getPort(): number {
-  try {
-    const result = execSync("portplz", { encoding: "utf8" }).trim();
-    const port = parseInt(result, 10);
-    if (isNaN(port) || port < 1024 || port > 65535) {
-      throw new Error(`Invalid port from portplz: ${result}`);
-    }
-    return port;
-  } catch {
-    console.error("portplz not found or failed, using default port 1420");
-    return 1420;
-  }
+function fail(message: string): never {
+  console.error(`✖ ${message}`);
+  process.exit(1);
 }
 
-function updateTauriConfig(port: number): void {
+function getPort(): Port {
+  const result = spawnSync("portplz", [], { encoding: "utf8" });
+  if (result.error || result.status !== 0) {
+    fail("Could not run portplz. Install it with: cargo install portplz");
+  }
+  const port = parsePort(result.stdout);
+  if (port === null) {
+    fail(`portplz returned an invalid port: ${JSON.stringify(result.stdout)}`);
+  }
+  return port;
+}
+
+function updateTauriConfig(port: Port): void {
   const config = JSON.parse(readFileSync(TAURI_CONF_PATH, "utf8"));
   config.build.devUrl = `http://localhost:${port}`;
   writeFileSync(TAURI_CONF_PATH, JSON.stringify(config, null, 2) + "\n");
@@ -33,10 +37,11 @@ function updateTauriConfig(port: number): void {
 
 function installDeps(): void {
   console.log("Installing frontend dependencies...");
-  execSync("pnpm install", { cwd: FRONTEND_DIR, stdio: "inherit" });
+  const install = spawnSync("pnpm", ["install"], { cwd: FRONTEND_DIR, stdio: "inherit" });
+  if (install.status !== 0) fail("pnpm install failed");
 }
 
-function startVite(port: number): ChildProcess {
+function startVite(port: Port): ChildProcess {
   console.log(`Starting Vite dev server on port ${port}...`);
   return spawn("pnpm", ["dev"], {
     cwd: FRONTEND_DIR,
@@ -73,10 +78,10 @@ function cleanup(vite: ChildProcess, tauri: ChildProcess): void {
 }
 
 function main(): void {
+  installDeps();
   const port = getPort();
   console.log(`Using port ${port} (HMR: ${port + 1})`);
 
-  installDeps();
   updateTauriConfig(port);
 
   const vite = startVite(port);
