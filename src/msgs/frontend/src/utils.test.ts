@@ -5,6 +5,10 @@ describe("escapeHtml", () => {
   it("escapes the markup characters of text context", () => {
     expect(escapeHtml("<b>Tom & Jerry</b>")).toBe("&lt;b&gt;Tom &amp; Jerry&lt;/b&gt;");
   });
+
+  it("escapes both quote characters, so the output is safe in an attribute", () => {
+    expect(escapeHtml(`a"b'c`)).toBe("a&quot;b&#39;c");
+  });
 });
 
 describe("byId", () => {
