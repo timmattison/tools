@@ -27,28 +27,50 @@ The Tauri app requires a non-standard layout compared to other `src/*` members. 
 src/msgs/
 ├── Cargo.toml          # Workspace member, Tauri app crate
 ├── tauri.conf.json     # Tauri configuration
-├── capabilities/       # Tauri v2 permissions
+├── capabilities/       # Tauri v2 permissions (default.json)
 ├── icons/
 ├── build.rs            # Tauri build script
 ├── src/
-│   ├── main.rs         # Tauri app entry point
-│   ├── commands.rs     # Tauri command handlers
+│   ├── main.rs         # Tauri app entry point, --version, command registration
+│   ├── commands.rs     # Tauri command handlers (thin, call AppState)
+│   ├── state.rs        # AppState: db and cache slots, cache build thread, CacheStatus
 │   ├── db.rs           # SQLite query layer
+│   ├── cache.rs        # Text cache: FTS5 index of message text
 │   ├── parser.rs       # attributedBody parser
 │   ├── export.rs       # Export engine
 │   ├── error.rs        # Error types
-│   └── types.rs        # Data model structs
+│   ├── types.rs        # Data model structs
+│   ├── util.rs         # Attachment path resolution, tilde expansion
+│   ├── bindings.rs     # Test-only: generates and checks frontend/src/bindings.ts
+│   └── test_fixture.rs # Test-only: builds a throwaway chat.db
+├── tests/
+│   └── version.rs      # Test of --version and -V
+├── scripts/
+│   ├── dev.ts          # Dev runner: free port, then tauri dev
+│   ├── dev-utils.ts    # Helpers of dev.ts
+│   ├── dev-utils.test.ts
+│   └── tsconfig.json
 └── frontend/           # Vanilla TS + Vite
     ├── package.json
+    ├── pnpm-lock.yaml
+    ├── pnpm-workspace.yaml
+    ├── tsconfig.json
+    ├── vite.config.ts
+    ├── vitest.config.ts
+    ├── .gitignore
     ├── index.html
-    ├── src/
-    │   ├── main.ts
-    │   ├── conversations.ts
-    │   ├── messages.ts
-    │   ├── search.ts
-    │   └── export.ts
-    └── src/styles/
-        └── main.css    # Plain CSS with custom properties
+    └── src/
+        ├── main.ts             # Start-up, keyboard shortcuts
+        ├── conversations.ts    # Conversation list
+        ├── messages.ts         # Message view
+        ├── search.ts           # Global search
+        ├── cache-status.ts     # Search index state in the search box
+        ├── export.ts           # Export selection mode and save dialog
+        ├── utils.ts            # DOM and error helpers
+        ├── bindings.ts         # Generated types (do not edit)
+        ├── *.test.ts           # Vitest tests of the modules above
+        └── styles/
+            └── main.css        # Plain CSS with custom properties
 ```
 
 The workspace `Cargo.toml` uses `members = ["src/*"]` which will pick up `src/msgs/Cargo.toml` directly. The `Cargo.toml` at `src/msgs/` is the Tauri app crate (it contains the `tauri` dependency and build script). The frontend lives in `src/msgs/frontend/` and is referenced by `tauri.conf.json`'s `frontendDist` / `devUrl` settings.
@@ -203,11 +225,11 @@ All commands return `Result<T, MsgsError>`.
 |---------|-------|--------|---------|
 | `check_db_access` | (none) | `DbStatus` | Verify chat.db is readable, helpful FDA error if not |
 | `get_cache_status` | (none) | `CacheStatus` | State of the search index: `not_started`, `building` (`indexed`, `total`), `ready`, or `failed` (`error`) |
-| `list_conversations` | offset, limit, sort_by | `Vec<Conversation>` | Paginated conversation list, sorted by recent |
+| `list_conversations` | offset, limit | `Vec<Conversation>` | Paginated conversation list, sorted by recent |
 | `get_messages` | chat_id, offset, limit | `Vec<Message>` | Paginated messages for a conversation |
 | `get_message_position` | chat_id, message_id | `i64` | The count of messages that come before the message in the newest-first order of `get_messages`, so `get_messages(chat_id, position, 1)` returns it. A click on a search result uses it to open the chat around the hit and highlight it. Fails when the message is not in the chat |
 | `search_messages` | query, chat_id (optional), offset, limit | `Vec<SearchResult>` | FTS5 search. The first version of the UI searches all chats |
-| `export_messages` | chat_id, start_message_id, end_message_id, include_attachments, export_path | `ExportResult` | Export the messages between two messages to JSON + attachment folder |
+| `export_messages` | chat_id, start_message_id, end_message_id, include_attachments, export_path | `ExportResult` | Export the messages between two messages to JSON + attachment folder. `export_path` is the folder that the user picked in the save dialog |
 
 ### Attachments
 
