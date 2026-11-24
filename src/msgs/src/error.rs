@@ -1,7 +1,7 @@
 use serde::Serialize;
 
 #[derive(Debug, thiserror::Error, Serialize, specta::Type)]
-#[allow(
+#[expect(
     dead_code,
     reason = "variants reserved for future use in parser and attachment flows"
 )]

@@ -97,6 +97,10 @@ mod tests {
         let text_bytes = text.as_bytes();
         if long {
             blob.push(0x2d);
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "test helper, length always < 4 GiB"
+            )]
             blob.extend_from_slice(&(text_bytes.len() as u32).to_le_bytes());
         } else {
             blob.push(0x2b);
