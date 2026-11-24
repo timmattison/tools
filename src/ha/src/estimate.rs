@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 
-use crate::job::{Job, RunnerName};
+use crate::job::{Job, JobId, RunnerName};
 use crate::run::{Run, RunState};
 use crate::target::RepoName;
 
@@ -39,20 +39,71 @@ pub struct Estimates<'a> {
 
 impl<'a> Estimates<'a> {
     /// Builds the index from each shown run and its last good jobs.
+    ///
+    /// A job is a match only when it passed, has a runner, has an end time, and
+    /// has a runner time at `now`. Each kind keeps its newest
+    /// [`MATCHES_PER_ESTIMATE`] matches by end time. A tie goes to the higher job
+    /// ID. The mean of a kind is the sum of those runner times in whole seconds,
+    /// divided by their count, with the remainder dropped.
     pub fn new(
         runs: impl IntoIterator<Item = (&'a Run, &'a [Job])>,
         now: DateTime<Utc>,
     ) -> Estimates<'a> {
-        let _ = (runs, now);
-        Estimates {
-            means: HashMap::new(),
+        let mut groups: HashMap<Key<'a>, Vec<(DateTime<Utc>, JobId, u64)>> = HashMap::new();
+        for (run, jobs) in runs {
+            for job in jobs {
+                if job.state != RunState::Passed {
+                    continue;
+                }
+                let (Some(runner), Some(completed), Some(time)) =
+                    (job.runner.as_ref(), job.completed_at, job.runner_time(now))
+                else {
+                    continue;
+                };
+                groups
+                    .entry((&run.repo, run.workflow.as_str(), job.name.as_str(), runner))
+                    .or_default()
+                    .push((completed, job.id, time.as_secs()));
+            }
         }
+        let means = groups
+            .into_iter()
+            .filter_map(|(key, mut matches)| {
+                matches.sort_unstable_by_key(|entry| std::cmp::Reverse((entry.0, entry.1)));
+                matches.truncate(MATCHES_PER_ESTIMATE);
+                let count = u64::try_from(matches.len()).ok()?;
+                let total = matches
+                    .iter()
+                    .fold(0_u64, |sum, entry| sum.saturating_add(entry.2));
+                let mean = total.checked_div(count)?;
+                Some((key, Duration::from_secs(mean)))
+            })
+            .collect();
+        Estimates { means }
     }
 
     /// The time left of `job` of `run` at `now`, or `None`.
+    ///
+    /// The result is `None` unless the job is running, has a runner, and has a
+    /// start time. It is also `None` when no match gives a mean for the kind of
+    /// the job. Else the result is [`Remaining::Left`] up to the mean, and
+    /// [`Remaining::Over`] past it.
+    #[must_use]
     pub fn remaining(&self, run: &Run, job: &Job, now: DateTime<Utc>) -> Option<Remaining> {
-        let _ = (&self.means, run, job, now);
-        None
+        if job.state != RunState::Running {
+            return None;
+        }
+        let runner = job.runner.as_ref()?;
+        let mean =
+            *self
+                .means
+                .get(&(&run.repo, run.workflow.as_str(), job.name.as_str(), runner))?;
+        let elapsed = job.runner_time(now)?;
+        if elapsed <= mean {
+            Some(Remaining::Left(mean.saturating_sub(elapsed)))
+        } else {
+            Some(Remaining::Over(elapsed.saturating_sub(mean)))
+        }
     }
 }
 
@@ -76,8 +127,8 @@ mod tests {
         Utc.with_ymd_and_hms(2026, 11, 23, 10, 0, 0).unwrap() + chrono::Duration::seconds(seconds)
     }
 
-    fn runner(name: &str) -> Option<RunnerName> {
-        Some(RunnerName::new(name.to_owned()).expect("a runner name"))
+    fn runner(name: &str) -> RunnerName {
+        RunnerName::new(name.to_owned()).expect("a runner name")
     }
 
     fn run(id: u64, repo: &str, workflow: &str) -> Run {
@@ -108,7 +159,7 @@ mod tests {
             id: JobId(id),
             name: name.to_owned(),
             state,
-            runner: runner_name.and_then(runner),
+            runner: runner_name.map(runner),
             labels: Vec::new(),
             created_at: Some(at(0)),
             started_at: started.map(at),
@@ -231,8 +282,16 @@ mod tests {
 
     #[test]
     fn a_sixth_and_older_match_does_not_change_the_mean() {
-        let mut history: Vec<Job> = (0..5)
-            .map(|index| passed(10 + index, "TypeScript", RUNNER, 2000 + 100 * index as i64, 300))
+        let mut history: Vec<Job> = (0_i64..5)
+            .map(|index| {
+                passed(
+                    10 + index.cast_unsigned(),
+                    "TypeScript",
+                    RUNNER,
+                    2000 + 100 * index,
+                    300,
+                )
+            })
             .collect();
         history.push(passed(1, "TypeScript", RUNNER, 1000, 900));
         let live = running(50, "TypeScript", Some(RUNNER), 100);
