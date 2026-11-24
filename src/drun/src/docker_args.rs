@@ -431,30 +431,30 @@ pub fn parse_buildx(args: &[OsString]) -> Result<BuildxArgs, ArgsError> {
     }
     let mut name = None;
     let mut driver = None;
+    let mut leave = false;
     for found in create.flags {
         match (found.long, found.setting) {
-            ("leave", Setting::Switch(true)) => return Ok(BuildxArgs::Unchanged),
+            ("leave", Setting::Switch(on)) => leave = on,
             ("name", Setting::Value(value)) => name = (!value.is_empty()).then_some(value),
             ("driver", Setting::Value(value)) => driver = Some(value),
             _ => {}
         }
     }
     // An empty driver is no driver, so buildx uses the default.
-    if driver.is_some_and(|driver| !driver.is_empty() && driver != CONTAINER_DRIVER) {
+    if leave || driver.is_some_and(|driver| !driver.is_empty() && driver != CONTAINER_DRIVER) {
         return Ok(BuildxArgs::Unchanged);
     }
     Ok(BuildxArgs::PlaceBuilder { name })
 }
 
 /// True when the flags of `scan` turn on the help. Docker then prints the
-/// help and does nothing else.
+/// help and does nothing else. The last `--help` wins, as for each switch.
 fn asks_for_help(scan: &Scan) -> bool {
-    scan.flags.iter().any(|found| {
-        matches!(
-            (found.long, &found.setting),
-            ("help", Setting::Switch(true))
-        )
-    })
+    scan.flags
+        .iter()
+        .rev()
+        .find(|found| found.long == "help")
+        .is_some_and(|found| matches!(found.setting, Setting::Switch(true)))
 }
 
 /// The container that the arguments of `docker logs` name.
