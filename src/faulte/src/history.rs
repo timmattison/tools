@@ -948,7 +948,7 @@ impl History {
             match entry {
                 Entry::Frame(frame) => {
                     extent.frames += 1;
-                    extent.measured += frame.window;
+                    extent.measured = extent.measured.saturating_add(frame.window);
                 }
                 Entry::Gap(_) => extent.gaps += 1,
             }
@@ -1151,11 +1151,20 @@ impl History {
                         .is_some_and(|seen| seen.state == CompactState::OtherAccount)
                 })
                 .count(),
-            faults: frames.iter().map(|frame| frame.claude.faults).sum(),
+            faults: frames
+                .iter()
+                .map(|frame| frame.claude.faults)
+                .fold(0, u64::saturating_add),
         };
         let skipped = Skipped {
-            exited: frames.iter().map(|frame| frame.skipped.exited).sum(),
-            exited_faults: frames.iter().map(|frame| frame.skipped.exited_faults).sum(),
+            exited: frames
+                .iter()
+                .map(|frame| frame.skipped.exited)
+                .fold(0, usize::saturating_add),
+            exited_faults: frames
+                .iter()
+                .map(|frame| frame.skipped.exited_faults)
+                .fold(0, u64::saturating_add),
             zombies: 0,
             unsampled: 0,
         };
@@ -1166,8 +1175,14 @@ impl History {
             at: end_at,
             ranking: Ranking {
                 rows,
-                window: frames.iter().map(|frame| frame.window).sum(),
-                total_faults: frames.iter().map(|frame| frame.total_faults).sum(),
+                window: frames
+                    .iter()
+                    .map(|frame| frame.window)
+                    .fold(Duration::ZERO, Duration::saturating_add),
+                total_faults: frames
+                    .iter()
+                    .map(|frame| frame.total_faults)
+                    .fold(0, u64::saturating_add),
                 claude,
                 skipped,
             },
@@ -1176,12 +1191,21 @@ impl History {
             header: HeaderFacts {
                 processes,
                 swap: VmDelta {
-                    swapins: frames.iter().map(|frame| frame.swap.swapins).sum(),
-                    swapouts: frames.iter().map(|frame| frame.swap.swapouts).sum(),
+                    swapins: frames
+                        .iter()
+                        .map(|frame| frame.swap.swapins)
+                        .fold(0, u64::saturating_add),
+                    swapouts: frames
+                        .iter()
+                        .map(|frame| frame.swap.swapouts)
+                        .fold(0, u64::saturating_add),
                 },
                 usage: newest.usage,
                 compressor_bytes: newest.compressor_bytes,
-                swap_window: frames.iter().map(|frame| frame.swap_window).sum(),
+                swap_window: frames
+                    .iter()
+                    .map(|frame| frame.swap_window)
+                    .fold(Duration::ZERO, Duration::saturating_add),
                 interval: newest.interval,
                 span: Some(SpanFacts {
                     label: width.label(),
