@@ -1228,6 +1228,38 @@ mod tests {
         assert!(timed.wall < BOUND, "the window is a time of this run");
     }
 
+    /// A sample with no rows is refused at the end of its own window: the
+    /// time that its own header arrived, not the time of the header that
+    /// ended it. A gap that ends there covers the one sample and no more.
+    #[test]
+    fn a_sample_with_no_rows_is_refused_at_the_time_of_its_own_header() {
+        let early = sample("12:00:00", "10     9000000   \n") + &sample("12:00:03", "\n");
+        let late = sample("12:00:06", "10     5         \n");
+        let before = format!(
+            "printf '%s' {}; sleep 0.3;",
+            shellquote::shell_quote(&early)
+        );
+        let mut stream = stub_printing(&before, &late);
+
+        let events = events_until(&mut stream, headers_at_least(3));
+
+        let headers: Vec<SystemTime> = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::Header { at, .. } => Some(*at),
+                _ => None,
+            })
+            .collect();
+        let refusals: Vec<SystemTime> = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::Refused { at, .. } => Some(*at),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(refusals, headers.get(1..2).unwrap_or_default(), "{events:?}");
+    }
+
     /// Gives a path in the temporary directory that no other run uses.
     fn unique_path(name: &str) -> std::path::PathBuf {
         let nanos = SystemTime::now()
