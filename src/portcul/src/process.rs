@@ -145,7 +145,9 @@ pub fn collect_listeners() -> anyhow::Result<Vec<ListeningProcess>> {
 ///
 /// # Errors
 ///
-/// Returns an error if the kill syscall fails (e.g., insufficient permissions).
+/// Returns the error of the kill syscall, with its errno (for example EPERM,
+/// when the process belongs to a different user). ESRCH gets its own message,
+/// because it means that the process exited after the list was read.
 pub fn kill_process(pid: Pid) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
@@ -154,22 +156,7 @@ pub fn kill_process(pid: Pid) -> anyhow::Result<()> {
         // construction that the value fits in i32, preventing kill(-1, sig).
         let ret = unsafe { libc::kill(pid.as_i32(), libc::SIGTERM) };
         if ret != 0 {
-            // Fall back to /bin/kill when libc::kill returns EPERM
-            // (some macOS processes require the external kill binary)
-            let errno = std::io::Error::last_os_error();
-            if errno.raw_os_error() == Some(libc::EPERM) {
-                let status = std::process::Command::new("/bin/kill")
-                    .arg("-TERM")
-                    .arg(pid.as_u32().to_string())
-                    .status()?;
-                if !status.success() {
-                    return Err(anyhow::anyhow!(
-                        "failed to kill PID {pid}: permission denied"
-                    ));
-                }
-                return Ok(());
-            }
-            return Err(anyhow::anyhow!("failed to kill PID {pid}: {errno}"));
+            return Err(kill_error(&std::io::Error::last_os_error()));
         }
         Ok(())
     }
@@ -179,6 +166,20 @@ pub fn kill_process(pid: Pid) -> anyhow::Result<()> {
         Err(anyhow::anyhow!(
             "killing processes is not supported on this platform"
         ))
+    }
+}
+
+/// Turns the OS error of a failed kill(2) into the error of [`kill_process`].
+///
+/// The text of `error` stays in the message, so the errno is not lost. ESRCH
+/// gets its own message, because it means that the process exited after the
+/// list was read.
+#[cfg(unix)]
+fn kill_error(error: &std::io::Error) -> anyhow::Error {
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        anyhow::anyhow!("the process exited before the signal reached it ({error})")
+    } else {
+        anyhow::anyhow!("{error}")
     }
 }
 
@@ -247,6 +248,15 @@ mod tests {
         let text = error.to_string();
         assert!(text.contains("exited"), "ESRCH needs its own message: {text}");
         assert!(text.contains("os error"), "the message must keep the errno: {text}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_kill_error_keeps_the_errno_of_eperm() {
+        let text = kill_error(&std::io::Error::from_raw_os_error(libc::EPERM)).to_string();
+        let expected = std::io::Error::from_raw_os_error(libc::EPERM).to_string();
+        assert_eq!(text, expected);
+        assert!(!text.contains("exited"), "only ESRCH says exited: {text}");
     }
 
     #[test]
