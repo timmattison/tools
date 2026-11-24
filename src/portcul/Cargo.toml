@@ -17,6 +17,7 @@ crossterm.workspace = true
 listeners.workspace = true
 libc.workspace = true
 ratatui.workspace = true
+textfit.workspace = true
 unicode-width.workspace = true
 
 [lints]

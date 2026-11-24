@@ -6628,6 +6628,7 @@ dependencies = [
  "libc",
  "listeners",
  "ratatui",
+ "textfit",
  "unicode-width",
 ]
 

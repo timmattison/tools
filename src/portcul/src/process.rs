@@ -76,7 +76,7 @@ impl fmt::Display for Pid {
 pub struct ListeningProcess {
     /// Process ID.
     pub pid: Pid,
-    /// Process name.
+    /// Process name, with each control character escaped by [`escape_controls`].
     pub name: String,
     /// Port number.
     pub port: u16,
@@ -125,7 +125,15 @@ pub fn group_by_process(flat: Vec<ListeningProcess>) -> Vec<ListeningProcess> {
 /// Each control character becomes its `escape_default` text (for example
 /// `\u{1b}` or `\n`), as `ps` escapes such bytes. Each other character stays.
 pub fn escape_controls(name: &str) -> String {
-    name.to_string()
+    let mut escaped = String::with_capacity(name.len());
+    for c in name.chars() {
+        if c.is_control() {
+            escaped.extend(c.escape_default());
+        } else {
+            escaped.push(c);
+        }
+    }
+    escaped
 }
 
 /// Collects all processes currently listening on ports.
@@ -145,7 +153,7 @@ pub fn collect_listeners() -> anyhow::Result<Vec<ListeningProcess>> {
         .map(|listener| {
             Ok(ListeningProcess {
                 pid: Pid::try_from(listener.process.pid)?,
-                name: listener.process.name.clone(),
+                name: escape_controls(&listener.process.name),
                 port: listener.socket.port(),
                 addresses: vec![listener.socket.ip().to_string()],
             })
@@ -254,12 +262,21 @@ pub fn format_kill_result(listener: &ListeningProcess) -> String {
 /// Formats a single (process, address) pair as a line for CLI output.
 ///
 /// Output format: `  PID <pid>  <name>   <address>:<port>`
+///
+/// The name is padded to [`NAME_COLUMN_WIDTH`] display columns, so a wide
+/// name (CJK, emoji) does not move the address column.
 pub fn format_process_line(listener: &ListeningProcess, address: &str) -> String {
     format!(
-        "  PID {:<7} {:<20} {}:{}",
-        listener.pid, listener.name, address, listener.port
+        "  PID {:<7} {} {}:{}",
+        listener.pid,
+        textfit::pad_right(&listener.name, NAME_COLUMN_WIDTH),
+        address,
+        listener.port
     )
 }
+
+/// The display width of the name column of [`format_process_line`].
+const NAME_COLUMN_WIDTH: usize = 20;
 
 /// Filters listeners to only those on the given port.
 pub fn filter_by_port(listeners: &[ListeningProcess], port: u16) -> Vec<&ListeningProcess> {
