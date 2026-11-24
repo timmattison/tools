@@ -10,7 +10,7 @@ import { initCacheStatus } from "./cache-status";
 import { initSearch } from "./search";
 import { showError } from "./utils";
 
-async function init(): Promise<void> {
+export async function init(): Promise<void> {
   const status = await invoke<DbStatus>("check_db_access");
   if (!status.accessible) {
     showError(status.error ?? "Cannot access message database");
