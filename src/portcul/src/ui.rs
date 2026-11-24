@@ -90,6 +90,43 @@ impl AppState {
         self.table_state.select(Some(i));
     }
 
+    /// Sends the kill that the confirmation dialog asked for.
+    ///
+    /// `fresh` is the list of listeners, read after the user confirmed. The
+    /// signal goes out through `kill` only when `fresh` still has a row with
+    /// the PID, the name, and the port of the dialog. Else the process exited,
+    /// and the OS can give its PID to a different process, so nothing is sent.
+    /// The state takes `fresh` as its list, and the dialog shows the result.
+    ///
+    /// Returns `true` when the signal went out.
+    pub fn confirm_kill(
+        &mut self,
+        fresh: Vec<ListeningProcess>,
+        kill: impl FnOnce(Pid) -> anyhow::Result<()>,
+    ) -> bool {
+        let KillConfirm::Pending { pid, name, .. } = &self.kill_confirm else {
+            return false;
+        };
+        let (pid, name) = (*pid, name.clone());
+        let _ = fresh;
+        match kill(pid) {
+            Ok(()) => {
+                self.kill_confirm = KillConfirm::Result {
+                    message: format!("Sent SIGTERM to {name} (PID {pid})"),
+                    is_error: false,
+                };
+                true
+            }
+            Err(e) => {
+                self.kill_confirm = KillConfirm::Result {
+                    message: format!("Failed to kill PID {pid}: {e}"),
+                    is_error: true,
+                };
+                false
+            }
+        }
+    }
+
     /// Refreshes the listener list, and keeps the selection on the same row.
     ///
     /// A row is the same row when it has the same PID and port, because one
@@ -568,6 +605,70 @@ mod tests {
             port,
             addresses: vec!["0.0.0.0".to_string()],
         }
+    }
+
+    /// A state whose dialog asks to kill `row(100, 8080)`.
+    fn pending_kill_of_100() -> AppState {
+        let target = row(100, 8080);
+        let mut state = AppState::new(vec![target.clone()]);
+        state.kill_confirm = KillConfirm::Pending {
+            pid: target.pid,
+            name: target.name,
+            port: target.port,
+        };
+        state
+    }
+
+    fn result_of(state: &AppState) -> (String, bool) {
+        match &state.kill_confirm {
+            KillConfirm::Result { message, is_error } => (message.clone(), *is_error),
+            other => panic!("expected a result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_confirm_kill_sends_nothing_when_the_process_exited() {
+        let mut state = pending_kill_of_100();
+        let called = std::cell::Cell::new(false);
+        let sent = state.confirm_kill(vec![row(200, 3000)], |_| {
+            called.set(true);
+            Ok(())
+        });
+        assert!(!sent);
+        assert!(!called.get(), "the PID can belong to a different process now");
+        let (message, is_error) = result_of(&state);
+        assert!(is_error);
+        assert!(message.contains("no longer listens"), "{message}");
+    }
+
+    #[test]
+    fn test_confirm_kill_sends_nothing_when_the_pid_has_a_new_owner() {
+        let mut state = pending_kill_of_100();
+        let mut reused = row(100, 8080);
+        reused.name = "other-program".to_string();
+        let called = std::cell::Cell::new(false);
+        let sent = state.confirm_kill(vec![reused], |_| {
+            called.set(true);
+            Ok(())
+        });
+        assert!(!sent);
+        assert!(!called.get());
+    }
+
+    #[test]
+    fn test_confirm_kill_sends_the_signal_when_the_row_is_still_there() {
+        let mut state = pending_kill_of_100();
+        let target = Pid::try_from(100_u32).unwrap();
+        let called_with = std::cell::Cell::new(None);
+        let sent = state.confirm_kill(vec![row(100, 8080)], |pid| {
+            called_with.set(Some(pid));
+            Ok(())
+        });
+        assert!(sent);
+        assert_eq!(called_with.get(), Some(target));
+        let (message, is_error) = result_of(&state);
+        assert!(!is_error);
+        assert_eq!(message, "Sent SIGTERM to proc-100 (PID 100)");
     }
 
     #[test]
