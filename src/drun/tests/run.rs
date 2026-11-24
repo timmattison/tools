@@ -502,6 +502,7 @@ fn a_help_among_the_flags_of_run_prints_the_usage_and_asks_no_host() {
 fn a_help_that_is_off_or_after_the_image_does_not_stop_the_run() {
     for args in [
         &["run", "-i", "--help", "--help=false", "alpine"][..],
+        &["run", "--help", "--help=false", "alpine"],
         &["run", "alpine", "--help"],
     ] {
         let fixture = two_hosts();

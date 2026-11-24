@@ -431,6 +431,10 @@ fn a_help_among_the_flags_prints_the_usage_and_asks_no_host() {
         &["rm", "-f", "--help", "job-a"],
         &["logs", "job-b", "--help"],
         &["exec", "-i", "--help=false", "--help", "job-a", "sh"],
+        &["logs", "--help"],
+        &["exec", "--help"],
+        &["cp", "--help"],
+        &["rm", "--help"],
     ] {
         let fixture = fleet();
         let run = fixture.run(args);
@@ -448,10 +452,16 @@ fn a_help_among_the_flags_prints_the_usage_and_asks_no_host() {
 
 #[test]
 fn a_help_that_is_off_or_after_the_command_of_exec_does_not_stop_the_command() {
+    for args in [
+        &["logs", "-f", "--help", "--help=false", "job-b"][..],
+        &["logs", "--help", "--help=false", "job-b"],
+    ] {
+        let fixture = fleet();
+        let run = fixture.run(args);
+        assert_eq!(run.code, Some(0), "{args:?}: {}", run.stderr);
+        assert_eq!(fixture.calls_of("box-b", "logs").len(), 1, "{args:?}");
+    }
     let fixture = fleet();
-    let run = fixture.run(&["logs", "-f", "--help", "--help=false", "job-b"]);
-    assert_eq!(run.code, Some(0), "{}", run.stderr);
-    assert_eq!(fixture.calls_of("box-b", "logs").len(), 1);
     let run = fixture.run(&["exec", "job-a", "ls", "--help"]);
     assert_eq!(run.code, Some(0), "{}", run.stderr);
     assert_eq!(fixture.calls_of("box-a", "exec").len(), 1);
