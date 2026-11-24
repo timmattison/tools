@@ -263,6 +263,39 @@ fn refresh_listeners(state: &mut AppState) {
 #[cfg(test)]
 mod tests {
     use buildinfo::version_string;
+    use clap::Parser;
+
+    use super::Cli;
+
+    #[test]
+    fn test_refresh_refuses_an_interval_too_large_for_a_duration() {
+        // Duration::from_secs_f64 panics on this value, after raw mode is on.
+        assert!(Cli::try_parse_from(["portcul", "--refresh", "1e300"]).is_err());
+    }
+
+    #[test]
+    fn test_refresh_refuses_an_interval_below_the_floor() {
+        // A zero Duration makes event::poll return at once: 100% CPU.
+        assert!(Cli::try_parse_from(["portcul", "--refresh", "1e-12"]).is_err());
+        assert!(Cli::try_parse_from(["portcul", "--refresh", "0.05"]).is_err());
+    }
+
+    #[test]
+    fn test_refresh_refuses_a_value_that_is_not_a_positive_number() {
+        for value in ["0", "-1", "nan", "inf"] {
+            let arg = format!("--refresh={value}");
+            assert!(
+                Cli::try_parse_from(["portcul", arg.as_str()]).is_err(),
+                "{value} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn test_refresh_accepts_the_floor_and_the_default() {
+        assert!(Cli::try_parse_from(["portcul", "--refresh", "0.1"]).is_ok());
+        assert!(Cli::try_parse_from(["portcul"]).is_ok());
+    }
 
     #[test]
     fn test_version_string_format() {
