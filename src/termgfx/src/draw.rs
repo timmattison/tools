@@ -4002,20 +4002,6 @@ mod tests {
         );
     }
 
-    /// A terminal that sends no file refuses a file of every format.
-    ///
-    /// The iTerm2 protocol carries a whole file, and [`write_iterm2`] is the
-    /// one writer that reads [`Request::source`]. The Kitty writer and the
-    /// Sixel writer read no byte of it, and a terminal that draws no picture
-    /// at all reads nothing at all. A caller that holds the file of a picture
-    /// for one of those terminals therefore holds a copy that nothing reads,
-    /// beside a decoded picture of the same size, for the whole length of the
-    /// draw.
-    ///
-    /// So the answer names the terminal before it names the format. The
-    /// iTerm2 case at the end holds the rule to the terminals that read no
-    /// file: an answer of false for every terminal passes the first three
-    /// cases and fails the fourth.
     /// A protocol that the user chose reaches the writer and the file rule.
     ///
     /// The draw and [`Capabilities::travels_as_it_stands`] both read the
@@ -4056,6 +4042,20 @@ mod tests {
         );
     }
 
+    /// A terminal that sends no file refuses a file of every format.
+    ///
+    /// The iTerm2 protocol carries a whole file, and [`write_iterm2`] is the
+    /// one writer that reads [`Request::source`]. The Kitty writer and the
+    /// Sixel writer read no byte of it, and a terminal that draws no picture
+    /// at all reads nothing at all. A caller that holds the file of a picture
+    /// for one of those terminals therefore holds a copy that nothing reads,
+    /// beside a decoded picture of the same size, for the whole length of the
+    /// draw.
+    ///
+    /// So the answer names the terminal before it names the format. The
+    /// iTerm2 case at the end holds the rule to the terminals that read no
+    /// file: an answer of false for every terminal passes the first three
+    /// cases and fails the fourth.
     #[test]
     fn a_terminal_that_sends_no_file_refuses_a_file_of_every_format() {
         let source = png_file_of(&photograph_fixture());

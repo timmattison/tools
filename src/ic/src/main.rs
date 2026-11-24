@@ -2459,9 +2459,12 @@ fn picture_from_stdin(
     Ok((img, source))
 }
 
-/// Selector for the image protocol, accepted by both the `--protocol` flag and the
-/// `IC_PROTOCOL` environment variable. `Auto` keeps terminal-based detection; the
-/// other values force a specific protocol (see [`forced_protocol`]).
+/// A value of the `--protocol` flag and of the `IC_PROTOCOL` environment
+/// variable.
+///
+/// `Auto` forces nothing, and `termgfx` selects the protocol for the
+/// terminal. Each other value forces its protocol. [`forced_protocol`] turns a
+/// value into the choice that `termgfx` reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 enum ProtocolArg {
     Auto,
@@ -2470,14 +2473,20 @@ enum ProtocolArg {
     Iterm2,
 }
 
-/// Resolve an explicit protocol override from the `--protocol` flag (`flag`) and the
-/// `IC_PROTOCOL` environment variable (`env`).
+/// The protocol that the user forced, from the flag and from the variable.
 ///
-/// The flag takes precedence over the environment variable. An unset or `auto`
-/// selection — or an unrecognised `IC_PROTOCOL` value — yields `None`, leaving
-/// terminal-based auto-detection in charge. Env parsing reuses clap's
-/// case-insensitive [`ValueEnum`](clap::ValueEnum) so the accepted values stay in
-/// lockstep with the `--protocol` flag.
+/// The flag wins over the variable. The variable goes through the same parser
+/// of clap as the flag, with no difference between uppercase and lowercase,
+/// so the two take the same values.
+///
+/// # Arguments
+/// * `flag` - The value of `--protocol`, when the command line gives one.
+/// * `env` - The value of `IC_PROTOCOL`, when the environment holds one.
+///
+/// # Returns
+/// The forced protocol. `None` when neither setting forces a protocol: no
+/// value, the value `auto`, or a value of `IC_PROTOCOL` that `ic` does not
+/// know. `termgfx` then selects the protocol for the terminal.
 fn forced_protocol(flag: Option<ProtocolArg>, env: Option<&str>) -> Option<ForcedProtocol> {
     let arg = match flag {
         Some(arg) => arg,
@@ -2491,9 +2500,17 @@ fn forced_protocol(flag: Option<ProtocolArg>, env: Option<&str>) -> Option<Force
     }
 }
 
-/// Resolve the effective protocol override from CLI args plus the `IC_PROTOCOL`
-/// environment variable. The flag wins; `IC_PROTOCOL` is the fallback so the choice
-/// can be pinned per shell session (handy for a ttyd/xterm.js front end).
+/// The protocol that the user forced for this run.
+///
+/// This is [`forced_protocol`] with the value of `IC_PROTOCOL` from the
+/// environment. The variable holds the choice for a whole shell session, for
+/// example in an xterm.js front end such as ttyd, and the flag wins over it.
+///
+/// # Arguments
+/// * `args` - The command line arguments, which hold `--protocol`.
+///
+/// # Returns
+/// The forced protocol, or `None` when the user forced no protocol.
 fn forced_protocol_for(args: &Args) -> Option<ForcedProtocol> {
     let env = std::env::var("IC_PROTOCOL").ok();
     forced_protocol(args.protocol, env.as_deref())
