@@ -4,7 +4,6 @@
 //! test runs stay isolated (see the parallel-safety note in the project
 //! guidelines).
 
-use std::io;
 use std::net::TcpListener;
 
 /// Port 1 (`tcpmux`) is below every platform's privileged threshold and holds
@@ -82,21 +81,16 @@ fn no_privilege_note_when_a_process_is_named() {
     drop(listener);
 }
 
-/// The other direction of the same rule: an answer that named nobody is the
-/// answer a hidden process explains, so the note belongs there.
+/// Free is the answer of a complete read of the kernel's socket table, which
+/// lists the sockets of every user. After Free no hidden process can exist, so
+/// the privilege note would be false, and `sudo` gives the same answer.
+///
+/// No applicability gate is needed: under root the note never prints, so "no
+/// note" is true there too. Gated to the platforms that have a reader that can
+/// answer Free.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
-fn privilege_note_when_no_process_is_named() {
-    // Decide whether this test applies. A process that can bind port 1 is
-    // privileged, and a privileged run earns no note at all, so there is
-    // nothing here to assert.
-    match TcpListener::bind(("127.0.0.1", REFUSED_UNUSED_PORT)) {
-        Ok(_) => return,
-        // Some other failure (the port really is held, the address is missing):
-        // not the case under test.
-        Err(e) if e.kind() != io::ErrorKind::PermissionDenied => return,
-        Err(_) => {}
-    }
-
+fn no_privilege_note_when_the_port_is_free() {
     let output = childenv::fixture_command(env!("CARGO_BIN_EXE_wl"))
         .arg(REFUSED_UNUSED_PORT.to_string())
         .output()
@@ -105,14 +99,14 @@ fn privilege_note_when_no_process_is_named() {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert!(
-        !stdout.contains("PID:"),
-        "nothing listens on port {REFUSED_UNUSED_PORT}, so wl should have named \
-         no process. stdout was: {stdout}"
+        stdout.contains("No processes listening"),
+        "this test needs the Free answer for port {REFUSED_UNUSED_PORT}. \
+         stdout was: {stdout}"
     );
     assert!(
-        stderr.contains("note: running without root"),
-        "wl named no process on port {REFUSED_UNUSED_PORT} while running \
-         unprivileged, and a process this user cannot see explains that answer, \
-         so the note belongs on stderr. stderr was: {stderr}"
+        !stderr.contains("note: running without root"),
+        "wl read the whole kernel socket table and found port {REFUSED_UNUSED_PORT} \
+         free, so no hidden process exists and the privilege note is false. \
+         stderr was: {stderr}"
     );
 }

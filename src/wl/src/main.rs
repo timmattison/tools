@@ -235,4 +235,26 @@ mod verdict_tests {
             "Cannot tell whether port 8080 is in use: wl could not read the kernel's list of listening sockets."
         );
     }
+
+    /// A listener exists, and the user cannot see its owner.
+    #[test]
+    fn in_use_earns_the_privilege_note() {
+        assert!(verdict(8080, PortStatus::InUse).hidden_listener_possible);
+    }
+
+    /// The read did not complete, so a hidden listener can explain the answer.
+    #[test]
+    fn unknown_earns_the_privilege_note() {
+        assert!(verdict(8080, PortStatus::Unknown).hidden_listener_possible);
+    }
+
+    /// Free is the answer of a complete read of the socket table.
+    #[test]
+    fn free_earns_no_privilege_note() {
+        assert!(
+            !verdict(8080, PortStatus::Free).hidden_listener_possible,
+            "a complete read of the kernel's socket table lists the sockets of \
+             every user, so after Free no hidden process exists, and the note is false"
+        );
+    }
 }
