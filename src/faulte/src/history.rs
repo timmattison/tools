@@ -36,12 +36,12 @@ const STORED_TEXT_BYTES: usize = 1024;
 /// of the budget in text, and the rest of the frame fits beside it.
 const TEXT_SHARE_DIVISOR: usize = 2;
 
-/// The share of the budget that the entries may use, as a divisor. A history
-/// keeps at most `budget / (ENTRY_SHARE_DIVISOR * size_of::<Entry>())`
-/// entries. The deque of the entries doubles its capacity as it grows and
-/// never gives it back, so its capacity stays under twice that count: an
-/// eighth of the budget. The rows of the frames get the rest.
-const ENTRY_SHARE_DIVISOR: usize = 16;
+/// The share of the budget that the deque of the entries may use, as a
+/// divisor. The deque doubles its capacity as it grows and never gives it
+/// back. A push that would double the capacity past this share makes the
+/// oldest entry leave first, so the push uses the free slot. The rows of the
+/// frames get the rest of the budget.
+const ENTRY_SHARE_DIVISOR: usize = 8;
 
 /// The value of `rss_kib` of a compact row that means "no value".
 const NO_RSS: u32 = u32::MAX;
@@ -795,10 +795,10 @@ impl History {
 
     /// Adds an update, and gives its name.
     ///
-    /// The oldest entry leaves first when the history holds the most entries
-    /// that its budget lets it keep. Then the oldest entries leave while the
-    /// history holds more than its budget and more than one entry. The entry
-    /// that arrived always stays.
+    /// The oldest entry leaves first when the deque of the entries is full and
+    /// a doubling would pass its share of the budget. Then the oldest entries
+    /// leave while the history holds more than its budget and more than one
+    /// entry. The entry that arrived always stays.
     pub fn add(&mut self, update: Update) -> EntryId {
         let entry = match update {
             Update::Frame(sampled) => Entry::Frame(self.compact(*sampled)),
@@ -810,7 +810,7 @@ impl History {
         };
         let id = EntryId(self.next_id);
         self.next_id += 1;
-        if self.entries.len() >= self.entry_limit() {
+        if self.a_push_passes_the_entry_share() {
             self.evict_oldest();
         }
         self.entries.push_back(entry);
@@ -1014,10 +1014,12 @@ impl History {
             .map(|later| self.id_at(later))
     }
 
-    /// Gives the most entries that the history keeps. See
-    /// [`ENTRY_SHARE_DIVISOR`].
-    fn entry_limit(&self) -> usize {
-        self.budget / (ENTRY_SHARE_DIVISOR * size_of::<Entry>())
+    /// Tells whether a push would double the capacity of the deque of the
+    /// entries past its share of the budget. See [`ENTRY_SHARE_DIVISOR`].
+    fn a_push_passes_the_entry_share(&self) -> bool {
+        let capacity = self.entries.capacity();
+        let doubled = capacity.saturating_mul(2 * size_of::<Entry>());
+        self.entries.len() == capacity && doubled > self.budget / ENTRY_SHARE_DIVISOR
     }
 
     /// Gives the bytes that the history holds. It counts the real sizes: the
