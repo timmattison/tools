@@ -1,7 +1,10 @@
 # `crap todos` — extract todo/task lists from a Claude session
 
 Date: 2026-05-27
-Status: design approved, pending spec review
+Status: design approved 2026-05-27, pending spec review. The 2026-11-24
+revision maps the flags that `crap` got after that date (`--expand`, `--user`,
+`--forks`, `--scan`, `NEW_SESSION_ID`) and the `__CRAP_FORK_AT__` reply. Nobody
+approved that revision yet.
 
 ## Problem
 
@@ -88,9 +91,13 @@ bare `crap <uuid>` still resumes.
 | `crap here <uuid>` | `crap --here <uuid>` | symlink into cwd, resume forked |
 | `crap status [<uuid>]` | `crap --status [<uuid>]` | conversational state (token / table) |
 | `crap todos [<uuid>]` | — *(new)* | extract todo/task lists |
+| `crap forks <uuid>` | `crap --forks <uuid>` | fork-log report (print only) |
 | `crap shell-setup` | `crap --shell-setup` | install shell function |
 
 - `--force` is a flag on `resume` and `here`.
+- `--expand` and `--user <name>` are flags on `resume` and `here`.
+  `NEW_SESSION_ID` is an optional positional of `here`. `--scan` is a flag on
+  `forks`.
 - `--json` is a flag on `status` and `todos`.
 - `--verbose` is a flag on `todos` (see Display).
 - Bare `crap <uuid>` maps to `resume` via clap's default-subcommand pattern
@@ -104,11 +111,16 @@ bare `crap <uuid>` still resumes.
 The installed `crap()` shell function currently branches on **flags**. It must
 branch on the **subcommand** (`$1`):
 
-- `todos | status | shell-setup | help | --help | -h | --version | -V` → run
-  straight through `command crap "$@"` and return (print, never `cd`).
-- `here` → the existing `__CRAP_HERE__` sentinel flow (symlink + `--fork-session`
-  + watcher cleanup), unchanged internally.
-- `resume`, or a bare UUID (default) → the `<id>\n<dir>` parse, `cd`, resume.
+- `todos | status | forks | shell-setup | help | --help | -h | --version | -V`
+  → run straight through `command crap "$@"` and return (print, never `cd`).
+- `resume`, `here`, or a bare UUID (default) → route the reply by its first
+  line, as `SHELL_CODE` does now. The subcommand cannot select the shape,
+  because a cross-user `resume` and `--expand` also fork:
+  - `__CRAP_HERE__` → `<session>\n<new-id>\n<link>`: the existing symlink +
+    `--fork-session` + watcher cleanup, unchanged internally.
+  - `__CRAP_FORK_AT__` → `<session>\n<new-id>\n<link>\n<dir>`: `cd` into
+    `<dir>`, then the same fork flow.
+  - Any other first line → the `<id>\n<dir>` parse, `cd`, resume.
 
 `with_old_end_marker()` must be set so existing installs upgrade in place per
 the repo's `shellsetup` rules; the marker is a distinctive line from the current
@@ -270,7 +282,8 @@ hardcoded paths (parallel-safe per CLAUDE.md):
 - Label truncation: Japanese / emoji / accented inputs (no panic, correct
   width).
 - Subcommand routing parser used by the shell function (Rust-level decision
-  table), and a shellcheck pass on the emitted `SHELL_CODE`.
+  table, with both fork shapes), and a shellcheck pass on the emitted
+  `SHELL_CODE`.
 - Display + JSON formatters: golden-string assertions for a representative
   `SessionTodos` (with and without `--verbose`).
 
