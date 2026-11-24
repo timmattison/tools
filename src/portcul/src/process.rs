@@ -318,8 +318,14 @@ mod tests {
         // exited after the list was read.
         let error = kill_process(Pid::try_from(4_000_000_u32).unwrap()).unwrap_err();
         let text = error.to_string();
-        assert!(text.contains("exited"), "ESRCH needs its own message: {text}");
-        assert!(text.contains("os error"), "the message must keep the errno: {text}");
+        assert!(
+            text.contains("exited"),
+            "ESRCH needs its own message: {text}"
+        );
+        assert!(
+            text.contains("os error"),
+            "the message must keep the errno: {text}"
+        );
     }
 
     fn kill_target(pid: u32) -> ListeningProcess {

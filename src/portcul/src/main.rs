@@ -299,8 +299,11 @@ mod tests {
 
     #[test]
     fn test_pressed_key_ignores_a_key_release() {
-        let release =
-            KeyEvent::new_with_kind(KeyCode::Char('j'), KeyModifiers::NONE, KeyEventKind::Release);
+        let release = KeyEvent::new_with_kind(
+            KeyCode::Char('j'),
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        );
         assert_eq!(pressed_key(Event::Key(release)), None);
     }
 

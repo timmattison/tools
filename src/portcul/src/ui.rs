@@ -238,9 +238,9 @@ fn render_table(frame: &mut Frame, area: Rect, state: &mut AppState) {
         .collect();
 
     let widths = [
-        Constraint::Length(7),  // Port
-        Constraint::Length(8),  // PID
-        Constraint::Min(15),    // Process
+        Constraint::Length(7), // Port
+        Constraint::Length(8), // PID
+        Constraint::Min(15),   // Process
         Constraint::Length(ADDRESS_COLUMN_WIDTH),
     ];
 
@@ -677,7 +677,10 @@ mod tests {
             Ok(())
         });
         assert!(!sent);
-        assert!(!called.get(), "the PID can belong to a different process now");
+        assert!(
+            !called.get(),
+            "the PID can belong to a different process now"
+        );
         let (message, is_error) = result_of(&state);
         assert!(is_error);
         assert!(message.contains("no longer listens"), "{message}");
