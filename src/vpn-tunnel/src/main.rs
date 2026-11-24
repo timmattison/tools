@@ -149,7 +149,7 @@ fn run(cli: Cli) -> Result<()> {
                 .read_item_fields(&op_path_validated, CREDENTIAL_FIELD_PREFIX)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-            // Check which credentials running gluetun containers already hold.
+            // Check which credentials running containers already hold.
             // A docker failure stops the command: handing out a credential on
             // unknown state risks reusing a key a running tunnel already holds.
             let running_tunnels = credential::find_running_tunnels()

@@ -2,7 +2,10 @@ use op_cache::ItemField;
 use std::io;
 use std::process::Output;
 
-/// A running gluetun container and its WireGuard key.
+/// A running container and the WireGuard key in its environment.
+///
+/// Any container that carries `WIREGUARD_PRIVATE_KEY` is a holder, whatever
+/// its image.
 #[derive(Debug, Clone)]
 pub struct RunningTunnel {
     pub container_name: String,
@@ -154,17 +157,15 @@ pub fn select_credential(
     Err(AllCredentialsInUse { usage })
 }
 
-/// The image repository every gluetun container runs.
-const GLUETUN_IMAGE: &str = "qmcgaw/gluetun";
-
 /// The environment variable that carries a container's WireGuard private key.
 const WIREGUARD_KEY_ENV: &str = "WIREGUARD_PRIVATE_KEY=";
 
-/// The docker template that reports one container per line, name then image.
-const PS_FORMAT: &str = "{{.Names}}\t{{.Image}}";
-
-/// The docker template that reports one environment entry per line.
-const INSPECT_ENV_FORMAT: &str = "{{range .Config.Env}}{{println .}}{{end}}";
+/// The docker template that reports one container per line: its name, a tab,
+/// and its environment, both as JSON.
+///
+/// JSON escapes a tab and a newline inside a value. So the literal tab is a
+/// safe separator and each container takes exactly one line.
+const INSPECT_FORMAT: &str = "{{json .Name}}\t{{json .Config.Env}}";
 
 /// A docker command that could not be run, or that ran and reported a failure.
 #[derive(Debug)]
@@ -192,46 +193,30 @@ impl DockerError {
     }
 }
 
-/// Whether a docker image reference names the gluetun repository.
-///
-/// The comparison is anchored at both ends of the repository name: a tag
-/// (`:v3.40`, `:latest`), a digest (`@sha256:...`), or nothing at all may
-/// follow it. So `evil/qmcgaw/gluetun` and `qmcgaw/gluetunnel` do not match,
-/// and every tag of the real image does. Docker's own `ancestor=` filter
-/// cannot do this: it resolves an untagged reference to `:latest`, which a
-/// machine that only ever pulled a pinned tag does not have, and then matches
-/// nothing while `docker ps` still exits 0.
-fn is_gluetun_image(image: &str) -> bool {
-    match image.strip_prefix(GLUETUN_IMAGE) {
-        Some(rest) => rest.is_empty() || rest.starts_with(':') || rest.starts_with('@'),
-        None => false,
-    }
-}
-
-/// Names of the running containers whose image is a gluetun image.
-///
-/// Reads the stdout of `docker ps --format '{{.Names}}\t{{.Image}}'`. A blank
-/// line, a row that carries no tab, and a row whose name or image is empty are
-/// all skipped.
-fn gluetun_container_names(ps_stdout: &str) -> Vec<&str> {
-    ps_stdout
-        .lines()
-        .filter_map(|line| line.split_once('\t'))
-        .map(|(name, image)| (name.trim(), image.trim()))
-        .filter(|(name, image)| !name.is_empty() && is_gluetun_image(image))
-        .map(|(name, _)| name)
-        .collect()
-}
-
 /// The WireGuard private key in a container's environment, if it carries one.
 ///
-/// Reads the stdout of
-/// `docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}'`.
-fn wireguard_key_from_env(inspect_stdout: &str) -> Option<&str> {
-    inspect_stdout
-        .lines()
-        .map(|line| line.trim_end_matches('\r'))
-        .find_map(|line| line.strip_prefix(WIREGUARD_KEY_ENV))
+/// The key is the text after the first `=`. A trailing `=` of base64 padding
+/// stays. A trailing carriage return does not.
+fn wireguard_key_from_env(env: &[String]) -> Option<&str> {
+    env.iter()
+        .map(|entry| entry.trim_end_matches('\r'))
+        .find_map(|entry| entry.strip_prefix(WIREGUARD_KEY_ENV))
+}
+
+/// Reads one line of the `docker inspect` answer: the name and the environment.
+///
+/// Docker prints the name with a leading `/`. This function removes it. A
+/// container with no environment gives `None` for the environment. A line that
+/// is not in the format gives `None`.
+fn parse_inspect_line(line: &str) -> Option<(String, Option<Vec<String>>)> {
+    let (name, env) = line.split_once('\t')?;
+    let name: String = serde_json::from_str(name).ok()?;
+    let env: Option<Vec<String>> = serde_json::from_str(env).ok()?;
+    let name = match name.strip_prefix('/') {
+        Some(rest) => rest.to_string(),
+        None => name,
+    };
+    Some((name, env))
 }
 
 /// Runs one docker command and hands back its stdout, or the reason it failed.
@@ -254,22 +239,47 @@ where
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// Lists the running gluetun containers and the WireGuard key each one holds,
-/// through the given docker runner.
+/// Lists the running containers that hold a WireGuard key, and the key each
+/// one holds, through the given docker runner.
+///
+/// The image of a container is not read. After a pull moves a tag, `docker ps`
+/// shows the image ID in place of the image name, and a mirror or a renamed
+/// image has another name. So one `docker inspect` reads the environment of
+/// every running container, and the key decides.
 fn find_running_tunnels_with<R>(run: R) -> Result<Vec<RunningTunnel>, DockerError>
 where
     R: Fn(&[&str]) -> io::Result<Output>,
 {
-    let ps_stdout = docker_stdout(&run, &["ps", "--format", PS_FORMAT])?;
-    let names: Vec<String> = gluetun_container_names(&ps_stdout)
-        .into_iter()
-        .map(ToString::to_string)
+    let ps_stdout = docker_stdout(&run, &["ps", "-q", "--no-trunc"])?;
+    let ids: Vec<&str> = ps_stdout
+        .lines()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
         .collect();
 
+    // `docker inspect` with no target fails, so ask nothing of it.
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut args = vec!["inspect", "--format", INSPECT_FORMAT];
+    args.extend(&ids);
+    let inspect_stdout = docker_stdout(&run, &args)?;
+
     let mut tunnels = Vec::new();
-    for name in names {
-        let env = docker_stdout(&run, &["inspect", "--format", INSPECT_ENV_FORMAT, &name])?;
-        if let Some(key) = wireguard_key_from_env(&env) {
+    for (index, line) in inspect_stdout.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        // The line holds environment values, and a key is a secret. So the
+        // error names the line and never shows it.
+        let (name, env) = parse_inspect_line(line).ok_or_else(|| {
+            DockerError::new(
+                &args,
+                format!("could not read line {} of the output", index + 1),
+            )
+        })?;
+        if let Some(key) = env.as_deref().and_then(wireguard_key_from_env) {
             tunnels.push(RunningTunnel {
                 container_name: name,
                 wireguard_key: key.to_string(),
@@ -280,12 +290,15 @@ where
     Ok(tunnels)
 }
 
-/// Lists the running gluetun containers and the WireGuard key each one holds.
+/// Lists the running containers that hold a WireGuard key, and that key.
+///
+/// A holder is any running container whose environment carries
+/// `WIREGUARD_PRIVATE_KEY`, whatever its image.
 ///
 /// # Errors
 ///
-/// Returns `DockerError` when docker cannot be started, or when a docker
-/// command exits non-zero. A docker failure is never reported as an empty
+/// Returns `DockerError` when docker cannot be started, when a docker
+/// command exits non-zero, or when a line of its answer cannot be read. A docker failure is never reported as an empty
 /// list: a credential handed out on unknown state is worse than no credential.
 pub fn find_running_tunnels() -> Result<Vec<RunningTunnel>, DockerError> {
     find_running_tunnels_with(|args| childenv::command("docker").args(args).output())
@@ -328,122 +341,131 @@ mod tests {
     }
 
     #[test]
-    fn every_gluetun_tag_matches() {
-        let ps = concat!(
-            "pinned\tqmcgaw/gluetun:v3.40\n",
-            "latest\tqmcgaw/gluetun:latest\n",
-            "bare\tqmcgaw/gluetun\n",
-            "digest\tqmcgaw/gluetun@sha256:0123456789abcdef\n",
-        );
-        assert_eq!(
-            gluetun_container_names(ps),
-            vec!["pinned", "latest", "bare", "digest"]
-        );
-    }
-
-    #[test]
-    fn an_image_that_is_not_gluetun_does_not_match() {
-        let ps = concat!(
-            "db\tpostgres:16\n",
-            "impostor\tevil/qmcgaw/gluetun:v3.40\n",
-            "lookalike\tqmcgaw/gluetunnel:v1\n",
-        );
-        assert_eq!(gluetun_container_names(ps), Vec::<&str>::new());
-    }
-
-    #[test]
-    fn blank_and_malformed_rows_are_skipped() {
-        let ps = concat!(
-            "\n",
-            "vpn-gluetun\tqmcgaw/gluetun:v3.40\n",
-            "no-tab-row\n",
-            "\tqmcgaw/gluetun:v3.40\n",
-            "empty-image\t\n",
-        );
-        assert_eq!(gluetun_container_names(ps), vec!["vpn-gluetun"]);
-    }
-
-    #[test]
     fn the_wireguard_key_is_read_from_the_environment() {
-        let env = "PATH=/usr/bin\nWIREGUARD_PRIVATE_KEY=abc123\nTZ=UTC\n";
-        assert_eq!(wireguard_key_from_env(env), Some("abc123"));
+        let env = env(&["PATH=/usr/bin", "WIREGUARD_PRIVATE_KEY=abc123", "TZ=UTC"]);
+        assert_eq!(wireguard_key_from_env(&env), Some("abc123"));
     }
 
     #[test]
     fn a_container_without_a_wireguard_key_reads_as_none() {
-        let env = "PATH=/usr/bin\nVPN_TYPE=openvpn\n";
-        assert_eq!(wireguard_key_from_env(env), None);
+        let env = env(&["PATH=/usr/bin", "VPN_TYPE=openvpn"]);
+        assert_eq!(wireguard_key_from_env(&env), None);
     }
 
     #[test]
     fn a_base64_key_keeps_its_trailing_padding() {
-        let env = "WIREGUARD_PRIVATE_KEY=cGFkZGVkK2tleQ==\n";
-        assert_eq!(wireguard_key_from_env(env), Some("cGFkZGVkK2tleQ=="));
+        let env = env(&["WIREGUARD_PRIVATE_KEY=cGFkZGVkK2tleQ=="]);
+        assert_eq!(wireguard_key_from_env(&env), Some("cGFkZGVkK2tleQ=="));
     }
 
     #[test]
     fn a_carriage_return_does_not_reach_the_key() {
-        let env = "WIREGUARD_PRIVATE_KEY=abc123\r\n";
-        assert_eq!(wireguard_key_from_env(env), Some("abc123"));
+        let env = env(&["WIREGUARD_PRIVATE_KEY=abc123\r"]);
+        assert_eq!(wireguard_key_from_env(&env), Some("abc123"));
     }
 
-    #[test]
-    fn docker_ps_asks_for_names_and_images_without_an_ancestor_filter() {
-        let calls: RefCell<Vec<Vec<String>>> = RefCell::new(Vec::new());
-        let tunnels = find_running_tunnels_with(|args| {
+    fn env(entries: &[&str]) -> Vec<String> {
+        entries.iter().map(|e| (*e).to_string()).collect()
+    }
+
+    /// A fake docker that holds the given containers: (ID, inspect line).
+    /// It records each call.
+    fn fake_docker<'a>(
+        containers: &'a [(&'a str, &'a str)],
+        calls: &'a RefCell<Vec<Vec<String>>>,
+    ) -> impl Fn(&[&str]) -> io::Result<Output> + 'a {
+        move |args| {
             calls
                 .borrow_mut()
                 .push(args.iter().map(|a| (*a).to_string()).collect());
-            Ok(ok_output(""))
-        })
-        .expect("docker succeeded");
+            Ok(match args {
+                ["ps", "-q", "--no-trunc"] => {
+                    let mut out = String::new();
+                    for (id, _) in containers {
+                        out.push_str(id);
+                        out.push('\n');
+                    }
+                    ok_output(&out)
+                }
+                ["inspect", "--format", format, targets @ ..] if *format == INSPECT_FORMAT => {
+                    let mut out = String::new();
+                    for target in targets {
+                        for (id, line) in containers {
+                            if id == target {
+                                out.push_str(line);
+                                out.push('\n');
+                            }
+                        }
+                    }
+                    ok_output(&out)
+                }
+                other => panic!("unexpected docker command: {other:?}"),
+            })
+        }
+    }
+
+    #[test]
+    fn no_running_container_means_no_inspect() {
+        let calls = RefCell::new(Vec::new());
+        let tunnels =
+            find_running_tunnels_with(fake_docker(&[], &calls)).expect("docker succeeded");
 
         assert!(tunnels.is_empty());
         let calls = calls.into_inner();
         assert_eq!(calls.len(), 1, "expected one docker command: {calls:?}");
         assert_eq!(calls[0].first().map(String::as_str), Some("ps"));
-        assert!(
-            calls[0].iter().any(|a| a == "{{.Names}}\t{{.Image}}"),
-            "docker ps must report the image of every container: {calls:?}"
-        );
-        assert!(
-            !calls[0].iter().any(|a| a.starts_with("ancestor=")),
-            "an ancestor filter resolves to :latest and matches nothing: {calls:?}"
+    }
+
+    #[test]
+    fn one_inspect_reads_every_container() {
+        let calls = RefCell::new(Vec::new());
+        let containers = [
+            ("id-aaa", r#""/one"	["WIREGUARD_PRIVATE_KEY=k1"]"#),
+            ("id-bbb", r#""/two"	["WIREGUARD_PRIVATE_KEY=k2"]"#),
+            ("id-ccc", r#""/three"	["WIREGUARD_PRIVATE_KEY=k3"]"#),
+        ];
+        let tunnels =
+            find_running_tunnels_with(fake_docker(&containers, &calls)).expect("docker succeeded");
+
+        assert_eq!(tunnels.len(), 3, "{tunnels:?}");
+        let calls = calls.into_inner();
+        assert_eq!(calls.len(), 2, "expected one ps and one inspect: {calls:?}");
+        assert_eq!(calls[0].first().map(String::as_str), Some("ps"));
+        assert_eq!(calls[1].first().map(String::as_str), Some("inspect"));
+        assert_eq!(
+            calls[1].get(3..).unwrap_or_default(),
+            ["id-aaa", "id-bbb", "id-ccc"],
+            "the inspect targets must be every ID: {calls:?}"
         );
     }
 
     #[test]
-    fn finds_gluetun_containers_and_their_keys() {
-        let tunnels = find_running_tunnels_with(|args| {
-            Ok(match args {
-                ["ps", ..] => ok_output("vpn-gluetun\tqmcgaw/gluetun:v3.40\ndb\tpostgres:16\n"),
-                ["inspect", .., "vpn-gluetun"] => {
-                    ok_output("PATH=/usr/bin\nWIREGUARD_PRIVATE_KEY=key-1\n")
-                }
-                other => panic!("unexpected docker command: {other:?}"),
-            })
-        })
-        .expect("docker succeeded");
+    fn a_container_of_any_image_is_found_by_its_key() {
+        // The image is never read, so a GHCR mirror needs no special case.
+        let calls = RefCell::new(Vec::new());
+        let containers = [(
+            "id-mirror",
+            r#""/mirror-gluetun"	["PATH=/usr/bin","WIREGUARD_PRIVATE_KEY=key-m"]"#,
+        )];
+        let tunnels =
+            find_running_tunnels_with(fake_docker(&containers, &calls)).expect("docker succeeded");
 
         assert_eq!(tunnels.len(), 1, "{tunnels:?}");
-        assert_eq!(tunnels[0].container_name, "vpn-gluetun");
-        assert_eq!(tunnels[0].wireguard_key, "key-1");
+        assert_eq!(tunnels[0].container_name, "mirror-gluetun");
+        assert_eq!(tunnels[0].wireguard_key, "key-m");
     }
 
     #[test]
-    fn a_gluetun_container_without_a_wireguard_key_is_skipped() {
-        let tunnels = find_running_tunnels_with(|args| {
-            Ok(match args {
-                ["ps", ..] => ok_output(concat!(
-                    "openvpn-gluetun\tqmcgaw/gluetun:v3.40\n",
-                    "wg-gluetun\tqmcgaw/gluetun:v3.40\n",
-                )),
-                ["inspect", .., "openvpn-gluetun"] => ok_output("VPN_TYPE=openvpn\n"),
-                ["inspect", .., "wg-gluetun"] => ok_output("WIREGUARD_PRIVATE_KEY=key-2\n"),
-                other => panic!("unexpected docker command: {other:?}"),
-            })
-        })
-        .expect("docker succeeded");
+    fn a_container_without_a_wireguard_key_is_skipped() {
+        let calls = RefCell::new(Vec::new());
+        let containers = [
+            ("id-db", r#""/db"	["POSTGRES_PASSWORD=x"]"#),
+            ("id-ovpn", r#""/ovpn"	["VPN_TYPE=openvpn"]"#),
+            ("id-none", r#""/no-env"	null"#),
+            ("id-wg", r#""/wg-gluetun"	["WIREGUARD_PRIVATE_KEY=key-2"]"#),
+        ];
+        let tunnels =
+            find_running_tunnels_with(fake_docker(&containers, &calls)).expect("docker succeeded");
 
         assert_eq!(tunnels.len(), 1, "{tunnels:?}");
         assert_eq!(tunnels[0].container_name, "wg-gluetun");
@@ -451,35 +473,34 @@ mod tests {
     }
 
     #[test]
-    fn a_tunnel_whose_ps_row_shows_an_image_id_is_still_found() {
-        // After a pull moves the tag, `docker ps` shows the bare image ID in
-        // the image column. The container still holds its key.
-        let tunnels = find_running_tunnels_with(|args| {
-            Ok(match args {
-                ["ps", rest @ ..] if rest.contains(&"-q") => ok_output("3fbc63216742aaaa\n"),
-                ["ps", ..] => ok_output("vpn-gluetun\t3fbc63216742\n"),
-                ["inspect", "--format", format, targets @ ..] if format.contains("{{json") => {
-                    let mut out = String::new();
-                    for target in targets {
-                        if *target == "3fbc63216742aaaa" {
-                            out.push_str(
-                                "\"/vpn-gluetun\"\t[\"PATH=/usr/bin\",\"WIREGUARD_PRIVATE_KEY=key-1\"]\n",
-                            );
-                        }
-                    }
-                    ok_output(&out)
-                }
-                ["inspect", "--format", _, ..] => {
-                    ok_output("PATH=/usr/bin\nWIREGUARD_PRIVATE_KEY=key-1\n")
-                }
-                other => panic!("unexpected docker command: {other:?}"),
-            })
-        })
-        .expect("docker succeeded");
+    fn the_leading_slash_of_the_name_is_removed() {
+        let (name, env) = parse_inspect_line(r#""/vpn-gluetun"	["A=b"]"#).expect("a valid line");
+        assert_eq!(name, "vpn-gluetun");
+        assert_eq!(env, Some(vec!["A=b".to_string()]));
+    }
 
-        assert_eq!(tunnels.len(), 1, "{tunnels:?}");
-        assert_eq!(tunnels[0].container_name, "vpn-gluetun");
-        assert_eq!(tunnels[0].wireguard_key, "key-1");
+    #[test]
+    fn a_line_that_cannot_be_read_is_an_error_that_hides_the_key() {
+        let calls = RefCell::new(Vec::new());
+        let containers = [
+            ("id-ok", r#""/ok"	["A=b"]"#),
+            (
+                "id-bad",
+                r#""/bad"	["WIREGUARD_PRIVATE_KEY=secret-key-value""#,
+            ),
+        ];
+        let err = find_running_tunnels_with(fake_docker(&containers, &calls))
+            .expect_err("an unreadable line must not be skipped");
+
+        let text = err.to_string();
+        assert!(
+            text.contains("line 2"),
+            "the error must name the line: {text}"
+        );
+        assert!(
+            !text.contains("secret-key-value"),
+            "the error must not show the key: {text}"
+        );
     }
 
     #[test]
@@ -518,14 +539,14 @@ mod tests {
     fn a_failed_docker_inspect_is_an_error() {
         let err = find_running_tunnels_with(|args| {
             Ok(match args {
-                ["ps", ..] => ok_output("vpn-gluetun\tqmcgaw/gluetun:v3.40\n"),
-                _ => failed_output(b"Error: No such object: vpn-gluetun"),
+                ["ps", ..] => ok_output("3fbc63216742aaaa\n"),
+                _ => failed_output(b"Error: No such object: 3fbc63216742aaaa"),
             })
         })
         .expect_err("a failed docker inspect must not silently drop a container");
 
         assert!(
-            err.to_string().contains("No such object: vpn-gluetun"),
+            err.to_string().contains("No such object: 3fbc63216742aaaa"),
             "the error must carry the docker stderr: {err}"
         );
     }

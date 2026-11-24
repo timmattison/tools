@@ -17,6 +17,7 @@ anyhow.workspace = true
 colored.workspace = true
 which.workspace = true
 op-cache.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true
