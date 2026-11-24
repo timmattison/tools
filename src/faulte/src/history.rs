@@ -2001,6 +2001,24 @@ mod tests {
         assert_eq!(history.forward_by(ids[0], Duration::ZERO), Some(ids[1]));
     }
 
+    /// A jump and a span near the latest time that the clock holds give an
+    /// answer and do not panic. A time is data from outside the program.
+    #[test]
+    fn a_time_near_the_end_of_the_clock_does_not_panic() {
+        let last = u64::try_from(i64::MAX).expect("i64::MAX fits in a u64");
+        let mut history = History::new();
+        let first = history.add(frame(last - 4, vec![row(1, 1)]));
+        let second = history.add(frame(last - 2, vec![row(1, 2)]));
+        let minute = Duration::from_secs(60);
+
+        assert_eq!(history.back_by(second, minute), None);
+        assert_eq!(history.forward_by(first, minute), None);
+        let reading = history
+            .span(second, SpanWidth::OneMinute)
+            .expect("the span holds two frames");
+        assert_eq!(reading.ranking().total_faults, 3);
+    }
+
     /// Makes `count` rows with PIDs from `first`, each with a long command.
     fn long_rows(first: u32, count: u32) -> Vec<RankedRow> {
         (first..first + count)
