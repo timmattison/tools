@@ -8,7 +8,9 @@
 
 **Tech Stack:** Tauri v2, Rust, rusqlite, specta/tauri-specta, chrono, thiserror, serde, Vite, TypeScript
 
-**Spec:** `docs/superpowers/specs/2026-03-17-msgs-imessage-browser-design.md`
+**Spec:** `specs/2026-03-17-msgs-imessage-browser-design.md`
+
+**Status:** This plan is the record of the first implementation. Its code listings show that first version. The fixes of review R-20261124T203119Z changed the parser, the cache, the export, the commands, and the frontend, thus the spec and the code are authoritative where they differ from a listing here.
 
 ---
 
