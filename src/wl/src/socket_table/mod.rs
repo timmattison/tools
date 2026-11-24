@@ -59,7 +59,7 @@ pub enum PortStatus {
 /// [`PortStatus::Unknown`] — see the module documentation.
 #[cfg_attr(
     not(any(target_os = "macos", target_os = "linux")),
-    allow(
+    expect(
         unused_variables,
         reason = "a platform with no socket-table reader answers Unknown without \
                   ever looking at the port"

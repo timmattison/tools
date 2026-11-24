@@ -151,23 +151,21 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+// Each test here reads the privilege note, and only Unix writes one.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     #[test]
     fn emits_note_for_non_root_euid() {
         assert!(non_root_privilege_note(1000).is_some());
     }
 
-    #[cfg(unix)]
     #[test]
     fn no_note_for_root_euid() {
         assert!(non_root_privilege_note(0).is_none());
     }
 
-    #[cfg(unix)]
     #[test]
     fn note_mentions_sudo() {
         let note = non_root_privilege_note(1000).expect("non-root should produce a note");
@@ -177,7 +175,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn note_does_not_tell_users_to_pass_dash_e() {
         let note = non_root_privilege_note(1000).expect("non-root should produce a note");
