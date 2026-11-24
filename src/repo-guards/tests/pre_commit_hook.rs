@@ -216,6 +216,26 @@ const MACHETE_BINARY_NAME: &str = "cargo-machete";
 /// The text of the stub `cargo-machete`. It does nothing and exits zero.
 const MACHETE_STUB_SCRIPT: &str = "#!/bin/sh\nexit 0\n";
 
+/// The variable that names the cargo home.
+const CARGO_HOME_VARIABLE: &str = "CARGO_HOME";
+
+/// The cargo home when `CARGO_HOME` is not set, in the home directory.
+const DEFAULT_CARGO_HOME: &str = ".cargo";
+
+/// The directory, in the cargo home, where cargo looks for a subcommand.
+const CARGO_HOME_BIN: &str = "bin";
+
+/// The cargo home of a hook run, as an absolute path. It obeys the rule of
+/// cargo: a `CARGO_HOME` that is set and not empty, else `.cargo` in the home
+/// directory. Gives back `None` when neither one is known.
+fn cargo_home() -> Option<PathBuf> {
+    std::env::var_os(CARGO_HOME_VARIABLE)
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::home_dir().map(|home| home.join(DEFAULT_CARGO_HOME)))
+        .and_then(|home| std::path::absolute(home).ok())
+}
+
 /// Run the real hook once with `dir` as CWD, shedding the inherited `GIT_`
 /// family so the hook operates on the fixture repo rather than this test's
 /// repo. It sets `CARGO_TARGET_DIR` to `dir/target`, so the cargo in the fixture
@@ -223,9 +243,15 @@ const MACHETE_STUB_SCRIPT: &str = "#!/bin/sh\nexit 0\n";
 ///
 /// It puts a stub `cargo-machete` that exits 0 first on PATH. The check script
 /// installs the real tool into the real `~/.cargo/bin` when the tool is not on
-/// PATH. A test must not write global state or need the network. The stub is
-/// the only `cargo-machete` that a hook run starts. Gives back the exit status
-/// and the printed output of that one run.
+/// PATH. A test must not write global state or need the network.
+///
+/// When PATH does not hold `$CARGO_HOME/bin`, cargo looks there first for a
+/// subcommand, and a cargo that is not the rustup proxy then starts the real
+/// tool. Thus it puts `$CARGO_HOME/bin` last on PATH, and it sets `CARGO_HOME`
+/// to that same cargo home. Cargo then obeys the PATH order, and the stub is the
+/// only `cargo-machete` that a hook run starts. The directory goes last, so the
+/// `cargo` that the hook starts stays the first one on PATH. Gives back the exit
+/// status and the printed output of that one run.
 fn run_hook(dir: &Path) -> HookRun {
     let mut command = Command::new("bash");
     shed_inherited_git_environment(&mut command);
@@ -233,10 +259,16 @@ fn run_hook(dir: &Path) -> HookRun {
     fs::create_dir_all(&stub_dir).expect("failed to create the stub directory");
     write_executable(stub_dir.join(MACHETE_BINARY_NAME), MACHETE_STUB_SCRIPT)
         .expect("failed to write the stub cargo-machete");
-    let path = std::env::join_paths(std::iter::once(stub_dir).chain(std::env::split_paths(
+    let mut path_dirs = vec![stub_dir];
+    path_dirs.extend(std::env::split_paths(
         &std::env::var_os("PATH").unwrap_or_default(),
-    )))
-    .expect("failed to join the stub directory onto PATH");
+    ));
+    if let Some(cargo_home) = cargo_home() {
+        path_dirs.push(cargo_home.join(CARGO_HOME_BIN));
+        command.env(CARGO_HOME_VARIABLE, cargo_home);
+    }
+    let path =
+        std::env::join_paths(path_dirs).expect("failed to join the stub directory onto PATH");
     command.env("PATH", path);
     command.env("CARGO_TARGET_DIR", dir.join("target"));
 
