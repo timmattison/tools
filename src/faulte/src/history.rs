@@ -2294,8 +2294,14 @@ mod tests {
         history.add(frame(secs + WINDOW_SECS, Vec::new()));
 
         let kept = history.extent().frames;
-        assert!(full > 1, "the add that filled the history kept {full} frames");
+        assert!(
+            full > 1,
+            "the add that filled the history kept {full} frames"
+        );
         assert!(kept > 1, "the next add kept {kept} frames");
-        assert_eq!(kept, full, "one add to a full history makes one frame leave");
+        assert_eq!(
+            kept, full,
+            "one add to a full history makes one frame leave"
+        );
     }
 }
