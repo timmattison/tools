@@ -159,6 +159,25 @@ fn find_pattern(
     matches
 }
 
+/// Writes a hex dump of `data`, the bytes of one match and its context, to
+/// `out`.
+///
+/// `file_offset` is the offset of the match in the file, `context_bytes` is
+/// the context that the search asked for, and `pattern_len` is the length of
+/// the pattern. The first byte of `data` is at `file_offset` minus
+/// `context_bytes` in the file, or at 0 when the match is nearer to the start.
+///
+/// Each line holds 16 bytes: the offset of its first byte as 8 hex digits,
+/// the bytes in hex with one more space after the eighth, and the bytes as
+/// ASCII between two `|`. A byte outside 0x20 to 0x7e shows as `.`. The first
+/// line starts at the offset of the first byte, aligned down to a multiple of
+/// 4, and a column that holds no byte of `data` is blank. The bytes of the
+/// pattern are bold red in the hex columns and in the ASCII column.
+///
+/// # Errors
+///
+/// Returns the first error of a write to `out`, for example a broken pipe.
+/// The function does not flush `out`.
 fn display_hex_dump(
     out: &mut impl Write,
     data: &[u8],
