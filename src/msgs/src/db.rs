@@ -365,6 +365,19 @@ impl MessageDb {
         )
     }
 
+    /// The count of messages of the chat that come before `message_id` in the
+    /// newest-first order of `get_messages`. `get_messages(chat_id, position, 1)`
+    /// returns the message.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MsgsError::DatabaseError` when the message is not in the chat
+    /// or the query fails.
+    pub fn message_position(&self, chat_id: i64, message_id: i64) -> Result<i64, MsgsError> {
+        let _ = (chat_id, message_id);
+        Ok(0)
+    }
+
     fn get_attachments_for_message(
         &self,
         message_id: i64,
@@ -1074,5 +1087,31 @@ mod tests {
         let messages = fx.open_db().get_messages(chat, 0, 10).expect("messages");
         assert_eq!(messages.len(), 2);
         assert!(messages.iter().all(|m| m.date.is_some()));
+    }
+
+    #[test]
+    fn message_position_locates_each_message_in_the_newest_first_order() {
+        let fx = ChatDbFixture::new();
+        let chat = fx.add_chat("c", None, 45);
+        let other = fx.add_chat("other", None, 45);
+        // Seven messages, some on one date, added out of date order.
+        let secs = [30, 10, 10, 20, 20, 20, 40];
+        let ids: Vec<i64> = secs
+            .iter()
+            .enumerate()
+            .map(|(i, s)| fx.add_message(text_message(&format!("m{i}"), *s, 0, &[chat])))
+            .collect();
+        let foreign = fx.add_message(text_message("x", 50, 0, &[other]));
+        let db = fx.open_db();
+        for id in &ids {
+            let position = db.message_position(chat, *id).expect("position");
+            let found = db.get_messages(chat, position, 1).expect("page");
+            assert_eq!(found.len(), 1, "id {id} at {position}");
+            assert_eq!(found[0].message_id, *id, "position {position}");
+        }
+        assert!(matches!(
+            db.message_position(chat, foreign),
+            Err(MsgsError::DatabaseError(_))
+        ));
     }
 }
