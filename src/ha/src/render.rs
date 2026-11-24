@@ -566,8 +566,9 @@ where
 /// puts the mark there and cuts the name at its start when the name does not
 /// fit. The job-sum cell shows `remaining`, the estimate of the time until the
 /// run finishes, when it is `Some`. Otherwise it shows `job_sum`, or it is
-/// blank when `job_sum` is `None`. The cost cell shows `cost`, or it is blank when `cost` is `None`,
-/// which is the case until the jobs of the run load. The line holds the spans of `cells`: the two marker cells keep
+/// blank when `job_sum` is `None`. The cost cell shows `cost`, or it is blank
+/// when `cost` is `None`, which is the case until the jobs of the run load.
+/// The line holds the spans of `cells`: the two marker cells keep
 /// `Color::Reset`, and the text cells take the style that the caller gives
 /// the line.
 #[expect(
@@ -1500,11 +1501,10 @@ fn draw_row<Tz: TimeZone>(
 /// recent header holds the word, because its rows show when each run finished.
 /// The job-sum column stands after the right marker cell. A run row shows its
 /// estimate there when it has one, and its `job_sum` when it has none (see
-/// [`run_line`]), a job row shows the time left of its job
-/// (see [`job_line`]), and the other rows leave it blank. The cost column
-/// stands after the job-sum column, at the right edge. A run row and a job row
-/// show their `cost` there (see [`run_line`] and [`job_line`]),
-/// and the other rows leave it blank.
+/// [`run_line`]). A job row shows the time left of its job (see [`job_line`]),
+/// and the other rows leave it blank. The cost column stands after the job-sum
+/// column, at the right edge. A run row and a job row show their `cost` there
+/// (see [`run_line`] and [`job_line`]), and the other rows leave it blank.
 /// This function never panics, whatever the size of the frame.
 pub fn draw<Tz: TimeZone>(
     frame: &mut Frame,
