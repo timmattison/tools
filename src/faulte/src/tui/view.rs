@@ -1259,6 +1259,71 @@ mod tests {
         );
     }
 
+    /// Opens the detail view of a process whose command is `command`.
+    fn detail_of(command: String) -> crate::tui::app::App {
+        let (mut app, _) = app_with(vec![frame(
+            0,
+            vec![
+                row(10, 50),
+                RankedRow {
+                    command,
+                    ..row(11, 40)
+                },
+            ],
+        )]);
+        app.on_key(press(KeyCode::Down));
+        app.on_key(press(KeyCode::Down));
+        app.on_key(press(KeyCode::Enter));
+        app
+    }
+
+    /// A command that fits on the screen has nothing to scroll to. The page
+    /// key leaves it where it is, so no number of presses blanks the text.
+    #[test]
+    fn page_down_does_not_scroll_a_short_command_off_the_screen() {
+        let mut app = detail_of("fits-on-one-screen --flag".to_owned());
+        assert!(
+            screen(&paint(&mut app, 80, 24, 3))
+                .iter()
+                .any(|line| line.contains("fits-on-one-screen"))
+        );
+
+        for _ in 0..5 {
+            app.on_key(press(KeyCode::PageDown));
+            let lines = screen(&paint(&mut app, 80, 24, 3));
+            assert!(
+                lines.iter().any(|line| line.contains("fits-on-one-screen")),
+                "the command is gone: {lines:#?}"
+            );
+        }
+    }
+
+    /// The page key moves by the height of the command area. The line after
+    /// the last line on the screen becomes the first one, with no line skipped
+    /// and none repeated.
+    #[test]
+    fn page_down_scrolls_the_command_by_the_lines_that_it_shows() {
+        let words: Vec<String> = (0..60)
+            .map(|word| format!("zq{word:02}{}", "-".repeat(26)))
+            .collect();
+        let mut app = detail_of(words.join(" "));
+        let command_lines = |lines: &[String]| -> Vec<usize> {
+            lines
+                .iter()
+                .filter(|line| line.starts_with("zq"))
+                .map(|line| line[2..4].parse().expect("two digits follow zq"))
+                .collect()
+        };
+
+        let first = command_lines(&screen(&paint(&mut app, 40, 20, 3)));
+        let last = *first.last().expect("the command shows");
+        assert_eq!(first[0], 0, "{first:?}");
+
+        app.on_key(press(KeyCode::PageDown));
+        let second = command_lines(&screen(&paint(&mut app, 40, 20, 3)));
+        assert_eq!(second.first(), Some(&(last + 1)), "{first:?} then {second:?}");
+    }
+
     /// A process states its own arguments, so a command line can hold a tab or
     /// an escape. The row stays aligned, and no such character reaches the
     /// screen.
