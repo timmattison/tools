@@ -1,9 +1,12 @@
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 
-#[derive(Debug, thiserror::Error, Serialize, specta::Type)]
-#[expect(
-    dead_code,
-    reason = "variants reserved for future use in parser and attachment flows"
+#[derive(Debug, thiserror::Error, specta::Type)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "variants reserved for future use in parser and attachment flows"
+    )
 )]
 pub enum MsgsError {
     #[error("Full Disk Access not granted. Open System Settings > Privacy & Security > Full Disk Access and add this app.")]
@@ -34,8 +37,15 @@ impl From<rusqlite::Error> for MsgsError {
     }
 }
 
-// Note: InvokeError conversion is provided automatically by Tauri's blanket
-// `impl<T: Serialize> From<T> for InvokeError`. No manual impl needed here.
+/// Serialize the error as its message. Tauri sends the serialized error as
+/// the rejection value of the invoke (through its blanket
+/// `impl<T: Serialize> From<T> for InvokeError`), and the frontend shows that
+/// value as text.
+impl Serialize for MsgsError {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
+}
 
 #[cfg(test)]
 mod tests {

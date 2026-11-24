@@ -102,8 +102,10 @@ The `attributedBody` column contains serialized `NSAttributedString` data in App
 
 ### Error Types
 
+`MsgsError` implements `Serialize` by hand as its message (`serializer.serialize_str(&self.to_string())`). Tauri sends that string as the rejection value of the invoke, and the frontend shows it.
+
 ```rust
-#[derive(Debug, thiserror::Error, Serialize)]
+#[derive(Debug, thiserror::Error)]
 enum MsgsError {
     #[error("Full Disk Access not granted. Open System Settings > Privacy & Security > Full Disk Access and add this app.")]
     NoFullDiskAccess,
