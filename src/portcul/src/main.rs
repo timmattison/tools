@@ -16,8 +16,8 @@ mod process;
 mod ui;
 
 use process::{
-    collect_listeners, filter_by_port, format_kill_header, format_kill_result, format_process_line,
-    kill_process,
+    collect_listeners, filter_by_port, format_kill_header, format_process_line, kill_process,
+    kill_targets,
 };
 use ui::{AppState, KillConfirm};
 
@@ -102,12 +102,7 @@ fn cmd_kill(port: u16, yes: bool) -> Result<()> {
 
     if yes {
         // Non-interactive: kill immediately
-        for listener in &targets {
-            match kill_process(listener.pid) {
-                Ok(()) => println!("{}", format_kill_result(listener)),
-                Err(e) => eprintln!("Failed to kill PID {}: {e}", listener.pid),
-            }
-        }
+        kill_targets(&targets, kill_process)?;
     } else {
         // Interactive: show processes and ask for confirmation.
         // Print one line per address so output is easy to grep/pipe.
@@ -127,12 +122,7 @@ fn cmd_kill(port: u16, yes: bool) -> Result<()> {
         io::stdin().read_line(&mut input)?;
 
         if input.trim().eq_ignore_ascii_case("y") {
-            for listener in &targets {
-                match kill_process(listener.pid) {
-                    Ok(()) => println!("{}", format_kill_result(listener)),
-                    Err(e) => eprintln!("Failed to kill PID {}: {e}", listener.pid),
-                }
-            }
+            kill_targets(&targets, kill_process)?;
         } else {
             eprintln!("Cancelled.");
         }

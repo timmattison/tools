@@ -182,12 +182,22 @@ pub fn kill_targets(
     targets: &[&ListeningProcess],
     kill: impl Fn(Pid) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
+    let mut failed = 0_usize;
     for listener in targets {
         match kill(listener.pid) {
             Ok(()) => println!("{}", format_kill_result(listener)),
-            Err(e) => eprintln!("Failed to kill PID {}: {e}", listener.pid),
+            Err(e) => {
+                eprintln!("Failed to kill PID {}: {e}", listener.pid);
+                failed += 1;
+            }
         }
     }
+    let total = targets.len();
+    anyhow::ensure!(
+        failed == 0,
+        "{failed} of {total} {} failed",
+        if total == 1 { "kill" } else { "kills" }
+    );
     Ok(())
 }
 
