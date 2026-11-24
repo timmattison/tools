@@ -9,11 +9,7 @@ use std::time::Duration;
 use anyhow::Result;
 use buildinfo::version_string;
 use clap::{Parser, Subcommand};
-use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-};
+use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 mod process;
@@ -24,36 +20,6 @@ use process::{
     kill_process,
 };
 use ui::{AppState, KillConfirm};
-
-/// RAII guard that restores terminal state on drop.
-///
-/// Ensures the terminal is properly restored even if a panic occurs,
-/// preventing the user from being left with a broken terminal.
-struct TerminalGuard {
-    initialized: bool,
-}
-
-impl TerminalGuard {
-    fn new() -> Self {
-        Self { initialized: true }
-    }
-
-    fn disarm(&mut self) {
-        self.initialized = false;
-    }
-}
-
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
-        if self.initialized {
-            let _ = disable_raw_mode();
-            let _ = execute!(io::stdout(), LeaveAlternateScreen);
-            // No access to Terminal here, so use raw ANSI to show cursor
-            let _ = io::stdout().write_all(b"\x1B[?25h");
-            let _ = io::stdout().flush();
-        }
-    }
-}
 
 /// A pretty TUI for viewing and killing processes listening on ports.
 ///
@@ -118,26 +84,10 @@ fn cmd_tui(refresh: f64) -> Result<()> {
         }
     };
 
-    // Set up terminal
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-    terminal.clear()?;
-
-    let mut guard = TerminalGuard::new();
-
-    let result = run_app(&mut terminal, refresh, listeners);
-
-    guard.disarm();
-
-    // Restore terminal
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
-
-    result
+    // The session erases the screen when it enters, and it restores the
+    // terminal when it drops, on an error, and on a panic.
+    let mut session = altscreen::RatatuiSession::enter(altscreen::Options::default())?;
+    run_app(session.terminal(), refresh, listeners)
 }
 
 /// Kills all processes on a given port (CLI mode).

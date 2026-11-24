@@ -9,6 +9,7 @@ name = "portcul"
 path = "src/main.rs"
 
 [dependencies]
+altscreen = { workspace = true, features = ["ratatui"] }
 anyhow.workspace = true
 buildinfo.workspace = true
 clap.workspace = true
