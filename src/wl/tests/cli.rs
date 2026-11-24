@@ -6,7 +6,6 @@
 
 use std::io;
 use std::net::TcpListener;
-use std::process::Command;
 
 /// Port 1 (`tcpmux`) is below every platform's privileged threshold and holds
 /// no service on a developer machine. An unprivileged process is therefore
@@ -30,7 +29,7 @@ const REFUSED_UNUSED_PORT: u16 = 1;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn unheld_privileged_port_is_reported_free() {
-    let output = Command::new(env!("CARGO_BIN_EXE_wl"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_wl"))
         .arg(REFUSED_UNUSED_PORT.to_string())
         .output()
         .expect("should be able to run the freshly built wl binary");
@@ -62,7 +61,7 @@ fn no_privilege_note_when_a_process_is_named() {
         .expect("bound listener must have a local address")
         .port();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_wl"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_wl"))
         .arg(port.to_string())
         .output()
         .expect("should be able to run the freshly built wl binary");
@@ -98,7 +97,7 @@ fn privilege_note_when_no_process_is_named() {
         Err(_) => {}
     }
 
-    let output = Command::new(env!("CARGO_BIN_EXE_wl"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_wl"))
         .arg(REFUSED_UNUSED_PORT.to_string())
         .output()
         .expect("should be able to run the freshly built wl binary");

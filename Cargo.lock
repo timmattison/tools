@@ -10364,6 +10364,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "buildinfo",
+ "childenv",
  "clap",
  "libc",
  "listeners",

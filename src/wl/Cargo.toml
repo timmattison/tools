@@ -13,5 +13,8 @@ listeners.workspace = true
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
+[dev-dependencies]
+childenv.workspace = true
+
 [lints]
 workspace = true
