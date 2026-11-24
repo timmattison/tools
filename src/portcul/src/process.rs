@@ -238,6 +238,17 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_kill_of_an_exited_process_says_that_it_exited() {
+        // No process has this PID, so kill(2) gives ESRCH: the process
+        // exited after the list was read.
+        let error = kill_process(Pid::try_from(4_000_000_u32).unwrap()).unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("exited"), "ESRCH needs its own message: {text}");
+        assert!(text.contains("os error"), "the message must keep the errno: {text}");
+    }
+
     #[test]
     fn test_pid_display() {
         assert_eq!(Pid::try_from(1234_u32).unwrap().to_string(), "1234");
