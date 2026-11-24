@@ -5999,3 +5999,38 @@ After Enter, `chf` replaces itself with the shell that runs `crap`. The exit sta
 ```bash
 cargo install --git https://github.com/timmattison/tools chf
 ```
+
+## msgs (iMessage browser)
+
+Browse, search, and export your iMessage conversations. `msgs` is a desktop app for macOS, made with Tauri v2. It reads `~/Library/Messages/chat.db` read-only, and it never writes to it.
+
+- **Conversations.** The left panel lists the conversations, newest first. The arrow keys move the selection, and Enter opens the conversation.
+- **Messages.** The right panel shows the messages of the conversation as chat bubbles. Older messages load when you scroll up. An attachment shows as a line with its name and size.
+- **Search.** The search box finds the text of all messages. After each start, `msgs` makes a full-text index of the message text in the background, and the search box shows the progress. Click a result to open its conversation.
+- **Export.** Click **Export Selection**, click the first and the last message of a range, then click **Export JSON**. `msgs` writes `messages.json` and an `attachments/` folder to the location that you choose. Each attachment file gets the name `<attachment id>-<file name>`, and `messages.json` gives that path in `exported_file`.
+
+The search index is a copy of the text of each message, in `~/Library/Application Support/msgs/text-cache.db`. To remove the copy, stop `msgs` and delete that file. `msgs` makes it again at the next start.
+
+`msgs --version` prints the version and does not start the app.
+
+### Requirements
+
+- macOS, with Messages set up.
+- Full Disk Access for the app, or for the terminal that starts it: System Settings > Privacy & Security > Full Disk Access. If the access is missing, `msgs` shows these steps.
+- Node.js, pnpm, and the Tauri CLI (`cargo install tauri-cli`).
+
+### Run it in development
+
+```bash
+src/msgs/scripts/dev.ts
+```
+
+The script installs the frontend dependencies, gets a free port from `portplz`, and starts Vite and the app on that port.
+
+### Build it
+
+Run this command from the root of the repository:
+
+```bash
+cargo tauri build --no-bundle   # the binary is target/release/msgs
+```

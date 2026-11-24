@@ -1,0 +1,2 @@
+# The output of `pnpm build`, which `cargo tauri build` runs as its beforeBuildCommand.
+dist/
