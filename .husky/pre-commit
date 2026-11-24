@@ -120,21 +120,20 @@ fi
 # commit and names the fix.
 #
 # --diff-filter carries D, as the index gate above does: deleting a file of a
-# plugin can break it as surely as an edit can. The same git-env scrub keeps
-# the CLI out of this repository's index.
+# plugin can break it as surely as an edit can. Each claude command runs
+# through `without_git_environment`, the same as each cargo command above. It
+# removes the whole GIT_ prefix, so GIT_CONFIG_PARAMETERS and each name that
+# git adds later stay out of the CLI too, not only the names of a list.
 if git diff --cached --name-only --diff-filter=ACMRD | grep -qE '^(plugins/|\.claude-plugin/)'; then
     if ! command -v claude >/dev/null 2>&1; then
         echo "pre-commit: the claude CLI is not on PATH, and it runs the checks of plugins/. Install Claude Code, then commit again." >&2
         exit 1
     fi
     echo "pre-commit: running claude plugin validate on the marketplace"
-    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_PREFIX \
-        claude plugin validate .
+    without_git_environment claude plugin validate .
     for plugin in plugins/*/; do
         echo "pre-commit: running claude plugin validate and claude plugin test on ${plugin}"
-        env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_PREFIX \
-            claude plugin validate "${plugin}"
-        env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_PREFIX \
-            claude plugin test "${plugin}"
+        without_git_environment claude plugin validate "${plugin}"
+        without_git_environment claude plugin test "${plugin}"
     done
 fi
