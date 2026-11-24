@@ -280,6 +280,54 @@ describe("export run", () => {
     }
   });
 
+  /**
+   * Open chat 1 with three messages, select the first two, and start an export
+   * whose reply waits. Then select the last two while the export runs.
+   */
+  async function newSelectionDuringExport(): Promise<Deferred<typeof RESULT>> {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const reply = deferred<typeof RESULT>();
+    vi.mocked(invoke).mockImplementation((command: string) =>
+      command === "export_messages"
+        ? reply.promise
+        : Promise.resolve([message(12, 1, 11, "c"), message(11, 1, 10, "b"), message(10, 1, 9, "a")])
+    );
+    vi.mocked(save).mockResolvedValue("/tmp/msgs-test-export");
+    const { loadConversation } = await import("./messages");
+    await loadConversation(1, "One", "one", false);
+    byTestId("btn-export").click();
+    const els = messageEls();
+    els[0]?.click();
+    els[1]?.click();
+    byTestId("btn-export-confirm").click();
+    await settle();
+    expect(exportCalls(invoke)).toBe(1);
+
+    els[1]?.click();
+    els[2]?.click();
+    expect(byTestId("btn-export-confirm").hasAttribute("disabled")).toBe(true);
+    return reply;
+  }
+
+  it("enables the confirm button for a selection made while the export ran", async () => {
+    const reply = await newSelectionDuringExport();
+
+    reply.resolve(RESULT);
+    await settle();
+
+    expect(byTestId("btn-export-confirm").hasAttribute("disabled")).toBe(false);
+  });
+
+  it("enables the confirm button for a selection made while a failed export ran", async () => {
+    const reply = await newSelectionDuringExport();
+
+    reply.reject("Export failed: disk full");
+    await settle();
+
+    expect(byTestId("btn-export-confirm").hasAttribute("disabled")).toBe(false);
+  });
+
   it("disables the confirm button while the selection lacks an end", async () => {
     const els = await selectTwo();
     expect(byTestId("btn-export-confirm").hasAttribute("disabled")).toBe(false);
