@@ -9,9 +9,11 @@
 //! subdirectories". The tree this repository is developed in is such a tree, so
 //! under the workflow it mandates the tool found nothing and never said why.
 //!
-//! The rules under test: a package is in a worktree only when a `.git` file is
-//! found between it and the search path; a `.git` directory is a repository
-//! rather than a worktree, and a package under one is listed; and a run that
+//! The rules under test: a package is in a worktree only when a `.git` file
+//! whose git directory holds a `commondir` file is found between it and the
+//! search path; a `.git` directory is a repository rather than a worktree, and
+//! a package under one is listed; a submodule, whose `.git` is a file too, is a
+//! repository of its own, and its package is listed; and a run that
 //! found packages and then filtered every one of them out says so, and names
 //! the flag that would have kept them.
 //!
@@ -159,21 +161,7 @@ impl Fixture {
         self.git(&repo, &["init", "-q", "-b", &unique("main")]);
         std::fs::write(repo.join("README"), "seed\n").expect("the seed file is written");
         self.git(&repo, &["add", "README"]);
-        self.git(
-            &repo,
-            &[
-                "-c",
-                &format!("user.name={FIXTURE_USER_NAME}"),
-                "-c",
-                &format!("user.email={FIXTURE_USER_EMAIL}"),
-                "-c",
-                "commit.gpgsign=false",
-                "commit",
-                "-q",
-                "-m",
-                "seed",
-            ],
-        );
+        self.commit_all(&repo, "seed");
 
         self.assert_toplevel(&repo);
         assert!(
@@ -214,6 +202,63 @@ impl Fixture {
         );
 
         worktree
+    }
+
+    /// Stages every change in `repository` and commits it as `message`.
+    ///
+    /// Identity and signing are stated per invocation with `-c`, never written
+    /// into a config file.
+    fn commit_all(&self, repository: &Path, message: &str) {
+        self.git(repository, &["add", "-A"]);
+        self.git(
+            repository,
+            &[
+                "-c",
+                &format!("user.name={FIXTURE_USER_NAME}"),
+                "-c",
+                &format!("user.email={FIXTURE_USER_EMAIL}"),
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "-m",
+                message,
+            ],
+        );
+    }
+
+    /// Adds the repository at `source` to `superproject` as a submodule at
+    /// `relative`, and proves it is one.
+    ///
+    /// A submodule is the look-alike of a linked worktree: its `.git` is a
+    /// *file* naming a git directory, as a worktree's is. But the directory it
+    /// names is a repository of its own, kept under `.git/modules`, not a
+    /// borrowed one. The assertion keeps a test that meant to build a submodule
+    /// from quietly measuring a plain repository.
+    fn submodule_at(&self, superproject: &Path, source: &Path, relative: &str) -> PathBuf {
+        let submodule = superproject.join(relative);
+
+        self.git(
+            superproject,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "--quiet",
+                "add",
+                &source.to_string_lossy(),
+                relative,
+            ],
+        );
+
+        self.assert_toplevel(&submodule);
+        assert!(
+            submodule.join(".git").is_file(),
+            "a submodule keeps its git link as a file, as a linked worktree does: {}",
+            submodule.join(".git").display()
+        );
+
+        submodule
     }
 
     /// Writes a package manifest at `relative`, so the walk has one to find.
@@ -395,6 +440,32 @@ fn a_repository_below_the_search_path_is_not_a_worktree() {
         vec!["clone/gamma".to_string()],
         "a repository of its own below the search path holds packages nothing else holds, so \
          the worktree filter has no opinion about it:\n{}",
+        said(&output)
+    );
+}
+
+#[test]
+fn a_package_inside_a_submodule_below_the_search_path_is_listed() {
+    let fixture = Fixture::new();
+
+    // The repository the submodule is cloned from lies outside the search
+    // path, so the walk meets its package once: inside the submodule.
+    let source = fixture.repository_at("source");
+    fixture.package_at("source", "workit-fixture-submodule-sublib");
+    fixture.commit_all(&source, "add the package");
+
+    let superproject = fixture.repository_at("superproject");
+    fixture.package_at("superproject/app", "workit-fixture-submodule-app");
+    fixture.submodule_at(&superproject, &source, "vendor/lib");
+
+    let output = fixture.workit(&superproject, &[]);
+
+    assert_succeeded(&output);
+    assert_eq!(
+        members_of(&output),
+        vec!["app".to_string(), "vendor/lib".to_string()],
+        "a submodule keeps a `.git` file as a linked worktree does, but it is a repository \
+         of its own, not a second checkout of packages the superproject holds:\n{}",
         said(&output)
     );
 }
