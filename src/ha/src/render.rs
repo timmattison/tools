@@ -405,9 +405,9 @@ fn fit_job_text(
 /// part of a run row, right-aligned. The branch and title columns stay blank.
 /// Thus the ID, started, time, and right marker cells stand in the same columns
 /// as those of a run row, at every frame width. The right marker repeats the
-/// left marker. The cells at the right end come from `end`. A job row passes a
-/// blank job-sum cell, because the time cell of a job row shows the time of the
-/// job. Its cost cell shows the cost of the job.
+/// left marker. The cells at the right end come from `end`. A job row passes the
+/// time left of its job in the job-sum cell, or a blank cell when it has none
+/// (see [`job_line`]). Its cost cell shows the cost of the job.
 ///
 /// The line holds these spans, in this order:
 ///
