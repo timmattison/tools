@@ -1004,10 +1004,16 @@ impl History {
 
     /// Gives the bytes that the history holds. It counts the real sizes: the
     /// entries and the rows, the text of the identities and of the gaps, and
-    /// each container by its capacity.
+    /// each container of the identities by its capacity.
+    ///
+    /// The entries count by their number, not by the capacity of their deque.
+    /// The deque doubles its capacity as it grows, and it never gives the
+    /// capacity back. With a count by capacity, one doubling alone can pass
+    /// the budget, and from then on each add makes every entry but the newest
+    /// leave. The spare capacity of the deque is thus not in this count.
     #[must_use]
     pub fn bytes_used(&self) -> usize {
-        self.entries.capacity() * size_of::<Entry>()
+        self.entries.len() * size_of::<Entry>()
             + self.stored_rows * size_of::<CompactRow>()
             + self.gap_text_bytes
             + self.identities.bytes()
