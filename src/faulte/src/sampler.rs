@@ -471,6 +471,8 @@ mod tests {
         /// When set, `fault_stream` waits for a message here before it gives
         /// its stream.
         gate: Mutex<Option<Receiver<()>>>,
+        /// How long each read of the process table takes.
+        table_delay: Mutex<Duration>,
     }
 
     /// The machine that the sampler owns. It drops with the sampler thread.
@@ -544,6 +546,7 @@ mod tests {
 
         fn process_table(&self) -> Result<Vec<ProcessRow>, MachineError> {
             self.shared.table_reads.fetch_add(1, Ordering::SeqCst);
+            thread::sleep(*locked(&self.shared.table_delay));
             if let Some(error) = locked(&self.shared.table_errors).pop_front() {
                 return Err(error);
             }
@@ -645,6 +648,12 @@ mod tests {
         /// States the process table that a read gets after `events` events.
         fn table_after(self, events: usize, table: Vec<ProcessRow>) -> Self {
             locked(&self.shared.tables_at).insert(events, table);
+            self
+        }
+
+        /// Makes each read of the process table take `delay`.
+        fn slow_table(self, delay: Duration) -> Self {
+            *locked(&self.shared.table_delay) = delay;
             self
         }
 
@@ -768,6 +777,39 @@ mod tests {
             }
         );
         assert_eq!(first.observed.swap_window, Duration::from_secs(4));
+    }
+
+    /// The swap window of a frame is the time between its two reads of the
+    /// counters, on the monotonic clock. A slow read of the other sources
+    /// delays the next read of the counters, and the window then holds that
+    /// delay too, so the swap rate stays true. Each sample here states a
+    /// window of 4 s, and the reads are a short time apart.
+    #[test]
+    fn the_swap_window_is_the_time_between_the_two_reads_of_the_counters() {
+        let slow = Duration::from_millis(300);
+        let started = std::time::Instant::now();
+        let rig = Rig::new().slow_table(slow).stream(vec![
+            header(10),
+            header(12),
+            finished(14, 12, 7_000),
+            finished(16, 14, 8_000),
+        ]);
+        let sampler = rig.start();
+
+        let first = next_frame(&sampler);
+        let second = next_frame(&sampler);
+        let elapsed = started.elapsed();
+
+        assert!(
+            first.observed.swap_window <= elapsed,
+            "{:?} is longer than the test",
+            first.observed.swap_window
+        );
+        assert!(
+            (slow..=elapsed).contains(&second.observed.swap_window),
+            "{:?} holds the slow read and is not longer than the test",
+            second.observed.swap_window
+        );
     }
 
     /// `top` prints a sample at the end of its window, and `faulte` learns
