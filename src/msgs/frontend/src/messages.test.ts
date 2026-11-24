@@ -211,3 +211,81 @@ describe("older pages", () => {
     expect(separators).toHaveLength(2);
   });
 });
+
+describe("export run", () => {
+  const RESULT = { export_path: "/tmp/msgs-test-export", message_count: 2, attachment_count: 0 };
+
+  beforeEach(() => {
+    vi.resetModules();
+    document.body.innerHTML = MARKUP;
+  });
+
+  /** Open chat 1, enter selection mode, and select its two messages. */
+  async function selectTwo(): Promise<HTMLElement[]> {
+    const { invoke } = await import("@tauri-apps/api/core");
+    vi.mocked(invoke).mockImplementation((command: string) =>
+      Promise.resolve(
+        command === "export_messages"
+          ? RESULT
+          : [message(11, 1, 10, "b"), message(10, 1, 9, "a")]
+      )
+    );
+    const { loadConversation } = await import("./messages");
+    await loadConversation(1, "One", "one", false);
+    byTestId("btn-export").click();
+    const els = messageEls();
+    els[0]?.click();
+    els[1]?.click();
+    return els;
+  }
+
+  function exportCalls(invoke: typeof import("@tauri-apps/api/core").invoke): number {
+    return vi.mocked(invoke).mock.calls.filter(([command]) => command === "export_messages")
+      .length;
+  }
+
+  it("starts one export for two clicks on the confirm button", async () => {
+    await selectTwo();
+    const { invoke } = await import("@tauri-apps/api/core");
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const dialog = deferred<string | null>();
+    vi.mocked(save).mockReturnValue(dialog.promise);
+
+    byTestId("btn-export-confirm").click();
+    byTestId("btn-export-confirm").click();
+    dialog.resolve("/tmp/msgs-test-export");
+    await settle();
+
+    expect(exportCalls(invoke)).toBe(1);
+  });
+
+  it("keeps a new selection that starts within 3 s of a finished export", async () => {
+    vi.useFakeTimers();
+    try {
+      const els = await selectTwo();
+      const { save } = await import("@tauri-apps/plugin-dialog");
+      vi.mocked(save).mockResolvedValue("/tmp/msgs-test-export");
+
+      byTestId("btn-export-confirm").click();
+      await settle();
+      expect(byTestId("export-status").textContent).toContain("Exported 2 messages");
+
+      els[0]?.click();
+      vi.advanceTimersByTime(3000);
+
+      expect(byTestId("export-bar").classList.contains("hidden")).toBe(false);
+      expect(els[0]?.classList.contains("export-start")).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("disables the confirm button while the selection lacks an end", async () => {
+    const els = await selectTwo();
+    expect(byTestId("btn-export-confirm").hasAttribute("disabled")).toBe(false);
+
+    els[0]?.click();
+
+    expect(byTestId("btn-export-confirm").hasAttribute("disabled")).toBe(true);
+  });
+});
