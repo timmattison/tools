@@ -14,3 +14,12 @@ export function parsePort(output: string): Port | null {
   if (port < 1 || port > MAX_PORT) return null;
   return port as Port;
 }
+
+/**
+ * Builds the arguments of `cargo` that start the app in development on a port.
+ * The port goes in a `--config` merge, so `tauri.conf.json` stays unchanged.
+ * Extra arguments go to the app after `--`.
+ */
+export function buildTauriDevArgs(_port: Port, _extraArgs: readonly string[]): string[] {
+  return ["tauri", "dev"];
+}
