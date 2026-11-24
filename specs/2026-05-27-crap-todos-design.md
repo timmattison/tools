@@ -127,7 +127,12 @@ branch on the **subcommand** (`$1`):
   line, as `SHELL_CODE` does now. The subcommand cannot select the shape,
   because a cross-user `resume` and `--expand` also fork:
   - `__CRAP_HERE__` → `<session>\n<new-id>\n<link>`: the existing symlink +
-    `--fork-session` + watcher cleanup, unchanged internally.
+    `--fork-session` + watcher cleanup. One line changes. After the cleanup,
+    the function asks `command crap --status "$__crap_newid"` whether Claude
+    saved the fork, and prints `Resume this fork with: crap <new-id>` only
+    then. `--status` is not a flag after the rewrite, and the call sends
+    stderr to `/dev/null`, thus the hint would stop with no error. The
+    rewrite changes the call to `command crap status "$__crap_newid"`.
   - `__CRAP_FORK_AT__` → `<session>\n<new-id>\n<link>\n<dir>`: `cd` into
     `<dir>`, then the same fork flow.
   - Any other first line → the `<id>\n<dir>` parse, `cd`, resume.
@@ -300,6 +305,9 @@ hardcoded paths (parallel-safe per CLAUDE.md):
   shellcheck pass on the emitted `SHELL_CODE`.
 - Clap parse: `crap status <id> --user <name>` parses with the id and the
   user, as `cli_status_user_composes` holds for the old form.
+- Shell function, with a fake `crap` and a fake launcher: after a fork that
+  Claude saved, the function prints `Resume this fork with: crap <new-id>`
+  under the subcommand CLI, and the fake `crap` gets `status <new-id>`.
 - Display + JSON formatters: golden-string assertions for a representative
   `SessionTodos` (with and without `--verbose`). A display golden compares
   `testcolor::strip_ansi(&testcolor::with_forced_ansi(...))`, because the
