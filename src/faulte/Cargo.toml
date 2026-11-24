@@ -28,6 +28,7 @@ textfit.workspace = true
 thiserror.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
+altscreen = { workspace = true, features = ["ratatui"] }
 libc.workspace = true
 signal-hook.workspace = true
 

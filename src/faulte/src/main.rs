@@ -250,22 +250,10 @@ fn run(cli: Cli) -> ExitCode {
     }
 }
 
-/// Puts the terminal back in its normal state when it drops, also when the
-/// loop returns an error or panics.
-#[cfg(target_os = "macos")]
-struct TerminalGuard;
-
-#[cfg(target_os = "macos")]
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
-        ratatui::restore();
-    }
-}
-
 /// Shows the full-screen view until the person quits or a signal arrives.
 ///
 /// The check for a terminal comes first, so a run with pipes starts no `top`.
-/// The locals drop in the reverse order of their making: the guard restores
+/// The locals drop in the reverse order of their making: the session restores
 /// the terminal first, then the sampler stops `top`.
 #[cfg(target_os = "macos")]
 fn tui(interval: Span) -> ExitCode {
@@ -281,11 +269,17 @@ fn tui(interval: Span) -> ExitCode {
         }
     }
     let sampler = Sampler::spawn(Mac::new(), interval, Pid::new(std::process::id()));
-    // `ratatui::init` also installs a panic hook that restores the terminal.
-    let mut terminal = ratatui::init();
-    let guard = TerminalGuard;
+    // The session erases the screen, restores the terminal on every exit, and
+    // installs a panic hook that restores it too.
+    let mut session = match altscreen::RatatuiSession::enter(altscreen::Options::default()) {
+        Ok(session) => session,
+        Err(error) => {
+            eprintln!("{TOOL}: cannot enter the alternate screen: {error}");
+            return ExitCode::from(EXIT_ERROR);
+        }
+    };
     let result = view::run(
-        &mut terminal,
+        session.terminal(),
         &mut TerminalEvents,
         sampler.updates(),
         &signalled,
@@ -295,9 +289,9 @@ fn tui(interval: Span) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            // The guard has not dropped yet, so the screen is still the
+            // The session has not dropped yet, so the screen is still the
             // alternate screen. Restore it before the message.
-            drop(guard);
+            drop(session);
             eprintln!("{TOOL}: {error}");
             ExitCode::from(EXIT_ERROR)
         }

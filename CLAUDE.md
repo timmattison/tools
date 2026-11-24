@@ -692,6 +692,7 @@ nothing is reported, so a stale entry fails too. The list holds three entries:
 - `cctop` - the full-screen view, through the ratatui session
 - `chf` - the picker, through the ratatui session
 - `diskhog` - the full-screen view, through the ratatui session
+- `faulte` - the view of `faulte tui`, through the ratatui session
 - `gitrdun` - the progress view, through the ratatui session
 - `gsw` - the watch view
 - `ha` - the full-screen view, through the ratatui session
