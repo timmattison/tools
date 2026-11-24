@@ -165,8 +165,9 @@ impl AppState {
     }
 }
 
-/// Width of the address column.
-const ADDRESS_COLUMN_WIDTH: u16 = 40;
+/// Width of the address column: the tree prefix `└─ ` (3 columns) and the
+/// longest IPv6 address (39 columns).
+const ADDRESS_COLUMN_WIDTH: u16 = 42;
 
 /// Height of the help footer.
 const HELP_FOOTER_HEIGHT: u16 = 1;
