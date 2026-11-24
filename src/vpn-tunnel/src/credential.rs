@@ -451,6 +451,38 @@ mod tests {
     }
 
     #[test]
+    fn a_tunnel_whose_ps_row_shows_an_image_id_is_still_found() {
+        // After a pull moves the tag, `docker ps` shows the bare image ID in
+        // the image column. The container still holds its key.
+        let tunnels = find_running_tunnels_with(|args| {
+            Ok(match args {
+                ["ps", rest @ ..] if rest.contains(&"-q") => ok_output("3fbc63216742aaaa\n"),
+                ["ps", ..] => ok_output("vpn-gluetun\t3fbc63216742\n"),
+                ["inspect", "--format", format, targets @ ..] if format.contains("{{json") => {
+                    let mut out = String::new();
+                    for target in targets {
+                        if *target == "3fbc63216742aaaa" {
+                            out.push_str(
+                                "\"/vpn-gluetun\"\t[\"PATH=/usr/bin\",\"WIREGUARD_PRIVATE_KEY=key-1\"]\n",
+                            );
+                        }
+                    }
+                    ok_output(&out)
+                }
+                ["inspect", "--format", _, ..] => {
+                    ok_output("PATH=/usr/bin\nWIREGUARD_PRIVATE_KEY=key-1\n")
+                }
+                other => panic!("unexpected docker command: {other:?}"),
+            })
+        })
+        .expect("docker succeeded");
+
+        assert_eq!(tunnels.len(), 1, "{tunnels:?}");
+        assert_eq!(tunnels[0].container_name, "vpn-gluetun");
+        assert_eq!(tunnels[0].wireguard_key, "key-1");
+    }
+
+    #[test]
     fn a_failed_docker_ps_is_an_error_not_an_empty_list() {
         let err = find_running_tunnels_with(|_| {
             Ok(failed_output(
