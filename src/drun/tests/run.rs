@@ -478,6 +478,40 @@ fn an_empty_name_is_refused_before_any_host_is_asked() {
 }
 
 #[test]
+fn a_help_among_the_flags_of_run_prints_the_usage_and_asks_no_host() {
+    for args in [
+        &["run", "-d", "--rm", "--help", "alpine"][..],
+        &["run", "-it", "--help"],
+        &["run", "-i", "--help=false", "--help", "alpine"],
+    ] {
+        let fixture = two_hosts();
+        let run = fixture.run(args);
+        assert_eq!(run.code, Some(0), "{args:?}: {}", run.stderr);
+        assert!(run.stdout.contains("drun run"), "{args:?}: {}", run.stdout);
+        assert!(
+            !run.stdout.lines().any(|line| line.starts_with("box-")),
+            "{args:?} names a container: {}",
+            run.stdout
+        );
+        assert!(fixture.calls("box-a").is_empty(), "{args:?}");
+        assert!(fixture.calls("box-b").is_empty(), "{args:?}");
+    }
+}
+
+#[test]
+fn a_help_that_is_off_or_after_the_image_does_not_stop_the_run() {
+    for args in [
+        &["run", "-i", "--help", "--help=false", "alpine"][..],
+        &["run", "alpine", "--help"],
+    ] {
+        let fixture = two_hosts();
+        let run = fixture.run(args);
+        assert_eq!(run.code, Some(0), "{args:?}: {}", run.stderr);
+        assert_eq!(fixture.calls_of("box-b", "run").len(), 1, "{args:?}");
+    }
+}
+
+#[test]
 fn run_without_an_image_is_a_usage_error() {
     let fixture = two_hosts();
     let run = fixture.run(&["run", "-d"]);
