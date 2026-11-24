@@ -310,7 +310,8 @@ impl OpCache {
     /// Lists fields from a 1Password item that match a given prefix.
     ///
     /// Resolution order:
-    /// 1. If the item fields are in the cache, return cached values
+    /// 1. If the item fields are in the cache, return cached values. An entry
+    ///    that does not parse is a miss, as a cache file that does not parse is
     /// 2. Fetch from 1Password with `op item get --format json`, parse, cache, return
     ///
     /// A field matches if its label equals `field_prefix` exactly or starts with
@@ -327,12 +328,17 @@ impl OpCache {
         // Check cache first
         let mut cache = self.read_cache();
         if let Some(entry) = cache.get(&cache_key) {
-            let pairs: Vec<(String, String)> = serde_json::from_str(&entry.value)
-                .map_err(|e| Error::ItemJsonParse(format!("cached item fields corrupted: {e}")))?;
-            return Ok(pairs
-                .into_iter()
-                .map(|(label, value)| ItemField { label, value })
-                .collect());
+            match serde_json::from_str::<Vec<(String, String)>>(&entry.value) {
+                Ok(pairs) => {
+                    return Ok(pairs
+                        .into_iter()
+                        .map(|(label, value)| ItemField { label, value })
+                        .collect());
+                }
+                Err(e) => eprintln!(
+                    "warning: cached field list {cache_key} is corrupted ({e}), re-fetching it"
+                ),
+            }
         }
 
         // Fetch from 1Password
