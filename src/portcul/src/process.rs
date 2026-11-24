@@ -211,8 +211,10 @@ pub fn kill_process(pid: Pid) -> anyhow::Result<()> {
 /// Returns an error that counts the failed kills when one kill or more failed.
 pub fn kill_targets(
     targets: &[&ListeningProcess],
+    fresh: &[ListeningProcess],
     kill: impl Fn(Pid) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
+    let _ = fresh;
     let mut failed = 0_usize;
     for listener in targets {
         match kill(listener.pid) {
@@ -230,6 +232,26 @@ pub fn kill_targets(
         if total == 1 { "kill" } else { "kills" }
     );
     Ok(())
+}
+
+/// Asks for no more than the answer: on `y` it sends SIGTERM to the targets.
+///
+/// # Errors
+///
+/// Returns an error when a kill fails.
+pub fn kill_after_confirmation(
+    targets: &[&ListeningProcess],
+    answer: &str,
+    read_listeners: impl FnOnce() -> anyhow::Result<Vec<ListeningProcess>>,
+    kill: impl Fn(Pid) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    if !answer.trim().eq_ignore_ascii_case("y") {
+        eprintln!("Cancelled.");
+        return Ok(());
+    }
+    let _ = read_listeners;
+    let stale: Vec<ListeningProcess> = targets.iter().map(|t| (*t).clone()).collect();
+    kill_targets(targets, &stale, kill)
 }
 
 /// Turns the OS error of a failed kill(2) into the error of [`kill_process`].
@@ -348,7 +370,9 @@ mod tests {
     fn test_kill_targets_fails_when_every_kill_fails() {
         let a = kill_target(100);
         let b = kill_target(200);
-        let result = kill_targets(&[&a, &b], |_| Err(anyhow::anyhow!("EPERM")));
+        let result = kill_targets(&[&a, &b], &[a.clone(), b.clone()], |_| {
+            Err(anyhow::anyhow!("EPERM"))
+        });
         let error = result.expect_err("a failed kill must give an error");
         assert!(error.to_string().contains("2 of 2"), "{error}");
     }
@@ -359,7 +383,7 @@ mod tests {
         let b = kill_target(200);
         let bad = Pid::try_from(200_u32).unwrap();
         let tried = std::cell::RefCell::new(Vec::new());
-        let result = kill_targets(&[&a, &b], |pid| {
+        let result = kill_targets(&[&a, &b], &[a.clone(), b.clone()], |pid| {
             tried.borrow_mut().push(pid);
             if pid == bad {
                 Err(anyhow::anyhow!("EPERM"))
@@ -375,7 +399,125 @@ mod tests {
     #[test]
     fn test_kill_targets_succeeds_when_every_kill_succeeds() {
         let a = kill_target(100);
-        assert!(kill_targets(&[&a], |_| Ok(())).is_ok());
+        assert!(kill_targets(&[&a], &[a.clone()], |_| Ok(())).is_ok());
+    }
+
+    #[test]
+    fn test_kill_targets_sends_nothing_to_a_target_that_no_longer_listens() {
+        let a = kill_target(100);
+        let calls = std::cell::RefCell::new(Vec::new());
+        let result = kill_targets(&[&a], &[kill_target(200)], |pid| {
+            calls.borrow_mut().push(pid);
+            Ok(())
+        });
+        assert!(calls.borrow().is_empty(), "no signal may go out");
+        let error = result.expect_err("a target that left must give an error");
+        assert!(error.to_string().contains("1 of 1"), "{error}");
+    }
+
+    #[test]
+    fn test_kill_targets_sends_nothing_when_the_pid_has_a_new_owner() {
+        let a = kill_target(100);
+        let mut reused = kill_target(100);
+        reused.name = "other-program".to_string();
+        let calls = std::cell::RefCell::new(Vec::new());
+        let result = kill_targets(&[&a], &[reused], |pid| {
+            calls.borrow_mut().push(pid);
+            Ok(())
+        });
+        assert!(calls.borrow().is_empty(), "no signal may go out");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_kill_targets_sends_only_to_the_targets_that_still_listen() {
+        let a = kill_target(100);
+        let b = kill_target(200);
+        let calls = std::cell::RefCell::new(Vec::new());
+        let result = kill_targets(&[&a, &b], &[kill_target(200)], |pid| {
+            calls.borrow_mut().push(pid);
+            Ok(())
+        });
+        assert_eq!(*calls.borrow(), vec![Pid::try_from(200_u32).unwrap()]);
+        let error = result.expect_err("a target that left must give an error");
+        assert!(error.to_string().contains("1 of 2"), "{error}");
+    }
+
+    #[test]
+    fn test_kill_after_confirmation_reads_the_list_again_after_yes() {
+        let a = kill_target(100);
+        let calls = std::cell::RefCell::new(Vec::new());
+        let result = kill_after_confirmation(
+            &[&a],
+            "y\n",
+            || Ok(vec![]),
+            |pid| {
+                calls.borrow_mut().push(pid);
+                Ok(())
+            },
+        );
+        assert!(calls.borrow().is_empty(), "no signal may go out");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_kill_after_confirmation_sends_nothing_when_the_new_read_fails() {
+        let a = kill_target(100);
+        let calls = std::cell::RefCell::new(Vec::new());
+        let result = kill_after_confirmation(
+            &[&a],
+            "y\n",
+            || Err(anyhow::anyhow!("boom")),
+            |pid| {
+                calls.borrow_mut().push(pid);
+                Ok(())
+            },
+        );
+        assert!(calls.borrow().is_empty(), "no signal may go out");
+        let error = result.expect_err("a failed read must give an error");
+        assert!(
+            format!("{error:#}").contains("no signal was sent"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn test_kill_after_confirmation_kills_a_target_that_still_listens() {
+        let a = kill_target(100);
+        let calls = std::cell::RefCell::new(Vec::new());
+        let result = kill_after_confirmation(
+            &[&a],
+            "Y\n",
+            || Ok(vec![kill_target(100)]),
+            |pid| {
+                calls.borrow_mut().push(pid);
+                Ok(())
+            },
+        );
+        assert_eq!(*calls.borrow(), vec![Pid::try_from(100_u32).unwrap()]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_kill_after_confirmation_cancels_without_reading_the_list() {
+        let a = kill_target(100);
+        let read = std::cell::Cell::new(false);
+        let calls = std::cell::RefCell::new(Vec::new());
+        let result = kill_after_confirmation(
+            &[&a],
+            "n\n",
+            || {
+                read.set(true);
+                Ok(vec![])
+            },
+            |pid| {
+                calls.borrow_mut().push(pid);
+                Ok(())
+            },
+        );
+        assert!(!read.get(), "a cancel must not read the list");
+        assert!(calls.borrow().is_empty());
+        assert!(result.is_ok());
     }
 
     #[cfg(unix)]
