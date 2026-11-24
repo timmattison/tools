@@ -64,6 +64,12 @@ pub struct App {
     detail_open: bool,
     /// How many lines the detail text is scrolled.
     detail_scroll: u16,
+    /// How many lines the command area of the detail view had at the last
+    /// draw.
+    detail_page: u16,
+    /// The largest scroll of the detail text at the last draw: the wrapped
+    /// lines of the command minus `detail_page`, never below 0.
+    detail_last: u16,
     /// The position of the first row that the table draws.
     top_row: usize,
     /// How many table rows fit on one screen. It is never 0.
@@ -87,6 +93,8 @@ impl App {
             row: None,
             detail_open: false,
             detail_scroll: 0,
+            detail_page: 0,
+            detail_last: 0,
             top_row: 0,
             page_rows: DEFAULT_PAGE_ROWS,
             quit: false,
@@ -200,14 +208,17 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => self.move_row(Way::Forward, 1),
             KeyCode::PageUp => {
                 if self.detail_open {
-                    self.detail_scroll = self.detail_scroll.saturating_sub(self.page_lines());
+                    self.detail_scroll = self.detail_scroll.saturating_sub(self.detail_page.max(1));
                 } else {
                     self.move_row(Way::Back, self.page_rows);
                 }
             }
             KeyCode::PageDown => {
                 if self.detail_open {
-                    self.detail_scroll = self.detail_scroll.saturating_add(self.page_lines());
+                    self.detail_scroll = self
+                        .detail_scroll
+                        .saturating_add(self.detail_page.max(1))
+                        .min(self.detail_last);
                 } else {
                     self.move_row(Way::Forward, self.page_rows);
                 }
@@ -249,11 +260,6 @@ impl App {
             }
             Some(_) => self.top_row,
         };
-    }
-
-    /// Gives the lines of one screen of the detail text.
-    fn page_lines(&self) -> u16 {
-        u16::try_from(self.page_rows).unwrap_or(u16::MAX)
     }
 
     /// Selects the live view.
@@ -351,6 +357,16 @@ impl App {
     pub fn set_page_rows(&mut self, rows: usize) {
         self.page_rows = rows.max(1);
         self.keep_selection_on_screen();
+    }
+
+    /// Tells the app how the detail view drew its command: `page` lines fit in
+    /// the command area, and the wrapped command has `lines` lines. The page
+    /// keys step by `page` and stop at the end of the text. The scroll is
+    /// clamped now, so a resize never leaves the text scrolled past its end.
+    pub fn set_detail_room(&mut self, page: u16, lines: u16) {
+        self.detail_page = page;
+        self.detail_last = lines.saturating_sub(page);
+        self.detail_scroll = self.detail_scroll.min(self.detail_last);
     }
 
     /// Gives the position of the first row that the table draws.
@@ -712,7 +728,8 @@ mod tests {
     }
 
     /// `PageUp` and `PageDown` move the selected row by one screen. With the
-    /// detail view open they scroll its text by one screen instead.
+    /// detail view open they scroll its text by the lines of the command area
+    /// instead.
     #[test]
     fn page_keys_move_a_screen_or_scroll_the_detail() {
         let mut app = ten_rows();
@@ -728,6 +745,7 @@ mod tests {
         assert_eq!(app.selected_row(), Some(5));
 
         app.on_key(press(KeyCode::Enter));
+        app.set_detail_room(4, 20);
         app.on_key(press(KeyCode::PageDown));
         app.on_key(press(KeyCode::PageDown));
         assert_eq!((app.detail_scroll(), app.selected_row()), (8, Some(5)));
@@ -736,6 +754,10 @@ mod tests {
         app.on_key(press(KeyCode::PageUp));
         app.on_key(press(KeyCode::PageUp));
         assert_eq!(app.detail_scroll(), 0);
+        for _ in 0..6 {
+            app.on_key(press(KeyCode::PageDown));
+        }
+        assert_eq!(app.detail_scroll(), 16, "the scroll stops at the last line");
     }
 
     /// `w` cycles the span, and the cycle ends at one frame again.

@@ -329,7 +329,7 @@ where
 fn paint_detail<Tz: TimeZone>(
     frame: &mut Frame<'_>,
     area: Rect,
-    app: &App,
+    app: &mut App,
     context: &ViewContext<'_, Tz>,
 ) where
     Tz::Offset: Display,
@@ -365,13 +365,15 @@ fn paint_detail<Tz: TimeZone>(
     let facts = u16::try_from(lines.len()).unwrap_or(u16::MAX);
     let [facts_area, command_area] =
         Layout::vertical([Constraint::Length(facts), Constraint::Min(0)]).areas(area);
+    let command = series.command;
     frame.render_widget(Paragraph::new(lines), facts_area);
-    frame.render_widget(
-        Paragraph::new(series.command)
-            .wrap(Wrap { trim: false })
-            .scroll((app.detail_scroll(), 0)),
-        command_area,
+    let paragraph = Paragraph::new(command).wrap(Wrap { trim: false });
+    let wrapped = paragraph.line_count(command_area.width);
+    app.set_detail_room(
+        command_area.height,
+        u16::try_from(wrapped).unwrap_or(u16::MAX),
     );
+    frame.render_widget(paragraph.scroll((app.detail_scroll(), 0)), command_area);
 }
 
 /// The label of the session line of the detail view.
@@ -1241,18 +1243,20 @@ mod tests {
         app.on_key(press(KeyCode::Down));
         app.on_key(press(KeyCode::Enter));
 
-        let lines = screen(&paint(&mut app, 40, 40, 3));
+        let lines = screen(&paint(&mut app, 40, 14, 3));
         let start = line_starting(&lines, "日本語-0 ");
-        let shown = lines[start..lines.len() - 2].join(" ");
-        for word in &words[..40] {
-            assert!(
-                shown.contains(word.as_str()),
-                "{word} is missing: {lines:#?}"
-            );
+        let shown: Vec<&str> = lines[start..lines.len() - 2]
+            .iter()
+            .flat_map(|line| line.split(' '))
+            .filter(|word| !word.is_empty())
+            .collect();
+        assert!(shown.len() >= 2 && shown.len() < words.len(), "{lines:#?}");
+        for (seen, word) in shown.iter().zip(&words) {
+            assert_eq!(seen, word, "a word is missing or out of order: {lines:#?}");
         }
 
         app.on_key(press(KeyCode::PageDown));
-        let scrolled = screen(&paint(&mut app, 40, 40, 3));
+        let scrolled = screen(&paint(&mut app, 40, 14, 3));
         assert!(
             !scrolled[start].starts_with("日本語-0 "),
             "the page key scrolls the command: {scrolled:#?}"
@@ -1282,11 +1286,9 @@ mod tests {
     #[test]
     fn page_down_does_not_scroll_a_short_command_off_the_screen() {
         let mut app = detail_of("fits-on-one-screen --flag".to_owned());
-        assert!(
-            screen(&paint(&mut app, 80, 24, 3))
-                .iter()
-                .any(|line| line.contains("fits-on-one-screen"))
-        );
+        assert!(screen(&paint(&mut app, 80, 24, 3))
+            .iter()
+            .any(|line| line.contains("fits-on-one-screen")));
 
         for _ in 0..5 {
             app.on_key(press(KeyCode::PageDown));
@@ -1311,7 +1313,11 @@ mod tests {
             lines
                 .iter()
                 .filter(|line| line.starts_with("zq"))
-                .map(|line| line[2..4].parse().expect("two digits follow zq"))
+                .map(|line| {
+                    line.get(2..4)
+                        .and_then(|digits| digits.parse().ok())
+                        .expect("two digits follow zq")
+                })
                 .collect()
         };
 
@@ -1321,7 +1327,11 @@ mod tests {
 
         app.on_key(press(KeyCode::PageDown));
         let second = command_lines(&screen(&paint(&mut app, 40, 20, 3)));
-        assert_eq!(second.first(), Some(&(last + 1)), "{first:?} then {second:?}");
+        assert_eq!(
+            second.first(),
+            Some(&(last + 1)),
+            "{first:?} then {second:?}"
+        );
     }
 
     /// A process states its own arguments, so a command line can hold a tab or

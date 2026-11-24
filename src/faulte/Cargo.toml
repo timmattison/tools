@@ -22,7 +22,7 @@ clap.workspace = true
 comfy-table.workspace = true
 crossterm.workspace = true
 occ.workspace = true
-ratatui.workspace = true
+ratatui = { workspace = true, features = ["unstable-rendered-line-info"] }
 termsize.workspace = true
 textfit.workspace = true
 thiserror.workspace = true
