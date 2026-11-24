@@ -6,6 +6,13 @@ const host = process.env.TAURI_DEV_HOST;
 // makes Vite fail instead of moving to another port.
 export default defineConfig({
   clearScreen: false,
+  build: {
+    // The repository guards walk the tree and skip only target and
+    // node_modules, thus the minified bundle goes under target.
+    // src/msgs/tauri.conf.json (frontendDist) names the same directory.
+    outDir: "../../../target/msgs-frontend",
+    emptyOutDir: true,
+  },
   server: {
     port: 1420,
     strictPort: true,
