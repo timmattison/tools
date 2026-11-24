@@ -450,12 +450,12 @@ fn read_cpu_load() -> Result<libc::host_cpu_load_info, MachineError> {
 /// the newest number. One short process in each sample costs nothing beside
 /// the hundreds of processes that this rate measures.
 fn newest_pid() -> Result<Pid, MachineError> {
-    let mut child = childenv::command(NEWEST_PID_PROGRAM).spawn().map_err(|error| {
-        MachineError::CommandDidNotStart {
+    let mut child = childenv::command(NEWEST_PID_PROGRAM)
+        .spawn()
+        .map_err(|error| MachineError::CommandDidNotStart {
             program: NEWEST_PID_PROGRAM.to_owned(),
             reason: error.to_string(),
-        }
-    })?;
+        })?;
     let pid = child.id();
     child
         .wait()
