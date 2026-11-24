@@ -410,6 +410,35 @@ mod tests {
     }
 
     #[test]
+    fn test_two_saves_of_one_recording_give_the_same_bytes() {
+        let mut recording = Recording::test_fixture();
+        recording.env = (0..32)
+            .map(|i| (format!("VAR_{i:02}"), i.to_string()))
+            .collect();
+        let dir = tempfile::tempdir().unwrap();
+        let (first, second) = (
+            dir.path().join("first.json"),
+            dir.path().join("second.json"),
+        );
+        recording.save(&first, false).unwrap();
+        // A load builds a new map, so a map with a random order saves in a new order.
+        Recording::load(&first)
+            .unwrap()
+            .save(&second, false)
+            .unwrap();
+
+        let text = std::fs::read_to_string(&first).unwrap();
+        assert_eq!(text, std::fs::read_to_string(&second).unwrap());
+        let positions: Vec<usize> = (0..32)
+            .map(|i| text.find(&format!("\"VAR_{i:02}\"")).unwrap())
+            .collect();
+        assert!(
+            positions.windows(2).all(|w| w[0] < w[1]),
+            "env is not in key order: {text}"
+        );
+    }
+
+    #[test]
     fn test_utf8_safety_in_recording_data() {
         let mut recording = Recording::test_fixture();
         recording.title = "日本語テスト".to_string();
