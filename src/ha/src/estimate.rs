@@ -63,14 +63,13 @@ struct Term {
     waits: bool,
 }
 
-/// What one job of an active run gives to the estimate of the run.
+/// What one job of an active run gives to the estimate of the run, when the
+/// job has the estimates that it needs.
 enum Counted {
     /// The job gives a term.
     Term(Term),
     /// The job gives no term, and it needs no estimate.
     NoTerm,
-    /// The job needs an estimate and has none, thus the run has none.
-    NoEstimate,
 }
 
 /// The estimates of one frame, built one time from the shown runs.
@@ -236,10 +235,8 @@ impl<'a> Estimates<'a> {
         }
         let mut terms = Vec::new();
         for job in jobs {
-            match self.term(run, job, now) {
-                Counted::Term(term) => terms.push(term),
-                Counted::NoTerm => {}
-                Counted::NoEstimate => return None,
+            if let Counted::Term(term) = self.term(run, job, now)? {
+                terms.push(term);
             }
         }
         let latest = terms.iter().map(|term| term.end).max()?;
@@ -269,21 +266,15 @@ impl<'a> Estimates<'a> {
         }
     }
 
-    /// The term of one job of an active run.
-    ///
-    fn term(&self, run: &Run, job: &Job, now: DateTime<Utc>) -> Counted {
-        self.try_term(run, job, now).unwrap_or(Counted::NoEstimate)
-    }
-
-    /// The term of one job, or `None` when the job needs an estimate and has
-    /// none.
-    fn try_term(&self, run: &Run, job: &Job, now: DateTime<Utc>) -> Option<Counted> {
+    /// The term of one job of an active run, or `None` when the job needs an
+    /// estimate and has none. Then the run has no estimate.
+    fn term(&self, run: &Run, job: &Job, now: DateTime<Utc>) -> Option<Counted> {
         let name = (&run.repo, run.workflow.as_str(), job.name.as_str());
-        let tail = |this: &Self| this.tails.get(&name).map(|time| signed(time.as_secs()));
+        let tail = self.tails.get(&name).map(|time| signed(time.as_secs()));
         let term = match job.state {
             RunState::Passed => {
                 let completed = job.completed_at?;
-                let end = seconds_from(now, completed).saturating_add(tail(self)?);
+                let end = seconds_from(now, completed).saturating_add(tail?);
                 Term {
                     end,
                     unfloored: end,
@@ -291,7 +282,7 @@ impl<'a> Estimates<'a> {
                 }
             }
             RunState::Running => {
-                let tail = tail(self)?;
+                let tail = tail?;
                 match self.remaining(run, job, now)? {
                     Remaining::Left(time) | Remaining::AtLeast(time) => {
                         let end = signed(time.as_secs()).saturating_add(tail);
@@ -310,7 +301,7 @@ impl<'a> Estimates<'a> {
             }
             RunState::Queued => {
                 let duration = signed(self.any_runner.get(&name)?.as_secs());
-                let end = duration.saturating_add(tail(self)?);
+                let end = duration.saturating_add(tail?);
                 Term {
                     end,
                     unfloored: end,
