@@ -397,6 +397,31 @@ printf '%s' '{{"title":"Item","fields":[{{"label":"credential","value":"{value}"
 }
 
 #[test]
+fn list_fields_gives_an_item_title_that_starts_with_a_dash_after_the_end_of_the_flags() {
+    for title in ["-old key", "--help"] {
+        let fixture = Fixture::new();
+        // op reads an argument that starts with '-' as a flag until `--`.
+        fixture.install_fake_op(&format!(
+            r#"[ "$#" = 8 ] && [ "$1 $2 $3 $4 $5 $6 $7" = "item get --vault Private --format json --" ] && [ "$8" = '{title}' ] || exit 9
+printf '%s' '{{"title":"x","fields":[{{"label":"credential","value":"v"}}]}}'"#
+        ));
+
+        let output = fixture
+            .command()
+            .args(["list-fields", &format!("op://Private/{title}")])
+            .output()
+            .expect("run op-cache");
+
+        assert!(
+            output.status.success(),
+            "op got the title {title:?} as a flag: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "  credential\n");
+    }
+}
+
+#[test]
 fn list_fields_fetches_again_when_the_cached_field_list_cannot_be_read() {
     let fixture = Fixture::new();
     let value = unique_token("refetched-field");
