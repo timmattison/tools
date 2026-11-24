@@ -823,6 +823,18 @@ mod tests {
     }
 
     #[test]
+    fn a_directory_without_a_label_keeps_the_key_its_own_tunnel_holds() {
+        let available = vec![field("credential", "key-1")];
+        let running = vec![tunnel("vpn-gluetun", "key-1")];
+        let result = select_credential(&available, &running, None, "vpn-gluetun")
+            .expect("the own tunnel of the directory holds the only key");
+        assert_eq!(result.field_label, "credential");
+        assert_eq!(result.key, "key-1");
+        assert_eq!(result.total, 1);
+        assert_eq!(result.in_use, 1);
+    }
+
+    #[test]
     fn the_named_label_matches_a_whole_label_and_not_a_prefix_of_one() {
         let available = vec![
             field("credential-20", "key-20"),
