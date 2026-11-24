@@ -28,7 +28,7 @@ use std::thread;
 use buildinfo::version_string;
 
 use crate::config::{Config, Environment, CONTEXTS_VARIABLE};
-use crate::docker_args::{BuildxArgs, RunArgs};
+use crate::docker_args::{BuildxArgs, Request, RmArgs, RunArgs};
 use crate::fleet::{Inventory, Scope, MANAGED_LABEL, STATE_FORMAT};
 use crate::host::ContextName;
 use crate::survey::{Survey, PROBE_IMAGE};
@@ -109,34 +109,34 @@ fn dispatch(
     let name = command.to_str().unwrap_or_default();
     let wants_help = args.first().is_some_and(|first| first == "--help");
     if matches!(name, "-h" | "--help" | "help") || (wants_help && COMMANDS.contains(&name)) {
-        print!("{}", usage(environment));
-        return Ok(ExitCode::SUCCESS);
+        return Ok(print_usage(environment));
     }
     match name {
         "-V" | "--version" => {
             println!("drun {}", version_string!());
             Ok(ExitCode::SUCCESS)
         }
-        "run" => run(environment, args),
+        "run" => unless_help(environment, docker_args::parse_run(args), |parsed| {
+            run(environment, args, &parsed)
+        }),
         "ps" => {
             no_arguments("ps", args)?;
             ps(environment)
         }
         "status" => status(environment, args),
         "wait" => wait(environment, args),
-        "logs" => {
-            let container = docker_args::parse_logs(args).map_err(usage_error)?;
+        "logs" => unless_help(environment, docker_args::parse_logs(args), |container| {
             hand_to_holder(environment, "logs", &container, args)
-        }
-        "exec" => {
-            let container = docker_args::parse_exec(args).map_err(usage_error)?;
+        }),
+        "exec" => unless_help(environment, docker_args::parse_exec(args), |container| {
             hand_to_holder(environment, "exec", &container, args)
-        }
-        "cp" => {
-            let container = docker_args::parse_cp(args).map_err(usage_error)?;
+        }),
+        "cp" => unless_help(environment, docker_args::parse_cp(args), |container| {
             hand_to_holder(environment, "cp", &container, args)
-        }
-        "rm" => rm(environment, args),
+        }),
+        "rm" => unless_help(environment, docker_args::parse_rm(args), |parsed| {
+            rm(environment, &parsed)
+        }),
         "check-flags" => {
             no_arguments("check-flags", args)?;
             check_flags()
@@ -158,13 +158,34 @@ fn dispatch(
     }
 }
 
-/// `drun run`: runs a container on the least busy host.
-fn run(environment: &Environment, args: &[OsString]) -> Result<ExitCode, Failure> {
-    let parsed = docker_args::parse_run(args).map_err(usage_error)?;
-    if parsed.help {
-        print!("{}", usage(environment));
-        return Ok(ExitCode::SUCCESS);
+/// Prints the usage of `drun` on standard output. Gives the exit status of a
+/// help.
+fn print_usage(environment: &Environment) -> ExitCode {
+    print!("{}", usage(environment));
+    ExitCode::SUCCESS
+}
+
+/// Prints the usage for a [`Request::Help`], and so asks no host. Else runs
+/// `command` on what the arguments name. A usage error of the arguments is
+/// the failure.
+fn unless_help<T>(
+    environment: &Environment,
+    request: Result<Request<T>, docker_args::ArgsError>,
+    command: impl FnOnce(T) -> Result<ExitCode, Failure>,
+) -> Result<ExitCode, Failure> {
+    match request.map_err(usage_error)? {
+        Request::Help => Ok(print_usage(environment)),
+        Request::Command(parsed) => command(parsed),
     }
+}
+
+/// `drun run`: runs a container on the least busy host. `parsed` is what the
+/// arguments `args` say.
+fn run(
+    environment: &Environment,
+    args: &[OsString],
+    parsed: &RunArgs,
+) -> Result<ExitCode, Failure> {
     let config = load(environment)?;
     let (survey, inventory) = thread::scope(|scope| {
         let survey = scope.spawn(|| survey::survey(&config));
@@ -189,7 +210,7 @@ fn run(environment: &Environment, args: &[OsString]) -> Result<ExitCode, Failure
             Failure::NotStarted("cannot find a container name that no host uses".to_owned())
         })?,
     };
-    warn_about(&parsed, host);
+    warn_about(parsed, host);
 
     let mut command = host.docker();
     command.arg("run").arg("--label").arg(MANAGED_LABEL);
@@ -355,8 +376,7 @@ fn hand_to_holder(
 /// It finds every container before it removes one, so it removes nothing when
 /// it cannot find one of them. It tries every host, and exits with the first
 /// exit status that is not zero.
-fn rm(environment: &Environment, args: &[OsString]) -> Result<ExitCode, Failure> {
-    let parsed = docker_args::parse_rm(args).map_err(usage_error)?;
+fn rm(environment: &Environment, parsed: &RmArgs) -> Result<ExitCode, Failure> {
     let config = load(environment)?;
     let inventory = fleet::inventory(&config, Scope::All);
     let mut plan: Vec<(ContextName, Vec<&str>)> = Vec::new();

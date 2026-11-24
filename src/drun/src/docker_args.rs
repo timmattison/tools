@@ -372,9 +372,17 @@ pub struct RunArgs {
     pub name: Option<String>,
     /// The source path of each bind mount, from `-v` and `--mount`.
     pub bind_sources: Vec<String>,
-    /// True when the last `--help` before the image is on. Docker then prints
-    /// the help and runs nothing, so each other field keeps its default.
-    pub help: bool,
+}
+
+/// What the arguments of a docker command ask for.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Request<T> {
+    /// The last `--help` among the flags is on. Docker then prints its
+    /// help and does nothing else, so `drun` prints its own usage and asks
+    /// no host.
+    Help,
+    /// The command itself, with the facts that `drun` needs to run it.
+    Command(T),
 }
 
 /// The arguments of `docker rm`, divided into the flags and the containers.
@@ -460,43 +468,46 @@ fn asks_for_help(scan: &Scan) -> bool {
         .is_some_and(|found| matches!(found.setting, Setting::Switch(true)))
 }
 
-/// The container that the arguments of `docker logs` name.
+/// The container that the arguments of `docker logs` name, or
+/// [`Request::Help`] when they ask for the help.
 ///
 /// # Errors
 ///
 /// Returns an [`ArgsError`] for a flag that `drun` does not know, a flag
 /// without its value, or arguments that do not name exactly one container.
-pub fn parse_logs(args: &[OsString]) -> Result<String, ArgsError> {
-    let scan = LOGS.scan(args)?;
-    match scan.positionals.as_slice() {
+/// Arguments that ask for the help get no error for the shape.
+pub fn parse_logs(args: &[OsString]) -> Result<Request<String>, ArgsError> {
+    LOGS.request(args, |scan| match scan.positionals.as_slice() {
         [container] => Ok(lossy(&args[*container])),
         _ => Err(ArgsError::Shape {
             command: LOGS.name,
             what: "one container",
         }),
-    }
+    })
 }
 
-/// The container that the arguments of `docker exec` name. The arguments
-/// after the container are the command to run in it.
+/// The container that the arguments of `docker exec` name, or
+/// [`Request::Help`] when they ask for the help. The arguments after the
+/// container are the command to run in it.
 ///
 /// # Errors
 ///
 /// Returns an [`ArgsError`] for a flag that `drun` does not know, a flag
 /// without its value, or arguments without a container and a command.
-pub fn parse_exec(args: &[OsString]) -> Result<String, ArgsError> {
-    let scan = EXEC.scan(args)?;
-    match scan.positionals.as_slice() {
+/// Arguments that ask for the help get no error for the shape.
+pub fn parse_exec(args: &[OsString]) -> Result<Request<String>, ArgsError> {
+    EXEC.request(args, |scan| match scan.positionals.as_slice() {
         [container, _command, ..] => Ok(lossy(&args[*container])),
         _ => Err(ArgsError::Shape {
             command: EXEC.name,
             what: "a container and a command",
         }),
-    }
+    })
 }
 
 /// The container that the arguments of `docker cp` name, on the side
-/// written as `CONTAINER:PATH`.
+/// written as `CONTAINER:PATH`, or [`Request::Help`] when they ask for the
+/// help.
 ///
 /// The rule is the rule of the docker CLI: an argument that starts with `/`
 /// or `.` is a path on this computer, and so is an argument without `:`.
@@ -505,23 +516,25 @@ pub fn parse_exec(args: &[OsString]) -> Result<String, ArgsError> {
 ///
 /// Returns an [`ArgsError`] for a flag that `drun` does not know, or for
 /// arguments that are not one container side and one side on this computer.
-pub fn parse_cp(args: &[OsString]) -> Result<String, ArgsError> {
-    let scan = CP.scan(args)?;
-    let shape = ArgsError::Shape {
-        command: CP.name,
-        what: "CONTAINER:PATH on one side and a path on this computer on the other",
-    };
-    let [first, second] = scan.positionals.as_slice() else {
-        return Err(shape);
-    };
-    let containers: Vec<String> = [first, second]
-        .into_iter()
-        .filter_map(|index| cp_container(&lossy(&args[*index])))
-        .collect();
-    match containers.as_slice() {
-        [container] => Ok(container.clone()),
-        _ => Err(shape),
-    }
+/// Arguments that ask for the help get no error for the shape.
+pub fn parse_cp(args: &[OsString]) -> Result<Request<String>, ArgsError> {
+    CP.request(args, |scan| {
+        let shape = ArgsError::Shape {
+            command: CP.name,
+            what: "CONTAINER:PATH on one side and a path on this computer on the other",
+        };
+        let [first, second] = scan.positionals.as_slice() else {
+            return Err(shape);
+        };
+        let containers: Vec<String> = [first, second]
+            .into_iter()
+            .filter_map(|index| cp_container(&lossy(&args[*index])))
+            .collect();
+        match containers.as_slice() {
+            [container] => Ok(container.clone()),
+            _ => Err(shape),
+        }
+    })
 }
 
 /// The container of the `docker cp` argument `arg`, by the rule of the docker
@@ -534,34 +547,37 @@ fn cp_container(arg: &str) -> Option<String> {
     (!container.is_empty()).then(|| container.to_owned())
 }
 
-/// Divides the arguments of `docker rm` into flags and containers.
+/// Divides the arguments of `docker rm` into flags and containers, or gives
+/// [`Request::Help`] when they ask for the help.
 ///
 /// # Errors
 ///
 /// Returns an [`ArgsError`] for a flag that `drun` does not know, or for
-/// arguments without a container.
-pub fn parse_rm(args: &[OsString]) -> Result<RmArgs, ArgsError> {
-    let scan = RM.scan(args)?;
-    if scan.positionals.is_empty() {
-        return Err(ArgsError::Shape {
-            command: RM.name,
-            what: "at least one container",
-        });
-    }
-    // Every flag of docker rm is a switch, so each argument that is not a
-    // container is a flag.
-    let flags = args
-        .iter()
-        .enumerate()
-        .filter(|(index, _)| !scan.positionals.contains(index))
-        .map(|(_, arg)| arg.clone())
-        .collect();
-    let containers = scan
-        .positionals
-        .iter()
-        .map(|index| lossy(&args[*index]))
-        .collect();
-    Ok(RmArgs { flags, containers })
+/// arguments without a container. Arguments that ask for the help get no
+/// error for the shape.
+pub fn parse_rm(args: &[OsString]) -> Result<Request<RmArgs>, ArgsError> {
+    RM.request(args, |scan| {
+        if scan.positionals.is_empty() {
+            return Err(ArgsError::Shape {
+                command: RM.name,
+                what: "at least one container",
+            });
+        }
+        // Every flag of docker rm is a switch, so each argument that is not a
+        // container is a flag.
+        let flags = args
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !scan.positionals.contains(index))
+            .map(|(_, arg)| arg.clone())
+            .collect();
+        let containers = scan
+            .positionals
+            .iter()
+            .map(|index| lossy(&args[*index]))
+            .collect();
+        Ok(RmArgs { flags, containers })
+    })
 }
 
 /// The one container name of a `drun` command that takes a name and no
@@ -587,7 +603,8 @@ fn lossy(arg: &OsString) -> String {
     arg.to_string_lossy().into_owned()
 }
 
-/// Reads the arguments that follow `docker run`.
+/// Reads the arguments that follow `docker run`, or gives
+/// [`Request::Help`] when they ask for the help.
 ///
 /// # Errors
 ///
@@ -596,44 +613,39 @@ fn lossy(arg: &OsString) -> String {
 /// arguments without an image, or a last `--name` that is empty once its
 /// leading `/` is gone. Arguments that ask for the help get no error for
 /// the image or the name, because docker then prints only the help.
-pub fn parse_run(args: &[OsString]) -> Result<RunArgs, ArgsError> {
-    let scan = RUN.scan(args)?;
-    if asks_for_help(&scan) {
-        return Ok(RunArgs {
-            help: true,
-            ..RunArgs::default()
-        });
-    }
-    if scan.positionals.is_empty() {
-        return Err(ArgsError::Shape {
-            command: RUN.name,
-            what: "an image",
-        });
-    }
-    let mut parsed = RunArgs::default();
-    for found in scan.flags {
-        match (found.long, found.setting) {
-            ("detach", Setting::Switch(on)) => parsed.detach = on,
-            ("rm", Setting::Switch(on)) => parsed.remove = on,
-            ("name", Setting::Value(name)) => parsed.name = Some(name),
-            ("volume", Setting::Value(spec)) => {
-                parsed.bind_sources.extend(volume_bind_source(&spec));
-            }
-            ("mount", Setting::Value(spec)) => {
-                parsed.bind_sources.extend(mount_bind_source(&spec));
-            }
-            _ => {}
+pub fn parse_run(args: &[OsString]) -> Result<Request<RunArgs>, ArgsError> {
+    RUN.request(args, |scan| {
+        if scan.positionals.is_empty() {
+            return Err(ArgsError::Shape {
+                command: RUN.name,
+                what: "an image",
+            });
         }
-    }
-    // Docker takes the last `--name`, so only the last one counts.
-    if parsed
-        .name
-        .as_deref()
-        .is_some_and(|name| crate::fleet::bare_name(name).is_empty())
-    {
-        return Err(ArgsError::EmptyName { command: RUN.name });
-    }
-    Ok(parsed)
+        let mut parsed = RunArgs::default();
+        for found in scan.flags {
+            match (found.long, found.setting) {
+                ("detach", Setting::Switch(on)) => parsed.detach = on,
+                ("rm", Setting::Switch(on)) => parsed.remove = on,
+                ("name", Setting::Value(name)) => parsed.name = Some(name),
+                ("volume", Setting::Value(spec)) => {
+                    parsed.bind_sources.extend(volume_bind_source(&spec));
+                }
+                ("mount", Setting::Value(spec)) => {
+                    parsed.bind_sources.extend(mount_bind_source(&spec));
+                }
+                _ => {}
+            }
+        }
+        // Docker takes the last `--name`, so only the last one counts.
+        if parsed
+            .name
+            .as_deref()
+            .is_some_and(|name| crate::fleet::bare_name(name).is_empty())
+        {
+            return Err(ArgsError::EmptyName { command: RUN.name });
+        }
+        Ok(parsed)
+    })
 }
 
 /// The source of the `-v` value `spec` when it is a bind mount.
@@ -705,6 +717,24 @@ impl CommandSpec {
     /// The flag with the long form `name`.
     fn by_long(&self, name: &str) -> Option<FlagSpec> {
         self.flags.iter().copied().find(|flag| flag.long == name)
+    }
+
+    /// Scans `args`. Gives [`Request::Help`] when the flags turn on the help,
+    /// and else what `read` makes of the scan.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`ArgsError`] of the scan, or the one of `read`.
+    fn request<T>(
+        &self,
+        args: &[OsString],
+        read: impl FnOnce(Scan) -> Result<T, ArgsError>,
+    ) -> Result<Request<T>, ArgsError> {
+        let scan = self.scan(args)?;
+        if asks_for_help(&scan) {
+            return Ok(Request::Help);
+        }
+        read(scan).map(Request::Command)
     }
 
     /// Divides `args` into flags and positional arguments, as the docker CLI
@@ -869,8 +899,12 @@ mod tests {
         words.iter().map(OsString::from).collect()
     }
 
+    /// What `parse_run` reads from `words`, for a test that expects no help.
     fn run(words: &[&str]) -> Result<RunArgs, ArgsError> {
-        parse_run(&args(words))
+        parse_run(&args(words)).map(|request| match request {
+            Request::Command(parsed) => parsed,
+            Request::Help => panic!("{words:?} ask for the help"),
+        })
     }
 
     #[test]
@@ -897,23 +931,23 @@ mod tests {
 
     #[test]
     fn a_help_before_the_image_asks_for_the_help_and_nothing_else() {
-        let help = Ok(RunArgs {
-            help: true,
-            ..RunArgs::default()
-        });
         for words in [
             &["-d", "--rm", "--help", "alpine"][..],
             &["-it", "--help"],
             &["--help", "--name", ""],
             &["--help=false", "--help", "alpine"],
         ] {
-            assert_eq!(run(words), help, "{words:?}");
+            assert_eq!(parse_run(&args(words)), Ok(Request::Help), "{words:?}");
         }
         for words in [
             &["--help", "--help=false", "alpine"][..],
             &["alpine", "--help"],
         ] {
-            assert_eq!(run(words), Ok(RunArgs::default()), "{words:?}");
+            assert_eq!(
+                parse_run(&args(words)),
+                Ok(Request::Command(RunArgs::default())),
+                "{words:?}"
+            );
         }
     }
 
@@ -1117,7 +1151,11 @@ mod tests {
             &["-n", "5", "-ft", "job"],
             &["--since=1h", "job", "--details"],
         ] {
-            assert_eq!(parse_logs(&args(words)), Ok("job".to_owned()), "{words:?}");
+            assert_eq!(
+                parse_logs(&args(words)),
+                Ok(Request::Command("job".to_owned())),
+                "{words:?}"
+            );
         }
     }
 
@@ -1143,11 +1181,11 @@ mod tests {
     fn exec_names_the_container_before_the_command() {
         assert_eq!(
             parse_exec(&args(&["-it", "-e", "A=b", "job", "sh", "-c", "echo -d"])),
-            Ok("job".to_owned())
+            Ok(Request::Command("job".to_owned()))
         );
         assert_eq!(
             parse_exec(&args(&["-u", "root", "job", "ls", "-x"])),
-            Ok("job".to_owned())
+            Ok(Request::Command("job".to_owned()))
         );
         assert_eq!(
             parse_exec(&args(&["-u", "job", "ls"])),
@@ -1163,29 +1201,29 @@ mod tests {
     fn cp_finds_the_container_on_either_side() {
         assert_eq!(
             parse_cp(&args(&["job:/out/result.json", "./result.json"])),
-            Ok("job".to_owned())
+            Ok(Request::Command("job".to_owned()))
         );
         assert_eq!(
             parse_cp(&args(&["./in.txt", "job:/in.txt"])),
-            Ok("job".to_owned())
+            Ok(Request::Command("job".to_owned()))
         );
         assert_eq!(
             parse_cp(&args(&["-a", "job:/x", "/tmp/x"])),
-            Ok("job".to_owned())
+            Ok(Request::Command("job".to_owned()))
         );
         assert_eq!(
             parse_cp(&args(&["/a:b", "job:/x"])),
-            Ok("job".to_owned()),
+            Ok(Request::Command("job".to_owned())),
             "an absolute path is on this computer, with or without a colon"
         );
         assert_eq!(
             parse_cp(&args(&["./a:b", "job:/x"])),
-            Ok("job".to_owned()),
+            Ok(Request::Command("job".to_owned())),
             "a path that starts with a dot is on this computer"
         );
         assert_eq!(
             parse_cp(&args(&["job:/x", "-"])),
-            Ok("job".to_owned()),
+            Ok(Request::Command("job".to_owned())),
             "- is stdout"
         );
     }
@@ -1206,10 +1244,10 @@ mod tests {
     fn rm_divides_the_flags_from_the_containers() {
         assert_eq!(
             parse_rm(&args(&["-f", "a", "b", "-v"])),
-            Ok(RmArgs {
+            Ok(Request::Command(RmArgs {
                 flags: args(&["-f", "-v"]),
                 containers: vec!["a".to_owned(), "b".to_owned()],
-            })
+            }))
         );
         assert_eq!(
             parse_rm(&args(&["-f"])),
@@ -1218,6 +1256,69 @@ mod tests {
                 what: "at least one container"
             })
         );
+    }
+
+    #[test]
+    fn a_help_among_the_flags_of_logs_exec_cp_and_rm_asks_for_the_help_only() {
+        for words in [
+            &["-f", "--help"][..],
+            &["--help"],
+            &["--help", "a", "b"],
+            &["--help=false", "--help"],
+        ] {
+            assert_eq!(parse_logs(&args(words)), Ok(Request::Help), "{words:?}");
+            assert_eq!(parse_rm(&args(words)), Ok(Request::Help), "{words:?}");
+        }
+        for words in [
+            &["-it", "--help"][..],
+            &["--help"],
+            &["-i", "--help=false", "--help", "job", "sh"],
+        ] {
+            assert_eq!(parse_exec(&args(words)), Ok(Request::Help), "{words:?}");
+        }
+        for words in [
+            &["-a", "--help"][..],
+            &["--help"],
+            &["--help", "./a", "./b"],
+        ] {
+            assert_eq!(parse_cp(&args(words)), Ok(Request::Help), "{words:?}");
+        }
+    }
+
+    #[test]
+    fn a_help_that_is_off_or_after_the_command_is_no_request_for_the_help() {
+        let job = Ok(Request::Command("job".to_owned()));
+        assert_eq!(parse_logs(&args(&["--help", "--help=false", "job"])), job);
+        assert_eq!(
+            parse_exec(&args(&["--help", "--help=false", "job", "ls"])),
+            job
+        );
+        assert_eq!(parse_exec(&args(&["job", "ls", "--help"])), job);
+        assert_eq!(
+            parse_cp(&args(&["--help", "--help=false", "job:/x", "./a"])),
+            job
+        );
+        assert_eq!(
+            parse_rm(&args(&["--help", "--help=false", "job"])),
+            Ok(Request::Command(RmArgs {
+                flags: args(&["--help", "--help=false"]),
+                containers: vec!["job".to_owned()],
+            }))
+        );
+    }
+
+    #[test]
+    fn an_unknown_flag_together_with_a_help_is_still_an_error() {
+        let words = args(&["--help", "--frobnicate", "job"]);
+        for result in [
+            parse_logs(&words).map(|_| ()),
+            parse_exec(&words).map(|_| ()),
+            parse_cp(&words).map(|_| ()),
+            parse_rm(&words).map(|_| ()),
+            parse_run(&words).map(|_| ()),
+        ] {
+            assert!(result.is_err(), "{result:?}");
+        }
     }
 
     fn buildx(words: &[&str]) -> Result<BuildxArgs, ArgsError> {

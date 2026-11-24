@@ -267,8 +267,11 @@ those of docker.
   and of docker, and `drun` runs its own command. The two are different. For
   example, `drun ps` takes no flags. For the command of docker, run `docker`.
 - `-h`, `--help`, `help`, `-V`, and `--version` give the help and the version
-  of `drun`. A `--help` among the flags of `drun run`, before the image, also
-  gives the help of `drun`, and `drun` asks no host.
+  of `drun`. A `--help` among the flags of `run`, `logs`, `exec`, `cp`, and
+  `rm` also gives the help of `drun`, and `drun` asks no host. For `run` and
+  `exec`, the `--help` must come before the image or the container. After it,
+  the `--help` is an argument of the command in the container. The last
+  `--help` wins, as in docker.
 
 ## Flags that drun does not know
 
