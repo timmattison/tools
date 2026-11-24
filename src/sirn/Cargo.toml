@@ -6,12 +6,14 @@ edition.workspace = true
 [dependencies]
 buildinfo.workspace = true
 clap = { workspace = true }
+httpfile.workspace = true
 percent-encoding.workspace = true
 portplz-core.workspace = true
 thiserror.workspace = true
 tiny_http.workspace = true
 
 [dev-dependencies]
+childenv.workspace = true
 tempfile.workspace = true
 
 [lints]

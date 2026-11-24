@@ -12,6 +12,7 @@ comfy-table.workspace = true
 gitscratch.workspace = true
 
 [dev-dependencies]
+childenv.workspace = true
 gitscratch = { workspace = true, features = ["testing"] }
 
 [lints]

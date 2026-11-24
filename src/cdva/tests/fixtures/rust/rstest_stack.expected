@@ -1,0 +1,10 @@
+. pub fn describe(n: i32) -> String {
+.     format!("café {n}")
+. }
+. 
+T #[rstest]
+T #[case("café")]
+T fn describes(input: &str) {
+T     assert_eq!(describe(1), "café 1");
+T     let _ = input;
+T }

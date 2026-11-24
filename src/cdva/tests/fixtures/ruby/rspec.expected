@@ -1,0 +1,12 @@
+. # Calculator adds two numbers.
+. class Calculator
+.   def add(a, b)
+.     a + b
+.   end
+. end
+. 
+T RSpec.describe Calculator do
+T   it "adds two numbers" do
+T     expect(Calculator.new.add(1, 2)).to eq(3)
+T   end
+T end

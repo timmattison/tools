@@ -1,0 +1,10 @@
+. import pytest
+. 
+. 
+. def double(x):
+.     return x * 2
+. 
+. 
+T @pytest.mark.parametrize("value,expected", [(1, 2), (2, 4)])
+T def check_double(value, expected):
+T     assert double(value) == expected

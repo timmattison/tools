@@ -24,16 +24,19 @@ The binary will be available at `target/release/ic`.
 ## Usage
 
 ### Display an image file:
+
 ```bash
 ./ic image.png
 ```
 
 ### Display an image with specific width:
+
 ```bash
 ./ic -w 80 image.jpg
 ```
 
 ### Play a video file:
+
 ```bash
 ./ic video.mp4
 ```
@@ -46,19 +49,69 @@ Press `a` to go back 1 second, `d` to go forward 1 second.
 Press `w` to go back 1 minute, `s` to go forward 1 minute.
 
 ### Display an image with specific dimensions:
+
 ```bash
 ./ic -w 80 --height 24 image.gif
 ```
 
 ### Read image from stdin:
+
 ```bash
 cat image.png | ./ic --stdin
 ```
 
 ### Download and display an image:
+
 ```bash
 curl -s https://example.com/image.jpg | ./ic --stdin
 ```
+
+### Show new images and text files in a directory:
+
+```bash
+ic --monitor ~/Screenshots
+```
+
+`--monitor` watches the directory and all the directories in it. When a file is new or changes, `ic` shows it:
+
+- `ic` shows a new image below the line `Found new image: <path>`.
+- `ic` prints the content of a new text file below the line `Found new text file: <path>`.
+
+`ic` shows each file one time. It forgets the files that it showed every 60 seconds, and a file that changes after that shows again.
+
+Monitor mode ignores these paths, and it gives no output for them:
+
+- A directory.
+- A binary file that is not an image. A file is binary when its bytes are not valid UTF-8, or when they hold a control character other than tab, line feed, and carriage return, such as a NUL byte or the escape character that starts a terminal control sequence. Any program can put a file in a watched directory, and such a sequence can write the clipboard or change the terminal.
+- An empty file. A program often makes a file before it writes to it, so `ic` shows the file at a later event, when the file holds its content.
+- A path that is gone at its event, for example a temporary file that a program renamed.
+- A video.
+
+A text file that `ic` cannot read, for example because you do not have permission to read it, gives one error. The error names the path and the cause.
+
+An image that does not display gives an error that names the path and the cause. `ic` tries the image again at the next event for it, because a program can write an image in more than one step, and an image that is not complete does not decode. Thus each failed event gives its error.
+
+To watch more than one directory, give `--monitor` one time for each directory. Press `Ctrl+C` to stop monitor mode.
+
+`--monitor` is an input mode of its own. Do not combine it with a file, `--stdin`, or `--will-display`.
+
+### Ask whether an image can be displayed here:
+
+```bash
+ic --will-display && ic image.png
+```
+
+`--will-display` exits with code 0 when this session can show an image, and prints nothing. It exits with code 1 and prints the reason to stderr when it cannot, for example:
+
+```
+$ TERM=linux ic --will-display
+Error: Image display is not supported in this terminal.
+...
+```
+
+The flag asks the same question the display path asks — the terminal, the multiplexer, and the remote transport — so a session that passes cannot be refused by the next `ic image.png`. The flag does not ask whether stdout is a terminal, thus a redirected stdout does not change the answer.
+
+`--will-display` is an input mode of its own. Do not combine it with a file, `--stdin`, or `--monitor`.
 
 ## Command Line Options
 
@@ -67,7 +120,9 @@ curl -s https://example.com/image.jpg | ./ic --stdin
 - `--height <HEIGHT>` - Height in characters (defaults to auto-sizing)
 - `--preserve-aspect` - Preserve aspect ratio when resizing (default: true)
 - `--stdin` - Read from stdin instead of file
-- `-n, --no-newline` - Don't output newline after image
+- `--monitor <DIR>` - Watch a directory and show each new image and text file (see [Show new images and text files in a directory](#show-new-images-and-text-files-in-a-directory)). Give it more than one time to watch more than one directory
+- `-n, --no-newline` - Leave the cursor to the caller and write only the image (see [Where the Cursor Ends](#where-the-cursor-ends))
+- `--will-display` - Report whether this session can display an image, then exit (0 = yes, 1 = no with the reason on stderr)
 - `-h, --help` - Print help information
 - `-V, --version` - Print version information
 
@@ -78,6 +133,47 @@ This utility uses iTerm2's inline image protocol or the Kitty image protocol. It
 Kitty support is experimental.
 
 Inside Zellij, `ic` uses Sixel instead, since the Kitty protocol does not pass through Zellij's renderer.
+
+### Where the Cursor Ends
+
+`ic` puts the cursor at column 1 of the first row below the image. It does the
+same thing for all three display routines, and the position does not depend on
+how the renderer moves the cursor.
+
+No inline-image protocol gives a usable contract for the position of the cursor
+after an image. Sixel gives none at all, so each renderer decides for itself.
+The Kitty protocol and the iTerm2 protocol each have a flag that holds the
+cursor still, but then the caller must move it. `ic` therefore states the
+position itself. Each routine writes four parts:
+
+1. One newline for each row of the image, bounded by the height of the terminal.
+   The reservation makes an image at the bottom of the screen scroll the
+   terminal instead of run off it. An image taller than the screen cannot have a
+   row below it, because the cursor stops at the edge of the screen. The bound
+   therefore holds the scroll to one screen.
+2. CUU, which goes back to the top of the reservation.
+3. DECSC, the image, and DECRC. The brackets make sure that cursor motion inside
+   the image cannot change the final position.
+4. CUD by the row count, and a carriage return.
+
+`-n, --no-newline` suppresses all four parts, and `ic` then writes only the
+image. Video playback uses that mode, because it puts the cursor where it wants
+it before every frame.
+
+The auto-fit size also pays for the rows that `ic` prints above the image. The
+file name rows, the image, and the row that the shell prompt returns to together
+fit inside the height of the terminal. A long file name is wider than the
+terminal, and the terminal then wraps it onto more than one row. `ic` measures
+the display width of each header line and counts the rows that the line takes,
+so a wrapped name pays for every row that it occupies.
+
+All three display routines obey that row count. The Kitty protocol and the
+iTerm2 protocol take the size of the image in character cells, so they take the
+count as it is. Sixel takes the size in pixels, and `ic` multiplies the count by
+the height of one character cell. Some terminals also report their own size in
+pixels, and `ic` keeps a margin inside that size. The image then gets the
+smaller of the two, because the margin knows nothing about the header rows and
+the row count knows nothing about the edge of the screen.
 
 ### muxiavelli Panels
 
@@ -90,6 +186,198 @@ A panel's PTY inherits the environment of whatever terminal launched the muxiave
 | `MUXIAVELLI` | `1` | The PTY is inside a muxiavelli panel. Checked before every host-terminal signal so leaked env vars cannot win. |
 | `MUXIAVELLI_IMAGE_PROTOCOLS` | e.g. `sixel,iterm2` | Ordered preference of inline-image protocols the panel renders. `ic` picks the first one it supports. Absent, empty, or naming nothing supported falls back to Sixel. The Kitty protocol is intentionally never used in muxiavelli panels. |
 
-### tmux Support
+### Multiplexers and mosh
 
-The utility automatically detects when running inside tmux and reports an error. This program does not work in tmux (yet).
+`ic` asks the terminal which image protocol it draws when the environment names
+no terminal, and the answer decides. The query is the query action of the kitty
+graphics protocol together with a request for the primary device attributes,
+whose parameter 4 names sixel. A terminal that answers draws the picture,
+whatever the process tree says.
+
+That covers three cases a name cannot:
+
+- **tmux.** tmux 3.7c answers `CSI ?1;2;4 c` and draws sixel. Older tmux
+  answers no such thing and still gets the error it always got.
+- **mosh.** Upstream mosh strips the sequences that carry an image. The Rust
+  port reads all three protocols, and its emulator answers the query for the
+  pair — mosh together with the terminal of the user.
+- **zellij.** A multiplexer owns the pseudo terminal of its pane and answers
+  every query itself, so its answer states what that pane draws. `ic` asks a
+  pane of zellij for that reason, and the answer outranks the name that the
+  `ZELLIJ` variable carries. A pane that answers nothing draws sixel by that
+  name, as it always did.
+
+A muxiavelli panel is not one of these cases. Its own author wrote the signal
+that names the protocols it draws, so a backing session that answers the query
+does not take that signal away.
+
+A terminal that answers nothing keeps the behavior it had: `ic` names it from
+the environment, and it reports an error for tmux and for mosh.
+
+### A mosh that draws images
+
+**No query reaches the transport of a mosh session from inside a multiplexer.**
+The multiplexer answers every query itself, so a round trip there tells an
+upstream mosh, which strips every image sequence, from a mosh that draws them
+never. The environment is the one channel that crosses a multiplexer, and a
+mosh that draws images states what it carries there:
+
+| Variable | Value | Meaning |
+|----------|-------|---------|
+| `MOSH_IMAGES` | e.g. `kitty,sixel,iterm2` | The protocols that the **transport** carries. Only a mosh that draws images writes it, so a mosh session that carries none is an upstream mosh and `ic` still refuses it. |
+| `MOSH_CLIENT_IMAGES` | e.g. `kitty,sixel` | The protocols that the **terminal of the user** draws. The wrapper writes it where that terminal answered the query, and an upstream server started by that wrapper carries this one and no `MOSH_IMAGES`. |
+| `MOSH_IMAGE_BUDGETS` | e.g. `kitty=1638400,sixel=1048576,iterm2=1048576` | The largest picture that the **transport** carries, for each protocol it carries. The names are the names of `MOSH_IMAGES` and they stand in the same order. Each cap counts the command of the protocol together with the payload, so `ic` takes room for the command off it. A protocol that the value does not name keeps a careful number that `ic` holds, so a mosh that states no cap draws as it drew before. |
+
+**The three numbers do not count one unit.** Each one counts the stretch of the
+escape sequence that carries one whole picture in its own protocol, and one unit
+is one byte on the wire in every case. The `kitty` number counts the characters
+of the control block and of the payload of one transmission, added together,
+over every chunk of that transmission. The `sixel` number counts the characters
+of the body of one device-control string. The `iterm2` number counts the bytes
+of the body of one operating system command, the `1337;File=` part and the
+base64 payload together. A reader that takes the three for one unit answers for
+the wrong protocol on two runs out of three, which is the defect that this
+variable closes.
+
+**Above the cap the three protocols fail two different ways.** mosh refuses a
+whole `kitty` transmission with `ENOSPC`, and the user reads an empty screen.
+mosh cuts a `sixel` picture or an `iterm2` picture at the cap and keeps the
+rest, and nothing tells `ic` that the cut happened. So `ic` measures a picture
+against the cap of the protocol it writes, before it writes one byte, and it
+draws a smaller picture in place of a picture that never arrives whole.
+
+`ic` reads the process tree as well as these three variables, and the two
+sources answer different questions: a variable states what the transport
+carries, and the process tree states that the transport of this session is a
+mosh. A variable outlives the session that wrote it, because it crosses a
+multiplexer. A user exports it by hand, and a tmux server or a Zellij server
+that a mosh session started hands the whole environment of that session to every
+pane it opens after the mosh session ends. So a variable that names no mosh of
+this session states nothing, and `ic` answers for the terminal that this session
+really has.
+
+A picture travels through the transport and then draws on the terminal of the
+user, so `ic` draws it with a protocol that both of them read and that this
+terminal draws as well. A mosh session that shares no protocol with this
+terminal takes a refusal that names each set, because the repair there is a
+different terminal and not `ssh`. The command below runs inside such a mosh:
+
+```
+$ MOSH_IMAGES=sixel MOSH_CLIENT_IMAGES=sixel TERM=xterm-kitty ic picture.png
+Error: Image display cannot work here: this session and this terminal share no image protocol.
+This Mosh carries: sixel. The terminal of the user draws: sixel.
+This terminal draws: kitty.
+A picture in a protocol that any one of the three does not read lands on the screen as text.
+
+For image display, use a terminal that draws one of the protocols this Mosh carries.
+```
+
+**The message names the sets that decided the refusal, and it names no other
+one.** A session that carries no `MOSH_CLIENT_IMAGES` states no terminal of the
+user, and an absent name is no name of an empty set, so `ic` reads what the
+transport carries alone. The message of such a session drops the line about the
+terminal of the user and names two sets:
+
+```
+$ MOSH_IMAGES=sixel TERM=xterm-kitty ic picture.png
+Error: Image display cannot work here: this session and this terminal share no image protocol.
+This Mosh carries: sixel.
+This terminal draws: kitty.
+A picture in a protocol that one of the two does not read lands on the screen as text.
+
+For image display, use a terminal that draws one of the protocols this Mosh carries.
+```
+
+The two lists state what the transport carries and what the terminal of the
+user draws. None of the three variables states what a multiplexer in front of
+the picture draws, because the shell that starts that multiplexer hands the
+whole environment to it. So a mosh session that carries images lifts the refusal
+that names mosh and lifts no other one: a tmux that answers no query still takes
+the refusal that names tmux, inside such a mosh as everywhere else.
+
+See [timmattison/mosh-rs#78](https://github.com/timmattison/mosh-rs/issues/78)
+for the two lists and where they come from, and
+[timmattison/mosh-rs#94](https://github.com/timmattison/mosh-rs/issues/94) for
+the caps and why the three numbers do not count one unit.
+
+### A terminal that refuses a picture
+
+A terminal can read a picture and refuse it. The image store of a mosh session
+is the case that shows first: mosh keeps every image for the length of the
+session, because a client that reconnects holds none, so the store is capped.
+A picture above that cap arrives whole and draws never.
+
+`ic` reports such a refusal instead of exiting 0 with an empty screen:
+
+```
+$ ic big-photograph.png
+Error: The terminal refused this image and drew nothing: ENOSPC: the image store is full
+
+The image reached the terminal, and the terminal reported the failure above.
+A smaller image can fit where this one did not: try --width, --height or --scale.
+```
+
+The exit code is 1, so a script reads the failure as well.
+
+**The last line belongs to `ENOSPC` alone.** A terminal that answers that code
+refused the picture for room, which is the one refusal that the size of the
+picture caused, so a smaller picture is the one repair for it. The message
+beside the code names the room that ran out. A mosh answers it where one
+transmission stands above the cap that `MOSH_IMAGE_BUDGETS` states for that
+protocol. A terminal that answers another code, such as `EINVAL` for bytes
+it decodes as no picture, refused the picture for a reason that a resize does
+not touch. `ic` reports the code and the message of the terminal there, and it
+advises nothing:
+
+```
+$ ic photograph.png
+Error: The terminal refused this image and drew nothing: EINVAL: the image is not a valid PNG
+
+The image reached the terminal, and the terminal reported the failure above.
+```
+
+The refusal arrives because `ic` asks for it. A Kitty image command carries the
+key `q`, and `q=2` asks the terminal to answer nothing at all, success and
+failure both. A still picture carries `q=1` instead, which asks for the failures
+alone, and `ic` reads the answer off the controlling terminal.
+
+Video playback is the path that keeps `q=2`: it draws frame after frame and
+holds the terminal in raw mode for the key presses of the user, and an answer of
+the terminal would arrive there as a key press.
+
+`-n, --no-newline` states who moves the cursor, and it states nothing about how
+many pictures the run draws. `ic -n photo.png` is one still picture, so it
+carries `q=1` and `ic` reads the answer for it as well.
+
+**`ic` reports only a refusal that could be its own.** The answer of a terminal
+reaches whoever reads that terminal next, and the answer of the run before this
+one arrives late. A second program that draws Kitty pictures on the same
+terminal writes an answer of its own as well. So a run that reported every
+refusal it read would fail for a picture that drew, and a false failure over a
+good picture is worse than the silence above.
+
+Every still picture therefore carries an image number of its own, under the key
+`I`, and the terminal writes that number back in the answer. A picture takes the
+number from a counter that starts at the process id and the clock, so two runs
+on one machine, two pictures of one run, and a program that counts its own
+pictures from one all carry different numbers. `ic` walks past every refusal
+that names another number.
+
+A refusal that names no image number at all is reported. A terminal that reports
+a failure and echoes no number is still a terminal that refused this picture,
+and a rule that took that report away would put the empty screen of the section
+above back.
+
+### The size of a still picture
+
+A still picture travels to a Kitty terminal as a PNG, under the key `f=100`.
+The picture cost four characters for every pixel before, because the protocol
+also takes the raw pixels and base64 makes three bytes into four characters. A
+photograph of 330 pixels by 440 cost 580,800 characters that way, and it costs
+about 300,000 as a PNG.
+
+A frame of a video keeps the raw pixels. A PNG encoder inside a frame loop
+costs more time than it saves bytes.
+
+`-n, --no-newline` changes none of this. It states who moves the cursor, so
+`ic -n photo.png` is one still picture and it travels as a PNG as well.

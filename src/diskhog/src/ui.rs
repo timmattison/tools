@@ -481,7 +481,7 @@ mod tests {
         const CONTENT_LINES: u16 = 2; // Line::from("") + Line::from(message)
         const MIN_REQUIRED: u16 = BORDER_LINES + CONTENT_LINES;
 
-        #[allow(
+        #[expect(
             clippy::assertions_on_constants,
             reason = "intentional change-detector test guarding the layout invariant if either constant is modified"
         )]
@@ -498,7 +498,7 @@ mod tests {
     fn test_min_truncation_width_constant() {
         // Verify the constant is at least ellipsis width + 1
         // (need room for at least one character plus "...")
-        #[allow(
+        #[expect(
             clippy::assertions_on_constants,
             reason = "intentional change-detector test guarding MIN_TRUNCATION_WIDTH if it is modified"
         )]

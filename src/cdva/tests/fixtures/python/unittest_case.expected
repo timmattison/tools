@@ -1,0 +1,11 @@
+. import unittest
+. 
+. 
+. class Ledger:
+.     def total(self):
+.         return 0
+. 
+. 
+T class LedgerCase(unittest.TestCase):
+T     def test_total(self):
+T         self.assertEqual(Ledger().total(), 0)

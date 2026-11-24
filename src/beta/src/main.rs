@@ -120,6 +120,13 @@ pub fn get_timestamp() -> f64 {
 
 impl Recording {
     /// Load a recording from a file, auto-detecting gzip compression via magic bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be opened, if its metadata cannot be
+    /// read, if it is empty, if seeking back to the start of the file fails, or
+    /// if its contents do not parse as a recording — either as gzip-compressed
+    /// JSON when the gzip magic bytes are present, or as plain JSON otherwise.
     pub fn load(path: &Path) -> Result<Self> {
         let mut file = std::fs::File::open(path)
             .with_context(|| format!("Failed to open recording file: {}", path.display()))?;
@@ -129,7 +136,7 @@ impl Recording {
         }
 
         // Check for gzip magic bytes (0x1f 0x8b) instead of relying on extension
-        let mut magic = [0u8; 2];
+        let mut magic = [0_u8; 2];
         let is_gzip = file.read_exact(&mut magic).is_ok() && magic == [0x1f, 0x8b];
 
         // Seek back to the beginning for the actual read

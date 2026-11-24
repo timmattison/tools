@@ -1,0 +1,9 @@
+. export function greet() {
+.   return "こんにちは";
+. }
+. 
+T describe("挨拶", () => {
+T   it("は日本語である", () => {
+T     expect(greet()).toBe("こんにちは");
+T   });
+T });

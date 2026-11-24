@@ -1,0 +1,14 @@
+package com.example.calc;
+
+/** The name of this class holds Test, and no method of it carries an annotation. */
+class CalcTest {
+    int add(int a, int b) {
+        return a + b;
+    }
+
+    void checkAdd() {
+        if (add(1, 2) != 3) {
+            throw new IllegalStateException("addition is broken");
+        }
+    }
+}

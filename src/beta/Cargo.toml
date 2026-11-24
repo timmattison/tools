@@ -4,7 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+altscreen.workspace = true
 anyhow = "1.0"
+childenv.workspace = true
 clap = { version = "4.0", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -22,7 +24,8 @@ image = "0.25"             # Image generation for video export
 imageproc = "0.25.0"         # Image processing for video export
 ab_glyph = "0.2"           # Font rendering for video export (replaces rusttype)
 vte = "0.15.0"               # VT100/ANSI terminal emulator
-signal-hook = "0.3"        # Signal handling for graceful termination
+signal-hook.workspace = true # Signal handling for graceful termination
+termsize.workspace = true    # The one reader of the terminal size, which takes a zero as no answer
 
-[lints.clippy]
-string_slice = "warn"
+[lints]
+workspace = true

@@ -1,14 +1,26 @@
 //! Shared test-support for `nwt`'s integration tests.
 //!
 //! Every integration test that drives the real `nwt` binary goes through this
-//! module instead of building a [`Command`] by hand. Centralising the spawn is
-//! what closes issue #283: `nwt` renames the *current* terminal-multiplexer tab
-//! whenever `ZELLIJ`/`TMUX` is present, so a test that inherits the multiplexer
-//! env (because the suite was launched from inside zellij/tmux) would hijack the
-//! user's real tab. [`nwt_command`] scrubs that env so the spawned binary never
-//! believes it is inside a multiplexer, and [`FakeMultiplexer`] lets the
-//! dedicated tab-rename tests *simulate* the multiplexer with a recording fake
-//! so they can assert exactly when a rename does and does not fire.
+//! module instead of building a [`Command`] by hand. A spawned binary that gets
+//! the full environment of the test can go out of its fixture and act on the
+//! real session of the developer. One entrance keeps each spawned binary in its
+//! fixture, and [`nwt_command`] is that entrance.
+//!
+//! The first escape is git, and
+//! [`childenv::fixture_command`] is the single answer to it:
+//! every `git` child this module spawns — the fixture's own commands and the
+//! real `nwt` binary alike — has the entire inherited `GIT_*` family removed, so
+//! it can only act on the directory it was handed. The rule is the prefix, never
+//! a list of names, and it lives in `childenv` because every git-spawning
+//! caller in this repository is broken the same way by the same environment.
+//! That function explains why a list is the bug.
+//!
+//! The second escape is the home directory. `nwt` reads `~/.nwt.toml`, and its
+//! git children read `~/.gitconfig`. A host file with `quiet = true` removes
+//! each stderr line that a test reads, and a host file with `checkout = ...`
+//! sends each run through `-c`. [`nwt_command`] gives the child a home
+//! directory that is private to the test process, so no configuration of the
+//! host home can change an answer. `tests/private-home.rs` holds that rule.
 //!
 //! Each integration test file is compiled as its own crate that pulls this
 //! module in via `mod support;`, so not every binary uses every helper — hence
@@ -18,18 +30,165 @@
     reason = "shared across integration-test crates; not every test binary uses every helper"
 )]
 
+use std::collections::BTreeMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tempfile::TempDir;
 
+/// What one path of a [`Snapshot`] holds.
+///
+/// A directory carries no content of its own, a file carries its bytes, and a
+/// link carries the path it names. Reading a link rather than following it
+/// keeps the snapshot a statement about this directory alone.
+#[derive(Debug, Eq, PartialEq)]
+pub enum Held {
+    Directory,
+    File(Vec<u8>),
+    Link(PathBuf),
+}
+
+/// Every path under one directory, with what each path holds.
+///
+/// A `BTreeMap` keys on the relative path and orders by it, so two snapshots of
+/// one directory compare the same way on every run and a difference reads in
+/// path order.
+pub type Snapshot = BTreeMap<String, Held>;
+
+/// The path of `path` under `root`, spelled with forward slashes.
+///
+/// # Panics
+///
+/// Panics if `path` does not lie under `root`.
+fn relative_name(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or_else(|e| panic!("{} lies under {}: {e}", path.display(), root.display()))
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Record every path under `dir` into `into`, and descend into each directory.
+///
+/// # Panics
+///
+/// Panics if a directory cannot be read, or a file cannot be read back.
+fn record(root: &Path, dir: &Path, into: &mut Snapshot) {
+    for entry in fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display())) {
+        let path = entry
+            .unwrap_or_else(|e| panic!("read an entry of {}: {e}", dir.display()))
+            .path();
+        let name = relative_name(root, &path);
+
+        // `symlink_metadata` reads the entry itself. `metadata` follows a link,
+        // so a link that points outside the decoy would put another directory's
+        // bytes into a snapshot of this one.
+        let kind = fs::symlink_metadata(&path)
+            .unwrap_or_else(|e| panic!("stat {}: {e}", path.display()))
+            .file_type();
+
+        if kind.is_dir() {
+            into.insert(name, Held::Directory);
+            record(root, &path, into);
+        } else if kind.is_symlink() {
+            let target =
+                fs::read_link(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            into.insert(name, Held::Link(target));
+        } else {
+            let bytes = fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            into.insert(name, Held::File(bytes));
+        }
+    }
+}
+
+/// Every path under `root`, with the bytes of every file.
+///
+/// A count of refs or of objects is not enough to say a repository is
+/// untouched: a write that replaces one object with another keeps the count.
+/// The whole tree, content included, is what makes the word "byte-identical"
+/// true.
+///
+/// Each decoy test of `tests/production-git-env-isolation.rs` takes a snapshot
+/// of the decoy before and after its run: the plain `-b` run, the sparse `-b`
+/// run, the sparse `-c` run, the two `-b` runs that track a remote branch, the
+/// `-b` run that copies an untracked `.env` file, the `-b` run that
+/// bootstraps the hooks with a fake `pnpm`, the `-b` run that reads the hooks
+/// setting, and the `-b` run that links a child repository.
+/// The helpers live here, so each of those tests
+/// reads the decoy with one rule, and a later test file that needs a decoy
+/// reads it with the same rule. `tests/link-children.rs` reads a child
+/// repository with the same rule, before a run and after
+/// `git worktree remove --force` of the new worktree.
+pub fn snapshot(root: &Path) -> Snapshot {
+    let mut held = Snapshot::new();
+    record(root, root, &mut held);
+    held
+}
+
+/// How `after` differs from `before`, one line per path, in path order.
+///
+/// An empty list means the two snapshots are equal. Naming each path, and
+/// whether it appeared, vanished or changed, is what turns a failure into
+/// evidence of which command wrote where. [`snapshot`] names the tests that
+/// use it.
+pub fn difference(before: &Snapshot, after: &Snapshot) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    for (path, held) in after {
+        match before.get(path) {
+            None => lines.push(format!("appeared: {path}")),
+            Some(was) if was != held => lines.push(format!("changed:  {path}")),
+            Some(_) => {}
+        }
+    }
+
+    for path in before.keys() {
+        if !after.contains_key(path) {
+            lines.push(format!("vanished: {path}"));
+        }
+    }
+
+    lines.sort();
+    lines
+}
+
 /// Runs a git command in `dir` with stdin/stdout/stderr nulled, returning
 /// whether it succeeded. Output is nulled so concurrent test runs (a background
 /// `bacon` loop alongside the pre-commit hook's own run) don't interleave noise.
+///
+/// Sheds the whole inherited `GIT_*` family through
+/// [`childenv::fixture_command`], which is what makes `dir` the
+/// repo git operates on. `current_dir(dir)` alone is not enough: when the suite
+/// runs from inside a git hook, git exports its own variables into the hook's
+/// environment, `cargo test` inherits them, and `GIT_DIR` overrides cwd-based
+/// discovery — so a fixture's `git config`/`commit` lands in the *real* repo.
+/// That is how `Test <t@example.com>` got written into this repo's own
+/// `.git/config` and then authored every later commit until it was noticed. A
+/// config write is sticky: one leak outlives the run that caused it.
+///
+/// The rule is the `GIT_` prefix and never a list of names, and it lives in
+/// `gitscratch` so this suite and every other git-spawning caller in the
+/// repository share one answer instead of each keeping a copy to drift. See
+/// that function for why a list is the bug and which variables walked through
+/// the last one. Pinned here by `tests/git-env-isolation.rs` and
+/// `tests/builder-guard.rs`, which probe the behaviour at this call site rather
+/// than trusting the helper.
+///
+/// Shedding also drops `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM`, and that costs
+/// nothing: removing a variable is not the same as pinning it to `/dev/null`.
+/// With them gone git falls back to the host's `~/.gitconfig` and
+/// `/etc/gitconfig` exactly as it does in a normal shell, so settings the
+/// fixtures rely on — `init.defaultBranch` among them — still apply.
+///
+/// That is true of the git of the fixture only. [`nwt_command`] gives the `nwt`
+/// child a private home, so the git children of `nwt` read no `~/.gitconfig`.
 pub fn run_git(dir: &Path, args: &[&str]) -> bool {
-    Command::new("git")
-        .args(args)
+    let mut cmd = childenv::fixture_command("git");
+    cmd.args(args)
         .current_dir(dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -37,6 +196,73 @@ pub fn run_git(dir: &Path, args: &[&str]) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+/// Runs a git command in `dir` and hands back its standard output.
+///
+/// [`run_git`] nulls every stream, so a test that has to *read* an answer out of
+/// git — `git worktree list --porcelain`, say — needs this one instead. The two
+/// share the one rule that matters: the whole inherited `GIT_*` family is shed
+/// through [`childenv::fixture_command`], so `dir` is the only
+/// repository the command can reach. See [`run_git`] for why a list of names is
+/// the bug and the prefix is the rule.
+///
+/// # Panics
+///
+/// Panics if git cannot be spawned or exits non-zero. The panic message carries
+/// the command, its standard output and its standard error.
+pub fn git_stdout(dir: &Path, args: &[&str]) -> String {
+    let mut cmd = childenv::fixture_command("git");
+
+    let output = cmd
+        .args(args)
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn git {args:?}: {e}"));
+
+    assert!(
+        output.status.success(),
+        "git {args:?} failed in {}:\n{}\n{}",
+        dir.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// Runs a git command in `dir` that must fail, and hands back its standard
+/// error.
+///
+/// A test that expects `nwt` to repeat an error of git takes the text from the
+/// same failed command, and does not copy a message that changes between
+/// versions of git. The command sheds the whole inherited `GIT_*` family
+/// through [`childenv::fixture_command`], as [`run_git`] and
+/// [`git_stdout`] do.
+///
+/// # Panics
+///
+/// Panics if git cannot be spawned or exits zero. The panic message carries
+/// the command and its standard output.
+pub fn git_failure_stderr(dir: &Path, args: &[&str]) -> String {
+    let mut cmd = childenv::fixture_command("git");
+
+    let output = cmd
+        .args(args)
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn git {args:?}: {e}"));
+
+    assert!(
+        !output.status.success(),
+        "git {args:?} must fail in {}, but it wrote:\n{}",
+        dir.display(),
+        String::from_utf8_lossy(&output.stdout),
+    );
+
+    String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
 /// Nanosecond timestamp for building process-unique, parallel-safe names.
@@ -58,6 +284,16 @@ pub fn nanos() -> u128 {
 /// is cleaned up with it. gpg signing is disabled so a globally-configured
 /// signer can't break the commit, and the commit is made exactly once (no retry
 /// loop, per the repo's git discipline).
+///
+/// `maintenance.auto` is set to `false`, and that is load-bearing rather than
+/// tidiness. `git commit` ends by starting `git maintenance run --auto`, which
+/// detaches and takes `.git/objects/maintenance.lock` while it decides it has
+/// nothing to do. The lock is there when `commit` returns on 38 runs out of 40,
+/// and it is gone a few milliseconds later. So a test that reads the whole tree
+/// of this repository sees a path that appears or vanishes on its own, and
+/// `tests/production-git-env-isolation.rs` reads exactly that to say the decoy
+/// came back byte-identical. Left on, a detached git of the fixture's own
+/// making answers that question one run in five.
 pub fn init_repo() -> (TempDir, PathBuf) {
     let temp = TempDir::new().expect("Failed to create temp dir");
     let repo = temp.path().join("repo");
@@ -71,6 +307,10 @@ pub fn init_repo() -> (TempDir, PathBuf) {
     assert!(
         run_git(&repo, &["config", "user.name", "Test User"]),
         "git config user.name failed"
+    );
+    assert!(
+        run_git(&repo, &["config", "maintenance.auto", "false"]),
+        "git config maintenance.auto failed"
     );
 
     std::fs::write(repo.join("README.md"), "baseline\n").expect("Failed to write baseline file");
@@ -86,58 +326,308 @@ pub fn init_repo() -> (TempDir, PathBuf) {
     (temp, repo)
 }
 
+/// Write `contents` to `relative` under `repo`, and make the parent
+/// directories first.
+///
+/// # Panics
+///
+/// Panics when a directory or the file cannot be written.
+pub fn write_file(repo: &Path, relative: &str, contents: &str) {
+    let path = repo.join(relative);
+    let parent = path.parent().expect("a file path has a parent");
+    std::fs::create_dir_all(parent).unwrap_or_else(|e| panic!("create {}: {e}", parent.display()));
+    std::fs::write(&path, contents).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+}
+
+/// Make a repository whose second commit adds `files`, and hand back the
+/// temporary directory that holds it (keep it alive) and the repository.
+///
+/// Each file holds its own path and a line break.
+///
+/// # Panics
+///
+/// Panics when [`init_repo`], a write, `git add`, or `git commit` fails.
+pub fn repo_with_files(files: &[&str]) -> (TempDir, PathBuf) {
+    let (temp, repo) = init_repo();
+
+    for file in files {
+        write_file(&repo, file, &format!("{file}\n"));
+    }
+    assert!(run_git(&repo, &["add", "--", "."]), "git add failed");
+    assert!(
+        run_git(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "add the tree"]
+        ),
+        "git commit failed"
+    );
+
+    (temp, repo)
+}
+
+/// The file that tells git which paths to ignore.
+pub const IGNORE_FILE: &str = ".gitignore";
+
+/// The file that each child repository of a fixture holds.
+pub const CHILD_FILE: &str = "README.md";
+
+/// Make the child repository `name` in `repo`, with one file in it.
+///
+/// # Panics
+///
+/// Panics when the directory cannot be made, or `git init` fails.
+pub fn make_child(repo: &Path, name: &str) {
+    let child = repo.join(name);
+    fs::create_dir(&child).unwrap_or_else(|e| panic!("create {}: {e}", child.display()));
+    assert!(
+        run_git(&child, &["init"]),
+        "git init failed in {}",
+        child.display()
+    );
+    write_file(&child, CHILD_FILE, &format!("{name}\n"));
+}
+
+/// A container repository whose committed `.gitignore` holds `ignore_lines`,
+/// with one child repository for each name of `children`.
+///
+/// The tests of the links to child repositories (issue #537) build each
+/// container with this function, so each of them reads one fixture.
+///
+/// Hand back the temporary directory (keep it alive) and the container.
+///
+/// # Panics
+///
+/// Panics when a write or a git command fails.
+pub fn container(ignore_lines: &[&str], children: &[&str]) -> (TempDir, PathBuf) {
+    let (temp, repo) = init_repo();
+
+    let mut ignore = ignore_lines.join("\n");
+    ignore.push('\n');
+    write_file(&repo, IGNORE_FILE, &ignore);
+    assert!(
+        run_git(&repo, &["add", "--", IGNORE_FILE]),
+        "git add {IGNORE_FILE} failed"
+    );
+    commit(&repo, "ignore the children");
+
+    for child in children {
+        make_child(&repo, child);
+    }
+
+    (temp, repo)
+}
+
+/// The options that [`commit`] gives git before the subcommand.
+///
+/// A child that [`make_child`] makes has no identity of its own, so the
+/// identity comes from here, and not from the configuration of the host.
+/// `maintenance.auto=false` stops the `git maintenance run --auto` that a
+/// commit starts. That process writes a lock file into the repository after
+/// the commit returns, so a snapshot of the repository then holds a path that
+/// appears and vanishes on its own.
+pub const COMMIT_OPTIONS: [&str; 8] = [
+    "-c",
+    "user.name=Test User",
+    "-c",
+    "user.email=test@example.com",
+    "-c",
+    "commit.gpgsign=false",
+    "-c",
+    "maintenance.auto=false",
+];
+
+/// Commit what `repo` has staged, with `message`, with [`COMMIT_OPTIONS`].
+///
+/// # Panics
+///
+/// Panics when `git commit` fails.
+pub fn commit(repo: &Path, message: &str) {
+    let mut args = COMMIT_OPTIONS.to_vec();
+    args.extend(["commit", "-m", message]);
+    assert!(
+        run_git(repo, &args),
+        "git commit -m {message:?} failed in {}",
+        repo.display()
+    );
+}
+
+/// Clone `source` into a new temporary directory, and hand back the temporary
+/// directory (keep it alive) and the clone.
+///
+/// The clone holds the checked-out branch of `source` as a local branch, and
+/// every other branch only as `origin/<branch>`. So `nwt -c <branch>` for such
+/// a branch goes through git's checkout DWIM. The clone is named `repo`, as
+/// [`init_repo`] names a repository, so a test that reads the temporary
+/// directory finds one entry with that name.
+///
+/// # Panics
+///
+/// Panics when a path is not UTF-8, or when `git clone` fails.
+pub fn clone_of(source: &Path) -> (TempDir, PathBuf) {
+    let temp = TempDir::new().expect("create a temporary directory");
+    let clone = temp.path().join("repo");
+    let source = source.to_str().expect("utf-8 source path");
+    let target = clone.to_str().expect("utf-8 clone path");
+
+    assert!(
+        run_git(temp.path(), &["clone", "--quiet", source, target]),
+        "git clone failed"
+    );
+
+    (temp, clone)
+}
+
+/// Write an executable `post-checkout` hook into `hooks_dir`, and point
+/// `core.hooksPath` of `repo` at that directory.
+///
+/// `body` is the shell script after the `#!/bin/sh` line. The hook runs with
+/// the new worktree as its working directory.
+///
+/// The fixture sets `core.hooksPath` in the repository, and does not write into
+/// `.git/hooks`. The host `~/.gitconfig` can set a global `core.hooksPath`, and
+/// git then ignores `.git/hooks`. A value in the repository configuration
+/// overrides the global value. The private home of [`nwt_command`] already
+/// keeps the host value away from the `nwt` child, but the git of the fixture
+/// still reads it. The value in the repository gives both the same hook.
+///
+/// Unix only: the hook is a POSIX `sh` script that the Unix permission bits
+/// make executable.
+///
+/// # Panics
+///
+/// Panics when the hook cannot be written or made executable, or when
+/// `git config` fails.
+#[cfg(unix)]
+pub fn install_post_checkout_hook(repo: &Path, hooks_dir: &Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let hook = hooks_dir.join("post-checkout");
+    std::fs::write(&hook, format!("#!/bin/sh\n{body}")).expect("write the post-checkout hook");
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+        .expect("make the post-checkout hook executable");
+
+    let hooks_dir = std::fs::canonicalize(hooks_dir).expect("resolve the hooks directory");
+    let hooks_dir = hooks_dir.to_str().expect("utf-8 hooks directory");
+    assert!(
+        run_git(repo, &["config", "core.hooksPath", hooks_dir]),
+        "git config core.hooksPath failed"
+    );
+}
+
+/// The prefix of the name of each private home that [`private_home`] makes.
+const PRIVATE_HOME_PREFIX: &str = "nwt-home-";
+
+/// The home directory that each `nwt` child of this test process gets.
+///
+/// The directory is empty when this function makes it, so it holds no
+/// `.nwt.toml`, no `.gitconfig` and no `.config/git/config`. `nwt` reads its
+/// configuration file through `dirs::home_dir`, which reads `HOME`, and git
+/// reads its global configuration from the same home. The value must be a real
+/// path: `dirs::home_dir` takes an empty `HOME` as no value and falls back to
+/// the home in the password database, which is the home of the host.
+///
+/// The choices, and why:
+///
+/// - **One directory for each process, made once through a [`OnceLock`].** A
+///   directory for each call has no owner: a [`Command`] cannot keep a
+///   [`TempDir`] alive, so each call would leave one directory behind. A
+///   static is never dropped either, so the one directory of a process also
+///   stays. One for each process keeps that to a few directories for each run.
+/// - **Under `CARGO_TARGET_TMPDIR`.** Cargo sets that path at compile time for
+///   each integration test. It lies in the target directory, so `cargo clean`
+///   removes what a run leaves, and nothing collects in the temporary directory
+///   of the system.
+/// - **A name that carries the process id and a nanosecond clock reading.** Two
+///   copies of one test binary can run at the same time, and a fixed name would
+///   give them one shared home. [`fs::create_dir`] refuses a name that already
+///   exists, so a collision fails loudly and never shares a home.
+///
+/// # Panics
+///
+/// Panics when the directory cannot be made.
+fn private_home() -> &'static Path {
+    static HOME: OnceLock<PathBuf> = OnceLock::new();
+    HOME.get_or_init(|| {
+        let parent = Path::new(env!("CARGO_TARGET_TMPDIR"));
+        fs::create_dir_all(parent).unwrap_or_else(|e| panic!("create {}: {e}", parent.display()));
+        let home = parent.join(format!(
+            "{PRIVATE_HOME_PREFIX}{}-{}",
+            std::process::id(),
+            nanos()
+        ));
+        fs::create_dir(&home).unwrap_or_else(|e| panic!("create {}: {e}", home.display()));
+        home
+    })
+}
+
 /// Builds a [`Command`] that runs the real `nwt` binary against `repo`.
 ///
 /// This is the single, mandatory entrance every integration test uses to spawn
-/// `nwt`. It sets the working directory to `repo` and nulls stdin (so an
-/// unexpected prompt can't hang the suite), and — crucially for issue #283 — it
-/// scrubs the terminal-multiplexer environment from the child so a suite
-/// launched from inside zellij/tmux can never hijack the user's real tab.
+/// `nwt`. It sets the working directory to `repo`, and it gives the child a
+/// null stdin, so that a prompt cannot stop the suite.
 ///
-/// Tests that deliberately *exercise* the multiplexer behaviour (see
-/// [`FakeMultiplexer`]) re-add `ZELLIJ`/`TMUX` on the returned command; because
-/// those `.env(...)` calls run after the scrub here, they win for that child.
+/// It sheds the whole inherited `GIT_*` family via
+/// [`childenv::fixture_command`], so the spawned `nwt` — which
+/// shells out to `git worktree add` — operates on
+/// `repo` and not on whatever repo an inherited `GIT_DIR` names, writes its
+/// objects into `repo`'s own store, and reads no config the launching
+/// environment injected. This scrub and the home scrub below guard the same
+/// class of bug: a fixture that acts on the real session of the developer.
+///
+/// It also points `HOME` at [`private_home`], and removes `XDG_CONFIG_HOME`.
+/// The same class of bug comes in through the home: `nwt` reads `~/.nwt.toml`,
+/// so a host file with `quiet = true` removes each stderr line that a test
+/// reads, and a host file with `checkout = ...` sends each run through `-c`.
+/// The git children of `nwt` read `~/.gitconfig`, and
+/// `$XDG_CONFIG_HOME/git/config` when that variable is set. With the variable
+/// gone, git reads `$HOME/.config/git/config`, which is in the private home. So
+/// no configuration of the host home can change an answer of the suite.
+/// `tests/private-home.rs` holds this rule, also with a run of the binary under
+/// a hostile home.
+///
+/// A test that needs a home of its own sets `HOME` on the returned command
+/// (`tests/worktrees-dir-override.rs`). That `.env(...)` call runs after the
+/// scrub here, so it wins for that child.
 pub fn nwt_command(repo: &Path) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_nwt"));
-    cmd.current_dir(repo)
-        .stdin(Stdio::null())
-        // Issue #283: strip the terminal-multiplexer env so a suite launched
-        // from inside zellij/tmux can't make the spawned nwt rename the user's
-        // real tab. Tests that deliberately exercise the multiplexer behavior
-        // re-add ZELLIJ/TMUX after calling this (a later `.env(..)` wins).
-        .env_remove("ZELLIJ")
-        .env_remove("TMUX");
+    let mut cmd = childenv::fixture_command(env!("CARGO_BIN_EXE_nwt"));
+    cmd.current_dir(repo).stdin(Stdio::null());
+    // A git hook exports GIT_* variables, `cargo test` inherits them, and
+    // GIT_DIR beats `current_dir`. Left in place, the spawned nwt would add its
+    // worktree to the real repo, write objects into it, or run under config the
+    // launching shell injected. Shed by prefix, never by name — see `run_git`
+    // above, and `childenv::fixture_command` for the rule.
+    // Same idea for the home: nwt reads ~/.nwt.toml, and its git children read
+    // ~/.gitconfig and $XDG_CONFIG_HOME/git/config. See `private_home` above.
+    cmd.env("HOME", private_home())
+        .env_remove("XDG_CONFIG_HOME");
     cmd
 }
 
-/// A pair of fake `zellij`/`tmux` executables that record every invocation
-/// instead of touching the real multiplexer.
+/// A fake `zellij` executable that records each call, and does not touch the
+/// real multiplexer.
 ///
-/// The dedicated tab-rename tests need to answer "did `nwt` try to rename the
-/// tab?" without actually renaming the tester's real tab — which matters
-/// because the suite is frequently run *from inside* a live zellij session
-/// (that is the very bug). [`FakeMultiplexer`] writes throwaway `zellij` and
-/// `tmux` scripts into a temp dir; a test prepends [`path_env`](Self::path_env)
-/// to the child's `PATH` so `nwt`'s `Command::new("zellij")` /
-/// `Command::new("tmux")` resolve to the fakes. Each fake appends its argv to a
-/// recorder file and exits `0`, so the real socket is never contacted and
-/// [`recorded`](Self::recorded) reports exactly what `nwt` attempted.
+/// `tests/no-zellij.rs` uses it to prove that `nwt` runs no `zellij` command
+/// (issue #633). [`FakeMultiplexer`] writes a `zellij` script into a temporary
+/// directory. A test puts [`path_env`](Self::path_env) on the `PATH` of the
+/// child, so a `zellij` call of the child runs the fake. The fake writes its
+/// arguments into a record and exits `0`. It never reaches a real zellij
+/// session, and [`recorded`](Self::recorded) shows each call.
 ///
-/// Unix-only: the fakes are POSIX `sh` scripts marked executable via the Unix
-/// permission bits. zellij and tmux are Unix-only anyway, so the tab-hijack
-/// this guards against can only occur there.
+/// Unix only: the fake is a POSIX `sh` script, and the Unix permission bits
+/// make it executable. zellij runs only on Unix.
 #[cfg(unix)]
 pub struct FakeMultiplexer {
     /// Owns the temp dir; dropping it deletes the fakes and the recorder.
     _dir: TempDir,
     bin_dir: PathBuf,
+    program: PathBuf,
     recorder: PathBuf,
 }
 
 #[cfg(unix)]
 impl FakeMultiplexer {
-    /// Creates the temp dir, writes executable fake `zellij`/`tmux` scripts into
-    /// it, and points them at a shared recorder file.
+    /// Creates the temp dir, writes an executable fake `zellij` script into it,
+    /// and points the script at a recorder file.
     pub fn new() -> Self {
         use std::os::unix::fs::PermissionsExt;
 
@@ -145,46 +635,50 @@ impl FakeMultiplexer {
         let bin_dir = dir.path().to_path_buf();
         let recorder = bin_dir.join("invocations.log");
 
-        for tool in ["zellij", "tmux"] {
-            let script_path = bin_dir.join(tool);
-            // POSIX sh that appends `<tool> <args>` to the recorder, then exits 0
-            // so the spawning `nwt` believes the multiplexer command succeeded.
-            // `"$*"` joins the args with spaces, which is all the substring-based
-            // assertions need (tab names never contain spaces).
-            let script = format!(
-                "#!/bin/sh\nprintf '%s %s\\n' '{tool}' \"$*\" >> '{recorder}'\nexit 0\n",
-                recorder = recorder.display()
-            );
-            std::fs::write(&script_path, script).expect("Failed to write fake multiplexer script");
-            let mut perms = std::fs::metadata(&script_path)
-                .expect("Failed to stat fake multiplexer script")
-                .permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&script_path, perms)
-                .expect("Failed to mark fake multiplexer script executable");
-        }
+        let tool = "zellij";
+        let script_path = bin_dir.join(tool);
+        // POSIX sh that appends `<tool> <args>` to the recorder, then exits 0,
+        // so a caller finds that the zellij command succeeded. `"$*"` joins
+        // the args with spaces. A test reads the record to find out if it is
+        // empty, and shows it in a failure message.
+        let script = format!(
+            "#!/bin/sh\nprintf '%s %s\\n' '{tool}' \"$*\" >> '{recorder}'\nexit 0\n",
+            recorder = recorder.display()
+        );
+        std::fs::write(&script_path, script).expect("Failed to write fake multiplexer script");
+        let mut perms = std::fs::metadata(&script_path)
+            .expect("Failed to stat fake multiplexer script")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script_path, perms)
+            .expect("Failed to mark fake multiplexer script executable");
 
         Self {
             _dir: dir,
             bin_dir,
+            program: script_path,
             recorder,
         }
     }
 
-    /// A `PATH` value with the fake bin dir prepended to the inherited `PATH`, so
-    /// the fakes shadow any real `zellij`/`tmux` while real tools (e.g. `git`,
-    /// which `nwt` shells out to) still resolve normally.
-    pub fn path_env(&self) -> std::ffi::OsString {
-        let mut joined = std::ffi::OsString::from(&self.bin_dir);
-        if let Some(existing) = std::env::var_os("PATH") {
-            joined.push(":");
-            joined.push(existing);
-        }
-        joined
+    /// The path of the fake `zellij` script.
+    ///
+    /// A test compares this path with the program that `zellij` resolves to on
+    /// [`path_env`](Self::path_env). An empty [`recorded`](Self::recorded) is
+    /// evidence only when the child can find the fake.
+    pub fn program(&self) -> &Path {
+        &self.program
     }
 
-    /// Every recorded invocation, newline-separated. Empty string if no fake was
-    /// ever invoked (the recorder file is only created on first write).
+    /// A `PATH` value with the fake bin dir prepended to the inherited `PATH`, so
+    /// the fake shadows any real `zellij` while real tools (e.g. `git`, which
+    /// `nwt` shells out to) still resolve normally. See [`path_with_first`].
+    pub fn path_env(&self) -> std::ffi::OsString {
+        path_with_first(&self.bin_dir)
+    }
+
+    /// Every recorded invocation, newline-separated. Empty string if the fake was
+    /// never invoked (the recorder file is only created on first write).
     pub fn recorded(&self) -> String {
         std::fs::read_to_string(&self.recorder).unwrap_or_default()
     }
@@ -195,4 +689,29 @@ impl Default for FakeMultiplexer {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// A `PATH` value with `dir` first, and the `PATH` of this test process after
+/// it.
+///
+/// A test sets this value on the child command, and never on this process. A
+/// fake program in `dir` then shadows the real program of that name for the
+/// child, and every other program (`git`, `sh`) still resolves.
+///
+/// The standard library splits and joins the value, so the separator is the
+/// separator of the platform. Unix only: each fake is a POSIX `sh` script.
+///
+/// # Panics
+///
+/// Panics when `dir` holds the `PATH` separator of the platform. Such a
+/// directory splits into two entries in the value, so the fake in it does not
+/// shadow the real program, and the test that uses it passes for the wrong
+/// reason.
+#[cfg(unix)]
+pub fn path_with_first(dir: &Path) -> std::ffi::OsString {
+    let mut dirs = vec![dir.to_path_buf()];
+    if let Some(existing) = std::env::var_os("PATH") {
+        dirs.extend(std::env::split_paths(&existing));
+    }
+    std::env::join_paths(dirs).expect("join the PATH value")
 }

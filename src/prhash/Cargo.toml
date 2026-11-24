@@ -22,10 +22,5 @@ sha2.workspace = true
 termbar.workspace = true
 tokio.workspace = true
 
-[lints.clippy]
-# Prevent potential panics from arithmetic operations (subtraction overflow, etc.)
-arithmetic_side_effects = "warn"
-# Warn about indexing/slicing that could panic
-indexing_slicing = "warn"
-# Warn about string slicing which can panic on UTF-8 character boundaries
-string_slice = "warn"
+[lints]
+workspace = true

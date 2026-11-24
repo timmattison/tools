@@ -22,10 +22,10 @@
 //! the ranking on top.
 
 use std::collections::{BTreeSet, HashMap};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result};
-use gitscratch::{BranchName, Conflicts, Git, Scratch};
+use gitscratch::{BranchName, Conflicts, Repo, Scratch};
 
 use crate::metrics::OrderingScore;
 use crate::plan::{ordering_count, permutations};
@@ -76,20 +76,34 @@ pub fn orderings_to_simulate(branches: &[BranchName]) -> Result<usize> {
 
 /// Measures what a candidate ordering would cost to carry out for real.
 pub struct Simulator {
-    repo: PathBuf,
+    repo: Repo,
     base: String,
     progress: Option<ProgressListener>,
 }
 
 impl Simulator {
-    /// Simulate against `repo`, landing branches on top of `base`.
-    #[must_use]
-    pub fn new(repo: impl Into<PathBuf>, base: impl Into<String>) -> Self {
-        Self {
-            repo: repo.into(),
+    /// Simulate against the repository containing `repo`, landing branches on
+    /// top of `base`.
+    ///
+    /// Opening the repository is `gitscratch`'s pre-flight, and it happens here,
+    /// in the constructor, rather than at the first replay. That is what makes
+    /// "you are not in a repository" answerable *before* a caller has announced
+    /// a run: left to the first replay, the answer arrives as git's own
+    /// complaint from inside `worktree add`, which names `.git` rather than the
+    /// directory the user pointed at and reads as a simulation that fell over
+    /// rather than a bad argument. A `Simulator` that exists is a `Simulator`
+    /// with somewhere to run.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git could not be spawned, or if `repo` is not inside
+    /// a git repository; the message names the directory.
+    pub fn new(repo: impl AsRef<Path>, base: impl Into<String>) -> Result<Self> {
+        Ok(Self {
+            repo: Repo::open(repo.as_ref())?,
             base: base.into(),
             progress: None,
-        }
+        })
     }
 
     /// Report each replay step to `listener` as it happens.
@@ -106,12 +120,6 @@ impl Simulator {
         }
     }
 
-    /// The repository being simulated against.
-    #[must_use]
-    pub fn repo(&self) -> &Path {
-        &self.repo
-    }
-
     /// The base ref that branches land on top of.
     #[must_use]
     pub fn base(&self) -> &str {
@@ -126,9 +134,9 @@ impl Simulator {
     /// created, a branch in `order` does not resolve, or a rebase reaches a
     /// state the resolution loop cannot drive forward.
     pub fn score(&self, order: &[BranchName]) -> Result<OrderingScore> {
-        let scratch = Scratch::create(&self.repo, &self.base)?;
-        let mut simulated_main = scratch.git().rev_parse(&self.base)?;
-        let mut total = Conflicts::default();
+        let scratch = self.repo.scratch(&self.base)?;
+        let mut simulated_main = self.repo.resolve(&self.base)?;
+        let mut total = Conflicts::nothing_replayed();
 
         for branch in order {
             let (next_main, step) = self.land(&scratch, &simulated_main, branch)?;
@@ -153,11 +161,11 @@ impl Simulator {
     pub fn evaluate(&self, branches: &[BranchName]) -> Result<Vec<OrderingScore>> {
         orderings_to_simulate(branches)?;
 
-        let scratch = Scratch::create(&self.repo, &self.base)?;
-        let base_commit = scratch.git().rev_parse(&self.base)?;
+        let scratch = self.repo.scratch(&self.base)?;
+        let base_commit = self.repo.resolve(&self.base)?;
 
         let mut memo: HashMap<Vec<BranchName>, (String, Conflicts)> = HashMap::new();
-        memo.insert(Vec::new(), (base_commit, Conflicts::default()));
+        memo.insert(Vec::new(), (base_commit, Conflicts::nothing_replayed()));
 
         let mut scores = Vec::new();
 
@@ -199,18 +207,18 @@ impl Simulator {
         onto: &str,
         branch: &BranchName,
     ) -> Result<(String, Conflicts)> {
-        let git = scratch.git();
-
         self.report(&format!("replaying {branch}"));
 
-        // Detached, so the real branch ref is never moved.
-        git.run(&["checkout", "-q", "--detach", branch.as_str()])
-            .with_context(|| format!("could not check out '{branch}'"))?;
+        // Detached, so the real branch ref is never moved. The separator that
+        // keeps a dash-leading branch name from being read as an option lives
+        // in `Scratch::check_out_detached`, along with the account of what it
+        // costs when it is missing. Pinned by `tests/simulation.rs`.
+        scratch.check_out_detached(branch.as_str())?;
 
         let cost = scratch
             .replay_rebase(onto)
             .with_context(|| format!("could not replay '{branch}' onto the simulated main"))?;
-        let next_main = squash_into(&git, onto, branch)?;
+        let next_main = squash_into(scratch, onto, branch)?;
 
         Ok((next_main, cost))
     }
@@ -228,14 +236,17 @@ fn into_score(conflicts: &Conflicts, order: Vec<BranchName>) -> OrderingScore {
 
 /// Collapse the checked-out (already rebased) branch into a single commit on
 /// top of `parent`, discarding its ancestry exactly as a squash merge does.
-fn squash_into(git: &Git, parent: &str, branch: &BranchName) -> Result<String> {
-    let tree = git.run(&["rev-parse", "HEAD^{tree}"])?;
-    git.run(&[
-        "commit-tree",
-        &tree,
-        "-p",
-        parent,
-        "-m",
-        &format!("squash {branch}"),
-    ])
+///
+/// Both halves are operations `Scratch` names, so `grist` never holds a git
+/// runner of its own. That is the crate's rule rather than a preference here: a
+/// scratch worktree is a linked worktree of the developer's real repository, and
+/// a runner reaches every command that repository answers.
+///
+/// # Errors
+///
+/// Returns an error if git could not be spawned, if the scratch worktree has no
+/// commit at HEAD, or if git refused to write the commit.
+fn squash_into(scratch: &Scratch, parent: &str, branch: &BranchName) -> Result<String> {
+    let tree = scratch.head_tree()?;
+    scratch.commit_tree(&tree, parent, &format!("squash {branch}"))
 }

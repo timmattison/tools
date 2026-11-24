@@ -3,6 +3,12 @@
 //! Every test uses its own `tempfile::tempdir()` so concurrent runs (including a
 //! background `bacon` loop sharing `./target`) never clobber each other.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "every unwrap in this file is an assertion, not an unhandled error: on fixtures the test just built in its own tempdir, or on the bm API under test, where an Err is the failure being reported (and unwrap_err on the deliberately unrenamable plan asserts the opposite direction). None of them stands in front of a production error path, which is why src/lib.rs raises both lints only under cfg(not(test)). No `.expect` appears here yet; the allow covers it so the first one does not silently change the file's position"
+)]
+
 use bm::{collect_sources, execute_plan, plan_moves, CollisionPolicy, FilterType};
 use std::fs;
 use std::path::Path;

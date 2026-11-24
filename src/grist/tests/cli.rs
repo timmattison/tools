@@ -1,20 +1,82 @@
 //! End-to-end coverage of the binary itself, so the wiring between argument
 //! parsing, simulation and output is exercised the way a user runs it.
 
-use std::process::Command;
-
 use gitscratch::testing::{
     contested_region_repo, equal_hunks_unequal_stops_repo, independent_branches_repo,
+    not_a_repository,
 };
 
 const TIE_ADVICE: &str = "Every order costs the same";
 
+/// Run `grist` in `repo`, with the ambient git environment taken back off.
+///
+/// A `cargo test` run from `.husky/pre-commit` inherits the hook's `GIT_DIR`
+/// and `GIT_INDEX_FILE`, which name the developer's real repository. `grist`
+/// reaches git only through `gitscratch`, which scrubs at the single place it
+/// spawns one, so this is belt to the binary's braces — but it costs one call
+/// and it means what these tests assert does not depend on how the suite was
+/// started.
 fn grist(repo: &std::path::Path, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_grist"))
+    childenv::fixture_command(env!("CARGO_BIN_EXE_grist"))
         .args(args)
         .current_dir(repo)
         .output()
         .expect("failed to run grist")
+}
+
+/// The sentence `--help` opens with, which is the doc comment on `Args`.
+///
+/// clap's derive takes the doc comment on the struct as the help text, unless
+/// the attribute names `about`. A bare `about` takes `CARGO_PKG_DESCRIPTION`
+/// instead, and the doc comment then says nothing to anybody who runs the tool.
+/// Two sentences describe `grist`, one of them is dead, and the dead one is the
+/// one sitting where a developer edits the help.
+///
+/// `grist` names no `about`, so the doc comment is the help. The manifest keeps
+/// a sentence of its own for crates.io and `cargo search`, where the reader has
+/// run nothing.
+const HELP_SUMMARY: &str =
+    "Rank the orders you could squash-merge branches in, cheapest conflicts first";
+
+/// The help a user reads has to be the help a developer edits.
+///
+/// The first line only, because the lines under it are clap's own layout, and
+/// pinning those makes an assertion about the version of clap.
+///
+/// Run outside every repository, because the help is a fact baked in at compile
+/// time and asking for it must not depend on where the binary stands.
+#[test]
+fn help_opens_with_the_summary_the_source_carries_rather_than_the_manifest_one() {
+    assert_ne!(
+        HELP_SUMMARY,
+        env!("CARGO_PKG_DESCRIPTION"),
+        "the two sentences have to differ, or this test cannot tell the help \
+         apart from the manifest wording it exists to keep out of it"
+    );
+
+    let elsewhere = not_a_repository();
+
+    let long = grist(elsewhere.path(), &["--help"]);
+    let short = grist(elsewhere.path(), &["-h"]);
+
+    let stdout = String::from_utf8_lossy(&long.stdout);
+
+    assert!(
+        long.status.success(),
+        "asking for the help is not a question about orderings, so it \
+         succeeds: {}",
+        String::from_utf8_lossy(&long.stderr)
+    );
+    assert_eq!(
+        stdout.lines().next(),
+        Some(HELP_SUMMARY),
+        "the help must open with the sentence the source carries\nstdout:\n{stdout}"
+    );
+    assert_eq!(
+        (short.status.code(), &short.stdout, &short.stderr),
+        (long.status.code(), &long.stdout, &long.stderr),
+        "-h and --help are two spellings of one switch, not two renderings"
+    );
 }
 
 /// `-q` exists so the answer can be piped straight into the next command.
@@ -114,6 +176,72 @@ fn still_calls_it_a_tie_when_the_whole_cost_key_matches() {
     assert!(stdout.contains(TIE_ADVICE), "got:\n{stdout}");
 }
 
+/// The same rule as the library keeps, stated where the user actually meets it:
+/// a replay grist could not carry out may reach them as an explanation, never as
+/// a number.
+///
+/// The branches here touch nothing in common, which is why this is the input
+/// worth testing. Unsealed, this repository is
+/// [`still_calls_it_a_tie_when_the_whole_cost_key_matches`] — every ordering
+/// costs zero and grist rightly says the order does not matter. Sealed, a replay
+/// whose failure got swallowed would collapse to those same zeroes and print
+/// that same shrug, and the user would take "pick whichever you prefer" as an
+/// answer to a question grist never asked git.
+///
+/// So the whole of stdout is the assertion: no table, no winner, no tie advice.
+/// The reason has to go to stderr, where a non-zero exit says the run is not an
+/// answer.
+#[cfg(unix)]
+#[test]
+fn a_failed_replay_never_reaches_the_user_as_a_cost_or_a_shrug() {
+    use gitscratch::testing::branches_behind_main_repo;
+
+    let repo = branches_behind_main_repo();
+
+    // Sealed for the run only. `main` has moved ahead of both branches, so
+    // replaying either has to write a commit and a read-only object database
+    // cannot - while `git worktree add` writes no objects, so what fails is the
+    // replay rather than grist's setup.
+    let sealed = repo.seal_object_store();
+    let output = grist(repo.path(), &["--onto", "main", "alpha", "beta"]);
+    // Released before a single assertion runs, so a failing one cannot leave a
+    // read-only directory behind for the temporary directory to trip over.
+    drop(sealed);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !output.status.success(),
+        "grist replayed nothing, so exiting zero tells the shell the ranking is good. \
+         stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("Hunks"),
+        "no replay finished, so there are no costs to tabulate, got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("Land them in this order"),
+        "grist cannot recommend an order it failed to price, got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains(TIE_ADVICE),
+        "costs that are all zero because nothing was replayed are not a tie, got:\n{stdout}"
+    );
+    assert!(
+        !stderr.trim().is_empty(),
+        "a non-zero exit with nothing said leaves the user guessing what went wrong"
+    );
+    // Named, not merely present. A swallowed replay still fails this run later
+    // on - the squash cannot write against a sealed store either - so a bare
+    // non-zero exit is satisfied by the wrong failure entirely, and only the
+    // replay's own attribution tells the two apart.
+    assert!(
+        stderr.contains("could not replay 'alpha'"),
+        "stderr should name the replay that failed, got:\n{stderr}"
+    );
+}
+
 /// A branch list grist will not simulate has to be turned away cleanly. The
 /// ordering count for 25 branches does not fit in a `usize`, so announcing the
 /// run before the list is validated either panics or prints a wrapped, nonsense
@@ -140,6 +268,45 @@ fn rejects_an_over_limit_branch_count_without_panicking_or_announcing_a_run() {
     assert!(
         !stderr.contains("Simulating"),
         "grist must not announce a run it is about to refuse, got:\n{stderr}"
+    );
+}
+
+/// Somewhere outside every repository there is no ordering to rank, and grist
+/// has to say so in those words before it starts anything.
+///
+/// `gitscratch::Repo` is the pre-flight that produces that answer, and `grist`
+/// is the consumer that skipped it: it went straight to building a scratch
+/// worktree, so the refusal arrived as git's own `not a git repository`
+/// complaint from inside `worktree add` — after the run had already been
+/// announced, and naming `.git` rather than the directory the user pointed at.
+///
+/// All three halves of that matter to somebody reading a terminal. The message
+/// has to be the pre-flight's, so it reads as a bad argument rather than a
+/// simulation that fell over; it has to name the directory, because that is the
+/// thing that was wrong; and nothing may announce a run that cannot happen,
+/// which is the same rule an over-limit branch list is already held to above.
+#[test]
+fn refuses_a_directory_that_is_not_a_repository_before_announcing_a_run() {
+    let elsewhere = not_a_repository();
+
+    let output = grist(elsewhere.path(), &["--onto", "main", "left", "right"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !output.status.success(),
+        "there is no repository to simulate against, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("is not inside a git repository"),
+        "the refusal has to be the pre-flight's, not a failed simulation's, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(&elsewhere.path().display().to_string()),
+        "the refusal has to name the directory it was pointed at, got:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("Simulating"),
+        "grist must not announce a run it cannot start, got:\n{stderr}"
     );
 }
 

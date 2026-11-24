@@ -1,0 +1,13 @@
+. package com.example.calc;
+. 
+. import org.junit.Test;
+. import org.junit.runner.RunWith;
+. import org.springframework.test.context.junit4.SpringRunner;
+. 
+T @RunWith(SpringRunner.class)
+T class RunwithSuite {
+T     @Test
+T     public void contextLoads() {
+T         System.out.println("loaded");
+T     }
+T }

@@ -15,53 +15,11 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-/// Returns the HTTP `Content-Type` for a file, based on its extension.
-///
-/// The lookup is case-insensitive (`.HTML`, `.Png`, and `.JSON` resolve the same
-/// as their lowercase forms). Files with no extension, a non-UTF-8 extension, or
-/// an unrecognized extension fall back to `application/octet-stream`. Textual
-/// types carry a `; charset=utf-8` parameter; binary types do not.
-///
-/// This function never panics.
-#[must_use]
-pub fn content_type_for(path: &Path) -> &'static str {
-    const OCTET_STREAM: &str = "application/octet-stream";
-
-    // A missing or non-UTF-8 extension falls through to the binary fallback.
-    let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
-        return OCTET_STREAM;
-    };
-
-    // Normalize the extension to lowercase for case-insensitive matching.
-    let ext = ext.to_ascii_lowercase();
-    match ext.as_str() {
-        "html" | "htm" => "text/html; charset=utf-8",
-        "css" => "text/css; charset=utf-8",
-        "js" | "mjs" => "text/javascript; charset=utf-8",
-        // application/json is conventionally served without a charset parameter.
-        "json" => "application/json",
-        "txt" => "text/plain; charset=utf-8",
-        "md" => "text/markdown; charset=utf-8",
-        "csv" => "text/csv; charset=utf-8",
-        "xml" => "text/xml; charset=utf-8",
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "svg" => "image/svg+xml",
-        "webp" => "image/webp",
-        "ico" => "image/x-icon",
-        "pdf" => "application/pdf",
-        "wasm" => "application/wasm",
-        "woff" => "font/woff",
-        "woff2" => "font/woff2",
-        "zip" => "application/zip",
-        "gz" => "application/gzip",
-        "mp4" => "video/mp4",
-        "mp3" => "audio/mpeg",
-        "wav" => "audio/wav",
-        _ => OCTET_STREAM,
-    }
-}
+// Content-type lookup and path confinement live in `httpfile`, shared with
+// `localnext`. Re-exported here so `sirn::content_type_for`,
+// `sirn::resolve_under_root`, and `sirn::PathResolution` keep working for
+// every existing caller.
+pub use httpfile::{content_type_for, resolve_under_root, PathResolution};
 
 /// HTML-escapes `s` for safe insertion into element text or a double-quoted
 /// attribute value. Escapes `&`, `<`, `>`, `"`, and `'`.
@@ -197,63 +155,6 @@ fn parent_of(base: &str) -> String {
         Some((prefix, _)) => format!("{prefix}/"),
         None => "/".to_string(),
     }
-}
-
-/// The result of resolving a request URL path against a directory-mode root.
-#[derive(Debug, PartialEq, Eq)]
-pub enum PathResolution {
-    /// The request resolved to this existing, in-root canonical path.
-    Allowed(PathBuf),
-    /// The request tried to escape the root (`..` traversal or a symlink that
-    /// points outside it) -> `403`.
-    Forbidden,
-    /// The request resolved to a path inside the root that does not exist -> `404`.
-    Missing,
-}
-
-/// Resolves an HTTP request URL path against `root`, confining the result to it.
-///
-/// `root` MUST already be canonicalized by the caller. `url_path` is the request
-/// path with any `?query` already stripped (e.g. `/`, `/sub/file.txt`). The path
-/// is rebuilt from only its normal components — a leading `/` (root) and `.`
-/// (current dir) components are skipped, while any `..` (parent) or Windows
-/// prefix component is treated as an escape attempt and rejected. The candidate
-/// is then canonicalized (resolving symlinks) and confirmed to live under `root`;
-/// a symlink pointing outside the root is therefore rejected even though it sits
-/// inside it textually.
-///
-/// Returns [`PathResolution::Forbidden`] for an escape attempt, `Missing` when
-/// the in-root path does not exist, and `Allowed(canonical)` otherwise.
-#[must_use]
-pub fn resolve_under_root(root: &Path, url_path: &str) -> PathResolution {
-    use std::path::Component;
-
-    // Rebuild the request path from only its normal components. A `..` or a
-    // Windows prefix is a textual escape attempt and is rejected outright; the
-    // leading `/` (root) and any `.` (current dir) are simply skipped.
-    let mut sanitized = PathBuf::new();
-    for component in Path::new(url_path).components() {
-        match component {
-            Component::Normal(c) => sanitized.push(c),
-            Component::CurDir | Component::RootDir => {}
-            Component::ParentDir | Component::Prefix(_) => return PathResolution::Forbidden,
-        }
-    }
-
-    let candidate = root.join(&sanitized);
-
-    // A non-existent path canonicalizes to an error -> Missing.
-    let canonical = match candidate.canonicalize() {
-        Ok(canonical) => canonical,
-        Err(_) => return PathResolution::Missing,
-    };
-
-    // A symlink that pointed outside the root now canonicalizes outside it.
-    if !canonical.starts_with(root) {
-        return PathResolution::Forbidden;
-    }
-
-    PathResolution::Allowed(canonical)
 }
 
 /// Error building the route map for files mode.
@@ -493,40 +394,6 @@ pub fn spawn_monitor(
     })
 }
 
-/// Opens `path` only if it is a regular file, returning `None` otherwise.
-///
-/// A directory, a missing path, or any other non-regular entry yields `None`.
-/// This guards the streaming path: advertising a directory's metadata length
-/// and then failing to read its bytes would hang the client waiting for a body
-/// that never arrives.
-fn open_regular_file(path: &Path) -> Option<std::fs::File> {
-    let file = std::fs::File::open(path).ok()?;
-    // A directory opens successfully on Unix, so confirm the entry is a regular
-    // file before letting it onto the streaming path.
-    file.metadata().ok()?.is_file().then_some(file)
-}
-
-/// Streams `path` to `request`, or responds `404` if it is not a regular file.
-///
-/// `path` is opened through [`open_regular_file`], so a missing path, a
-/// directory, or any other non-regular entry yields `404` (never a hung stream).
-/// A regular file (even empty) streams as a `200` with a `Content-Length` (set
-/// by `tiny_http` from the file size) and a `Content-Type` from its extension.
-fn serve_file(path: &Path, request: tiny_http::Request) -> std::io::Result<()> {
-    let Some(file) = open_regular_file(path) else {
-        return request.respond(tiny_http::Response::empty(404));
-    };
-
-    // The header name and value are compile-time-known-valid, so the only
-    // `expect` on the request path can never fire.
-    let content_type =
-        tiny_http::Header::from_bytes(&b"Content-Type"[..], content_type_for(path).as_bytes())
-            .expect("static Content-Type header is always valid");
-
-    let response = tiny_http::Response::from_file(file).with_header(content_type);
-    request.respond(response)
-}
-
 /// Dispatches one request to the handler for the active [`ServeMode`].
 fn respond(mode: &ServeMode, request: tiny_http::Request) -> std::io::Result<()> {
     match mode {
@@ -555,7 +422,8 @@ fn decode_path(raw: &str) -> String {
 /// percent-decoded (see [`decode_path`]), so a browser-encoded name like
 /// `/my%20file.txt` matches its on-disk basename. An unregistered path, or a
 /// registered path whose target is missing or is a directory, yields `404`; a
-/// registered regular file (even empty) streams as a `200` (see [`serve_file`]).
+/// registered regular file (even empty) streams as a `200`, or answers a
+/// `Range` header with `206`/`416` (see [`httpfile::serve_file`]).
 fn respond_files(
     routes: &BTreeMap<String, PathBuf>,
     request: tiny_http::Request,
@@ -566,7 +434,7 @@ fn respond_files(
         return request.respond(tiny_http::Response::empty(404));
     };
 
-    serve_file(file_path, request)
+    httpfile::serve_file(file_path, request)
 }
 
 /// Handles one directory-mode request: resolves the URL path under `root`, then
@@ -579,7 +447,8 @@ fn respond_files(
 /// decoded `..` (e.g. from `%2e%2e`) is still rejected. An escape attempt (`..`
 /// traversal or a symlink pointing outside the root) yields `403`; an in-root
 /// path that does not exist yields `404`. An in-root directory renders an HTML
-/// listing; an in-root regular file streams as a `200` (see [`serve_file`]).
+/// listing; an in-root regular file streams as a `200`, or answers a `Range`
+/// header with `206`/`416` (see [`httpfile::serve_file`]).
 fn respond_directory(root: &Path, request: tiny_http::Request) -> std::io::Result<()> {
     // Own the decoded path so `request` can be moved into the handler below while
     // it is still needed (the listing renderer needs the request path).
@@ -591,7 +460,7 @@ fn respond_directory(root: &Path, request: tiny_http::Request) -> std::io::Resul
             if path.is_dir() {
                 respond_listing(&path, &url_path, request)
             } else {
-                serve_file(&path, request)
+                httpfile::serve_file(&path, request)
             }
         }
     }
@@ -716,138 +585,6 @@ impl AvailabilityMonitor {
             }
         }
         transitions
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::content_type_for;
-    use std::path::Path;
-
-    /// Asserts the Content-Type for a given filename, for readability.
-    fn ct(filename: &str) -> &'static str {
-        content_type_for(Path::new(filename))
-    }
-
-    #[test]
-    fn html_and_htm_are_html() {
-        assert_eq!(ct("index.html"), "text/html; charset=utf-8");
-        assert_eq!(ct("index.htm"), "text/html; charset=utf-8");
-    }
-
-    #[test]
-    fn css_is_css() {
-        assert_eq!(ct("style.css"), "text/css; charset=utf-8");
-    }
-
-    #[test]
-    fn js_and_mjs_are_javascript() {
-        assert_eq!(ct("app.js"), "text/javascript; charset=utf-8");
-        assert_eq!(ct("module.mjs"), "text/javascript; charset=utf-8");
-    }
-
-    #[test]
-    fn json_has_no_charset() {
-        assert_eq!(ct("data.json"), "application/json");
-    }
-
-    #[test]
-    fn txt_is_plain() {
-        assert_eq!(ct("notes.txt"), "text/plain; charset=utf-8");
-    }
-
-    #[test]
-    fn md_is_markdown() {
-        assert_eq!(ct("README.md"), "text/markdown; charset=utf-8");
-    }
-
-    #[test]
-    fn csv_is_csv() {
-        assert_eq!(ct("rows.csv"), "text/csv; charset=utf-8");
-    }
-
-    #[test]
-    fn xml_is_xml() {
-        assert_eq!(ct("feed.xml"), "text/xml; charset=utf-8");
-    }
-
-    #[test]
-    fn image_types() {
-        assert_eq!(ct("logo.png"), "image/png");
-        assert_eq!(ct("photo.jpg"), "image/jpeg");
-        assert_eq!(ct("photo.jpeg"), "image/jpeg");
-        assert_eq!(ct("anim.gif"), "image/gif");
-        assert_eq!(ct("icon.svg"), "image/svg+xml");
-        assert_eq!(ct("pic.webp"), "image/webp");
-        assert_eq!(ct("favicon.ico"), "image/x-icon");
-    }
-
-    #[test]
-    fn document_and_binary_types() {
-        assert_eq!(ct("doc.pdf"), "application/pdf");
-        assert_eq!(ct("mod.wasm"), "application/wasm");
-        assert_eq!(ct("archive.zip"), "application/zip");
-        assert_eq!(ct("blob.gz"), "application/gzip");
-    }
-
-    #[test]
-    fn font_types() {
-        assert_eq!(ct("font.woff"), "font/woff");
-        assert_eq!(ct("font.woff2"), "font/woff2");
-    }
-
-    #[test]
-    fn media_types() {
-        assert_eq!(ct("clip.mp4"), "video/mp4");
-        assert_eq!(ct("song.mp3"), "audio/mpeg");
-        assert_eq!(ct("sound.wav"), "audio/wav");
-    }
-
-    #[test]
-    fn lookup_is_case_insensitive() {
-        assert_eq!(ct("INDEX.HTML"), "text/html; charset=utf-8");
-        assert_eq!(ct("Logo.Png"), "image/png");
-        assert_eq!(ct("DATA.JSON"), "application/json");
-        assert_eq!(ct("Photo.JPEG"), "image/jpeg");
-    }
-
-    #[test]
-    fn text_types_carry_charset() {
-        for name in ["a.html", "a.css", "a.js", "a.txt", "a.md", "a.csv", "a.xml"] {
-            assert!(
-                ct(name).contains("; charset=utf-8"),
-                "{name} should carry a utf-8 charset, got {}",
-                ct(name)
-            );
-        }
-    }
-
-    #[test]
-    fn binary_types_do_not_carry_charset() {
-        for name in ["a.png", "a.jpg", "a.pdf", "a.zip", "a.mp4", "a.wasm"] {
-            assert!(
-                !ct(name).contains("charset"),
-                "{name} should not carry a charset, got {}",
-                ct(name)
-            );
-        }
-    }
-
-    #[test]
-    fn unknown_extension_is_octet_stream() {
-        assert_eq!(ct("mystery.xyz"), "application/octet-stream");
-    }
-
-    #[test]
-    fn no_extension_is_octet_stream() {
-        assert_eq!(ct("README"), "application/octet-stream");
-        assert_eq!(ct("Makefile"), "application/octet-stream");
-    }
-
-    #[test]
-    fn dotfile_without_extension_is_octet_stream() {
-        // A leading-dot file like ".gitignore" has no Path extension.
-        assert_eq!(ct(".gitignore"), "application/octet-stream");
     }
 }
 
@@ -1206,36 +943,6 @@ mod monitor_tests {
 }
 
 #[cfg(test)]
-mod serve_file_tests {
-    use super::open_regular_file;
-    use tempfile::TempDir;
-
-    #[test]
-    fn directory_is_not_opened_as_a_regular_file() {
-        // A directory is openable via `File::open` on Unix, but it is not a
-        // regular file: streaming it would advertise the directory's metadata
-        // length and then hang the client. It must never be opened here.
-        let dir = TempDir::new().expect("temp dir");
-        assert!(open_regular_file(dir.path()).is_none());
-    }
-
-    #[test]
-    fn regular_file_is_opened() {
-        let dir = TempDir::new().expect("temp dir");
-        let path = dir.path().join("x.txt");
-        std::fs::write(&path, b"hi").expect("write file");
-        assert!(open_regular_file(&path).is_some());
-    }
-
-    #[test]
-    fn missing_path_is_not_opened() {
-        let dir = TempDir::new().expect("temp dir");
-        let path = dir.path().join("does-not-exist.txt");
-        assert!(open_regular_file(&path).is_none());
-    }
-}
-
-#[cfg(test)]
 mod mode_tests {
     use super::{decide_mode, ModeDecision, ModeError};
     use std::path::PathBuf;
@@ -1490,140 +1197,6 @@ mod listing_tests {
         assert!(
             html.contains("href=\"/sub/docs/\""),
             "plain ASCII directory href should be unchanged, got:\n{html}"
-        );
-    }
-}
-
-#[cfg(test)]
-mod confinement_tests {
-    use super::{resolve_under_root, PathResolution};
-    use std::path::PathBuf;
-    use tempfile::TempDir;
-
-    /// Creates a temp dir and returns it alongside its canonicalized path.
-    ///
-    /// The root MUST be canonicalized: on macOS `TempDir` lives under `/var`,
-    /// which is a symlink to `/private/var`, so an uncanonicalized root would make
-    /// every `starts_with` check fail spuriously.
-    fn canonical_root() -> (TempDir, PathBuf) {
-        let dir = TempDir::new().expect("temp dir");
-        let root = dir.path().canonicalize().expect("canonicalize root");
-        (dir, root)
-    }
-
-    #[test]
-    fn root_request_resolves_to_the_root() {
-        let (_dir, root) = canonical_root();
-        assert_eq!(
-            resolve_under_root(&root, "/"),
-            PathResolution::Allowed(root.clone())
-        );
-    }
-
-    #[test]
-    fn in_root_file_resolves_to_its_canonical_path() {
-        let (_dir, root) = canonical_root();
-        let file = root.join("a.txt");
-        std::fs::write(&file, b"hi").expect("write file");
-        let expected = file.canonicalize().expect("canonicalize file");
-        assert_eq!(
-            resolve_under_root(&root, "/a.txt"),
-            PathResolution::Allowed(expected)
-        );
-    }
-
-    #[test]
-    fn nested_in_root_file_resolves() {
-        let (_dir, root) = canonical_root();
-        let sub = root.join("sub");
-        std::fs::create_dir(&sub).expect("create sub dir");
-        let file = sub.join("b.txt");
-        std::fs::write(&file, b"hi").expect("write file");
-        let expected = file.canonicalize().expect("canonicalize file");
-        assert_eq!(
-            resolve_under_root(&root, "/sub/b.txt"),
-            PathResolution::Allowed(expected)
-        );
-    }
-
-    #[test]
-    fn parent_traversal_is_forbidden() {
-        let (_dir, root) = canonical_root();
-        assert_eq!(
-            resolve_under_root(&root, "/../../etc/passwd"),
-            PathResolution::Forbidden
-        );
-    }
-
-    #[test]
-    fn dotdot_anywhere_is_forbidden() {
-        let (_dir, root) = canonical_root();
-        assert_eq!(
-            resolve_under_root(&root, "/sub/../../x"),
-            PathResolution::Forbidden
-        );
-    }
-
-    #[test]
-    fn missing_in_root_path_is_missing() {
-        let (_dir, root) = canonical_root();
-        assert_eq!(
-            resolve_under_root(&root, "/does-not-exist.txt"),
-            PathResolution::Missing
-        );
-    }
-
-    #[test]
-    fn absolute_looking_request_stays_in_root() {
-        let (_dir, root) = canonical_root();
-        // `/etc/passwd` must be rebuilt under the root, never resolving to the
-        // real system file. Since `root/etc/passwd` does not exist, this is
-        // `Missing`; it must never be an Allowed path outside the root.
-        let resolution = resolve_under_root(&root, "/etc/passwd");
-        assert_ne!(
-            resolution,
-            PathResolution::Allowed(PathBuf::from("/etc/passwd"))
-        );
-        if let PathResolution::Allowed(path) = &resolution {
-            assert!(
-                path.starts_with(&root),
-                "an Allowed path must stay under the root, got {path:?}"
-            );
-        }
-        assert_eq!(resolution, PathResolution::Missing);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn symlink_escape_is_forbidden() {
-        let (_dir, root) = canonical_root();
-        // A secret directory living OUTSIDE the served root.
-        let outside = TempDir::new().expect("outside temp dir");
-        let secret = outside.path().join("secret.txt");
-        std::fs::write(&secret, b"top secret").expect("write secret");
-
-        // A symlink that sits textually inside the root but points outside it.
-        std::os::unix::fs::symlink(outside.path(), root.join("link")).expect("create symlink");
-
-        // The symlink target canonicalizes outside the root, so it is rejected.
-        assert_eq!(
-            resolve_under_root(&root, "/link"),
-            PathResolution::Forbidden
-        );
-        assert_eq!(
-            resolve_under_root(&root, "/link/secret.txt"),
-            PathResolution::Forbidden
-        );
-    }
-
-    #[test]
-    fn utf8_request_path_does_not_panic() {
-        let (_dir, root) = canonical_root();
-        // A multi-byte request path for a file that does not exist must resolve
-        // to `Missing` without any byte-index slicing panic.
-        assert_eq!(
-            resolve_under_root(&root, "/日本語.txt"),
-            PathResolution::Missing
         );
     }
 }

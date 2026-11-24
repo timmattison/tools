@@ -1,0 +1,333 @@
+//! One GitHub Actions run, as the board and the source share it.
+//!
+//! GitHub names many statuses and conclusions. The board needs only seven
+//! states, thus [`RunState`] folds the GitHub values into those seven.
+
+use std::collections::HashSet;
+use std::hash::Hash;
+
+use chrono::{DateTime, Utc};
+
+use crate::target::RepoName;
+
+/// The time from one instant to a later one. A clock that runs behind makes
+/// a negative span, and that gives zero.
+#[must_use]
+pub fn span(from: DateTime<Utc>, to: DateTime<Utc>) -> std::time::Duration {
+    std::time::Duration::from_secs(u64::try_from((to - from).num_seconds()).unwrap_or(0))
+}
+
+/// The database ID that GitHub gives to one workflow run.
+///
+/// The run URL (`/actions/runs/<ID>`) and the jobs endpoint take this ID. The
+/// board shows it at the right end of the workflow cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RunId(pub u64);
+
+/// Whether a repository is public or private.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Visibility {
+    /// Anybody can read the repository. A standard runner is free there.
+    Public,
+    /// Only people with access can read the repository. This is the value when
+    /// GitHub does not say.
+    Private,
+}
+
+/// What a run is doing now, or how it ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunState {
+    /// The run waits for a runner, for an approval, or for another run of its
+    /// concurrency group.
+    Queued,
+    /// The run is in progress.
+    Running,
+    /// The run finished and succeeded.
+    Passed,
+    /// The run finished and failed, timed out, or did not start.
+    Failed,
+    /// The run finished because somebody cancelled it.
+    Cancelled,
+    /// The run finished because GitHub skipped it, for example a job whose
+    /// `if:` condition is false, or a job that needs a failed job.
+    Skipped,
+    /// Any other state, for example a neutral run or a value that GitHub does
+    /// not document.
+    Other,
+}
+
+impl RunState {
+    /// Folds a GitHub `status` and `conclusion` into a state.
+    ///
+    /// A value that GitHub does not document gives [`RunState::Other`].
+    /// This function never fails.
+    #[must_use]
+    pub fn from_github(status: &str, conclusion: Option<&str>) -> RunState {
+        match status {
+            "completed" => match conclusion {
+                Some("success") => RunState::Passed,
+                Some("failure" | "timed_out" | "startup_failure") => RunState::Failed,
+                Some("cancelled") => RunState::Cancelled,
+                Some("skipped") => RunState::Skipped,
+                _ => RunState::Other,
+            },
+            "queued" | "waiting" | "pending" | "requested" => RunState::Queued,
+            "in_progress" => RunState::Running,
+            _ => RunState::Other,
+        }
+    }
+
+    /// Returns true while the run waits or runs.
+    #[must_use]
+    pub fn is_active(self) -> bool {
+        matches!(self, RunState::Queued | RunState::Running)
+    }
+
+    /// Returns true when the run passed, failed, or was cancelled. The board
+    /// shows these runs in its recent section.
+    ///
+    /// A skipped run is not finished in this sense. It is not active either,
+    /// thus the board does not show it.
+    #[must_use]
+    pub fn is_finished(self) -> bool {
+        matches!(
+            self,
+            RunState::Passed | RunState::Failed | RunState::Cancelled
+        )
+    }
+
+    /// Returns the state that the board shows for a run with this GitHub
+    /// state and the states of its jobs.
+    ///
+    /// GitHub reports a run as queued while any job of the run waits for a
+    /// runner, also when other jobs of the run are in progress. A queued run
+    /// with at least one running job thus shows as [`RunState::Running`].
+    /// A run that GitHub reports as finished keeps its state, because old job
+    /// data never changes a finished run. In every other case the shown state
+    /// is the GitHub state.
+    #[must_use]
+    pub fn shown_with_jobs(self, jobs: impl IntoIterator<Item = RunState>) -> RunState {
+        match self {
+            RunState::Queued if jobs.into_iter().any(|job| job == RunState::Running) => {
+                RunState::Running
+            }
+            _ => self,
+        }
+    }
+}
+
+/// One workflow run of one repository.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Run {
+    /// The database ID from GitHub. The run URL and the jobs endpoint take it.
+    pub id: RunId,
+    /// The repository that holds the run.
+    pub repo: RepoName,
+    /// Whether the repository of the run is public or private, from
+    /// `repository.private`. A run whose JSON gives no such value counts as
+    /// private. The cost is an estimate at list price, and a private repository
+    /// shows the list price instead of a `$0` that can hide a cost.
+    pub visibility: Visibility,
+    /// The name of the workflow.
+    pub workflow: String,
+    /// The head branch. The text is empty when GitHub gives none.
+    pub branch: String,
+    /// The display title of the run. The name of the workflow is the fallback.
+    pub title: String,
+    /// What the run is doing now, or how it ended.
+    pub state: RunState,
+    /// When the run started. The creation time is the fallback.
+    pub started_at: DateTime<Utc>,
+    /// When GitHub made the run. A re-run does not change it.
+    pub created_at: DateTime<Utc>,
+    /// When the run last changed at GitHub. This is not the end of a finished
+    /// run, because GitHub can change it after the last job of the run ended.
+    /// On 2026-11-06, 4 of 29 finished runs of one repository had an update
+    /// from 59 s to 18 minutes after their last job ended. The board gives the
+    /// end of a finished run from its jobs, and uses this time only when the
+    /// jobs do not give an end.
+    pub updated_at: DateTime<Utc>,
+    /// The address of the run page on GitHub.
+    pub url: String,
+}
+
+/// Keeps the first item of each ID and drops the later items of the same ID.
+///
+/// The function takes the ID of an item from `id`. The order of the kept items
+/// does not change. A paged list can hold one item two times when the item
+/// moves from one page to the next between two requests. The board needs one
+/// row for each ID.
+pub fn keep_first_of_each_id<T, K: Eq + Hash>(items: &mut Vec<T>, id: impl Fn(&T) -> K) {
+    let mut seen = HashSet::new();
+    items.retain(|item| seen.insert(id(item)));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run_with(id: u64, title: &str) -> Run {
+        let time = DateTime::<Utc>::UNIX_EPOCH;
+        Run {
+            visibility: crate::run::Visibility::Private,
+            id: RunId(id),
+            repo: RepoName::parse("o/r").expect("a valid repository"),
+            workflow: "ci".to_owned(),
+            branch: "main".to_owned(),
+            title: title.to_owned(),
+            state: RunState::Running,
+            started_at: time,
+            created_at: time,
+            updated_at: time,
+            url: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_first_run_of_an_id_stays() {
+        let mut runs = vec![run_with(5, "first"), run_with(5, "second")];
+        keep_first_of_each_id(&mut runs, |run| run.id);
+        assert_eq!(runs, [run_with(5, "first")]);
+    }
+
+    #[test]
+    fn the_order_of_the_kept_runs_does_not_change() {
+        let mut runs = vec![
+            run_with(7, "a"),
+            run_with(3, "b"),
+            run_with(7, "c"),
+            run_with(9, "d"),
+            run_with(3, "e"),
+        ];
+        keep_first_of_each_id(&mut runs, |run| run.id);
+        let ids: Vec<u64> = runs.iter().map(|run| run.id.0).collect();
+        assert_eq!(ids, [7, 3, 9]);
+    }
+
+    #[test]
+    fn each_active_status_maps_to_its_state() {
+        let cases = [
+            ("queued", RunState::Queued),
+            ("waiting", RunState::Queued),
+            ("pending", RunState::Queued),
+            ("requested", RunState::Queued),
+            ("in_progress", RunState::Running),
+        ];
+        for (status, expected) in cases {
+            assert_eq!(RunState::from_github(status, None), expected, "{status}");
+        }
+    }
+
+    #[test]
+    fn a_completed_run_maps_by_its_conclusion() {
+        let cases = [
+            ("success", RunState::Passed),
+            ("failure", RunState::Failed),
+            ("timed_out", RunState::Failed),
+            ("startup_failure", RunState::Failed),
+            ("cancelled", RunState::Cancelled),
+            ("skipped", RunState::Skipped),
+            ("neutral", RunState::Other),
+            ("action_required", RunState::Other),
+            ("stale", RunState::Other),
+        ];
+        for (conclusion, expected) in cases {
+            assert_eq!(
+                RunState::from_github("completed", Some(conclusion)),
+                expected,
+                "{conclusion}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_value_that_github_does_not_document_maps_to_other() {
+        assert_eq!(RunState::from_github("brand_new", None), RunState::Other);
+        assert_eq!(
+            RunState::from_github("brand_new", Some("success")),
+            RunState::Other
+        );
+        assert_eq!(
+            RunState::from_github("completed", Some("brand_new")),
+            RunState::Other
+        );
+        assert_eq!(RunState::from_github("completed", None), RunState::Other);
+        assert_eq!(RunState::from_github("", None), RunState::Other);
+    }
+
+    #[test]
+    fn only_queued_and_running_are_active() {
+        assert!(RunState::Queued.is_active());
+        assert!(RunState::Running.is_active());
+        assert!(!RunState::Passed.is_active());
+        assert!(!RunState::Failed.is_active());
+        assert!(!RunState::Cancelled.is_active());
+        assert!(!RunState::Skipped.is_active());
+        assert!(!RunState::Other.is_active());
+    }
+
+    #[test]
+    fn only_passed_failed_and_cancelled_are_finished() {
+        assert!(RunState::Passed.is_finished());
+        assert!(RunState::Failed.is_finished());
+        assert!(RunState::Cancelled.is_finished());
+        assert!(!RunState::Queued.is_finished());
+        assert!(!RunState::Running.is_finished());
+        assert!(!RunState::Skipped.is_finished());
+        assert!(!RunState::Other.is_finished());
+    }
+
+    #[test]
+    fn the_shown_state_of_a_run_comes_from_its_state_and_its_jobs() {
+        use RunState::{Cancelled, Failed, Other, Passed, Queued, Running, Skipped};
+        let rows: [(&str, RunState, Vec<RunState>, RunState); 9] = [
+            (
+                "queued run, a job runs",
+                Queued,
+                vec![Running, Queued],
+                Running,
+            ),
+            (
+                "queued run, no job runs",
+                Queued,
+                vec![Queued, Passed],
+                Queued,
+            ),
+            ("queued run, no job data yet", Queued, vec![], Queued),
+            (
+                "running run, a job waits",
+                Running,
+                vec![Passed, Queued],
+                Running,
+            ),
+            (
+                "passed run, stale running job",
+                Passed,
+                vec![Running],
+                Passed,
+            ),
+            (
+                "failed run, stale running job",
+                Failed,
+                vec![Running],
+                Failed,
+            ),
+            (
+                "cancelled run, stale running job",
+                Cancelled,
+                vec![Running],
+                Cancelled,
+            ),
+            (
+                "skipped run, stale running job",
+                Skipped,
+                vec![Running],
+                Skipped,
+            ),
+            ("other run, stale running job", Other, vec![Running], Other),
+        ];
+        for (name, state, jobs, expected) in rows {
+            assert_eq!(state.shown_with_jobs(jobs), expected, "{name}");
+        }
+    }
+}

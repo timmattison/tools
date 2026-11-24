@@ -12,26 +12,562 @@ guarantees instead of each reimplementing a weaker version.
 ## The interface
 
 ```rust
-use gitscratch::Scratch;
+use gitscratch::{Repo, Report};
 
+// The pre-flight first — it is also the only route to a worktree. See below.
 // A detached worktree at `main`, in a temp directory, torn down on drop.
-let scratch = Scratch::create(repo_path, "main")?;
+let scratch = Repo::open(repo_path)?.scratch("main")?;
 
 // Check the candidate out detached, then replay it.
-scratch.git().run(&["checkout", "-q", "--detach", "feature"])?;
+scratch.check_out_detached("feature")?;
 let conflicts = scratch.replay_rebase("main")?;
 
-println!(
-    "{} hunks across {} files, {} stops",
-    conflicts.hunks(),
-    conflicts.files(),
-    conflicts.stops()
-);
+if conflicts.is_clean() {
+    // Nothing conflicted.
+} else {
+    for (file, hunks) in conflicts.file_hunks() {
+        // `file` is a `&Path` — git's own bytes, never decoded. `hunks` is a
+        // `Hunks` — the same type the headline total comes back as, so it
+        // already knows its own noun.
+        println!("name: {} bytes, {}", file.as_os_str().len(), hunks.phrase());
+    }
+}
+
+// A file name is text out of the repository. The renderer converts each name
+// only when it prints it, and it escapes each control character in the name.
+// So no escape sequence in a name gets to the terminal.
+let report = Report::for_tool("grind").describing("replaying HEAD onto main");
+println!("{}", report.render(&conflicts));
 ```
 
-`Scratch` is the only door in. It hands out a `Git` that already carries the
-whole safety configuration, so there is no way to get a worktree from here
-without also getting the hardening — which is the point.
+The loop prints only values that hold no text out of the repository, because a
+file name can hold an ESC. [The report](#the-report) gives the rules of
+`Report::render` and the text that it gives.
+
+A rebase is one of the two questions this crate answers. The other is the
+merge, and it is a straight line where the rebase is a loop:
+
+```rust
+// A worktree standing where the merge would happen, and the cost of merging
+// `feature` into it.
+let conflicts = Repo::open(repo_path)?.scratch("HEAD")?.replay_merge("feature")?;
+```
+
+`replay_rebase` replays one commit at a time and can halt at every one of them,
+so it walks the halts and folds a cost per stop. `replay_merge` makes a single
+three-way merge of two trees, so it has one halt to count and one set of
+conflicted files to read — which is why its stop count is only ever one or zero
+and tells a reader nothing the verdict has not said already. Both answer with
+the same `Conflicts`, and that is what lets `grind` and `grime` print one shape.
+
+Two flags on that merge are load-bearing. `--no-ff` is there because git takes a
+merge whose branch is strictly ahead as a fast-forward, and a fast-forward
+merges no trees at all: it moves HEAD to the other tip and stops. The verdict is
+the same either way — such a merge has HEAD as its own merge base, so ours
+equals base and the three-way merge is conflict-free by construction — but the
+flag is what makes `replay_merge` perform the operation its name promises, and
+so leave what a halted merge leaves: `MERGE_HEAD`, and a worktree standing where
+the replay started. A fast-forward leaves the other branch checked out instead,
+which is what a caller that reads the worktree rather than the verdict sees —
+`head_tree` would answer with the other branch's tree. Nothing pairs the two
+today, so the flag protects the next caller rather than a defect on hand.
+`--end-of-options` is there because the branch name arrives from a caller and a
+caller can spell a revision that starts with a dash, which git reads as an
+option of `merge`. Every caller-supplied revision in this crate carries that
+separator for the same reason.
+
+A merge git will not perform at all is neither verdict. It leaves no unmerged
+path, so there is nothing for a person to resolve, and it wrote nothing, so
+nothing is clean either. `replay_merge` returns an error carrying git's own two
+streams — "refusing to merge unrelated histories" is the plain case, and a
+branch name that resolves to nothing is the other — because that sentence is the
+only part of the answer that says which refusal this was. `replay_rebase`
+refuses the same shape of state for the same reason.
+
+A rebase has two roles that `replay_rebase` gives to one revision. The upstream
+sets which commits git replays, which are the commits of `upstream..HEAD`. The
+new base sets where they land. `replay_rebase(upstream)` uses one revision for
+both, as `git rebase <upstream>` does. `replay_rebase_onto(new_base, upstream)`
+gives the two roles to two revisions, as `git rebase --onto <new_base>
+<upstream>` does:
+
+```rust
+// `feature` started on `parent`, and `parent` got a squash merge into `main`.
+// The squash commit holds the change of each commit of `parent` under a
+// different patch, so git does not drop them, and a plain replay onto `main`
+// stops on each one. With `parent` as the upstream, only the commits of
+// `feature` replay.
+scratch.check_out_detached("feature")?;
+let conflicts = scratch.replay_rebase_onto("main", "parent")?;
+```
+
+The arguments come in the order git takes them. The new base goes to git joined
+to its option, as `--onto=<new_base>`, so the value binds to the option whatever
+its first character is. The upstream goes after `--end-of-options`, as it does
+in the one-revision form. Both forms run the same loop, so they count stops,
+hunks and files by the same rules.
+
+A replay can also capture the **halt diff** of each halt: the text `git diff`
+shows at that halt in a real rebase or merge. Three entrances capture it, one
+beside each plain entrance — `replay_rebase_with_diffs`,
+`replay_rebase_onto_with_diffs` and `replay_merge_with_diffs`:
+
+```rust
+let (conflicts, diffs) = scratch.replay_rebase_with_diffs("main")?;
+for halt in diffs.iter() {
+    // `Some` at a rebase stop: the short id and the subject of the stopped
+    // commit. A merge halt has none.
+    let named = halt.stopped().is_some();
+    match halt.diff() {
+        // The bytes git wrote, not trimmed and not decoded.
+        Ok(bytes) => println!("named: {named}, diff: {} bytes", bytes.len()),
+        // Git gave no diff, and the message from git is here. The halt still
+        // counts.
+        Err(_message) => println!("named: {named}, no diff"),
+    }
+}
+
+// The name, the diff and the message are text out of the repository. The
+// renderer escapes them, so no escape sequence in them gets to the terminal.
+let report = Report::for_tool("grind").describing("replaying HEAD onto main");
+if let Some(text) = report.render_diffs(&diffs) {
+    println!("{text}");
+}
+
+let (conflicts, diffs) = Repo::open(repo_path)?
+    .scratch("HEAD")?
+    .replay_merge_with_diffs("feature")?;
+```
+
+The loop prints only values that hold no text out of the repository, because a
+commit subject can hold an ESC, and so can file content and the message from
+git. [The halt diffs](#the-halt-diffs) gives the rules of
+`Report::render_diffs` and the text that it gives.
+
+The capture is opt-in. `replay_rebase` and `replay_merge` keep their
+signatures and their cost, and capture nothing. `grist` calls `replay_rebase`
+once for each step of each ordering and prints no diff, so it pays nothing for
+the capture. The halt diffs come back in a `HaltDiffs` beside the `Conflicts`,
+not inside it. `grist` folds `Conflicts` values with `absorb` and ranks the
+orderings on them, and a diff inside that type puts a copy of each diff into
+each ordering that `grist` keeps. The replay that captures is the same rebase
+loop, or the same merge, as the plain replay. Only the capture is on, so the
+two count the same halts the same way.
+
+At a rebase stop, the capture sits above the `git add -A` that stages the
+markers, because after that line `git diff` shows nothing for the stop. A
+capture below it gives an empty halt diff at every stop. The diff call carries
+`--diff-filter=U`, the filter the counter reads the conflicted files with, so a
+halt diff names the files the breakdown counts at that halt and no other file.
+Its other flags pin the settings of the developer that change the text of a
+diff, so one halt gives the same bytes on each machine.
+[What it guarantees](#what-it-guarantees) lists each pin. A diff that git
+cannot give does not stop the replay. The halt diff holds git's error in its
+place, and the counts and the exit code stay the same.
+
+`HaltDiff::from_parts` and `HaltDiffs::from_halts` build halt diffs by hand for
+the tests of a renderer. The `testing` feature gates them the way it gates
+`Conflicts::from_files`, so a released binary gets a halt diff from a replay
+and from nothing else.
+
+A `Conflicts` records how many times the replay halted and, for every file that
+conflicted, how many hunks it contributed. The headline totals — `hunks()`,
+`files()`, `stops()` — are summaries of that breakdown rather than numbers
+tracked beside it, so the total and the list underneath it cannot tell a reader
+two different stories.
+
+Every count that crosses the boundary is one of the newtypes in `metrics`, in
+both directions: `file_hunks()` yields a `&Path` and a `Hunks` for the same
+reason `hunks()` does, so a renderer never throws the type away and immediately
+rebuilds it, and counts that are all `usize` underneath can never be transposed
+on the way in or out. That holds off the conflict path too —
+`Repo::uncommitted_files()` returns an `Uncommitted`, whose noun is the whole
+`"uncommitted file"`, so the one count that is *not* about conflicts still
+arrives knowing what to call itself.
+
+A counter has no `Display`, and that is what makes the paragraph above true
+rather than merely intended. A count comes back out of one only through a method
+that names the rendering: `phrase()` for a sentence, which supplies the noun and
+the `s` it takes in the plural, and `digits()` for a table cell whose column
+heading carries the noun already. With a `Display` on the counters,
+`format!("{} across {}", c.hunks(), c.files())` compiles and prints
+`4 across 2` — the exact wording failure these types exist to stop — and `{}` is
+the spelling a caller reaches for first while `phrase()` is the one they have to
+remember. Neither rendering is free now, so a caller chooses one. `BranchName`
+keeps its `Display`, because that type *is* its string.
+
+`is_clean()` reads the file set rather than the counts, and the agreement
+between them is structural rather than observed. Adding to the breakdown is the
+one door in, and it floors every entry at one hunk, so hunks are non-zero
+exactly when the set is non-empty — on the replay path and in a hand-built
+fixture alike.
+
+A `Conflicts` a consumer holds is one a replay produced. There is no `Default`
+derive on it, because the value that derive hands out — no files, no stops — is
+the clean verdict, the one that renders "hit no conflicts" and exits 0, and a
+derive puts it behind the spelling every caller reaches for first and behind
+every generic route to it besides. The seed a fold really does need is
+`Conflicts::nothing_replayed()`, which says at the call site that nothing has
+been replayed into it. `Conflicts::from_files()`, the constructor that states a
+breakdown, is compiled only under the `testing` feature — and that gate is a
+boundary rather than a form of words only because no derive stands beside it.
+A `compile_fail` doc-test holds the derive out — see **Testing** below.
+
+`Scratch` is the only way to get a worktree, and `Repo::scratch` is the only way
+to get a `Scratch`. A `Scratch` answers the operations it names —
+`check_out_detached`, `replay_rebase`, `replay_rebase_with_diffs`,
+`replay_rebase_onto`, `replay_rebase_onto_with_diffs`, `replay_merge`,
+`replay_merge_with_diffs`, `head_tree`, `commit_tree`,
+`apply_patch`, `apply_patch_three_way`, `restore`, `bisect_all`, `bisect_steps` — and
+each of them builds its own git call under the whole safety configuration. So there is no way to get a worktree from here without also
+getting the hardening — nor without first having established that the directory
+is a repository at all, which is the pre-flight's job below.
+
+What a `Scratch` does **not** hand back is the runner that makes those calls. A
+scratch worktree is a *linked* worktree of the developer's real repository, so
+it shares that repository's refs, configuration and object store — and the
+hardening is configuration. It pins the settings that make a *replay*
+non-destructive, and it says nothing at all about `branch -D`, `update-ref`,
+`config --local` or `push`, because those are different commands and no setting
+refuses them. A consumer holding a runner reaches every one of them, in the
+developer's own repository.
+
+So the runner stays inside the crate, and both halves of that are needed.
+`Git::new` is crate-private, so nothing outside can *build* one; and `Scratch`
+answers with the operation rather than with the thing that performs it, so
+nothing outside is *handed* one. The crate carried the first half alone for a
+while, and the promise was false for the whole of it. A `compile_fail`
+doc-test on `Scratch` now holds the second half — see **Testing** below. An
+operation this list is missing is a pull request, not a reason to reopen the
+door.
+
+The rest of this section is the runner's own rules. A consumer never calls it,
+but a reader auditing the harness needs them, because they are what the named
+operations above are built on.
+
+Every reader on the runner takes the **subcommand as its own parameter**, ahead
+of the arguments, and that shape is a guard rather than a courtesy. Git reads
+whatever stands ahead of the subcommand as *its* options, and its rule for two
+`-c` pairs naming one key is that the last pair wins — so a caller whose
+arguments reached that position could re-pin every setting in the table below,
+`rebase.updateRefs=false` included, and could aim the runner at any repository
+on the machine with `-C`. Naming the subcommand separately puts every caller
+argument after it, where git reads it as an argument of the subcommand. The
+bypass therefore does not compile, rather than being refused at run time.
+
+The runner reads a **list of paths** back out of git through one of two
+readers. Each one inserts `-z` right after the subcommand and splits stdout on
+NUL without trimming anything. `nul_separated_paths` then takes each field as
+the path those bytes spell:
+
+```rust
+let conflicted = git.nul_separated_paths("diff", &["--name-only", "--diff-filter=U"])?;
+```
+
+That reader is byte-exact in both halves. `nul_separated` underneath it hands
+back `Vec<Vec<u8>>` — git's bytes, for output whose fields are not all paths,
+such as a `status --porcelain -z` record of `XY <path>` — and
+`nul_separated_paths` converts each field with no decoding step at all, because
+on unix a path *is* an arbitrary byte string. Decoding one lossily would put
+`U+FFFD` where the bytes were, which is the same two-part failure C-quoting
+causes: a name nobody typed, and a name that opens no file.
+
+`paths` is the second list reader, and what separates it from the first is what
+it does with such a name. It asks git the same way and then decodes each field
+to a `String`, and it **fails** on a name that is not valid UTF-8 rather than
+repairing it. The refusal is the whole reason for a second reader: `-z` undoes
+the quoting and the trimming, but a byte outside UTF-8 has no `String` to come
+back *as*, so a repaired name carries `U+FFFD` where the bytes were and names
+no file at all. The empty-commit probe takes this reader, because it intersects
+two path lists and then names the difference in a sentence a developer reads. A
+conflicted path takes `nul_separated_paths`, because the report has to carry the
+name git holds all the way to the screen.
+
+There is deliberately no line-oriented equivalent, because one cannot be made
+correct. Git C-quotes a path containing `"`, `\` or a control character no
+matter how `core.quotePath` is set, so a quoted name arrives naming no file on
+disk; and a name that merely begins or ends with whitespace arrives intact and
+is destroyed by the reader instead, since Rust's `str::trim` is Unicode-aware
+and strips `U+3000` as readily as a space. Either way the path cannot be opened,
+and in this crate a conflicted file that cannot be opened is floored at one hunk
+— a wrong total that looks entirely plausible. `-z` is the one mode with no
+quoting and a separator no path can contain, so every reader for a *list* asks
+git for it.
+
+**One** path is a different question, and it has a third reader of its own,
+`path`. `rev-parse` has no `-z` at all — it prints the flag back as an
+unknown option and exits 0, so a NUL-delimited read of it hands back `-z` and
+the path as two fields — and a single answer needs no separator anyway, since
+the end of stdout ends the path. So `path` takes git's raw stdout, strips
+exactly one trailing newline, and hands the rest to the same byte-for-byte
+conversion:
+
+```rust
+let state = git.path("rev-parse", &["--git-path", "rebase-merge"])?;
+```
+
+One newline rather than a trim, because every other byte of that answer belongs
+to the name. `run` and `try_run` trim *and* decode lossily, and are for output
+meant for a human. Reading a path back through either of them is a bug, and the
+replay read the halted rebase's state directory that way for a while: in a
+linked worktree git builds that answer out of the *developer's* own repository
+path, so a byte outside UTF-8 anywhere in that path came back as `U+FFFD` and
+named a directory nothing holds. `exists()` was then false, the replay reported
+no rebase in progress, and a real halt was announced as "the rebase failed
+without leaving a rebase to resolve".
+
+The two losses do not reach the same answers, which is exactly why the guard is
+one reader rather than a rule per call site. `--git-path` glues a state
+directory name onto the end of its answer, so the repository's own last
+character sits in the middle and no trim reaches it there — while
+`rev-parse --show-toplevel` ends on that character, and a trimming reader takes
+it off. A call site that reasoned about which loss its own question is open to
+would have to be right twice, every time. Taking the reader is right once.
+
+A **halt diff** is a fourth question, and it has a fourth reader, `verbatim`.
+It returns git's stdout as the bytes git wrote, not trimmed and not decoded.
+When git exits non-zero, it returns an error that carries git's stderr. The
+halt diff is text that goes to a person verbatim, and each other reader changes
+it: `run` trims and decodes, the list readers split on NUL, and `path` removes
+a newline. `Report::render_diffs` decodes the diff at print time, and it
+escapes the diff, so no escape sequence in it gets to the terminal.
+
+A caller that wants progress builds its scratch worktree with
+`Repo::scratch_with_progress`. The observer gets one report at the start of each
+phase. A rebase also sends the position of the commit that git replays now.
+`Repo::scratch` sends no reports, so `gsw`, `grist`, and `bibibi` show no
+progress:
+
+```rust
+use gitscratch::{ReplayObserver, ReplayProgress, Repo};
+
+struct Print;
+
+impl ReplayObserver for Print {
+    // The call must return fast, because the replay waits for it.
+    fn report(&self, progress: ReplayProgress) {
+        eprintln!("{progress:?}");
+    }
+}
+
+let scratch = Repo::open(repo_path)?.scratch_with_progress("main", Print)?;
+```
+
+A report never changes the answer of a replay. The observer only listens.
+
+## The pre-flight
+
+Not every question is worth a worktree. `Repo` answers the cheap ones first, so
+a mistyped branch name fails in milliseconds with a message naming it, rather
+than arriving later disguised as a failed simulation:
+
+```rust
+use gitscratch::Repo;
+
+let repo = Repo::open(cwd)?;           // any directory *inside* one; errors if there is none
+let onto = repo.resolve("main")?;      // errors naming the revision that did not resolve
+let dirty = repo.uncommitted_files()?; // an `Uncommitted`: staged + unstaged + untracked, per file
+let patch = repo.patch_of(&onto)?;     // the change of one commit, as bytes for `git apply`
+
+let scratch = repo.scratch(&onto)?;    // the only way to a worktree
+```
+
+`Repo::patch_of` reads the change of one commit as a patch that `git apply`
+accepts. It uses `git diff-tree`, not `git diff`, because `git diff` obeys
+`color.ui` and `diff.noprefix` and the patch then breaks.
+
+`Repo::subject` reads the subject line of one commit, so a progress line can
+name the commit it is about.
+
+`Repo::parents` lists the parents of one commit, so a caller can tell a root
+commit (none) and a merge commit (two or more) from a plain one.
+
+`Repo::is_ancestor` tells whether one commit is reachable from another. It is
+also true for the same commit, so a caller that needs a strict ancestor checks
+the equality first.
+
+`Repo::resolve` puts the question to git in the one form git can refuse. A bare
+`git rev-parse <revision>` prints an argument it cannot place straight back and
+exits **0**, so a name that names no commit passed the very check that exists to
+catch it, and `grind -- --root` answered `clean` for a branch that does not
+exist. The question carries `--verify`, so git answers with one commit id or
+fails, and `--end-of-options`, so a revision that starts with a dash arrives as a
+revision rather than as a flag. The same separator stands ahead of every other
+caller-supplied revision this crate hands to git — the commit-ish of
+`worktree add` and the upstream of `rebase` — because each of those is a place
+where git accepts an option and answers cheaply instead of refusing.
+
+These live here rather than in each consuming tool for the same reason as
+everything else: `Git::new` is crate-private, so a repository-rooted runner can
+only be built from inside this crate, and nothing here hands one out either. The
+queries are all reads, which fire no hooks, so unlike `Scratch` the pre-flight
+creates nothing at all — no temporary directory, no worktree, nothing to clean
+up if it rejects.
+
+And it is not optional. `Repo::scratch` is the only public entrance to a
+`Scratch`, so the last line above is not a convenience — it is the only line
+that compiles. `Repo` deliberately does *not* hand its path back: a pre-flight a
+caller can walk around is a suggestion, and handing back the opened directory
+would have made the checked path and an unchecked one the same `&Path`,
+indistinguishable at the call site. The validated path never leaves the type, so
+the worktree comes out of the thing that validated it.
+
+## The branch a caller did not name
+
+Almost every run of a tool built on this crate means the repository's default
+branch, so `Repo::branch_or_default` is where "which branch did they mean?" is
+answered — once, for every consumer:
+
+```rust
+let branch = repo.branch_or_default(named.as_deref())?; // `None` → main, else master
+let onto = repo.resolve(&branch)?;                      // still the caller's to resolve
+```
+
+A name the caller *was* given comes straight back, unresolved. Resolving it is
+the caller's line above, and the caller's message is the one that names the typo
+the developer actually made — folding the check in here would answer a typo with
+words about a default that was never reached.
+
+A repository holding neither `DEFAULT_BRANCHES` candidate is an **error**, and
+the message names both — with the first candidate's own failure kept as the
+cause, so a caller printing `{err:#}` can tell a repository that has no `main`
+from one whose `main` git could not read. It is deliberately not a fall back to `HEAD`: a replay of
+HEAD onto HEAD is clean in every repository there is, so that fallback turns "I
+could not tell which branch you meant" into a confident wrong answer. Both
+candidates are local names, because `git rev-parse main` reads local refs — a
+repository whose default branch exists only as `origin/main` is refused too, and
+the developer names the remote-tracking ref themselves. Searching the remote refs
+would make the rule harder to state and would hide which branch got measured
+behind a name nobody typed.
+
+The choice lives here rather than in each tool for the reason the hardening does:
+two implementations of it are two implementations that drift, and the one that
+drifts is the one measuring a different branch than the one it printed.
+
+## The report
+
+`Report` turns a `Conflicts` into the words a developer reads. It lives here,
+not in the binaries, because `grind` (rebase) and `grime` (merge) ask different
+questions and have to print the same shape — and two renderers would drift apart
+on exactly the details that make the two answers comparable at a glance:
+
+```rust
+use gitscratch::Report;
+use termbar::TerminalWidth;
+
+// The tool's name alone, because the note below reads nothing else.
+let unworded = Report::for_tool("grind");
+
+// Read while no scratch worktree stands, and held: a caveat qualifies an
+// answer, so a run that fails before the answer must not print one.
+let note = unworded.dirty_note(repo.uncommitted_files()?);
+
+let conflicts = repo.scratch("HEAD")?.replay_rebase("main")?;
+
+if let Some(note) = note {
+    eprintln!("{note}");
+}
+
+let report = unworded.describing("replaying HEAD onto main");
+let columns = usize::from(TerminalWidth::get_or_default());
+println!("{}", report.render_within(&conflicts, columns));
+```
+
+The tool name and the action arrive through two differently-named calls rather
+than as two arguments to one constructor, because both are `&str`: passing them
+the wrong way round would compile, and produce a report prefixed with `replaying
+HEAD onto main` and indented to the width of it. Named calls cannot be
+transposed.
+
+The first call also hands back a *different type*, and that is what closes the
+other half of the same defect. `Report::for_tool` returns an `UnwordedReport`,
+which has no `render`, no `render_within` and no `without_stops`. Its one route
+to the words is `describing`, and `describing` is what builds the `Report`. So
+the second call is not a step a caller can leave out: a report carrying half a
+sentence has no type to be. One used to, and it printed `grind: clean -  hit no
+conflicts`, with two spaces where the action belongs — a hole only whoever reads
+the output ever sees. The split takes a second silent mistake away with it: a
+`Report` has no `describing`, so calling it twice and keeping the last wording
+in silence names a method the worded type does not have. A `compile_fail`
+doc-test holds the door — see **Testing** below.
+
+`dirty_note` sits on the unworded type rather than on `Report`, because it reads
+the tool's name and nothing else. A caller can read that caveat before it has an
+action string at all. `grind` reads it before the replay and prints it after.
+The count has to be taken while no scratch worktree stands, since a scratch
+worktree can land inside the repository and be counted as the user's own work. A
+caveat qualifies an answer that has arrived. Both types are `Copy`, so neither
+`describing` nor `without_stops` spends the value it was called on.
+
+```console
+grind: conflicts - replaying HEAD onto main
+       4 hunks across 2 files, 3 stops
+
+  src/lib.rs     3 hunks
+  src/main.rs    1 hunk
+```
+
+The only variation the two tools get is `Report::without_stops()`, which drops
+the stop count for `grime`: a merge halts exactly once, so the number would be a
+constant dressed up as a measurement. Everything else is fixed — the indent is
+measured from the tool's own name, the counts are padded in *display* width so a
+CJK filename still lines its column up, and every noun is pluralised by the
+metric newtype that owns it rather than by whoever is printing it. The dirty
+note is the shape of that last rule: `dirty_note` takes an `Uncommitted` and
+chooses only the verb, because "1 uncommitted file **is**" and "3 uncommitted
+files **are**" are one agreement written in two places, and the half that names
+the thing being counted belongs to the counter.
+
+Three things about a file name are the renderer's to handle, and every one of
+them happens once, ahead of the measurement and ahead of the print, so the
+string that was measured is the string that reaches the screen.
+
+The first is that a name is bytes and a terminal takes text. This is the one
+place the crate decodes a name at all, and it decodes it lossily, so a byte
+outside UTF-8 becomes U+FFFD here and nowhere earlier — earlier would put that
+name back into the map, where it names no file and costs the file its real hunk
+count. One replacement character per undecodable byte leaves the rest of the
+name alone, which is what lets a developer match `bad-<U+FFFD>.txt` against
+their own repository.
+
+The second is that a name holds every byte but NUL — which is the premise the
+`-z` reader rests on — so a newline, a carriage return and an ESC are all legal
+in one. `render_within` spells every control character out as `\u{...}`. A raw
+newline would split one row of this line-oriented layout in two and strand the
+count on the second row, and a raw ESC would hand an escape sequence out of the
+repository straight to the terminal of whoever ran the tool. The rule is
+`char::is_control` and nothing wider, so a leading space, a trailing space,
+U+3000, a backslash, a double quote and an emoji all arrive unchanged — every
+one of them names a real file, and this crate went to some trouble to carry them
+here intact.
+
+The third is that a name has no bound. The count column sits past the widest
+name, and one deeply nested path — an ordinary thing to have — carries the
+counts of every row off the right-hand edge of the terminal, which then wraps
+each of them. `render_within` takes the width of the terminal and clamps the
+name column to what is left after the indent, the gap and the widest count. A
+name too wide for the clamp takes a row of its own and its count takes the next
+row, in the same column as every other count. Here, on a terminal 40 columns
+wide:
+
+```console
+grind: conflicts - replaying HEAD onto main
+       4 hunks across 2 files, 2 stops
+
+  readme.md                      1 hunk
+  src/a/very/deeply/nested/directory/with/a/long/name/module.rs
+                                 3 hunks
+```
+
+The name is never cut short, because a truncated path opens no file. The width
+arrives as a parameter and is never read here, because measuring a terminal is
+a decision about one program's output and this crate renders for every consumer
+that asks. `Report::render` is the same layout with no right-hand edge, for a
+caller that has no terminal to name — a test, or anything building this text for
+somewhere other than a screen.
+
+This is a deliberate, spec-sanctioned acceptance of a little presentation logic
+in a library crate. The alternative is two copies of it.
 
 A replay walks the *whole* operation rather than bailing at the first collision,
 resolving as it goes by staging the conflict markers verbatim. That is the
@@ -41,19 +577,361 @@ again, which is faithful to reality, since a human resolution also leaves later
 commits conflicting against the resolved state. Treat a `Conflicts` as a cost
 index measured under identical rules, not as an exact prediction.
 
+A hunk is a **closed conflict region**: an opening marker, and the closing
+marker that comes after it. Both are matched exactly — seven brackets, then a
+space or the end of the line — because that shape is the only thing separating a
+marker git wrote from a line of file content that begins with brackets, and
+files full of such lines are ordinary. A document about resolving conflicts, a
+fixture for a conflict parser and a saved merge transcript all hold them. An
+opening marker nothing closes is content by the same rule: it holds one version
+of the lines under it rather than two, so there is no decision in it for anyone
+to make. A closing marker with no opening one before it closes nothing and
+counts as nothing, which is that reasoning read the other way round — counting
+it alone would put the over-count back in by the other door. A conflict with no
+markers at all — a binary file, a delete/modify — costs one decision, which is
+the floor every conflicted file meets.
+
+The "identical rules" are what `merge.conflictStyle=merge` in the table below
+buys. `diff3` and `zdiff3` put the base version inside the region, so a base
+carrying a line that reads as a marker is measured on a developer who set the
+key and not on one who did not.
+
+### The halt diffs
+
+`Report::render_diffs` turns the halt diffs of a replay into the text that
+follows the verdict. A tool that shows them prints that text through
+`Console::verdict`, after the verdict:
+
+```rust
+let (conflicts, diffs) = scratch.replay_rebase_with_diffs("main")?;
+
+console.verdict(&report.render_within(&conflicts, columns));
+if let Some(text) = report.render_diffs(&diffs) {
+    console.verdict(&text);
+}
+```
+
+It returns `None` when the replay did not halt, so a clean run prints the same
+bytes with `--diff` and without it. Otherwise the text starts with an empty
+line, which separates it from the breakdown. It has one section for each halt,
+in halt order, with one empty line between two sections. It ends with no
+newline, because `Console::verdict` writes one. Here, for the two stops of a
+rebase:
+
+```console
+grind: conflicts - replaying HEAD onto main
+       3 hunks across 2 files, 2 stops
+
+  f.txt    2 hunks
+  g.txt    1 hunk
+
+stop 1 of 2 - 6ee2c41 feat one
+diff --cc f.txt
+index a5f1be7,60b32f6..0000000
+--- a/f.txt
++++ b/f.txt
+@@@ -1,5 -1,5 +1,9 @@@
+  a
+++<<<<<<< HEAD
+ +MAIN
+++=======
++ FEAT1
+++>>>>>>> 6ee2c41 (feat one)
+  c
+  d
+  e
+* Unmerged path g.txt
+
+stop 2 of 2 - 9910691 feat two
+diff --cc f.txt
+index 1edf9f2,a1ec13b..0000000
+--- a/f.txt
++++ b/f.txt
+@@@ -1,9 -1,5 +1,13 @@@
+  a
+ +<<<<<<< HEAD
+++<<<<<<< HEAD
+ +MAIN
+ +=======
+ +FEAT1
+ +>>>>>>> 6ee2c41 (feat one)
+++=======
++ FEAT2
+++>>>>>>> 9910691 (feat two)
+  c
+  d
+  e
+```
+
+A section starts with a stop heading, `stop {i} of {n} - {stopped}`, which
+names the stop and the stopped commit. A halt with no stopped commit gets
+`stop {i} of {n}`. `Report::without_stops()` removes the stop headings and no
+other line. A merge halts once and has no stopped commit, so `grime` prints the
+halt diff of its one halt alone, under the empty line.
+
+Under the heading is the text `git diff` showed at that halt, less its last
+newline. Only that newline goes. A trim removes more: a line of a diff can end
+in spaces, and an empty context line of a combined diff is two spaces. A halt
+where git gave no diff gets `diff not available: ` and the message from git in
+place of the diff. The message can span lines, and each newline stays. The
+heading stays too, and the counts and the exit code do not change.
+
+The renderer writes each control character as `\u{...}`, the form the
+breakdown writes for a name. A name cannot write an escape sequence to the
+terminal, and neither can file content or a commit subject. So the rule applies
+to the diff, to the stop heading, and to the message. Three characters stay,
+because a diff is lines of text: a newline, a tab, and a carriage return
+immediately before a newline, which is a CRLF line ending. Each other carriage
+return comes out as `\u{d}`. A lone one moves the cursor back to the start of
+the line, and the text after it writes over the text before it. The escape runs
+before the last newline goes, so the last line of a CRLF file keeps its
+carriage return. Bytes that are not UTF-8 come out as U+FFFD, as they do in a
+name, so file content never causes a panic. The breakdown and the halt diffs
+escape through one loop, so a name and a diff cannot spell one character two
+ways.
+
+The renderer paints each line with the palette of git, so the halt diffs look
+like `git diff` on a terminal:
+
+| Line | Color | The git setting whose default it copies |
+| --- | --- | --- |
+| A header line of a file: `diff --cc`, `index`, `---`, `+++`, and each other line between the `diff ` line of a file and its first hunk header or its binary line, except the mode line of a combined diff | bold | `color.diff.meta` |
+| `mode <parent modes>..<result mode>`, the mode line that git writes in the header of a combined diff when the mode of a parent is not the mode of the result | plain | none |
+| `Binary files differ`, the binary line that git writes in place of the hunks of a binary file | plain | none |
+| A hunk header, `@@@ ... @@@` or `@@ ... @@` | cyan | `color.diff.frag` |
+| A content line with a `+` in a prefix column, the marker lines included | green | `color.diff.new` |
+| A context line | plain | `color.diff.context` |
+| `\ No newline at end of file`, in a hunk of a diff of two files | plain | `color.diff.context` |
+| A content line with a `-` in a prefix column | red | `color.diff.old` |
+| `* Unmerged path <name>`, and each other line outside a file | plain | none |
+| The stop heading | yellow | `color.diff.commit`, the color of a commit line in `git log` |
+| `diff not available: ` and the message from git | plain | none |
+
+The `color.diff.<slot>` settings of the user do not apply, because the capture
+is plain: `--no-color` is one of the pins of the diff call.
+
+Each line opens and closes its own color codes, so no code spans a newline.
+The renderer does not ask whether color is on. The `colored` crate decides that
+when it formats each line, from the environment and from whether stdout is a
+terminal. So a run whose stdout is a pipe gets the text above with no code,
+unless the environment or the tool forces color on.
+
+Two rules keep the paint correct:
+
+- **Escape first, paint second.** The capture is plain, and the renderer
+  escapes the control characters before it paints. So each ESC byte in the
+  output is a code that the renderer wrote. A color code from git and an ESC
+  out of a file look the same, and nothing can tell them apart after the
+  escape.
+- **Classify a line by its position, not by its text alone.** A content line
+  starts with its prefix columns, and its text follows them. In a combined
+  diff, a line that both parents hold and the result does not starts with
+  `--`, so a removed line whose text is `- a/f.txt` reads `--- a/f.txt`. The
+  header lines of a file stand between its `diff ` line and its first hunk
+  header. Git writes no hunk for a binary file, so its binary line ends its
+  header. Git writes each `* Unmerged path` line after the last file, so such
+  a line can end a header that has no hunk, and the renderer reads it from
+  outside each file. The mode line of a combined diff stands in the header
+  too, and it does not end the header, because the `---` line and the `+++`
+  line come after it. Inside a hunk, the prefix columns decide, and the count
+  of leading `@` in the hunk header, less one, is the count of prefix
+  columns. The first line whose prefix columns hold another character ends
+  the hunk, and the renderer reads that line again from outside each file. A
+  painter that matches the text of one line paints the removed line bold, and
+  a test of the usual lines does not see it.
+
+## The shell
+
+`Report` says what a replay cost, and `Console` is the program around it.
+`grime` and `grind` ask different questions and answer them with the same short
+program — parse a command line, run the replay, print the verdict, exit with a
+number a script can act on — so that program lives here for the reason the
+renderer does, and each binary owns only the question in the middle:
+
+```rust
+use gitscratch::{Conflicts, Console};
+
+fn main() -> ExitCode {
+    let args = Args::parse();
+
+    Console::answer("grind", args.quiet, |console| run(&args, console))
+}
+
+fn run(args: &Args, console: &Console) -> Result<Conflicts> {
+    // The pre-flight, the dirty note, and the replay.
+    console.verdict(&report.render_within(&conflicts, columns));
+    Ok(conflicts)
+}
+```
+
+`Console::answer` is the only door. It builds the console, hands it to the
+tool's own body, and turns what that body answers into the code the caller
+reads:
+
+| Code | Meaning |
+| --- | --- |
+| `0` | `Conflicts::is_clean()` — the operation hit no conflicts. |
+| `1` | Conflicts, and the verdict says how many and where. |
+| `2` | The body returned an error, printed as `<tool>: error: <chain>`. |
+
+Three codes rather than two, because "the operation would conflict" and "I could
+not tell you" are different answers and a script has to be able to act on the
+difference. Returning an `ExitCode` rather than a `Result` is what keeps them
+apart: a `main` that returns a `Result` prints the error and exits `1`, which is
+already the conflict code.
+
+The body answers with the `Conflicts` it measured and never with a code of its
+own, so the number a script acts on is read off the very value the verdict was
+rendered from. The words and the number cannot tell two different stories, and
+no tool can publish a fourth code or swap two of the three.
+
+`-q` reaches all three writes and nothing ahead of them. Argument parsing runs
+before the console exists, so a usage error and the version line are the
+parser's to print — both answer about the tool rather than about a replay, and
+silencing the refusal would leave a caller a bare exit code and no word about
+which argument is missing. `note` and `verdict` are named for what is being said
+rather than for which stream it lands on, because the stream is the console's
+decision to make: the verdict is the answer and goes to stdout, while a caveat
+or a failure goes to stderr where it cannot contaminate a pipeline.
+
+Every one of those writes is a `writeln!` whose result is discarded, and that is
+a guarantee rather than an oversight. `println!` panics when the write fails,
+and a reader that closes early — `grind main | head -1` — makes it fail with
+`EPIPE`, because Rust ignores `SIGPIPE` and hands the error back rather than
+letting the signal end the process. A panic unwinds straight past the table
+above and exits `101`: a fourth code no README publishes, out of the one kind of
+tool whose whole contract is that its exit code is the answer. The words are
+what a broken pipe costs, never the answer.
+
+`Console::progress` gives the observer that draws the progress display. It sits
+behind the cargo feature `progress`, so a tool that does not draw takes no
+code for it. `grind` and `grime` turn the feature on. A tool passes the result
+to `Repo::scratch_with_progress`, and the display shows the phases and, for a
+rebase, a bar of commit N of M.
+
+The display writes to stderr only. It shows only when stderr is a terminal and
+`-q` is absent. It waits for `PROGRESS_DELAY`, which is 500 ms, so a fast run
+writes no byte of it. `Console::answer` uses that delay.
+`Console::answer_with_progress_delay` takes the delay as an argument, so a test
+does not wait for it.
+
+Each write of the console clears the display first. So the note, the verdict,
+and the error line never hold a part of it.
+
+A failure of the display costs the display. It never costs the verdict or the
+exit code, the same rule as for each other write of the console.
+
+The width of the terminal for the breakdown stays with the tool, which is what
+`render_within` above already says: measuring a terminal is a decision about one
+program's output. The progress display measures the terminal itself, but only
+behind the `progress` feature. `grist` does not turn that feature on, so it
+still carries no dependency on the terminal size.
+
+## Three ways a rebase halts, and why the third one matters
+
+A halted rebase with **no unmerged paths** is a classification point, not a
+single known case. Git stops there for a commit that adds nothing to the new
+base — free to drop — and it stops there for a commit it could not *write*,
+where dropping it throws the work away and answers with a cost for a branch
+that was never replayed. Signing, hooks, a full or read-only object database, an
+unusable editor all land in that same state, and git exits non-zero for the
+harmless case too, so nothing about the invocation separates them.
+
+| Halt | What it means | What the replay does |
+| --- | --- | --- |
+| Unmerged paths | A human would hand-merge these | Count them, stage the markers, continue |
+| Nothing unmerged, commit adds nothing | The work is already in the new base | `rebase --skip`, costs nothing |
+| Nothing unmerged, commit could not be written | git refused to create the commit | **Fail**, naming the commit and quoting git |
+
+The third row is separated from the second by two probes, both of them
+repository state rather than a match on git's wording, since wording changes and
+state does not:
+
+1. **Anything left uncommitted.** A commit that truly became empty leaves the
+   index matching `HEAD` and the worktree matching the index. Content left
+   behind is content that failed to be committed.
+2. **Whether the stopped commit's work is already in the new base.** A failed
+   commit write on a *clean* pick leaves nothing behind at all — git rolls the
+   index back and reschedules the pick — so probe 1 has nothing to see. What
+   still separates the two is the commit itself: for every path `REBASE_HEAD`
+   touches, does `HEAD` already hold exactly that content? If so the commit is
+   genuinely empty, and airtight rather than heuristic — applying `C` onto
+   `HEAD` is a three-way merge (base `C^`, ours `HEAD`, theirs `C`), and on a
+   path where both sides already agree the merge changes nothing, while a path
+   `C` never touched cannot change either.
+
+   That probe takes two path lists from git and intersects them here, rather
+   than handing the first list back as a pathspec: one argv cannot hold every
+   path of a vendored-dependency drop, and a name read back in is a pathspec
+   rather than a path. Both of its invocations carry `--ignore-submodules=none`,
+   because one of them is plumbing and the other is porcelain, and the porcelain
+   one reads `diff.ignoreSubmodules` out of the developer's own configuration.
+   Under `diff.ignoreSubmodules=all` a commit that moves a submodule pointer and
+   touches nothing else is a path to one command and nothing to the other, which
+   reads as a commit that adds nothing to the new base.
+
+Ahead of both probes stands a refusal, because a **merge commit** at a halt is
+one neither of them can answer about. `git diff-tree` reports no changed path
+for a merge unless it is asked for `-c`, `--cc` or `-m`, and probe 2 asks for
+none of them, so an unguarded probe reads the halt as a commit that changes
+nothing and `rebase --skip` drops a whole side of history. The probe therefore
+counts `REBASE_HEAD`'s parents first and refuses a commit with more than one,
+naming it. `rebase.rebaseMerges=false` in the table below closes the route a
+developer's own configuration opens; the refusal is the structural half, and it
+reads the shape of the commit rather than a setting, so it holds whatever a
+later setting does.
+
+That same silence has a second cause, and a flag rather than a refusal answers
+it. `git diff-tree` compares a commit against its parent, so it prints no path
+for a **root commit** either. Probe 2 therefore asks for `--root`, which compares
+such a commit against nothing and names every path it adds. A root commit reaches
+a halt in ordinary use: replaying a branch onto one that shares no history with
+it replays every commit of that branch, its root commit included. The parent
+count lets it through, correctly — a root commit has no parent at all, so the
+count is zero.
+
+A refused `git rebase --skip` fails the replay immediately, carrying git's own
+message, rather than being re-issued until the round limit runs out.
+
+Both probes err toward the loud answer, which is the safe direction: a dry run
+may say "this is expensive" or "I cannot answer", but never "this is cheap"
+because it quietly discarded the work.
+
 ## What it guarantees
 
 | Guard | Why |
 | --- | --- |
-| `rebase.updateRefs=false` | Without it, rebasing a detached HEAD still rewrites every branch ref pointing into the replayed range — including the branch being simulated. Not paranoia: with the setting enabled and the guard removed, a dry run *destroys the branch it is replaying*. |
+| `rebase.updateRefs=false` | Without it, rebasing a detached HEAD still rewrites every branch ref pointing into the replayed range — including the branch being simulated. Not paranoia: with the setting enabled and the guard removed, a dry run *destroys the branch it is replaying*. The claim holds on every machine only because the row below pins the backend alongside it; under the apply backend the setting is inert either way. |
+| `rebase.backend=merge` | `--update-refs` is a merge-backend feature, and the apply backend ignores it outright. Left unpinned, the row above is unfalsifiable on a developer who prefers apply — it could be deleted and nothing on that machine would notice, because the backend already silences what it overrides. The backend also decides where a halted rebase files its state, `rebase-merge` rather than `rebase-apply`, so a consumer inspecting an interrupted replay reads the same repository everywhere. |
 | `rerere.enabled=false`, `rerere.autoupdate=false` | A simulated resolution would otherwise land in the shared `rr-cache` and silently pre-resolve the developer's real merges later. |
-| `core.hooksPath` → an empty directory | No hook fires. An empty *value* is not "hooks off" — git still resolves lookups against it — so the path is a real, empty, temporary directory, validated once at creation. |
+| `core.hooksPath` → an empty directory | No hook fires. An empty *value* is not "hooks off" — git joins the configured directory onto the hook name, so an empty one resolves `pre-commit` to `/pre-commit`, at the root of the file system, which is one hooks directory for every repository on the machine — so the path is a real, empty, temporary directory, validated once at creation, and `Git::new` refuses the empty value outright. `Repo`'s read-only pre-flight points it at a relative path this crate never creates instead: reads fire no hooks, and rejecting a typo must not be able to fail for want of a writable temp directory. |
+| `core.fsmonitor=false` | The one program git runs that the row above cannot take away. The filesystem monitor is executed directly rather than resolved through the hooks directory, so the classic `core.fsmonitor=.git/hooks/fsmonitor-watchman` survives the redirect verbatim and every index refresh a replay performs would run it — in the developer's repository and in the scratch worktree both. `core.fsmonitor=true` costs more than that: git starts a daemon that watches a temporary directory the replay is about to delete. A freshly created scratch worktree gains nothing from a monitor, so the pin costs the replay nothing. Read from git's settings resolution rather than executed; what the test executes is the pin. |
 | `GIT_EDITOR`, `GIT_SEQUENCE_EDITOR`, `GIT_TERMINAL_PROMPT` | A halted rebase would otherwise open an editor and hang forever. |
+| The inherited git environment, shed | The guard that decides *which* repository every other row protects, and who its commits belong to. Git obeys `GIT_DIR`, `GIT_WORK_TREE` and `GIT_INDEX_FILE` before it obeys the directory it was pointed at, and it exports them into every hook it runs — `GIT_INDEX_FILE` often the *relative* `.git/index`, which silently re-anchors on whichever directory each command runs in. It exports `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL`/`GIT_AUTHOR_DATE` and their committer siblings too, and an identity variable outranks every config source, `-c` included. Run from a `pre-push` gate, `git bisect run`, `rebase --exec`, or `cargo test` from `.husky/pre-commit`, an unscrubbed simulation aims itself at the hook's repository and stamps the developer's own name on what it commits there. The rule is the `GIT_` prefix and never a list of names: a list strips nothing new the day git adds a variable, and it goes on returning the same clean-looking answer as a list that works — which is how `GIT_CONFIG_PARAMETERS`, a variable git exports to every hook that injects arbitrary configuration, walked through the fifteen-name list this used to carry. Shed at the single place a git process is created and at every fixture spawn through `childenv::fixture_command`, and the consumers' spawns take the same crate, so the rule cannot drift between them. A consumer's *production* spawn takes `childenv::command` instead, which sheds the same prefix and keeps the six names of `childenv::USER_INTENT_GIT_ENVIRONMENT` — the two configuration files and the four that decide how git authenticates — because a person states each of those on purpose. A replay keeps the blanket rule, because it has no user whose intent to honor. |
 | `commit.gpgsign=false` | A signing config in the developer's global gitconfig would otherwise prompt or fail mid-replay. |
 | `gpg.format=openpgp` | Belt to `commit.gpgsign`'s braces. `gpg.format = ssh` is a different signing backend entirely, with its own key and helper program; pinning the format back to git's default means that configuration is never consulted, so signing cannot be attempted through it. |
-| `gc.auto=0` | Simulated commits are loose and nothing references them yet; an opportunistic gc could collect one out from under the run. |
+| `gc.auto=0` | Simulated commits are loose and nothing references them yet; an opportunistic gc could collect one out from under the run. This covers the gc task and nothing else, which is narrower than it reads: the switch on the rest of automatic maintenance is the row below. |
+| `maintenance.auto=false` | The other half of automatic maintenance, and the half that reaches the network. Git's `run_auto_maintenance` starts the maintenance tasks unless this key is explicitly false, and the default is to run them — so `gc.auto=0` holds back one task while the rest go ahead. Every resolved conflict runs `rebase --continue`, which commits, and a commit reaches that call. On a developer who has run `git maintenance start` the incremental strategy turns the prefetch task on, and prefetch carries no auto-condition of its own, so `--auto` does not hold it back: it fetches from every remote and writes `refs/prefetch/*` into the developer's repository, because a linked scratch worktree shares the common dir. A dry run that reaches the network and writes refs is the class `gc.auto=0` was added for. Read from git's source rather than executed; what the test executes is the pin. |
 | `rebase.autoStash=false`, `rebase.autosquash=false` | The replay must be the operation as written, not a rewritten variant of it. |
-| `user.name=gitscratch`, `user.email=gitscratch@localhost` | Scratch commits are throwaway, but they still have to be attributable to the harness that made them rather than to whichever tool is driving it — and a developer's real name and address have no business being stamped on commits that only ever simulated something. |
+| `rebase.rebaseMerges=false` | A rebase that keeps merges puts a merge commit on the replay's todo list, and a merge commit at a halt is a commit the replay cannot measure: `git diff-tree` prints no path at all for one unless it is asked for `-c`, `--cc` or `-m`, and the empty-commit probe asks for none of them. That probe would read the halt as a commit that changes nothing, and `rebase --skip` would drop a whole side of history. Git 2.55 was watched to re-create the merge commit under `rebase.rebaseMerges=true`, so this is a developer's own configuration rather than a hypothetical. The probe refuses a multi-parent stopped commit outright as well, which holds whatever a later setting does; this pin closes the one route into it that exists today. |
+| `-z` on the way out, `--literal-pathspecs` on the way in | Git C-quotes a non-ASCII name whenever it prints a path on a line, and a name that begins or ends with whitespace survives git only to lose that whitespace to a trimming reader. `-z` turns the escaping off and separates on the one byte a path cannot contain, so a path comes back as the bytes it is stored under. `--literal-pathspecs` covers the other direction, where a path handed back to git stops being a path and becomes a pathspec: a leading `:` is magic, and `*`, `?` and `[` are wildcards. A pathspec that matches *nothing* is the mild half — it can only add to the paths a probe finds missing, and that only ever buys a refusal nobody needed. The half worth the guard is one that matches the *wrong* file: `:/foo.txt` read as magic means from the top of the working tree, so it silently answers about the root `foo.txt`. No call site in this crate hands a path back to git today — the empty-commit probe intersects two path lists in Rust instead — so the pin protects the next call site that does, at the cost of one argument on the single door every git call goes through. |
+| `user.name=gitscratch`, `user.email=gitscratch@localhost` | Scratch commits are throwaway, but they still have to be attributable to the harness that made them rather than to whichever tool is driving it — and a developer's real name and address have no business being stamped on commits that only ever simulated something. The config half settles nothing on its own: an identity variable outranks every config source, `-c` included, which is why the row above sheds the whole inherited environment first. The runner then restates the identity as environment on every command it builds, so it holds with either guard edited away — the four variables that name a person pinned to the harness, and `GIT_AUTHOR_DATE`/`GIT_COMMITTER_DATE` *removed* rather than pinned, since a pinned date gives every commit of one run the same timestamp. All six, because a restatement that covered four of them would hold the name and let both dates through the day the sweep went away. |
+| `core.quotePath=false` | Correctness, not cosmetics. By default git C-quotes and octal-escapes any path outside ASCII, so `日本語.txt` comes back from `diff --name-only` as `"\346\227\245\346\234\254\350\252\236.txt"`. That breaks a caller twice: it reports a name nobody typed, *and* the escaped string names no file on disk, so reading it fails and the hunk counter floors that file at 1 — a plausible-looking wrong total. This is the belt, not the braces: it governs only bytes ≥ `0x80`, and git quotes a `"`, a `\` or a control character whatever it is set to. Reading a path list is `Git::nul_separated_paths`'s job or `Git::paths`'s, and reading one path is `Git::path`'s (all three above), and this narrows what a call site that reaches around them can get wrong. |
+| `merge.conflictStyle=merge` | The count has to mean the same thing on every machine. All three styles open and close a conflict region with the same markers, so a region whose two sides carry no bracket line of their own costs one hunk under any of them. What `diff3` and `zdiff3` add is the **base** version of the region, between a `|||||||` line and the `=======` one — so a base carrying a line that reads as a marker lands inside the region under those two and outside it under `merge`. The replay then measures a different file on a developer who set the key, and `grist` ranks candidates on that count: two developers comparing the same branches read two orders and neither is told why. Read out of a real merge rather than from git's documentation. |
+| `merge.verifySignatures=false` | The two rows about signing above cover a replay asked to *make* a signature; this one covers a replay asked to **read** one. `merge.verifySignatures` is consulted by `git merge` alone, so a developer who turns it on leaves the rebase replay untouched and breaks the merge replay outright: git 2.55 exits 128 with `fatal: Commit <sha> does not have a GPG signature.` for any branch that carries no signature, which is nearly every branch, and it leaves no unmerged path behind it. The merge replay reads that empty path list as its own "the merge failed and left nothing to resolve" — neither a cost nor a clean replay — so `grime` answers exit 2, "I cannot tell you", for every unsigned branch on that machine. Read out of a real merge rather than from git's documentation. |
+| `--no-color` on the diff call of a halt diff | `color.ui=always` or `color.diff=always` makes git write color codes into `git diff`, although git writes to a pipe. Watched on git 2.55: each setting alone puts a code on each line of the halt diff. A renderer cannot tell such a code from an ESC byte in the file. So it escapes both, and the reader sees `\u{1b}[1m` in place of a color. The renderer paints the diff itself, so the capture stays plain. |
+| `--no-textconv` on the diff call of a halt diff | A `.gitattributes` entry can select a diff driver, and `diff.<driver>.textconv` names a program that git runs on each side of the file before it compares them. Watched on git 2.55 at a conflict: a program that fails stops `git diff` with `fatal: unable to read files to diff`, so the halt diff holds that error and no diff. A program that works changes the text: `sed s/line/LINE/` put `LINE12` in the halt diff in place of `line12`. The pin keeps the halt diff to the bytes in the file, and it keeps the capture from running a program from the configuration of the developer. The counts never depend on the diff, so they are the same with and without the pin. |
+| `-U3` on the diff call of a halt diff | `diff.context` sets how many unchanged lines git shows around a change, and three is git's own default. Watched on git 2.55: at `diff.context=0` the halt diff of one conflicted line shrank from 16 lines to 10, because the three lines above the region and the three below it went away. Those lines show where the region is in the file. The pin gives each machine the same three lines. |
+| `--default-prefix` on the diff call of a halt diff | Four settings change the prefixes of the two file header lines of a diff, and each one reaches the conflict diff. Watched on git 2.55 at a conflict: `diff.noprefix=true` gives `--- shared.txt` in place of `--- a/shared.txt`. `diff.mnemonicPrefix=true` gives `--- i/shared.txt` and `+++ w/shared.txt`. `diff.srcPrefix=x/` gives `--- x/shared.txt`, and `diff.dstPrefix=y/` gives `+++ y/shared.txt`. The flag restores `--- a/<name>` and `+++ b/<name>` under each of the four, and a test holds each setting in a fixture of its own. |
+| `--no-ext-diff` on the diff call of a halt diff | `diff.external` names a program that git runs in place of its own diff. `diff.<driver>.command` does the same for a file whose `.gitattributes` entry selects that driver. The capture must never run a program from the configuration of the developer. Watched on git 2.55: git runs each program for an ordinary diff of two commits, and neither one for the conflict diff at a halt. So no test can make this pin fail, and `MUTATIONS.md` records it as such. It stays for the day git runs such a program for a combined diff. |
+| `core.abbrev=auto` | `core.abbrev` sets how many hex digits git prints for an abbreviated object id, and the halt diff carries three such ids on its `index` line. Watched on git 2.55 at a conflict: `core.abbrev=12` gives `index ca88aa969c5a,9e4d34aa23b2..000000000000` in place of `index ca88aa9,9e4d34a..0000000`. The flag `--abbrev=7` on the diff call does not reach that line of a combined diff, and only `-c core.abbrev=auto` gives it back. A `-c` pair must come before the subcommand, so this pin is in the safety configuration and not on the diff call. `auto` is what git uses when nothing sets the key, so the pin also gives the name of a stopped commit git's default length on each machine. |
+| `log.showSignature=false` | `log.showSignature=true` makes `git log` check the signature of each signed commit it shows, and write the result on stdout, above the line of the format. The name of a stopped commit is what `git log -1 --format="%h %s"` prints for `REBASE_HEAD`. Watched on git 2.55 with an SSH-signed commit: that call wrote `Good "git" signature for <principal> with ED25519 key SHA256:...` above `<id> <subject>`. So the stop heading of each signed stop had two lines, its first line named a signature and not the commit, and its yellow color code spanned the newline. The pin gives back the one line. It is in the safety configuration and not on the one call, so it covers each `log` call, the refusals that name a stopped commit included. With no check of a signature, a replay also runs no program that `gpg.ssh.program` or `gpg.program` names. |
+
+The halt diff takes no pin for the names of files. `core.quotePath=false` above
+already prints `日本語.txt` raw in the `diff --cc` header, watched on git 2.55.
+Git still C-quotes a name that holds `"`, `\` or a control character, whatever
+that setting says: `quo"te.txt` comes out as `diff --cc "quo\"te.txt"`. That is
+the text `git diff` shows at a real halt, so the halt diff keeps it.
 
 Teardown removes the scratch worktree **by path** and deliberately never runs
 `git worktree prune`. Pruning is repo-wide and immediate: it deletes the
@@ -64,29 +942,720 @@ cost the developer a worktree.
 
 ## Testing
 
-`tests/safety.rs` pins three properties today, each verified by mutation —
-remove the guard, watch that specific test fail, put it back:
+`tests/replay-progress.rs` holds the reports of a replay. A merge reports its
+three phases in order and no commit position. A halt at 3 of 5 reports that
+position. A rebase of 30 commits ends at 30/30. No test asserts how many
+reports arrive between the first and the last, because the poll depends on
+timing.
 
-- **`rebase.updateRefs=false`**, the first row above, asserted with the setting
-  deliberately turned *on* in the repository being replayed.
+`tests/console-progress.rs` holds the display on a pseudo-terminal of a size
+that the test chose, with a delay of zero. The bar shows, and the rows of the
+verdict, the note, and the error hold no part of it. A run with `-q`, a delay
+of one hour, or stderr on a pipe writes no byte of the display.
+
+`tests/safety.rs` pins nine properties across eight tests, each verified by
+mutation — break the guard, watch that specific test fail, put it back. The two
+counts differ because the teardown test pins two of them, the removal itself and
+the backend its halted rebase is inspected under, and each gets a bullet:
+
+- **`rebase.updateRefs=false`**, asserted with the setting deliberately turned
+  *on* in the repository being replayed — and with `rebase.backend = apply`
+  armed beside it and left armed through the replay, since the harness picks
+  its own backend rather than inheriting the developer's.
 - **The detached checkout**, which is what lets a branch already checked out in
   another worktree be replayed at all. It is spelled out in the test rather than
   hidden behind a library call precisely because it is a guard.
 - **The absence of `git worktree prune` in teardown.** This one is mutated in
   the opposite direction — *add* a prune and watch the test fail — because the
   guarantee is that it is not there.
+- **`rerere.enabled=false`**, asserted with rerere deliberately turned on: a
+  conflicting replay must leave `rr-cache` unwritten.
+- **`core.hooksPath`**, asserted by planting `post-checkout`, `pre-rebase`,
+  `post-rewrite` and `pre-merge-commit` hooks that each touch a sentinel, and
+  proving no sentinel appears.
+- **The scratch worktree itself**, asserted by dirtying the real working tree
+  and index three ways — a tracked edit, a staged change, and an untracked file
+  that no reflog or stash could get back — and requiring every one of them to
+  survive a replay unchanged, the two on disk compared byte for byte.
+- **`worktree remove --force` in teardown**, asserted after a clean run, after a
+  resolved conflict, and after a `Scratch` dropped while a rebase was still
+  halted — the path most likely to leak a registration.
+- **`rebase.backend=merge`**, pinned by that same halted-rebase case: it locates
+  the halted rebase at `rebase-merge` in a fixture that arms
+  `rebase.backend = apply`, so removing the harness's pin sends the state to
+  `rebase-apply` and turns the test red.
+- **`commit.gpgsign=false`**, asserted with signing turned on and a key that
+  cannot resolve. The replay runs under a timeout, so the test catches a hang on
+  a passphrase prompt and not only an outright failure.
 
-A fourth guarantee — **the `user.name`/`user.email` identity**, the last row
-above — is pinned by a unit test in `src/git.rs` instead, which reads back
-`git var GIT_AUTHOR_IDENT` rather than building a repository to commit into.
+The unit tests in `src/git.rs` pin what needs no repository built around it.
+Some are about the code itself. **The `user.name`/`user.email` identity**, the
+last row above, is read back through `git var GIT_AUTHOR_IDENT` rather than by
+committing into a fixture, by
+`commits_under_the_crate_s_own_identity_not_a_consuming_tool_s`, which reads it
+in an environment carrying nothing of its own — the way the suite runs from a
+shell. `the_pinned_identity_survives_a_hook_environment` reads it again under
+the environment a git hook hands down, where `GIT_AUTHOR_NAME` and its siblings
+outrank every `-c` the harness pins. **The inherited git environment, shed** is
+asserted by
+`ignores_an_inherited_git_environment_naming_another_identity_or_repository`,
+which adds another repository's `GIT_DIR` and `GIT_INDEX_FILE` to that
+environment and watches neither reach git.
+`every_identity_variable_is_settled_on_the_command_the_runner_builds` pins the
+same identity from the other side: what the runner *says*, rather than what git
+resolves. Git hands a hook six identity variables, and the runner settles all
+six on every command it builds — the four that name a person pinned to the
+harness, and the two that carry a time removed, since a pinned date gives every
+commit of one run the same timestamp. The sweep and those entries are two guards
+over one hazard, kept apart so the identity survives either one being edited
+away, and that redundancy is only real where it covers all six: with two of them
+left to the sweep alone, a sweep that goes away holds the name and lets both
+dates through. A commit cannot show this, because the sweep alone already keeps
+a leaked date out of one — so the test reads the command's own environment
+overrides, in a child half handed all six variables removed, where nothing on
+the command came from the sweep. Those three run in a re-executed child of the
+test binary rather than in it: the environment is process-wide, and mutating it
+in place reaches every sibling test and every concurrent run of the suite. All
+three go through `gitscratch::testing`'s `run_child_half`, which is the one
+child runner in this crate: every child half here, in `src/testing.rs` and in
+`tests/isolation.rs`, is spawned by it, and it alone decides what counts as a
+child that ran.
 
-The remaining rows of the table above — the `rerere` pair, `core.hooksPath`, the
-editor and prompt environment, `commit.gpgsign`, `gpg.format`, `gc.auto`, and
-the `rebase.autoStash`/`autosquash` pair — are established by construction in
-`safety_config` and are **not yet covered by a test**. Issue #329 tracks growing
-the suite to eight guarantees and mutation-verifying every guard; the `rerere`
-pair, `core.hooksPath` and `commit.gpgsign` are the rows it reaches, so this
-paragraph shrinks rather than disappears when it lands.
+That decision is the reason the runner is one function rather than a copy per
+suite. Each parent names its child by a libtest filter, which is a string the
+compiler never checks against the test it names, so a child that ran counts
+only when it *says* it ran — one sentinel line, printed at the end of the
+child's body and required in its output alongside a successful exit. Neither
+the exit status nor libtest's count can carry that. libtest exits 0 when a
+filter matches no test at all, and it counts a child that ran some *other*
+test exactly as it counts the right one — one test, passed — so a filter
+pointed at nothing and a filter pointed at a neighbour both look from the
+parent's side like the run that was asked for. Two tests in `src/testing.rs`
+pin the refusal, one for each of those shapes:
+`a_child_half_that_matched_no_test_is_a_failure_not_a_pass` hands the runner a
+filter naming no test at all, and
+`a_child_half_that_ran_another_test_is_not_taken_for_the_one_that_was_named`
+hands it a filter naming a different test of that file. Each requires a failure
+that says which filter went stale. The rename that breaks a filter is the
+rename that hides the breakage, which is why no guard is left to police its own
+filter. **The UTF-8
+refusal in `Git::paths`** —
+`refuses_a_path_that_is_not_valid_utf_8_rather_than_replacing_the_byte` — covers
+the one loss `-z` cannot undo: a byte that is not UTF-8 has no `String` to come
+back *as*, and repairing it into U+FFFD hands back a name no file has — a path
+the developer cannot find in their own repository, and a file nothing can open,
+which in this crate floors a conflicted file at one hunk and undercounts the
+work behind a plausible total. The classification is safe from this one, and the
+distinction is worth keeping straight: the empty-commit probe reads both of its
+path lists through `Git::paths`, so a lossy decode mangles the two lists the
+same way and their intersection is unchanged. macOS will not let a working tree
+hold such a name at all, so the commit is built directly in the object database
+and the guard is pinned here rather than end-to-end.
+
+**The refusal of an empty hooks path** is pinned by
+`refuses_an_empty_hooks_path_rather_than_resolving_a_hook_outside_the_repository`.
+An empty `core.hooksPath` is not "hooks off". Git joins the configured directory
+onto the hook name, so an empty directory resolves `pre-commit` to
+`/pre-commit`, at the root of the file system — one hooks directory shared by
+every repository on the machine, where an unset key resolves the same hook
+inside the repository. `Git::new` refuses the value outright, which is what
+leaves the two real spellings as the only ones a call site can write: the
+scratch's own empty directory, and the relative path the pre-flight names. The
+test carries an armed control ahead of the refusal, since refusing a harmless
+value proves nothing — plain git has to answer `/pre-commit` for the empty key
+and `.git/hooks/pre-commit` for the unset one, or the two answers the refusal
+tells apart are no longer different.
+
+**The refusal of a revision that names no commit** is pinned by
+`refuses_a_revision_that_starts_with_a_dash_rather_than_echoing_it_back`. Plain
+`git rev-parse <revision>` reads a dash-leading argument as an option it does not
+know, prints the argument back, and exits 0. The pre-flight read that exit code
+as a commit, so `grind -- --root` announced a clean verdict for a branch that
+does not exist. `Git::rev_parse` asks with `--verify` and `--end-of-options`
+instead: `--verify` makes git refuse a revision it cannot resolve, and
+`--end-of-options` ends git's own option position, so the revision arrives as a
+revision. The test carries an armed control — plain git, through the fixture,
+must still print the argument back at exit 0, or the refusal stands against a
+hazard that is already gone.
+`resolves_a_revision_that_names_a_commit_to_its_full_id` holds the other side of
+the same guard, because a reader that refuses every revision passes the test
+above and breaks every caller.
+
+Three more cover the readers themselves. The first two are about an undecodable
+name, which the readers answer differently on purpose, and the third is about
+the ends of a path, where a reader that trims takes a character off a name that
+had one.
+`a_non_ascii_path_read_back_through_run_is_not_octal_escaped` pins
+**`core.quotePath=false`**, a row above, against `Git::run`. That setting used to
+be pinned from the other direction, by `tests/conflicts.rs` asserting the
+*answer* a non-ASCII path produces, and it stopped testing this setting the
+moment `nul_separated_paths` became the path-list reader: `-z` output is unquoted
+whatever `quotePath` says, so removing the pin today leaves every integration
+test green — verified. `Git::run` is the surface it still covers, and the one a
+future call site would reach for by mistake.
+`a_path_git_reports_comes_back_byte_for_byte_even_when_it_is_not_utf8` pins the
+other half of the pair, against the refusal named just above it:
+`Git::nul_separated` hands back the bytes git wrote, so a name outside UTF-8
+survives it, where `Git::paths` refuses one outright. A path on unix is a byte
+string with no encoding promised, and a lossy conversion would destroy exactly
+the names that reader exists to preserve. The name never touches the filesystem —
+APFS rejects it outright — so the test puts it in the index directly.
+`a_path_that_ends_in_whitespace_comes_back_with_that_whitespace_intact` pins the
+third, `Git::path`, which reads *one* path rather than a list. Its fixture is a
+repository whose own directory name ends in whitespace — a space, and U+3000,
+which Rust's Unicode-aware `str::trim` eats just as readily — so the repository
+spells that character as the last character of its own path, and
+`rev-parse --show-toplevel` prints it there. A trimmed answer names a directory
+nothing holds, and every question asked of that path is then answered about
+nothing. The test carries an armed control: the same answer, read back through
+`Git::run`, must be missing exactly that character, or the assertion under it
+stands against a loss that is already gone. `--show-toplevel` rather than the
+`--git-path` the replay reads, and the limit is worth stating: `--git-path`
+glues a state directory name onto the end, so no trim reaches the repository's
+own last character there, and the loss that does reach it — a byte outside UTF-8
+— is a name APFS refuses to hold at all. One reader carries both losses, so the
+half a fixture on this machine can arm pins the reader.
+
+Two more pin **the position a caller's arguments land in**, which is what keeps
+every row of the table above from being undone by the caller. Git reads the
+arguments ahead of the subcommand as its own options, so an argument list that
+reaches that position re-pins any setting `safety_config` fixed — git's rule for
+two `-c` pairs naming one key is that the last pair wins — and aims the runner
+at any repository on the machine with `-C`.
+`an_argument_cannot_re_pin_a_setting_the_safety_config_fixed` smuggles
+`-c rebase.updateRefs=OVERRIDDEN` past the runner and requires the pinned
+`false` to hold, and
+`an_argument_cannot_aim_the_runner_at_another_repository` smuggles a `-C` naming
+a second fixture and requires the answer to be about the first. Each carries an
+armed control ahead of its assertion, because both assertions say that
+something did *not* happen and an assertion of that shape passes just as
+cheerfully when the hazard was never live: the first reads the pin back
+unmodified and then watches plain git honour the last `-c` pair, and the second
+watches plain git follow `-C` into the other repository. The guard itself is
+structural rather than a check — `Git` takes the subcommand as a parameter of
+its own, so an argument can only land *after* it, where git reads it as an
+argument of the subcommand.
+
+Three more pin the settings that let git act on the repository **on its own**,
+without any command asking it to. Each fixture arms the opposite value in its own
+repository, reads it back through plain git — the armed control, since a setting
+the fixture never took is one the runner cannot be shown to override — and then
+requires the runner to answer with the pinned value.
+`pins_automatic_maintenance_off_even_when_the_repository_turns_it_on` covers
+`maintenance.auto=false`, the row `gc.auto=0` does not reach: every resolved
+conflict runs `rebase --continue`, which commits, and a commit reaches git's
+automatic maintenance.
+`pins_the_filesystem_monitor_off_even_when_the_repository_names_one` covers
+`core.fsmonitor=false`, the one program git runs that the redirected
+`core.hooksPath` cannot take away, since git executes the named path directly.
+`pins_merge_preserving_rebase_off_even_when_the_repository_turns_it_on` covers
+`rebase.rebaseMerges=false`, which keeps a merge commit off the replay's todo
+list — `git diff-tree` reports no changed path for a merge, so a halt on one
+reads as a commit that changes nothing. The first two settings are read from
+git's own source rather than executed; what these tests execute is the pin
+itself. The third was executed: git 2.55 was watched to re-create the merge
+commit under `rebase.rebaseMerges=true`.
+
+One more pins the setting that decides **what git writes into a conflicted
+file**, which is the thing the hunk counter measures.
+`pins_the_conflict_style_even_when_the_repository_asks_for_diff3` covers
+`merge.conflictStyle=merge`, against a fixture that asks for `diff3`. The three
+styles open and close a region with the same markers, so the count holds for a
+region whose two sides carry no bracket line of their own; what `diff3` and
+`zdiff3` add is the base version, between a `|||||||` line and the `=======`
+one. A base carrying a line that reads as a marker therefore lands inside the
+region under those two styles and outside it under `merge`, and the same replay
+measures a different file on a developer who set the key. The style each setting
+writes was read out of a real merge; what the test executes is the pin.
+
+`src/scratch.rs` holds the structural half of that last one.
+`refuses_a_merge_commit_at_a_halt_rather_than_reading_it_as_a_commit_that_changes_nothing`
+points `REBASE_HEAD` at a merge commit and requires the empty-commit probe to
+refuse it by name. The probe counts the stopped commit's parents before it asks
+anything else, so the classification is correct whatever a later setting does,
+where the pin above only closes the route into it that exists today. It carries
+two controls ahead of the assertion — the fixture's stopped commit really has two
+parents, and `diff-tree` really is silent about it — and one after it: the same
+probe, pointed at a single-parent commit, has to answer rather than refuse.
+
+One more pins the setting that decides **whether git will merge at all**.
+`pins_signature_verification_off_even_when_the_repository_turns_it_on` covers
+`merge.verifySignatures=false`, against a fixture that turns verification on.
+The two signing rows above cover a replay asked to *make* a signature; this key
+is the other direction, a replay asked to *read* one, and `git merge` is the
+only command that reads it — so a developer who sets it leaves the rebase replay
+untouched and stops the merge replay dead. Git 2.55 was watched to exit 128 with
+`fatal: Commit <sha> does not have a GPG signature.` for a branch carrying no
+signature, and to leave no unmerged path behind it, which the merge replay reads
+as its own "the merge failed and left nothing to resolve". That is neither a
+cost nor a clean replay, so `grime` answers exit 2 for every unsigned branch on
+that machine. The refusal was read out of a real merge; what the test executes
+is the pin.
+
+The fixture builder stamps commits too, and is covered on its own ground in
+`src/testing.rs`, by
+`a_fixture_commits_under_its_own_identity_in_a_hook_environment`. It needs an
+actual commit to ask about, so it reads `git log` back for author, committer and
+both raw dates. It re-executes its own test binary with a hook's identity
+variables set on the *child* for the reason the two above do, and through the
+same `run_child_half` — the runner `tests/isolation.rs` reaches for as well. It
+used to carry a child check of its own, which accepted any child whose output
+held the literal `1 passed`. `tests/isolation.rs` carried a third copy of that
+same weaker check. One runner is what stops three guards standing at two
+strengths.
+
+**Four properties are pinned by doc-tests**, because each is about what a
+consumer can *compile* and no ordinary test can state that. Rustdoc compiles a
+doc-test as a program outside this crate, which is exactly the seat a consumer
+sits in, so a ` ```compile_fail ` block is the only place such a property can be
+written down. Each of the four was watched to fail before it was believed —
+rustdoc reports `Test compiled successfully, but it's marked compile_fail` —
+and each refusal was then read, because a block that failed over a typo, a
+renamed method or a missing import reports exactly the same green forever.
+
+- **The door**, on `Scratch`. The block reaches for `scratch.git()`, and it
+  passes only while that reach fails to compile. Watched to fail with the runner
+  still public, and the refusal read as `error[E0624]: method git is private`.
+- **The verdict**, on `Conflicts`. The block writes `Conflicts::default()`, and
+  it passes only while the `Default` derive is gone. Watched to fail with the
+  derive put back, and the refusal read as `error[E0599]: no associated function
+  or constant named default found for struct Conflicts`, whose note points a
+  reader at `Conflicts::nothing_replayed` and `Conflicts::from_files`.
+- **The bare count**, on the `metrics` module. The block writes
+  `format!("{hunks}")`, and it passes only while the counters have no `Display`.
+  Watched to fail with the `Display` impl put back on the counter macro, and the
+  refusal read as `error[E0277]: Hunks doesn't implement std::fmt::Display`.
+- **The unfinished sentence**, on `Report`. The block writes
+  `Report::for_tool("grind").render(…)`, and it passes only while `for_tool`
+  hands back an `UnwordedReport` that cannot render. Watched to fail with a
+  `render` put back on the unworded type, and the refusal read as
+  `error[E0599]: no method named render found for struct UnwordedReport<'a>`.
+
+A block asserting that something does *not* compile passes just as readily when
+it never compiled for an unrelated reason, so each guard carries a control: a
+block beside it that has to compile and that differs by exactly the line under
+test. `Scratch`'s control puts the named operations in place of the reach.
+`Conflicts`'s control puts a measured `replay_rebase` in place of the derive.
+The counter's control puts `hunks.phrase()` in place of `{}`. `Report`'s control
+puts `describing` back on the first of the two lines. One line differs, so the
+one line is what each ` ```compile_fail ` block measures.
+
+Each mutation reddens its own guard and nothing else across `gitscratch`,
+`grind` and `grist`. [`MUTATIONS.md`](./MUTATIONS.md) records the first two in
+its map, because what each of them costs is a plausible wrong answer nobody
+sees: a runner in a consumer's hands, and a clean verdict for a replay that
+never happened. The other two are out of that map, on the basis the two
+render-boundary tests in `src/report.rs` set — a `Display` on a counter costs
+`4 across 2` and an unworded report costs `grind: clean -  hit no conflicts`,
+and both of those are sentences a reader sees on screen. Each still carries its
+own record, in `MUTATIONS.md` under a heading that says why it is not a map row.
+
+The rest are about this document rather than about the code.
+`every_guard_the_safety_config_pins_is_named_in_the_readme_inventory` asks
+`safety_config` what it pins and requires the **What it guarantees** section
+above to name every one of them — the whole `key=value` for a settled value, the
+key alone for `core.hooksPath`, whose value is computed per run and so cannot be
+quoted anywhere, the option verbatim for a main option like
+`--literal-pathspecs`. That one key is named in the check rather than derived
+from its value: the rule used to read an *empty* value as the mark of a computed
+one, which needed the runner under test to carry an empty hooks path, and an
+empty hooks path is the value `Git::new` refuses. So the inventory is checked, not
+merely maintained: a guard added to the configuration and forgotten here fails
+the build instead of leaving a reader with a table they will reasonably take for
+the complete list. `--literal-pathspecs` is why the test exists — it was
+load-bearing in `safety_config` for a while before it was ever a row. It now
+makes the case for this check from the other side as well: the empty-commit
+probe stopped handing paths back to git, so no test in the workspace goes red
+when the pin is removed, and a guard whose own test has gone quiet still has to
+be a row.
+
+More of them pin the *scope* those checks read, since a check pointed at the
+wrong span of the file reports clean without ever having seen the table.
+`the_inventory_section_stops_at_the_next_heading_of_any_level` ends a section at
+the next heading whatever its level: demoting the heading below the inventory —
+one character — would otherwise widen it to swallow the prose here, which names
+`--literal-pathspecs` and `core.hooksPath`, the exact two guards matched by bare
+name, so both would be satisfiable with no row for either. Its last fixture ends
+the section at a setext heading — `Testing` over a rule of dashes — the one
+heading spelling that carries no `#`, so a lexical cut cannot pass this test.
+`an_inventory_section_that_nothing_closes_is_refused_rather_than_run_to_the_end`
+shuts the same gap from the other side: a section with no heading after it is
+refused outright rather than read to the end of the file.
+`a_hash_that_is_not_a_heading_does_not_end_a_section` shuts the third, the one
+this very section fell down. A `#` is not a heading: the `#329` below is the
+wrapped tail of an `Issue`, and a `#` opening a line inside a fenced shell block
+is a comment. A cut that stopped at either ended this section well short of its
+own end — so a test named down there read as named nowhere — and, worse, handed
+the refusal above a boundary to be satisfied by, leaving an unbounded scope
+reporting clean. The bounds come from a CommonMark parse for that reason: it is
+the only thing that answers "is this line a heading?" instead of answering some
+particular spelling of the question.
+
+One more turns that treatment on this section.
+`every_unit_test_in_this_file_is_named_in_the_readme_testing_section` reads
+`src/git.rs` back as text, collects every test defined in it, and requires the
+paragraphs above to name each one. Two of this README's lists have drifted out
+from under it — the guard table, and this walkthrough, which went on describing
+four tests through the commits that added two more — so this one is checked
+rather than trusted too.
+
+`tests/conflicts.rs` now pins the reader rather than the setting, and pins it
+over both classes of name the setting cannot rescue: one git quotes anyway
+(`back\slash.txt`, `quo"te.txt`) and one a trimming reader erodes (` lead.txt`,
+`trail.txt `, `　wide.txt `, whose leading `U+3000` Rust's Unicode-aware
+`str::trim` eats as readily as a space). Both halves of the defect are asserted
+together, because they break together — the name and the count. `tests/repo.rs`
+covers the other call site's one wrinkle: `status --porcelain -z` spends two
+fields on a record that names where the content came from, and such a record is
+one uncommitted file. All four spellings of it have a test there, because the
+pairing reads two status bytes for two letters and an arm nothing can fail is an
+arm nobody can trust. `git mv` writes `R` in the index column;
+`status.renames=copies` — a key this crate pins nothing about, so it arrives out
+of the developer's own configuration — writes `C` there beside the modification
+of the source; and both letters reach the *working-tree* column where the
+destination is in the index with no content behind it, which is what
+`git add -N` records and what `git add -p` records for a new file. The two new
+tests each carry an armed control, since an undetected copy comes back as
+`A  copy.txt`, one field for one file, and the count is then right without the
+pairing ever running.
+
+**The removed location variables**, the `GIT_DIR` row above, are pinned by
+`tests/isolation.rs`, which has to reach for a mechanism the rest of the suite
+does not. `std::env::set_var` is process-global and `unsafe`, and Rust runs a
+binary's tests as threads of one process, so poisoning the environment there
+would race every other test. The tests re-execute the test binary instead, with
+the variables set on the *child* — which is the leak verbatim, a whole process
+whose environment names another repository, and is parallel-safe because nothing
+outside that child ever sees them. Each one builds a victim repository, snapshots
+the file the leak corrupts, and asserts the bytes are identical afterwards: a
+snapshot rather than a second interrogation through git, because once a phantom
+index entry points at an object the victim does not have, git's own answers about
+it stop being trustworthy. Both shapes are covered — the severe one, where the
+fixture directory never gets a `.git` at all, and the `GIT_INDEX_FILE`-only one a
+`pre-commit` hook produces on its own. `grind`'s `tests/cli.rs` pins the same
+thing end to end through the binary.
+
+One child test carries every spawn a fixture makes, along with the crate's own
+runner, because one leaked environment reaches every one of them at once: the
+fixture builder, the spawn that pipes a record in on stdin, `TestRepo::try_git`,
+the `not_a_repository` probe, `DetachedGitDirRepo`'s runner, and the `Git` every
+replay goes through. Its doc comment names
+that list and gives no count. It used to say four, while the crate had six, and
+the two it left out were the two most recently added — the stdin spawn, reached
+here through `commit_file_named_by_bytes`, and the detached-git-directory
+runner, reached through a fixture with one linked worktree. A count written in
+prose is a fact nothing checks. Deriving it means scanning `src/testing.rs` for
+the shape of a spawn, and such a matcher carries a spelling list that goes
+stale the same silent way, so the sites are named where a reader can hold the
+list against the file.
+
+`DetachedGitDirRepo`'s runner is the site with the sharpest consequence.
+`--git-dir` and `--work-tree` on its command line outrank `GIT_DIR` and
+`GIT_WORK_TREE`, so that fixture looks protected by its own arguments — and
+nothing on a git command line outranks `GIT_INDEX_FILE`. Without the sweep, the
+fixture's own `git add` stages into the index the environment names. The
+mutation record in [`MUTATIONS.md`](./MUTATIONS.md) carries what that looks
+like: the victim's own staged file arriving in the fixture's commit.
+
+`tests/halts.rs` covers the other half of telling the truth: not that the
+harness leaves the repository alone, but that it does not report a cheap number
+for work it dropped. It puts a replay in each halt state *for real* — a resolved
+conflict whose commit cannot be written, a clean pick whose commit cannot be
+written, a commit that genuinely became empty, and a `--skip` git refuses — by
+making the object database unwritable, which is the only cause of a failed
+commit write still reachable through the harness once signing, hooks and the
+editor are pinned off. It is Unix-only for that reason. The last of those four
+states is named for what the replay believes about it rather than for what git
+did: `git rebase --skip` exits non-zero whenever the rebase is left unfinished,
+so the replay cannot tell a skip git refused from a skip that worked and halted
+again. [`MUTATIONS.md`](./MUTATIONS.md) records that, and records why it is
+written down rather than fixed here.
+
+Three of those clean picks are there for what the probe reads a path *as*, and
+every one of them asserts the *classification* rather than merely that something
+failed — the commit must never be called empty.
+`refuses_to_report_a_cost_when_a_clean_pick_of_quoted_paths_could_not_be_committed`
+is the spelling git prints: a commit touching nothing but a `café.txt` and a name
+with a leading space, the two spellings a line-oriented read mangles, with no
+plainly-spelled file alongside to carry the refusal on its own.
+`refuses_to_report_a_cost_when_a_clean_pick_of_a_pathspec_magic_path_could_not_be_committed`
+is the spelling a pathspec reads back: a `foo.txt` inside a directory literally
+named `:`, with an untouched `foo.txt` at the root for the magic spelling to
+answer about instead, so a probe built out of pathspecs gets an empty diff back —
+a true answer to a question nobody asked.
+`refuses_to_report_a_cost_when_a_clean_pick_of_a_submodule_pointer_could_not_be_committed`
+is the path git declines to print at all: a commit that moves a submodule pointer
+and touches nothing else, in a fixture that sets `diff.ignoreSubmodules=all` in
+its own configuration. `diff-tree` is plumbing and reports the submodule;
+`git diff` is porcelain and reads that key, so it reports nothing. One tree, two
+sets of rules, and the answer that comes out of them is "this commit adds
+nothing". Both invocations now ask for `--ignore-submodules=none`, and the test
+carries an armed control proving the setting really does hide the pointer from
+the porcelain, so a git that stopped honouring it fails the test rather than
+quietly emptying it.
+
+A fourth clean pick asks a different question: whether git names a path there at
+all.
+`refuses_to_report_a_cost_when_a_clean_pick_of_a_root_commit_could_not_be_committed`
+puts a **root commit** at the halt, on a fixture whose second history was started
+with `git checkout --orphan`. `diff-tree` compares a commit against its parent,
+so it prints nothing for a commit that has none until it is asked for `--root`,
+and a probe without the flag reads the first commit of a whole history as a
+commit that changes nothing. Two controls stand ahead of the replay: the branch's
+only commit really has no parent, read back through `rev-list --parents`, and
+`diff-tree` really is silent about that commit until the flag is added. The
+parent count that refuses a merge commit is not the guard here and must not be —
+a root commit has no parent, so the count is zero and the refusal passes it
+through.
+
+The first two of those were written when the probe handed its paths back to git
+as pathspecs, and that round trip is gone — `missing` is now the intersection of
+the two path lists, computed in Rust, so a spelling that changes on the way out
+changes identically on both sides and no argv has to carry every path of a
+commit. Both tests keep their worth as the answer asserted end to end. What the
+magic-path one no longer does is redden when `--literal-pathspecs` is removed,
+which [`MUTATIONS.md`](./MUTATIONS.md) records rather than leaves to be
+re-derived.
+
+`tests/hook_environment.rs` runs a whole replay under the environment `git
+commit` actually exports to a pre-commit hook — the everyday way a consumer is
+invoked, since a pre-commit hook running a test suite runs whatever that suite
+drives. It is a test binary of its own because the environment is process-wide,
+and cargo gives every integration test file its own process.
+
+The genuinely-empty halt is driven explicitly rather than assumed: on git 2.55 a
+patch already upstream is dropped without halting, a resolution that empties a
+commit is dropped silently by `rebase --continue`, and the `rebase.empty` config
+key is ignored on this path — only `--empty=stop` on git's command line reaches
+that stop. The test starts that rebase itself and asserts the halt happened, so
+a git that stops halting fails the test instead of quietly passing without
+exercising anything.
+
+The remaining rows of the table above are established by construction rather
+than by a test of their own, in two different places. `gpg.format`, `gc.auto`,
+and the `rebase.autoStash`/`autosquash` pair are entries in `safety_config`,
+which returns `-c key=value` arguments and nothing else; the editor and prompt
+environment — `GIT_EDITOR`, `GIT_SEQUENCE_EDITOR`, `GIT_TERMINAL_PROMPT` — is
+set on the command itself, in `Git::command`. The editor guard is at least
+exercised indirectly: every conflict test above drives a rebase that halts, and
+a halted rebase without `GIT_EDITOR` set sits waiting on a commit message.
+
+Those four were measured rather than assumed: removing all of them together
+leaves every test in `gitscratch`, `grind` and `grist` green, which
+[`MUTATIONS.md`](./MUTATIONS.md) records under **The pins nothing in this
+workspace can redden**, alongside the same answer for the `user.name` and
+`user.email` pair.
+
+`gpg.format` looks like the signing test covers it and it does not, which is
+worth saying out loud so nobody re-derives the wrong answer. That test's fixture
+pins `gpg.format=openpgp` itself, deliberately — the format selects *which*
+program config git reads, so without it the fake signing program the fixture
+names would go unused on a developer who has `gpg.format = ssh` set globally —
+and `openpgp` is the same value `safety_config` pins. Removing the harness's
+entry would therefore change nothing that test can observe. The pin earns its
+place for the reason the table gives; it is just not what makes that test pass.
+
+[`MUTATIONS.md`](./MUTATIONS.md) records which guard each test pins, where that
+guard lives, and the failure output captured when it was removed. It also
+records the other half of the question — what keeps each test *honest*: the
+start-state control proving the fixture began where the test needs it to, and
+the armed control proving the hazard would really have fired without the guard.
+That second half is the one that rots, and it rots green. Anyone changing
+`safety_config`, `Scratch::create` or the teardown should re-run the relevant
+mutation rather than trusting a green suite.
+
+`tests/repo.rs` covers the pre-flight separately, since what it must get right
+is the *cheap rejection*: a directory that is not a repository and a revision
+that does not resolve both have to fail there, by name. The premise for the
+first of those comes from `not_a_repository()` rather than from a bare
+`TempDir`, so a `TMPDIR` that turns out to sit inside a repository is reported
+where the mistake is instead of as the pre-flight accepting a directory it
+should have refused. `scratch_refuses_a_revision_that_starts_with_a_dash_rather_than_building_one_at_head`
+covers the revision that reaches the worktree rather than the reader:
+`git worktree add -q --detach <path> --force` is a complete and valid command,
+so without `--end-of-options` git reads `--force` as its own flag and builds the
+worktree at HEAD at exit 0 — a scratch of a revision nobody asked for, and every
+number measured in it about another branch.
+
+It also pins the other half of `Repo::open`'s contract: the directory it is
+handed may be any directory *inside* the repository, which is what every run
+from a subdirectory — that is, nearly every run — depends on. The validated path
+is private, so nothing outside the crate can inspect it and only behaviour can
+be asserted. `nested_conflict_repo()` is opened two levels down and has to
+resolve a revision to the same commit the root-opened `Repo` does, count a file
+edited at the repository *root* as uncommitted, and still hand back a worktree
+standing on the fixture's own `main`. `grind`'s `tests/cli.rs` closes the same
+loop through the binary, where the quiet failure lives: a run started in
+`sub/nested` has to name the two conflicted files `shared.txt` and
+`sub/nested/shared.txt` — the prefix kept, and neither file dropped for sitting
+outside the directory the run began in — and print byte-identically to the same
+run from the root.
+
+Three mutations pin that pair, each failing only the assertion it belongs to
+while the rest of the workspace's suite stays green: making `Repo::open` refuse
+a non-empty `rev-parse --show-prefix`, scoping `uncommitted_files` to the cwd
+with a `-- .` pathspec, and reducing each conflicted path to its last component.
+The last of those is why the fixture is contested in two places at two depths —
+every other fixture's conflicts sit at the repository root, where a
+root-relative name and a cwd-relative one are the same string.
+
+`tests/conflicts.rs` covers the answer rather than the safety of getting it:
+whether a replay conflicted at all, that the per-file breakdown accumulates
+across stops and adds up to the total it explains, and that a conflicted
+`日本語.txt` comes back by its real name carrying its real hunk count. It also
+asserts that a fold adds the stop counts of the steps it takes. Stops are the
+one measure a fold carries as a number of its own rather than as a sum of the
+breakdown, so a fold that dropped a step's stops would leave every other
+assertion in that file green. The name test is deliberately built on a file
+contested in *two* regions — with one, the undercount and the truth would both
+be 1 and the defect would pass. `Report`'s
+own tests sit beside it in `src/report.rs`, because rendering a `Conflicts` is
+pure string work that needs no repository at all. Two of them cover the render
+boundary, where every byte this crate carried intact finally becomes text.
+`a_name_that_is_not_valid_utf_8_is_rendered_with_the_replacement_character`
+builds the name straight out of bytes — `Conflicts::from_files` takes a
+`PathBuf`, and APFS refuses such a name on disk — and asserts both the U+FFFD
+the decode writes and that the count of that row still starts in the column its
+ASCII sibling's does.
+`a_name_that_holds_a_space_or_an_emoji_is_rendered_as_it_stands` covers the
+printable characters the escape rule was written to leave alone: a leading
+space, a trailing space, U+3000 and an emoji, asserted through the rendered text
+rather than through the map. Both were watched to fail — replacing the decode
+with a `to_str` that gives up reddens the first, and trimming the converted name
+reddens the second.
+
+The tests of `Report::render_diffs` sit in `src/report.rs` too. They build their
+halt diffs with `HaltDiff::from_parts` and `HaltDiffs::from_halts`, so they
+need no repository.
+`each_halt_gets_a_section_with_its_heading_and_its_diff_in_halt_order` holds
+the whole block against a golden made of the real halt diffs of the
+`grind --diff` example in GitHub issue #475.
+`a_merge_halt_without_stops_renders_its_diff_alone` holds the `grime --diff`
+example to the byte.
+`dropping_the_stop_count_removes_the_stop_headings_and_nothing_else` compares
+the block with the headings, less exactly its heading lines, against the block
+without them. `a_replay_that_did_not_halt_renders_no_halt_diffs`,
+`a_halt_with_no_stopped_commit_gets_a_heading_that_names_the_stop_alone` and
+`a_halt_where_git_gave_no_diff_says_so_under_its_heading` hold the other
+shapes.
+`a_control_character_in_a_halt_diff_is_escaped_and_each_line_ending_stays`
+and `a_control_character_in_a_commit_subject_is_escaped_in_the_heading` hold
+the escape. The first was watched to fail under two mutations: the rule of the
+breakdown in place of the rule of the diff, and an end of text that counts as a
+line ending. `a_halt_diff_loses_its_last_newline_and_nothing_else` fails under a
+trim. `multi_byte_text_survives_in_a_halt_diff_and_in_its_heading` was watched
+to fail with the escape walking bytes in place of characters. These goldens read
+the text through `glyphs`, which forces color on with
+`testcolor::with_forced_ansi` and takes the codes back out, so each one gives
+the same answer on a terminal and in a pipe. The painter tests read the paint
+of each line off its typed `ColoredString`, as `gsw` and `seescc` do. Four of
+them were watched to fail under a mutation:
+`inside_a_hunk_a_line_that_reads_like_a_header_gets_the_color_of_content` under
+a painter that reads the text of one line,
+`each_painted_line_opens_and_closes_its_own_color_codes` under one reset at the
+end of the block, `painting_a_halt_diff_changes_no_character_of_it` under a
+painter that trims an added line, and
+`an_esc_in_file_content_stays_escaped_on_a_painted_line` under a painter that
+paints before it escapes.
+
+Every column assertion in that file reads through one helper, `count_column`,
+and the helper has a test of its own —
+`the_count_column_is_read_from_the_last_place_the_count_appears`. The count is
+the last thing on a row, so the helper reads the last place the count appears. A
+name can spell its own count, `11 hunks.txt` being a legal file name, and a
+helper that stopped at the first occurrence answers with the column the *name*
+starts in — leaving every alignment assertion built on it passing or failing for
+a reason that has nothing to do with alignment. `grind`'s command-line suite
+carries the same helper over the rendered output of the binary, and the same
+test beside it.
+
+**That a counter's noun is the counter's own business** is pinned by a unit test
+in `src/metrics.rs` on `Uncommitted` — the newest counter, and the one whose
+noun is two words rather than one, so it is where the macro's suffix-`s` rule is
+most worth asserting. The doc-test pair in that module's own documentation pins
+the half a unit test cannot reach: that a caller has no way to route around the
+noun by printing the bare number. See the doc-test account above.
+`src/report.rs` pins the other end of the same seam: the note reads as a
+sentence at one file and at three, with the noun coming from the counter and the
+verb from the renderer, so the two cannot drift apart unnoticed.
+A default `Uncommitted` is a clean tree, which is what lets a caller that could
+not measure fall back to saying nothing rather than to saying something about
+zero files.
+
+One test there is honest about being a compile-time guarantee in a test's
+clothing: `Report`'s `Debug` and `Copy` derives cannot fail an assertion, only a
+build — drop `Copy` and using a report after `without_stops()` is a
+use-after-move, drop `Debug` and the format string does not compile. It is
+written as a test so that whoever deletes a derive trips over the reason it was
+added. What it *does* assert at runtime is the part a hand-written `Debug` could
+still get wrong: that the representation names the tool and the action, which is
+the only thing that makes it worth anything in a failing assertion's message.
+
+**The replay's round budget** is pinned by unit tests in `src/scratch.rs`, which
+the integration suite could not serve: the constant is 1000, and the case that
+matters is a replay needing exactly that many rounds. So the tests name the
+budget instead — `replay_rebase_within` is `replay_rebase` with the bound, and
+the capture switch, as parameters — and spend it on `contested_region_repo()`,
+whose three colliding
+commits take exactly three rounds. Both sides of the boundary are asserted:
+three rounds must produce the answer, two must still refuse. Noticing that the
+rebase has *finished* costs no round, so a fully-measured replay is never
+reported as one the harness gave up on.
+
+A `--skip` round costs one too, and that half is pinned by nothing, because
+nothing can pin it. The skip arm reads git's outcome the moment it comes back and
+stops the replay unless git exited zero, and `git rebase --skip` exits zero only
+when it has finished the rebase — git 2.55 exits 1 for a skip that worked and
+then met a conflict, and again for one that worked and then met a second empty
+commit. So no round can follow a skip round, and moving the charge into the
+conflict arm alone changes no answer this suite can produce. The charge stays at
+the top of the loop because the rule is that a round of work costs a round, and a
+charge written into one arm leaves the next arm uncounted.
+[`MUTATIONS.md`](./MUTATIONS.md) records it as unfalsifiable rather than as a
+guard somebody watched fail.
+
+**That a `Conflicts` cannot contradict its own accessors** is pinned by three
+further unit tests in `src/scratch.rs`, which need no repository either. The
+stop count is a `Stops` in the field as well as in the accessor, so there is no
+unwrapping step between the two for those tests to have to cover. One test
+attributes a measured count of zero to a file and requires the total to come
+back as one hunk: the floor lives at the single door into the breakdown, so it
+covers the replay path — the one place a count is still measured at runtime —
+and not just the constructor, whose `NonZeroUsize` makes a zero-hunk file
+unspellable. The other two require the constructor to refuse a breakdown and a
+stop count that disagree about whether anything conflicted, in both directions:
+stops with no files would otherwise render the clean line and swallow them, and
+files with no stops would report a replay that never halted.
+
+`tests/diffs.rs` covers the halt diffs that the three capturing entrances give
+beside the counts. A rebase replay of `contested_region_repo()` gives three
+halt diffs in stop order. Each one names its own stopped commit and holds the
+markers of its own region, and the counts equal those of the plain entrance.
+An `--onto` replay of `squash_merged_parent_repo()` from `contested-child` gives
+one halt diff that names `stacked.txt` only, and its counts equal those of the
+plain `--onto` entrance.
+The test on the markers is the one that fails when the capture moves below
+`git add -A`, because after that line `git diff` shows nothing. Each halt diff
+of `equal_hunks_unequal_stops_repo()` names the files the breakdown counted at
+its stop, and no other file. A modify/delete halt diff names its file as
+`* Unmerged path x.txt`. A merge gives one halt diff with no stopped commit,
+and a replay that does not halt gives none through either entrance. Two unit
+tests sit in `src/diffs.rs`.
+`a_diff_call_that_fails_leaves_git_s_own_words_in_the_halt_diff` runs the
+capture outside a repository and requires git's own words in the halt diff. A
+control reads those words from plain git first, so the test holds in each
+language git speaks. `a_hand_built_halt_diff_reads_back_what_it_was_given` pins
+the two fixture constructors. [`MUTATIONS.md`](./MUTATIONS.md) records the
+capture moved below `git add -A` and the merge capture moved above its early
+return, each watched to fail. It also records `--diff-filter=U` removed, which
+no test can make fail. Seven more tests put one hostile setting in the
+fixture's configuration, and an armed control shows plain git acting on it. Six
+of them require a halt diff that does not change. It holds no color code,
+survives a textconv program that fails, carries three context lines, names its
+file as `a/` and `b/`, carries ids of seven digits, and names a signed stopped
+commit on one line under `log.showSignature=true`. The seventh, on
+`diff.external`, passes with `--no-ext-diff` and without it, and
+[`MUTATIONS.md`](./MUTATIONS.md) records why.
 
 Consumers pin what they compose on top of the harness. `grist`'s own
 `tests/safety.rs` asserts that a full simulation — its `checkout --detach` →
@@ -98,6 +1667,128 @@ with known conflict shapes, shared by every crate built on the harness so the
 fixtures exist once rather than once per test binary. Every fixture lives in its
 own `TempDir`, so concurrent `cargo test` runs never share a path.
 
+A fixture runs git two ways. `TestRepo::git` raises a failed command as a panic,
+which is what building a fixture wants. `TestRepo::try_git` hands the `Output`
+back instead, which is what a **control** wants — the command a test runs to
+prove the hazard it is guarding against is really armed, whose failure *is* the
+demonstration and so has to be read rather than raised. Both shed the inherited
+git environment; only the assertion differs. That is the point of the second
+one: without it a control buys its permission by reaching around the fixture for
+a raw `Command`, and loses the scrub in the same move — and `current_dir` does
+not settle which repository git uses, because `GIT_DIR` outranks it, so the
+control then merges or commits in the developer's own repository. `try_git`
+applies a caller's own variables *after* the sweep, which is what lets a control
+pin `GIT_TERMINAL_PROMPT=0`, or the `LC_ALL` it needs to read git's words rather
+than their translation, without the `GIT_` prefix rule taking them straight back
+off.
+
+It also gates `Conflicts::from_files`, the hand-built-breakdown constructor
+`Report`'s tests are built on. Every call site is a fixture, and a released
+binary has no business stating a cost that nothing measured, so the constructor
+is simply not compiled into one. What makes that a boundary rather than a form
+of words is that nothing ungated stands beside it: `Conflicts` lost its
+`Default` derive, and the one constructor a released binary keeps is
+`nothing_replayed()`, which states no breakdown and names itself as the seed of
+a fold.
+
+It also holds `path_at_or_above`, the safety matcher that reads the output of a
+destructive tool for a path at or above the work tree of a
+`DetachedGitDirRepo` — the work tree that stands in for `$HOME`. `gitnuke`,
+`nodenuke` and `repotidy` each assert that it answers `None` for a run in a
+detached git directory, and each of the three carried a byte-identical copy of
+it. A copy that widened left the other two narrow, and a matcher that finds too
+little answers `None` for the wrong reason, which is the defect those three
+guards exist to stop. The matcher reads one line at a time and tries the
+longest candidate of each start first, so a path that holds a space reaches the
+comparison. Its mutation test sits beside it in `src/testing.rs`:
+`the_path_check_flags_the_work_tree_and_the_directory_above_it` plants four
+paths the matcher must flag, one of them under a directory whose name holds a
+space, and one path under the work tree that it must pass.
+
+`DetachedGitDirRepo` carries a precondition of its own, and it runs before the
+fixture builds anything. The fixture leaves no `.git` entry, so a tool that
+walks upward for one finds whatever stands above the temporary directory. A
+repository up there becomes the root that tool works in, and `nodenuke` deletes
+what it walks into without asking. `TempDir` reads `TMPDIR`, so a `TMPDIR`
+inside a checkout aims every guard built on this fixture at that checkout.
+`init` therefore asks `ancestor_repository` whether the temporary directory sits
+inside a repository, and panics with the offending path when it does. A path
+check that reads a run's output is a post-mortem; this one runs first.
+`the_ancestor_check_finds_the_repository_a_directory_sits_inside` pins it, and
+[`MUTATIONS.md`](./MUTATIONS.md) records both directions it was watched to fail
+in.
+
+`TestRepo::seal_object_store` is the fixture side of the halt tests, and the
+guard it hands back has to survive the walk that arms it. The walk strips the
+write bit off every directory of the object database, and it raises every I/O
+error as a panic. So the guard is built *before* the walk and the walk fills the
+guard's own list: built out of what the walk returns, it is never built at all
+when the walk panics partway, and the directories stripped up to that point keep
+their new modes. Such a tree stops its own `TempDir` from deleting itself, and
+`rm -rf` refuses it — permission denied on the files, directory not empty on the
+parents — until somebody runs `chmod -R u+w` on it.
+`a_panic_inside_the_seal_walk_puts_back_the_directories_it_already_stripped`
+pins the unwind. The panic is planted rather than provoked, by a directory name
+this crate's own test build alone checks for, because nothing a test can put on
+disk makes that walk fail *after* it has stripped something: a directory is
+sealed only once every directory under it is sealed, and which of two
+directories the walk meets first is the file system's choice. One end stays out
+of reach of every `Drop` — a signal that terminates without unwinding, which is
+what `Ctrl-C` during `cargo test` sends — and the doc comment says so and names
+the same repair. Each fixture owns a temporary directory of its own, so what
+that end leaves is litter on the disk rather than a hazard to a later run.
+
+It also holds `gitscratch::testing::pty`, a pseudo-terminal of a size that a
+test chose, for a test of a tool that measures its terminal or decides color by
+it. `Pty::give_as_controlling_terminal` makes the terminal the controlling
+terminal of a child. A tool that measures `/dev/tty` then measures a known
+window, and not the window of whoever typed `cargo test`.
+`Pty::run_with_stdout_on_terminal` also puts standard output of the child on
+the terminal, and gives back a `std::process::Output`.
+`Pty::run_with_output_on_terminal` puts standard error on the terminal too, so a
+test sees the display that a person sees. So a test of `grind` or
+`grime` sees the color that a person at a terminal sees. Output processing is
+off, so the bytes come back as the child wrote them. The master end is read on
+a thread of its own, so output of any size comes back whole. The helper lives
+here because both tools need it, and two copies of the same `unsafe` code part
+company. `tests/pty.rs` holds the helper to those claims.
+`tests/pty-descriptors.rs` holds that the terminal reaches the child on its
+standard streams alone. It is a target of its own, because a second test in its
+process can open a terminal before the close-on-exec flag is set.
+
+It also holds `gitscratch::testing::git_shim`, a `git` that goes first on
+`PATH`. The shim logs each call, one record for each call and one field for each
+argument, and then runs the real git. `GitShim::calls` reads the log back, and
+`GitShim::path_variable` gives the `PATH` for a child process. The shim can
+also pause for one second before a subcommand that a test names, so a display
+that waits for its delay has time to show. The terminal tests of `grind` and
+`grime` use that pause. It exists because gitscratch sheds
+every `GIT_*` variable from its children, so `GIT_TRACE` logs nothing. Only a
+`git` on `PATH` sees which git processes a replay starts.
+
+| Fixture | Shape |
+| --- | --- |
+| `contested_region_repo()` | `iterated` rewrites one region across three commits, `single` touches it once — the asymmetry that makes a stop count worth printing. |
+| `stacked_branches_repo()` | `built-on-top` branched from `groundwork`, not from main. |
+| `squash_merged_parent_repo()` | `child` and `contested-child` branched from `parent`, and `parent` got a squash merge into `main`. `parent` rewrote one line of `shared.txt` in two commits, and the squash commit holds them under a different patch, so a plain rebase of either child onto `main` stops on each of them. `child` adds its own file, so `--onto main parent` replays it clean. `contested-child` rewrites the line of `stacked.txt` that `main` also rewrote, so `--onto main parent` stops once, in `stacked.txt` only. |
+| `equal_hunks_unequal_stops_repo()` | Two branches making the same two edits, packaged as one commit and as two, so they tie on hunks and differ on stops. |
+| `independent_branches_repo()` | Two branches that each add a file of their own, so nothing can conflict. |
+| `conflicting_repo()` | Two branches rewriting the same line, so a replay is guaranteed to conflict and resolve. |
+| `nested_conflict_repo()` | The same collision in `shared.txt` and in `sub/nested/shared.txt`, so a tool can be run from a committed subdirectory two levels down — one conflict inside it, one outside it. |
+| `modify_delete_repo()` | A branch that modifies the file `main` deleted, so a replay is a modify/delete conflict. Its auto-resolution stages a blob the object store already holds, so this is the shape that gets all the way to `rebase --continue` under a sealed object database and fails on the commit write alone — the resolution staged, and nothing unmerged. Sealing is a permission trick, so the tests that reach these halts are Unix only. |
+| `branches_behind_main_repo()` | Two branches that each add a file of their own, and a `main` that has moved past both, so replaying either has to *write* a commit rather than move a ref. The pick applies cleanly, so a sealed object database halts it with nothing unmerged and nothing dirty — the state a commit that genuinely became empty is otherwise indistinguishable from. |
+| `branches_behind_main_with_quoted_and_space_led_paths_repo()` | The same shape with the branch's work in `café.txt`, which git C-quotes whenever it prints a path alone on a line, and ` leading space.txt`, which any trim of that line silently shortens. Neither path is plainly spelled, deliberately: an ordinary sibling in the same commit would come back matching and carry the refusal on its own, leaving what the mangled names cost invisible. |
+| `branches_behind_main_with_a_pathspec_magic_path_repo()` | The same shape again, with the branch's work in `:/foo.txt` and a decoy `foo.txt` committed at the root. Nothing mangles on the way out; the leading `:` is pathspec magic on the way back in, so the name asks about the decoy neither side touched — the direction that *shrinks* the set of paths a probe finds missing to empty, which is a halt read as a commit to skip. The probe builds no pathspec today, so what this fixture asks for now is the answer: such a commit is never called empty. Unix only, because the filesystem has to hold a directory named `:`. |
+| `branches_behind_main_with_a_submodule_pointer_bump_repo()` | The same shape once more, with the branch's work in a submodule pointer and `diff.ignoreSubmodules=all` set in the fixture's own configuration. `diff-tree` reports the moved gitlink and `git diff` reports nothing, so a probe that asks one command what the commit touched and the other whether the new base holds it reads one tree under two sets of rules — and calls a commit empty because the porcelain declined to mention its only path. The pointer's two values are commits of this repository's own object database, so no second repository is cloned or kept alive; a `.gitmodules` entry sits in the base commit, where a real superproject records one, leaving the bump commit touching the gitlink alone. |
+| `unrelated_histories_repo()` | `main` and `unrelated` share no commit at all: `git checkout --orphan` gives the second branch a root commit of its own, and the two histories name their files differently so the pick applies cleanly. Replaying `unrelated` onto `main` therefore puts a **root commit** at a halt, which is where `diff-tree` prints no path until it is asked for `--root`. Every other fixture here starts from a base commit both branches share, so this is the one shape that reaches that question. Sealing the object database halts the pick with nothing unmerged and nothing dirty, as `branches_behind_main_repo()` does for a commit with a parent. |
+| `commit_emptied_by_main_repo()` | A branch whose first commit reaches content `main` arrived at by a different route, followed by a second commit that is real work. No commit shares a patch id with one on the other side, so git cannot drop the first early: under `--empty=stop` the rebase halts on it legitimately, and the second still has to survive. |
+| `multi_byte_names_repo()` | Branches `left-左` and `right-右` colliding in `readme.md` and `日本語.txt` — a name git would escape, a hunk count that collapses when it does, and two names whose byte, character and column widths disagree. |
+| `awkward_names_repo()` | Conflicts in names git C-quotes whatever `core.quotePath` says — a backslash, a double quote — beside names with leading and trailing whitespace, including U+3000. Each is contested in two regions, so a mangled name floors at one hunk and the count fails, not just the spelling. Unix only, because the filesystem has to hold the names. |
+| `default_branch_choice_repo(candidates)` | A repository holding exactly the default-branch candidates `candidates` names — `main`, `master`, both, or neither — with `CHOICE_HEAD_BRANCH` checked out. That head branch is neither candidate deliberately, since a fixture sitting on one would let a tool that measured HEAD against itself pass. The two candidates differ in the *answer* rather than only in the name a run prints: replaying the head branch onto `main` is clean and onto `master` conflicts, so the exit code alone says which branch a run measured, and a tool that named one candidate while measuring the other is caught by the number. |
+| `not_a_repository()` | A directory outside every repository, which checks its own premise and says so if `TMPDIR` turns out to sit inside one. |
+| `TestRepo::bare_clone(head)` | A `BareRepo`: `worktree add` succeeds there but `status --porcelain` cannot run, so a pre-flight query can fail where the replay still answers. |
+| `DetachedGitDirRepo::nested()` and `::beside()` | A repository whose git directory is detached from its work tree, the way `yadm` keeps a directory of dotfiles. The fixture leaves no `.git` entry anywhere, so a walk upward for one finds no repository at all. `nested` puts the git directory inside the work tree, which is what `yadm` does, and git reports `--is-inside-work-tree` as true from there. `beside` puts it outside, and git reports that same question as false and `--is-inside-git-dir` as true, so code that reads either answer needs both shapes. Like `not_a_repository()`, it checks its own premise and refuses a `TMPDIR` that sits inside a repository. |
+
 ```toml
 [dev-dependencies]
 gitscratch = { workspace = true, features = ["testing"] }
@@ -106,3 +1797,9 @@ gitscratch = { workspace = true, features = ["testing"] }
 ## Used by
 
 - [`grist`](../grist/README.md) — ranks squash-merge orderings by conflict cost
+- [`grind`](../grind/README.md) — would rebasing HEAD onto this branch conflict,
+  and by how much?
+- [`grime`](../grime/README.md) — would merging this branch into HEAD conflict,
+  and by how much?
+- [`bibibi`](../../README.md#bibibi-bye-bye-bye) — which commit caused this
+  regression, found with a test from a later commit?

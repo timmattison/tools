@@ -1,0 +1,656 @@
+#![deny(unsafe_code)]
+#![warn(clippy::pedantic)]
+//! `sidecar worktree <name> [<branch>]`, tested through the binary.
+
+mod support;
+
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use support::Fixture;
+
+/// The name of the sidecar in these tests.
+const NAME: &str = "testdata";
+
+/// Makes a fixture and runs `sidecar setup` in the main checkout.
+fn after_setup() -> Fixture {
+    let fixture = Fixture::new(&[NAME]);
+    set_up_in(&fixture, &fixture.main_checkout());
+    fixture
+}
+
+/// Runs `sidecar setup` in `worktree` and asserts success.
+fn set_up_in(fixture: &Fixture, worktree: &Path) {
+    let run = fixture.run(worktree, &["setup"]);
+    assert_eq!(run.code, 0, "{run:?}");
+}
+
+/// What the link of `name` in `worktree` points at, canonical.
+fn link_target(fixture: &Fixture, worktree: &Path, name: &str) -> PathBuf {
+    fs::canonicalize(fixture.link(worktree, name)).expect("the link points at a path")
+}
+
+/// The branch checked out in the directory `place`.
+fn branch_of(fixture: &Fixture, place: &Path) -> String {
+    fixture.git(place, &["symbolic-ref", "--short", "HEAD"])
+}
+
+/// Asserts that a run of `sidecar worktree` made the sidecar worktree for `branch`,
+/// points the link of `worktree` at it, and names the link, the target, and the branch.
+fn assert_pointed_at_new_worktree(
+    fixture: &Fixture,
+    worktree: &Path,
+    run: &support::Run,
+    branch: &str,
+) {
+    assert_eq!(run.code, 0, "{run:?}");
+    let target = fixture.worktrees_dir(NAME).join(branch);
+    assert!(target.is_dir(), "{} is missing", target.display());
+    assert_eq!(branch_of(fixture, &target), branch);
+    assert_eq!(
+        link_target(fixture, worktree, NAME),
+        fs::canonicalize(&target).unwrap()
+    );
+    assert!(run.stdout.contains("data/testdata"), "{run:?}");
+    assert!(run.stdout.contains(&*target.to_string_lossy()), "{run:?}");
+    assert!(
+        run.stdout.contains(&format!("(branch {branch})")),
+        "{run:?}"
+    );
+}
+
+#[test]
+fn no_branch_uses_the_current_branch_of_the_host() {
+    let fixture = after_setup();
+    let host = fixture.add_host_worktree("issue-123");
+    set_up_in(&fixture, &host);
+
+    let run = fixture.run(&host, &["worktree", NAME]);
+
+    assert_pointed_at_new_worktree(&fixture, &host, &run, "issue-123");
+}
+
+#[test]
+fn a_named_branch_is_used() {
+    let fixture = after_setup();
+    let host = fixture.add_host_worktree("issue-123");
+    set_up_in(&fixture, &host);
+
+    let run = fixture.run(&host, &["worktree", NAME, "other"]);
+
+    assert_pointed_at_new_worktree(&fixture, &host, &run, "other");
+}
+
+#[test]
+fn a_branch_with_a_slash_makes_nested_directories() {
+    let fixture = after_setup();
+    let host = fixture.main_checkout();
+
+    let run = fixture.run(&host, &["worktree", NAME, "team/topic"]);
+
+    assert_pointed_at_new_worktree(&fixture, &host, &run, "team/topic");
+    assert!(fixture.worktrees_dir(NAME).join("team").is_dir());
+}
+
+/// The names in `dir`, sorted. The list is empty when `dir` is missing.
+fn entries(dir: &Path) -> Vec<String> {
+    let Ok(read) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = read
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// The records of `git worktree list --porcelain -z` in the main clone. A record is
+/// the list of fields up to an empty field.
+fn worktree_records(fixture: &Fixture) -> Vec<Vec<String>> {
+    let output = fixture.try_git(
+        &fixture.main_clone(NAME),
+        &["worktree", "list", "--porcelain", "-z"],
+    );
+    assert!(output.status.success());
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    let mut records = Vec::new();
+    let mut current = Vec::new();
+    for field in text.split('\0') {
+        if field.is_empty() {
+            if !current.is_empty() {
+                records.push(std::mem::take(&mut current));
+            }
+        } else {
+            current.push(field.to_string());
+        }
+    }
+    records
+}
+
+#[test]
+fn main_points_the_link_at_the_main_clone_and_makes_no_worktree() {
+    let fixture = after_setup();
+    let host = fixture.add_host_worktree("issue-123");
+    set_up_in(&fixture, &host);
+    let first = fixture.run(&host, &["worktree", NAME]);
+    assert_eq!(first.code, 0, "{first:?}");
+    let before_entries = entries(&fixture.worktrees_dir(NAME));
+    let before_records = worktree_records(&fixture);
+
+    let run = fixture.run(&host, &["worktree", NAME, "main"]);
+
+    assert_eq!(run.code, 0, "{run:?}");
+    assert_eq!(
+        link_target(&fixture, &host, NAME),
+        fs::canonicalize(fixture.main_clone(NAME)).unwrap()
+    );
+    assert_eq!(entries(&fixture.worktrees_dir(NAME)), before_entries);
+    assert_eq!(worktree_records(&fixture), before_records);
+    assert!(run.stdout.contains("(branch main)"), "{run:?}");
+}
+
+#[test]
+fn two_host_worktrees_share_one_sidecar_worktree() {
+    let fixture = after_setup();
+    let a = fixture.add_host_worktree("a");
+    let b = fixture.add_host_worktree("b");
+    set_up_in(&fixture, &a);
+    set_up_in(&fixture, &b);
+
+    let first = fixture.run(&a, &["worktree", NAME, "shared"]);
+    let second = fixture.run(&b, &["worktree", NAME, "shared"]);
+
+    assert_eq!(first.code, 0, "{first:?}");
+    assert_eq!(second.code, 0, "{second:?}");
+    assert_eq!(
+        link_target(&fixture, &a, NAME),
+        link_target(&fixture, &b, NAME)
+    );
+    let on_shared = worktree_records(&fixture)
+        .iter()
+        .filter(|record| {
+            record
+                .iter()
+                .any(|field| field == "branch refs/heads/shared")
+        })
+        .count();
+    assert_eq!(on_shared, 1);
+}
+
+/// The commit that `rev` names in `place`.
+fn commit_of(fixture: &Fixture, place: &Path, rev: &str) -> String {
+    fixture.git(place, &["rev-parse", rev])
+}
+
+/// Makes a commit on a new branch `branch` of a scratch clone of the bare sidecar
+/// remote and pushes it. Returns the commit.
+fn push_branch_to_remote(fixture: &Fixture, branch: &str) -> String {
+    let scratch = fixture.root().join(format!("scratch-{branch}"));
+    fixture.git(
+        fixture.root(),
+        &[
+            "clone",
+            "--quiet",
+            &fixture.sidecar_remote(NAME).to_string_lossy(),
+            &scratch.to_string_lossy(),
+        ],
+    );
+    fixture.git(&scratch, &["checkout", "--quiet", "-b", branch]);
+    fixture.write(&scratch.join("from-remote.txt"), branch);
+    fixture.git(&scratch, &["add", "from-remote.txt"]);
+    fixture.git(&scratch, &["commit", "--quiet", "-m", branch]);
+    fixture.git(&scratch, &["push", "--quiet", "origin", branch]);
+    commit_of(fixture, &scratch, "HEAD")
+}
+
+#[test]
+fn a_local_branch_is_taken_first() {
+    let fixture = after_setup();
+    let host = fixture.main_checkout();
+    let clone = fixture.main_clone(NAME);
+    fixture.git(&clone, &["branch", "feature"]);
+    fixture.git(&clone, &["checkout", "--quiet", "feature"]);
+    fixture.write(&clone.join("local-only.txt"), "local");
+    fixture.git(&clone, &["add", "local-only.txt"]);
+    fixture.git(&clone, &["commit", "--quiet", "-m", "local"]);
+    let local = commit_of(&fixture, &clone, "HEAD");
+    fixture.git(&clone, &["checkout", "--quiet", "main"]);
+    push_branch_to_remote(&fixture, "feature");
+
+    let run = fixture.run(&host, &["worktree", NAME, "feature"]);
+
+    assert_pointed_at_new_worktree(&fixture, &host, &run, "feature");
+    let target = fixture.worktrees_dir(NAME).join("feature");
+    assert_eq!(commit_of(&fixture, &target, "HEAD"), local);
+}
+
+#[test]
+fn origin_branch_is_taken_after_a_fetch() {
+    let fixture = after_setup();
+    let host = fixture.main_checkout();
+    let pushed = push_branch_to_remote(&fixture, "remote-only");
+
+    let run = fixture.run(&host, &["worktree", NAME, "remote-only"]);
+
+    assert_pointed_at_new_worktree(&fixture, &host, &run, "remote-only");
+    let target = fixture.worktrees_dir(NAME).join("remote-only");
+    assert_eq!(commit_of(&fixture, &target, "HEAD"), pushed);
+    assert_eq!(
+        fixture.git(&target, &["rev-parse", "--abbrev-ref", "@{upstream}"]),
+        "origin/remote-only"
+    );
+}
+
+#[test]
+fn a_new_branch_from_main_is_the_last_choice() {
+    let fixture = after_setup();
+    let host = fixture.main_checkout();
+    // HEAD of the main clone is on another branch, thus only the name `main` is right.
+    let clone = fixture.main_clone(NAME);
+    fixture.git(&clone, &["checkout", "--quiet", "-b", "elsewhere"]);
+    fixture.write(&clone.join("elsewhere.txt"), "x");
+    fixture.git(&clone, &["add", "elsewhere.txt"]);
+    fixture.git(&clone, &["commit", "--quiet", "-m", "elsewhere"]);
+
+    let run = fixture.run(&host, &["worktree", NAME, "fresh"]);
+
+    assert_pointed_at_new_worktree(&fixture, &host, &run, "fresh");
+    let target = fixture.worktrees_dir(NAME).join("fresh");
+    assert_eq!(
+        commit_of(&fixture, &target, "HEAD"),
+        commit_of(&fixture, &fixture.main_clone(NAME), "main")
+    );
+}
+
+#[test]
+fn a_failed_fetch_warns_and_continues_with_the_local_branches() {
+    let fixture = after_setup();
+    let host = fixture.main_checkout();
+    let remote = fixture.sidecar_remote(NAME);
+    fs::rename(&remote, fixture.root().join("moved-away.git")).unwrap();
+
+    let run = fixture.run(&host, &["worktree", NAME, "fresh"]);
+
+    assert_pointed_at_new_worktree(&fixture, &host, &run, "fresh");
+    let warning = run
+        .stderr
+        .lines()
+        .find(|line| line.starts_with("warning: "))
+        .unwrap_or_else(|| panic!("no warning line: {run:?}"));
+    assert!(warning.contains("fetch"), "{warning}");
+    let target = fixture.worktrees_dir(NAME).join("fresh");
+    assert_eq!(
+        commit_of(&fixture, &target, "HEAD"),
+        commit_of(&fixture, &fixture.main_clone(NAME), "main")
+    );
+}
+
+/// Asserts that the run failed with exit 1 and that stderr holds every text in `parts`.
+fn assert_fails_naming(run: &support::Run, parts: &[&str]) {
+    assert_eq!(run.code, 1, "{run:?}");
+    assert_eq!(run.stdout, "", "{run:?}");
+    assert!(run.stderr.starts_with("sidecar: "), "{run:?}");
+    for part in parts {
+        assert!(run.stderr.contains(part), "{part:?} not in {run:?}");
+    }
+}
+
+#[test]
+fn an_unregistered_name_lists_the_registered_names() {
+    let fixture = Fixture::new(&[NAME, "pics"]);
+    let host = fixture.main_checkout();
+    let run = fixture.run(&host, &["worktree", "nothing"]);
+    assert_fails_naming(&run, &["\"nothing\"", "testdata", "pics"]);
+}
+
+#[test]
+fn a_missing_main_clone_names_sidecar_setup() {
+    let fixture = Fixture::new(&[NAME]);
+    let host = fixture.main_checkout();
+    let run = fixture.run(&host, &["worktree", NAME, "x"]);
+    assert_fails_naming(&run, &["missing", "`sidecar setup`"]);
+    assert!(!fixture.main_clone(NAME).exists());
+    assert!(!fixture.worktrees_dir(NAME).exists());
+}
+
+#[test]
+fn a_detached_head_asks_for_a_branch() {
+    let fixture = after_setup();
+    let host = fixture.add_host_worktree("detached");
+    set_up_in(&fixture, &host);
+    fixture.git(&host, &["checkout", "--quiet", "--detach"]);
+    let before = link_target(&fixture, &host, NAME);
+
+    let run = fixture.run(&host, &["worktree", NAME]);
+
+    assert_fails_naming(
+        &run,
+        &["detached HEAD", "sidecar worktree testdata <branch>"],
+    );
+    assert_eq!(link_target(&fixture, &host, NAME), before);
+}
+
+#[test]
+fn a_branch_name_that_git_refuses_is_an_error() {
+    let fixture = after_setup();
+    let host = fixture.main_checkout();
+    let run = fixture.run(&host, &["worktree", NAME, "bad..name"]);
+    assert_fails_naming(&run, &["git refuses the branch name \"bad..name\""]);
+    assert!(!fixture.worktrees_dir(NAME).exists());
+}
+
+#[test]
+fn a_real_directory_at_the_link_is_not_touched() {
+    let fixture = after_setup();
+    let host = fixture.main_checkout();
+    let link = fixture.link(&host, NAME);
+    fs::remove_file(&link).unwrap();
+    fs::create_dir(&link).unwrap();
+    fixture.write(&link.join("mine.txt"), "mine");
+
+    let run = fixture.run(&host, &["worktree", NAME, "x"]);
+
+    assert_fails_naming(
+        &run,
+        &["data/testdata is a real directory", "does not touch it"],
+    );
+    assert_eq!(fs::read_to_string(link.join("mine.txt")).unwrap(), "mine");
+    assert!(!fixture.worktrees_dir(NAME).exists());
+}
+
+#[test]
+fn a_file_at_the_link_is_not_touched() {
+    let fixture = after_setup();
+    let host = fixture.main_checkout();
+    let link = fixture.link(&host, NAME);
+    fs::remove_file(&link).unwrap();
+    fs::write(&link, "mine").unwrap();
+
+    let run = fixture.run(&host, &["worktree", NAME, "x"]);
+
+    assert_fails_naming(&run, &["data/testdata is a real file", "does not touch it"]);
+    assert_eq!(fs::read_to_string(&link).unwrap(), "mine");
+    assert!(!fixture.worktrees_dir(NAME).exists());
+}
+
+#[test]
+fn something_at_the_new_worktree_path_is_not_touched() {
+    let fixture = after_setup();
+    let host = fixture.main_checkout();
+    let busy = fixture.worktrees_dir(NAME).join("busy");
+    fixture.write(&busy.join("mine.txt"), "mine");
+    let before = link_target(&fixture, &host, NAME);
+
+    let run = fixture.run(&host, &["worktree", NAME, "busy"]);
+
+    assert_fails_naming(&run, &["busy", "already exists", "does not touch it"]);
+    assert_eq!(fs::read_to_string(busy.join("mine.txt")).unwrap(), "mine");
+    assert_eq!(entries(&busy), ["mine.txt"]);
+    assert_eq!(link_target(&fixture, &host, NAME), before);
+}
+
+#[test]
+fn the_link_changes_atomically() {
+    let fixture = after_setup();
+    let host = fixture.main_checkout();
+    let before = fixture.link(&host, NAME);
+
+    let run = fixture.run(&host, &["worktree", NAME, "atomic"]);
+
+    assert_eq!(run.code, 0, "{run:?}");
+    // The link is renamed over the old link, thus it is a link at every moment and no
+    // scratch entry stays in the link directory.
+    let names = entries(before.parent().unwrap());
+    assert_eq!(names, [NAME], "{names:?}");
+    assert!(names
+        .iter()
+        .all(|n| !n.starts_with(".testdata.sidecar-link-")));
+    assert!(fs::symlink_metadata(&before)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+}
+
+#[test]
+fn only_the_link_of_the_name_in_this_worktree_changes() {
+    let fixture = Fixture::new(&[NAME, "pics"]);
+    let a = fixture.add_host_worktree("a");
+    let b = fixture.add_host_worktree("b");
+    set_up_in(&fixture, &a);
+    set_up_in(&fixture, &b);
+    let others = [
+        link_target(&fixture, &a, "pics"),
+        link_target(&fixture, &b, NAME),
+        link_target(&fixture, &b, "pics"),
+    ];
+
+    let run = fixture.run(&a, &["worktree", NAME, "x"]);
+
+    assert_eq!(run.code, 0, "{run:?}");
+    assert_ne!(link_target(&fixture, &a, NAME), others[1]);
+    assert_eq!(
+        [
+            link_target(&fixture, &a, "pics"),
+            link_target(&fixture, &b, NAME),
+            link_target(&fixture, &b, "pics"),
+        ],
+        others
+    );
+}
+
+#[test]
+fn never_deletes_a_worktree_a_branch_or_a_change() {
+    let fixture = after_setup();
+    let host = fixture.main_checkout();
+    let run = fixture.run(&host, &["worktree", NAME, "keep"]);
+    assert_eq!(run.code, 0, "{run:?}");
+    let keep = fixture.worktrees_dir(NAME).join("keep");
+    fixture.write(&keep.join("new-file.txt"), "new");
+    fixture.write(&keep.join("data.txt"), "changed\n");
+
+    for branch in ["main", "other"] {
+        let moved = fixture.run(&host, &["worktree", NAME, branch]);
+        assert_eq!(moved.code, 0, "{moved:?}");
+    }
+
+    assert_eq!(
+        fs::read_to_string(keep.join("new-file.txt")).unwrap(),
+        "new"
+    );
+    assert_eq!(
+        fs::read_to_string(keep.join("data.txt")).unwrap(),
+        "changed\n"
+    );
+    assert_eq!(branch_of(&fixture, &keep), "keep");
+    let branches = fixture.git(
+        &fixture.main_clone(NAME),
+        &["branch", "--list", "keep", "--format=%(refname:short)"],
+    );
+    assert_eq!(branches, "keep");
+}
+
+#[test]
+fn works_from_a_subdirectory_of_the_host_worktree() {
+    let fixture = after_setup();
+    let host = fixture.main_checkout();
+    let inner = host.join("some").join("deep");
+    fs::create_dir_all(&inner).unwrap();
+
+    let run = fixture.run(&inner, &["worktree", NAME, "deep"]);
+
+    assert_pointed_at_new_worktree(&fixture, &host, &run, "deep");
+}
+
+#[test]
+fn checkout_and_switch_keep_the_link() {
+    let fixture = after_setup();
+    let host = fixture.add_host_worktree("old");
+    set_up_in(&fixture, &host);
+    let run = fixture.run(&host, &["worktree", NAME, "feature"]);
+    assert_eq!(run.code, 0, "{run:?}");
+    let target = link_target(&fixture, &host, NAME);
+
+    // The post-checkout hook runs this command after `git checkout` and `git switch`.
+    let hook = fixture.run(&host, &["setup", "--hook", "old", "new", "1"]);
+
+    assert_eq!(hook.code, 0, "{hook:?}");
+    assert_eq!(link_target(&fixture, &host, NAME), target);
+    assert_eq!(
+        target,
+        fs::canonicalize(fixture.worktrees_dir(NAME).join("feature")).unwrap()
+    );
+}
+
+/// Makes the worktree of `feature`, optionally locks it, moves its directory away like a
+/// person does, and runs `sidecar worktree` again. Asserts the link did not change.
+fn rerun_after_removal_by_hand(lock: bool) -> support::Run {
+    let fixture = after_setup();
+    let host = fixture.main_checkout();
+    let first = fixture.run(&host, &["worktree", NAME, "feature"]);
+    assert_eq!(first.code, 0, "{first:?}");
+    let path = fixture.worktrees_dir(NAME).join("feature");
+    if lock {
+        fixture.git(
+            &fixture.main_clone(NAME),
+            &["worktree", "lock", &path.to_string_lossy()],
+        );
+    }
+    fs::rename(&path, fixture.root().join("moved-away")).unwrap();
+    let link = fixture.link(&host, NAME);
+    let before = fs::read_link(&link).unwrap();
+
+    let run = fixture.run(&host, &["worktree", NAME, "feature"]);
+
+    assert_eq!(fs::read_link(&link).unwrap(), before, "{run:?}");
+    let main_clone = fixture.main_clone(NAME);
+    assert_fails_naming(
+        &run,
+        &[
+            "worktree prune",
+            &main_clone.to_string_lossy(),
+            &path.to_string_lossy(),
+        ],
+    );
+    run
+}
+
+#[test]
+fn a_worktree_removed_by_hand_is_refused_and_the_link_stays() {
+    rerun_after_removal_by_hand(false);
+}
+
+#[test]
+fn a_locked_worktree_removed_by_hand_names_unlock() {
+    let run = rerun_after_removal_by_hand(true);
+    assert!(run.stderr.contains("worktree unlock"), "{run:?}");
+}
+
+/// Makes `count` commits on `main` of a scratch clone of the bare sidecar remote and
+/// pushes them. `tag` keeps the scratch directory and the file names apart.
+fn push_commits_to_remote_main(fixture: &Fixture, tag: &str, count: usize) {
+    let scratch = fixture.root().join(format!("scratch-main-{tag}"));
+    fixture.git(
+        fixture.root(),
+        &[
+            "clone",
+            "--quiet",
+            &fixture.sidecar_remote(NAME).to_string_lossy(),
+            &scratch.to_string_lossy(),
+        ],
+    );
+    for index in 0..count {
+        let file = format!("remote-{tag}-{index}.txt");
+        fixture.write(&scratch.join(&file), tag);
+        fixture.git(&scratch, &["add", &file]);
+        fixture.git(&scratch, &["commit", "--quiet", "-m", &file]);
+    }
+    fixture.git(&scratch, &["push", "--quiet", "origin", "main"]);
+}
+
+/// The first line of stderr that starts with `warning: `.
+fn warning_of(run: &support::Run) -> &str {
+    run.stderr
+        .lines()
+        .find(|line| line.starts_with("warning: "))
+        .unwrap_or_else(|| panic!("no warning line: {run:?}"))
+}
+
+#[test]
+fn main_says_when_the_main_clone_is_behind_origin() {
+    let fixture = after_setup();
+    let host = fixture.main_checkout();
+    let clone = fixture.main_clone(NAME);
+    let before = commit_of(&fixture, &clone, "refs/heads/main");
+    push_commits_to_remote_main(&fixture, "behind", 2);
+
+    let run = fixture.run(&host, &["worktree", NAME, "main"]);
+
+    assert_eq!(run.code, 0, "{run:?}");
+    assert_eq!(
+        link_target(&fixture, &host, NAME),
+        fs::canonicalize(&clone).unwrap()
+    );
+    let warning = warning_of(&run);
+    assert!(warning.contains("2 commits behind"), "{warning}");
+    assert!(
+        warning.contains(&format!(
+            "git -C {} pull --ff-only",
+            clone.to_string_lossy()
+        )),
+        "{warning}"
+    );
+    assert_eq!(commit_of(&fixture, &clone, "refs/heads/main"), before);
+}
+
+#[test]
+fn main_says_nothing_when_the_main_clone_is_current() {
+    let fixture = after_setup();
+    let host = fixture.main_checkout();
+
+    let run = fixture.run(&host, &["worktree", NAME, "main"]);
+
+    assert_eq!(run.code, 0, "{run:?}");
+    assert_eq!(run.stderr, "", "{run:?}");
+}
+
+#[test]
+fn main_names_a_diverged_main() {
+    let fixture = after_setup();
+    let host = fixture.main_checkout();
+    let clone = fixture.main_clone(NAME);
+    fixture.write(&clone.join("local-only.txt"), "local");
+    fixture.git(&clone, &["add", "local-only.txt"]);
+    fixture.git(&clone, &["commit", "--quiet", "-m", "local"]);
+    let before = commit_of(&fixture, &clone, "refs/heads/main");
+    push_commits_to_remote_main(&fixture, "diverged", 1);
+
+    let run = fixture.run(&host, &["worktree", NAME, "main"]);
+
+    assert_eq!(run.code, 0, "{run:?}");
+    let warning = warning_of(&run);
+    assert!(warning.contains("1 commit that"), "{warning}");
+    assert!(warning.contains("1 commit behind"), "{warning}");
+    assert!(warning.contains("merge or rebase"), "{warning}");
+    assert_eq!(commit_of(&fixture, &clone, "refs/heads/main"), before);
+}
+
+#[test]
+fn a_new_branch_from_an_old_main_says_so() {
+    let fixture = after_setup();
+    let host = fixture.main_checkout();
+    let clone = fixture.main_clone(NAME);
+    push_commits_to_remote_main(&fixture, "old", 1);
+
+    let run = fixture.run(&host, &["worktree", NAME, "fresh"]);
+
+    assert_pointed_at_new_worktree(&fixture, &host, &run, "fresh");
+    let target = fixture.worktrees_dir(NAME).join("fresh");
+    assert_eq!(
+        commit_of(&fixture, &target, "HEAD"),
+        commit_of(&fixture, &clone, "refs/heads/main")
+    );
+    let warning = warning_of(&run);
+    assert!(warning.contains("fresh"), "{warning}");
+    assert!(warning.contains("1 commit behind"), "{warning}");
+    assert!(warning.contains("pull --ff-only"), "{warning}");
+}

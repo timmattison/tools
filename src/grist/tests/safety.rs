@@ -33,7 +33,7 @@ fn a_full_simulation_never_moves_real_branch_refs() {
     // dropped before the refs are re-read: teardown runs on drop, and teardown
     // is part of what must not move a branch. Do not flatten this block away.
     {
-        let simulator = Simulator::new(repo.path(), "main");
+        let simulator = Simulator::new(repo.path(), "main").expect("open the fixture repository");
         simulator
             .score(&order(&["left", "right"]))
             .expect("simulation runs");

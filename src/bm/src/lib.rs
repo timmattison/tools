@@ -1,10 +1,16 @@
 //! Core logic for `bm` (Bulk Move): recursively find files matching a pattern
 //! and move them to a destination directory.
 //!
-//! This crate is split into a small, narrow public surface (a [`run`] entry
-//! point plus the pieces it composes) hiding the real work: pattern selection,
-//! collision-safe move planning, and a cross-volume move fallback that ordinary
-//! `rename(2)` cannot perform.
+//! The public surface is one pipeline in four steps. [`select_filter`] makes a
+//! filter from the pattern the user gave, [`collect_sources`] finds the files
+//! that match it, [`plan_moves`] gives each of those files a destination under
+//! a [`CollisionPolicy`], and [`execute_plan`] moves them. The pipeline hides
+//! the two parts that are easy to get wrong: collision-safe naming, and a
+//! cross-volume fallback that a bare `rename(2)` cannot perform.
+//!
+//! [`execute_plan`] takes the cross-volume copy as a parameter, and
+//! [`copy_file`] is the copy this crate supplies. The caller therefore owns the
+//! progress report, and the `bm` binary wraps [`copy_file`] in a progress bar.
 
 #![cfg_attr(not(test), warn(clippy::unwrap_used))]
 #![cfg_attr(not(test), warn(clippy::expect_used))]
