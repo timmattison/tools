@@ -596,6 +596,77 @@ mod tests {
         assert!(matches!(result, Err(MsgsError::DatabaseNotFound)));
     }
 
+    /// Set the Unix mode of `path`.
+    #[cfg(unix)]
+    fn set_mode(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("set mode");
+    }
+
+    /// Sets a mode on drop, so a `TempDir` can delete the path when a test fails.
+    #[cfg(unix)]
+    struct RestoreMode<'a>(&'a Path);
+
+    #[cfg(unix)]
+    impl Drop for RestoreMode<'_> {
+        fn drop(&mut self) {
+            set_mode(self.0, 0o755);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_at_inside_unreadable_directory_is_no_full_disk_access() {
+        let fx = ChatDbFixture::new();
+        let dir = tempfile::tempdir().expect("temp dir");
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).expect("make subdir");
+        let db_path = sub.join("chat.db");
+        std::fs::copy(fx.path(), &db_path).expect("copy fixture");
+
+        let _restore = RestoreMode(&sub);
+        set_mode(&sub, 0o000);
+        if std::fs::metadata(&db_path).is_ok() {
+            eprintln!("skipped: the mode does not block this user (root)");
+            return;
+        }
+        let result = MessageDb::open_at(&db_path);
+        set_mode(&sub, 0o755);
+        assert!(matches!(result, Err(MsgsError::NoFullDiskAccess)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_at_unreadable_file_is_no_full_disk_access() {
+        let fx = ChatDbFixture::new();
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db_path = dir.path().join("chat.db");
+        std::fs::copy(fx.path(), &db_path).expect("copy fixture");
+
+        let _restore = RestoreMode(&db_path);
+        set_mode(&db_path, 0o000);
+        if std::fs::File::open(&db_path).is_ok() {
+            eprintln!("skipped: the mode does not block this user (root)");
+            return;
+        }
+        let result = MessageDb::open_at(&db_path);
+        set_mode(&db_path, 0o755);
+        assert!(matches!(result, Err(MsgsError::NoFullDiskAccess)));
+    }
+
+    #[test]
+    fn open_at_non_sqlite_file_is_database_error() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db_path = dir.path().join("chat.db");
+        std::fs::write(
+            &db_path,
+            "this is plain text, not a sqlite database. ".repeat(3),
+        )
+        .expect("write file");
+        let result = MessageDb::open_at(&db_path);
+        assert!(matches!(result, Err(MsgsError::DatabaseError(_))));
+    }
+
     #[test]
     fn list_conversations_sorts_newest_first_and_counts_messages() {
         let fx = ChatDbFixture::new();
