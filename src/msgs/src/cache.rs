@@ -287,6 +287,91 @@ mod tests {
         assert!(cache.needs_rebuild(2).expect("needs with other count"));
     }
 
+    /// The staleness check as `check_db_access` runs it: the message count
+    /// of `check_access` goes to `needs_rebuild`.
+    fn needs_rebuild_as_the_command_does(cache: &TextCache, db: &crate::db::MessageDb) -> bool {
+        let count = db
+            .check_access()
+            .expect("check access")
+            .message_count
+            .unwrap_or(0);
+        cache.needs_rebuild(count).expect("needs rebuild")
+    }
+
+    fn rebuilt_cache(fx: &ChatDbFixture, db: &crate::db::MessageDb) -> TextCache {
+        let cache = TextCache::open_at(&fx.dir().join("text-cache.db")).expect("open cache");
+        cache.rebuild(db.connection()).expect("rebuild");
+        cache
+    }
+
+    #[test]
+    fn a_message_in_two_chats_needs_no_rebuild_after_a_rebuild() {
+        let fx = ChatDbFixture::new();
+        let chat_a = fx.add_chat("a", None, 45);
+        let chat_b = fx.add_chat("b", None, 45);
+        fx.add_message(MessageSpec {
+            text: Some("shared".to_string()),
+            date: apple_ns(1_700_000_010, 0),
+            chats: vec![chat_a, chat_b],
+            ..MessageSpec::default()
+        });
+        let db = fx.open_db();
+        let cache = rebuilt_cache(&fx, &db);
+        assert!(!needs_rebuild_as_the_command_does(&cache, &db));
+    }
+
+    #[test]
+    fn a_message_in_no_chat_needs_no_rebuild_after_a_rebuild() {
+        let fx = ChatDbFixture::new();
+        let chat_a = fx.add_chat("a", None, 45);
+        fx.add_message(MessageSpec {
+            text: Some("in a chat".to_string()),
+            date: apple_ns(1_700_000_010, 0),
+            chats: vec![chat_a],
+            ..MessageSpec::default()
+        });
+        fx.add_message(MessageSpec {
+            text: Some("orphan".to_string()),
+            date: apple_ns(1_700_000_020, 0),
+            chats: vec![],
+            ..MessageSpec::default()
+        });
+        let db = fx.open_db();
+        let cache = rebuilt_cache(&fx, &db);
+        assert!(!needs_rebuild_as_the_command_does(&cache, &db));
+    }
+
+    #[test]
+    fn an_edit_that_keeps_the_count_needs_a_rebuild() {
+        let (fx, _chat_a, _chat_b, lunch_a, _lunch_b) = two_chat_fixture();
+        let db = fx.open_db();
+        let cache = rebuilt_cache(&fx, &db);
+        fx.execute(
+            "UPDATE message SET text = 'lunch at one', date_edited = ?1 WHERE ROWID = ?2",
+            rusqlite::params![apple_ns(1_700_000_100, 0), lunch_a],
+        );
+        assert!(needs_rebuild_as_the_command_does(&cache, &db));
+    }
+
+    #[test]
+    fn a_delete_and_an_insert_that_keep_the_count_need_a_rebuild() {
+        let (fx, chat_a, _chat_b, _lunch_a, lunch_b) = two_chat_fixture();
+        let db = fx.open_db();
+        let cache = rebuilt_cache(&fx, &db);
+        fx.execute(
+            "DELETE FROM chat_message_join WHERE message_id = ?1",
+            [lunch_b],
+        );
+        fx.execute("DELETE FROM message WHERE ROWID = ?1", [lunch_b]);
+        fx.add_message(MessageSpec {
+            text: Some("a new message".to_string()),
+            date: apple_ns(1_700_000_040, 0),
+            chats: vec![chat_a],
+            ..MessageSpec::default()
+        });
+        assert!(needs_rebuild_as_the_command_does(&cache, &db));
+    }
+
     /// Builds a fixture with two chats: "lunch" once in each chat, and
     /// "dinner" in chat A only. Returns the fixture, the two chat ids, and
     /// the ids of the "lunch" messages.

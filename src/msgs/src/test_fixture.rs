@@ -213,6 +213,14 @@ impl ChatDbFixture {
         attachment_id
     }
 
+    /// Run one write statement against the fixture and return the number of
+    /// changed rows. For a test that edits or deletes after the first open.
+    pub fn execute(&self, sql: &str, params: impl rusqlite::Params) -> usize {
+        self.writer
+            .execute(sql, params)
+            .expect("execute fixture sql")
+    }
+
     /// Open the fixture through `MessageDb::open_at`.
     pub fn open_db(&self) -> MessageDb {
         MessageDb::open_at(self.path()).expect("open fixture db")
