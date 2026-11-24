@@ -18,12 +18,17 @@ use crate::target::RepoName;
 /// How many of the newest matches an estimate reads.
 pub const MATCHES_PER_ESTIMATE: usize = 5;
 
-/// How the time of a running job compares with its estimate.
+/// How the time of a running job, or of an active run, compares with its
+/// estimate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Remaining {
     /// The time that the job has left before it reaches its estimate. It is
     /// zero when the job is exactly at its estimate.
     Left(Duration),
+    /// The least time that an active run has left. The latest end of the run
+    /// comes from a job that waits for a runner, and the start of that job is
+    /// unknown. Thus the run can take longer. Only a run row gets this value.
+    AtLeast(Duration),
     /// The time that the job ran past its estimate. It is never zero.
     Over(Duration),
 }

@@ -2105,7 +2105,7 @@ pub fn format_elapsed(d: Duration) -> String {
 #[must_use]
 pub fn format_remaining(remaining: Remaining) -> String {
     let (sign, time) = match remaining {
-        Remaining::Left(time) => ('~', time),
+        Remaining::Left(time) | Remaining::AtLeast(time) => ('~', time),
         Remaining::Over(time) => ('+', time),
     };
     let total = time.as_secs();
@@ -2880,6 +2880,11 @@ mod tests {
                 format!("+{expected}"),
                 "over by {seconds}s"
             );
+            assert_eq!(
+                format_remaining(Remaining::AtLeast(d)),
+                format!(">{expected}"),
+                "at least {seconds}s"
+            );
         }
     }
 
@@ -2890,6 +2895,7 @@ mod tests {
             let d = Duration::from_secs(seconds);
             for text in [
                 format_remaining(Remaining::Left(d)),
+                format_remaining(Remaining::AtLeast(d)),
                 format_remaining(Remaining::Over(d)),
             ] {
                 assert!(
@@ -2901,6 +2907,7 @@ mod tests {
         }
         let max = Duration::from_secs(u64::MAX);
         assert_eq!(format_remaining(Remaining::Left(max)), "~>99h");
+        assert_eq!(format_remaining(Remaining::AtLeast(max)), ">>99h");
         assert_eq!(format_remaining(Remaining::Over(max)), "+>99h");
     }
 
