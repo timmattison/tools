@@ -29,4 +29,14 @@ describe("Timeline", () => {
     expect(screen.getByText(/2 events/)).toBeInTheDocument();
     expect(screen.getByText(/2m 5\.5s/)).toBeInTheDocument();
   });
+
+  it("rounds before it splits: 59.96 seconds is 1m 0.0s", () => {
+    render(<Timeline recording={{ ...TEST_RECORDING, duration: 59.96 }} />);
+    expect(screen.getByText(/1m 0\.0s/)).toBeInTheDocument();
+  });
+
+  it("rounds before it splits: 119.96 seconds is 2m 0.0s", () => {
+    render(<Timeline recording={{ ...TEST_RECORDING, duration: 119.96 }} />);
+    expect(screen.getByText(/2m 0\.0s/)).toBeInTheDocument();
+  });
 });

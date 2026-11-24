@@ -24,7 +24,7 @@ describe("PropertiesPanel", () => {
     render(<PropertiesPanel metadata={TEST_METADATA} />);
     expect(screen.getByText("Demo Recording")).toBeInTheDocument();
     expect(screen.getByText("echo hello")).toBeInTheDocument();
-    expect(screen.getByText("65.3s")).toBeInTheDocument();
+    expect(screen.getByText("1m 5.3s")).toBeInTheDocument();
     expect(screen.getByText("42")).toBeInTheDocument();
     expect(screen.getByText("120x40")).toBeInTheDocument();
   });
