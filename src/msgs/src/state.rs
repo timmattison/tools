@@ -559,6 +559,45 @@ mod tests {
         assert_eq!(indexed.last(), Some(&3));
     }
 
+    /// A state whose index holds the 3 messages of `fixture`.
+    fn ready_state(fixture: &ChatDbFixture) -> AppState {
+        let paths = DataPaths {
+            chat_db: fixture.path().to_path_buf(),
+            cache_db: fixture.dir().join("text-cache.db"),
+        };
+        let (state, seen) = statuses_of_a_finished_build(paths);
+        assert_eq!(seen.last(), Some(&CacheStatus::Ready));
+        state
+    }
+
+    #[test]
+    fn search_skips_a_hit_whose_message_is_gone_from_the_database() {
+        let fixture = fixture_with_messages(3);
+        let state = ready_state(&fixture);
+        fixture.execute("DELETE FROM message WHERE text = 'lunch 0'", []);
+        fixture.execute(
+            "DELETE FROM chat_message_join WHERE message_id NOT IN (SELECT ROWID FROM message)",
+            [],
+        );
+
+        let hits = state.search("lunch", None, 0, 50).expect("search");
+        assert_eq!(hits.len(), 2);
+    }
+
+    #[test]
+    fn search_reports_a_failed_query_of_a_hit() {
+        let fixture = fixture_with_messages(3);
+        let state = ready_state(&fixture);
+        // The query of each hit joins the handle table.
+        fixture.execute("DROP TABLE handle", []);
+
+        let result = state.search("lunch", None, 0, 50);
+        assert!(
+            matches!(result, Err(MsgsError::DatabaseError(_))),
+            "{result:?}"
+        );
+    }
+
     #[test]
     fn a_build_that_panics_reports_failed_and_the_next_open_starts_a_build() {
         let fixture = fixture_with_messages(1);
