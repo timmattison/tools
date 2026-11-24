@@ -32,13 +32,46 @@
 //! about every program built on this crate. `grist` settles it: it is built on
 //! this crate, prints no breakdown at all, and must not pay for a
 //! terminal-size dependency it would never read.
+//!
+//! That holds for a build without the `progress` feature. The progress display
+//! is the one part of the shell that measures a terminal: it draws a spinner
+//! and a bar on standard error while a replay runs, and it needs the width to
+//! size the bar. So the display lives behind the `progress` feature, which
+//! `grind` and `grime` turn on and `grist` does not. Without the feature, this
+//! crate holds no dependency on `indicatif` or `termbar`.
+//!
+//! The display shows only when standard error is a terminal, `-q` is not on,
+//! and the run has lasted `PROGRESS_DELAY`. A run that ends sooner draws no
+//! byte. With standard error on a pipe or a file, the bytes of a run are the
+//! bytes that it wrote before the display existed. [`Console::note`],
+//! [`Console::verdict`], and the failure line clear the display before they
+//! write, so a partial bar never shares a line with them.
 
+#[cfg(feature = "progress")]
+use std::io::IsTerminal;
 use std::io::Write;
 use std::process::ExitCode;
+#[cfg(feature = "progress")]
+use std::sync::{Mutex, PoisonError};
+#[cfg(feature = "progress")]
+use std::time::Duration;
 
 use anyhow::Result;
 
 use crate::scratch::Conflicts;
+
+#[cfg(feature = "progress")]
+mod progress;
+
+#[cfg(feature = "progress")]
+pub use progress::Progress;
+
+/// How long a run must take before the progress display shows.
+///
+/// A run that ends in less time draws nothing. A person then sees no flash of
+/// a bar that is gone before it can be read.
+#[cfg(feature = "progress")]
+pub const PROGRESS_DELAY: Duration = Duration::from_millis(500);
 
 /// Exit code for a replay that hit no conflicts.
 const CLEAN: u8 = 0;
@@ -68,6 +101,10 @@ const ERROR: u8 = 2;
 /// the version line. Both answer about the tool rather than about a replay.
 /// Silencing the refusal leaves a caller with a bare exit code and no word
 /// about which argument is missing.
+///
+/// With the `progress` feature, the type also owns the progress display of a
+/// replay, and `-q` hides it. The display goes to standard error and only when
+/// standard error is a terminal. The three writes below clear it first.
 ///
 /// `-q` has to reach three writes on three different paths - the
 /// uncommitted-work note, the verdict, and the failure - and the last of those
@@ -103,6 +140,22 @@ pub struct Console {
     /// Whether `-q` was given, and therefore whether any of the three writes
     /// below happens at all.
     quiet: bool,
+
+    /// How long a run takes before the progress display shows.
+    #[cfg(feature = "progress")]
+    progress_delay: Duration,
+
+    /// The live progress display, if one is.
+    #[cfg(feature = "progress")]
+    active: Mutex<Option<progress::Active>>,
+}
+
+/// A body that returns with no verdict leaves no bar on the screen.
+#[cfg(feature = "progress")]
+impl Drop for Console {
+    fn drop(&mut self) {
+        self.clear_progress();
+    }
 }
 
 impl Console {
@@ -132,8 +185,51 @@ impl Console {
     where
         F: FnOnce(&Console) -> Result<Conflicts>,
     {
-        let console = Console { tool, quiet };
+        #[cfg(feature = "progress")]
+        {
+            Self::answer_with_progress_delay(tool, quiet, PROGRESS_DELAY, ask)
+        }
+        #[cfg(not(feature = "progress"))]
+        {
+            Self::run(Console { tool, quiet }, ask)
+        }
+    }
 
+    /// Answer the question as [`Console::answer`] does, with a progress display
+    /// that waits `delay` before it shows.
+    ///
+    /// A test sets the delay to zero, so the display shows at once, or to a
+    /// very long time, so the display never shows. A tool calls
+    /// [`Console::answer`], which uses [`PROGRESS_DELAY`].
+    #[cfg(feature = "progress")]
+    pub fn answer_with_progress_delay<F>(
+        tool: &'static str,
+        quiet: bool,
+        delay: Duration,
+        ask: F,
+    ) -> ExitCode
+    where
+        F: FnOnce(&Console) -> Result<Conflicts>,
+    {
+        Self::run(
+            Console {
+                tool,
+                quiet,
+                progress_delay: delay,
+                active: Mutex::new(None),
+            },
+            ask,
+        )
+    }
+
+    /// Run `ask` against `console` and map its answer onto the exit code.
+    ///
+    /// The one place that maps the answer onto a code, so the two doors cannot
+    /// map it two ways.
+    fn run<F>(console: Console, ask: F) -> ExitCode
+    where
+        F: FnOnce(&Console) -> Result<Conflicts>,
+    {
         match ask(&console) {
             Ok(conflicts) => ExitCode::from(if conflicts.is_clean() {
                 CLEAN
@@ -147,8 +243,58 @@ impl Console {
         }
     }
 
+    /// Start the progress display of a replay, and give the handle that the
+    /// replay reports to.
+    ///
+    /// `action` is the sentence of the replay, for example
+    /// `replaying HEAD onto main`. The display shows it next to the name of
+    /// the tool, and the replay then reports its phase and its commit
+    /// position through the handle, for example through
+    /// [`Repo::scratch_with_progress`](crate::Repo::scratch_with_progress).
+    ///
+    /// A call ends the display that an earlier call started, and then starts a
+    /// new one. The handle is hidden, and does nothing on a report, when `-q`
+    /// is on, when standard error is not a terminal, or when the thread of the
+    /// display does not start. A display that cannot start costs the display
+    /// and never the verdict or the exit code, so this method returns no error.
+    /// The display shows after the delay of the console, and
+    /// [`Console::note`], [`Console::verdict`], and the failure line end it
+    /// before they write.
+    #[cfg(feature = "progress")]
+    pub fn progress(&self, action: &str) -> Progress {
+        self.clear_progress();
+        if self.quiet || !std::io::stderr().is_terminal() {
+            return Progress::hidden();
+        }
+        let Some((handle, active)) = Progress::start(self.tool, action, self.progress_delay) else {
+            return Progress::hidden();
+        };
+        *self.active.lock().unwrap_or_else(PoisonError::into_inner) = Some(active);
+        handle
+    }
+
+    /// End the display, if one is live, and take its lines off the screen.
+    ///
+    /// Every write of this type calls it first, so a partial bar never shares
+    /// a line with a note, a verdict, or an error. It does nothing when no
+    /// display is live. A poisoned lock does not stop it, because the display
+    /// holds no state that a panic can leave half written.
+    #[cfg(feature = "progress")]
+    fn clear_progress(&self) {
+        let taken = self
+            .active
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(active) = taken {
+            active.stop();
+        }
+    }
+
     /// A caveat that qualifies the verdict without changing it.
     pub fn note(&self, note: &str) {
+        #[cfg(feature = "progress")]
+        self.clear_progress();
         if !self.quiet {
             let _ = writeln!(std::io::stderr(), "{note}");
         }
@@ -156,6 +302,8 @@ impl Console {
 
     /// The answer itself.
     pub fn verdict(&self, verdict: &str) {
+        #[cfg(feature = "progress")]
+        self.clear_progress();
         if !self.quiet {
             let _ = writeln!(std::io::stdout(), "{verdict}");
         }
@@ -163,6 +311,8 @@ impl Console {
 
     /// Why there is no answer.
     fn failure(&self, err: &anyhow::Error) {
+        #[cfg(feature = "progress")]
+        self.clear_progress();
         if !self.quiet {
             // Alternate formatting so the whole context chain arrives, not just
             // the outermost sentence: git's own stderr is carried in the causes

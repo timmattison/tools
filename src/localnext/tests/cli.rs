@@ -11,7 +11,7 @@
 
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -81,7 +81,7 @@ fn export_fixture() -> TempDir {
 /// `--version` exits at once and `Command::output` carries no deadline, so the
 /// cost lands here, where nothing is timed.
 fn warm_the_binary() {
-    let _ = Command::new(env!("CARGO_BIN_EXE_localnext"))
+    let _ = childenv::fixture_command(env!("CARGO_BIN_EXE_localnext"))
         .arg("--version")
         .output();
 }
@@ -101,7 +101,7 @@ fn warm_the_binary() {
 fn serving_root(cwd: &Path) -> String {
     warm_the_binary();
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_localnext"))
+    let mut child = childenv::fixture_command(env!("CARGO_BIN_EXE_localnext"))
         .args(["--port", "0"])
         .current_dir(cwd)
         .stdout(Stdio::piped())
@@ -177,7 +177,7 @@ enum DerivedPortOutcome {
 fn run_with_derived_port(cwd: &Path) -> DerivedPortOutcome {
     warm_the_binary();
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_localnext"))
+    let mut child = childenv::fixture_command(env!("CARGO_BIN_EXE_localnext"))
         .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -253,7 +253,7 @@ fn run_with_derived_port(cwd: &Path) -> DerivedPortOutcome {
 /// string, as every tool in this workspace must.
 #[test]
 fn the_version_flag_prints_the_buildinfo_string() {
-    let output = Command::new(env!("CARGO_BIN_EXE_localnext"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_localnext"))
         .arg("--version")
         .output()
         .expect("spawning localnext --version should succeed");
@@ -279,7 +279,7 @@ fn the_version_flag_prints_the_buildinfo_string() {
 /// escape hatch from the derived default.
 #[test]
 fn the_help_documents_the_port_flag() {
-    let output = Command::new(env!("CARGO_BIN_EXE_localnext"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_localnext"))
         .arg("--help")
         .output()
         .expect("spawning localnext --help should succeed");
@@ -303,7 +303,7 @@ fn the_help_documents_the_port_flag() {
 fn a_directory_with_no_export_aborts_startup() {
     let dir = TempDir::new().expect("temp dir");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_localnext"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_localnext"))
         .current_dir(dir.path())
         .output()
         .expect("spawning localnext outside an export should succeed");
@@ -338,7 +338,7 @@ fn a_taken_port_aborts_startup() {
         .port();
     let dir = export_fixture();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_localnext"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_localnext"))
         .args(["--port", &port.to_string()])
         .current_dir(dir.path())
         .output()

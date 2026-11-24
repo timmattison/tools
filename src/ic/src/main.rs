@@ -803,7 +803,7 @@ fn is_text_file(file_path: &Path) -> bool {
 }
 
 fn ensure_ffmpeg_available() -> Result<()> {
-    if std::process::Command::new("ffmpeg")
+    if childenv::command("ffmpeg")
         .arg("-version")
         .output()
         .is_err()
@@ -816,7 +816,7 @@ fn ensure_ffmpeg_available() -> Result<()> {
 }
 
 fn ensure_ffprobe_available() -> Result<()> {
-    if std::process::Command::new("ffprobe")
+    if childenv::command("ffprobe")
         .arg("-version")
         .output()
         .is_err()
@@ -1315,30 +1315,6 @@ fn update_adaptive_fps(
     *last_display_time = Instant::now();
 }
 
-/// RAII guard that restores the main screen buffer and shows the cursor on drop.
-/// This ensures terminal state is restored even if video playback panics.
-struct AlternateScreenGuard;
-
-impl AlternateScreenGuard {
-    fn enter() -> Result<Self> {
-        // Switch to alternate screen buffer and hide cursor for clean full-screen rendering.
-        // The alternate screen buffer prevents scrollback accumulation and eliminates
-        // ghost progress bars caused by terminal scrolling during image display.
-        print!("\x1b[?1049h\x1b[?25l");
-        io::stdout().flush()?;
-        Ok(Self)
-    }
-}
-
-impl Drop for AlternateScreenGuard {
-    fn drop(&mut self) {
-        // Restore main screen buffer and show cursor.
-        // Ignore flush errors — best effort during cleanup.
-        print!("\x1b[?25h\x1b[?1049l");
-        let _ = io::stdout().flush();
-    }
-}
-
 fn play_video_simple(
     file_path: &Path,
     _frame_duration: Duration,
@@ -1349,7 +1325,8 @@ fn play_video_simple(
     let terminal_caps = Capabilities::detect_by_asking();
     let (_raw_mode, input_rx, _input_handle) = setup_video_controls(&terminal_caps)?;
 
-    let _screen_guard = AlternateScreenGuard::enter()?;
+    // Termion owns raw mode, so the session leaves it alone.
+    let _session = altscreen::Session::enter(altscreen::Options::default().raw_mode(false))?;
 
     play_video_inner(file_path, args, duration, fps, &input_rx)
 }
@@ -1389,8 +1366,10 @@ fn play_video_inner(
 
         // Start ffmpeg from current position
         let (video_width, video_height) = get_video_dimensions(file_path)?;
+        // Check the size before the spawn, so an error leaves no ffmpeg child.
+        let frame_size = require_rgb_frame_bytes(video_width, video_height)?;
 
-        let mut ffmpeg_child = std::process::Command::new("ffmpeg")
+        let mut ffmpeg_child = childenv::command("ffmpeg")
             .args([
                 "-i",
                 file_path.to_str().unwrap(),
@@ -1415,7 +1394,6 @@ fn play_video_inner(
             .context("Failed to get ffmpeg stdout")?;
 
         let mut reader = BufReader::new(stdout);
-        let frame_size = (video_width * video_height * 3) as usize;
         let mut frame_buffer = vec![0_u8; frame_size];
 
         // Read and display frames until paused, finished, or exit
@@ -1644,9 +1622,32 @@ fn play_video_inner(
     Ok(())
 }
 
+/// Bytes in one pixel of an `rgb24` frame.
+const RGB_BYTES_PER_PIXEL: usize = 3;
+
+/// The number of bytes in one `rgb24` frame of `width` x `height` pixels,
+/// or `None` when the product does not fit in `usize`.
+fn rgb_frame_bytes(width: u32, height: u32) -> Option<usize> {
+    usize::try_from(width)
+        .ok()?
+        .checked_mul(usize::try_from(height).ok()?)?
+        .checked_mul(RGB_BYTES_PER_PIXEL)
+}
+
+/// The same as `rgb_frame_bytes`, but an error that names the dimensions
+/// when the product does not fit in `usize`.
+///
+/// # Errors
+///
+/// Returns an error when the size of the frame does not fit in `usize`.
+fn require_rgb_frame_bytes(width: u32, height: u32) -> Result<usize> {
+    rgb_frame_bytes(width, height)
+        .with_context(|| format!("video dimensions {width}x{height} are too large"))
+}
+
 fn rgb_data_to_image(rgb_data: &[u8], width: u32, height: u32) -> Result<DynamicImage> {
     // Verify the data size matches expected dimensions
-    let expected_size = (width * height * 3) as usize;
+    let expected_size = require_rgb_frame_bytes(width, height)?;
     if rgb_data.len() != expected_size {
         anyhow::bail!(
             "RGB data size mismatch: expected {} bytes, got {} bytes",
@@ -1666,7 +1667,7 @@ fn get_video_dimensions(file_path: &Path) -> Result<(u32, u32)> {
     ensure_ffprobe_available()?;
 
     // Use ffprobe to get video dimensions
-    let output = std::process::Command::new("ffprobe")
+    let output = childenv::command("ffprobe")
         .args([
             // `error` (not `quiet`) so a genuinely unprobeable file still emits a
             // real diagnostic on stderr instead of an empty failure message.
@@ -1739,7 +1740,7 @@ fn get_video_fps(file_path: &Path) -> Result<f64> {
     // recordings, can be a large multiple of the real rate. We keep the keys
     // (no `nokey=1`) because ffprobe emits these fields in its own internal
     // order regardless of the requested order, so position alone is ambiguous.
-    let output = std::process::Command::new("ffprobe")
+    let output = childenv::command("ffprobe")
         .args([
             // `error` (not `quiet`) so a genuinely unprobeable file still emits a
             // real diagnostic on stderr instead of an empty failure message.
@@ -1824,7 +1825,7 @@ fn get_video_duration(file_path: &Path) -> Result<f64> {
     }
 
     // Use ffprobe to get video duration in seconds
-    let output = std::process::Command::new("ffprobe")
+    let output = childenv::command("ffprobe")
         .args([
             // `error` (not `quiet`) so a genuinely unprobeable file still emits a
             // real diagnostic on stderr instead of an empty failure message.
@@ -2817,6 +2818,56 @@ mod tests {
     use std::rc::Rc;
     use std::sync::atomic::{AtomicU64, Ordering};
     use termgfx::{AnsweredProtocol, PayloadBudget};
+
+    /// Dimensions whose frame does not fit in `usize` give the error that
+    /// names them, not an overflow. The size check of `rgb_data_to_image`
+    /// uses the checked frame size.
+    #[test]
+    fn rgb_data_to_image_refuses_dimensions_whose_frame_does_not_fit_in_usize() {
+        let error = rgb_data_to_image(&[], u32::MAX, u32::MAX).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "video dimensions 4294967295x4294967295 are too large"
+        );
+    }
+
+    /// A frame above `u32::MAX` bytes fits in a 64-bit `usize`, so the size
+    /// check compares the data with the exact size of the frame.
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn rgb_data_to_image_compares_the_exact_size_above_u32_max_on_a_64_bit_target() {
+        let error = rgb_data_to_image(&[], 40_000, 40_000).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "RGB data size mismatch: expected 4800000000 bytes, got 0 bytes"
+        );
+    }
+
+    /// A frame size that does not fit in `usize` is `None`, not a wrapped
+    /// value.
+    #[test]
+    fn rgb_frame_bytes_is_none_when_the_frame_does_not_fit_in_usize() {
+        assert_eq!(rgb_frame_bytes(2, 3), Some(18));
+        assert_eq!(rgb_frame_bytes(u32::MAX, u32::MAX), None);
+    }
+
+    /// A frame above `u32::MAX` bytes fits in a 64-bit `usize`, so its size
+    /// is the exact product and not `None`.
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn rgb_frame_bytes_is_exact_above_u32_max_on_a_64_bit_target() {
+        assert_eq!(rgb_frame_bytes(40_000, 40_000), Some(4_800_000_000));
+    }
+
+    /// The error for a frame that is too large names its dimensions.
+    #[test]
+    fn rgb_frame_too_large_for_usize_names_its_dimensions() {
+        let error = require_rgb_frame_bytes(u32::MAX, u32::MAX).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "video dimensions 4294967295x4294967295 are too large"
+        );
+    }
 
     /// A mosh reads the caps off the session, and no other transport names a
     /// cap.

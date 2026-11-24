@@ -1,0 +1,596 @@
+//! Tests of the read of the whole machine, over a machine that the test makes.
+//!
+//! Every fact is a plain value that the test states. No test here runs `ps`,
+//! calls the kernel, reads a process, or reads a clock. The one test that
+//! reads the real Mac is `tests/this-mac.rs`.
+
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use faulte::duration::Span;
+use faulte::pid::{Pid, Uid};
+use faulte::vm::{SwapUsage, VmCounters};
+use whyslow::groups::Group;
+use whyslow::machine::{observe, Machine, SourceError};
+use whyslow::sample::{CpuTime, ProcessRow};
+use whyslow::tally::GroupTotal;
+use whyslow::verdict::{CpuTicks, Facts, Pressure};
+
+/// The size of one page of memory of an Apple Silicon Mac, in bytes.
+const PAGE_SIZE: u64 = 16_384;
+
+/// The text that each failed source of the tests states.
+const REFUSED: &str = "refused by the test";
+
+/// Gives the interval that the person asked for in the tests.
+fn interval() -> Span {
+    "2s".parse().expect("2s is a span")
+}
+
+/// Gives one row of the process table.
+fn row(pid: u32, cpu_centiseconds: u64, rss_kib: u64, comm: &str) -> ProcessRow {
+    ProcessRow {
+        pid: Pid::new(pid),
+        uid: Uid::new(501),
+        started: "Sat Nov 14 10:00:00 2026".to_owned(),
+        cpu: CpuTime::from_centiseconds(cpu_centiseconds),
+        rss_kib,
+        comm: comm.to_owned(),
+    }
+}
+
+/// Gives the error that a failed source of the tests gives.
+fn refused(call: &str) -> SourceError {
+    SourceError::KernelRead {
+        call: call.to_owned(),
+        reason: REFUSED.to_owned(),
+    }
+}
+
+/// The reads of a machine that the test states, and what each read gave.
+struct FakeMachine {
+    /// The name of each read that the run made, in order.
+    log: RefCell<Vec<&'static str>>,
+    /// Each time that the run slept.
+    slept: RefCell<Vec<Duration>>,
+    /// The process tables that the reads give, in order.
+    tables: RefCell<VecDeque<Result<Vec<ProcessRow>, SourceError>>>,
+    /// The CPU ticks that the reads give, in order.
+    ticks: RefCell<VecDeque<Result<CpuTicks, SourceError>>>,
+    /// The counters that the reads give, in order.
+    counters: RefCell<VecDeque<Result<VmCounters, SourceError>>>,
+    /// The times that the clock gives, in order.
+    clock: RefCell<VecDeque<Duration>>,
+    /// The swap file.
+    swap: Result<SwapUsage, SourceError>,
+    /// The memory pressure.
+    pressure: Result<Pressure, SourceError>,
+    /// The load average.
+    load: Result<f64, SourceError>,
+    /// The number of processors.
+    processors: Result<u32, SourceError>,
+    /// The footprint of each process that has one.
+    footprints: HashMap<Pid, u64>,
+    /// The Claude Code processes.
+    claude: HashSet<Pid>,
+    /// The arguments of each process.
+    arguments: Result<HashMap<Pid, String>, SourceError>,
+    /// The directories that hold a `.git` entry.
+    git: HashSet<PathBuf>,
+    /// The process that exits right after the second process table, if any.
+    departs: Option<Pid>,
+    /// The number of process tables that the run has read.
+    tables_read: Cell<u32>,
+    /// Tells whether the process of `departs` has exited.
+    departed: Cell<bool>,
+}
+
+impl FakeMachine {
+    /// Gives a machine that answers every read, with an empty process table
+    /// and CPU ticks that move.
+    fn new() -> Self {
+        Self {
+            log: RefCell::new(Vec::new()),
+            slept: RefCell::new(Vec::new()),
+            tables: RefCell::new(VecDeque::from([Ok(Vec::new()), Ok(Vec::new())])),
+            ticks: RefCell::new(VecDeque::from([
+                Ok(CpuTicks {
+                    user: 100,
+                    system: 50,
+                    idle: 850,
+                    nice: 0,
+                }),
+                Ok(CpuTicks {
+                    user: 160,
+                    system: 70,
+                    idle: 970,
+                    nice: 0,
+                }),
+            ])),
+            counters: RefCell::new(VecDeque::from([
+                Ok(VmCounters {
+                    swapins: 1_000,
+                    swapouts: 2_000,
+                    compressor_pages: 10,
+                }),
+                Ok(VmCounters {
+                    swapins: 1_036,
+                    swapouts: 2_005,
+                    compressor_pages: 20,
+                }),
+            ])),
+            clock: RefCell::new(VecDeque::from([
+                Duration::from_secs(100),
+                Duration::from_millis(102_050),
+            ])),
+            swap: Ok(SwapUsage {
+                total_bytes: 5_368_709_120,
+                used_bytes: 4_187_593_113,
+            }),
+            pressure: Ok(Pressure::Warning),
+            load: Ok(152.0),
+            processors: Ok(14),
+            footprints: HashMap::new(),
+            claude: HashSet::new(),
+            arguments: Ok(HashMap::new()),
+            git: HashSet::new(),
+            departs: None,
+            tables_read: Cell::new(0),
+            departed: Cell::new(false),
+        }
+    }
+
+    /// Marks the process of `departs` as exited, when the run has read the
+    /// second process table. Each read that follows the memory and argument
+    /// reads of a good run calls this function.
+    fn depart_after_second_table(&self) {
+        if self.tables_read.get() >= 2 {
+            self.departed.set(true);
+        }
+    }
+
+    /// Writes the name of a read in the log.
+    fn note(&self, name: &'static str) {
+        self.log.borrow_mut().push(name);
+    }
+
+    /// Takes the next answer of a queue of answers.
+    fn next<T>(queue: &RefCell<VecDeque<Result<T, SourceError>>>) -> Result<T, SourceError> {
+        queue
+            .borrow_mut()
+            .pop_front()
+            .unwrap_or_else(|| Err(refused("the queue ran out")))
+    }
+}
+
+impl Machine for FakeMachine {
+    fn process_table(&self) -> Result<Vec<ProcessRow>, SourceError> {
+        self.note("ps");
+        self.tables_read.set(self.tables_read.get() + 1);
+        Self::next(&self.tables)
+    }
+
+    fn cpu_ticks(&self) -> Result<CpuTicks, SourceError> {
+        self.note("ticks");
+        Self::next(&self.ticks)
+    }
+
+    fn vm_counters(&self) -> Result<VmCounters, SourceError> {
+        self.note("vm");
+        self.depart_after_second_table();
+        Self::next(&self.counters)
+    }
+
+    fn swap_usage(&self) -> Result<SwapUsage, SourceError> {
+        self.note("swap");
+        self.depart_after_second_table();
+        self.swap.clone()
+    }
+
+    fn pressure(&self) -> Result<Pressure, SourceError> {
+        self.note("pressure");
+        self.depart_after_second_table();
+        self.pressure.clone()
+    }
+
+    fn load(&self) -> Result<f64, SourceError> {
+        self.note("load");
+        self.depart_after_second_table();
+        self.load.clone()
+    }
+
+    fn processors(&self) -> Result<u32, SourceError> {
+        self.note("processors");
+        self.depart_after_second_table();
+        self.processors.clone()
+    }
+
+    fn page_size(&self) -> u64 {
+        PAGE_SIZE
+    }
+
+    fn footprint(&self, pid: Pid) -> Option<u64> {
+        self.note("footprint");
+        if self.departed.get() && self.departs == Some(pid) {
+            return Some(0);
+        }
+        self.footprints.get(&pid).copied()
+    }
+
+    fn claude_pids(&self) -> HashSet<Pid> {
+        self.note("claude");
+        self.depart_after_second_table();
+        self.claude.clone()
+    }
+
+    fn arguments(&self) -> Result<HashMap<Pid, String>, SourceError> {
+        self.note("arguments");
+        let mut arguments = self.arguments.clone();
+        if let (Ok(map), true, Some(gone)) = (&mut arguments, self.departed.get(), self.departs) {
+            map.remove(&gone);
+        }
+        arguments
+    }
+
+    fn holds_git(&self, directory: &Path) -> bool {
+        self.git.contains(directory)
+    }
+
+    fn sleep(&self, how_long: Duration) {
+        self.note("sleep");
+        self.slept.borrow_mut().push(how_long);
+    }
+
+    fn clock(&self) -> Duration {
+        self.note("clock");
+        self.clock.borrow_mut().pop_front().unwrap_or_default()
+    }
+}
+
+/// The run reads the sources in one fixed order, and it sleeps the interval
+/// between the two snapshots. The order is the design: the counters of the
+/// virtual memory system bracket the window, and the clock sits beside each
+/// process table, so the window is the time between the two tables. The
+/// footprints and the arguments follow the second table at once, before any
+/// slow read, so a process that exits later still has both. The footprints
+/// come first, because each one is one call and the arguments are one `ps`.
+#[test]
+fn the_run_reads_the_sources_in_the_fixed_order_and_sleeps_the_interval() {
+    let mut machine = FakeMachine::new();
+    *machine.tables.get_mut() = VecDeque::from([
+        Ok(vec![row(7, 10, 100, "/bin/zsh")]),
+        Ok(vec![row(7, 20, 100, "/bin/zsh")]),
+    ]);
+    let _ = observe(&machine, interval());
+    assert_eq!(
+        *machine.log.borrow(),
+        [
+            "vm",
+            "ps",
+            "clock",
+            "ticks",
+            "sleep",
+            "ps",
+            "clock",
+            "ticks",
+            "footprint",
+            "arguments",
+            "vm",
+            "pressure",
+            "swap",
+            "load",
+            "processors",
+            "claude",
+        ]
+    );
+    assert_eq!(*machine.slept.borrow(), [Duration::from_secs(2)]);
+}
+
+/// Runs the run over a machine that `change` spoiled, and gives its answer.
+fn run_with(change: impl FnOnce(&mut FakeMachine)) -> Result<Facts, SourceError> {
+    let mut machine = FakeMachine::new();
+    change(&mut machine);
+    observe(&machine, interval())
+}
+
+/// The first process table fails: the run stops with its error.
+#[test]
+fn a_failed_first_process_table_stops_the_run() {
+    let result = run_with(|m| {
+        m.tables
+            .get_mut()
+            .front_mut()
+            .unwrap()
+            .clone_from(&Err(refused("ps1")))
+    });
+    assert_eq!(result, Err(refused("ps1")));
+}
+
+/// The second process table fails: the run stops with its error.
+#[test]
+fn a_failed_second_process_table_stops_the_run() {
+    let result = run_with(|m| {
+        m.tables
+            .get_mut()
+            .back_mut()
+            .unwrap()
+            .clone_from(&Err(refused("ps2")))
+    });
+    assert_eq!(result, Err(refused("ps2")));
+}
+
+/// The CPU ticks fail: the run stops with their error.
+#[test]
+fn failed_cpu_ticks_stop_the_run() {
+    let result = run_with(|m| *m.ticks.get_mut() = VecDeque::from([Err(refused("ticks"))]));
+    assert_eq!(result, Err(refused("ticks")));
+}
+
+/// The counters of the virtual memory system fail: the run stops.
+#[test]
+fn failed_vm_counters_stop_the_run() {
+    let result = run_with(|m| *m.counters.get_mut() = VecDeque::from([Err(refused("vm"))]));
+    assert_eq!(result, Err(refused("vm")));
+}
+
+/// The swap file fails: the run stops with its error.
+#[test]
+fn a_failed_swap_read_stops_the_run() {
+    let result = run_with(|m| m.swap = Err(refused("swap")));
+    assert_eq!(result, Err(refused("swap")));
+}
+
+/// The pressure fails: the run stops with its error.
+#[test]
+fn a_failed_pressure_read_stops_the_run() {
+    let result = run_with(|m| m.pressure = Err(SourceError::UnknownPressure { level: 3 }));
+    assert_eq!(result, Err(SourceError::UnknownPressure { level: 3 }));
+}
+
+/// The load average fails: the run stops with its error.
+#[test]
+fn a_failed_load_read_stops_the_run() {
+    let result = run_with(|m| m.load = Err(refused("load")));
+    assert_eq!(result, Err(refused("load")));
+}
+
+/// The number of processors fails: the run stops with its error.
+#[test]
+fn a_failed_processors_read_stops_the_run() {
+    let result = run_with(|m| m.processors = Err(refused("processors")));
+    assert_eq!(result, Err(refused("processors")));
+}
+
+/// The arguments are missing because `ps` did not run: the run stops. A
+/// compiler with no known arguments would show as `no worktree`, which is a
+/// false answer.
+#[test]
+fn missing_arguments_stop_the_run() {
+    let result = run_with(|m| m.arguments = Err(SourceError::NoArguments));
+    assert_eq!(result, Err(SourceError::NoArguments));
+}
+
+/// The facts hold the change of each counter, and the values that the machine
+/// gave as they are. The window is the time between the two readings of the
+/// clock, and the compressor is the pages after the window times the page
+/// size.
+#[test]
+fn the_facts_hold_the_changes_and_the_values_of_the_machine() {
+    let facts = run_with(|_| {}).expect("every source answers");
+    assert_eq!(facts.window, Duration::from_millis(2_050));
+    assert_eq!(
+        facts.ticks,
+        CpuTicks {
+            user: 60,
+            system: 20,
+            idle: 120,
+            nice: 0
+        }
+    );
+    assert_eq!(facts.swapouts, 5);
+    assert_eq!(facts.compressor_bytes, 20 * PAGE_SIZE);
+    assert_eq!(facts.pressure, Pressure::Warning);
+    assert_eq!(
+        facts.swap,
+        SwapUsage {
+            total_bytes: 5_368_709_120,
+            used_bytes: 4_187_593_113,
+        }
+    );
+    assert!((facts.load - 152.0).abs() < f64::EPSILON);
+    assert_eq!(facts.processors, 14);
+}
+
+/// A clock that went back gives a window of zero and no panic.
+#[test]
+fn a_clock_that_went_back_gives_a_window_of_zero() {
+    let facts = run_with(|m| {
+        *m.clock.get_mut() = VecDeque::from([Duration::from_secs(9), Duration::from_secs(3)]);
+    })
+    .expect("every source answers");
+    assert_eq!(facts.window, Duration::ZERO);
+}
+
+/// CPU ticks that are the same twice give no window to measure in. The run
+/// refuses them, because a percent of nothing has no meaning.
+#[test]
+fn cpu_ticks_that_did_not_move_stop_the_run() {
+    let still = CpuTicks {
+        user: 5,
+        system: 5,
+        idle: 5,
+        nice: 5,
+    };
+    let result = run_with(|m| *m.ticks.get_mut() = VecDeque::from([Ok(still), Ok(still)]));
+    assert_eq!(result, Err(SourceError::CpuTicksDidNotMove));
+}
+
+/// The PID of the Claude Code process of the groups scenario.
+const CLAUDE_PID: u32 = 10;
+
+/// The PID of the compiler that builds for a worktree.
+const BUILDER_PID: u32 = 20;
+
+/// The PID of the compiler that has no argument text.
+const BLIND_PID: u32 = 21;
+
+/// The PID of the shell whose arguments name a worktree.
+const SHELL_PID: u32 = 30;
+
+/// The PID of the process that exists in the second table only.
+const NEWCOMER_PID: u32 = 50;
+
+/// The worktree of the groups scenario.
+const WORKTREE: &str = "/wt/issue-17";
+
+/// Gives a machine with five processes, as the second table of a window
+/// shows them.
+///
+/// Process 10 is Claude Code, named for its version. Process 20 is a `clang`
+/// that writes into a worktree, and process 21 is a `clang` that `ps` gave no
+/// arguments. Process 30 is a shell whose arguments name the worktree. Process
+/// 50 started inside the window.
+fn groups_machine() -> FakeMachine {
+    let mut machine = FakeMachine::new();
+    *machine.tables.get_mut() = VecDeque::from([
+        Ok(vec![
+            row(CLAUDE_PID, 100, 2_000, "/v/claude/versions/2.1.325"),
+            row(BUILDER_PID, 1_000, 1_000, "/usr/bin/clang"),
+            row(BLIND_PID, 500, 100, "/usr/bin/clang"),
+            row(SHELL_PID, 50, 10, "/bin/zsh"),
+        ]),
+        Ok(vec![
+            row(CLAUDE_PID, 160, 2_000, "/v/claude/versions/2.1.325"),
+            row(BUILDER_PID, 1_250, 1_000, "/usr/bin/clang"),
+            row(BLIND_PID, 700, 100, "/usr/bin/clang"),
+            row(SHELL_PID, 50, 10, "/bin/zsh"),
+            row(NEWCOMER_PID, 80, 7, "/usr/bin/newtool"),
+        ]),
+    ]);
+    machine.claude = HashSet::from([Pid::new(CLAUDE_PID)]);
+    machine.footprints = HashMap::from([(Pid::new(CLAUDE_PID), 3_000_000)]);
+    machine.git = HashSet::from([PathBuf::from(WORKTREE)]);
+    machine.arguments = Ok(HashMap::from([
+        (
+            Pid::new(BUILDER_PID),
+            format!("clang -c a.c -o {WORKTREE}/target/x.o"),
+        ),
+        (Pid::new(SHELL_PID), format!("zsh -c cd {WORKTREE}")),
+    ]));
+    machine
+}
+
+/// Runs the run over the groups scenario and gives the total of one group.
+fn total_of(group: &Group) -> GroupTotal {
+    let facts = observe(&groups_machine(), interval()).expect("every source answers");
+    facts
+        .groups
+        .into_iter()
+        .find(|total| &total.group == group)
+        .unwrap_or_else(|| panic!("no total for {group:?}"))
+}
+
+/// A process that `occ` classified as Claude Code goes into that group,
+/// although its name is a version number. Its CPU is what it used in the
+/// window, and its memory is the footprint that the kernel gave.
+#[test]
+fn a_claude_code_process_goes_into_its_group_with_its_footprint() {
+    let total = total_of(&Group::ClaudeCode);
+    assert_eq!(total.processes, 1);
+    assert_eq!(total.cpu, CpuTime::from_centiseconds(60));
+    assert_eq!(total.memory_bytes, 3_000_000);
+    assert!(!total.at_least);
+}
+
+/// A compiler takes the worktree that its arguments name, and a compiler with
+/// no argument text takes none. The compilers without a worktree sort first.
+#[test]
+fn a_compiler_takes_the_worktree_of_its_arguments() {
+    let total = total_of(&Group::Compilers);
+    assert_eq!(total.processes, 2);
+    assert_eq!(total.cpu, CpuTime::from_centiseconds(450));
+    let worktrees: Vec<(Option<PathBuf>, CpuTime)> = total
+        .worktrees
+        .iter()
+        .map(|each| (each.worktree.clone(), each.cpu))
+        .collect();
+    assert_eq!(
+        worktrees,
+        [
+            (None, CpuTime::from_centiseconds(200)),
+            (
+                Some(PathBuf::from(WORKTREE)),
+                CpuTime::from_centiseconds(250)
+            ),
+        ]
+    );
+}
+
+/// A process that is not a compiler gets no worktree, although its arguments
+/// name one. Only a build writes for a worktree.
+#[test]
+fn a_process_that_is_not_a_compiler_gets_no_worktree() {
+    let total = total_of(&Group::Named("zsh".to_owned()));
+    assert_eq!(total.processes, 1);
+    assert!(total.worktrees.is_empty());
+}
+
+/// A process that started inside the window has no row in the first table,
+/// and all of its CPU time counts. A process that was in both tables counts
+/// only the change.
+#[test]
+fn a_process_that_started_in_the_window_counts_all_of_its_cpu() {
+    assert_eq!(
+        total_of(&Group::Named("newtool".to_owned())).cpu,
+        CpuTime::from_centiseconds(80)
+    );
+    assert_eq!(
+        total_of(&Group::Named("zsh".to_owned())).cpu,
+        CpuTime::from_centiseconds(0)
+    );
+}
+
+/// A process that the kernel gave no footprint for counts its resident size
+/// in bytes, and the total says that the number is a lower bound.
+#[test]
+fn a_process_with_no_footprint_counts_its_resident_size_as_a_lower_bound() {
+    let total = total_of(&Group::Named("newtool".to_owned()));
+    assert_eq!(total.memory_bytes, 7 * 1024);
+    assert!(total.at_least);
+}
+
+/// A compiler exits right after the second table. The run read its footprint
+/// and its arguments beside that table, so the group counts the footprint
+/// that the machine gave, with no lower-bound mark, and the compiler keeps its
+/// worktree. A later read would find a footprint of zero and no arguments.
+#[test]
+fn a_compiler_that_exits_after_the_second_table_keeps_its_footprint_and_worktree() {
+    let mut machine = FakeMachine::new();
+    *machine.tables.get_mut() = VecDeque::from([
+        Ok(vec![row(BUILDER_PID, 1_000, 1_000, "/usr/bin/clang")]),
+        Ok(vec![row(BUILDER_PID, 1_250, 1_000, "/usr/bin/clang")]),
+    ]);
+    machine.footprints = HashMap::from([(Pid::new(BUILDER_PID), 4_000_000)]);
+    machine.departs = Some(Pid::new(BUILDER_PID));
+    machine.git = HashSet::from([PathBuf::from(WORKTREE)]);
+    machine.arguments = Ok(HashMap::from([(
+        Pid::new(BUILDER_PID),
+        format!("clang -c a.c -o {WORKTREE}/target/x.o"),
+    )]));
+    let facts = observe(&machine, interval()).expect("every source answers");
+    let total = facts
+        .groups
+        .into_iter()
+        .find(|total| total.group == Group::Compilers)
+        .expect("a total for the compilers");
+    assert_eq!(total.memory_bytes, 4_000_000);
+    assert!(!total.at_least);
+    let worktrees: Vec<Option<PathBuf>> = total
+        .worktrees
+        .iter()
+        .map(|each| each.worktree.clone())
+        .collect();
+    assert_eq!(worktrees, [Some(PathBuf::from(WORKTREE))]);
+}

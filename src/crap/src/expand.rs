@@ -7,8 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-use serde::de::{Deserialize, Deserializer, MapAccess, Visitor};
-use serde_json::value::RawValue;
+use claude_transcript::{CompactionTally, Record};
 
 /// What `expand_transcript` made of a transcript.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,70 +91,30 @@ const KEY_PARENT_UUID: &str = "parentUuid";
 const KEY_LOGICAL_PARENT_UUID: &str = "logicalParentUuid";
 const KEY_TYPE: &str = "type";
 const DROPPED_TYPES: [&str; 2] = ["bridge-session", "queue-operation"];
-const KEY_COMPACT_METADATA: &str = "compactMetadata";
-const KEY_PRE_TOKENS: &str = "preTokens";
 const KEY_SESSION_ID: &str = "sessionId";
-const KEY_SUBTYPE: &str = "subtype";
-const KEY_IS_COMPACT_SUMMARY: &str = "isCompactSummary";
-const SUBTYPE_COMPACT_BOUNDARY: &str = "compact_boundary";
 
-/// The top-level pairs of a JSON object, in file order.
-struct Pairs<'a>(Vec<(String, &'a RawValue)>);
-
-impl<'de> Deserialize<'de> for Pairs<'de> {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct PairsVisitor;
-
-        impl<'de> Visitor<'de> for PairsVisitor {
-            type Value = Pairs<'de>;
-
-            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("a JSON object")
-            }
-
-            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-                let mut pairs = Vec::new();
-                while let Some((key, value)) = map.next_entry::<String, &'de RawValue>()? {
-                    pairs.push((key, value));
-                }
-                Ok(Pairs(pairs))
-            }
-        }
-
-        deserializer.deserialize_map(PairsVisitor)
-    }
-}
-
-/// One line of a transcript: its bytes, and its pairs when it is a JSON object.
+/// One line of a transcript: its bytes, and its record when it is a JSON object.
 struct Line<'a> {
     /// The whole line, terminator included.
     raw: &'a [u8],
-    /// The pairs of the line. `None` marks an opaque line.
-    pairs: Option<Vec<(String, &'a RawValue)>>,
+    /// The record of the line. `None` marks an opaque line.
+    record: Option<Record<'a>>,
 }
 
 impl<'a> Line<'a> {
     fn parse(raw: &'a [u8]) -> Self {
-        let pairs = std::str::from_utf8(raw)
-            .ok()
-            .and_then(|text| {
-                let body = text.strip_suffix('\n').unwrap_or(text);
-                let body = body.strip_suffix('\r').unwrap_or(body);
-                serde_json::from_str::<Pairs<'_>>(body).ok()
-            })
-            .map(|pairs| pairs.0);
-        Self { raw, pairs }
+        Self {
+            raw,
+            record: Record::parse(raw),
+        }
     }
 
     fn value<T: serde::de::DeserializeOwned>(&self, key: &str) -> Option<T> {
-        let (_, raw) = self.pairs.as_ref()?.iter().find(|(k, _)| k == key)?;
-        serde_json::from_str(raw.get()).ok()
+        self.record.as_ref()?.get(key)
     }
 
     fn has_key(&self, key: &str) -> bool {
-        self.pairs
-            .as_ref()
-            .is_some_and(|pairs| pairs.iter().any(|(k, _)| k == key))
+        self.record.as_ref().is_some_and(|r| r.has_key(key))
     }
 
     /// A line type that an import does not keep.
@@ -164,18 +123,14 @@ impl<'a> Line<'a> {
             .is_some_and(|kind| DROPPED_TYPES.contains(&kind.as_str()))
     }
 
-    /// `compactMetadata.preTokens`, when it is a u64.
-    fn pre_tokens(&self) -> Option<u64> {
-        let metadata = self.value::<serde_json::Value>(KEY_COMPACT_METADATA)?;
-        metadata.get(KEY_PRE_TOKENS)?.as_u64()
-    }
-
     fn is_boundary(&self) -> bool {
-        self.value::<String>(KEY_SUBTYPE).as_deref() == Some(SUBTYPE_COMPACT_BOUNDARY)
+        self.record
+            .as_ref()
+            .is_some_and(Record::is_compact_boundary)
     }
 
     fn is_summary(&self) -> bool {
-        self.value::<bool>(KEY_IS_COMPACT_SUMMARY) == Some(true)
+        self.record.as_ref().is_some_and(Record::is_compact_summary)
     }
 }
 
@@ -293,10 +248,11 @@ fn check_no_cycle(kept: &[(&Line<'_>, Option<Relink>)]) -> Result<(), ExpandErro
 /// Re-emit a line. Each `sessionId` becomes `import_id`, and the `parentUuid`
 /// becomes the new parent when the line has a relink.
 fn rewrite(line: &Line<'_>, relink: Option<&Relink>, import_id: &str, out: &mut Vec<u8>) {
-    let Some(pairs) = line.pairs.as_ref() else {
+    let Some(record) = line.record.as_ref() else {
         out.extend_from_slice(line.raw);
         return;
     };
+    let pairs = record.pairs();
     out.push(b'{');
     for (index, (key, raw_value)) in pairs.iter().enumerate() {
         if index > 0 {
@@ -435,14 +391,16 @@ pub fn expand_transcript(transcript: &[u8], import_id: &str) -> Result<ExpandOut
         }
     }
 
+    let mut tally = CompactionTally::default();
+    for record in lines.iter().filter_map(|l| l.record.as_ref()) {
+        tally.observe(record);
+    }
+    let facts = tally.facts();
+
     Ok(ExpandOutcome::Expanded(Expansion {
         transcript: output,
-        compactions: boundary_order.len(),
-        last_pre_tokens: lines
-            .iter()
-            .rev()
-            .find(|l| l.is_boundary())
-            .and_then(Line::pre_tokens),
+        compactions: facts.compactions,
+        last_pre_tokens: facts.last_pre_tokens,
     }))
 }
 

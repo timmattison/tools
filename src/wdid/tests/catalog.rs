@@ -5,7 +5,6 @@ use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use chrono::NaiveDate;
 use wdid::catalog::{
@@ -382,8 +381,7 @@ const TWO_COMMIT_DATE: &str = "2026-03-04T12:00:00Z";
 /// Runs git in `dir` with no inherited git environment. `date` states the
 /// author and committer date, after the sweep.
 fn git(dir: &Path, args: &[&str], date: Option<&str>) {
-    let mut command = Command::new("git");
-    gitscratch::shed_inherited_git_environment(&mut command);
+    let mut command = childenv::fixture_command("git");
     if let Some(date) = date {
         command
             .env("GIT_AUTHOR_DATE", date)
@@ -525,8 +523,7 @@ fn workspace_root_refuses_a_work_tree_without_cargo_toml() {
 #[test]
 fn workspace_root_outside_any_work_tree_is_not_a_work_tree() {
     let dir = tempfile::tempdir().unwrap();
-    let mut probe = Command::new("git");
-    gitscratch::shed_inherited_git_environment(&mut probe);
+    let mut probe = childenv::fixture_command("git");
     let inside = probe
         .args(["rev-parse", "--show-toplevel"])
         .current_dir(dir.path())
@@ -601,8 +598,7 @@ fn fake_cargo_bin() -> tempfile::TempDir {
 
 /// True when git finds a work tree that holds `dir`.
 fn inside_work_tree(dir: &Path) -> bool {
-    let mut probe = Command::new("git");
-    gitscratch::shed_inherited_git_environment(&mut probe);
+    let mut probe = childenv::fixture_command("git");
     probe
         .args(["rev-parse", "--show-toplevel"])
         .current_dir(dir)

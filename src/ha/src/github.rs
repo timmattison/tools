@@ -4,8 +4,8 @@
 //! token of its own. This module starts `gh`, reads what it prints, and maps
 //! the answer to the types of the rest of the crate.
 //!
-//! The cancel of a run is the only request that changes something on GitHub.
-//! Every other request only reads.
+//! The cancel of a run, the re-run of a run, and the re-run of a job change
+//! something on GitHub. Every other request only reads.
 //!
 //! The requests about the merge queue use GraphQL where REST has no answer:
 //! which repositories have a queue, the entries of a queue, and the head
@@ -26,6 +26,9 @@
 //! `GhSource::with_program` captures none, thus a stub in a test never sees the
 //! token of the test run.
 //!
+//! The split of the output of `gh api -i` into status, headers, and body comes
+//! from the `ghrest` crate: `ghrest::parse_response` gives a `ghrest::Response`.
+//!
 //! The bounded run of the `gh` child comes from the `runlimit` crate. Its
 //! `run_with_limit` starts a program and kills it when the time limit ends.
 
@@ -36,6 +39,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use ghrest::{parse_response, EtagEntry, Response};
 use runlimit::{run_with_limit, RunFailure};
 use serde::Deserialize;
 
@@ -553,31 +557,22 @@ impl TokenEnvironment {
 pub struct GhSource {
     program: OsString,
     limit: Duration,
-    etags: Mutex<HashMap<String, Cached>>,
+    /// The `ETag` cache, with one `ghrest::EtagEntry` for each key.
+    ///
+    /// The key of a page of runs names the repository, the filter family, and
+    /// the page number, but not the value of the filter. A created-since filter
+    /// holds the start of the hour, thus its path changes each hour. With the
+    /// path as the key, the cache would keep one stale page for each hour, and
+    /// a session that runs for days would grow with no limit. Each entry keeps
+    /// the path instead, and the `ETag` goes out only when the path of the
+    /// request is the same.
+    ///
+    /// The key of a page of jobs names the repository, the run, and the page
+    /// number. `Source::forget_jobs` removes those pages when the worker stops
+    /// fetching the run.
+    etags: Mutex<HashMap<String, EtagEntry>>,
     rate: Mutex<Option<RateLimit>>,
     tokens: TokenEnvironment,
-}
-
-/// One answer in the `ETag` cache.
-///
-/// The key of a page of runs names the repository, the filter family, and the
-/// page number, but not the value of the filter. A created-since filter holds
-/// the start of the hour, thus its path changes each hour. With the path as the
-/// key, the cache would keep one stale page for each hour, and a session that
-/// runs for days would grow with no limit. The path is kept here instead, and
-/// the `ETag` goes out only when the path of the request is the same.
-///
-/// The key of a page of jobs names the repository, the run, and the page
-/// number. `Source::forget_jobs` removes those pages when the worker stops
-/// fetching the run.
-#[derive(Debug, Clone)]
-struct Cached {
-    /// The path of the request that gave this page.
-    path: String,
-    /// The `ETag` of that answer.
-    etag: String,
-    /// The body of that answer. A `304` parses this text again.
-    body: String,
 }
 
 impl GhSource {
@@ -597,8 +592,7 @@ impl GhSource {
 
     /// The child that runs `gh` with `args`, before it starts.
     fn command(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(&self.program);
-        gitscratch::shed_inherited_git_environment_keeping_user_intent(&mut command);
+        let mut command = childenv::command(&self.program);
         command
             .env("GH_NO_UPDATE_NOTIFIER", "1")
             .env("GH_PROMPT_DISABLED", "1")
@@ -620,17 +614,17 @@ impl GhSource {
 
     /// Fetches `path` with `gh api -i` and splits the answer.
     ///
-    /// With an `etag`, the request carries an `If-None-Match` header. A status
-    /// of 400 or more gives the error of [`http_error`].
-    fn request(&self, path: &str, etag: Option<&str>) -> Result<Response, SourceError> {
-        refuse_http_error(self.request_raw(path, etag)?)
+    /// With a `condition`, the request carries that whole header line, for
+    /// example the line of `ghrest::EtagEntry::condition_for`. A status of 400
+    /// or more gives the error of [`http_error`].
+    fn request(&self, path: &str, condition: Option<&str>) -> Result<Response, SourceError> {
+        refuse_http_error(self.request_raw(path, condition)?)
     }
 
     /// Like [`GhSource::request`], and the answer comes back for any status.
-    fn request_raw(&self, path: &str, etag: Option<&str>) -> Result<Response, SourceError> {
-        let condition = etag.map(|etag| format!("If-None-Match: {etag}"));
+    fn request_raw(&self, path: &str, condition: Option<&str>) -> Result<Response, SourceError> {
         let mut args = vec!["api", "-i"];
-        if let Some(condition) = &condition {
+        if let Some(condition) = condition {
             args.extend(["-H", condition]);
         }
         args.push(path);
@@ -661,10 +655,10 @@ impl GhSource {
     /// Cancels `run` of `repo` on GitHub.
     ///
     /// The request is `POST /repos/{owner}/{repo}/actions/runs/{run_id}/cancel`.
-    /// It changes GitHub. Every other request of `ha` only reads. The request
-    /// needs the `repo` scope on an OAuth token or a classic token. A login
-    /// without write access gets `403`. GitHub answers `409` for a run that
-    /// finished.
+    /// It changes GitHub, as do the re-run of a run and the re-run of a job.
+    /// Every other request of `ha` only reads. The request needs the `repo`
+    /// scope on an OAuth token or a classic token. A login without write
+    /// access gets `403`. GitHub answers `409` for a run that finished.
     ///
     /// The request sends no `If-None-Match` header and does not touch the `ETag`
     /// cache.
@@ -680,14 +674,71 @@ impl GhSource {
             repo.name(),
             run.0
         );
-        self.send(&["api", "-i", "-X", "POST", &path])?;
+        self.post(&path)
+    }
+
+    /// Re-runs `job` of `repo` on GitHub.
+    ///
+    /// The request is `POST /repos/{owner}/{repo}/actions/jobs/{job_id}/rerun`.
+    /// It changes GitHub. GitHub re-runs the job and each job that needs it.
+    /// The request needs the `repo` scope on an OAuth token or a classic token.
+    /// A login without write access gets `403`. GitHub answers `201` when it
+    /// accepts the re-run.
+    ///
+    /// The request sends no `If-None-Match` header and does not touch the `ETag`
+    /// cache.
+    ///
+    /// # Errors
+    ///
+    /// Gives the error of `gh` or the error of [`http_error`] for a status of
+    /// 400 or more.
+    pub fn rerun_job(&self, repo: &RepoName, job: JobId) -> Result<(), SourceError> {
+        let path = format!(
+            "repos/{}/{}/actions/jobs/{}/rerun",
+            repo.owner(),
+            repo.name(),
+            job.0
+        );
+        self.post(&path)
+    }
+
+    /// Sends a `POST` with no body to `path` and drops the answer.
+    ///
+    /// The request sends no `If-None-Match` header and does not touch the `ETag`
+    /// cache. A status of 400 or more gives the error of [`http_error`].
+    fn post(&self, path: &str) -> Result<(), SourceError> {
+        self.send(&["api", "-i", "-X", "POST", path])?;
         Ok(())
+    }
+
+    /// Re-runs `run` of `repo` on GitHub.
+    ///
+    /// The request is `POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun`.
+    /// It changes GitHub. The request needs the `repo` scope on an OAuth token
+    /// or a classic token. A login without write access gets `403`. GitHub
+    /// answers `201` when it accepts the re-run.
+    ///
+    /// The request sends no `If-None-Match` header and does not touch the `ETag`
+    /// cache.
+    ///
+    /// # Errors
+    ///
+    /// Gives the error of `gh` or the error of [`http_error`] for a status of
+    /// 400 or more.
+    pub fn rerun_run(&self, repo: &RepoName, run: RunId) -> Result<(), SourceError> {
+        let path = format!(
+            "repos/{}/{}/actions/runs/{}/rerun",
+            repo.owner(),
+            repo.name(),
+            run.0
+        );
+        self.post(&path)
     }
 
     /// Fetches the page `number` of the runs of `repo` for `filter`.
     ///
     /// `family` names the kind of filter without its value, for the cache key
-    /// (see [`Cached`]).
+    /// (see the field `etags`).
     fn runs_page(
         &self,
         repo: &RepoName,
@@ -732,21 +783,19 @@ impl GhSource {
         parse: impl Fn(&str) -> Result<T, E>,
         refuse: impl Fn(&Response) -> E,
     ) -> Result<T, E> {
-        let etag = self
+        let condition = self
             .lock_etags()
             .get(key)
-            .filter(|cached| cached.path == path)
-            .map(|cached| cached.etag.clone());
-        let response = self.request_raw(path, etag.as_deref())?;
-        if response.status >= 400 {
+            .and_then(|entry| entry.condition_for(path));
+        let response = self.request_raw(path, condition.as_deref())?;
+        if response.status() >= 400 {
             return Err(refuse(&response));
         }
-        if response.status == 304 {
+        if response.status() == 304 {
             let body = self
                 .lock_etags()
                 .get(key)
-                .filter(|cached| cached.path == path)
-                .map(|cached| cached.body.clone())
+                .and_then(|entry| entry.body_for(path).map(str::to_owned))
                 .ok_or_else(|| {
                     SourceError::BadResponse(
                         "GitHub said 304 for a page that ha has not seen".to_owned(),
@@ -754,14 +803,9 @@ impl GhSource {
                 })?;
             return parse(&body);
         }
-        let parsed = parse(&response.body)?;
-        if let Some(etag) = response.header("etag") {
-            let cached = Cached {
-                path: path.to_owned(),
-                etag: etag.to_owned(),
-                body: response.body,
-            };
-            self.lock_etags().insert(key.to_owned(), cached);
+        let parsed = parse(response.body())?;
+        if let Some(entry) = EtagEntry::from_response(path, response) {
+            self.lock_etags().insert(key.to_owned(), entry);
         }
         Ok(parsed)
     }
@@ -835,12 +879,12 @@ impl GhSource {
         for field in &fields {
             args.extend(["-f", field.as_str()]);
         }
-        Ok(self.send(&args)?.body)
+        Ok(self.send(&args)?.into_body())
     }
 
     /// The `ETag` cache. The guard lives for one statement. A poisoned lock still
     /// holds a usable map, thus the poison is ignored.
-    fn lock_etags(&self) -> std::sync::MutexGuard<'_, HashMap<String, Cached>> {
+    fn lock_etags(&self) -> std::sync::MutexGuard<'_, HashMap<String, EtagEntry>> {
         self.etags
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -974,7 +1018,7 @@ impl Source for GhSource {
         let path = format!("repos/{}/{}", repo.owner(), repo.name());
         match self.request(&path, None) {
             Ok(response) => {
-                let body: RepoBody = serde_json::from_str(&response.body)
+                let body: RepoBody = serde_json::from_str(response.body())
                     .map_err(|error| SourceError::BadResponse(error.to_string()))?;
                 Ok(!body.archived && body.full_name.eq_ignore_ascii_case(&repo.to_string()))
             }
@@ -992,7 +1036,7 @@ impl Source for GhSource {
         );
         match self.request(&path, None) {
             Ok(response) => {
-                let json: RunJson = serde_json::from_str(&response.body)
+                let json: RunJson = serde_json::from_str(response.body())
                     .map_err(|error| SourceError::BadResponse(error.to_string()))?;
                 Ok(Some(run_of(json, repo)))
             }
@@ -1004,7 +1048,7 @@ impl Source for GhSource {
     fn account_kind(&self, owner: &OwnerName) -> Result<AccountKind, SourceError> {
         let path = format!("users/{owner}");
         let response = self.request(&path, None)?;
-        let account: AccountJson = serde_json::from_str(&response.body)
+        let account: AccountJson = serde_json::from_str(response.body())
             .map_err(|error| SourceError::BadResponse(error.to_string()))?;
         match account.kind.as_str() {
             "Organization" => Ok(AccountKind::Organization),
@@ -1575,7 +1619,7 @@ fn no_answer_error(output: &Output) -> SourceError {
 /// Gives the answer back, or the error of [`http_error`] for a status of 400
 /// or more.
 fn refuse_http_error(response: Response) -> Result<Response, SourceError> {
-    if response.status >= 400 {
+    if response.status() >= 400 {
         return Err(http_error(&response));
     }
     Ok(response)
@@ -1641,7 +1685,7 @@ fn scope_list(value: &str) -> Vec<&str> {
 /// or with an empty accepted list, the error is the plain one of
 /// [`http_error`].
 fn billing_refusal(response: &Response, origin: TokenOrigin) -> BillingError {
-    let refused = matches!(response.status, 403 | 404);
+    let refused = matches!(response.status(), 403 | 404);
     let held = response.header("x-oauth-scopes").map(scope_list);
     let accepted = response.header("x-accepted-oauth-scopes").map(scope_list);
     match (refused, held, accepted) {
@@ -1681,13 +1725,13 @@ fn http_error(response: &Response) -> SourceError {
     struct ErrorBody {
         message: String,
     }
-    let message = serde_json::from_str::<ErrorBody>(&response.body)
-        .map_or_else(|_| response.reason.clone(), |body| body.message);
-    if response.status == 401 {
+    let message = serde_json::from_str::<ErrorBody>(response.body())
+        .map_or_else(|_| response.reason().to_owned(), |body| body.message);
+    if response.status() == 401 {
         return SourceError::NotLoggedIn(message);
     }
     SourceError::Http {
-        status: response.status,
+        status: response.status(),
         message,
     }
 }
@@ -1702,71 +1746,15 @@ fn first_line(bytes: &[u8]) -> String {
         .to_owned()
 }
 
-/// One answer of `gh api -i`, split into its parts.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Response {
-    /// The status code of the HTTP status line.
-    status: u16,
-    /// The reason phrase of the HTTP status line. It can be empty.
-    reason: String,
-    /// The headers, in the order and the case that `gh` printed them.
-    headers: Vec<(String, String)>,
-    /// Everything after the empty line that ends the headers.
-    body: String,
-}
+/// The answers of GitHub that the tests of more than one module give to a
+/// fake `gh`.
+#[cfg(test)]
+pub(crate) mod test_answers {
+    /// The answer of GitHub for a cancel that it accepted.
+    pub(crate) const ACCEPTED: &str = "HTTP/2.0 202 Accepted\nContent-Type: application/json; charset=utf-8\r\nX-Ratelimit-Limit: 5000\r\nX-Ratelimit-Remaining: 4999\r\nX-Ratelimit-Reset: 1791977652\r\n\r\n{}";
 
-impl Response {
-    /// The value of the first header with this name. The name match ignores case.
-    fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.as_str())
-    }
-}
-
-/// Splits `text` at the first empty line. The first part is the status line
-/// and the headers, line by line. The second part is the body. A text with no
-/// empty line has an empty body.
-fn split_head(text: &str) -> (Vec<&str>, &str) {
-    let mut head = Vec::new();
-    let mut rest = text;
-    while !rest.is_empty() {
-        let (line, after) = rest.split_once('\n').unwrap_or((rest, ""));
-        rest = after;
-        if line.strip_suffix('\r').unwrap_or(line).is_empty() {
-            return (head, rest);
-        }
-        head.push(line);
-    }
-    (head, "")
-}
-
-/// Splits the output of `gh api -i` into status, headers, and body.
-///
-/// Returns `None` when the first line is not an HTTP status line.
-fn parse_response(text: &str) -> Option<Response> {
-    let (head, body) = split_head(text);
-    let mut lines = head
-        .iter()
-        .map(|line| line.strip_suffix('\r').unwrap_or(line));
-    let status_line = lines.next()?;
-    let mut parts = status_line.splitn(3, ' ');
-    if !parts.next()?.starts_with("HTTP/") {
-        return None;
-    }
-    let status = parts.next()?.parse().ok()?;
-    let reason = parts.next().unwrap_or_default().trim().to_owned();
-    let headers = lines
-        .filter_map(|line| line.split_once(':'))
-        .map(|(name, value)| (name.trim().to_owned(), value.trim().to_owned()))
-        .collect();
-    Some(Response {
-        status,
-        reason,
-        headers,
-        body: body.to_owned(),
-    })
+    /// The answer of GitHub for a re-run that it created.
+    pub(crate) const CREATED: &str = "HTTP/2.0 201 Created\nContent-Type: application/json; charset=utf-8\r\nX-Ratelimit-Limit: 5000\r\nX-Ratelimit-Remaining: 4999\r\nX-Ratelimit-Reset: 1791977652\r\n\r\n{}";
 }
 
 #[cfg(test)]
@@ -1775,6 +1763,7 @@ mod tests {
 
     use tempfile::TempDir;
 
+    use super::test_answers::{ACCEPTED, CREATED};
     use super::*;
     use crate::billing::EnterpriseSlug;
 
@@ -1800,46 +1789,6 @@ mod tests {
              X-Ratelimit-Reset: 1791977652\r\n\
              \r\n{body}"
         )
-    }
-
-    #[test]
-    fn a_response_splits_into_status_headers_and_body() {
-        let response = parse_response(&ok_output("{\"a\":1}")).expect("a response");
-        assert_eq!(response.status, 200);
-        assert_eq!(response.reason, "OK");
-        assert_eq!(response.body, "{\"a\":1}");
-        assert_eq!(response.headers.len(), 4);
-        assert_eq!(response.header("etag"), Some("W/\"4c00158b\""));
-        assert_eq!(response.header("X-RATELIMIT-REMAINING"), Some("4866"));
-        assert_eq!(response.header("x-ratelimit-reset"), Some("1791977652"));
-        assert_eq!(response.header("missing"), None);
-    }
-
-    #[test]
-    fn a_response_with_no_body_and_a_long_reason_parses() {
-        let response =
-            parse_response("HTTP/2.0 304 Not Modified\nEtag: \"x\"\r\n\r\n").expect("a response");
-        assert_eq!(response.status, 304);
-        assert_eq!(response.reason, "Not Modified");
-        assert_eq!(response.body, "");
-        assert_eq!(response.header("etag"), Some("\"x\""));
-    }
-
-    #[test]
-    fn a_body_keeps_its_own_line_breaks_and_colons() {
-        let response = parse_response("HTTP/2.0 200 OK\r\nA: b\r\n\r\n{\"x\":\r\n\"y: z\"}\n")
-            .expect("a response");
-        assert_eq!(response.status, 200);
-        assert_eq!(response.body, "{\"x\":\r\n\"y: z\"}\n");
-        assert_eq!(response.headers, [("A".to_owned(), "b".to_owned())]);
-    }
-
-    #[test]
-    fn output_with_no_status_line_gives_none() {
-        assert_eq!(parse_response(""), None);
-        assert_eq!(parse_response("not http\r\n\r\nbody"), None);
-        assert_eq!(parse_response("HTTP/2.0 abc OK\n\n"), None);
-        assert_eq!(parse_response("{\"message\":\"x\"}"), None);
     }
 
     fn repo(text: &str) -> RepoName {
@@ -4092,9 +4041,6 @@ mod tests {
         );
     }
 
-    /// The answer of GitHub for a cancel that it accepted.
-    const ACCEPTED: &str = "HTTP/2.0 202 Accepted\nContent-Type: application/json; charset=utf-8\r\nX-Ratelimit-Limit: 5000\r\nX-Ratelimit-Remaining: 4999\r\nX-Ratelimit-Reset: 1791977652\r\n\r\n{}";
-
     /// Runs `cancel_run` against a stub that prints `answer` and exits with `exit`.
     fn cancel_with(answer: &str, exit: u8) -> Result<(), SourceError> {
         let stub = Stub::new(&format!("cat \"$dir/cancel.out\"; exit {exit}"));
@@ -4169,6 +4115,113 @@ mod tests {
         assert!(requests[2]
             .iter()
             .any(|arg| arg.starts_with("If-None-Match: ")));
+    }
+
+    #[test]
+    fn rerun_run_posts_to_the_rerun_path_of_the_run() {
+        let stub = Stub::new("cat \"$dir/rerun.out\"");
+        stub.file("rerun.out", CREATED);
+        stub.source().rerun_run(&repo("o/r"), RunId(7)).unwrap();
+        assert_eq!(
+            stub.requests(),
+            vec![vec![
+                "api",
+                "-i",
+                "-X",
+                "POST",
+                "repos/o/r/actions/runs/7/rerun"
+            ]]
+        );
+    }
+
+    #[test]
+    fn rerun_job_posts_to_the_rerun_path_of_the_job() {
+        let stub = Stub::new("cat \"$dir/rerun.out\"");
+        stub.file("rerun.out", CREATED);
+        stub.source().rerun_job(&repo("o/r"), JobId(11)).unwrap();
+        assert_eq!(
+            stub.requests(),
+            vec![vec![
+                "api",
+                "-i",
+                "-X",
+                "POST",
+                "repos/o/r/actions/jobs/11/rerun"
+            ]]
+        );
+    }
+
+    /// Runs `rerun_run` and `rerun_job` against a stub that prints `answer` and
+    /// exits with `exit`. Gives the two results in that order.
+    fn rerun_with(answer: &str, exit: u8) -> (Result<(), SourceError>, Result<(), SourceError>) {
+        let stub = Stub::new(&format!("cat \"$dir/rerun.out\"; exit {exit}"));
+        stub.file("rerun.out", answer);
+        let source = stub.source();
+        (
+            source.rerun_run(&repo("o/r"), RunId(7)),
+            source.rerun_job(&repo("o/r"), JobId(11)),
+        )
+    }
+
+    #[test]
+    fn rerun_run_and_rerun_job_give_ok_for_201_created() {
+        assert_eq!(rerun_with(CREATED, 0), (Ok(()), Ok(())));
+        let empty = CREATED.strip_suffix("{}").unwrap();
+        assert_eq!(rerun_with(empty, 0), (Ok(()), Ok(())));
+    }
+
+    /// The body of GitHub for a re-run that a login without write access sent.
+    const RERUN_403_BODY: &str = r#"{"message":"Must have admin rights to Repository.","documentation_url":"https://docs.github.com/rest","status":"403"}"#;
+
+    /// The error that `RERUN_403_BODY` must give.
+    fn rerun_403_error() -> SourceError {
+        SourceError::Http {
+            status: 403,
+            message: "Must have admin rights to Repository.".to_owned(),
+        }
+    }
+
+    #[test]
+    fn rerun_run_gives_the_message_of_github_for_403() {
+        let (run, _) = rerun_with(&http_output("HTTP/2.0 403 Forbidden", RERUN_403_BODY), 1);
+        assert_eq!(run.unwrap_err(), rerun_403_error());
+    }
+
+    #[test]
+    fn rerun_job_gives_the_message_of_github_for_403() {
+        let (_, job) = rerun_with(&http_output("HTTP/2.0 403 Forbidden", RERUN_403_BODY), 1);
+        assert_eq!(job.unwrap_err(), rerun_403_error());
+    }
+
+    #[test]
+    fn rerun_run_and_rerun_job_do_not_change_the_etag_cache() {
+        let stub = Stub::new(
+            "case \"$*\" in
+  *rerun*) cat \"$dir/rerun.out\";;
+  *If-None-Match*) cat \"$dir/not-modified.out\"; echo 'gh: HTTP 304' >&2; exit 1;;
+  *) cat \"$dir/page1.out\";;
+ esac",
+        );
+        stub.file("page1.out", &ok_output(RUNS_JSON));
+        stub.file("not-modified.out", NOT_MODIFIED);
+        stub.file("rerun.out", CREATED);
+        let source = stub.source();
+        let tools = repo("timmattison/tools");
+        source.runs_of(&tools, since_query()).unwrap();
+        let keys = cache_keys(&source);
+        source.rerun_run(&tools, RunId(7)).unwrap();
+        source.rerun_job(&tools, JobId(11)).unwrap();
+        assert_eq!(cache_keys(&source), keys);
+        source.runs_of(&tools, since_query()).unwrap();
+        let requests = stub.requests();
+        assert_eq!(requests.len(), 4);
+        assert_eq!(requests[3][1], "-i");
+        assert!(requests[3]
+            .iter()
+            .any(|arg| arg.starts_with("If-None-Match: ")));
+        for rerun in &requests[1..3] {
+            assert!(!rerun.iter().any(|arg| arg.starts_with("If-None-Match: ")));
+        }
     }
 
     /// The output of `gh api -i graphql` for a `200`. The headers state the

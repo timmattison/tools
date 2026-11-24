@@ -13,7 +13,7 @@
 //! diff does not change.
 
 use std::collections::BTreeSet;
-use std::process::{Command, Output};
+use std::process::Output;
 
 use gitscratch::testing::{
     conflicting_repo, contested_region_repo, equal_hunks_unequal_stops_repo,
@@ -983,7 +983,7 @@ fn ssh_signing_key() -> TempDir {
     let dir = TempDir::new().expect("create a temporary directory for the signing key");
     let key = dir.path().join(KEY_FILE);
 
-    let generated = Command::new(SSH_KEYGEN)
+    let generated = childenv::fixture_command(SSH_KEYGEN)
         .args(["-q", "-t", "ed25519", "-N", "", "-C", SIGNER, "-f"])
         .arg(&key)
         .output()

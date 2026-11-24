@@ -15,7 +15,7 @@ use gitscratch::testing::{
     independent_branches_repo, multi_byte_names_repo, nested_conflict_repo, not_a_repository,
     unrelated_histories_repo, TestRepo, CHOICE_HEAD_BRANCH,
 };
-use gitscratch::{NoInheritedGitEnvironment, DEFAULT_BRANCHES};
+use gitscratch::DEFAULT_BRANCHES;
 use unicode_width::UnicodeWidthStr;
 
 /// Exit code for a replay that hit no conflicts.
@@ -93,11 +93,8 @@ const STATED_WIDTH: &str = "200";
 /// play nowhere else is what keeps them the only place the answer depends on
 /// it.
 fn grime_command(repo: &Path, args: &[&str]) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_grime"));
-    command
-        .args(args)
-        .current_dir(repo)
-        .without_inherited_git_environment();
+    let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_grime"));
+    command.args(args).current_dir(repo);
 
     // After the scrub, and for the reason `TestRepo::try_git` applies a
     // caller's own variables after its own: the rule the scrub applies is the
@@ -2008,6 +2005,53 @@ fn diff_on_a_terminal_is_painted_with_no_color_variable_set() {
     );
 }
 
+/// A run on a terminal draws the spinner, with the phase.
+///
+/// This holds the wiring of the display in the binary: issue #682, criterion 2.
+/// A `grime` that merges with `scratch` in place of `scratch_with_progress`,
+/// or a crate that drops the `progress` feature, draws nothing, and no run
+/// through a pipe can show it. The shim pauses for 1 s before each `merge`
+/// call, because the display waits for `PROGRESS_DELAY` (500 ms) before it
+/// shows. The pause only lengthens the run, so the test has no upper time bound.
+#[cfg(unix)]
+#[test]
+fn spinner_shows_its_phase_on_a_terminal() {
+    use gitscratch::testing::git_shim::GitShim;
+    use gitscratch::testing::pty::Pty;
+
+    /// The width of the terminal. Any width serves, because the width that
+    /// the builder states wins.
+    const TERMINAL_COLUMNS: u16 = 80;
+    /// The text that only the display writes: the prefix, then the two spaces
+    /// that part the action from the spinner.
+    const DISPLAY_PREFIX: &str = "grime: merging right into HEAD  ";
+
+    let repo = conflicting_repo();
+    repo.checkout("left");
+    let plain = String::from_utf8_lossy(&grime(repo.path(), &["right"]).stdout).into_owned();
+    assert!(
+        !plain.contains(DISPLAY_PREFIX),
+        "the verdict through a pipe must not hold the display:\n{plain}"
+    );
+
+    let shim = GitShim::new(&["merge"]);
+    let mut command = grime_command(repo.path(), &["right"]);
+    command.env("PATH", shim.path_variable());
+    let output = Pty::open(TERMINAL_COLUMNS).run_with_output_on_terminal(command);
+    let bytes = testcolor::strip_ansi(&String::from_utf8_lossy(&output.stdout));
+
+    assert_eq!(
+        output.status.code(),
+        Some(CONFLICTS),
+        "bytes:\n{bytes}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        bytes.contains(DISPLAY_PREFIX),
+        "the spinner names the tool and the phase:\n{bytes}"
+    );
+}
+
 /// Which of `grime`'s streams is handed a pipe nobody is reading.
 #[derive(Debug, Clone, Copy)]
 enum Unread {
@@ -2272,7 +2316,7 @@ fn a_leaked_repository_location_does_not_redirect_the_replay() {
     let git_dir = hooks_repo.path().join(".git");
     let config = snapshot(&git_dir.join("config"));
 
-    let output = Command::new(env!("CARGO_BIN_EXE_grime"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_grime"))
         .arg("two")
         .current_dir(repo.path())
         .env("GIT_DIR", &git_dir)
@@ -2327,7 +2371,7 @@ fn a_leaked_index_file_is_neither_read_from_nor_written_to() {
     let index = hooks_repo.path().join(".git").join("index");
     let before = snapshot(&index);
 
-    let output = Command::new(env!("CARGO_BIN_EXE_grime"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_grime"))
         .arg("two")
         .current_dir(repo.path())
         .env("GIT_INDEX_FILE", &index)

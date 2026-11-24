@@ -1,0 +1,10 @@
+    1     0 /sbin/launchd
+42617     1 /opt/homebrew/bin/zellij
+28878 42617 /bin/zsh
+29130 28878 claude
+19800 19501 zellij
+19501 19400 -zsh
+19400     1 /Applications/WezTerm.app/Contents/MacOS/wezterm-gui
+51234 51200 claude
+51200 51100 -zsh
+51100 19400 /usr/bin/login

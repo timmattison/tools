@@ -1,6 +1,6 @@
 //! Tests that run the built `faulte` binary.
 
-use std::process::{Command, Output};
+use std::process::Output;
 
 /// The path of the binary that cargo built for these tests.
 const BIN: &str = env!("CARGO_BIN_EXE_faulte");
@@ -24,7 +24,7 @@ const USAGE_ERROR: i32 = 2;
 
 /// Runs the binary with `args` and returns what it wrote and how it ended.
 fn run(args: &[&str]) -> Output {
-    Command::new(BIN)
+    childenv::fixture_command(BIN)
         .args(args)
         .env("COLUMNS", COLUMNS)
         .env(CLICOLOR_FORCE, PAINT)
@@ -321,7 +321,7 @@ fn check_help_names_each_exit_code_and_claims_no_cause() {
 #[cfg(target_os = "macos")]
 mod signals {
     use std::os::unix::process::ExitStatusExt;
-    use std::process::{Child, Command, ExitStatus, Stdio};
+    use std::process::{Child, ExitStatus, Stdio};
     use std::thread;
     use std::time::{Duration, SystemTime};
 
@@ -368,7 +368,7 @@ mod signals {
     /// the test and it. Thus the number that [`Child::id`] gives is the number
     /// of the process that the test signals.
     fn sleeping_child() -> Child {
-        Command::new(SLEEP)
+        childenv::fixture_command(SLEEP)
             .arg(SLEEP_SECONDS)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -385,7 +385,7 @@ mod signals {
     /// one process, the same as [`sleeping_child`], and it answers no
     /// `SIGTERM`.
     fn deaf_child() -> Child {
-        Command::new(SHELL)
+        childenv::fixture_command(SHELL)
             .arg("-c")
             .arg(format!("trap '' TERM; exec {SLEEP} {SLEEP_SECONDS}"))
             .stdin(Stdio::null())
@@ -630,7 +630,7 @@ fn check_watch_prints_lines_and_ends_when_the_reader_goes_away() {
     use std::io::{BufRead, BufReader};
     use std::process::Stdio;
 
-    let mut child = Command::new(BIN)
+    let mut child = childenv::fixture_command(BIN)
         .args(["check", "--watch", "--interval", "1s"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -664,7 +664,7 @@ fn check_watch_prints_lines_and_ends_when_the_reader_goes_away() {
 fn check_with_no_reader_keeps_the_exit_code_of_its_verdict() {
     use std::process::Stdio;
 
-    let mut child = Command::new(BIN)
+    let mut child = childenv::fixture_command(BIN)
         .args(["check", "--interval", "1s"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -710,7 +710,7 @@ fn run_with_no_room_for_output(name: &str, args: &[&str]) -> (Option<i32>, Strin
         "faulte-no-room-{name}-{}-{nanos}.txt",
         std::process::id()
     ));
-    let mut child = Command::new("/bin/sh")
+    let mut child = childenv::fixture_command("/bin/sh")
         .args([
             "-c",
             r#"trap "" XFSZ; ulimit -f 0; output=$1; shift; exec "$@" > "$output""#,

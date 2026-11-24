@@ -8,12 +8,13 @@
     clippy::module_name_repetitions,
     reason = "types such as run::RunState repeat the module name on purpose"
 )]
+pub mod action;
 pub mod app;
 pub mod billing;
 pub mod board;
 pub mod browser;
-pub mod cancel;
 pub mod cost;
+pub mod estimate;
 pub mod first_cycle;
 pub mod github;
 pub mod job;

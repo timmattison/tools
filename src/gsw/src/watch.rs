@@ -18,16 +18,18 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::cursor::{Hide, MoveTo, Show};
+use crossterm::cursor::MoveTo;
 use crossterm::event::{self, Event as CtEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
-};
+use crossterm::terminal::{Clear, ClearType};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::conflicts::ConflictsWorker;
+use crate::pull::{
+    run_lookup, target_of, LookupRequest, PullHeader, PullIndicator, PullSettings, PullWatch,
+    LOOKUP_LIMIT,
+};
 use crate::push::{PushCommand, PushUi};
 use crate::render::Snapshot;
 use crate::repo::{LogStart, RepoHandle};
@@ -549,6 +551,17 @@ impl WalkSchedule {
             .map(|interval| walk_start + interval.max(cooldown));
     }
 
+    /// Whether the timed walk is due at `now`: a timed walk is armed and its
+    /// instant is not after `now`. A deferred change does not make it due, and
+    /// a schedule with no interval never makes it due.
+    ///
+    /// The loop asks it before [`Self::record`], which moves the timed walk on.
+    /// It tells a walk that a timed refresh caused from a walk that a
+    /// filesystem event caused, because only the first one asks GitHub again.
+    fn timed_due(&self, now: Instant) -> bool {
+        self.next_timed_at.is_some_and(|due| now >= due)
+    }
+
     /// The instant a pending deferred walk should fire — the cooldown's expiry —
     /// or `None` when no walk is owed. A change that arrives mid-cooldown is
     /// deferred (it sets the dirty flag) and registers exactly one coalesced
@@ -638,7 +651,8 @@ fn ceil_secs(remaining: Duration) -> Duration {
 /// Every input is already expressed as a duration from now, and a `None` from a
 /// source means that source imposes no deadline. Taking a slice rather than a
 /// fixed pair is what lets a new source (the timed refresh, the refresh clock's
-/// own cadence) join without every caller and test changing shape.
+/// own cadence, the end of a rate-limit block that holds a pull lookup) join
+/// without every caller and test changing shape.
 fn wait_window(deadlines: &[Option<Duration>]) -> Option<Duration> {
     deadlines.iter().flatten().min().copied()
 }
@@ -810,6 +824,19 @@ enum Event {
         generation: Generation,
         /// What the run did.
         outcome: crate::issue::IssueOutcome,
+    },
+    /// One lookup of the pull requests of a branch has ended.
+    ///
+    /// It arrives on the channel of the loop, like every other answer of work
+    /// that runs off this thread. It names its target, so an answer for a
+    /// worktree that the frame no longer shows only fills the cache of
+    /// [`PullWatch`]. It never paints the header of another
+    /// worktree.
+    PullAnswered {
+        /// The target that the lookup asked about.
+        target: crate::pull::PullTarget,
+        /// What the lookup found.
+        outcome: crate::pull::LookupOutcome,
     },
     /// The user asked to run the tab-title command (`T`).
     ///
@@ -1499,9 +1526,16 @@ impl Watched {
         cfg: &RenderConfig,
         start: &StartPoint,
         log_limit: usize,
+        pulls: Option<&PullSettings>,
     ) -> Result<Snapshot> {
         let snapshot = walk(&mut self.handle, &self.ignore, cfg, log_limit)?;
-        Ok(badged(snapshot, self.handle.repo(), &self.path, start))
+        Ok(badged(
+            snapshot,
+            self.handle.repo(),
+            &self.path,
+            start,
+            pulls,
+        ))
     }
 }
 
@@ -1520,6 +1554,12 @@ struct StartPoint {
 
 /// Put the badge of the worktree at `path` on `snapshot`, which a walk of
 /// `repo` collected. `start` is where the user started gsw.
+///
+/// This is where every walk of watch mode gets what only watch mode adds. With
+/// `pulls`, a branch that maps to a GitHub repository gets a pull header with
+/// no answer yet, so the frame shows `PR ?` until a lookup answers. Without
+/// `pulls`, or on a branch that maps to no GitHub repository, the snapshot has
+/// no pull header and the header row stays as it is today.
 ///
 /// The seed walk of [`run`] and every walk of a [`Watched`] go through here, so
 /// the first frame and every later frame name the worktree in the same way.
@@ -1540,7 +1580,14 @@ fn badged(
     repo: &gix::Repository,
     path: &WorktreePath,
     start: &StartPoint,
+    pulls: Option<&PullSettings>,
 ) -> Snapshot {
+    snapshot.pull = pulls
+        .and_then(|settings| target_of(repo, settings.extra_host()))
+        .map(|target| PullHeader {
+            target,
+            indicator: PullIndicator::Unknown,
+        });
     snapshot.worktree =
         crate::worktrees::badge(&worktree_paths(repo), path, &start.home, head_label(repo));
     snapshot.off_start_branch = start
@@ -1578,10 +1625,11 @@ fn switch_watched(
     cfg: &RenderConfig,
     start: &StartPoint,
     log_limit: usize,
+    pulls: Option<&PullSettings>,
 ) -> Result<Snapshot, String> {
     let mut candidate = Watched::open(target, tx)?;
     let snapshot = candidate
-        .walk(cfg, start, log_limit)
+        .walk(cfg, start, log_limit, pulls)
         .map_err(|error| format!("{WALK_FAILED}: {}: {error:#}", target.as_path().display()))?;
     // The old worktree goes here, and the drop of its watcher stops its events.
     drop(watched.replace(candidate));
@@ -1627,7 +1675,7 @@ fn listed_paths(watched: &RefCell<Watched>) -> Vec<WorktreePath> {
 /// started from ([`Snapshot::log_start`]), and never from the live HEAD. The
 /// resize reads nothing when the cached log is complete
 /// ([`Snapshot::log_complete`]) or has no start.
-/// The [`TerminalGuard`] restores the main screen and cursor on every exit path.
+/// The `altscreen` session restores the main screen and cursor on every exit path.
 ///
 /// Takes the [`RepoHandle`] **by value**: watch mode owns the repository for
 /// the rest of the process. The handle moves into the [`Watched`] of the home
@@ -1641,15 +1689,19 @@ fn listed_paths(watched: &RefCell<Watched>) -> Vec<WorktreePath> {
 /// `worktrees` and `worktree_paths` hooks read the worktrees of its repository
 /// through [`listed`] and [`listed_paths`], and the `switch` hook replaces it
 /// through [`switch_watched`].
-pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
-    // Before the guard takes the screen, so a refusal prints on the screen the
-    // user started from, and not on the alternate screen that the guard
+pub(crate) fn run(
+    handle: RepoHandle,
+    cfg: &RenderConfig,
+    pulls: Option<PullSettings>,
+) -> Result<()> {
+    // Before the session takes the screen, so a refusal prints on the screen the
+    // user started from, and not on the alternate screen that the session
     // clears when it goes.
     let start = StartPoint {
         home: resolve_home(&handle)?,
         branch: StartBranch::read(handle.repo()),
     };
-    let _guard = TerminalGuard::enter()?;
+    let _session = altscreen::Session::enter(altscreen::Options::default())?;
 
     // Seed the cache with one git walk and paint the first frame at offset 0,
     // byte-identical to a one-shot render of the same state. That frame's
@@ -1673,6 +1725,7 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
         handle.repo(),
         &start.home,
         &start,
+        pulls.as_ref(),
     );
     // The seed walk pays into the duty-cycle budget like every walk after it,
     // so its cost is what the schedule's first timed walk is gated on. The seed
@@ -1760,6 +1813,11 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
             home: start.home.clone(),
             log: cfg.log,
             start_branch: start.branch.clone(),
+            pulls: if pulls.is_some() {
+                PullWatch::enabled()
+            } else {
+                PullWatch::disabled()
+            },
         },
         LoopHooks {
             // The loop passes the worktree on the screen. The loop moves to a
@@ -1778,7 +1836,7 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
                     current, &watched.path,
                     "the loop and the watch must be on the same worktree",
                 );
-                watched.walk(cfg, &start, log_limit)
+                watched.walk(cfg, &start, log_limit, pulls.as_ref())
             },
             // A resize reads the log alone when the pane outgrows the log of
             // the cache, and that log is not complete. The read starts from
@@ -1905,9 +1963,42 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
             // channel of the loop. The first walk of the new worktree fetches
             // as many commits as the loop passes, as `collect` does.
             switch: |target: &WorktreePath, log_limit: usize| {
-                switch_watched(&watched, target, switch_tx.clone(), cfg, &start, log_limit)
+                switch_watched(
+                    &watched,
+                    target,
+                    switch_tx.clone(),
+                    cfg,
+                    &start,
+                    log_limit,
+                    pulls.as_ref(),
+                )
             },
             on_start_branch: worktree_on_start_branch,
+            // One thread for each lookup, and nobody joins it. The loop never
+            // waits for the network. `run_lookup` kills a `gh` that runs past
+            // `LOOKUP_LIMIT`, so the thread ends. A quit drops the receiver of
+            // the loop, and a late answer then goes nowhere. The hook is
+            // called only when `pulls` is enabled, so the settings exist.
+            start_pull: |request: LookupRequest| {
+                let Some(program) = pulls.as_ref().map(|settings| settings.program().to_owned())
+                else {
+                    return;
+                };
+                let answer_tx = switch_tx.clone();
+                thread::spawn(move || {
+                    let outcome = run_lookup(
+                        program.as_os_str(),
+                        &request.target,
+                        request.cached.as_ref(),
+                        LOOKUP_LIMIT,
+                    );
+                    // A send error means the loop quit. The answer has no reader.
+                    let _ = answer_tx.send(Event::PullAnswered {
+                        target: request.target,
+                        outcome,
+                    });
+                });
+            },
             start_return: |child: std::process::Command| {
                 // Two senders on the one channel, as the push has. The lines
                 // are the push's own event, because the window under the frame
@@ -2729,6 +2820,10 @@ struct LoopStart {
     /// The branch where the user started gsw, when HEAD named one. The two
     /// presses of Esc go back to it. `None` leaves Esc with no return.
     start_branch: Option<StartBranch>,
+    /// What decides when a lookup of the pull requests starts and what the
+    /// indicator of the header shows. [`PullWatch::disabled`]
+    /// leaves the header as it was before the indicator.
+    pulls: PullWatch,
 }
 
 /// Everything the loop changes while it runs.
@@ -2766,6 +2861,8 @@ struct LoopState {
     log: LogDemand,
     /// The branch where the user started gsw. See [`LoopStart::start_branch`].
     start_branch: Option<StartBranch>,
+    /// The pull-request lookups. See [`LoopStart::pulls`].
+    pulls: PullWatch,
 }
 
 impl LoopState {
@@ -2935,6 +3032,7 @@ struct LoopHooks<
     Paths,
     Switch,
     OnStartBranch,
+    StartPull,
     StartReturn,
 > {
     /// Walk the worktree that the loop passes, which is the worktree the frame
@@ -3034,6 +3132,14 @@ struct LoopHooks<
     /// [`StartBranch::is_checked_out_in`], so a rebase of the start branch
     /// counts.
     on_start_branch: OnStartBranch,
+    /// Start one lookup of the pull requests of a branch, given the
+    /// [`LookupRequest`] that [`PullWatch`] made: the
+    /// target, and the cache entry to send as `If-None-Match`. Production
+    /// spawns a thread that runs the lookup and sends the answer back as
+    /// [`Event::PullAnswered`]; tests record the request and decide for
+    /// themselves when, or whether, the answer arrives. The loop never waits
+    /// for the network, because the thread answers on the channel of the loop.
+    start_pull: StartPull,
     /// Start the `git switch` of the second Esc, given the child that
     /// [`StartBranch::switch_child`] built: `git switch --no-guess` and the
     /// start branch, to run in the home worktree. Production spawns a thread
@@ -3046,6 +3152,10 @@ struct LoopHooks<
 /// The triggers one wake collected, before the render decides what to do with
 /// them. A burst can carry several at once, and they are not exclusive: a walk
 /// forced by `r` and a resize can arrive together.
+///
+/// The pull lookups need no flag of their own here. `r` is `force`, and the
+/// other causes show in the target of the cached snapshot, which the loop
+/// compares after the walk. A filesystem event starts no lookup.
 #[derive(Default)]
 struct Pending {
     /// A relevant filesystem path changed.
@@ -3102,9 +3212,9 @@ enum Flow {
 /// their work.
 #[expect(
     clippy::type_complexity,
-    reason = "the loop takes one generic for each of its eighteen hooks, so each hook stays \
+    reason = "the loop takes one generic for each of its nineteen hooks, so each hook stays \
               a plain closure that a test replaces with a fake. A type alias spells the same \
-              eighteen generics, and the borrow of the whole value keeps every call of \
+              nineteen generics, and the borrow of the whole value keeps every call of \
               absorb the same"
 )]
 fn absorb<
@@ -3125,6 +3235,7 @@ fn absorb<
     Paths,
     Switch,
     OnStartBranch,
+    StartPull,
     StartReturn,
 >(
     event: Event,
@@ -3148,6 +3259,7 @@ fn absorb<
         Paths,
         Switch,
         OnStartBranch,
+        StartPull,
         StartReturn,
     >,
 ) -> Flow
@@ -3162,6 +3274,7 @@ where
     Paths: FnMut() -> Vec<WorktreePath>,
     Switch: FnMut(&WorktreePath, usize) -> Result<Snapshot, String>,
     OnStartBranch: FnMut(&StartBranch, &WorktreePath) -> bool,
+    StartPull: FnMut(LookupRequest),
     StartReturn: FnMut(std::process::Command),
 {
     let clock = &hooks.clock;
@@ -3169,6 +3282,13 @@ where
         Event::Quit => return Flow::Quit,
         Event::FsChanged => pending.fs = true,
         Event::Resize => pending.resize = true,
+        // The answer goes into the cache of its own target, whatever the
+        // frame shows now. A lookup that waited for this one starts here.
+        Event::PullAnswered { target, outcome } => {
+            if let Some(request) = state.pulls.answered(target, outcome, clock()) {
+                (hooks.start_pull)(request);
+            }
+        }
         Event::ForceRefresh => pending.force = true,
         Event::Key(key) => {
             let keys = state.base_updates.keys(state.issue.key(), state.tab.key());
@@ -3598,6 +3718,15 @@ where
 /// - while the list of the worktrees is open, the frame is the frame of the
 ///   list (`render_list` in `hooks`), and every other frame is the status
 ///   frame (`render`);
+/// - the loop starts a pull lookup ([`LoopHooks::start_pull`]) through
+///   [`PullWatch`], and only on these triggers: the start of the loop (after
+///   the first frame is on the screen), a timed refresh, `r`, a change of the
+///   worktree or the branch on the screen, and the end of a rate-limit block
+///   that held a lookup (a wake of its own, [`PullWatch::wake_at`]). A
+///   filesystem event starts none, so a build that writes many files sends no
+///   many requests. The answer arrives as [`Event::PullAnswered`] on the same
+///   channel, so the loop never waits for the network. Each frame takes its
+///   indicator from the cache of its own target ([`show_pull_indicator`]);
 /// - [`Event::Quit`] ends the loop, as does every sender hanging up.
 ///
 /// A failed collect is absorbed rather than propagated because the failures are
@@ -3619,9 +3748,9 @@ where
 /// loop goes back to the home worktree ([`LoopState::return_home_if_gone`]).
 #[expect(
     clippy::type_complexity,
-    reason = "the loop takes one generic for each of its eighteen hooks, so each hook stays \
+    reason = "the loop takes one generic for each of its nineteen hooks, so each hook stays \
               a plain closure that a test replaces with a fake. A type alias spells the same \
-              eighteen generics, as the expectation on absorb says"
+              nineteen generics, as the expectation on absorb says"
 )]
 fn event_loop<
     Collect,
@@ -3641,6 +3770,7 @@ fn event_loop<
     Paths,
     Switch,
     OnStartBranch,
+    StartPull,
     StartReturn,
 >(
     rx: &Receiver<Event>,
@@ -3665,6 +3795,7 @@ fn event_loop<
         Paths,
         Switch,
         OnStartBranch,
+        StartPull,
         StartReturn,
     >,
 ) -> Result<()>
@@ -3686,6 +3817,7 @@ where
     Paths: FnMut() -> Vec<WorktreePath>,
     Switch: FnMut(&WorktreePath, usize) -> Result<Snapshot, String>,
     OnStartBranch: FnMut(&StartBranch, &WorktreePath) -> bool,
+    StartPull: FnMut(LookupRequest),
     StartReturn: FnMut(std::process::Command),
 {
     let LoopStart {
@@ -3697,6 +3829,7 @@ where
         home,
         log,
         start_branch,
+        pulls,
     } = start;
     let mut state = LoopState {
         cache,
@@ -3718,7 +3851,18 @@ where
         generation: Generation::default(),
         log,
         start_branch,
+        pulls,
     };
+    // The lookup of the first frame. The first frame is on the screen already,
+    // so the lookup delays nothing. The instant is the start of the walk that
+    // seeded the cache, and no clock is read for it.
+    if let Some(request) = state.pulls.refresh(
+        pull_target(&state.cache.snapshot),
+        false,
+        state.cache.collected_at,
+    ) {
+        (hooks.start_pull)(request);
+    }
     loop {
         // Wait for the first event, or — when the decay timer is enabled — wake
         // after `interval` of quiet for a tick.
@@ -3735,9 +3879,16 @@ where
             .schedule
             .next_walk_at()
             .map(|at| at.saturating_duration_since((hooks.clock)()));
+        // A lookup that waited for the end of a rate-limit block is the other
+        // source of a wake. The clock is read only when such a lookup waits.
+        let pull_wait = state
+            .pulls
+            .wake_at()
+            .map(|at| at.saturating_duration_since((hooks.clock)()));
         let wait = wait_window(&[
             (hooks.next_tick)(freshest),
             walk_wait,
+            pull_wait,
             state.schedule.interval.map(|_| CLOCK_CADENCE),
             state.ui.next_tick(&hooks.clock),
         ]);
@@ -3839,6 +3990,12 @@ where
         } else {
             false
         };
+
+        // Does this walk follow a timed refresh? It is asked before the walk
+        // records itself, because the record moves the timed deadline on. A walk
+        // that a filesystem event caused is not a timed refresh, so it asks
+        // GitHub again only when the target changed.
+        let timed_refresh = walk_now && state.schedule.timed_due(now);
 
         // Re-measure the pane before rendering, on the same two triggers as
         // before: a walk and a resize. Hoisted out of the branches so the frame
@@ -3946,6 +4103,19 @@ where
             }
         }
 
+        // One call decides every lookup of this wake. The target of the cached
+        // snapshot is the target on the screen, so the call sees a switch that
+        // `absorb` made, a branch that the walk found, a timed refresh, `r`, and
+        // the end of a rate-limit block. It starts none for a filesystem event
+        // that left the target as it was.
+        if let Some(request) = state.pulls.refresh(
+            pull_target(&state.cache.snapshot),
+            saw_force || timed_refresh,
+            now,
+        ) {
+            (hooks.start_pull)(request);
+        }
+
         // The open list takes the rows under the head of the frame. A pane
         // that leaves it no row closes it, so Enter never chooses a row that
         // the user did not see. The check comes after the walk, because the
@@ -4005,6 +4175,7 @@ where
             &state.schedule,
             now,
         );
+        show_pull_indicator(&mut state.cache.snapshot, &state.pulls, now);
         // The open list of the worktrees takes the pane, so its frame replaces
         // the status frame for as long as it is open.
         let render = match state.ui.list() {
@@ -4030,6 +4201,30 @@ where
         }
     }
     Ok(())
+}
+
+/// The pull target that the snapshot asks about, or `None` when the indicator
+/// does not apply to it.
+fn pull_target(snapshot: &Snapshot) -> Option<&crate::pull::PullTarget> {
+    snapshot.pull.as_ref().map(|header| &header.target)
+}
+
+/// Put into the header of `snapshot` what `pulls` shows for its target at `now`.
+///
+/// The walk gives a header with an unknown indicator, and the cache of the
+/// answers is the truth. So each frame takes its indicator from the cache of
+/// its own target, and an answer for another worktree never reaches it. When
+/// the watch shows nothing any more, as after a `gh` that went missing, the
+/// header goes away and the frame is the frame of a watch with no indicator.
+/// The loop calls this once for each frame, just before the render.
+fn show_pull_indicator(snapshot: &mut Snapshot, pulls: &PullWatch, now: Instant) {
+    let Some(header) = snapshot.pull.as_mut() else {
+        return;
+    };
+    match pulls.indicator(&header.target, now) {
+        Some(indicator) => header.indicator = indicator,
+        None => snapshot.pull = None,
+    }
 }
 
 /// Join a frame and the push overlay into the one string that gets painted.
@@ -4260,63 +4455,6 @@ fn spawn_event_reader(tx: Sender<Event>) {
             }
         }
     });
-}
-
-/// A panic hook, matching what [`std::panic::take_hook`] returns. Held in an
-/// [`Arc`] so the installed wrapper and [`TerminalGuard::drop`] can both reach
-/// the same pre-watch hook — the wrapper to chain to it, `Drop` to reinstate it.
-type PanicHook = Arc<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send>;
-
-/// RAII guard for the alternate screen, hidden cursor, and raw mode. Restores
-/// the main screen and cursor on drop *and* via a panic hook, so no exit path
-/// — normal return, propagated error, or panic — can leave the terminal in a
-/// wedged state. The panic hook restores *before* the default handler prints,
-/// so the panic message lands on the main screen rather than the torn-down
-/// alternate one. On drop the pre-watch panic hook is reinstated, so our
-/// terminal-restoring wrapper never lingers as global process state once the
-/// guard is gone.
-struct TerminalGuard {
-    /// The panic hook in effect before [`TerminalGuard::enter`] wrapped it,
-    /// reinstated on drop. `Option` only so `Drop` can move it back out.
-    previous_hook: Option<PanicHook>,
-}
-
-impl TerminalGuard {
-    fn enter() -> Result<Self> {
-        enable_raw_mode()?;
-        execute!(io::stdout(), EnterAlternateScreen, Hide)?;
-
-        let previous: PanicHook = Arc::from(std::panic::take_hook());
-        let chained = Arc::clone(&previous);
-        std::panic::set_hook(Box::new(move |info| {
-            restore_terminal();
-            (*chained)(info);
-        }));
-
-        Ok(TerminalGuard {
-            previous_hook: Some(previous),
-        })
-    }
-}
-
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
-        restore_terminal();
-        // Reinstate the pre-watch panic hook so our terminal-restoring wrapper
-        // doesn't outlive the guard as global process state.
-        if let Some(previous) = self.previous_hook.take() {
-            std::panic::set_hook(Box::new(move |info| (*previous)(info)));
-        }
-    }
-}
-
-/// Best-effort restore of the terminal to its pre-watch state. Idempotent and
-/// failure-tolerant: both the panic hook and `Drop` may call it (a panic runs
-/// the hook, then unwinding runs `Drop`), and a partially-entered terminal
-/// must still be cleaned up, so every step is independently ignored on error.
-fn restore_terminal() {
-    let _ = disable_raw_mode();
-    let _ = execute!(io::stdout(), Show, LeaveAlternateScreen);
 }
 
 #[cfg(test)]
@@ -4997,6 +5135,30 @@ mod tests {
             Some(t0 + Duration::from_secs(15)),
             "an owed walk at 15 s beats the timed walk at 60 s",
         );
+    }
+
+    #[test]
+    fn the_timed_walk_is_due_from_its_instant_and_a_deferred_change_does_not_make_it_due() {
+        let t0 = Instant::now();
+        let mut schedule = WalkSchedule::new(Some(TEST_INTERVAL), t0, Duration::ZERO);
+        let due = t0 + TEST_INTERVAL;
+        assert!(!schedule.timed_due(due - Duration::from_millis(1)));
+        assert!(schedule.timed_due(due), "the instant itself is due");
+        assert!(schedule.timed_due(due + Duration::from_secs(1)));
+        // A walk moves the timed walk on a whole interval.
+        schedule.record(due, CHEAP);
+        assert!(!schedule.timed_due(due + Duration::from_secs(1)));
+        // A deferred change owes a walk at the end of its cooldown. That walk
+        // is not the timed one.
+        assert_eq!(
+            schedule.on_change(due + Duration::from_secs(1)),
+            Walk::Defer
+        );
+        assert!(!schedule.timed_due(due + CHEAP));
+        // No interval, no timed walk, at any instant.
+        let mut unscheduled = WalkSchedule::unscheduled();
+        unscheduled.record(t0, CHEAP);
+        assert!(!unscheduled.timed_due(t0 + Duration::from_secs(3600)));
     }
 
     #[test]
@@ -6275,6 +6437,10 @@ mod tests {
     /// with no worktree on the start branch. It starts nothing.
     pub(super) fn no_return(_child: std::process::Command) {}
 
+    /// A `start_pull` hook for the loop tests that run with a disabled
+    /// [`PullWatch`], so the loop never asks for a lookup. It starts nothing.
+    pub(super) fn no_pull(_request: LookupRequest) {}
+
     /// A `start_tab` hook for a test that presses no `T`.
     pub(super) fn no_tab(
         _command: crate::shell::ShellCommand,
@@ -6333,6 +6499,7 @@ mod tests {
             push_remote: None,
             worktree: None,
             off_start_branch: false,
+            pull: None,
         }
     }
 
@@ -6397,6 +6564,7 @@ mod tests {
                 home: loop_home(),
                 log: LogDemand::Off,
                 start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -6428,6 +6596,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_pull: no_pull,
                 start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
@@ -6468,6 +6637,7 @@ mod tests {
                 home: loop_home(),
                 log: LogDemand::Off,
                 start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| Ok(empty_snapshot()),
@@ -6492,6 +6662,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_pull: no_pull,
                 start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
@@ -6532,6 +6703,7 @@ mod tests {
                 home: loop_home(),
                 log: LogDemand::Off,
                 start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -6559,6 +6731,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_pull: no_pull,
                 start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
@@ -6602,6 +6775,7 @@ mod tests {
                 home: loop_home(),
                 log: LogDemand::Off,
                 start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -6628,6 +6802,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_pull: no_pull,
                 start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
@@ -6665,6 +6840,7 @@ mod tests {
                 home: loop_home(),
                 log: LogDemand::Off,
                 start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -6693,6 +6869,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_pull: no_pull,
                 start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
@@ -6729,6 +6906,7 @@ mod tests {
                 home: loop_home(),
                 log: LogDemand::Off,
                 start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -6755,6 +6933,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_pull: no_pull,
                 start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
@@ -6789,6 +6968,7 @@ mod tests {
                 home: loop_home(),
                 log: LogDemand::Off,
                 start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| Ok(empty_snapshot()),
@@ -6819,6 +6999,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_pull: no_pull,
                 start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
@@ -6856,6 +7037,7 @@ mod tests {
                 home: loop_home(),
                 log: LogDemand::Off,
                 start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| Ok(empty_snapshot()),
@@ -6883,6 +7065,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_pull: no_pull,
                 start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
@@ -6920,6 +7103,7 @@ mod tests {
                 home: loop_home(),
                 log: LogDemand::Off,
                 start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -6948,6 +7132,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_pull: no_pull,
                 start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
@@ -6993,6 +7178,7 @@ mod tests {
                 home: loop_home(),
                 log: LogDemand::Off,
                 start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -7019,6 +7205,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_pull: no_pull,
                 start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
@@ -7304,6 +7491,7 @@ mod tests {
                     home: loop_home(),
                     log: cfg.log,
                     start_branch: None,
+                    pulls: PullWatch::disabled(),
                 },
                 LoopHooks {
                     collect: |_current: &WorktreePath, limit: usize| {
@@ -7348,6 +7536,7 @@ mod tests {
                     worktree_paths: Vec::new,
                     switch: no_switch,
                     on_start_branch: no_start_branch,
+                    start_pull: no_pull,
                     start_return: no_return,
                     render_list: no_list,
                 },
@@ -7874,6 +8063,7 @@ mod tests {
                 home: loop_home(),
                 log: LogDemand::Fill,
                 start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, limit: usize| {
@@ -7898,6 +8088,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_pull: no_pull,
                 start_return: no_return,
                 render_list: no_list,
             },
@@ -7947,6 +8138,7 @@ mod tests {
                 home: loop_home(),
                 log: LogDemand::Fill,
                 start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| Ok(empty_snapshot()),
@@ -7975,6 +8167,7 @@ mod tests {
                     Ok(empty_snapshot())
                 },
                 on_start_branch: no_start_branch,
+                start_pull: no_pull,
                 start_return: no_return,
                 render_list: no_list,
             },
@@ -8020,6 +8213,7 @@ mod tests {
                 home: loop_home(),
                 log: LogDemand::Off,
                 start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| Ok(empty_snapshot()),
@@ -8052,6 +8246,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_pull: no_pull,
                 start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
@@ -8116,6 +8311,7 @@ mod tests {
                 home: loop_home(),
                 log: LogDemand::Off,
                 start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -8153,6 +8349,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_pull: no_pull,
                 start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
@@ -8211,6 +8408,7 @@ mod tests {
                 home: loop_home(),
                 log: LogDemand::Off,
                 start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -8258,6 +8456,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_pull: no_pull,
                 start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
@@ -8303,6 +8502,7 @@ mod tests {
                 home: loop_home(),
                 log: LogDemand::Off,
                 start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -8344,6 +8544,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_pull: no_pull,
                 start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
@@ -8396,6 +8597,7 @@ mod tests {
                 home: loop_home(),
                 log: LogDemand::Off,
                 start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -8437,6 +8639,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_pull: no_pull,
                 start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
@@ -8489,6 +8692,7 @@ mod tests {
                 home: loop_home(),
                 log: LogDemand::Off,
                 start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -8529,6 +8733,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_pull: no_pull,
                 start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
@@ -8571,6 +8776,7 @@ mod tests {
                 home: loop_home(),
                 log: LogDemand::Off,
                 start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -8601,6 +8807,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_pull: no_pull,
                 start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
@@ -8656,6 +8863,7 @@ mod tests {
                 home: loop_home(),
                 log: LogDemand::Off,
                 start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -8686,6 +8894,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_pull: no_pull,
                 start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
@@ -8758,6 +8967,7 @@ mod tests {
                 home: loop_home(),
                 log: LogDemand::Off,
                 start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -8795,6 +9005,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_pull: no_pull,
                 start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
@@ -8870,6 +9081,7 @@ mod tests {
                 home: loop_home(),
                 log: LogDemand::Off,
                 start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -8928,6 +9140,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_pull: no_pull,
                 start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
@@ -9086,8 +9299,8 @@ mod tests {
 #[cfg(test)]
 mod push_loop_tests {
     use super::tests::{
-        frame, loop_home, no_fetch, no_list, no_return, no_start_branch, no_switch, no_tab,
-        stepping_clock, timer_off, TEST_DEBOUNCE, TEST_DIMS,
+        frame, loop_home, no_fetch, no_list, no_pull, no_return, no_start_branch, no_switch,
+        no_tab, stepping_clock, timer_off, TEST_DEBOUNCE, TEST_DIMS,
     };
     use super::*;
     use crate::conflicts::ConflictsOutcome;
@@ -9117,6 +9330,7 @@ mod push_loop_tests {
             push_remote: Some("origin".into()),
             worktree: None,
             off_start_branch: false,
+            pull: None,
         }
     }
 
@@ -9208,6 +9422,9 @@ mod push_loop_tests {
         /// The program, the arguments, and the current directory of each
         /// child the `start_return` hook was given, in order.
         returns: Vec<(String, Vec<String>, Option<std::path::PathBuf>)>,
+        /// Every lookup of the pull requests that the loop started, in
+        /// order.
+        pull_lookups: Vec<LookupRequest>,
     }
 
     /// Run the loop over a pre-loaded event queue and report what it did.
@@ -9313,6 +9530,7 @@ mod push_loop_tests {
                 schedule: no_timed_refresh_for_push(),
                 world: World::alone(),
                 start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             clock,
         )
@@ -9377,6 +9595,9 @@ mod push_loop_tests {
         /// not press Esc twice: no worktree is then ever off the start
         /// branch, and Esc has no return.
         start_branch: Option<StartBranch>,
+        /// The pull-request lookups the loop starts from. A disabled watch
+        /// for every test that does not look at the indicator.
+        pulls: PullWatch,
     }
 
     /// The name of the one worktree of [`World::alone`]. Its snapshot is
@@ -9410,6 +9631,30 @@ mod push_loop_tests {
         Snapshot {
             branch: name.to_string(),
             ..pushable_snapshot()
+        }
+    }
+
+    /// The pull target of the branch `branch`: the repository that every
+    /// worktree of the fake world shares, and the branch as the head.
+    fn pull_target_named(branch: &str) -> crate::pull::PullTarget {
+        crate::pull::PullTarget::new(
+            ghrest::GithubRepo::from_remote_url("git@github.com:owner/name.git", None)
+                .expect("a GitHub remote"),
+            branch,
+        )
+    }
+
+    /// The pull target of the worktree at `path`: the head is the branch that
+    /// [`snapshot_of`] gives it, which is the name of the worktree.
+    fn pull_target_of(path: &WorktreePath) -> crate::pull::PullTarget {
+        pull_target_named(&snapshot_of(path).branch)
+    }
+
+    /// The header of the pull request for `branch`, before any answer.
+    fn pull_header_of(branch: &str) -> crate::pull::PullHeader {
+        crate::pull::PullHeader {
+            target: pull_target_named(branch),
+            indicator: crate::pull::PullIndicator::Unknown,
         }
     }
 
@@ -9469,6 +9714,14 @@ mod push_loop_tests {
         /// pane since the last walk. Every later walk tells the truth. The
         /// probe tells the truth too.
         reddened: Vec<WorktreePath>,
+        /// Whether each snapshot carries a pull target, as the walk of a
+        /// worktree on a GitHub remote gives. See [`pull_target_of`].
+        pull_targets: bool,
+        /// The worktrees whose branch another pane switched, with the new
+        /// branch. Each walk of such a worktree finds the new branch. The
+        /// first frame and a switch to the worktree show the old branch,
+        /// because they come before that walk.
+        branch_switched: Vec<(WorktreePath, String)>,
     }
 
     impl World {
@@ -9502,6 +9755,8 @@ mod push_loop_tests {
                 behind: 0,
                 on_start_branch: Vec::new(),
                 reddened: Vec::new(),
+                pull_targets: false,
+                branch_switched: Vec::new(),
             }
         }
 
@@ -9577,6 +9832,21 @@ mod push_loop_tests {
             self.reddened.push(worktree(name));
             self
         }
+
+        /// This world, where each snapshot carries a pull target. See
+        /// [`World::pull_targets`].
+        fn with_pull_targets(mut self) -> Self {
+            self.pull_targets = true;
+            self
+        }
+
+        /// This world, where another pane switched the worktree `name` to the
+        /// branch `branch`. See [`World::branch_switched`].
+        fn switching_branch(mut self, name: &str, branch: &str) -> Self {
+            self.branch_switched
+                .push((worktree(name), branch.to_string()));
+            self
+        }
     }
 
     /// The shared body of every helper above: pre-load the queue, run the loop
@@ -9615,6 +9885,7 @@ mod push_loop_tests {
             schedule,
             world,
             start_branch,
+            pulls,
         } = setup;
         let (tx, rx) = mpsc::channel();
         let mut bursts = VecDeque::from(bursts);
@@ -9649,10 +9920,22 @@ mod push_loop_tests {
         let behind = world.behind;
         let has_start_branch = start_branch.is_some();
         let on_start_branch = world.on_start_branch.clone();
+        let pull_targets = world.pull_targets;
         let snapshot_here = move |path: &WorktreePath| Snapshot {
             commits_behind: behind,
             off_start_branch: has_start_branch && !on_start_branch.contains(path),
+            pull: pull_targets.then(|| pull_header_of(&snapshot_of(path).branch)),
             ..snapshot_of(path)
+        };
+        // What a walk finds: the snapshot of the worktree, on the branch that
+        // another pane switched it to, when a test says so.
+        let snapshot_walked = |path: &WorktreePath| {
+            let mut snapshot = snapshot_here(path);
+            if let Some((_, branch)) = world.branch_switched.iter().find(|(p, _)| p == path) {
+                snapshot.branch.clone_from(branch);
+                snapshot.pull = pull_targets.then(|| pull_header_of(branch));
+            }
+            snapshot
         };
 
         event_loop(
@@ -9677,6 +9960,7 @@ mod push_loop_tests {
                 home: world.home.clone(),
                 log: LogDemand::Off,
                 start_branch,
+                pulls,
             },
             LoopHooks {
                 collect: |current: &WorktreePath, _limit: usize| {
@@ -9686,7 +9970,7 @@ mod push_loop_tests {
                     if removed.borrow().contains(current) || world.unreadable.contains(current) {
                         anyhow::bail!("{UNWALKABLE}: {}", current.as_path().display());
                     }
-                    Ok(snapshot_here(current))
+                    Ok(snapshot_walked(current))
                 },
                 fetch_log: no_fetch,
                 render: |snap: &Snapshot, frame_dims: Dimensions, timing: FrameTiming| {
@@ -9777,6 +10061,9 @@ mod push_loop_tests {
                 on_start_branch: |_branch: &StartBranch, path: &WorktreePath| {
                     seen.borrow_mut().start_branch_probes.push(path.clone());
                     world.on_start_branch.contains(path)
+                },
+                start_pull: |request: LookupRequest| {
+                    seen.borrow_mut().pull_lookups.push(request);
                 },
                 start_return: |child: std::process::Command| {
                     seen.borrow_mut().returns.push((
@@ -10963,6 +11250,7 @@ mod push_loop_tests {
                 home: loop_home(),
                 log: LogDemand::Off,
                 start_branch: None,
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| Ok(pushable_snapshot()),
@@ -10998,6 +11286,7 @@ mod push_loop_tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_pull: no_pull,
                 start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
@@ -11856,6 +12145,7 @@ mod push_loop_tests {
                     home: loop_home(),
                     log: LogDemand::Off,
                     start_branch: None,
+                    pulls: PullWatch::disabled(),
                 },
                 LoopHooks {
                     collect: |_current: &WorktreePath, _limit: usize| Ok(pushable_snapshot()),
@@ -11886,6 +12176,7 @@ mod push_loop_tests {
                     worktree_paths: Vec::new,
                     switch: no_switch,
                     on_start_branch: no_start_branch,
+                    start_pull: no_pull,
                     start_return: no_return,
                     fetch_log: no_fetch,
                     render_list: no_list,
@@ -11920,6 +12211,7 @@ mod push_loop_tests {
             schedule: no_timed_refresh_for_push(),
             world,
             start_branch: None,
+            pulls: PullWatch::disabled(),
         }
     }
 
@@ -12460,6 +12752,7 @@ mod push_loop_tests {
             generation: Generation::default(),
             log: LogDemand::Off,
             start_branch: None,
+            pulls: PullWatch::disabled(),
         };
         assert!(
             state.issue.armed.is_armed(now),
@@ -12509,6 +12802,7 @@ mod push_loop_tests {
             generation: Generation::default(),
             log: LogDemand::Off,
             start_branch: Some(StartBranch::fake(TOPIC)),
+            pulls: PullWatch::disabled(),
         };
         assert!(state.ui.shows_hint(now), "the fixture must start armed");
 
@@ -14264,6 +14558,361 @@ mod push_loop_tests {
             "the next measurement must report, got {displayed:?}",
         );
     }
+
+    // ---- The pull-request lookups ----
+
+    /// The frame text of the pull-request tests: the branch of the snapshot,
+    /// then the text of its indicator, or `-` when the snapshot has none. A
+    /// frame then says which worktree it shows and what its header says.
+    fn pull_frame(snapshot: &Snapshot, _frame_dims: Dimensions) -> String {
+        format!(
+            "{} {}",
+            snapshot.branch,
+            snapshot
+                .pull
+                .as_ref()
+                .map_or("-".to_string(), |header| header.indicator.text()),
+        )
+    }
+
+    /// The setup of the pull-request tests: `world` with a pull target on each
+    /// snapshot, an enabled watch, and [`pull_frame`].
+    fn pull_setup(world: World) -> Setup {
+        Setup {
+            pulls: PullWatch::enabled(),
+            render: Box::new(pull_frame),
+            ..in_world(world.with_pull_targets())
+        }
+    }
+
+    /// The answer of a lookup of the worktree `name`, as the loop receives it.
+    fn pull_answer(name: &str, outcome: crate::pull::LookupOutcome) -> Event {
+        Event::PullAnswered {
+            target: pull_target_of(&worktree(name)),
+            outcome,
+        }
+    }
+
+    /// An answer that says the worktree `name` has the open pull request 690.
+    fn open_pull_answer(name: &str) -> Event {
+        pull_answer(
+            name,
+            crate::pull::LookupOutcome::Answered {
+                numbers: vec![ghrest::PullNumber::new(690)],
+                entry: None,
+            },
+        )
+    }
+
+    /// An answer that says the worktree `name` has no open pull request.
+    fn empty_pull_answer(name: &str) -> Event {
+        pull_answer(
+            name,
+            crate::pull::LookupOutcome::Answered {
+                numbers: Vec::new(),
+                entry: None,
+            },
+        )
+    }
+
+    /// The targets of the lookups that the loop started, in order.
+    fn lookup_targets(seen: &Seen) -> Vec<crate::pull::PullTarget> {
+        seen.pull_lookups
+            .iter()
+            .map(|request| request.target.clone())
+            .collect()
+    }
+
+    /// Run the loop over `bursts` in `setup` on a frozen clock. Gives what
+    /// the hooks saw.
+    fn pull_run(setup: Setup, bursts: Vec<Vec<Event>>) -> Seen {
+        let base = Instant::now();
+        drive_bursts(bursts, setup, move || base).1
+    }
+
+    #[test]
+    fn the_first_lookup_starts_before_any_event_and_the_first_frame_says_unknown() {
+        // The first lookup starts when the loop starts, which is after the
+        // first frame is on the screen. A run that quits at once still
+        // started it, with no cache entry to send.
+        let seen = pull_run(pull_setup(World::alone()), vec![vec![Event::Quit]]);
+        assert_eq!(
+            seen.pull_lookups,
+            vec![LookupRequest {
+                target: pull_target_of(&worktree(ALONE)),
+                cached: None,
+            }],
+            "the loop must start one lookup for the home target",
+        );
+        let (paints, _seen) = paints_of(
+            pull_setup(World::alone()),
+            vec![vec![Event::Resize], vec![Event::Quit]],
+        );
+        assert_eq!(
+            paints,
+            vec![format!("{ALONE} PR ?")],
+            "the header says unknown until the answer comes",
+        );
+    }
+
+    #[test]
+    fn a_filesystem_event_starts_no_lookup() {
+        // A build that writes many files must not send many requests. The
+        // event walks git, and the walk finds the same target.
+        let seen = pull_run(
+            pull_setup(World::alone()),
+            vec![
+                vec![empty_pull_answer(ALONE)],
+                vec![Event::FsChanged],
+                vec![Event::Quit],
+            ],
+        );
+        assert_eq!(seen.collects, 1, "the filesystem event must walk");
+        assert_eq!(seen.pull_lookups.len(), 1, "and it must start no lookup");
+    }
+
+    #[test]
+    fn r_starts_a_lookup() {
+        let seen = pull_run(
+            pull_setup(World::alone()),
+            vec![
+                vec![empty_pull_answer(ALONE)],
+                vec![Event::ForceRefresh],
+                vec![Event::Quit],
+            ],
+        );
+        assert_eq!(seen.collects, 1, "r must walk");
+        assert_eq!(seen.pull_lookups.len(), 2, "r must start one lookup");
+    }
+
+    #[test]
+    fn a_timed_refresh_starts_a_lookup() {
+        // The clock steps a second on each read, so the loop crosses the
+        // deadline of the timed refresh, which is 200 ms after the seed
+        // walk. The wake has no event behind it.
+        let base = Instant::now();
+        let setup = Setup {
+            schedule: WalkSchedule::new(Some(Duration::from_millis(200)), base, Duration::ZERO),
+            ..pull_setup(World::alone())
+        };
+        let (_screen, seen) = drive_bursts(
+            vec![vec![empty_pull_answer(ALONE)], vec![], vec![Event::Quit]],
+            setup,
+            stepping_clock(base, Duration::from_secs(1)),
+        );
+        assert!(seen.collects >= 1, "the timed refresh must walk");
+        assert_eq!(
+            seen.pull_lookups.len(),
+            2,
+            "the timed refresh must start one lookup",
+        );
+    }
+
+    #[test]
+    fn with_no_interval_a_late_clock_starts_no_timed_lookup() {
+        // `--refresh-interval 0` leaves no timed refresh. The clock stands
+        // far past any deadline, and a walk that a filesystem event causes
+        // finds nothing to look up again.
+        let base = Instant::now();
+        let setup = Setup {
+            schedule: WalkSchedule::new(None, base, Duration::ZERO),
+            ..pull_setup(World::alone())
+        };
+        let (_screen, seen) = drive_bursts(
+            vec![
+                vec![empty_pull_answer(ALONE)],
+                vec![Event::FsChanged],
+                vec![Event::Quit],
+            ],
+            setup,
+            stepping_clock(base, Duration::from_secs(3600)),
+        );
+        assert!(seen.collects >= 1, "the event must walk");
+        assert_eq!(seen.pull_lookups.len(), 1, "no interval, no timed lookup");
+    }
+
+    #[test]
+    fn a_move_to_another_worktree_starts_a_lookup_for_it() {
+        let seen = pull_run(
+            pull_setup(World::three()),
+            vec![
+                vec![empty_pull_answer(BRAVO)],
+                vec![key(KeyCode::Right)],
+                vec![Event::Quit],
+            ],
+        );
+        assert_eq!(
+            lookup_targets(&seen),
+            vec![
+                pull_target_of(&worktree(BRAVO)),
+                pull_target_of(&worktree(CHARLIE)),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_branch_that_a_walk_finds_starts_a_lookup_for_the_new_branch() {
+        // `git switch` in another pane moves the branch of the worktree. The
+        // walk that the filesystem event causes finds it, and the target of
+        // the header changes.
+        let world = World::alone().switching_branch(ALONE, "other-topic");
+        let (paints, seen) = paints_of(
+            pull_setup(world),
+            vec![
+                vec![empty_pull_answer(ALONE)],
+                vec![Event::FsChanged],
+                vec![Event::Quit],
+            ],
+        );
+        assert_eq!(
+            lookup_targets(&seen),
+            vec![
+                pull_target_of(&worktree(ALONE)),
+                pull_target_named("other-topic"),
+            ],
+        );
+        assert_eq!(
+            paints.last().map(String::as_str),
+            Some("other-topic PR ?"),
+            "the new branch has no answer yet",
+        );
+    }
+
+    #[test]
+    fn two_triggers_while_a_lookup_is_in_flight_start_one_more_lookup() {
+        let seen = pull_run(
+            pull_setup(World::alone()),
+            vec![
+                vec![Event::ForceRefresh, Event::ForceRefresh],
+                vec![Event::ForceRefresh],
+                vec![empty_pull_answer(ALONE)],
+                vec![Event::Quit],
+            ],
+        );
+        assert_eq!(
+            seen.pull_lookups.len(),
+            2,
+            "the first lookup, and one for all the triggers that waited",
+        );
+    }
+
+    #[test]
+    fn an_answer_after_a_move_never_paints_the_header_of_the_new_worktree() {
+        // The lookup of bravo is in flight when the user moves to charlie.
+        // Its answer fills the cache of bravo. The header of charlie says
+        // unknown, and the move back to bravo shows the answer at once.
+        let (paints, seen) = paints_of(
+            pull_setup(World::three()),
+            vec![
+                vec![key(KeyCode::Right)],
+                vec![open_pull_answer(BRAVO)],
+                vec![key(KeyCode::Left)],
+                vec![Event::Quit],
+            ],
+        );
+        assert_eq!(
+            paints,
+            vec![
+                format!("{CHARLIE} PR ?"),
+                // The answer changes nothing on the screen, so burst 2
+                // paints nothing.
+                format!("{BRAVO} PR #690"),
+            ],
+        );
+        assert_eq!(
+            lookup_targets(&seen),
+            vec![
+                pull_target_of(&worktree(BRAVO)),
+                pull_target_of(&worktree(CHARLIE)),
+            ],
+            "the answer of bravo releases the lookup that waited for charlie",
+        );
+    }
+
+    #[test]
+    fn a_rate_limit_holds_the_lookups_and_the_header_says_unknown() {
+        let seen_paints = paints_of(
+            pull_setup(World::alone()),
+            vec![
+                vec![pull_answer(
+                    ALONE,
+                    crate::pull::LookupOutcome::RateLimited(Duration::from_secs(60)),
+                )],
+                vec![Event::ForceRefresh],
+                vec![Event::Quit],
+            ],
+        );
+        let (paints, seen) = seen_paints;
+        assert_eq!(
+            seen.pull_lookups.len(),
+            1,
+            "the block holds the lookup of r"
+        );
+        assert_eq!(paints, vec![format!("{ALONE} PR ?")]);
+    }
+
+    #[test]
+    fn the_pending_lookup_goes_out_by_itself_at_the_end_of_a_rate_limit() {
+        // The block lasts 200 ms of the real clock. The lookup that `r`
+        // left pending goes out when the loop wakes at the end of the block,
+        // with no event behind the wake. The empty burst keeps the loop
+        // waiting for that wake.
+        //
+        // A loop that never wakes by itself waits on its channel for ever, so
+        // the loop runs on a thread of its own and the test waits for it
+        // with a bound. A missing wake then fails this test instead of
+        // hanging the suite. The thread of such a failure stays blocked
+        // until the test process ends.
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let (_screen, seen) = drive_bursts(
+                vec![
+                    vec![pull_answer(
+                        ALONE,
+                        crate::pull::LookupOutcome::RateLimited(Duration::from_millis(200)),
+                    )],
+                    vec![Event::ForceRefresh],
+                    vec![],
+                    vec![Event::Quit],
+                ],
+                pull_setup(World::alone()),
+                Instant::now,
+            );
+            let _ = done_tx.send(seen.pull_lookups.len());
+        });
+        let lookups = done_rx
+            .recv_timeout(RESCUE_AFTER)
+            .expect("the loop must wake by itself at the end of the block and quit");
+        assert_eq!(lookups, 2);
+    }
+
+    #[test]
+    fn a_missing_gh_turns_the_indicator_off_and_starts_no_more_lookups() {
+        let (paints, seen) = paints_of(
+            pull_setup(World::alone()),
+            vec![
+                vec![pull_answer(ALONE, crate::pull::LookupOutcome::NotInstalled)],
+                vec![Event::ForceRefresh],
+                vec![Event::Quit],
+            ],
+        );
+        assert_eq!(paints, vec![format!("{ALONE} -")], "no indicator any more");
+        assert_eq!(seen.pull_lookups.len(), 1, "r starts no lookup");
+    }
+
+    #[test]
+    fn a_disabled_watch_starts_no_lookup_and_draws_no_indicator() {
+        let setup = Setup {
+            pulls: PullWatch::disabled(),
+            ..pull_setup(World::alone())
+        };
+        let (paints, seen) = paints_of(setup, vec![vec![Event::ForceRefresh], vec![Event::Quit]]);
+        assert!(
+            seen.pull_lookups.is_empty(),
+            "a disabled watch looks up nothing"
+        );
+        assert_eq!(paints, vec![format!("{ALONE} -")]);
+    }
 }
 
 /// The tests of [`Watched`] and of the production switch, against real
@@ -14284,13 +14933,13 @@ mod watched_tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use super::tests::{
-        frame, no_fetch, no_list, no_tab, timer_off, walk_config, TEST_DEBOUNCE, TEST_DIMS,
-        WALK_LOG_LIMIT,
+        frame, no_fetch, no_list, no_pull, no_tab, timer_off, walk_config, TEST_DEBOUNCE,
+        TEST_DIMS, WALK_LOG_LIMIT,
     };
     use super::{
         event_loop, listed, listed_paths, switch_watched, worktree_on_start_branch, Dimensions,
-        Event, FrameTiming, Generation, LogDemand, LoopHooks, LoopStart, PushCommand, PushUi,
-        SnapshotCache, StartBranch, StartPoint, WalkSchedule, Watched, DIRECTORY_GONE,
+        Event, FrameTiming, Generation, LogDemand, LoopHooks, LoopStart, PullWatch, PushCommand,
+        PushUi, SnapshotCache, StartBranch, StartPoint, WalkSchedule, Watched, DIRECTORY_GONE,
         NOT_A_WORK_TREE,
     };
     use crate::render::{Operation, Snapshot};
@@ -14425,7 +15074,7 @@ mod watched_tests {
         for (name, badge) in expected {
             let mut watched = seeded(&dir.path().join(name), tx.clone());
             let snapshot = watched
-                .walk(&walk_config(), &home, WALK_LOG_LIMIT)
+                .walk(&walk_config(), &home, WALK_LOG_LIMIT, None)
                 .expect("walk the fixture");
             assert_eq!(
                 snapshot.worktree,
@@ -14445,7 +15094,7 @@ mod watched_tests {
 
         let mut watched = seeded(dir.path(), tx);
         let snapshot = watched
-            .walk(&walk_config(), &home, WALK_LOG_LIMIT)
+            .walk(&walk_config(), &home, WALK_LOG_LIMIT, None)
             .expect("walk the fixture");
 
         assert_eq!(snapshot.worktree, None);
@@ -14454,7 +15103,7 @@ mod watched_tests {
     /// Walk `watched` once, with the config and the log limit of the tests.
     fn walked_off_start(watched: &mut Watched, start: &StartPoint) -> bool {
         watched
-            .walk(&walk_config(), start, WALK_LOG_LIMIT)
+            .walk(&walk_config(), start, WALK_LOG_LIMIT, None)
             .expect("walk the fixture")
             .off_start_branch
     }
@@ -14503,6 +15152,7 @@ mod watched_tests {
                 &cfg,
                 &start,
                 WALK_LOG_LIMIT,
+                None,
             )
             .unwrap_or_else(|reason| panic!("the switch to {name} must work: {reason}"));
             assert_eq!(
@@ -14562,7 +15212,7 @@ mod watched_tests {
 
         git_allowing_failure(p, &["rebase", "main"]);
         let snapshot = watched
-            .walk(&walk_config(), &start, WALK_LOG_LIMIT)
+            .walk(&walk_config(), &start, WALK_LOG_LIMIT, None)
             .expect("walk the fixture");
 
         assert!(
@@ -14590,7 +15240,7 @@ mod watched_tests {
         git(p, &["checkout", "-q", "feature"]);
         git_allowing_failure(p, &["rebase", "main"]);
         let snapshot = watched
-            .walk(&walk_config(), &start, WALK_LOG_LIMIT)
+            .walk(&walk_config(), &start, WALK_LOG_LIMIT, None)
             .expect("walk the fixture");
 
         assert!(
@@ -14615,7 +15265,7 @@ mod watched_tests {
         let start = start_at(p);
 
         let snapshot = watched
-            .walk(&walk_config(), &start, WALK_LOG_LIMIT)
+            .walk(&walk_config(), &start, WALK_LOG_LIMIT, None)
             .expect("walk the fixture");
         assert!(
             matches!(snapshot.operation, Some(Operation::Rebase { .. })),
@@ -14651,7 +15301,7 @@ mod watched_tests {
         let start = start_at(p);
 
         let snapshot = watched
-            .walk(&walk_config(), &start, WALK_LOG_LIMIT)
+            .walk(&walk_config(), &start, WALK_LOG_LIMIT, None)
             .expect("walk the fixture");
         assert!(
             matches!(snapshot.operation, Some(Operation::Rebase { .. })),
@@ -14681,7 +15331,7 @@ mod watched_tests {
 
         git_allowing_failure(p, &["merge", "feature"]);
         let snapshot = watched
-            .walk(&walk_config(), &start, WALK_LOG_LIMIT)
+            .walk(&walk_config(), &start, WALK_LOG_LIMIT, None)
             .expect("walk the fixture");
 
         assert!(
@@ -14729,7 +15379,7 @@ mod watched_tests {
         std::fs::write(dir.join(CHANGED), "changed\n").expect("write in the old worktree");
         let later = watched
             .borrow_mut()
-            .walk(&walk_config(), home, WALK_LOG_LIMIT)
+            .walk(&walk_config(), home, WALK_LOG_LIMIT, None)
             .expect("walk the old worktree");
         assert_eq!(
             later.branch, branch,
@@ -14802,6 +15452,7 @@ mod watched_tests {
             &cfg,
             &home,
             WALK_LOG_LIMIT,
+            None,
         )
         .unwrap_or_else(|reason| panic!("the switch to {LINKED} must work: {reason}"));
         assert_eq!(
@@ -14813,7 +15464,7 @@ mod watched_tests {
         std::fs::write(linked.join(CHANGED), "changed\n").expect("write in the new worktree");
         let later = watched
             .borrow_mut()
-            .walk(&cfg, &home, WALK_LOG_LIMIT)
+            .walk(&cfg, &home, WALK_LOG_LIMIT, None)
             .expect("walk the new worktree");
 
         assert_eq!(later.branch, LINKED);
@@ -14847,8 +15498,16 @@ mod watched_tests {
         let (tx, _rx) = mpsc::channel();
         let watched = RefCell::new(seeded(&main, tx.clone()));
 
-        let reason = switch_watched(&watched, &target, tx, &walk_config(), &home, WALK_LOG_LIMIT)
-            .expect_err("a directory that is gone must refuse the switch");
+        let reason = switch_watched(
+            &watched,
+            &target,
+            tx,
+            &walk_config(),
+            &home,
+            WALK_LOG_LIMIT,
+            None,
+        )
+        .expect_err("a directory that is gone must refuse the switch");
 
         assert_still_on(&watched, &main, MAIN, &home);
         assert!(
@@ -14887,8 +15546,16 @@ mod watched_tests {
         let (tx, _rx) = mpsc::channel();
         let watched = RefCell::new(seeded(&main, tx.clone()));
 
-        let reason = switch_watched(&watched, &target, tx, &walk_config(), &home, WALK_LOG_LIMIT)
-            .expect_err("a worktree whose walk fails must refuse the switch");
+        let reason = switch_watched(
+            &watched,
+            &target,
+            tx,
+            &walk_config(),
+            &home,
+            WALK_LOG_LIMIT,
+            None,
+        )
+        .expect_err("a worktree whose walk fails must refuse the switch");
 
         assert_still_on(&watched, &main, MAIN, &home);
         assert!(
@@ -14934,6 +15601,7 @@ mod watched_tests {
             &walk_config(),
             &home,
             WALK_LOG_LIMIT,
+            None,
         )
         .unwrap_or_else(|reason| panic!("the switch to {LINKED} must work: {reason}"));
 
@@ -15017,7 +15685,12 @@ mod watched_tests {
 
         assert_eq!(watched.path, linked);
         let snapshot = watched
-            .walk(&walk_config(), &start_at(linked.as_path()), WALK_LOG_LIMIT)
+            .walk(
+                &walk_config(),
+                &start_at(linked.as_path()),
+                WALK_LOG_LIMIT,
+                None,
+            )
             .expect("walk the linked worktree");
         assert_eq!(snapshot.branch, LINKED);
     }
@@ -15158,7 +15831,7 @@ mod watched_tests {
         let base = Instant::now();
         let seed = watched
             .borrow_mut()
-            .walk(&cfg, start, WALK_LOG_LIMIT)
+            .walk(&cfg, start, WALK_LOG_LIMIT, None)
             .expect("walk the fixture");
         let mut bursts = std::collections::VecDeque::from(bursts);
         for event in bursts.pop_front().unwrap_or_default() {
@@ -15186,10 +15859,11 @@ mod watched_tests {
                 home: start.home.clone(),
                 log: LogDemand::Off,
                 start_branch: start.branch.clone(),
+                pulls: PullWatch::disabled(),
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, limit: usize| {
-                    watched.borrow_mut().walk(&cfg, start, limit)
+                    watched.borrow_mut().walk(&cfg, start, limit, None)
                 },
                 fetch_log: no_fetch,
                 render: |snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
@@ -15224,9 +15898,10 @@ mod watched_tests {
                 worktrees: || listed(&watched),
                 worktree_paths: || listed_paths(&watched),
                 switch: |target: &WorktreePath, limit: usize| {
-                    switch_watched(&watched, target, tx.clone(), &cfg, start, limit)
+                    switch_watched(&watched, target, tx.clone(), &cfg, start, limit, None)
                 },
                 on_start_branch: worktree_on_start_branch,
+                start_pull: no_pull,
                 start_return: |child: std::process::Command| {
                     let outcome =
                         crate::push::run_streamed(child, super::RETURN_RUN_NAME, &|line| {
@@ -15537,5 +16212,73 @@ mod watched_tests {
             testcolor::strip_ansi(last_paint).contains(INVALID_REFERENCE),
             "the words of git must be on the row, got {last_paint:?}",
         );
+    }
+
+    /// A directory that holds an executable `gh` stub, and the settings that
+    /// find it. The directory must outlive the settings.
+    fn pull_settings() -> (TempDir, crate::pull::PullSettings) {
+        let bin = crate::pull::dir_with_gh(0o755);
+        let path = std::env::join_paths([bin.path()]).expect("join the path");
+        let settings = crate::pull::PullSettings::from_environment(false, Some(&path), None)
+            .expect("the stub is on the path");
+        (bin, settings)
+    }
+
+    /// A repository on branch `main` that tracks `origin/main`, where `origin`
+    /// is `url`.
+    fn tracking_repo(url: &str) -> TempDir {
+        let dir = init_repo();
+        git(dir.path(), &["remote", "add", "origin", url]);
+        git(dir.path(), &["config", "branch.main.remote", "origin"]);
+        git(
+            dir.path(),
+            &["config", "branch.main.merge", "refs/heads/main"],
+        );
+        dir
+    }
+
+    /// The pull header of one walk of `dir`, with `pulls` as the settings.
+    fn pull_of_walk(
+        dir: &Path,
+        pulls: Option<&crate::pull::PullSettings>,
+    ) -> Option<crate::pull::PullHeader> {
+        let (tx, _rx) = mpsc::channel();
+        let mut watched = seeded(dir, tx);
+        watched
+            .walk(&walk_config(), &start_at(dir), WALK_LOG_LIMIT, pulls)
+            .expect("walk the fixture")
+            .pull
+    }
+
+    /// With settings, a walk of a branch on GitHub puts the target of the
+    /// branch on the snapshot, with no answer yet.
+    #[test]
+    fn a_walk_with_settings_marks_a_github_branch_as_unknown() {
+        let dir = tracking_repo("git@github.com:owner/name.git");
+        let (_bin, settings) = pull_settings();
+
+        let header = pull_of_walk(dir.path(), Some(&settings)).expect("a pull header");
+
+        assert_eq!(header.target.repo().to_string(), "github.com/owner/name");
+        assert_eq!(header.target.head(), "main");
+        assert_eq!(header.indicator, crate::pull::PullIndicator::Unknown);
+    }
+
+    /// With no settings, a walk puts no pull header on the snapshot, whatever
+    /// the remote is.
+    #[test]
+    fn a_walk_without_settings_puts_no_pull_header_on_the_snapshot() {
+        let dir = tracking_repo("git@github.com:owner/name.git");
+
+        assert_eq!(pull_of_walk(dir.path(), None), None);
+    }
+
+    /// A remote that is not on GitHub gets no pull header, with settings.
+    #[test]
+    fn a_walk_of_a_gitlab_branch_puts_no_pull_header_on_the_snapshot() {
+        let dir = tracking_repo("git@gitlab.com:owner/name.git");
+        let (_bin, settings) = pull_settings();
+
+        assert_eq!(pull_of_walk(dir.path(), Some(&settings)), None);
     }
 }

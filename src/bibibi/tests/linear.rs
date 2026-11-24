@@ -2,8 +2,6 @@
 
 mod support;
 
-use std::process::Command;
-
 use gitscratch::testing::TestRepo;
 use support::{add_test_commit, bibibi, linear_history, search_lines, snapshot};
 
@@ -35,7 +33,7 @@ fn finds_the_first_bad_commit_and_leaves_the_checkout_alone() {
 
 #[test]
 fn version_names_the_tool_and_the_build() {
-    let output = Command::new(env!("CARGO_BIN_EXE_bibibi"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_bibibi"))
         .arg("--version")
         .output()
         .expect("failed to run bibibi");

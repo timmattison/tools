@@ -8,7 +8,6 @@ use std::thread;
 
 use buildinfo::version_string;
 use clap::Parser;
-use gitscratch::shed_inherited_git_environment_keeping_user_intent;
 use names::Generator;
 use repowalker::find_repo_context;
 use serde::Deserialize;
@@ -338,7 +337,7 @@ enum ShellCommandResult {
 /// on other platforms (e.g., wasm32).
 fn run_shell_command(cmd: &str, working_dir: &Path) -> ShellCommandResult {
     #[cfg(unix)]
-    let result = Command::new("sh")
+    let result = childenv::command("sh")
         .args(["-c", cmd])
         .current_dir(working_dir)
         .stdout(Stdio::inherit())
@@ -346,7 +345,7 @@ fn run_shell_command(cmd: &str, working_dir: &Path) -> ShellCommandResult {
         .status();
 
     #[cfg(windows)]
-    let result = Command::new("cmd")
+    let result = childenv::command("cmd")
         .args(["/C", cmd])
         .current_dir(working_dir)
         .stdout(Stdio::inherit())
@@ -2183,9 +2182,9 @@ enum WorktreeResult {
 /// `--random-directory` solves. Only git can say which.
 ///
 /// This is a production spawn, so it takes
-/// [`gitscratch::shed_inherited_git_environment_keeping_user_intent`]. That
+/// [`childenv::command`]. That
 /// sheds the whole inherited `GIT_` prefix and keeps the six names of
-/// [`gitscratch::USER_INTENT_GIT_ENVIRONMENT`]. An inherited `GIT_DIR` aims the
+/// [`childenv::USER_INTENT_GIT_ENVIRONMENT`]. An inherited `GIT_DIR` aims the
 /// question at another repository, whose branches say nothing about this one.
 /// The rule is the prefix plus a keep-list, and never a strip-list of names: a
 /// strip-list inherits the variable git invents next year, and a keep-list
@@ -2199,8 +2198,7 @@ enum WorktreeResult {
 /// that classifies its failure read one environment. Two answers from one
 /// environment do not disagree.
 fn branch_exists(repo_root: &Path, branch: &str) -> bool {
-    let mut command = Command::new("git");
-    shed_inherited_git_environment_keeping_user_intent(&mut command);
+    let mut command = childenv::command("git");
 
     command
         .args(["show-ref", "--verify", "--quiet"])
@@ -2244,17 +2242,16 @@ fn branch_known_absent(repo_root: &Path, branch: &str) -> bool {
 ///
 /// Each git child that the sparse checkout adds starts here, so none of them
 /// can forget the shed. The command takes
-/// [`gitscratch::shed_inherited_git_environment_keeping_user_intent`], which
+/// [`childenv::command`], which
 /// sheds the whole inherited `GIT_` prefix and keeps the six names of
-/// [`gitscratch::USER_INTENT_GIT_ENVIRONMENT`]. An inherited `GIT_DIR` or
+/// [`childenv::USER_INTENT_GIT_ENVIRONMENT`]. An inherited `GIT_DIR` or
 /// `GIT_WORK_TREE` otherwise aims the command at the repository that a
 /// launching hook names, and not at `dir`. Stdin is null, so a git that asks a
 /// question gets no answer and does not stop the run.
 ///
 /// The caller adds the arguments and decides where the output goes.
 fn production_git_command(dir: &Path) -> Command {
-    let mut command = Command::new("git");
-    shed_inherited_git_environment_keeping_user_intent(&mut command);
+    let mut command = childenv::command("git");
     command.current_dir(dir).stdin(Stdio::null());
     command
 }
@@ -2577,9 +2574,9 @@ fn run_cleanup_step(mut command: Command) -> Result<(), String> {
 /// `nwt` that a git hook started.
 ///
 /// So the command takes the production entrance,
-/// [`gitscratch::shed_inherited_git_environment_keeping_user_intent`], before
+/// [`childenv::command`], before
 /// the arguments are set. It sheds the whole inherited `GIT_` prefix and keeps
-/// the six names of [`gitscratch::USER_INTENT_GIT_ENVIRONMENT`]. The four
+/// the six names of [`childenv::USER_INTENT_GIT_ENVIRONMENT`]. The four
 /// authentication names of that list earn their keep here: the add checks a
 /// tree out, and a smudge filter or a `post-checkout` hook that fetches —
 /// git-lfs installs one — then reaches the network as the user's own shell
@@ -2617,8 +2614,7 @@ fn try_create_worktree(
     let checkout_branch_absent = !sparse_excludes.is_empty()
         && checkout_ref.is_some_and(|name| branch_known_absent(repo_root, name));
 
-    let mut cmd = Command::new("git");
-    shed_inherited_git_environment_keeping_user_intent(&mut cmd);
+    let mut cmd = childenv::command("git");
 
     cmd.args(["worktree", "add"]);
     if !sparse_excludes.is_empty() {
@@ -2792,19 +2788,18 @@ fn setup_shell_integration() -> Result<(), shellsetup::ShellSetupError> {
 /// missing critical development configuration.
 fn get_tracked_files(repo_root: &Path) -> HashSet<PathBuf> {
     // Shed the inherited `GIT_` family, through
-    // [`gitscratch::shed_inherited_git_environment_keeping_user_intent`], so the
+    // [`childenv::command`], so the
     // query targets `repo_root` rather than whatever repository a parent git
     // hook exported. The rule is the prefix and never a list of names: this call
     // site listed three, and `GIT_OBJECT_DIRECTORY` and `GIT_CONFIG_PARAMETERS`
     // walked straight through them.
     //
-    // The six names of `gitscratch::USER_INTENT_GIT_ENVIRONMENT` stay, because a
+    // The six names of `childenv::USER_INTENT_GIT_ENVIRONMENT` stay, because a
     // person states them on purpose and `nwt` runs for that person. None of them
     // moves this query to another repository: two name configuration files, and
     // four name how git authenticates to a remote, which `ls-files` never
     // reaches.
-    let mut command = Command::new("git");
-    shed_inherited_git_environment_keeping_user_intent(&mut command);
+    let mut command = childenv::command("git");
 
     let output = command.args(["ls-files"]).current_dir(repo_root).output();
 
@@ -3242,9 +3237,9 @@ const GIT_CONFIG_KEY_NOT_FOUND: i32 = 1;
 /// add` that says so plainly.
 ///
 /// This is a production spawn, so it takes
-/// [`gitscratch::shed_inherited_git_environment_keeping_user_intent`]. That
+/// [`childenv::command`]. That
 /// sheds the whole inherited `GIT_` prefix and keeps the six names of
-/// [`gitscratch::USER_INTENT_GIT_ENVIRONMENT`]. An inherited `GIT_DIR` aims git
+/// [`childenv::USER_INTENT_GIT_ENVIRONMENT`]. An inherited `GIT_DIR` aims git
 /// at another repository, and the answer is then that repository's setting.
 /// `GIT_CONFIG_PARAMETERS` leaves with the rest, because git hands it to every
 /// hook: it carries the launching hook's `-c` options, and it answers this
@@ -3260,10 +3255,9 @@ const GIT_CONFIG_KEY_NOT_FOUND: i32 = 1;
 /// The rule is the prefix plus a keep-list, and never a strip-list of names. A
 /// strip-list inherits the variable git invents next year and still reports a
 /// clean-looking answer; a keep-list sheds it. See
-/// [`gitscratch::USER_INTENT_GIT_ENVIRONMENT`] for what each kept name buys.
+/// [`childenv::USER_INTENT_GIT_ENVIRONMENT`] for what each kept name buys.
 fn stated_worktrees_dir(repo_root: &Path) -> StatedWorktreesDir {
-    let mut command = Command::new("git");
-    shed_inherited_git_environment_keeping_user_intent(&mut command);
+    let mut command = childenv::command("git");
 
     let output = command
         .args(["config", "--type=path", "--get", WORKTREES_DIR_KEY])
@@ -3911,8 +3905,7 @@ fn bootstrap_hooks(worktree: &Path, quiet: bool) -> bool {
     // `/dev/tty`. The shell wrapper captures this command's stdout to `cd` with,
     // so the user reads such a prompt as a command that stalls with nothing on
     // the screen.
-    let mut command = Command::new(program);
-    shed_inherited_git_environment_keeping_user_intent(&mut command);
+    let mut command = childenv::command(program);
 
     let status = command
         .args(args)
@@ -3969,7 +3962,7 @@ fn bootstrap_hooks(worktree: &Path, quiet: bool) -> bool {
 /// That precedence is honored in full, and it takes an allowlist to honor it.
 /// The inherited `GIT_` family leaves before the query runs, but
 /// `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` stay — they are two of the six
-/// names in `gitscratch::USER_INTENT_GIT_ENVIRONMENT`. A user who exports one
+/// names in `childenv::USER_INTENT_GIT_ENVIRONMENT`. A user who exports one
 /// of them means it, and the global and system steps of the precedence are two
 /// of the four steps this function exists to predict. `GIT_CONFIG_PARAMETERS`
 /// still leaves, because git hands it to every hook: it carries the launching
@@ -3999,8 +3992,7 @@ fn missing_hooks_path(worktree: &Path) -> Option<String> {
     // a value the user never configured. `GIT_CONFIG_GLOBAL` and
     // `GIT_CONFIG_SYSTEM` stay, because a user states those on purpose and this
     // query predicts what git reads at commit time — see the function doc.
-    let mut command = Command::new("git");
-    shed_inherited_git_environment_keeping_user_intent(&mut command);
+    let mut command = childenv::command("git");
 
     let output = command
         .args(["config", "--type=path", "core.hooksPath"])
@@ -4091,7 +4083,7 @@ mod tests {
     /// don't interleave noise.
     ///
     /// The whole inherited `GIT_*` family leaves through
-    /// [`gitscratch::shed_inherited_git_environment`], so `dir` is the
+    /// [`childenv::fixture_command`], so `dir` is the
     /// repository git operates on even when the suite runs from inside the
     /// pre-commit hook's own `cargo test`. Without that sweep,
     /// `current_dir(dir)` is not enough: git exports its own variables into the
@@ -4102,15 +4094,14 @@ mod tests {
     ///
     /// This is the entrance a fixture takes, and it keeps nothing, because a
     /// fixture has no user whose intent to honor. Which variables to shed is
-    /// knowledge that lives in `gitscratch` rather than being copied here to
+    /// knowledge that lives in `childenv` rather than being copied here to
     /// drift, and the rule there is the `GIT_` prefix and never a list of names.
     fn run_git(dir: &Path, args: &[&str]) -> bool {
-        let mut cmd = Command::new("git");
+        let mut cmd = childenv::fixture_command("git");
         cmd.args(args)
             .current_dir(dir)
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        gitscratch::shed_inherited_git_environment(&mut cmd);
 
         cmd.status().map(|s| s.success()).unwrap_or(false)
     }
@@ -5262,8 +5253,7 @@ mod tests {
     /// The command sheds the whole inherited `GIT_` prefix, as [`run_git`]
     /// does, so it reads `repo` and no other repository.
     fn listed_refs(repo: &Path, pattern: &str) -> Vec<String> {
-        let mut command = Command::new("git");
-        gitscratch::shed_inherited_git_environment(&mut command);
+        let mut command = childenv::fixture_command("git");
         let output = command
             .args(["for-each-ref", "--format=%(refname)", pattern])
             .current_dir(repo)
@@ -5898,7 +5888,6 @@ mod tests {
     mod unix_shell_tests {
         use super::*;
         use std::env;
-        use std::process::Command;
 
         #[test]
         fn test_run_shell_command_success() {
@@ -5952,7 +5941,9 @@ mod tests {
         #[test]
         fn test_get_exit_code_with_success() {
             // Run a command that succeeds
-            let status = Command::new("true").status().expect("Failed to run true");
+            let status = childenv::fixture_command("true")
+                .status()
+                .expect("Failed to run true");
             let code = get_exit_code(status);
             assert_eq!(code, 0, "Successful command should have exit code 0");
         }
@@ -5960,7 +5951,9 @@ mod tests {
         #[test]
         fn test_get_exit_code_with_failure() {
             // Run a command that fails
-            let status = Command::new("false").status().expect("Failed to run false");
+            let status = childenv::fixture_command("false")
+                .status()
+                .expect("Failed to run false");
             let code = get_exit_code(status);
             assert_eq!(code, 1, "false command should have exit code 1");
         }
@@ -5968,7 +5961,7 @@ mod tests {
         #[test]
         fn test_get_exit_code_custom_code() {
             // Run a command with custom exit code
-            let status = Command::new("sh")
+            let status = childenv::fixture_command("sh")
                 .args(["-c", "exit 123"])
                 .status()
                 .expect("Failed to run command");
@@ -7645,7 +7638,7 @@ mod tests {
 
         /// Returns true if `pnpm --version` runs, i.e. pnpm is installed.
         fn pnpm_available() -> bool {
-            Command::new("pnpm")
+            childenv::fixture_command("pnpm")
                 .arg("--version")
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())

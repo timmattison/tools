@@ -54,6 +54,7 @@ use tempfile::TempDir;
 use crate::diffs::{HaltDiff, HaltDiffs};
 use crate::git::Git;
 use crate::metrics::{Files, Hunks, Stops};
+use crate::progress::{Phase, RebaseWatch, ReplayObserver, ReplayProgress};
 
 /// Upper bound on the rounds one replay may spend advancing a halted rebase, so
 /// a git state we failed to anticipate stalls the run instead of spinning
@@ -155,9 +156,22 @@ pub struct Scratch {
     /// so a path that cannot be spelled for git has to fail the run, not
     /// degrade into one. [`Git::new`] refuses the empty value outright.
     hooks: String,
+    /// The receiver of progress reports, when the caller asked for one.
+    observer: Option<Box<dyn ReplayObserver>>,
 }
 
 impl Scratch {
+    /// Send a report to the observer, when the caller gave one.
+    ///
+    /// A scratch worktree built by [`Repo::scratch`](crate::Repo::scratch) has
+    /// no observer, and then this method does nothing. A report never changes
+    /// the answer of a replay.
+    fn report(&self, progress: ReplayProgress) {
+        if let Some(observer) = &self.observer {
+            observer.report(progress);
+        }
+    }
+
     /// Add a detached worktree at `at` in a private temporary directory.
     ///
     /// Crate-private on purpose, and for the same reason [`Git::new`] is:
@@ -174,7 +188,11 @@ impl Scratch {
     /// Returns an error if the temporary directory cannot be created, if its
     /// path cannot be spelled for git as UTF-8, or if git refuses to add the
     /// worktree - most commonly because `at` does not name a commit.
-    pub(crate) fn create(repo: &Path, at: &str) -> Result<Self> {
+    pub(crate) fn create(
+        repo: &Path,
+        at: &str,
+        observer: Option<Box<dyn ReplayObserver>>,
+    ) -> Result<Self> {
         let dir = TempDir::new().context("could not create a scratch directory")?;
         let worktree = dir.path().join("worktree");
         let hooks_dir = dir.path().join("hooks");
@@ -189,7 +207,12 @@ impl Scratch {
             dir,
             worktree,
             hooks,
+            observer,
         };
+
+        // The report comes before the call, so a caller sees the phase while
+        // git works and not after it ends.
+        scratch.report(ReplayProgress::Phase(Phase::CreateScratch));
 
         // `--end-of-options` ahead of both positionals, because `at` arrives
         // from a caller and a caller can spell a revision that starts with a
@@ -633,6 +656,19 @@ impl Scratch {
         let git = self.git();
         let worktree = self.path();
 
+        self.report(ReplayProgress::Phase(Phase::Replay));
+        // Resolved once, before the rebase starts, because a start of
+        // `git rev-parse` in each poll is slow on a loaded machine. It is
+        // resolved only when an observer listens, because a replay with no
+        // observer (`gsw`, `grist`) must start no more git processes. Git gives
+        // the path also when the directory does not exist yet. A path that does
+        // not resolve costs the display and never the replay.
+        let watch = self.observer.as_deref().and_then(|observer| {
+            git.path("rev-parse", &["--git-path", "rebase-merge"])
+                .ok()
+                .map(|path| RebaseWatch::new(observer, worktree.join(path)))
+        });
+
         let mut cost = Conflicts::nothing_replayed();
         let mut halt_diffs = HaltDiffs::nothing_captured();
         // `--end-of-options` ahead of `upstream`, because `upstream` arrives
@@ -650,7 +686,13 @@ impl Scratch {
         let onto_option = new_base.map(|base| format!("--onto={base}"));
         let mut rebase_args: Vec<&str> = onto_option.as_deref().into_iter().collect();
         rebase_args.extend(["--end-of-options", upstream]);
-        let mut outcome = git.try_run("rebase", &rebase_args)?;
+        // Each `git rebase` call goes through here, so the poll covers the first
+        // rebase, each `--continue`, and each `--skip`.
+        let run_rebase = |args: &[&str]| match &watch {
+            Some(watch) => watch.watch(|| git.try_run("rebase", args)),
+            None => git.try_run("rebase", args),
+        };
+        let mut outcome = run_rebase(&rebase_args)?;
         let mut rounds = 0;
 
         loop {
@@ -661,7 +703,16 @@ impl Scratch {
                     outcome.stdout,
                     outcome.stderr
                 );
+                if let Some(watch) = &watch {
+                    watch.finish(|| landed_commits(&git, new_base.unwrap_or(upstream)));
+                }
                 return Ok((cost, halt_diffs));
+            }
+
+            // The halt reads its own position, so the report does not depend on
+            // the timing of a poll.
+            if let Some(watch) = &watch {
+                watch.poll();
             }
 
             anyhow::ensure!(
@@ -696,13 +747,12 @@ impl Scratch {
                     }
 
                     git.run("add", &["-A"])?;
-                    outcome = git.try_run("rebase", &["--continue"])?;
+                    outcome = run_rebase(&["--continue"])?;
                 }
                 Halt::EmptyCommit { stopped } => {
                     // Nothing for a human to resolve and nothing lost by
                     // dropping it, so it costs nothing.
-                    outcome = git
-                        .try_run("rebase", &["--skip"])
+                    outcome = run_rebase(&["--skip"])
                         .with_context(|| format!("could not skip the empty commit {stopped}"))?;
 
                     // Read here, before the loop can come round again, because
@@ -802,6 +852,7 @@ impl Scratch {
         let git = self.git();
         let worktree = self.path();
 
+        self.report(ReplayProgress::Phase(Phase::Replay));
         // `--no-ff`, because git takes a merge whose branch is strictly ahead
         // as a fast-forward, and a fast-forward merges no trees at all: it
         // moves HEAD to the other tip and stops. The verdict is the same
@@ -844,6 +895,10 @@ impl Scratch {
         if outcome.success {
             return Ok((cost, halt_diffs));
         }
+
+        // A clean merge returned above, so only a halted merge reports this
+        // phase. The read of the conflicted files is what it names.
+        self.report(ReplayProgress::Phase(Phase::CountHunks));
 
         // The same two readers the rebase replay takes, because a conflicted
         // path costs the same to mis-read whichever operation produced it.
@@ -1506,6 +1561,21 @@ fn rebase_in_progress(git: &Git, worktree: &Path) -> Result<bool> {
         }
     }
     Ok(false)
+}
+
+/// How many commits the replay put on `base`, or `None` when git cannot say.
+///
+/// This is the fallback of [`RebaseWatch::finish`], for a rebase that no read
+/// of the state files saw. It never fails the replay, because a failed count
+/// costs one report and nothing else.
+fn landed_commits(git: &Git, base: &str) -> Option<usize> {
+    git.run(
+        "rev-list",
+        &["--count", "--end-of-options", &format!("{base}..HEAD")],
+    )
+    .ok()?
+    .parse()
+    .ok()
 }
 
 /// How many brackets git writes in a conflict marker.

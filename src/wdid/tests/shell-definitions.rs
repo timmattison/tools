@@ -357,7 +357,11 @@ fn stub(body: &str) -> (tempfile::TempDir, PathBuf) {
 fn a_shell_that_runs_too_long_is_timed_out_and_killed() {
     let (_dir, path) = stub("exec sleep 60");
     let started = std::time::Instant::now();
-    let result = read(Command::new(&path), ShellKind::Zsh, Duration::from_secs(1));
+    let result = read(
+        childenv::fixture_command(&path),
+        ShellKind::Zsh,
+        Duration::from_secs(1),
+    );
     assert!(
         matches!(result, Err(ShellError::TimedOut { seconds: 1 })),
         "{result:?}"
@@ -374,7 +378,11 @@ fn a_shell_that_runs_too_long_is_timed_out_and_killed() {
 #[test]
 fn a_shell_that_exits_with_a_failure_is_failed_with_its_stderr() {
     let (_dir, path) = stub("echo 'bad config' >&2\nexit 3");
-    let result = read(Command::new(&path), ShellKind::Zsh, Duration::from_secs(10));
+    let result = read(
+        childenv::fixture_command(&path),
+        ShellKind::Zsh,
+        Duration::from_secs(10),
+    );
     match result {
         Err(ShellError::Failed { status, stderr }) => {
             assert!(status.contains('3'), "{status}");
@@ -388,7 +396,7 @@ fn a_shell_that_exits_with_a_failure_is_failed_with_its_stderr() {
 fn a_shell_that_prints_no_markers_is_no_markers() {
     let (_dir, path) = stub("echo hello");
     let result = read(
-        Command::new(&path),
+        childenv::fixture_command(&path),
         ShellKind::Bash,
         Duration::from_secs(10),
     );
@@ -399,7 +407,11 @@ fn a_shell_that_prints_no_markers_is_no_markers() {
 fn a_shell_that_does_not_exist_is_a_spawn_error() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("no-such-shell");
-    let result = read(Command::new(&path), ShellKind::Zsh, Duration::from_secs(10));
+    let result = read(
+        childenv::fixture_command(&path),
+        ShellKind::Zsh,
+        Duration::from_secs(10),
+    );
     match result {
         Err(ShellError::Spawn { shell, source }) => {
             assert_eq!(shell, path.to_string_lossy());
@@ -417,7 +429,11 @@ fn the_shell_gets_the_interactive_flag_and_the_script_with_stdin_closed() {
         "printf '%s\\n' \"$1\" \"$2\" \"$#\" > {quoted}\nif read -r line; then echo \"stdin: $line\" >&2; fi\nprintf '%s' \"$3\" >> {quoted}\nexit 4",
         quoted = shellquote::shell_quote(&record.to_string_lossy())
     ));
-    let result = read(Command::new(&path), ShellKind::Zsh, Duration::from_secs(10));
+    let result = read(
+        childenv::fixture_command(&path),
+        ShellKind::Zsh,
+        Duration::from_secs(10),
+    );
     match result {
         Err(ShellError::Failed { stderr, .. }) => assert_eq!(stderr, ""),
         other => panic!("{other:?}"),
@@ -497,7 +513,7 @@ fn find_shell(name: &str) -> Option<PathBuf> {
 
 /// Makes a command for a real shell with `HOME` and `ZDOTDIR` in `home`.
 fn real_shell(path: &Path, home: &Path) -> Command {
-    let mut command = Command::new(path);
+    let mut command = childenv::fixture_command(path);
     command
         .env("HOME", home)
         .env("ZDOTDIR", home)

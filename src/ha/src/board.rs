@@ -22,6 +22,7 @@ use chrono::{DateTime, Utc};
 use unicode_width::UnicodeWidthStr;
 
 use crate::cost::{job_cost, run_cost, JobCost, PriceBook, RunCost};
+use crate::estimate::{Estimates, Remaining};
 use crate::job::{Job, JobId, RunnerName};
 use crate::queue::{Departure, History, Outcome, PullNumber, QueueEntry};
 use crate::run::{keep_first_of_each_id, Run, RunId, RunState};
@@ -33,7 +34,8 @@ use crate::target::RepoName;
 pub enum Section {
     /// Pull requests in a merge queue.
     Queue,
-    /// Runs that wait or run.
+    /// Runs that wait or run. A run that waits (`⏳`) for more than
+    /// `STUCK_WAIT` (8 hours) does not show, see `Board::is_stuck`.
     Active,
     /// Pull requests that left a merge queue inside the window.
     History,
@@ -48,8 +50,9 @@ pub enum Section {
 /// `passed` counts the merged ones, `failed` the ones that the queue
 /// removed, and `cancelled` the ones that a person removed. Each one shows
 /// the marker of the run state of the same name. In the active section,
-/// `jobs` counts the jobs of the active runs, and `runners` names the runners
-/// that have a job that waits or runs.
+/// `jobs` counts the jobs of the active runs that show, and `runners` names
+/// the runners that have a job that waits or runs in those runs. A run that
+/// does not show (see `Board::is_stuck`) is in no count and gives no name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Header<'a> {
     /// The section that the header opens.
@@ -191,6 +194,11 @@ pub enum Row<'a> {
         run_ended: Option<DateTime<Utc>>,
         /// The estimated list-price cost of the job at the time of the view.
         cost: JobCost,
+        /// The time that the job has left, from the passed jobs of the same
+        /// kind on the same runner in the shown runs (see `Estimates`). It is
+        /// `None` for a job that does not run, for a job with no runner, and
+        /// for a job with no match.
+        remaining: Option<Remaining>,
     },
     /// The row of an expanded run before the first answer: "Loading jobs…".
     JobsLoading,
@@ -421,6 +429,16 @@ const QUEUE_ERROR_PREFIX: &str = "merge queue: ";
 /// The text before the error of a failed read of the events of a queue.
 const HISTORY_ERROR_PREFIX: &str = "merge history: ";
 
+/// How long a run can wait (`⏳`) and still show in the active section. The
+/// wait starts at the end of the newest finished job of the run, or at the
+/// start of the run when no job finished (see `Board::is_stuck`).
+///
+/// A GitHub outage left runs queued that never start, and they filled the
+/// section. This limit is temporary, and issue #680 removes it. It is not the
+/// window of the finished runs, so a change of that window does not change
+/// which active runs hide.
+const STUCK_WAIT: Duration = Duration::from_hours(8);
+
 impl Board {
     /// Makes an empty board. A finished run shows while its last update is
     /// inside `window` (see `Board::sections`). A pull request that left a
@@ -622,10 +640,48 @@ impl Board {
             .unwrap_or(DateTime::<Utc>::MIN_UTC)
     }
 
+    /// Whether the row of `run` shows the waiting marker and the run waited
+    /// for more than [`STUCK_WAIT`] at `now`. Such a run does not show as
+    /// active.
+    ///
+    /// The wait starts at the later of `run.started_at` and the newest
+    /// `completed_at` of the held jobs of the run. The later time also covers
+    /// a re-run, where the held jobs can be from an earlier attempt. A run
+    /// that waits for exactly [`STUCK_WAIT`] still shows.
+    ///
+    /// The marker comes from `RunState::shown_with_jobs` on the state of the
+    /// run and the job states that the board holds for it, as in the row.
+    /// GitHub reports a run as queued while one of its jobs waits, also when
+    /// another job of the run is in progress. Thus the GitHub state alone
+    /// cannot tell a stuck run from a live run.
+    ///
+    /// The worker still reads the jobs of each active run, also of a run that
+    /// does not show. Thus a hidden run shows again when one of its jobs
+    /// starts, because its marker then changes to the running marker.
+    ///
+    /// `Board::settle` drops the jobs of a hidden run, and the wait then
+    /// starts at `run.started_at`, which is never later than the old wait
+    /// start. Thus a hidden run stays hidden until a job runs.
+    fn is_stuck(&self, run: &Run, now: DateTime<Utc>) -> bool {
+        let cutoff = chrono::Duration::from_std(STUCK_WAIT)
+            .ok()
+            .and_then(|wait| now.checked_sub_signed(wait))
+            .unwrap_or(DateTime::<Utc>::MIN_UTC);
+        let jobs = last_good_jobs(self.jobs.get(&run.id));
+        let marker = run.state.shown_with_jobs(jobs.iter().map(|job| job.state));
+        let wait_start = jobs
+            .iter()
+            .filter_map(|job| job.completed_at)
+            .max()
+            .map_or(run.started_at, |ended| ended.max(run.started_at));
+        marker == RunState::Queued && wait_start < cutoff
+    }
+
     /// Splits the shown runs into the active list and the recent list.
     ///
     /// Both lists are sorted. A run that is not shown at `now` is in neither.
-    /// The active list is in order of the start, oldest first. The recent
+    /// The active list holds each active run except a stuck run (see
+    /// [`Board::is_stuck`]), in order of the start, oldest first. The recent
     /// list is in order of the end of each run ([`run_end`]), newest first,
     /// then by the run ID.
     ///
@@ -641,7 +697,7 @@ impl Board {
             .runs
             .values()
             .flatten()
-            .filter(|run| run.state.is_active())
+            .filter(|run| run.state.is_active() && !self.is_stuck(run, now))
             .collect();
         active.sort_by_key(|run| (run.started_at, run.id));
         let oldest = self.window_start(now);
@@ -863,8 +919,8 @@ impl Board {
     /// The order of the sections is: the merge queue, the active runs, the
     /// merge history, and the recent runs. The two merge sections show only
     /// when [`Board::shows_merge_sections`] is true. The header of the active
-    /// section counts the jobs of the active runs by state and names the
-    /// runners of the jobs that wait or run. The selected row carries the
+    /// section counts the jobs of the active runs that show by state and names
+    /// the runners of the jobs that wait or run. The selected row carries the
     /// selection mark. This is the row of the selected item, or the row of its
     /// selected job. The block of each expanded run follows the row of that
     /// run. The item rows come in the order of `shown_items`, and the selection
@@ -873,7 +929,9 @@ impl Board {
     /// index of a row is not the position of its item. The `job_sum` of each
     /// run row is the sum of the runner times of its last good jobs at `now`.
     /// The `cost` of each run row and of each job row is the list-price cost at
-    /// `now`, with the prices of the book from [`Board::set_prices`].
+    /// `now`, with the prices of the book from [`Board::set_prices`]. The method
+    /// builds one [`Estimates`] index for the frame from the shown runs and
+    /// their last good jobs. Each job row carries its time left from it.
     fn build_rows(&self, now: DateTime<Utc>) -> Vec<Row<'_>> {
         let selected = self.selected.as_ref();
         let mut rows = Vec::new();
@@ -881,6 +939,7 @@ impl Board {
         let has_queue = self.shows_merge_sections();
         let (entries, departures) = self.queue_sections(now);
         let (active, recent) = self.sections(now);
+        let estimates = self.estimates(&active, &recent, now);
         let view = JobView {
             jobs: &self.jobs,
             errors: &self.errors,
@@ -921,7 +980,15 @@ impl Board {
             jobs: self.active_job_counts(&active),
             runners: self.active_runner_names(&active),
         }));
-        push_runs(&mut rows, &active, Section::Active, first, selected, view);
+        push_runs(
+            &mut rows,
+            &active,
+            Section::Active,
+            first,
+            selected,
+            view,
+            &estimates,
+        );
         first += active.len();
         if has_queue {
             let count_of = |outcome: Outcome| {
@@ -953,22 +1020,40 @@ impl Board {
             );
             first += departures.len();
         }
-        let count_of = |state: RunState| recent.iter().filter(|run| run.state == state).count();
-        rows.push(Row::Header(Header {
-            section: Section::Recent,
-            count: recent.len(),
-            passed: count_of(RunState::Passed),
-            failed: count_of(RunState::Failed),
-            cancelled: count_of(RunState::Cancelled),
-            jobs: JobCounts::default(),
-            runners: Vec::new(),
-        }));
-        push_runs(&mut rows, &recent, Section::Recent, first, selected, view);
+        rows.push(Row::Header(recent_header(&recent)));
+        push_runs(
+            &mut rows,
+            &recent,
+            Section::Recent,
+            first,
+            selected,
+            view,
+            &estimates,
+        );
         rows
     }
 
-    /// The jobs of the `active` runs. This covers each active run that the
-    /// board holds, expanded or not and in the view or not. A run with no job
+    /// The index of the estimates for one frame. It reads the shown runs, the
+    /// `active` and the `recent` ones, with the same last good jobs that the
+    /// job sum and the cost read.
+    fn estimates<'a>(
+        &'a self,
+        active: &[&'a Run],
+        recent: &[&'a Run],
+        now: DateTime<Utc>,
+    ) -> Estimates<'a> {
+        Estimates::new(
+            active
+                .iter()
+                .chain(recent.iter())
+                .map(|&run| (run, last_good_jobs(self.jobs.get(&run.id)))),
+            now,
+        )
+    }
+
+    /// The jobs of the `active` runs. This covers each run of the active list
+    /// of `Board::sections`, expanded or not and in the view or not. A stuck
+    /// run is not in that list (see [`Board::is_stuck`]). A run with no job
     /// answer gives no job. A run whose last fetch failed gives its last good
     /// jobs. A run that is not in `active` gives no job.
     fn active_jobs<'s, 'a>(&'s self, active: &'a [&Run]) -> impl Iterator<Item = &'s Job> + 'a
@@ -1290,6 +1375,21 @@ fn scroll(
     offset.min(len.saturating_sub(height))
 }
 
+/// The header row of the section of the finished runs, with the count of each
+/// state in `recent`.
+fn recent_header<'a>(recent: &[&'a Run]) -> Header<'a> {
+    let count_of = |state: RunState| recent.iter().filter(|run| run.state == state).count();
+    Header {
+        section: Section::Recent,
+        count: recent.len(),
+        passed: count_of(RunState::Passed),
+        failed: count_of(RunState::Failed),
+        cancelled: count_of(RunState::Cancelled),
+        jobs: JobCounts::default(),
+        runners: Vec::new(),
+    }
+}
+
 /// The job data that the rows of the board read.
 #[derive(Clone, Copy)]
 struct JobView<'a> {
@@ -1329,7 +1429,8 @@ fn job_sum(jobs: &[Job], now: DateTime<Utc>) -> Option<Duration> {
 /// expanded or not. The `job_sum` of each run row is the sum of the runner
 /// times of the last good jobs at `view.now`, see `job_sum`. The `cost` of each
 /// run row is the list-price cost of the same jobs, see `run_cost`. The block of jobs
-/// of each run in `view.expanded` follows the row of that run.
+/// of each run in `view.expanded` follows the row of that run. `estimates` is
+/// the index of the frame, and each job row reads its time left from it.
 fn push_runs<'a>(
     rows: &mut Vec<Row<'a>>,
     runs: &[&'a Run],
@@ -1337,6 +1438,7 @@ fn push_runs<'a>(
     first: usize,
     selected: Option<&Selection>,
     view: JobView<'a>,
+    estimates: &Estimates<'_>,
 ) {
     if runs.is_empty() {
         rows.push(Row::Empty(section));
@@ -1368,6 +1470,7 @@ fn push_runs<'a>(
                 answer,
                 here.and_then(|selection| selection.job),
                 view,
+                estimates,
             );
         }
     }
@@ -1381,7 +1484,8 @@ fn push_runs<'a>(
 /// run. `None` gives the loading row. The job row at the position of
 /// `selected` gets the mark. The `cost` of each job row is the list-price cost
 /// of the job at `view.now`, with the billing prices of the owner of the run
-/// from `view.prices`.
+/// from `view.prices`. The `remaining` of each job row is its time left from
+/// `estimates`, at `view.now`.
 fn push_jobs<'a>(
     rows: &mut Vec<Row<'a>>,
     run: &'a Run,
@@ -1389,6 +1493,7 @@ fn push_jobs<'a>(
     answer: Option<&'a Jobs>,
     selected: Option<(JobId, usize)>,
     view: JobView<'a>,
+    estimates: &Estimates<'_>,
 ) {
     let prices = view.prices.of(run.repo.owner());
     let cost_of = |job: &Job| job_cost(job, run.visibility, prices, view.now);
@@ -1404,6 +1509,7 @@ fn push_jobs<'a>(
                 run,
                 run_ended,
                 cost: cost_of(job),
+                remaining: estimates.remaining(run, job, view.now),
             }));
         }
         Some(Jobs::Failed { jobs, error }) => {
@@ -1414,6 +1520,7 @@ fn push_jobs<'a>(
                 run,
                 run_ended,
                 cost: cost_of(job),
+                remaining: estimates.remaining(run, job, view.now),
             }));
             rows.push(Row::JobsError(error));
         }
@@ -1918,7 +2025,8 @@ mod tests {
             repo("a/x"),
             vec![
                 finished_run(1, RunState::Running, 3 * 24 * 3600, 3 * 24 * 3600),
-                finished_run(2, RunState::Queued, 20 * 3600, 20 * 3600),
+                // Run 2 waits for less than `STUCK_WAIT`.
+                finished_run(2, RunState::Queued, 7 * 3600, 7 * 3600),
             ],
             now(),
         );
@@ -1930,6 +2038,145 @@ mod tests {
                 "Run(2)",
                 "Header(Recent,0,0,0,0)",
             ]
+        );
+    }
+
+    /// A run that waits for more than 8 hours does not show in the active section.
+    #[test]
+    fn a_run_that_waits_for_more_than_8_hours_does_not_show_in_running() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Queued, 9 * 60, 1)],
+            now(),
+        );
+        board.set_jobs(
+            RunId(1),
+            vec![
+                runner_job(1, RunState::Queued, "pi5"),
+                job(2, RunState::Passed),
+            ],
+        );
+        let rows = board.rows(now());
+        assert_eq!(
+            shape(&rows)[..2],
+            ["Header(Active,0,0,0,0)", "Empty(Active)"]
+        );
+        assert_eq!(active_header(&rows).jobs, JobCounts::default());
+        assert!(active_runners(&rows).is_empty());
+    }
+
+    /// A run that waits for exactly 8 hours still shows in the active section.
+    #[test]
+    fn a_run_that_waits_for_exactly_8_hours_still_shows_in_running() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Queued, 8 * 60, 1)],
+            now(),
+        );
+        assert_eq!(
+            shape(&board.rows(now()))[..2],
+            ["Header(Active,1,0,0,0)", "Run(1)"]
+        );
+    }
+
+    /// A run that waits for more than 8 hours shows again, with the running
+    /// marker, when one of its jobs starts.
+    #[test]
+    fn a_hidden_run_shows_again_with_the_running_marker_when_a_job_starts() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Queued, 9 * 60, 1)],
+            now(),
+        );
+        assert_eq!(
+            shape(&board.rows(now()))[..2],
+            ["Header(Active,0,0,0,0)", "Empty(Active)"]
+        );
+        board.set_jobs(
+            RunId(1),
+            vec![
+                runner_job(1, RunState::Running, "pi5"),
+                job(2, RunState::Queued),
+            ],
+        );
+        let rows = board.rows(now());
+        assert_eq!(shape(&rows)[..2], ["Header(Active,1,0,0,0)", "Run(1)"]);
+        let marker = rows.iter().find_map(|row| match row {
+            Row::Run { state, .. } => Some(*state),
+            _ => None,
+        });
+        assert_eq!(marker, Some(RunState::Running));
+        assert_eq!(
+            active_header(&rows).jobs,
+            JobCounts {
+                queued: 1,
+                running: 1,
+                ..JobCounts::default()
+            }
+        );
+        assert_eq!(active_runners(&rows), ["pi5"]);
+    }
+
+    /// A run that started more than 8 hours ago, and whose last job ended
+    /// recently, shows while its next job waits for a runner.
+    #[test]
+    fn a_run_whose_last_job_ended_recently_still_shows() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Queued, 9 * 60, 1)],
+            now(),
+        );
+        board.set_jobs(
+            RunId(1),
+            vec![
+                Job {
+                    started_at: Some(now() - Span::minutes(20)),
+                    completed_at: Some(now() - Span::minutes(10)),
+                    ..job(2, RunState::Passed)
+                },
+                runner_job(1, RunState::Queued, "pi5"),
+            ],
+        );
+        let rows = board.rows(now());
+        assert_eq!(shape(&rows)[..2], ["Header(Active,1,0,0,0)", "Run(1)"]);
+        assert_eq!(
+            active_header(&rows).jobs,
+            JobCounts {
+                queued: 1,
+                passed: 1,
+                ..JobCounts::default()
+            }
+        );
+    }
+
+    /// A run whose newest job ended more than 8 hours ago hides while its
+    /// next job waits for a runner.
+    #[test]
+    fn a_run_whose_last_job_ended_over_8_hours_ago_hides() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Queued, 10 * 60, 1)],
+            now(),
+        );
+        board.set_jobs(
+            RunId(1),
+            vec![
+                Job {
+                    started_at: Some(now() - Span::minutes(9 * 60 + 10)),
+                    completed_at: Some(now() - Span::minutes(9 * 60)),
+                    ..job(2, RunState::Passed)
+                },
+                runner_job(1, RunState::Queued, "pi5"),
+            ],
+        );
+        assert_eq!(
+            shape(&board.rows(now()))[..2],
+            ["Header(Active,0,0,0,0)", "Empty(Active)"]
         );
     }
 
@@ -2351,7 +2598,19 @@ mod tests {
 
     #[test]
     fn when_the_selected_run_leaves_the_window_the_nearest_run_is_selected() {
-        let mut board = four_runs_in_two_sections();
+        // The runs of `four_runs_in_two_sections`, but run 2 runs. The clock
+        // below moves past `STUCK_WAIT`, and a run that waits then hides.
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Running, 20, 1),
+                run(3, "a/x", RunState::Passed, 60, 10),
+                run(4, "a/x", RunState::Failed, 60, 20),
+            ],
+            now(),
+        );
         select_third(&mut board);
         let later = now() + Span::hours(8) + Span::minutes(15);
         let rows = board.rows(later);
@@ -5210,5 +5469,123 @@ mod tests {
             run_rows(marked(&board.rows(late_now()))),
             ["Run(41874500000)", "Run(41874496263)*"]
         );
+    }
+
+    /// Builds a job with the name `name`, the state `state`, and the runner
+    /// `runner`. It started `started` seconds before `now()`, and it ended
+    /// `ended` seconds before `now()` (`None` for a job that still runs).
+    fn timed_runner_job(
+        id: u64,
+        name: &str,
+        state: RunState,
+        runner: &str,
+        started: i64,
+        ended: Option<i64>,
+    ) -> Job {
+        Job {
+            name: name.to_owned(),
+            runner: Some(RunnerName::new(runner.to_owned()).expect("a runner name")),
+            started_at: Some(now() - Span::seconds(started)),
+            completed_at: ended.map(|seconds| now() - Span::seconds(seconds)),
+            ..job(id, state)
+        }
+    }
+
+    /// The job ID and the time left of each job row, in the order of the rows.
+    fn job_remaining(rows: &[Row<'_>]) -> Vec<(u64, Option<Remaining>)> {
+        rows.iter()
+            .filter_map(|row| match row {
+                Row::Job { job, remaining, .. } => Some((job.id.0, *remaining)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A board with one passed run (ID 1, 300 s of `TypeScript` on `m1-ts`) and
+    /// one running run (ID 2, `TypeScript` on `m1-ts` for 2 minutes). The passed
+    /// run ended `ended_minutes_ago` minutes before `now()`.
+    fn estimate_board(ended_minutes_ago: i64) -> Board {
+        let mut board = board();
+        board.replace(
+            repo("timmattison/megarepo"),
+            vec![
+                run(
+                    1,
+                    "timmattison/megarepo",
+                    RunState::Passed,
+                    600,
+                    ended_minutes_ago,
+                ),
+                run(2, "timmattison/megarepo", RunState::Running, 5, 1),
+            ],
+            now(),
+        );
+        board.set_jobs(
+            RunId(1),
+            vec![timed_runner_job(
+                11,
+                "TypeScript",
+                RunState::Passed,
+                "m1-ts",
+                900,
+                Some(600),
+            )],
+        );
+        board.set_jobs(
+            RunId(2),
+            vec![timed_runner_job(
+                21,
+                "TypeScript",
+                RunState::Running,
+                "m1-ts",
+                120,
+                None,
+            )],
+        );
+        board
+    }
+
+    #[test]
+    fn a_running_job_row_carries_the_time_left_from_a_passed_match_of_a_shown_run() {
+        let mut board = estimate_board(50);
+        board.expand_all(now());
+        assert_eq!(
+            job_remaining(&board.rows(now())),
+            [
+                (21, Some(Remaining::Left(Duration::from_secs(180)))),
+                (11, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_job_row_of_a_run_with_no_match_carries_no_time_left() {
+        let mut board = board();
+        board.replace(
+            repo("timmattison/megarepo"),
+            vec![run(2, "timmattison/megarepo", RunState::Running, 5, 1)],
+            now(),
+        );
+        board.set_jobs(
+            RunId(2),
+            vec![timed_runner_job(
+                21,
+                "TypeScript",
+                RunState::Running,
+                "m1-ts",
+                120,
+                None,
+            )],
+        );
+        board.expand_all(now());
+        assert_eq!(job_remaining(&board.rows(now())), [(21, None)]);
+    }
+
+    #[test]
+    fn a_match_in_a_run_that_does_not_show_does_not_count() {
+        // The passed run ended more than 8 hours before `now()`, so it does not show.
+        let mut board = estimate_board(9 * 60);
+        board.expand_all(now());
+        assert_eq!(job_remaining(&board.rows(now())), [(21, None)]);
     }
 }

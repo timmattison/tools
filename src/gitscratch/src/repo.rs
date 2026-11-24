@@ -28,6 +28,7 @@ use anyhow::{anyhow, Context, Result};
 
 use crate::git::Git;
 use crate::metrics::Uncommitted;
+use crate::progress::ReplayObserver;
 use crate::scratch::Scratch;
 
 /// Where hook lookups are pointed while answering a pre-flight question.
@@ -133,7 +134,24 @@ impl Repo {
     /// not a repository" is not among them: [`Repo::open`] has already settled
     /// that, which is the whole point of arriving here through it.
     pub fn scratch(&self, at: &str) -> Result<Scratch> {
-        Scratch::create(&self.path, at)
+        Scratch::create(&self.path, at, None)
+    }
+
+    /// Build a scratch worktree like [`Repo::scratch`], and report progress.
+    ///
+    /// The errors are the same as the errors of [`Repo::scratch`]. The observer
+    /// gets every report of this scratch worktree and of each replay on it. The
+    /// observer is opt-in: [`Repo::scratch`] sends no reports.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error in the same cases as [`Repo::scratch`].
+    pub fn scratch_with_progress(
+        &self,
+        at: &str,
+        observer: impl ReplayObserver + 'static,
+    ) -> Result<Scratch> {
+        Scratch::create(&self.path, at, Some(Box::new(observer)))
     }
 
     /// The change that `commit` made, as a patch that `git apply` accepts.

@@ -99,7 +99,7 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
 ### runlimit
 A shared Rust library that runs a child program with a time limit. It drains stdout and stderr on reader threads,
 so a chatty child cannot fill a pipe. It kills and reaps a child that does not finish in time, so a hung child
-cannot hang the caller. Used by `cwt` and `ha`.
+cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
 
 ## The tools
 
@@ -128,6 +128,9 @@ cannot hang the caller. Used by `cwt` and `ha`.
 - update-aws-credentials
     - Takes AWS credentials from your clipboard in the format provided by AWS SSO and writes it to
       your AWS config file. This is useful if you're using AWS SSO and you want to use the AWS CLI locally.
+    - In a mosh-rs session, it reads the clipboard of your client computer through the `pbpaste` shim that the
+      mosh-rs server puts on `PATH`. That read needs `MOSH_ALLOW_PASTE=1` on the client. When paste is off, the shim
+      runs the next `pbpaste` on `PATH`, which is the `pbpaste` of the server.
     - To install: `cargo install --git https://github.com/timmattison/tools update-aws-credentials`
 - sf (size of files)
     - Shows you the total size of files in the specified directories (and subdirectories) in a human-readable format. 
@@ -158,9 +161,13 @@ cannot hang the caller. Used by `cwt` and `ha`.
     - To install: `cargo install --git https://github.com/timmattison/tools thermal-watch`
 - htmlboard
     - Waits for HTML to be put on the clipboard and then pretty prints it and puts it back in the clipboard.
+    - In a mosh-rs session, it watches the clipboard of the server, not the clipboard of your client computer. It
+      reads the clipboard each 500 ms, and the mosh-rs client allows only 5 pastes in each 10 seconds.
     - To install: `cargo install --git https://github.com/timmattison/tools htmlboard`
 - jsonboard
     - Waits for JSON to be put on the clipboard and then pretty prints it and puts it back in the clipboard.
+    - In a mosh-rs session, it watches the clipboard of the server, not the clipboard of your client computer. It
+      reads the clipboard each 500 ms, and the mosh-rs client allows only 5 pastes in each 10 seconds.
     - To install: `cargo install --git https://github.com/timmattison/tools jsonboard`
 - bm
     - Bulk Move - recursively find and move files matching a pattern to a destination directory. Named "bm" because
@@ -181,6 +188,8 @@ cannot hang the caller. Used by `cwt` and `ha`.
     - To install: `cargo install --git https://github.com/timmattison/tools localnext`
 - unescapeboard
     - Waits for text with `\\"` in it to be put on the clipboard and then unescapes one level of it.
+    - In a mosh-rs session, it watches the clipboard of the server, not the clipboard of your client computer. It
+      reads the clipboard each 500 ms, and the mosh-rs client allows only 5 pastes in each 10 seconds.
     - To install: `cargo install --git https://github.com/timmattison/tools unescapeboard`
 - prhash
     - Hashes files with the requested hashing algorithm (MD5, SHA1, SHA256, SHA512, Blake3) and shows the progress
@@ -242,12 +251,16 @@ cannot hang the caller. Used by `cwt` and `ha`.
     - Waits for text that looks like a YouTube video URL to be put on the clipboard and then extracts the video ID from
       it.
       I use this for deep linking videos to my Roku TVs through their APIs.
+    - In a mosh-rs session, it watches the clipboard of the server, not the clipboard of your client computer. It
+      reads the clipboard each 500 ms, and the mosh-rs client allows only 5 pastes in each 10 seconds.
     - To install: `cargo install --git https://github.com/timmattison/tools tubeboard`
 - safeboard
     - Monitors clipboard for dangerous Unicode characters that could be used in copy-paste attacks. Detects invisible 
       characters like zero-width spaces, directional overrides, and private use area characters that attackers use to 
       hide malicious code or commands. Options include `--audible` for sound alerts and `--modify` to prepend a warning 
       to dangerous content. Includes a test script to verify functionality.
+    - In a mosh-rs session, it watches the clipboard of the server, not the clipboard of your client computer. It
+      reads the clipboard each 500 ms, and the mosh-rs client allows only 5 pastes in each 10 seconds.
     - To install: `cargo install --git https://github.com/timmattison/tools safeboard`
 - gitrdun
     - Shows your recent git commits across multiple repositories. Useful for finding what you've been working on
@@ -345,6 +358,11 @@ cannot hang the caller. Used by `cwt` and `ha`.
       one does not, so an alias written for the Go version needs the second dash.
     - Set `DIRC_CLIPBOARD_FILE` to the path of a file to read and write that file in place of the clipboard of the
       machine. This is what lets the tests of `dirc` run without touching the clipboard of the person at the keyboard.
+    - In a mosh-rs session, `dirc` copies to the clipboard of your client computer, and `dirc --paste` reads it. Both
+      go through the `pbcopy` and `pbpaste` shims that the mosh-rs server puts on `PATH`. A read needs
+      `MOSH_ALLOW_PASTE=1` on the client. When paste is off, the shim runs the next `pbpaste` on `PATH`, which is the
+      `pbpaste` of the server. Outside mosh-rs, `dirc` uses the clipboard of the machine, and it runs `pbcopy` or
+      `pbpaste` from `PATH` when that clipboard does not open.
     - To install: `cargo install --git https://github.com/timmattison/tools dirc`
 - gitdiggin
     - Recursively searches Git repositories for commits containing a specific string. Can search in commit messages by
@@ -366,6 +384,8 @@ cannot hang the caller. Used by `cwt` and `ha`.
     - Generates random data and copies it to the clipboard. Supports two modes: binary data (with hex, base64, or raw 
       output formats) and text with diacritics (Zalgo text). Features include customizable parameters, presets for 
       text generation (mild, scary, insane, zalgo, doom), and a dry run mode to preview without copying.
+    - In a mosh-rs session, the data goes to the clipboard of your client computer, through the `pbcopy` shim that the
+      mosh-rs server puts on `PATH`.
     - To install: `cargo install --git https://github.com/timmattison/tools clipboard-random`
 - freeport
     - Finds a free TCP port on localhost (127.0.0.1) quickly and cross-platform. Supports random or sequential port 
@@ -478,7 +498,10 @@ cannot hang the caller. Used by `cwt` and `ha`.
     path, a directory name, or a branch name (exact matches only). A worktree with
     submodules checked out - which plain `git worktree remove` refuses outright - or with
     uncommitted changes needs `--force`. `--dry-run` reports the plan as a preflight, and
-    `--safe` keeps the branch unless it is fully merged.
+    `--safe` keeps the branch unless it is fully merged. Before it deletes a branch that no
+    message of the last 10 commits of the main branch or its upstream names, it asks. Thus a
+    mistyped issue number does not delete unmerged work. `--yes` skips the question. Without
+    a terminal, gitnuke cannot ask, and it refuses with exit code `10`.
   - To install: `cargo install --git https://github.com/timmattison/tools gitnuke`
 - crap (Claude, Resume Anywhere Please)
   - Resume a Claude Code session from wherever you are. Given a session id, `crap` looks the
@@ -563,6 +586,33 @@ cannot hang the caller. Used by `cwt` and `ha`.
     gsw purely event-driven. On a repository where a status walk is expensive, the 1% duty-cycle
     budget pushes the timed refresh out past the interval, and the countdown shows the longer wait
     rather than promising one it will not keep.
+  - Under the live watch, the right end of the header row shows whether the branch on the screen
+    has an open pull request on GitHub:
+
+    ```
+    gsw ⌂ 1/4 • issue-681 • 3 commits ahead of main • ↑0 ↓0 origin/issue-681        PR #690
+    ```
+
+    | State | Text | Style |
+    | --- | --- | --- |
+    | One open pull request | `PR #690` | green, bold |
+    | Two or more open pull requests | `PR #690 +1` (the lowest number, then the count of the others) | green, bold |
+    | No open pull request | `no PR` | dim |
+    | No answer yet, or the last lookup failed | `PR ?` | dim |
+
+    A draft pull request counts as open, and the text carries the meaning without color. The pull
+    request is the one whose head is the branch that `branch.<name>.merge` names, in the repository
+    of the remote of the branch. A branch that tracks nothing asks about its own name, in the
+    remote that `p` pushes a new branch to. gsw asks through `gh api` with REST and an `ETag`, so
+    an answer that did not change costs nothing against the GitHub rate limit. It asks after the
+    first frame, at each timed refresh, when `r` refreshes, and when the branch or the worktree on
+    the screen changes — never because of a filesystem event, so a build that writes many files
+    sends no requests. One lookup runs at a time, on a thread of its own, for at most 10 seconds,
+    and the screen never waits for it. A rate limit shows `PR ?` and stops the lookups until GitHub
+    lets them start again. The name of the branch outranks the indicator: in a pane too narrow for
+    both, the indicator goes. One-shot mode, `--no-pr`, a machine with no `gh` on `PATH`, a
+    detached HEAD, and a remote that is not on GitHub show no indicator, and the header is then
+    the same as before. `GH_HOST` names one more GitHub host, for GitHub Enterprise.
   - Watch-mode keys: `q` or Ctrl-C quits, `r` forces an immediate refresh, `p` pushes the
     current branch, `P` pushes it without the `pre-push` hook, `G` opens the pull request of the
     branch (or the issue the branch names when
@@ -1001,6 +1051,48 @@ cannot hang the caller. Used by `cwt` and `ha`.
     so repeated calls don't re-hit 1Password (or trigger Touch ID) for every secret. Supports text and
     binary secrets, env-var overrides, cache invalidation, and includes worktree hooks for automatic
     setup. Required by other tools in this repo (e.g. `vpn-tunnel`).
+  - The 1Password prompt names only the application above the caller. In a zellij pane, it names
+    "zellij", whichever of the sessions asked. Thus, before each run of `op`, op-cache names the
+    caller itself. A cache hit and an `--env-var` override run no `op`, thus they do neither step.
+    A failure of either step prints one warning on stderr and never stops the read. The stdout of
+    op-cache does not change.
+  - On macOS, op-cache shows a notification at the same time as the 1Password prompt:
+
+    ```text
+    op-cache → 1Password
+    earth-science-d4 · earth-science
+    op://Private/cloudflare-fastip-deploy/credential
+    ```
+
+    The subtitle is the Claude Code session and the zellij session. When both are absent, it is the
+    name of the repo directory. A retry adds `(attempt 2 of 3)` to the title. Set
+    `OP_CACHE_NOTIFY=0` to turn the notification off. macOS shows the notification under Script
+    Editor, because `osascript` posts it as `com.apple.ScriptEditor2`. If no notification appears,
+    allow notifications for Script Editor in System Settings → Notifications.
+  - op-cache writes an audit trail to `$XDG_STATE_HOME/op-cache/audit.jsonl`. When
+    `XDG_STATE_HOME` is unset, empty, or relative, the file is `~/.local/state/op-cache/audit.jsonl`.
+    The audit trail has no switch. Each line is one JSON record, of one of two kinds:
+    - `op_start`, before `op` runs: the time, the `request_id`, the attempt, the operation (`read` or
+      `read-binary`), the reference, the working directory, the cache file, the zellij session and
+      pane, `TERM_PROGRAM`, the Claude Code session, and the chain of ancestor processes (at most 32,
+      each command line cut to 1024 bytes). The Claude Code session is the nearest ancestor that has
+      a file `sessions/<pid>.json` in `$CLAUDE_CONFIG_DIR`, else in `~/.claude`. A file whose
+      `startedAt` is earlier than the start of that ancestor is skipped, because that PID now belongs
+      to a different process. The lookup then continues to the next ancestor.
+    - `op_end`, after `op` returns, with the same `request_id`: the `outcome` (`ok`, `empty`,
+      `failed`, or `spawn_error`), the `exit_code`, and the `duration_ms`. An `empty` outcome means
+      `op` exited 0 but gave no value, and op-cache tries again as after a failure. An `empty` or a
+      `failed` record holds the first 512 bytes of the stderr of `op`, in `op_stderr`. That text
+      shows if the person denied or dismissed the prompt. A `spawn_error` record holds the reason
+      in `error`.
+  - The audit trail never holds a secret or the stdout of `op`. But a command line of an ancestor can
+    hold a secret of a different program, thus the directory has mode 0700 and the file mode 0600.
+    To see who asked recently:
+
+    ```sh
+    jq -c 'select(.event=="op_start") | {time, reference, claude: .claude.name, zellij_session}' ~/.local/state/op-cache/audit.jsonl | tail
+    ```
+
   - To install: `cargo install --git https://github.com/timmattison/tools op-cache`
 - kitchen-sync
   - Installs every Rust binary from a git repository with a single command. Clones the repo, parses
@@ -1020,6 +1112,15 @@ cannot hang the caller. Used by `cwt` and `ha`.
     directory *shared* by every worktree of the repo (`git rev-parse --git-common-dir`), so two merges
     launched from two different worktrees of one repo contend for the same lock. Drop an executable
     `.swt-check` at the parent repo root to override the default green check.
+  - A SIGHUP, SIGINT, or SIGTERM removes what the run holds: the unverified worktree and its branch of
+    `swt create`, or the merge lock of `swt merge`. The run then exits 128 + the signal (129, 130, or
+    143). A closed terminal window, a dropped SSH session, or a killed tmux pane sends SIGHUP. A
+    signal that arrives while `swt` holds nothing keeps its default action. If a signal arrives while
+    `swt` removes the worktree and the branch of a red check, `swt` finishes both removals first. The
+    run then exits 1 or ends by the signal. A signal that the parent set to ignore stays ignored, so
+    `nohup swt merge <path> &` survives a closed terminal. A signal to the whole process group also
+    stops the green check, and the run can then exit 1 in place of 128 + the signal. Nothing stays
+    behind in that case either.
   - In a parent worktree on the branch `<branch>`, `swt create <name>` makes the branch
     `swt/<branch>/<name>-<token>` and the directory `<parent-worktree-name>--<name>-<token>.swt`
     beside the parent. One token keys both names, and `ls` shows each child next to its parent.
@@ -1597,6 +1698,10 @@ cannot hang the caller. Used by `cwt` and `ha`.
     variable is a common accident. The clipboard is also the cache a run of `claude` writes its
     plan to, so a reader who turns the clipboard off turns that cache off with it: every bare
     `wn` then pays for a new run and keeps nothing.
+  - In a mosh-rs session, the clipboard is the clipboard of your client computer. `wn` reads the
+    chain through the `pbpaste` shim that the mosh-rs server puts on `PATH`, and it keeps a plan
+    through the `pbcopy` shim. A read needs `MOSH_ALLOW_PASTE=1` on the client. When paste is
+    off, the shim runs the next `pbpaste` on `PATH`, which is the `pbpaste` of the server.
   - One GraphQL query through `gh` answers every number of the chain, so a chain of six issues
     costs one round trip and one unit of the rate limit, and the credential is the one `gh`
     already holds. Each round of blockers that stand nowhere in the chain costs one query more, as
@@ -2149,12 +2254,18 @@ cannot hang the caller. Used by `cwt` and `ha`.
     when the run is expanded and when it is collapsed. A finished run always shows the marker of
     its GitHub state. Each row shows the start time in the local time zone and the elapsed time,
     which increases each second. A run that is active for too long is often a stuck runner.
-  - The header of "Running" counts the jobs of all active runs by state: the jobs that wait
-    (`⏳`), run (`🏃`), passed (`✅`), or failed (`❌`), the jobs that GitHub skipped (`💨`), and
-    the cancelled jobs (`🪦`). An active run can hold cancelled jobs, for example the jobs of a
-    matrix that `fail-fast` cancelled. The counts include a collapsed run and a run below the
-    bottom of the screen. Each count shows also when it is 0. After the counts, the header names
-    the runners of the jobs that wait or run, in cyan, each name one time, for example
+    "Running" does not show a run that waits (`⏳`) for more than 8 hours. The wait starts at the end
+    of the newest finished job of the run, or at the start of the run when no job finished. A
+    GitHub outage left many runs queued that never start, and they pushed the live runs below the
+    bottom of the screen. Such a run shows again when one of its jobs starts. The header does not
+    count it. To cancel it, use the GitHub web interface or `gh run cancel`. This rule is
+    temporary.
+  - The header of "Running" counts the jobs of the active runs that show by state: the jobs
+    that wait (`⏳`), run (`🏃`), passed (`✅`), or failed (`❌`), the jobs that GitHub skipped
+    (`💨`), and the cancelled jobs (`🪦`). An active run can hold cancelled jobs, for example the
+    jobs of a matrix that `fail-fast` cancelled. The counts include a collapsed run and a run
+    below the bottom of the screen. Each count shows also when it is 0. After the counts, the
+    header names the runners of the jobs that wait or run, in cyan, each name one time, for example
     `Running · 2 ⏳ · 3 🏃 · 7 ✅ · 1 ❌ · 2 💨 · 1 🪦 · pi5, mini, GitHub Actions 1001`. The
     shortest name comes first, thus the names of the local runners show before the names of the
     GitHub-hosted runners. The right edge of the screen can cut the last names. Before the first
@@ -2254,7 +2365,8 @@ cannot hang the caller. Used by `cwt` and `ha`.
       runner time, not cost.
     - The cell is empty until `ha` has the jobs of the run, and when GitHub gives no job for the
       run. When a later request for the jobs fails, the cell keeps the sum of the last good jobs.
-      A job row, a merge queue row, and a merge history row show an empty cell.
+      A merge queue row and a merge history row show an empty cell. A job row shows the time
+      left of its job, as the next item tells.
     - `ha` reads the jobs of each finished run in "Last 8h" one time, also when you do not
       expand the run, thus each row of the section gets a sum. It reads at most 32 new runs in
       each refresh, the newest finish first, thus the top rows fill first. At the start, the
@@ -2262,6 +2374,24 @@ cannot hang the caller. Used by `cwt` and `ha`.
     - The cell has the color of its row, thus it fades with a finished row. The column is 7
       columns wide, the width of the `TIME` column. On a narrow terminal, the text columns give
       up their columns first.
+    - A job row of a running job shows `~` and the time that the job has left, for example
+      `~3m 02s`. A job past its estimate shows `+` and the time over the estimate. For example,
+      `+1m 10s` means 1 minute 10 seconds more than the estimate. A negative time never shows.
+      - The estimate is the mean time of the newest 5 jobs that passed in the window ("Last 8h"
+        by default) with the same repository, the same workflow, the same job name, and the
+        same runner name. A matrix job such as `test (ubuntu, 18)` matches only the same
+        matrix entry. A failed, cancelled, or skipped job does not count.
+      - The text gets less precise as the time increases: seconds below 1 minute, minutes and
+        seconds below 10 minutes, minutes below 1 hour, hours and minutes below 10 hours, hours
+        below 100 hours, and `>99h` above. The text fits the 7 columns of the cell.
+      - These rows show a blank cell: a job that waits for a runner, a job that finished, and a
+        job with no match. Each job on a GitHub-hosted runner shows a blank cell too. GitHub
+        gives such a runner a different name for each job, for example
+        `GitHub Actions 1000001050`, thus no job matches. A self-hosted runner keeps its name,
+        thus its jobs get an estimate.
+      - The estimate needs no more request to GitHub. It reads the jobs that `ha` already loads
+        for the job sum. `ha` keeps no history after it stops. Thus after a start, the
+        estimates fill in over the first refreshes, as the jobs of the recent runs load.
     - A finished run can show a `JOB SUM` smaller than its `TIME`, also when its jobs ran in
       parallel. The `TIME` cell of a finished run ends at the last update of the run, and GitHub
       sometimes makes that update some minutes after the last job finished.
@@ -2373,12 +2503,24 @@ cannot hang the caller. Used by `cwt` and `ha`.
       job names the machine where it failed. A job that has no runner shows no runner name. This
       occurs while the job waits for a runner, and when the job ended before a runner took it, for
       example a skipped job.
-    - The job name has priority in its cell. The runner name gets only the columns that the job
-      name does not use. Thus the job ID and the time columns do not move when a runner takes a
-      job. A runner name that fits shows whole, also in fewer than 4 columns, for example `mbp` in
-      3 columns. A longer runner name keeps its start and ends in `…`, for example `m1-…`. This cut
-      needs 4 free columns, thus in fewer columns the longer name does not show. On a highlighted
-      job row, the runner name stays cyan.
+    - The job name and the runner name share one text cell. Thus the job ID and the time columns
+      do not move when a runner takes a job. The **runner floor** is the part of the runner name
+      that a job row must always show. A name of 6 characters or fewer is its own floor. A longer
+      name has a floor of its first 6 characters and `…`, for example `GitHub…`. The floor counts
+      characters, not columns. If the cut saves no column, for example in a name of 7 ASCII
+      characters, the whole name is the floor. The first rule that applies gives the row:
+      1. If the job name and the whole runner name fit, both show whole.
+      2. If the job name and the runner floor fit, the job name shows whole. The runner name keeps
+         its start and gets the columns that the job name leaves, and it ends in `…`.
+      3. If the cell can hold the tree glyph, one space, `…`, one space, and the runner floor, the
+         runner name shows as its floor. The job name gets the other columns. It keeps its end and
+         starts with `…`, for example `…e-remotesensing (2) m1-ts`. Thus the part that divides the
+         jobs of a matrix stays.
+      4. In a narrower cell, the text keeps its start, and no runner name shows. The text ends in `…`
+         only when it is wider than the cell.
+
+      A job with no runner keeps the start of its text. On a highlighted job row, the runner name
+      stays cyan, also its `…`.
     - The jobs are sorted by name, with no difference between capital and small letters. Thus the
       order stays the same through each refresh and each re-run, and the jobs of one matrix stay
       together. GitHub gives the jobs in the order of their IDs, which has no meaning that you can
@@ -2437,6 +2579,22 @@ cannot hang the caller. Used by `cwt` and `ha`.
     - On a finished run, `c` shows no box. The status line says that there is nothing to cancel.
       On a pull request row, `c` also shows no box, and the status line says that a pull request
       is not a run.
+    - `R` (Shift-R) asks to re-run the highlighted row, and the row picks the scope. On a run
+      row, `R` asks to re-run all jobs of the workflow. On a job row, `R` asks to re-run only that
+      job, and the box says that GitHub also re-runs each job that needs this job. To re-run the
+      whole workflow from a job row, move the highlight to the run row. The box names the
+      repository, the workflow, the run ID, the branch, and the title. The box of a job row also
+      names the job.
+    - `y` or `Y` sends the re-run. Every other key closes the box and sends nothing, also Enter,
+      `q`, Esc, and `R`. Ctrl-C still quits. `r` continues to refresh. With Caps Lock on, `r` gives
+      `R`, and the box stops that press.
+    - The status line shows `re-running …`, and then that GitHub accepted the re-run or the reason
+      that GitHub refused it. After GitHub accepts, `ha` refreshes at once, the run moves to the
+      top section, and the highlight stays on it. GitHub permits a re-run up to 30 days after the
+      first run, and at most 50 times. `ha` does not do a check of these limits.
+    - On an active run, and on a job row where the run or the job is active, `R` shows no box. The
+      status line says that there is nothing to re-run yet. On a pull request row, `R` also shows
+      no box, and the status line says that a pull request is not a run.
     - When no box shows, `q`, Esc, or Ctrl-C quits and gives back the terminal.
   - Enter runs the command that `BROWSER` names when that variable is set and not empty. Thus a
     forwarder that sets `BROWSER`, for example the opener of mosh-rs, opens the page on your local
@@ -2535,10 +2693,11 @@ cannot hang the caller. Used by `cwt` and `ha`.
     - The enterprise endpoint gives only the usage that has no cost center. An enterprise that
       uses cost centers thus shows less than its bill.
   - `ha` uses the GitHub CLI, `gh`, and its login and host. It does not keep a second token. When
-    `gh` is missing or not logged in, `ha` stops with a message before it draws. The cancel of a
-    run is the only request of `ha` that changes something on GitHub. It needs the `repo` scope on
-    an OAuth token or a classic token. The default login of `gh auth login` has it. A login
-    without write access to the repository gets `403`, and the status line shows it.
+    `gh` is missing or not logged in, `ha` stops with a message before it draws. Only the cancel
+    of a run, the re-run of a run, and the re-run of a job change something on GitHub. These
+    requests need the `repo` scope on an OAuth token or a classic token. The default login of
+    `gh auth login` has it. A login without write access to the repository gets `403`, and the
+    status line shows it.
   - API budget: GitHub gives 5,000 requests each hour. An organization of 200 repositories at a
     60 s interval asks for 12,000 requests each hour. Thus `ha` sends the `ETag` of each answer
     back in `If-None-Match`, and GitHub does not count a `304 Not Modified` answer. The lookback
@@ -2652,6 +2811,13 @@ cannot hang the caller. Used by `cwt` and `ha`.
   - `sidecar` never deletes a repository, a main clone, a worktree, a branch, or a change. It removes only its own scratch clones.
   - See [docs/sidecar.md](./docs/sidecar.md) for the pattern, the rules, and the setup of a host.
   - To install: `cargo install --git https://github.com/timmattison/tools sidecar`
+- whyslow (why slow)
+  - Takes one sample of 1 s and prints a short summary of the likely cause when a Mac is slow. It
+    names which resource is short (CPU, memory, or both), and the groups of processes that use it.
+  - Puts each process into one group and adds the CPU and the memory of each group. Many small
+    processes, such as 176 Claude Code sessions, then count as one cause. It uses no language
+    model. It supports macOS only. See below for the full entry.
+  - To install: `cargo install --git https://github.com/timmattison/tools whyslow`
 
 ## dirhash
 
@@ -4171,8 +4337,52 @@ gitnuke issue-42              # by branch name
 gitnuke --force issue-42      # worktree has submodules or uncommitted changes
 gitnuke --dry-run issue-42    # report the plan, change nothing
 gitnuke --safe issue-42       # keep the branch unless it is fully merged
+gitnuke --yes issue-42        # do not ask about a branch that no recent commit names
 gitnuke wt-a wt-b wt-c        # nuke several; each is reported independently
 ```
+
+### A branch that no recent commit names
+
+The normal flow is: the PR merges, then you nuke its branch. gitnuke counts on a merge
+convention that this repository obeys: each squash commit names its branch on a
+`Branch: <branch>` line. Thus the recent commits of the main branch name each branch that is
+safe to nuke, and a mistyped issue number gives a name that they do not name.
+
+GitHub does not write that line. Its default squash message holds no branch name, and its
+default merge commit names `owner/branch`, which is not a whole-token match for `branch`. In
+a repository that does not obey the convention, no recent commit names a branch, so gitnuke
+asks before each nuke. Use `--yes` there.
+
+Before gitnuke removes a worktree that has a branch, it looks for the branch name in the
+messages of the last 10 commits of the main worktree's branch. It also reads the last 10
+commits of the upstream of that branch (`origin/main`), because `gh pr merge` in a worktree
+does not move the local `main`. If no message names the branch, gitnuke asks:
+
+```text
+gitnuke: no commit in the last 10 of main or origin/main names branch 'issue-42'.
+  If you typed the wrong name, answer n. If its PR merged moments ago, run git fetch and try again.
+  Remove worktree /code/repo-worktrees/issue-42 and delete branch issue-42? [y/N]
+```
+
+- Only `y` or `yes`, in any case, continues. Each other answer, an empty line, and the end
+  of the input keep the worktree and the branch, with exit code `10`.
+- The name must be a whole token. The character before it and the character after it must
+  not be a letter, a digit, `.`, `_`, `/` or `-`. Thus `issue-70` does not match
+  `Branch: issue-704`.
+- gitnuke does not fetch, and it uses no network. If the PR merged moments ago, run
+  `git fetch` first.
+- When stdin is not a terminal, gitnuke cannot ask. It refuses with exit code `10`, and it
+  does not continue silently. An agent that runs gitnuke through a tool can type the wrong
+  number too.
+- `--yes` skips the question. `--force` does not skip it: `--force` overrides git's refusals
+  about the content of a worktree, but this question is about which worktree you named.
+- A detached-HEAD worktree has no branch, so gitnuke asks nothing about it.
+- A target that an earlier gate refuses (locked, submodules, uncommitted changes) gets that
+  refusal, with no question first.
+- `--dry-run` asks nothing. It reports that a real run asks, and it exits `10`. With `--yes`,
+  the dry run exits `0`.
+- Each target gets its own question. A "no" keeps that target only, and the run continues
+  with the next target.
 
 ### Worktrees with submodules
 
@@ -4252,18 +4462,25 @@ out when the lock has none. This is exit code `8`, and `--dry-run` reports it to
 - **A lock is honoured, not overridden.** A worktree locked with `git worktree lock` is
   refused even with `--force`, quoting the lock reason if git recorded one and handing back
   the `git worktree unlock` command to run.
+- **A mistyped branch gets a question.** gitnuke asks before it deletes a branch that no
+  recent commit names, and it refuses with exit `10` when it cannot ask. See
+  [A branch that no recent commit names](#a-branch-that-no-recent-commit-names).
 - **`--dry-run` is a real preflight.** It runs every check a real run runs — submodules,
-  uncommitted changes, and under `--safe` whether the branch is merged — and exits with the
-  same status that run would, so `gitnuke -n x` failing means `gitnuke x` would fail too.
+  uncommitted changes, whether a recent commit names the branch, and under `--safe` whether
+  the branch is merged — and exits with the same status that run would, so `gitnuke -n x`
+  failing means `gitnuke x` would fail too.
 
 ### Options
 
 - `-f, --force`: Nuke the worktree despite the two refusals it overrides — submodules checked
   out, or uncommitted changes. It does not override a locked worktree; that is refused
-  separately, with instructions to unlock it
+  separately, with instructions to unlock it. It does not skip the question about a branch
+  that no recent commit names
 - `-s, --safe`: Keep the branch unless it is fully merged (`git branch -d` semantics instead
   of the default force-delete). Only affects the branch; the worktree is still removed
 - `-n, --dry-run`: Report what would happen without removing or deleting anything
+- `-y, --yes`: Do not ask about a branch that no recent commit names. Without a terminal,
+  gitnuke needs this flag to delete such a branch
 - `[TARGETS]...`: One or more worktrees, each given as a path, directory name, or branch name
 
 ### Exit Codes
@@ -4278,6 +4495,7 @@ out when the lock has none. This is exit code `8`, and `--dry-run` reports it to
 - `7`: The worktree was removed but its branch could not be deleted
 - `8`: The worktree is locked, which `--force` does not override
 - `9`: The worktree contains modified or untracked files and `--force` was not given
+- `10`: No recent commit names the branch, and nobody answered yes
 
 ### Replacing the shell functions
 
@@ -5389,4 +5607,401 @@ bibibi: skips leave 3 candidates for the first bad commit
 
 ```bash
 cargo install --git https://github.com/timmattison/tools bibibi
+```
+
+## whyslow (why slow)
+
+`whyslow` answers one question: why is this Mac slow? It takes one sample of 1 s, puts each process into a group, adds the CPU and the memory of each group, and prints a short summary of the likely cause. It uses no language model.
+
+On 2026-11-15 at 13:17, the load average was 152 on 14 processors, and the CPU was 0% idle. The memory was full: 63 of 64 GiB used, 26 GiB in the compressor, and 3.9 of 5 GiB of swap in use. No row of `ps` or `top` showed the cause. These were the causes:
+
+| Group | Processes | CPU | Memory |
+| --- | --- | --- | --- |
+| Claude Code sessions, 2 accounts | 176 | 288% | 24.2 GiB RSS |
+| `clang` for the C++ code of DuckDB (`libduckdb-sys`), in 2 worktrees | 12 | 284% | 2.7 GiB RSS |
+| `kernel_task`, for memory compression and swap | 1 | 245% | — |
+| `WindowServer` | 1 | 75% | 3.0 GiB footprint |
+
+It took about 10 commands to find them. Some facts mislead when a person reads them alone:
+
+- Sorted by CPU, the list shows 12 `clang` rows at about 20% each. The 176 Claude Code rows, at about 1.6% each, are far down the list. But the sums of the two groups are about equal.
+- The parent of each `clang` is the `sccache` server, and the parent of that server is `launchd`. Thus the ancestry does not lead to the build.
+- The working directory of each `clang` is the crate source in `~/.cargo/registry`, not the worktree. Only the output path in the arguments (`-o <worktree>/target/...`) names the worktree.
+- `top` names each Claude Code process `2.1.325`, the file name of its version. `ps` names it `claude`.
+- RSS does not include compressed memory. For `WindowServer`, `ps` gave 94 MiB of RSS, and `top` gave 2,990 MiB of footprint.
+- `memory_pressure` said "free percentage: 49%". At the same time, `top` said "91M unused".
+
+`faulte` answers a different question: which processes make page faults. Its table has 25 rows or more, and the person must still find the cause in that table.
+
+### Basic Usage
+
+```bash
+whyslow
+whyslow --interval 5s
+```
+
+- `--interval <DURATION>`: The time between the two samples of the process table, for example `1s`, `5s`, or `2m`. A bare number is a number of seconds. Defaults to `1s`. Zero is refused, because a sample of no time measures nothing.
+- `-V`, `--version`: Print the version, the git hash, and whether the build was clean.
+- `-h`, `--help`: Print the usage.
+
+`whyslow` has no `--shell-setup`. It needs nothing from the shell.
+
+This is the output for the sample of 2026-11-15. It is the fixture of the tests of `render`, and it has 18 lines:
+
+```
+Likely cause: the CPU is full, and the memory is short.
+CPU     0% idle, 44% system, load 152 on 14 processors
+        High system time and short memory: likely compression and swap.
+  Compilers and linkers        68 processes       322%
+    prediction-markets-worktrees/issue-17         166%
+    prediction-markets-worktrees/issue-36         118%
+    1 more worktree                                38%
+  Claude Code                 176 processes       290%   2 accounts
+  WindowServer                  1 process          75%
+  Kernel and short-lived processes                688%
+Memory  pressure warning, 26.0 GiB compressed, swap 3.9 of 5.0 GiB in use
+  Claude Code                 176 processes  ≥24.2 GiB   2 accounts
+  wezterm-gui                   1 process      3.4 GiB
+  Compilers and linkers        68 processes    2.7 GiB
+    prediction-markets-worktrees/issue-17      1.5 GiB
+    prediction-markets-worktrees/issue-36      0.8 GiB
+    1 more worktree                            0.4 GiB
+≥ counts the RSS of other accounts. Run with sudo for the footprint.
+```
+
+Each line has 80 columns or fewer. Each value ends at display column 54. A name that is too wide ends with `…`, and the cut is on a character boundary. The widths come from the display-width function of `termbar`, thus Japanese, emoji, and accented names stay aligned.
+
+If no resource is short, `whyslow` prints two lines: the idle share and the pressure level, and then the tools for the other causes. For the disk, run `diskhog`. For the clock speed, run `thermal-watch`.
+
+```
+The CPU and the memory are not short: 85% idle, pressure normal.
+For the disk, run diskhog. For the clock speed, run thermal-watch.
+```
+
+### The groups
+
+Each process goes into exactly one group. The first rule that matches decides.
+
+1. **Claude Code**: each process that `occ::classify` gives the role `Session`, `Unreadable`, or `Support`. The name does not count, because `top` gives the version (`2.1.325`) as the name.
+2. **Compilers and linkers**: `clang`, `clang++`, `cc`, `c++`, `cc1`, `cc1plus`, `gcc`, `g++`, `ld`, `ld64`, `lld`, `ld.lld`, `rust-lld`, `rustc`, `clippy-driver`, `cargo`, `cargo-clippy`, `sccache`, `swift-frontend`, `swiftc`, `cmake`, `make`, `gmake`, `ninja`, and each name that starts with `build-script-`.
+3. **Spotlight**: `mds`, `mds_stores`, `mdworker`, `mdworker_shared`, `corespotlightd`, and each name that starts with `spotlightknowledged`.
+4. **Each other process** goes into a group of its name. The name is the last part of `argv[0]`, as the `comm` column of `ps` prints it. `whyslow` removes the `-` in front of a login shell (`-zsh`), so `-zsh` and `zsh` are one group. Thus 40 copies of an unknown tool add up, and a new cause shows.
+
+The group of compilers divides by worktree. `whyslow` reads the arguments of each compiler process and takes the candidate paths in this order: the value of `-o`, the value of `--out-dir`, and then each other absolute path of the arguments from left to right. The program path (`argv[0]`) is not an argument, so it is not a candidate: the `sccache` server runs as `/opt/homebrew/bin/sccache`, and Homebrew keeps a git checkout at `/opt/homebrew`. A path after an `=` counts too, for example `dependency=/x`. A relative path is skipped, because `whyslow` never reads the working directory. For each candidate, `whyslow` looks for the nearest parent directory that holds `.git`. The first candidate that lies in a worktree gives the worktree. If a candidate lies in no worktree (for example a header path under `/Applications/Xcode.app`), `whyslow` tries the next candidate. A process with no such candidate goes into "no worktree". A worktree shows as the last two parts of its path.
+
+### The sources
+
+The measurements are from 2026-11-15, at a load of 81 to 96.
+
+| Fact | Source | Reason |
+| --- | --- | --- |
+| CPU of each process | Two snapshots of `ps -A -ww` with `pid`, `uid`, `lstart`, `time`, `rss`, and `comm`, one interval apart. The CPU of a process is the change of `time`. | `ps` is setuid root, reads each account, and took 0.11 s. `top -l 2 -s 1` took 8.8 s. |
+| The identity of a process | The PID and the start time (`lstart`) | A reused PID is a different process. |
+| The arguments of a compiler | `proctree::ps_arguments`, which runs `ps -eo pid=,args=` | `proctree` is the shared reader of the process table. |
+| Footprint of each process | `proc_pid_rusage` with `RUSAGE_INFO_V4`, field `ri_phys_footprint` | RSS does not include compressed memory (94 MiB of RSS against 2,990 MiB of footprint for `WindowServer`). If the kernel refuses a process (another account and no root), `whyslow` uses its RSS and marks its group with `≥`. A process that exits before the read of its footprint counts 0 bytes and gets no `≥`, because `sudo` does not help there. |
+| CPU of the machine | `host_statistics` with `HOST_CPU_LOAD_INFO`, over the same interval | `ps` does not list `kernel_task`. `top` took 4.9 s for PID 0 alone. |
+| Memory of the machine | `kern.memorystatus_vm_pressure_level` (1 normal, 2 warning, 4 critical), the compressor pages and the swapouts of `host_statistics64` over the interval, and `vm.swapusage` | These are the numbers of the kernel. The free percentage of `memory_pressure` is not used. |
+| Load and processors | `getloadavg` and `hw.ncpu` | — |
+
+`ps` runs with `LC_ALL=en_US.UTF-8` and `TZ=UTC`, not with `LC_ALL=C`. The C locale makes `ps` print each non-ASCII byte of a name as an escape (`é` is `M-CM-)`). In `en_US.UTF-8`, the name prints as UTF-8, and `lstart` is the same English text. `whyslow` does not run `top`, because one sample of `top -l 1` took 4.7 s.
+
+### The verdict
+
+All thresholds are named constants in `src/whyslow/src/verdict.rs`, and a test holds each one at the limit and one step on each side.
+
+- The CPU is **full** if it is less than 10% idle over the interval, and **busy** if it is less than 40% idle.
+- The memory is **short** if the pressure level is warning or critical, or if the interval had swapouts.
+- The first line names the resources that are short. Each short resource then lists its 3 largest groups. A compiler group also lists its 2 largest worktrees, and then one line for the rest. The compiler group lists its worktrees in the memory block too. That is why the summary of 2026-11-15 has 18 lines.
+- If the system time is 30% or more, and the memory is short, the CPU block says that the likely cause is memory compression and swap.
+- The CPU that no group explains is the CPU of the machine minus the sum of the groups. If it is 100% (one processor) or more, the CPU block shows it as `Kernel and short-lived processes`. `ps` does not list `kernel_task`, and the kernel refuses `proc_pid_rusage` for PID 0 without root, so this CPU holds the kernel as well as the processes that start and stop between the two snapshots. On 2026-11-15, `kernel_task` alone used 245%.
+- If no resource is short, the summary is the two lines above.
+
+### Exit codes
+
+- `0`: A summary was printed.
+- `1`: The platform is not macOS. `whyslow` prints `whyslow supports macOS only.`
+- `2`: A source failed, or its output failed a parser, or the CPU counters of the kernel did not move. `whyslow` prints `whyslow: <the reason>` on the error output and no summary, because a summary with a missing source can look like a quiet Mac. A bad `--interval` also gives 2, from the parser of the command line.
+
+### Limits
+
+- **macOS only.** The process table, the CPU ticks, and the footprint come from `ps` and from calls of macOS.
+- **One sample.** The summary is what the Mac did in one interval. The numbers come from one Mac on one day, and the thresholds are a first choice.
+- **`≥` and sudo.** Without root, the kernel refuses the footprint of each process of another account. `whyslow` then uses the RSS, which is a lower bound, and it marks the value with `≥`. Run with `sudo` to get the footprint.
+- **The kernel line.** `kernel_task` has no row of its own. Its CPU is part of `Kernel and short-lived processes`.
+- **The arguments have no boundaries.** `ps` prints the arguments of a process as one line of words with spaces between them. A path with a space in it is read as two words, so such a path can fail to find its worktree. The process then goes into the next candidate path, or into "no worktree".
+- **Out of scope:** a language model, a live view and a history (issue #669 makes a live view for `faulte`), an action on a process (`faulte kill` stops old idle Claude Code sessions), disk I/O and the clock speed (the summary only names `diskhog` and `thermal-watch`), JSON output, and a platform other than macOS.
+
+### Install
+
+```bash
+cargo install --git https://github.com/timmattison/tools whyslow
+```
+
+## glance (CPU and memory at a glance)
+
+Show two small charts in the macOS menu bar: the share of the CPU time that the system processes and the user processes use, and the memory pressure. In local mode, the status item reads each value from the kernel in one call, starts no child process, and draws its charts into a pixel buffer itself. Thus the monitor adds almost nothing to the load that it shows.
+
+`glance --host <destination>` shows the same charts for a second Mac, through one SSH connection that stays open. See [Show a second Mac](#show-a-second-mac).
+
+`glance` starts the status item in the background and returns to the shell. A second run of the same command stops it. `glance -f` keeps the status item in the foreground. See [Start and stop](#start-and-stop).
+
+### What it shows
+
+- **The left chart is the CPU.** Each column is one sample. The red part at the bottom is the system share, and the blue part above it is the user share. A nice process counts as a user process. These are the colors of the CPU chart in Activity Monitor.
+- **The right chart is the memory pressure.** The height of each column is the memory in use as a percentage, and its color is the pressure level of that sample: green for normal, orange for warn, and red for critical. A level that `glance` does not know is gray, never green.
+- **Each chart is as high as the menu bar**, inside a thin frame, and the two charts share one border. Thus a low load is easy to see: on a menu bar of 22 points, each chart has 20 rows, and a CPU share of 10% fills 2 of them.
+- **The charts show the last 32 samples.** At the default interval, that is the last 32 seconds. The newest column is at the right edge, so a short spike stays visible after it ends.
+- **The name of the Mac is in small text at the top of the charts.** In local mode, it is the short name of the Mac: the name before the first `.`, as `hostname -s` gives it (`M4-Pro-Mac-Mini`, not `M4-Pro-Mac-Mini.local`). In remote mode, it is the destination of `--host` as you typed it, or, with `--resolve`, the name that the second Mac reports after the first line arrives (see [Show a second Mac](#show-a-second-mac)). The name goes across both charts, over the columns. Each pixel of the name is black or white, whichever contrasts more with the pixel behind it. Thus the name is black where it crosses a column, and it has the text color of the menu bar where the chart is empty. The charts are wide enough for a name such as `M4-Pro-Mac-Mini`. A longer name ends in an ellipsis, and the status item does not grow. If the menu bar is too thin for the name, the name goes away.
+- **A click on the charts opens a menu** with the host (`Host: <name>`, the full name, or `Host: <destination> (ssh)` in remote mode, or `Host: <name> (ssh <destination>)` with `--resolve` when the reported name differs from the destination), the current values (user %, system %, idle %, the pressure level, and the percentage in use), and a **Quit glance** item.
+- `glance` has no Dock icon and no window.
+
+### Basic Usage
+
+```bash
+glance                         # start the status item in the background; a second run stops it
+glance -f                      # start it in the foreground, where it keeps the terminal
+glance --interval 2            # one sample every 2 seconds
+glance --sample                # print one reading as JSON, then stop
+glance --stream --count 3      # print 3 JSON lines, one each interval, then stop
+glance --host m1-ts            # show the charts of the Mac that ssh calls m1-ts; a second run stops only m1-ts
+glance --host m1-ts --resolve  # the same, with the name that the second Mac reports
+```
+
+### Options
+
+- `--interval <SECONDS>`: The time between two samples, in seconds. A decimal number is permitted. Defaults to `1`. A value below `0.25` is a usage error. A longer interval uses less CPU time and shows a longer history.
+- `--sample`: Take two readings one interval apart, print one JSON object, and stop. This mode needs no window server.
+- `--stream`: Print one JSON line for each interval until the standard output closes. A closed pipe stops the stream with status 0. This mode needs no window server, thus it runs in an SSH session. It cannot go with `--sample`.
+- `--count <N>`: Stop the stream after `N` lines. It needs `--stream`. With no `--count`, the stream has no limit.
+- `--host <DESTINATION>`: Show the charts of a second Mac. `DESTINATION` is anything that `ssh` takes: an alias of `~/.ssh/config`, `user@host`, or an address. A destination that is empty or that starts with `-` is a usage error. It cannot go with `--stream` or `--sample`.
+- `--remote-binary <PATH>`: The path of `glance` on the second Mac. Defaults to `~/.cargo/bin/glance`. It needs `--host`.
+- `--resolve`: Show the name that the second Mac reports (`hostname -s` on that Mac), not the destination as you typed it. Before the first line arrives, the status item shows the destination. It needs `--host`.
+- `-f`, `--foreground`: Run the status item in the process of the run, which keeps the terminal until the status item stops. Give it to a LaunchAgent (see [Start at login](#start-at-login)). With no `-f`, `glance` starts the status item in a copy that has no terminal, and returns to the shell when the status item is up. It cannot go with `--stream` or `--sample`.
+- `-V`, `--version`: Print the version, the git hash, and whether the build was clean.
+- `-h`, `--help`: Print the usage.
+
+### Start and stop
+
+Each Mac that `glance` shows has one status item: this Mac, and each destination of `--host`. A run of `glance` first looks for the status item of its own Mac. When that status item runs, the run stops it, starts nothing, and exits with status 0. Thus a second run of the same command closes the status item that the first run opened.
+
+```bash
+glance                    # glance: the status item runs as PID 4242. Run glance again to stop it.
+glance --host m1-ts       # glance: the status item of the host m1-ts runs as PID 4250. Run glance again with the same --host to stop it.
+glance --host m1-ts       # glance: stopped the status item of the host m1-ts that ran as PID 4250.
+glance                    # glance: stopped the status item that ran as PID 4242.
+```
+
+- **A run stops only the status item of its own Mac.** A plain run stops the local status item, never a status item of `--host`. A run with `--host m1-ts` stops only the status item of `m1-ts`.
+- **The Mac is the destination as you typed it.** `m1-ts` and `tim@m1-ts` are two different status items, even when they log in to the same Mac.
+- **A new status item runs in the background.** The start returns to the shell when the status item is up. `-f` keeps a new status item in the foreground.
+- **The default changed.** Before, a plain run kept the terminal, and `-b` started the status item in the background. Now a plain run starts it in the background. `-b` and `--background` are gone, and each one is a usage error. A LaunchAgent that runs a plain `glance` must get `--foreground` (see [Start at login](#start-at-login)).
+- **`--foreground` does not change which status item a run stops.** A run with or without `-f` stops the status item of its Mac. `-f` only decides where a new status item runs.
+- **`--resolve` does not change which status item a run stops.** `glance --host m1-ts` stops the status item that `glance --host m1-ts --resolve` started, and the reverse is also true.
+- **A background status item has no terminal.** It runs in a new session, thus the close of the terminal or Control-C does not stop it. Until the status item is up, the start shows what the copy writes to its standard error. After that, the standard output and the standard error of the status item go to `/dev/null`. The start returns when the status item is up, or it prints why the status item did not start and exits with status 1.
+- **A foreground status item (`-f`) keeps the terminal** until **Quit glance**, Control-C, or a second run. It prints the same line as a background start when it is up.
+- **`--sample` and `--stream` never stop a status item.**
+- **A stop is a quit.** The run sends `SIGTERM`, and the status item exits with status 0 at once, as **Quit glance** does. Thus a LaunchAgent does not start it again (see [Start at login](#start-at-login)). In remote mode, the `ssh` child then stops on its next write, as after `kill -9` (see [Show a second Mac](#show-a-second-mac)).
+- **A lock file marks each status item** in `~/Library/Application Support/glance/`: `local.lock`, and `host-<destination>.lock` for each destination. The name writes each byte of the destination as `%` and two hex digits, unless the byte is a lowercase letter, a digit, `.`, `-`, `_`, or `@`. The default file system of macOS folds case, so `Alpha` and `alpha` get two files. The kernel releases the lock when its status item ends, also after a crash or `kill -9`. Thus a lock file that stays behind stops nothing and blocks nothing. The files are not in `$TMPDIR`, because macOS deletes old files there, and the lock of a status item that runs for days must stay.
+
+### The `--sample` and `--stream` output
+
+`--sample` prints one JSON object, and `--stream` prints one for each line. The keys are `host` (the short host name of the Mac that read the kernel), `user`, `system`, and `idle` (fractions whose sum is 1), `pressure_level` (`normal`, `warn`, `critical`, or `unknown`), `pressure_level_raw` (the value of the kernel), and `pressure_percent` (the memory in use).
+
+```json
+{"host":"M4-Pro-Mac-Mini","user":0.08,"system":0.05,"idle":0.87,"pressure_level":"normal","pressure_level_raw":1,"pressure_percent":53}
+```
+
+In `--stream`, a failed read gives the line `{"host":"<name>","error":"<reason>"}`, and the stream continues.
+
+### Show a second Mac
+
+`glance --host <destination>` runs on the Mac at your desk. It starts one `ssh` child, and that child runs `glance --stream` on the second Mac. The connection stays open while the status item runs, thus each sample costs one line of text, not one SSH handshake. The charts, the colors, and the menu lines are the same as in local mode.
+
+1. Install `glance` on the second Mac: `cargo install --git https://github.com/timmattison/tools glance`.
+2. Make sure that `ssh <destination>` logs in with a key and asks for nothing. `glance` starts `ssh` with `BatchMode=yes`, thus a refused key gives an error line in the menu, never a password prompt.
+3. Start `glance --host <destination>` on the Mac at your desk. Run a second, local `glance` next to it to see both Macs.
+
+**The label shows the destination as you typed it**, for the full life of the status item. That is the name that you know the Mac by. `tim@m1-ts` stays `tim@m1-ts`, and `studio.example.com` is not cut at the first `.`. A destination that is too wide for the label ends in an ellipsis. The first line of the menu is `Host: <destination> (ssh)`.
+
+**This default changed.** Before, the label showed the name that the second Mac reports. To get that label, add `--resolve`. A wrong alias then cannot show a false name. Before the first line arrives, the label shows the destination. After that, it shows the name that the newest line reports, which is `hostname -s` on the second Mac. When that name is different from the destination, the first line of the menu is `Host: <name> (ssh <destination>)`.
+
+**The default remote binary is the full path `~/.cargo/bin/glance`**, where `cargo install` puts it. `sshd` runs the command through the login shell of the remote user with `-c`. zsh then reads `~/.zshenv`, but not `~/.zprofile` or `~/.zshrc`, thus a bare `glance` is often not on `PATH` there. For a different place, give `--remote-binary`:
+
+```bash
+glance --host m1-ts --remote-binary '~/bin/glance'      # ~/ is the home directory of the remote user
+glance --host m1-ts --remote-binary /opt/tools/glance   # an absolute path
+glance --host m1-ts --remote-binary glance              # a bare name: the remote PATH finds it
+```
+
+Put quotes around a value that starts with `~/`. Without the quotes, your local shell expands `~` to your local home directory before `glance` sees it. `glance` keeps a leading `~/` outside the quotes of the remote command, so that the remote shell expands it. It quotes the rest of the path, so a space or a quote in the path stays in one word.
+
+**When the connection stops**, the menu shows why, for example `Cannot read m1-ts: zsh:1: no such file or directory: /Users/tim/.cargo/bin/glance` or `Cannot read m1-ts: ssh: connect to host m1-ts port 22: Connection refused`. The reason is the last line that `ssh` wrote to its standard error, or its exit status. `glance` then connects again on its own: 5 seconds after the first stop, and twice as long after each failure, up to 60 seconds. The first sample of a connection sets the delay back to 5 seconds. The charts keep their history across a new connection.
+
+**No process stays behind.** **Quit glance** stops the `ssh` child before `glance` stops. When the connection closes, the remote `glance --stream` fails on its next write and stops. If the local `glance` stops with no clean-up (for example, `kill -9`), its end of the pipe closes, and `ssh` and then the remote `glance --stream` stop on their next write. If the network goes down, `ssh` finds the loss within about 45 seconds (`ServerAliveInterval=15`, `ServerAliveCountMax=2`), and the menu shows the error line.
+
+A remote `glance` that does not know `--stream` gives a usage error, and that error shows in the menu. Install the same version on both Macs.
+
+### Start at login
+
+`glance` has no "start at login" item. A LaunchAgent starts it instead. Write this file to `~/Library/LaunchAgents/com.timmattison.glance.plist`, and replace `YOU` with your account name. launchd does not expand `~`, thus the path must be complete.
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.timmattison.glance</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/YOU/.cargo/bin/glance</string>
+        <string>--foreground</string>
+    </array>
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+</dict>
+</plist>
+```
+
+Then load it:
+
+```bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.timmattison.glance.plist
+```
+
+`RunAtLoad` starts `glance` at each login. `KeepAlive` with `SuccessfulExit` set to `false` starts it again after a crash, but not after **Quit glance**, which exits with status 0. `--foreground` is necessary. Without it, `glance` starts a copy in a new session and exits with status 0. launchd then watches no process, and it does not start the status item again after a crash. A run of `glance` in a terminal stops it the same way, with status 0. To stop it and keep it stopped until the next login, run `launchctl bootout gui/$(id -u)/com.timmattison.glance`.
+
+For the status item of a second Mac, write a second file with its own label, for example `~/Library/LaunchAgents/com.timmattison.glance.m1-ts.plist`. Replace `m1-ts` with your SSH destination:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.timmattison.glance.m1-ts</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/YOU/.cargo/bin/glance</string>
+        <string>--foreground</string>
+        <string>--host</string>
+        <string>m1-ts</string>
+    </array>
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+</dict>
+</plist>
+```
+
+Load it with `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.timmattison.glance.m1-ts.plist`. launchd starts `glance` with its own `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`), thus `glance` runs `/usr/bin/ssh`, which reads `~/.ssh/config` as in a terminal. launchd does not give `glance` the variables that your shell sets. If `ssh` needs one of them, the menu shows the error of `ssh`.
+
+### Notes
+
+- **The sources.** The CPU ticks come from `host_statistics(HOST_CPU_LOAD_INFO)`. The pressure level is `kern.memorystatus_vm_pressure_level` (1 is normal, 2 is warn, 4 is critical). The percentage in use is `100 - kern.memorystatus_level`, and `kern.memorystatus_level` is the free percentage that `memory_pressure` prints.
+- **The height of the memory chart can be different from Activity Monitor.** Activity Monitor computes its graph with a formula that Apple does not document. The color is the level of the kernel, which is the same value that Activity Monitor uses.
+- **Activity Monitor calls the warn level yellow.** `glance` shows it orange.
+- **Weeks of uptime are safe.** The tick counters are 32 bits wide and wrap after about 31 days on a Mac with 16 cores. `glance` subtracts them with wrapping arithmetic, so a wrap does not show a false spike.
+- **Child processes and threads.** In local mode, the status item starts no child process and no thread. A start with no `--foreground` starts one copy of `glance`, which runs the status item, and one thread that reads the standard error of the copy. The start then ends. In remote mode, it starts one `ssh` child at a time and two threads that read its pipes. The remote Mac sends samples, not raw tick counters, thus one sample line is the same object that `--sample` prints.
+- **macOS only.** On a different platform, `glance` prints `glance supports macOS only.` and exits with status 1. The second Mac of `--host` must be a Mac too.
+
+### Install
+
+```bash
+cargo install --git https://github.com/timmattison/tools glance
+```
+
+## cctop (Claude Code top)
+
+cctop shows one row for each live Claude Code session, with its state: working, needs-you, idle, agents, or shells. A row also shows `frozen` when the process of the session is stopped. It keeps a log of the changes, and it sends a macOS notification when a session needs you. Enter brings the Zellij pane and the WezTerm window of the session to the front.
+
+To install: `cargo install --git https://github.com/timmattison/tools cctop`
+
+See [src/cctop/README.md](src/cctop/README.md) for the keys, the focus steps, and the limits.
+
+## chf (ch find)
+
+Find a Claude Code session by the words in its messages, and resume it.
+
+The `/resume` picker of Claude Code shows the sessions of one worktree by default. It does not open the expanded version of a compacted session. A person who remembers a word from a session, but not its folder, cannot find it. `chf` searches the sessions of every folder. It then resumes the session you pick with `ch` or `che`.
+
+Run `chf` and type words. The list changes at each key press. A preview of the messages around the first match shows beside the list, or below it on a terminal narrower than 100 columns.
+
+```bash
+chf
+```
+
+### Keys
+
+| Key | Action |
+| --- | --- |
+| Up, Down, `Ctrl-P`, `Ctrl-N` | Move the selection. |
+| PageUp, PageDown | Move the selection by one page. |
+| Shift-Up, Shift-Down | Scroll the preview. |
+| `Ctrl-U` | Clear the query. |
+| Enter | Resume the selected session. |
+| Esc, `Ctrl-C` | Quit. |
+
+### Matching rules
+
+- Each word is a literal text. There is no fuzzy match.
+- Each word must occur in the session. Words can occur in different messages.
+- The case rule is "smart case" for each word. A word in lowercase matches text in any case. A word with a capital letter matches only that capital letter.
+- The case folding follows Unicode.
+
+### The row
+
+Each row shows the time of the last message, a `⇊` mark with the count of compactions for a session that Claude Code compacted, the folder, and the title of the session. The preview header shows the session id, the folder, and the git branch.
+
+### A compacted session
+
+When you press Enter on a compacted session, `chf` asks which version to resume. Press `c` for `ch`, the compacted version. Press `e` for `che`, the expanded version. The question shows the token count of the conversation before the last compaction. The expanded version holds all of those tokens. Thus it can fill the context window of Claude at once. The question also tells you when the first match is in a message from before the last compaction. The compacted version holds that message only as part of a summary.
+
+### Requirements
+
+`chf` runs `crap --here` through `$SHELL -ic`. Thus:
+
+- The `crap` shell function must exist. Run `crap --shell-setup` to install it.
+- `$SHELL` must be `bash` or `zsh`. For other shells, `chf` prints the command to paste.
+- `CRAP_LAUNCHER` applies, because the shell function starts Claude.
+
+### The cache
+
+`chf` keeps its index in `<cache dir>/chf`. It writes one file for each project folder. The directory has mode 0700 and each file has mode 0600. The first run reads every transcript and shows its progress. Later runs read only the files that changed. If `chf` cannot read a project folder or the store, it counts it as unreadable and keeps its cache files. If `chf` cannot stat a transcript, it counts it as unreadable and keeps its cache entry.
+
+### What `chf` does not search
+
+- Tool calls
+- Tool results
+- Thinking blocks
+- Transcripts of subagents
+
+### Exit codes
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | `chf --help` and `chf --version` print their text and exit with this code. |
+| 1 | A failure, or a `$SHELL` that is not `bash` or `zsh`. |
+| 2 | Standard input or standard output is not a terminal, or `chf` cannot find the home directory. |
+| 130 | You pressed Esc or `Ctrl-C`. |
+
+After Enter, `chf` replaces itself with the shell that runs `crap`. The exit status is then the status of that shell. This status can be any of the codes above or another code.
+
+### Install
+
+```bash
+cargo install --git https://github.com/timmattison/tools chf
 ```

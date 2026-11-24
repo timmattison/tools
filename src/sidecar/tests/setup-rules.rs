@@ -488,7 +488,7 @@ fn without_hook_an_unlinked_sidecar_gives_exit_1() {
 
 /// The process number of a process that has ended.
 fn dead_pid() -> u32 {
-    let mut child = std::process::Command::new("true")
+    let mut child = childenv::fixture_command("true")
         .spawn()
         .expect("start `true`");
     let pid = child.id();
