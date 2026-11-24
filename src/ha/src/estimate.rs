@@ -110,6 +110,22 @@ impl<'a> Estimates<'a> {
             Some(Remaining::Over(elapsed.saturating_sub(mean)))
         }
     }
+
+    /// The time until an active run finishes, at `now`, or `None`.
+    ///
+    /// `jobs` are the jobs of `run`. The result is `None` for a run that is not
+    /// active, and for a run with no jobs. It is also `None` when one job that
+    /// counts has no estimate. See the module documentation for the rule.
+    #[must_use]
+    pub fn run_remaining(
+        &self,
+        run: &Run,
+        jobs: &[Job],
+        now: DateTime<Utc>,
+    ) -> Option<Remaining> {
+        let _ = (run, jobs, now);
+        None
+    }
 }
 
 #[cfg(test)]
@@ -381,6 +397,88 @@ mod tests {
         assert_eq!(
             remaining_of(&history, &run(9, REPO, "CI"), &live),
             Some(Remaining::Left(secs(200)))
+        );
+    }
+
+    /// A run of the given state.
+    fn run_in(id: u64, state: RunState) -> Run {
+        let mut made = run(id, REPO, "CI");
+        made.state = state;
+        made
+    }
+
+    /// Seconds after `at(0)` of a time `seconds` before `now()`.
+    fn ago(seconds: i64) -> i64 {
+        7200 - seconds
+    }
+
+    /// The jobs of one past run of the chain: build, test, and deploy.
+    fn chain_jobs() -> Vec<Job> {
+        vec![
+            passed(1, "build", RUNNER, 300, 300),
+            passed(2, "test", RUNNER, 900, 600),
+            passed(3, "deploy", RUNNER, 1020, 120),
+        ]
+    }
+
+    fn run_remaining_of(history: &[(Run, Vec<Job>)], jobs: &[Job]) -> Option<Remaining> {
+        let current = run(99, REPO, "CI");
+        let estimates = Estimates::new(
+            history.iter().map(|(past, list)| (past, list.as_slice())),
+            now(),
+        );
+        estimates.run_remaining(&current, jobs, now())
+    }
+
+    fn chain() -> Vec<(Run, Vec<Job>)> {
+        vec![(run_in(1, RunState::Passed), chain_jobs())]
+    }
+
+    fn assert_text(value: Option<Remaining>, expected: Remaining, text: &str) {
+        assert_eq!(value, Some(expected));
+        assert_eq!(crate::render::format_remaining(expected), text);
+    }
+
+    #[test]
+    fn the_chain_example_gives_the_time_until_the_run_finishes() {
+        let history = chain();
+        // Build runs 120 s. Its term is 180 s left plus a tail of 720 s.
+        let jobs = [running(10, "build", Some(RUNNER), 120)];
+        assert_text(
+            run_remaining_of(&history, &jobs),
+            Remaining::Left(secs(900)),
+            "~15m",
+        );
+        // Build passed. Test waits. The queued term is 600 + 120 s.
+        let jobs = [
+            passed(10, "build", RUNNER, ago(30), 300),
+            job(11, "test", RunState::Queued, None, None, None),
+        ];
+        assert_text(
+            run_remaining_of(&history, &jobs),
+            Remaining::AtLeast(secs(720)),
+            ">12m",
+        );
+        // Test runs past its mean. The build term still gives the latest end.
+        let jobs = [
+            passed(10, "build", RUNNER, ago(780), 300),
+            running(11, "test", Some(RUNNER), 780),
+        ];
+        assert_text(
+            run_remaining_of(&history, &jobs),
+            Remaining::Left(secs(120)),
+            "~2m 00s",
+        );
+        // Deploy runs past its mean, and each earlier job is late too.
+        let jobs = [
+            passed(10, "build", RUNNER, ago(750), 300),
+            passed(11, "test", RUNNER, ago(150), 600),
+            running(12, "deploy", Some(RUNNER), 150),
+        ];
+        assert_text(
+            run_remaining_of(&history, &jobs),
+            Remaining::Over(secs(30)),
+            "+30s",
         );
     }
 }
