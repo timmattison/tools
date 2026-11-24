@@ -362,6 +362,40 @@ fn read_binary_writes_a_pair_with_operation_read_binary() {
     assert_eq!(records[1]["outcome"], "ok");
 }
 
+#[test]
+fn list_fields_writes_a_pair_with_operation_item_get_and_never_a_value() {
+    let fixture = Fixture::new();
+    let value = unique_token("field");
+    // Called as: op item get <item> --vault <vault> --format json
+    fixture.install_fake_op(&format!(
+        r#"[ "$1 $2 $3 $4 $5" = "item get Item --vault Private" ] || exit 9
+printf '%s' '{{"title":"Item","fields":[{{"label":"credential","value":"{value}"}}]}}'"#
+    ));
+
+    let output = fixture
+        .command()
+        .args(["list-fields", "op://Private/Item"])
+        .output()
+        .expect("run op-cache");
+
+    assert!(
+        output.status.success(),
+        "op-cache failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "  credential\n");
+    let text = audit_text(&fixture);
+    assert!(!text.contains(&value), "a field value reached the trail");
+    let records = records(&text);
+    assert_eq!(records.len(), 2, "audit file: {text}");
+    assert_eq!(records[0]["event"], "op_start");
+    assert_eq!(records[0]["operation"], "item-get");
+    assert_eq!(records[0]["reference"], "op://Private/Item");
+    assert_eq!(records[1]["event"], "op_end");
+    assert_eq!(records[1]["request_id"], records[0]["request_id"]);
+    assert_eq!(records[1]["outcome"], "ok");
+}
+
 const OP_MUST_NOT_RUN: &str = "echo 'op must not run' >&2\nexit 1";
 
 #[test]
