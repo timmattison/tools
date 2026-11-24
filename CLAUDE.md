@@ -274,6 +274,8 @@ full path, `shellquote::shell_quote(...)`, where the call site sits behind a
 - `aws2env` - the value of each credential it prints, when the value needs
   quotes. A value that holds only letters, digits, `_`, `-`, `.` and `/`
   prints bare, because a person reads that output before they paste it
+- `chf` - the session id in the shell script it runs, and in the command it
+  prints for a person to paste
 - `crap` - the paths that the tests of the shell function put into the fake
   scripts
 - `faulte` - the text and the PID file path that the stream tests put into
@@ -542,6 +544,283 @@ constructor or states an exemption at its site. It does not prove three things:
   test asks `cargo metadata` whether the read set holds every target root cargo
   builds, so a directory the walk never reaches shows up as a set difference
   instead of a clean report
+
+## Alternate Screen
+
+Every tool in this repository that enters the alternate screen of the terminal
+**must** enter it through the `altscreen` library crate at `src/altscreen/`. A
+raw entry fails the build or the guard.
+
+### Why
+
+A tool that enters the alternate screen depends on the terminal to clear it.
+xterm clears the screen for mode 1049, but the emulator in the mosh server
+ignores the modes 47, 1047 and 1049. Thus the text of the shell stays on the
+screen.
+
+ratatui does not help. It sends no clear at startup, and its first frame is a
+diff against an empty buffer. Thus ratatui writes only the cells that are not
+blank, and the shell text shows through each blank cell. `gitrdun` and `cctop`
+shipped this defect. `ha` had it until PR #596 (branch `issue-592`) put a clear
+into its view loop. Issue #593 moved that clear into one helper.
+
+Ten tools had their own code to enter the alternate screen, and each one gave a
+different subset of the guarantees below. `gitrdun` and `runat` left the shell
+in raw mode after a panic. `diskhog` and `runat` called `Terminal::clear`, which
+asks the terminal for the cursor position and waits for the answer. A terminal
+that does not answer, for example a recording under `script`, stopped them at
+the start.
+
+### What the Helper Guarantees
+
+- The erase of the whole screen goes out in the same write as the entry.
+- A failed entry leaves no raw mode.
+- Each exit restores the terminal: a drop, an error, and a panic.
+- A panic restores the terminal first, so the panic message prints on the
+  screen of the shell.
+- The session never asks the terminal for the cursor position.
+
+### Usage
+
+Take the crate with `altscreen.workspace = true`. A tool that paints the screen
+itself holds a `Session`:
+
+```rust
+let _session = altscreen::Session::enter(altscreen::Options::default())?;
+```
+
+A tool that draws with ratatui takes the feature `ratatui`, and draws on the
+`Terminal` of the session:
+
+```toml
+altscreen = { workspace = true, features = ["ratatui"] }
+```
+
+```rust
+let mut session = altscreen::RatatuiSession::enter(altscreen::Options::default())?;
+session.terminal().draw(|frame| render(frame))?;
+```
+
+`Options` has two settings:
+
+- `raw_mode(false)` is for a tool that holds raw mode another way. `ic` holds it
+  through termion.
+- `mouse_capture(true)` turns mouse capture on, and the restore turns it off.
+  `runat` uses it.
+
+To restore the terminal before the tool does more work, drop the session.
+`runat` does this before it runs its command, and `diskhog` does it before it
+prints its shutdown errors.
+
+### The Ban
+
+`clippy.toml` bans the spellings that clippy can see:
+
+- `disallowed-types`: the `use` of `crossterm::terminal::EnterAlternateScreen`,
+  `termion::screen::ToAlternateScreen` and `termion::screen::AlternateScreen`.
+  A `use … as` rename and the re-export through `ratatui::crossterm` are caught
+  too.
+- `disallowed-methods`: `ratatui::init`, `ratatui::try_init`, `ratatui::run`, and
+  the `into_alternate_screen` method of termion.
+
+`ratatui::init_with_options` and `ratatui::try_init_with_options` stay open. They
+do not enter the alternate screen, and an inline viewport is a correct use of
+them.
+
+`altscreen` is the one legitimate user. It says so at its import with
+`#[expect(clippy::disallowed_types, reason = "...")]`, and clippy fails if that
+expectation stops being fulfilled.
+
+### The Guard
+
+Clippy does not see three spellings. `disallowed-types` checks `use` items, not
+a unit struct in the position of a value, so
+`execute!(out, crossterm::terminal::EnterAlternateScreen)` with no import passes
+it. A name that a glob import brings in passes it too. Clippy reads no string
+literal, so `print!("\x1b[?1049h")` passes it.
+
+`repo_guards::alternate_screen` reads tokens to close that gap. It has two
+rules:
+
+- **The identifier rule.** No identifier token is `EnterAlternateScreen`,
+  `ToAlternateScreen`, `AlternateScreen`, `IntoAlternateScreen` or
+  `into_alternate_screen`. A comment and a string are not identifier tokens, so
+  prose stays data. A local type named `AlternateScreen` is reported too. That
+  failure is loud, and a rename fixes it.
+- **The literal rule.** No string literal, byte string literal or C string
+  literal holds a DEC private mode set (`ESC [ ? Pm h`, or the 8-bit CSI) whose
+  parameters include 47, 1047 or 1049. The rule reads the value of the literal
+  after the escapes, so each spelling of ESC is one spelling. It parses the
+  parameter list, so `\x1b[?25;1049h` is caught. A leave sequence (`…l`) is not
+  reported.
+
+The guard reads the same set of files as `repo_guards::git_env_sweep`: the Rust
+that cargo compiles. It parses each file first, so a file that does not parse
+is a refusal and not a clean report.
+
+### The Exemptions
+
+`repo_guards::alternate_screen::EXEMPTIONS` keys each entry on (file, spelling),
+so a new spelling in an exempt file is still a violation. An entry that matches
+nothing is reported, so a stale entry fails too. The list holds three entries:
+
+- `src/altscreen/src/lib.rs`, `EnterAlternateScreen` — the one entrance. It
+  writes the entry command into the bytes of its entry write.
+- `src/altscreen/src/lib.rs`, `CSI ?1049 h` — its unit tests expect the exact
+  entry bytes.
+- `src/krt/tests/terminal.rs`, `CSI ?1049 h` — the pty tests of `krt` search the
+  output for the entry sequence. They write to no user terminal.
+
+### What the Ban and the Guard Do Not Prove
+
+- A sequence that code builds at runtime, for example
+  `format!("\x1b[?{}h", 1049)`.
+- A sequence that `concat!` joins from parts.
+
+### Guards Enforcing This
+
+- `clippy.toml` `disallowed-types` and `disallowed-methods` — the spellings of
+  "The Ban" fail the build
+- `repo_guards::alternate_screen` (`src/repo-guards/src/alternate_screen.rs`) —
+  no file cargo compiles names a listed identifier or holds an entry sequence,
+  other than the exempt ones. `src/repo-guards/tests/alternate_screen.rs` holds
+  one fixture for each syntactic form, and one test that audits this workspace
+
+### Tools Currently Using altscreen
+
+- `beta` - the player of a recording
+- `cctop` - the full-screen view, through the ratatui session
+- `chf` - the picker, through the ratatui session
+- `diskhog` - the full-screen view, through the ratatui session
+- `gitrdun` - the progress view, through the ratatui session
+- `gsw` - the watch view
+- `ha` - the full-screen view, through the ratatui session
+- `ic` - the video player, with raw mode off, because termion holds raw mode
+- `krt` - the live view
+- `runat` - the countdown view, through the ratatui session, with mouse capture
+- `seescc` - the watch view
+
+## System Clipboard
+
+Every tool in this repository that reads or writes the clipboard of the machine
+**must** go through the `sysclip` library crate at `src/sysclip/`. A direct
+dependency on `arboard` fails the guard, and a direct use of its clipboard fails
+clippy.
+
+### Why
+
+The mosh-rs server puts a `pbcopy` shim and a `pbpaste` shim on the `PATH` of
+each session, and it sets `MOSH_OPEN_SOCKET`. Each shim sends the text through
+that socket to the clipboard of the client computer, which is the clipboard of
+the person at the keyboard.
+
+`arboard` does not know about the shims. It opens the clipboard of the server.
+On a Mac where the session cannot reach the pasteboard of a GUI login, AppKit
+gives no pasteboard, and `arboard` fails with "The selected clipboard is not
+supported with the current system configuration". On a Linux server with no
+display, it fails with an X11 timeout. On a Mac with a GUI login, it succeeds,
+and that is worse: the text goes to the pasteboard of the server, and the
+person at the client does not get it.
+
+Five crates used `arboard` directly, and two of them kept their own copy of the
+same error map. A private fallback in each crate is five copies that drift.
+
+### The Order Rule
+
+`sysclip::Clipboard::open` picks the clipboard in this order:
+
+1. If `MOSH_OPEN_SOCKET` is set and not empty, the session has the shims.
+   `sysclip` runs `pbcopy` or `pbpaste` from `PATH` and never opens `arboard`.
+   A failure of the command is the answer, because the pasteboard of the server
+   is not the clipboard of the user.
+2. Else, `sysclip` uses `arboard`. If `arboard` fails, `sysclip` runs `pbcopy`
+   or `pbpaste` from `PATH`. `ContentNotAvailable` on a read is not a failure.
+   It is an empty clipboard.
+3. If `PATH` holds no such command, the error is the `arboard` error.
+4. If both fail, the error names both causes.
+
+A command gets the text on its standard input, and gives the text on its
+standard output. A non-zero exit is a failure, and the error holds the first
+line of its standard error, for example `mosh-open: did not paste: …`.
+
+`sysclip::Clipboard::open_native` skips the commands. It is for a tool that
+polls. The mosh-rs client allows 5 pastes in each 10 seconds, and it shows each
+paste on its notification bar, so a poll through `pbpaste` each 500 ms fails
+and fills the bar. `clipboardmon` uses it.
+
+### Usage
+
+Take the crate with `sysclip.workspace = true`:
+
+```rust
+let mut clipboard = sysclip::Clipboard::open()?;
+clipboard.write("/tmp/somewhere")?;
+let text = clipboard.read()?; // an empty string when the clipboard holds no text
+```
+
+The error type, `sysclip::ClipboardError`, holds a message. It has no trailing
+period, so a caller can put it inside a longer sentence.
+
+No test reaches the clipboard of the machine. The order rule takes the opener
+of `arboard`, the environment and the search path as parameters, so the unit
+tests of `sysclip` cover each branch and set no process variable. An end-to-end
+test starts the binary with `MOSH_OPEN_SOCKET` set and with a `PATH` that holds
+a fake `pbcopy` and `pbpaste` in a temporary directory of its own. `dirc`,
+`wn`, `clipboard-random` and `update-aws-credentials` hold such tests.
+`sysclip::testing::FakeShims` (feature `testing`, as a dev-dependency) writes
+those fake commands. Each such test takes them from that one place.
+
+### The Ban
+
+`clippy.toml` bans `arboard::Clipboard` in `disallowed-types` and
+`arboard::Clipboard::new` in `disallowed-methods`. A call of
+`arboard::Clipboard::new` raises both lints, and a name of the type in a `use`,
+a signature or a field raises `disallowed_types`. `disallowed_methods` is
+`deny` in the workspace lint set, and the pre-commit hook runs clippy with
+`-D warnings`, so each spelling fails the gate. The ban matches the name of the
+crate, so a renamed dependency and a `use … as` rename are caught too.
+
+`sysclip` is the one legitimate user. It says so at each of its sites with
+`#[expect(clippy::disallowed_types, reason = "...")]` (and
+`clippy::disallowed_methods` at the call), and clippy fails if that
+expectation stops being fulfilled.
+
+### The Guard
+
+`repo_guards::arboard_wall` reads `cargo metadata`. It fails when a workspace
+member other than `sysclip` has a direct dependency on the package `arboard`,
+of any kind: normal, dev or build, for every target. It matches the name of the
+package, so a renamed dependency (`clip = { package = "arboard", … }`) is
+caught. It refuses a result where `sysclip` itself is missing, because a guard
+that finds no owner proves nothing.
+
+### What the Ban and the Guard Do Not Prove
+
+- A dependency of a dependency. A crate outside this workspace that opens the
+  clipboard itself is out of reach of both.
+- A tool that runs `pbcopy` or `xclip` itself with `childenv::command`. That is
+  a spawn, not a use of `arboard`.
+- Clippy on macOS does not compile a `#[cfg(windows)]` site.
+
+### Guards Enforcing This
+
+- `clippy.toml` `disallowed-types` and `disallowed-methods` — a use of
+  `arboard::Clipboard` outside `sysclip` fails the build.
+  `src/repo-guards/tests/arboard_ban.rs` runs clippy on a fixture of each form
+  and reads the real `clippy.toml`.
+- `repo_guards::arboard_wall` (`src/repo-guards/src/arboard_wall.rs`) — no
+  workspace member other than `sysclip` depends on `arboard`.
+  `src/repo-guards/tests/arboard_wall.rs` holds one fixture for each kind of
+  dependency and one for the rename, and one test that audits this workspace.
+
+### Crates Currently Using sysclip
+
+- `clipboard-random` - each write of the generated data
+- `clipboardmon` - the poll of the board tools, through `open_native`
+- `dirc` - `SystemClipboard`. `FileClipboard` and `DIRC_CLIPBOARD_FILE` stay
+- `update-aws-credentials` - the read of the credentials
+- `wn` - the read of the chain, and the write of the plan. `WN_NO_CLIPBOARD`
+  stays
 
 ## Version Information
 

@@ -7,7 +7,7 @@
 
 use std::num::NonZeroUsize;
 
-use crate::connection::Event;
+use crate::connection::{Event, HostNaming};
 use crate::history::History;
 use crate::host::HostName;
 use crate::sample::{Reading, Sample};
@@ -85,31 +85,48 @@ impl KernelInput {
 }
 
 /// The rules of remote mode.
+///
+/// The [`HostNaming`] of the input decides the name that [`origin`] gives.
+///
+/// [`origin`]: RemoteInput::origin
 #[derive(Debug)]
 pub struct RemoteInput {
     destination: String,
+    naming: HostNaming,
     host: Option<HostName>,
 }
 
 impl RemoteInput {
     /// An input for the SSH `destination`, as the user typed it.
+    ///
+    /// With [`HostNaming::Destination`], the name is the destination for the
+    /// full life of the input. With [`HostNaming::Reported`], the name is the
+    /// host that the newest line reports.
     #[must_use]
-    pub fn new(destination: String) -> RemoteInput {
+    pub fn new(destination: String, naming: HostNaming) -> RemoteInput {
         RemoteInput {
             destination,
+            naming,
             host: None,
         }
     }
 
     /// Applies one event of the connection to `view`.
+    ///
+    /// A sample is pushed and clears the error. A read error and an end set
+    /// the error. With [`HostNaming::Reported`], a sample and a read error
+    /// that has a host also keep that host as the name. With
+    /// [`HostNaming::Destination`], no event changes the name.
     pub fn apply(&mut self, event: Event, view: &mut View) {
         match event {
             Event::Sample { host, sample } => {
-                self.host = Some(host);
+                if self.naming == HostNaming::Reported {
+                    self.host = Some(host);
+                }
                 view.push_sample(sample);
             }
             Event::ReadError { host, reason } => {
-                if let Some(name) = host {
+                if let (HostNaming::Reported, Some(name)) = (self.naming, host) {
                     self.host = Some(name);
                 }
                 view.fail(reason);
@@ -120,8 +137,10 @@ impl RemoteInput {
 
     /// The Mac that the values come from.
     ///
-    /// The host is the host of the newest line, or the destination before the
-    /// first line.
+    /// With [`HostNaming::Destination`], the host is the destination. With
+    /// [`HostNaming::Reported`], the host is the host of the newest line, or
+    /// the destination before the first line. The destination is always
+    /// present.
     #[must_use]
     pub fn origin(&self) -> Origin<'_> {
         Origin {
@@ -189,16 +208,16 @@ mod tests {
         }
     }
 
-    fn remote() -> (RemoteInput, View) {
+    fn remote(naming: HostNaming) -> (RemoteInput, View) {
         (
-            RemoteInput::new(DESTINATION.to_owned()),
+            RemoteInput::new(DESTINATION.to_owned(), naming),
             View::new(CAPACITY),
         )
     }
 
     #[test]
     fn a_view_keeps_the_number_of_samples_that_it_gets() {
-        let (mut input, mut view) = remote();
+        let (mut input, mut view) = remote(HostNaming::Reported);
         for share in 0..10 {
             input.apply(line(FULL_HOST, sample_of(share, 100 - share)), &mut view);
         }
@@ -242,7 +261,7 @@ mod tests {
 
     #[test]
     fn a_remote_sample_sets_the_host_pushes_and_clears_the_error() {
-        let (mut input, mut view) = remote();
+        let (mut input, mut view) = remote(HostNaming::Reported);
         input.apply(read_error(None, REASON_ONE), &mut view);
         input.apply(line(FULL_HOST, sample_of(10, 90)), &mut view);
         assert_eq!(input.origin().host, SHORT_HOST);
@@ -252,7 +271,7 @@ mod tests {
 
     #[test]
     fn a_remote_read_error_with_a_host_changes_the_host_and_sets_the_error() {
-        let (mut input, mut view) = remote();
+        let (mut input, mut view) = remote(HostNaming::Reported);
         input.apply(line(FULL_HOST, sample_of(10, 90)), &mut view);
         input.apply(read_error(Some(OTHER_HOST), REASON_ONE), &mut view);
         assert_eq!(input.origin().host, OTHER_SHORT_HOST);
@@ -262,7 +281,7 @@ mod tests {
 
     #[test]
     fn a_remote_read_error_with_no_host_keeps_the_host() {
-        let (mut input, mut view) = remote();
+        let (mut input, mut view) = remote(HostNaming::Reported);
         input.apply(line(FULL_HOST, sample_of(10, 90)), &mut view);
         input.apply(read_error(None, REASON_TWO), &mut view);
         assert_eq!(input.origin().host, SHORT_HOST);
@@ -271,7 +290,7 @@ mod tests {
 
     #[test]
     fn a_remote_end_sets_the_error_and_keeps_the_host_and_the_history() {
-        let (mut input, mut view) = remote();
+        let (mut input, mut view) = remote(HostNaming::Reported);
         input.apply(line(FULL_HOST, sample_of(10, 90)), &mut view);
         input.apply(
             Event::Ended {
@@ -286,7 +305,7 @@ mod tests {
 
     #[test]
     fn before_the_first_line_the_origin_names_the_destination() {
-        let (input, _view) = remote();
+        let (input, _view) = remote(HostNaming::Reported);
         let origin = input.origin();
         assert_eq!(origin.host, DESTINATION);
         assert_eq!(origin.destination, Some(DESTINATION));
@@ -294,10 +313,27 @@ mod tests {
 
     #[test]
     fn after_a_sample_the_origin_keeps_the_destination_and_shows_the_short_host() {
-        let (mut input, mut view) = remote();
+        let (mut input, mut view) = remote(HostNaming::Reported);
         input.apply(line(FULL_HOST, sample_of(10, 90)), &mut view);
         let origin = input.origin();
         assert_eq!(origin.host, SHORT_HOST);
         assert_eq!(origin.destination, Some(DESTINATION));
+    }
+
+    #[test]
+    fn without_resolve_a_sample_keeps_the_destination_as_the_name() {
+        let (mut input, mut view) = remote(HostNaming::Destination);
+        input.apply(line(FULL_HOST, sample_of(10, 90)), &mut view);
+        assert_eq!(input.origin().host, DESTINATION);
+        assert_eq!(input.origin().destination, Some(DESTINATION));
+        assert_eq!(view.history().newest(), Some(sample_of(10, 90)));
+    }
+
+    #[test]
+    fn without_resolve_a_read_error_with_a_host_keeps_the_destination_as_the_name() {
+        let (mut input, mut view) = remote(HostNaming::Destination);
+        input.apply(read_error(Some(OTHER_HOST), REASON_ONE), &mut view);
+        assert_eq!(input.origin().host, DESTINATION);
+        assert_eq!(view.error(), Some(REASON_ONE));
     }
 }

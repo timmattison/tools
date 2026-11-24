@@ -16,8 +16,8 @@ const READ_ERROR_LOCAL_PREFIX: &str = "Cannot read the kernel: ";
 const READ_ERROR_REMOTE_PREFIX: &str = "Cannot read ";
 /// The start of the host line.
 const HOST_LINE_PREFIX: &str = "Host: ";
-/// The word before the SSH destination in the host line.
-const SSH_WORD: &str = "ssh ";
+/// The word that names the SSH connection in the host line.
+const SSH_WORD: &str = "ssh";
 /// The key of the short host name in the JSON line.
 const KEY_HOST: &str = "host";
 /// The key of the reason in the JSON line of a failed read.
@@ -317,20 +317,29 @@ fn sample_of(object: &Map<String, Value>) -> Result<Sample, LineError> {
 /// Where the values of the menu come from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Origin<'a> {
-    /// The name of the Mac whose kernel gave the values.
+    /// The name that the status item shows for the Mac whose kernel gave the values.
+    /// In remote mode, it is the destination, or with `--resolve` the name that the
+    /// second Mac reports.
     pub host: &'a str,
     /// The SSH destination in remote mode, as the user typed it. `None` in local mode.
     pub destination: Option<&'a str>,
 }
 
-/// The first info line of the menu. It names the Mac and, in remote mode, the SSH destination.
+/// The first info line of the menu. It has three forms:
+///
+/// - Local mode: `Host: <host>`.
+/// - Remote mode, with a name that is the destination: `Host: <destination> (ssh)`.
+/// - Remote mode, with a name that is not the destination: `Host: <host> (ssh <destination>)`.
 ///
 /// The line is never truncated.
 #[must_use]
 pub fn host_line(origin: &Origin<'_>) -> String {
     match origin.destination {
+        Some(destination) if destination == origin.host => {
+            format!("{HOST_LINE_PREFIX}{destination} ({SSH_WORD})")
+        }
         Some(destination) => format!(
-            "{HOST_LINE_PREFIX}{} ({SSH_WORD}{destination})",
+            "{HOST_LINE_PREFIX}{} ({SSH_WORD} {destination})",
             origin.host
         ),
         None => format!("{HOST_LINE_PREFIX}{}", origin.host),
@@ -744,10 +753,23 @@ mod tests {
     }
 
     #[test]
-    fn the_host_line_in_remote_mode_names_the_destination() {
+    fn the_host_line_names_the_destination_once_when_it_is_the_name() {
+        let origin = Origin {
+            host: "m1-ts",
+            destination: Some("m1-ts"),
+        };
+        assert_eq!(host_line(&origin), "Host: m1-ts (ssh)");
+    }
+
+    #[test]
+    fn the_host_line_names_both_when_the_name_is_not_the_destination() {
+        let origin = Origin {
+            host: "studio",
+            destination: Some("me@studio.example.com"),
+        };
         assert_eq!(
-            host_line(&remote(DESTINATION)),
-            "Host: m1-ts (ssh tim@m1.local)"
+            host_line(&origin),
+            "Host: studio (ssh me@studio.example.com)"
         );
     }
 

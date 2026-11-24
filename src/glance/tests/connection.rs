@@ -4,7 +4,7 @@
 //! and runs the built `glance --stream`, so no test changes `PATH`.
 
 use glance::connection::{
-    Connection, Destination, Event, Feed, Remote, RemoteBinary, FIRST_RETRY_DELAY,
+    Connection, Destination, Event, Feed, HostNaming, Remote, RemoteBinary, FIRST_RETRY_DELAY,
 };
 use glance::host::HostName;
 use glance::interval::Interval;
@@ -349,6 +349,7 @@ fn remote() -> Remote {
     Remote {
         destination: DESTINATION.parse().expect("a destination"),
         remote_binary: RemoteBinary::default(),
+        naming: HostNaming::Destination,
     }
 }
 

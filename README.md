@@ -128,6 +128,9 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
 - update-aws-credentials
     - Takes AWS credentials from your clipboard in the format provided by AWS SSO and writes it to
       your AWS config file. This is useful if you're using AWS SSO and you want to use the AWS CLI locally.
+    - In a mosh-rs session, it reads the clipboard of your client computer through the `pbpaste` shim that the
+      mosh-rs server puts on `PATH`. That read needs `MOSH_ALLOW_PASTE=1` on the client. When paste is off, the shim
+      runs the next `pbpaste` on `PATH`, which is the `pbpaste` of the server.
     - To install: `cargo install --git https://github.com/timmattison/tools update-aws-credentials`
 - sf (size of files)
     - Shows you the total size of files in the specified directories (and subdirectories) in a human-readable format. 
@@ -158,9 +161,13 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
     - To install: `cargo install --git https://github.com/timmattison/tools thermal-watch`
 - htmlboard
     - Waits for HTML to be put on the clipboard and then pretty prints it and puts it back in the clipboard.
+    - In a mosh-rs session, it watches the clipboard of the server, not the clipboard of your client computer. It
+      reads the clipboard each 500 ms, and the mosh-rs client allows only 5 pastes in each 10 seconds.
     - To install: `cargo install --git https://github.com/timmattison/tools htmlboard`
 - jsonboard
     - Waits for JSON to be put on the clipboard and then pretty prints it and puts it back in the clipboard.
+    - In a mosh-rs session, it watches the clipboard of the server, not the clipboard of your client computer. It
+      reads the clipboard each 500 ms, and the mosh-rs client allows only 5 pastes in each 10 seconds.
     - To install: `cargo install --git https://github.com/timmattison/tools jsonboard`
 - bm
     - Bulk Move - recursively find and move files matching a pattern to a destination directory. Named "bm" because
@@ -181,6 +188,8 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
     - To install: `cargo install --git https://github.com/timmattison/tools localnext`
 - unescapeboard
     - Waits for text with `\\"` in it to be put on the clipboard and then unescapes one level of it.
+    - In a mosh-rs session, it watches the clipboard of the server, not the clipboard of your client computer. It
+      reads the clipboard each 500 ms, and the mosh-rs client allows only 5 pastes in each 10 seconds.
     - To install: `cargo install --git https://github.com/timmattison/tools unescapeboard`
 - prhash
     - Hashes files with the requested hashing algorithm (MD5, SHA1, SHA256, SHA512, Blake3) and shows the progress
@@ -242,12 +251,16 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
     - Waits for text that looks like a YouTube video URL to be put on the clipboard and then extracts the video ID from
       it.
       I use this for deep linking videos to my Roku TVs through their APIs.
+    - In a mosh-rs session, it watches the clipboard of the server, not the clipboard of your client computer. It
+      reads the clipboard each 500 ms, and the mosh-rs client allows only 5 pastes in each 10 seconds.
     - To install: `cargo install --git https://github.com/timmattison/tools tubeboard`
 - safeboard
     - Monitors clipboard for dangerous Unicode characters that could be used in copy-paste attacks. Detects invisible 
       characters like zero-width spaces, directional overrides, and private use area characters that attackers use to 
       hide malicious code or commands. Options include `--audible` for sound alerts and `--modify` to prepend a warning 
       to dangerous content. Includes a test script to verify functionality.
+    - In a mosh-rs session, it watches the clipboard of the server, not the clipboard of your client computer. It
+      reads the clipboard each 500 ms, and the mosh-rs client allows only 5 pastes in each 10 seconds.
     - To install: `cargo install --git https://github.com/timmattison/tools safeboard`
 - gitrdun
     - Shows your recent git commits across multiple repositories. Useful for finding what you've been working on
@@ -345,6 +358,11 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
       one does not, so an alias written for the Go version needs the second dash.
     - Set `DIRC_CLIPBOARD_FILE` to the path of a file to read and write that file in place of the clipboard of the
       machine. This is what lets the tests of `dirc` run without touching the clipboard of the person at the keyboard.
+    - In a mosh-rs session, `dirc` copies to the clipboard of your client computer, and `dirc --paste` reads it. Both
+      go through the `pbcopy` and `pbpaste` shims that the mosh-rs server puts on `PATH`. A read needs
+      `MOSH_ALLOW_PASTE=1` on the client. When paste is off, the shim runs the next `pbpaste` on `PATH`, which is the
+      `pbpaste` of the server. Outside mosh-rs, `dirc` uses the clipboard of the machine, and it runs `pbcopy` or
+      `pbpaste` from `PATH` when that clipboard does not open.
     - To install: `cargo install --git https://github.com/timmattison/tools dirc`
 - gitdiggin
     - Recursively searches Git repositories for commits containing a specific string. Can search in commit messages by
@@ -366,6 +384,8 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
     - Generates random data and copies it to the clipboard. Supports two modes: binary data (with hex, base64, or raw 
       output formats) and text with diacritics (Zalgo text). Features include customizable parameters, presets for 
       text generation (mild, scary, insane, zalgo, doom), and a dry run mode to preview without copying.
+    - In a mosh-rs session, the data goes to the clipboard of your client computer, through the `pbcopy` shim that the
+      mosh-rs server puts on `PATH`.
     - To install: `cargo install --git https://github.com/timmattison/tools clipboard-random`
 - freeport
     - Finds a free TCP port on localhost (127.0.0.1) quickly and cross-platform. Supports random or sequential port 
@@ -478,7 +498,10 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
     path, a directory name, or a branch name (exact matches only). A worktree with
     submodules checked out - which plain `git worktree remove` refuses outright - or with
     uncommitted changes needs `--force`. `--dry-run` reports the plan as a preflight, and
-    `--safe` keeps the branch unless it is fully merged.
+    `--safe` keeps the branch unless it is fully merged. Before it deletes a branch that no
+    message of the last 10 commits of the main branch or its upstream names, it asks. Thus a
+    mistyped issue number does not delete unmerged work. `--yes` skips the question. Without
+    a terminal, gitnuke cannot ask, and it refuses with exit code `10`.
   - To install: `cargo install --git https://github.com/timmattison/tools gitnuke`
 - crap (Claude, Resume Anywhere Please)
   - Resume a Claude Code session from wherever you are. Given a session id, `crap` looks the
@@ -1675,6 +1698,10 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
     variable is a common accident. The clipboard is also the cache a run of `claude` writes its
     plan to, so a reader who turns the clipboard off turns that cache off with it: every bare
     `wn` then pays for a new run and keeps nothing.
+  - In a mosh-rs session, the clipboard is the clipboard of your client computer. `wn` reads the
+    chain through the `pbpaste` shim that the mosh-rs server puts on `PATH`, and it keeps a plan
+    through the `pbcopy` shim. A read needs `MOSH_ALLOW_PASTE=1` on the client. When paste is
+    off, the shim runs the next `pbpaste` on `PATH`, which is the `pbpaste` of the server.
   - One GraphQL query through `gh` answers every number of the chain, so a chain of six issues
     costs one round trip and one unit of the rate limit, and the credential is the one `gh`
     already holds. Each round of blockers that stand nowhere in the chain costs one query more, as
@@ -2338,7 +2365,8 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
       runner time, not cost.
     - The cell is empty until `ha` has the jobs of the run, and when GitHub gives no job for the
       run. When a later request for the jobs fails, the cell keeps the sum of the last good jobs.
-      A job row, a merge queue row, and a merge history row show an empty cell.
+      A merge queue row and a merge history row show an empty cell. A job row shows the time
+      left of its job, as the next item tells.
     - `ha` reads the jobs of each finished run in "Last 8h" one time, also when you do not
       expand the run, thus each row of the section gets a sum. It reads at most 32 new runs in
       each refresh, the newest finish first, thus the top rows fill first. At the start, the
@@ -2346,6 +2374,24 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
     - The cell has the color of its row, thus it fades with a finished row. The column is 7
       columns wide, the width of the `TIME` column. On a narrow terminal, the text columns give
       up their columns first.
+    - A job row of a running job shows `~` and the time that the job has left, for example
+      `~3m 02s`. A job past its estimate shows `+` and the time over the estimate. For example,
+      `+1m 10s` means 1 minute 10 seconds more than the estimate. A negative time never shows.
+      - The estimate is the mean time of the newest 5 jobs that passed in the window ("Last 8h"
+        by default) with the same repository, the same workflow, the same job name, and the
+        same runner name. A matrix job such as `test (ubuntu, 18)` matches only the same
+        matrix entry. A failed, cancelled, or skipped job does not count.
+      - The text gets less precise as the time increases: seconds below 1 minute, minutes and
+        seconds below 10 minutes, minutes below 1 hour, hours and minutes below 10 hours, hours
+        below 100 hours, and `>99h` above. The text fits the 7 columns of the cell.
+      - These rows show a blank cell: a job that waits for a runner, a job that finished, and a
+        job with no match. Each job on a GitHub-hosted runner shows a blank cell too. GitHub
+        gives such a runner a different name for each job, for example
+        `GitHub Actions 1000001050`, thus no job matches. A self-hosted runner keeps its name,
+        thus its jobs get an estimate.
+      - The estimate needs no more request to GitHub. It reads the jobs that `ha` already loads
+        for the job sum. `ha` keeps no history after it stops. Thus after a start, the
+        estimates fill in over the first refreshes, as the jobs of the recent runs load.
     - A finished run can show a `JOB SUM` smaller than its `TIME`, also when its jobs ran in
       parallel. The `TIME` cell of a finished run ends at the last update of the run, and GitHub
       sometimes makes that update some minutes after the last job finished.
@@ -4291,8 +4337,52 @@ gitnuke issue-42              # by branch name
 gitnuke --force issue-42      # worktree has submodules or uncommitted changes
 gitnuke --dry-run issue-42    # report the plan, change nothing
 gitnuke --safe issue-42       # keep the branch unless it is fully merged
+gitnuke --yes issue-42        # do not ask about a branch that no recent commit names
 gitnuke wt-a wt-b wt-c        # nuke several; each is reported independently
 ```
+
+### A branch that no recent commit names
+
+The normal flow is: the PR merges, then you nuke its branch. gitnuke counts on a merge
+convention that this repository obeys: each squash commit names its branch on a
+`Branch: <branch>` line. Thus the recent commits of the main branch name each branch that is
+safe to nuke, and a mistyped issue number gives a name that they do not name.
+
+GitHub does not write that line. Its default squash message holds no branch name, and its
+default merge commit names `owner/branch`, which is not a whole-token match for `branch`. In
+a repository that does not obey the convention, no recent commit names a branch, so gitnuke
+asks before each nuke. Use `--yes` there.
+
+Before gitnuke removes a worktree that has a branch, it looks for the branch name in the
+messages of the last 10 commits of the main worktree's branch. It also reads the last 10
+commits of the upstream of that branch (`origin/main`), because `gh pr merge` in a worktree
+does not move the local `main`. If no message names the branch, gitnuke asks:
+
+```text
+gitnuke: no commit in the last 10 of main or origin/main names branch 'issue-42'.
+  If you typed the wrong name, answer n. If its PR merged moments ago, run git fetch and try again.
+  Remove worktree /code/repo-worktrees/issue-42 and delete branch issue-42? [y/N]
+```
+
+- Only `y` or `yes`, in any case, continues. Each other answer, an empty line, and the end
+  of the input keep the worktree and the branch, with exit code `10`.
+- The name must be a whole token. The character before it and the character after it must
+  not be a letter, a digit, `.`, `_`, `/` or `-`. Thus `issue-70` does not match
+  `Branch: issue-704`.
+- gitnuke does not fetch, and it uses no network. If the PR merged moments ago, run
+  `git fetch` first.
+- When stdin is not a terminal, gitnuke cannot ask. It refuses with exit code `10`, and it
+  does not continue silently. An agent that runs gitnuke through a tool can type the wrong
+  number too.
+- `--yes` skips the question. `--force` does not skip it: `--force` overrides git's refusals
+  about the content of a worktree, but this question is about which worktree you named.
+- A detached-HEAD worktree has no branch, so gitnuke asks nothing about it.
+- A target that an earlier gate refuses (locked, submodules, uncommitted changes) gets that
+  refusal, with no question first.
+- `--dry-run` asks nothing. It reports that a real run asks, and it exits `10`. With `--yes`,
+  the dry run exits `0`.
+- Each target gets its own question. A "no" keeps that target only, and the run continues
+  with the next target.
 
 ### Worktrees with submodules
 
@@ -4372,18 +4462,25 @@ out when the lock has none. This is exit code `8`, and `--dry-run` reports it to
 - **A lock is honoured, not overridden.** A worktree locked with `git worktree lock` is
   refused even with `--force`, quoting the lock reason if git recorded one and handing back
   the `git worktree unlock` command to run.
+- **A mistyped branch gets a question.** gitnuke asks before it deletes a branch that no
+  recent commit names, and it refuses with exit `10` when it cannot ask. See
+  [A branch that no recent commit names](#a-branch-that-no-recent-commit-names).
 - **`--dry-run` is a real preflight.** It runs every check a real run runs — submodules,
-  uncommitted changes, and under `--safe` whether the branch is merged — and exits with the
-  same status that run would, so `gitnuke -n x` failing means `gitnuke x` would fail too.
+  uncommitted changes, whether a recent commit names the branch, and under `--safe` whether
+  the branch is merged — and exits with the same status that run would, so `gitnuke -n x`
+  failing means `gitnuke x` would fail too.
 
 ### Options
 
 - `-f, --force`: Nuke the worktree despite the two refusals it overrides — submodules checked
   out, or uncommitted changes. It does not override a locked worktree; that is refused
-  separately, with instructions to unlock it
+  separately, with instructions to unlock it. It does not skip the question about a branch
+  that no recent commit names
 - `-s, --safe`: Keep the branch unless it is fully merged (`git branch -d` semantics instead
   of the default force-delete). Only affects the branch; the worktree is still removed
 - `-n, --dry-run`: Report what would happen without removing or deleting anything
+- `-y, --yes`: Do not ask about a branch that no recent commit names. Without a terminal,
+  gitnuke needs this flag to delete such a branch
 - `[TARGETS]...`: One or more worktrees, each given as a path, directory name, or branch name
 
 ### Exit Codes
@@ -4398,6 +4495,7 @@ out when the lock has none. This is exit code `8`, and `--dry-run` reports it to
 - `7`: The worktree was removed but its branch could not be deleted
 - `8`: The worktree is locked, which `--force` does not override
 - `9`: The worktree contains modified or untracked files and `--force` was not given
+- `10`: No recent commit names the branch, and nobody answered yes
 
 ### Replacing the shell functions
 
@@ -5686,7 +5784,7 @@ Show two small charts in the macOS menu bar: the share of the CPU time that the 
 
 `glance --host <destination>` shows the same charts for a second Mac, through one SSH connection that stays open. See [Show a second Mac](#show-a-second-mac).
 
-`glance --background` starts the status item and returns to the shell. A second run of the same command stops it. See [Start and stop](#start-and-stop).
+`glance` starts the status item in the background and returns to the shell. A second run of the same command stops it. `glance -f` keeps the status item in the foreground. See [Start and stop](#start-and-stop).
 
 ### What it shows
 
@@ -5694,20 +5792,20 @@ Show two small charts in the macOS menu bar: the share of the CPU time that the 
 - **The right chart is the memory pressure.** The height of each column is the memory in use as a percentage, and its color is the pressure level of that sample: green for normal, orange for warn, and red for critical. A level that `glance` does not know is gray, never green.
 - **Each chart is as high as the menu bar**, inside a thin frame, and the two charts share one border. Thus a low load is easy to see: on a menu bar of 22 points, each chart has 20 rows, and a CPU share of 10% fills 2 of them.
 - **The charts show the last 32 samples.** At the default interval, that is the last 32 seconds. The newest column is at the right edge, so a short spike stays visible after it ends.
-- **The short name of the Mac is in small text at the top of the charts.** It is the name before the first `.`, as `hostname -s` gives it (`M4-Pro-Mac-Mini`, not `M4-Pro-Mac-Mini.local`). The name goes across both charts, over the columns. Each pixel of the name is black or white, whichever contrasts more with the pixel behind it. Thus the name is black where it crosses a column, and it has the text color of the menu bar where the chart is empty. The charts are wide enough for a name such as `M4-Pro-Mac-Mini`. A longer name ends in an ellipsis, and the status item does not grow. If the menu bar is too thin for the name, the name goes away.
-- **A click on the charts opens a menu** with the host (`Host: <name>`, the full name), the current values (user %, system %, idle %, the pressure level, and the percentage in use), and a **Quit glance** item.
+- **The name of the Mac is in small text at the top of the charts.** In local mode, it is the short name of the Mac: the name before the first `.`, as `hostname -s` gives it (`M4-Pro-Mac-Mini`, not `M4-Pro-Mac-Mini.local`). In remote mode, it is the destination of `--host` as you typed it, or, with `--resolve`, the name that the second Mac reports after the first line arrives (see [Show a second Mac](#show-a-second-mac)). The name goes across both charts, over the columns. Each pixel of the name is black or white, whichever contrasts more with the pixel behind it. Thus the name is black where it crosses a column, and it has the text color of the menu bar where the chart is empty. The charts are wide enough for a name such as `M4-Pro-Mac-Mini`. A longer name ends in an ellipsis, and the status item does not grow. If the menu bar is too thin for the name, the name goes away.
+- **A click on the charts opens a menu** with the host (`Host: <name>`, the full name, or `Host: <destination> (ssh)` in remote mode, or `Host: <name> (ssh <destination>)` with `--resolve` when the reported name differs from the destination), the current values (user %, system %, idle %, the pressure level, and the percentage in use), and a **Quit glance** item.
 - `glance` has no Dock icon and no window.
 
 ### Basic Usage
 
 ```bash
-glance                         # start the status item; a second run stops it
-glance -b                      # start it in the background and return to the shell
+glance                         # start the status item in the background; a second run stops it
+glance -f                      # start it in the foreground, where it keeps the terminal
 glance --interval 2            # one sample every 2 seconds
 glance --sample                # print one reading as JSON, then stop
 glance --stream --count 3      # print 3 JSON lines, one each interval, then stop
-glance --host m1-ts            # show the charts of the Mac that ssh calls m1-ts
-glance --host m1-ts -b         # the same in the background; a second run stops only m1-ts
+glance --host m1-ts            # show the charts of the Mac that ssh calls m1-ts; a second run stops only m1-ts
+glance --host m1-ts --resolve  # the same, with the name that the second Mac reports
 ```
 
 ### Options
@@ -5718,7 +5816,8 @@ glance --host m1-ts -b         # the same in the background; a second run stops 
 - `--count <N>`: Stop the stream after `N` lines. It needs `--stream`. With no `--count`, the stream has no limit.
 - `--host <DESTINATION>`: Show the charts of a second Mac. `DESTINATION` is anything that `ssh` takes: an alias of `~/.ssh/config`, `user@host`, or an address. A destination that is empty or that starts with `-` is a usage error. It cannot go with `--stream` or `--sample`.
 - `--remote-binary <PATH>`: The path of `glance` on the second Mac. Defaults to `~/.cargo/bin/glance`. It needs `--host`.
-- `-b`, `--background`: Start the status item in a copy of `glance` that has no terminal, and return to the shell when the status item is up. It cannot go with `--stream` or `--sample`.
+- `--resolve`: Show the name that the second Mac reports (`hostname -s` on that Mac), not the destination as you typed it. Before the first line arrives, the status item shows the destination. It needs `--host`.
+- `-f`, `--foreground`: Run the status item in the process of the run, which keeps the terminal until the status item stops. Give it to a LaunchAgent (see [Start at login](#start-at-login)). With no `-f`, `glance` starts the status item in a copy that has no terminal, and returns to the shell when the status item is up. It cannot go with `--stream` or `--sample`.
 - `-V`, `--version`: Print the version, the git hash, and whether the build was clean.
 - `-h`, `--help`: Print the usage.
 
@@ -5727,17 +5826,20 @@ glance --host m1-ts -b         # the same in the background; a second run stops 
 Each Mac that `glance` shows has one status item: this Mac, and each destination of `--host`. A run of `glance` first looks for the status item of its own Mac. When that status item runs, the run stops it, starts nothing, and exits with status 0. Thus a second run of the same command closes the status item that the first run opened.
 
 ```bash
-glance -b                 # glance: the status item runs as PID 4242. Run glance again to stop it.
-glance --host m1-ts -b    # glance: the status item of the host m1-ts runs as PID 4250. Run glance again with the same --host to stop it.
+glance                    # glance: the status item runs as PID 4242. Run glance again to stop it.
+glance --host m1-ts       # glance: the status item of the host m1-ts runs as PID 4250. Run glance again with the same --host to stop it.
 glance --host m1-ts       # glance: stopped the status item of the host m1-ts that ran as PID 4250.
 glance                    # glance: stopped the status item that ran as PID 4242.
 ```
 
 - **A run stops only the status item of its own Mac.** A plain run stops the local status item, never a status item of `--host`. A run with `--host m1-ts` stops only the status item of `m1-ts`.
 - **The Mac is the destination as you typed it.** `m1-ts` and `tim@m1-ts` are two different status items, even when they log in to the same Mac.
-- **`--background` does not change which status item a run stops.** A run with or without `-b` stops the status item of its Mac. `-b` only decides where a new status item runs.
+- **A new status item runs in the background.** The start returns to the shell when the status item is up. `-f` keeps a new status item in the foreground.
+- **The default changed.** Before, a plain run kept the terminal, and `-b` started the status item in the background. Now a plain run starts it in the background. `-b` and `--background` are gone, and each one is a usage error. A LaunchAgent that runs a plain `glance` must get `--foreground` (see [Start at login](#start-at-login)).
+- **`--foreground` does not change which status item a run stops.** A run with or without `-f` stops the status item of its Mac. `-f` only decides where a new status item runs.
+- **`--resolve` does not change which status item a run stops.** `glance --host m1-ts` stops the status item that `glance --host m1-ts --resolve` started, and the reverse is also true.
 - **A background status item has no terminal.** It runs in a new session, thus the close of the terminal or Control-C does not stop it. Until the status item is up, the start shows what the copy writes to its standard error. After that, the standard output and the standard error of the status item go to `/dev/null`. The start returns when the status item is up, or it prints why the status item did not start and exits with status 1.
-- **A foreground status item keeps the terminal** until **Quit glance**, Control-C, or a second run. It prints the same line as a background start when it is up.
+- **A foreground status item (`-f`) keeps the terminal** until **Quit glance**, Control-C, or a second run. It prints the same line as a background start when it is up.
 - **`--sample` and `--stream` never stop a status item.**
 - **A stop is a quit.** The run sends `SIGTERM`, and the status item exits with status 0 at once, as **Quit glance** does. Thus a LaunchAgent does not start it again (see [Start at login](#start-at-login)). In remote mode, the `ssh` child then stops on its next write, as after `kill -9` (see [Show a second Mac](#show-a-second-mac)).
 - **A lock file marks each status item** in `~/Library/Application Support/glance/`: `local.lock`, and `host-<destination>.lock` for each destination. The name writes each byte of the destination as `%` and two hex digits, unless the byte is a lowercase letter, a digit, `.`, `-`, `_`, or `@`. The default file system of macOS folds case, so `Alpha` and `alpha` get two files. The kernel releases the lock when its status item ends, also after a crash or `kill -9`. Thus a lock file that stays behind stops nothing and blocks nothing. The files are not in `$TMPDIR`, because macOS deletes old files there, and the lock of a status item that runs for days must stay.
@@ -5760,7 +5862,9 @@ In `--stream`, a failed read gives the line `{"host":"<name>","error":"<reason>"
 2. Make sure that `ssh <destination>` logs in with a key and asks for nothing. `glance` starts `ssh` with `BatchMode=yes`, thus a refused key gives an error line in the menu, never a password prompt.
 3. Start `glance --host <destination>` on the Mac at your desk. Run a second, local `glance` next to it to see both Macs.
 
-**The label shows the name that the second Mac reports**, not the SSH alias, thus a wrong alias cannot show a false name. Before the first line arrives, the label shows the destination as you typed it. The first line of the menu is `Host: <name> (ssh <destination>)`.
+**The label shows the destination as you typed it**, for the full life of the status item. That is the name that you know the Mac by. `tim@m1-ts` stays `tim@m1-ts`, and `studio.example.com` is not cut at the first `.`. A destination that is too wide for the label ends in an ellipsis. The first line of the menu is `Host: <destination> (ssh)`.
+
+**This default changed.** Before, the label showed the name that the second Mac reports. To get that label, add `--resolve`. A wrong alias then cannot show a false name. Before the first line arrives, the label shows the destination. After that, it shows the name that the newest line reports, which is `hostname -s` on the second Mac. When that name is different from the destination, the first line of the menu is `Host: <name> (ssh <destination>)`.
 
 **The default remote binary is the full path `~/.cargo/bin/glance`**, where `cargo install` puts it. `sshd` runs the command through the login shell of the remote user with `-c`. zsh then reads `~/.zshenv`, but not `~/.zprofile` or `~/.zshrc`, thus a bare `glance` is often not on `PATH` there. For a different place, give `--remote-binary`:
 
@@ -5792,6 +5896,7 @@ A remote `glance` that does not know `--stream` gives a usage error, and that er
     <key>ProgramArguments</key>
     <array>
         <string>/Users/YOU/.cargo/bin/glance</string>
+        <string>--foreground</string>
     </array>
     <key>LimitLoadToSessionType</key>
     <string>Aqua</string>
@@ -5812,7 +5917,7 @@ Then load it:
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.timmattison.glance.plist
 ```
 
-`RunAtLoad` starts `glance` at each login. `KeepAlive` with `SuccessfulExit` set to `false` starts it again after a crash, but not after **Quit glance**, which exits with status 0. A run of `glance` in a terminal stops it the same way, with status 0. To stop it and keep it stopped until the next login, run `launchctl bootout gui/$(id -u)/com.timmattison.glance`.
+`RunAtLoad` starts `glance` at each login. `KeepAlive` with `SuccessfulExit` set to `false` starts it again after a crash, but not after **Quit glance**, which exits with status 0. `--foreground` is necessary. Without it, `glance` starts a copy in a new session and exits with status 0. launchd then watches no process, and it does not start the status item again after a crash. A run of `glance` in a terminal stops it the same way, with status 0. To stop it and keep it stopped until the next login, run `launchctl bootout gui/$(id -u)/com.timmattison.glance`.
 
 For the status item of a second Mac, write a second file with its own label, for example `~/Library/LaunchAgents/com.timmattison.glance.m1-ts.plist`. Replace `m1-ts` with your SSH destination:
 
@@ -5826,6 +5931,7 @@ For the status item of a second Mac, write a second file with its own label, for
     <key>ProgramArguments</key>
     <array>
         <string>/Users/YOU/.cargo/bin/glance</string>
+        <string>--foreground</string>
         <string>--host</string>
         <string>m1-ts</string>
     </array>
@@ -5850,11 +5956,93 @@ Load it with `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.timmat
 - **The height of the memory chart can be different from Activity Monitor.** Activity Monitor computes its graph with a formula that Apple does not document. The color is the level of the kernel, which is the same value that Activity Monitor uses.
 - **Activity Monitor calls the warn level yellow.** `glance` shows it orange.
 - **Weeks of uptime are safe.** The tick counters are 32 bits wide and wrap after about 31 days on a Mac with 16 cores. `glance` subtracts them with wrapping arithmetic, so a wrap does not show a false spike.
-- **Child processes and threads.** In local mode, the status item starts no child process and no thread. A start with `--background` starts one copy of `glance`, which runs the status item, and one thread that reads the standard error of the copy. The start then ends. In remote mode, it starts one `ssh` child at a time and two threads that read its pipes. The remote Mac sends samples, not raw tick counters, thus one sample line is the same object that `--sample` prints.
+- **Child processes and threads.** In local mode, the status item starts no child process and no thread. A start with no `--foreground` starts one copy of `glance`, which runs the status item, and one thread that reads the standard error of the copy. The start then ends. In remote mode, it starts one `ssh` child at a time and two threads that read its pipes. The remote Mac sends samples, not raw tick counters, thus one sample line is the same object that `--sample` prints.
 - **macOS only.** On a different platform, `glance` prints `glance supports macOS only.` and exits with status 1. The second Mac of `--host` must be a Mac too.
 
 ### Install
 
 ```bash
 cargo install --git https://github.com/timmattison/tools glance
+```
+
+## cctop (Claude Code top)
+
+cctop shows one row for each live Claude Code session, with its state: working, needs-you, idle, agents, or shells. A row also shows `frozen` when the process of the session is stopped. It keeps a log of the changes, and it sends a macOS notification when a session needs you. Enter brings the Zellij pane and the WezTerm window of the session to the front.
+
+To install: `cargo install --git https://github.com/timmattison/tools cctop`
+
+See [src/cctop/README.md](src/cctop/README.md) for the keys, the focus steps, and the limits.
+
+## chf (ch find)
+
+Find a Claude Code session by the words in its messages, and resume it.
+
+The `/resume` picker of Claude Code shows the sessions of one worktree by default. It does not open the expanded version of a compacted session. A person who remembers a word from a session, but not its folder, cannot find it. `chf` searches the sessions of every folder. It then resumes the session you pick with `ch` or `che`.
+
+Run `chf` and type words. The list changes at each key press. A preview of the messages around the first match shows beside the list, or below it on a terminal narrower than 100 columns.
+
+```bash
+chf
+```
+
+### Keys
+
+| Key | Action |
+| --- | --- |
+| Up, Down, `Ctrl-P`, `Ctrl-N` | Move the selection. |
+| PageUp, PageDown | Move the selection by one page. |
+| Shift-Up, Shift-Down | Scroll the preview. |
+| `Ctrl-U` | Clear the query. |
+| Enter | Resume the selected session. |
+| Esc, `Ctrl-C` | Quit. |
+
+### Matching rules
+
+- Each word is a literal text. There is no fuzzy match.
+- Each word must occur in the session. Words can occur in different messages.
+- The case rule is "smart case" for each word. A word in lowercase matches text in any case. A word with a capital letter matches only that capital letter.
+- The case folding follows Unicode.
+
+### The row
+
+Each row shows the time of the last message, a `⇊` mark with the count of compactions for a session that Claude Code compacted, the folder, and the title of the session. The preview header shows the session id, the folder, and the git branch.
+
+### A compacted session
+
+When you press Enter on a compacted session, `chf` asks which version to resume. Press `c` for `ch`, the compacted version. Press `e` for `che`, the expanded version. The question shows the token count of the conversation before the last compaction. The expanded version holds all of those tokens. Thus it can fill the context window of Claude at once. The question also tells you when the first match is in a message from before the last compaction. The compacted version holds that message only as part of a summary.
+
+### Requirements
+
+`chf` runs `crap --here` through `$SHELL -ic`. Thus:
+
+- The `crap` shell function must exist. Run `crap --shell-setup` to install it.
+- `$SHELL` must be `bash` or `zsh`. For other shells, `chf` prints the command to paste.
+- `CRAP_LAUNCHER` applies, because the shell function starts Claude.
+
+### The cache
+
+`chf` keeps its index in `<cache dir>/chf`. It writes one file for each project folder. The directory has mode 0700 and each file has mode 0600. The first run reads every transcript and shows its progress. Later runs read only the files that changed. If `chf` cannot read a project folder or the store, it counts it as unreadable and keeps its cache files. If `chf` cannot stat a transcript, it counts it as unreadable and keeps its cache entry.
+
+### What `chf` does not search
+
+- Tool calls
+- Tool results
+- Thinking blocks
+- Transcripts of subagents
+
+### Exit codes
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | `chf --help` and `chf --version` print their text and exit with this code. |
+| 1 | A failure, or a `$SHELL` that is not `bash` or `zsh`. |
+| 2 | Standard input or standard output is not a terminal, or `chf` cannot find the home directory. |
+| 130 | You pressed Esc or `Ctrl-C`. |
+
+After Enter, `chf` replaces itself with the shell that runs `crap`. The exit status is then the status of that shell. This status can be any of the codes above or another code.
+
+### Install
+
+```bash
+cargo install --git https://github.com/timmattison/tools chf
 ```

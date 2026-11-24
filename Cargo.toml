@@ -50,7 +50,7 @@ notify = "8.2"
 # cache, and each Homebrew upgrade then stops the link. The default ssh and
 # https transports are off, because no crate clones or fetches, and ssh links
 # the Homebrew OpenSSL dylib. Held by src/gitrdun/tests/vendored-libgit2.rs.
-git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
+git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2"] }
 gix = "0.83"
 
 # Hashing
@@ -223,10 +223,13 @@ windows-sys = { version = "0.60", features = [
 # Internal crates
 buildinfo = { path = "src/buildinfo" }
 childenv = { path = "src/childenv" }
+sysclip = { path = "src/sysclip" }
+claude-transcript = { path = "src/claude-transcript" }
 op-cache = { path = "src/op-cache" }
 clipboardmon = { path = "src/clipboardmon" }
 faulte = { path = "src/faulte" }
 filewalker = { path = "src/filewalker" }
+altscreen = { path = "src/altscreen" }
 ghrest = { path = "src/ghrest" }
 gitscratch = { path = "src/gitscratch" }
 httpfile = { path = "src/httpfile" }

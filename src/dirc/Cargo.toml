@@ -5,13 +5,14 @@ edition.workspace = true
 description = "Directory Clipboard — copies the current directory to the clipboard, or gives a cd command for the directory in the clipboard"
 
 [dependencies]
-arboard.workspace = true
 buildinfo.workspace = true
 clap.workspace = true
+sysclip.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
 childenv.workspace = true
+sysclip = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 
 [lints]

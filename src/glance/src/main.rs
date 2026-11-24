@@ -10,9 +10,9 @@ use std::process::ExitCode;
 
 use buildinfo::version_string;
 use clap::Parser;
-#[cfg(target_os = "macos")]
-use glance::connection::Remote;
 use glance::connection::{Destination, RemoteBinary, DEFAULT_REMOTE_BINARY};
+#[cfg(target_os = "macos")]
+use glance::connection::{HostNaming, Remote};
 use glance::flags;
 use glance::interval::Interval;
 #[cfg(target_os = "macos")]
@@ -32,6 +32,8 @@ const AFTER_HELP: &str = "\
 Each target has one status item: this Mac, and each destination of --host.
 When the status item of the target runs already, glance stops it and starts
 no new one. Thus a second run of the same command closes the status item.
+A new status item runs in the background, and glance returns to the shell
+when it is up. -f keeps the status item in the foreground.
 --sample and --stream never stop a status item.";
 
 /// The text that `glance` gives on a platform other than macOS.
@@ -71,7 +73,8 @@ struct Cli {
     count: Option<u64>,
 
     /// Show the charts of a second Mac. glance opens one ssh connection to
-    /// DESTINATION and runs `glance --stream` there.
+    /// DESTINATION and runs `glance --stream` there. The status item names
+    /// the Mac DESTINATION, as you typed it.
     #[arg(
         long = flags::HOST,
         value_name = "DESTINATION",
@@ -89,24 +92,48 @@ struct Cli {
     )]
     remote_binary: RemoteBinary,
 
-    /// Start the status item in the background and return to the shell.
+    /// Show the name that the second Mac reports, as `hostname -s` gives it
+    /// there, in place of DESTINATION. Before the first line arrives, the
+    /// status item shows DESTINATION. Needs --host.
+    #[arg(long = flags::RESOLVE, requires = "host")]
+    resolve: bool,
+
+    /// Run the status item in this process, which keeps the terminal until
+    /// the status item stops. Give it to a LaunchAgent. With no -f, glance
+    /// starts the status item in the background and returns to the shell.
     #[arg(short, long, conflicts_with_all = ["stream", "sample"])]
-    background: bool,
+    foreground: bool,
 
     /// The mark of the copy that a background start makes. A person never
     /// gives it.
     #[arg(
-        long = flags::BACKGROUND_CHILD,
+        long = flags::SPAWNED_COPY,
         hide = true,
-        conflicts_with_all = ["stream", "sample", "background"]
+        conflicts_with_all = ["stream", "sample", "foreground"]
     )]
-    background_child: bool,
+    spawned_copy: bool,
 
     /// End the status item this many seconds after it is up. The tests give
     /// it to each status item that they start, so that a status item that a
     /// failed test leaves behind ends by itself.
     #[arg(long = flags::EXIT_AFTER, hide = true, value_name = "SECONDS")]
     exit_after: Option<NonZeroU32>,
+}
+
+#[cfg(target_os = "macos")]
+impl Cli {
+    /// The second Mac of this command line, or `None` for this Mac.
+    fn remote(&self) -> Option<Remote> {
+        self.host.clone().map(|destination| Remote {
+            destination,
+            remote_binary: self.remote_binary.clone(),
+            naming: if self.resolve {
+                HostNaming::Reported
+            } else {
+                HostNaming::Destination
+            },
+        })
+    }
 }
 
 fn main() -> ExitCode {
@@ -122,16 +149,13 @@ fn run(cli: Cli) -> ExitCode {
     if cli.stream {
         return stream(cli.interval, cli.count);
     }
-    let remote = cli.host.map(|destination| Remote {
-        destination,
-        remote_binary: cli.remote_binary,
-    });
-    let mode = if cli.background_child {
-        Mode::BackgroundChild
-    } else if cli.background {
-        Mode::Background
-    } else {
+    let remote = cli.remote();
+    let mode = if cli.spawned_copy {
+        Mode::SpawnedCopy
+    } else if cli.foreground {
         Mode::Foreground
+    } else {
+        Mode::Background
     };
     launch::run(
         mode,
@@ -290,11 +314,12 @@ mod tests {
             remote: None,
             exit_after: None,
         });
-        assert!(cli.background_child);
-        assert!(!cli.background);
+        assert!(cli.spawned_copy);
+        assert!(!cli.foreground);
         assert_eq!(cli.interval, interval);
         assert_eq!(cli.host, None);
         assert_eq!(cli.exit_after, None);
+        assert_eq!(cli.remote(), None);
     }
 
     #[cfg(target_os = "macos")]
@@ -303,21 +328,48 @@ mod tests {
         let remote = Remote {
             destination: "tim@m1-ts".parse().unwrap(),
             remote_binary: "-odd bin/glance".parse().unwrap(),
+            naming: HostNaming::Destination,
         };
         let cli = parse_child(&Settings {
             interval: Interval::DEFAULT,
             remote: Some(remote.clone()),
             exit_after: NonZeroU32::new(7),
         });
-        assert!(cli.background_child);
-        assert_eq!(cli.host, Some(remote.destination));
+        assert!(cli.spawned_copy);
+        assert_eq!(cli.host.as_ref(), Some(&remote.destination));
         assert_eq!(cli.remote_binary, remote.remote_binary);
         assert_eq!(cli.exit_after, NonZeroU32::new(7));
+        assert_eq!(cli.remote(), Some(remote));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_copy_of_a_resolve_start_gets_the_same_settings() {
+        let remote = Remote {
+            destination: "tim@m1-ts".parse().unwrap(),
+            remote_binary: "-odd bin/glance".parse().unwrap(),
+            naming: HostNaming::Reported,
+        };
+        let cli = parse_child(&Settings {
+            interval: Interval::DEFAULT,
+            remote: Some(remote.clone()),
+            exit_after: NonZeroU32::new(7),
+        });
+        assert_eq!(cli.remote(), Some(remote));
     }
 
     #[test]
-    fn background_with_stream_is_a_usage_error() {
-        let refused = Cli::try_parse_from(["glance", "--background", "--stream"]);
-        assert!(refused.is_err(), "the parse took --background --stream");
+    fn foreground_with_stream_is_a_usage_error() {
+        let refused = Cli::try_parse_from(["glance", "--foreground", "--stream"]);
+        assert!(refused.is_err(), "the parse took --foreground --stream");
+    }
+
+    #[test]
+    fn foreground_with_the_mark_of_the_copy_is_a_usage_error() {
+        let refused = Cli::try_parse_from(["glance", "--foreground", "--spawned-copy"]);
+        assert!(
+            refused.is_err(),
+            "the parse took --foreground --spawned-copy"
+        );
     }
 }

@@ -696,7 +696,7 @@ pub fn run(interval: Interval, remote: Option<Remote>, on_ready: impl FnOnce()) 
             input: KernelInput::new(),
         },
         Some(remote) => Source::Remote {
-            input: RemoteInput::new(remote.destination.as_str().to_owned()),
+            input: RemoteInput::new(remote.destination.as_str().to_owned(), remote.naming),
             feed: Feed::new(SSH_PROGRAM, remote, interval),
         },
     };

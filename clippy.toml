@@ -88,4 +88,42 @@ disallowed-methods = [
     { path = "std::process::Command::new", reason = "call childenv::command in production code or childenv::fixture_command in test code; a raw spawn inherits the GIT_ variables of a hook, and git obeys them before the directory of the command" },
     { path = "tokio::process::Command::new", reason = "build the command with tokio::process::Command::from(childenv::command(program)); a raw spawn inherits the GIT_ variables of a hook" },
     { path = "portable_pty::CommandBuilder::new", reason = "remove each name that childenv::inherited_git_variables gives, then state the exemption with an #[expect] at this site; a raw spawn inherits the GIT_ variables of a hook" },
+    # `ratatui::init`, `ratatui::try_init` and `ratatui::run` enter the alternate
+    # screen, and so does `termion`'s `into_alternate_screen`. The first three
+    # send no erase at startup. Each of the four is banned for the reason in the
+    # block below. `ratatui::init_with_options` and
+    # `ratatui::try_init_with_options` stay open: they do not enter the
+    # alternate screen, and an inline viewport is a correct use of them.
+    { path = "ratatui::init", reason = "enter the alternate screen through altscreen::Session::enter or altscreen::RatatuiSession::enter; they erase the screen in the same write, and mosh ignores mode 1049" },
+    { path = "ratatui::try_init", reason = "enter the alternate screen through altscreen::Session::enter or altscreen::RatatuiSession::enter; they erase the screen in the same write, and mosh ignores mode 1049" },
+    { path = "ratatui::run", reason = "enter the alternate screen through altscreen::Session::enter or altscreen::RatatuiSession::enter; they erase the screen in the same write, and mosh ignores mode 1049" },
+    { path = "termion::screen::IntoAlternateScreen::into_alternate_screen", reason = "enter the alternate screen through altscreen::Session::enter; it erases the screen in the same write, and mosh ignores mode 1049" },
+    # The clipboard of the machine has one entrance, the crate `sysclip`. It
+    # holds the one dependency on `arboard`. A tool that opens `arboard` by itself
+    # skips the shims of mosh-rs and skips the order rule that `sysclip` keeps.
+    # `repo_guards::arboard_wall` keeps every other member from depending on
+    # `arboard` at all. This ban covers the spellings that remain, so a call or a
+    # type fails the build at its own site. `sysclip` states its exemption with
+    # an `#[expect]` and a reason at its sites. The matching type ban is in
+    # `disallowed-types` below.
+    { path = "arboard::Clipboard::new", reason = "open the clipboard through sysclip::Clipboard::open, or sysclip::Clipboard::open_native for a poll; sysclip keeps the mosh-rs shims and the order rule" },
+]
+
+# A full-screen tool enters the alternate screen so that the shell screen comes
+# back when the tool ends. The alternate screen arrives through two crate APIs
+# and through raw bytes. The mosh server ignores mode 1049, so a tool that
+# enters by itself draws over the shell text, and `ratatui` sends no erase at
+# startup. The crate `altscreen` is the one entrance: it erases the screen in
+# the same write as the entry and restores the terminal on every exit.
+#
+# This file bans the spellings that clippy can see. `repo_guards::alternate_screen`
+# reads the rest: a unit struct in value position, and a raw `ESC [ ? 1049 h` in
+# a string. `ratatui::init_with_options` and `ratatui::try_init_with_options`
+# stay open, because they do not enter the alternate screen.
+disallowed-types = [
+    { path = "crossterm::terminal::EnterAlternateScreen", reason = "enter the alternate screen through altscreen::Session::enter or altscreen::RatatuiSession::enter; they erase the screen in the same write, and mosh ignores mode 1049" },
+    { path = "termion::screen::ToAlternateScreen", reason = "enter the alternate screen through altscreen::Session::enter; it erases the screen in the same write, and mosh ignores mode 1049" },
+    { path = "termion::screen::AlternateScreen", reason = "enter the alternate screen through altscreen::Session::enter; it erases the screen in the same write, and mosh ignores mode 1049" },
+    # See the block above `arboard::Clipboard::new` in `disallowed-methods`.
+    { path = "arboard::Clipboard", reason = "hold the clipboard through sysclip::Clipboard, or open one with sysclip::Clipboard::open_native for a poll; sysclip keeps the mosh-rs shims and the order rule" },
 ]

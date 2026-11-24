@@ -17,6 +17,7 @@ use crate::action::{Action, Confirm};
 use crate::billing::{AccountCell, BillingView, Total};
 use crate::board::{Board, Header, JobCounts, Row, Section};
 use crate::cost::{JobCost, RunCost};
+use crate::estimate::Remaining;
 use crate::job::{Job, RunnerName};
 use crate::queue::{Departure, EntryState, Outcome, PullNumber, QueueEntry};
 use crate::run::{span, Run, RunState};
@@ -44,9 +45,10 @@ const STARTED_WIDTH: usize = 11;
 const TIME_WIDTH: usize = 7;
 /// The header word of the job-sum column.
 const JOB_SUM_HEADER: &str = "JOB SUM";
-/// The width of the job-sum column. It is the width of the time column,
-/// because both cells hold a `format_elapsed` text, which is never wider than
-/// 7 columns. The header word fills the cell.
+/// The width of the job-sum column. It is the width of the time column. The
+/// cell holds a `format_elapsed` text on a run row and a `format_remaining`
+/// text on a job row, and neither is wider than 7 columns. The header word
+/// fills the cell.
 const JOB_SUM_WIDTH: usize = TIME_WIDTH;
 /// The header word of the cost column.
 const COST_HEADER: &str = "COST";
@@ -403,9 +405,9 @@ fn fit_job_text(
 /// part of a run row, right-aligned. The branch and title columns stay blank.
 /// Thus the ID, started, time, and right marker cells stand in the same columns
 /// as those of a run row, at every frame width. The right marker repeats the
-/// left marker. The cells at the right end come from `end`. A job row passes a
-/// blank job-sum cell, because the time cell of a job row shows the time of the
-/// job. Its cost cell shows the cost of the job.
+/// left marker. The cells at the right end come from `end`. A job row passes the
+/// time left of its job in the job-sum cell, or a blank cell when it has none
+/// (see [`job_line`]). Its cost cell shows the cost of the job.
 ///
 /// The line holds these spans, in this order:
 ///
@@ -695,12 +697,19 @@ where
 /// a job that waits shows how long it waited, from its creation until `now`,
 /// and is empty when the job has no creation time. The time cell of each other
 /// job shows [`Job::runner_time`], and is empty when that time is `None`. The
-/// cost cell shows `cost`, the cost of the job.
+/// cost cell shows `cost`, the cost of the job. The job-sum cell shows the time
+/// left of a running job (`~`) or its time over the estimate (`+`), from
+/// `remaining`, and is blank when `remaining` is `None`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is a distinct fact of the job row or of the view; a parameter struct would only rename them"
+)]
 fn job_line<Tz: TimeZone>(
     job: &Job,
     run: &Run,
     last: bool,
     cost: JobCost,
+    remaining: Option<Remaining>,
     now: DateTime<Utc>,
     tz: &Tz,
     widths: Widths,
@@ -740,7 +749,7 @@ where
         EndCells {
             started: &started,
             time: &time,
-            job_sum: "",
+            job_sum: &remaining.map(format_remaining).unwrap_or_default(),
             cost: &cost.to_string(),
         },
     )
@@ -1450,8 +1459,12 @@ fn draw_row<Tz: TimeZone>(
             selected,
             run,
             cost,
+            remaining,
             ..
-        } => put_selectable(job_line(job, run, *last, *cost, now, tz, widths), *selected),
+        } => put_selectable(
+            job_line(job, run, *last, *cost, *remaining, now, tz, widths),
+            *selected,
+        ),
         Row::Entry { entry, selected } => {
             put_selectable(entry_line(entry, now, tz, widths), *selected);
         }
@@ -1479,9 +1492,10 @@ fn draw_row<Tz: TimeZone>(
 /// rows show when each pull request left the queue. With no merge history, the
 /// recent header holds the word, because its rows show when each run finished.
 /// The job-sum column stands after the right marker cell. A run row shows its
-/// `job_sum` there (see [`run_line`]), and the other rows leave it blank. The
-/// cost column stands after the job-sum column, at the right edge. A run row
-/// and a job row show their `cost` there (see [`run_line`] and [`job_line`]),
+/// `job_sum` there (see [`run_line`]), a job row shows the time left of its job
+/// (see [`job_line`]), and the other rows leave it blank. The cost column
+/// stands after the job-sum column, at the right edge. A run row and a job row
+/// show their `cost` there (see [`run_line`] and [`job_line`]),
 /// and the other rows leave it blank.
 /// This function never panics, whatever the size of the frame.
 pub fn draw<Tz: TimeZone>(
@@ -2070,6 +2084,47 @@ pub fn format_elapsed(d: Duration) -> String {
     } else {
         ">99d".to_owned()
     }
+}
+
+/// Writes the time that a running job has left, in at most 7 columns.
+///
+/// The text is a sign and a time. The sign is `~` for `Remaining::Left`, the
+/// time before the job reaches its estimate. The sign is `+` for
+/// `Remaining::Over`, the time that the job ran past its estimate. An estimate
+/// is a mean of a few jobs and is not correct to the second. Thus the text
+/// gets less precise as the time increases:
+///
+/// - Under 1 minute: seconds, for example `~45s`.
+/// - Under 10 minutes: minutes and seconds, for example `~3m 02s`.
+/// - Under 1 hour: minutes only, for example `~12m`.
+/// - Under 10 hours: hours and minutes, for example `~1h 05m`.
+/// - Under 100 hours: hours only, for example `~12h`.
+/// - 100 hours or more: `~>99h`.
+///
+/// The text is never wider than `JOB_SUM_WIDTH` (7) columns.
+#[must_use]
+pub fn format_remaining(remaining: Remaining) -> String {
+    let (sign, time) = match remaining {
+        Remaining::Left(time) => ('~', time),
+        Remaining::Over(time) => ('+', time),
+    };
+    let total = time.as_secs();
+    let (minute, hour) = (60, 3_600);
+    let (ten_minutes, ten_hours, hundred_hours) = (10 * minute, 10 * hour, 100 * hour);
+    let text = if total < minute {
+        format!("{total}s")
+    } else if total < ten_minutes {
+        format!("{}m {:02}s", total / minute, total % minute)
+    } else if total < hour {
+        format!("{}m", total / minute)
+    } else if total < ten_hours {
+        format!("{}h {:02}m", total / hour, total % hour / minute)
+    } else if total < hundred_hours {
+        format!("{}h", total / hour)
+    } else {
+        ">99h".to_owned()
+    };
+    format!("{sign}{text}")
 }
 
 #[cfg(test)]
@@ -2797,6 +2852,75 @@ mod tests {
     }
 
     #[test]
+    fn format_remaining_holds_each_band_edge() {
+        let cases: [(u64, &str); 13] = [
+            (0, "0s"),
+            (59, "59s"),
+            (60, "1m 00s"),
+            (599, "9m 59s"),
+            (600, "10m"),
+            (3_599, "59m"),
+            (3_600, "1h 00m"),
+            (35_940, "9h 59m"),
+            (35_999, "9h 59m"),
+            (36_000, "10h"),
+            (359_940, "99h"),
+            (359_999, "99h"),
+            (360_000, ">99h"),
+        ];
+        for (seconds, expected) in cases {
+            let d = Duration::from_secs(seconds);
+            assert_eq!(
+                format_remaining(Remaining::Left(d)),
+                format!("~{expected}"),
+                "left of {seconds}s"
+            );
+            assert_eq!(
+                format_remaining(Remaining::Over(d)),
+                format!("+{expected}"),
+                "over by {seconds}s"
+            );
+        }
+    }
+
+    #[test]
+    fn format_remaining_is_never_wider_than_the_job_sum_cell() {
+        let mut seconds: u64 = 0;
+        while seconds < 500 * 3_600 {
+            let d = Duration::from_secs(seconds);
+            for text in [
+                format_remaining(Remaining::Left(d)),
+                format_remaining(Remaining::Over(d)),
+            ] {
+                assert!(
+                    text.chars().count() <= JOB_SUM_WIDTH,
+                    "{seconds}s gave {text:?}"
+                );
+            }
+            seconds += 997;
+        }
+        let max = Duration::from_secs(u64::MAX);
+        assert_eq!(format_remaining(Remaining::Left(max)), "~>99h");
+        assert_eq!(format_remaining(Remaining::Over(max)), "+>99h");
+    }
+
+    #[test]
+    fn format_remaining_writes_the_examples_of_the_issue() {
+        let secs = Duration::from_secs;
+        assert_eq!(format_remaining(Remaining::Left(secs(182))), "~3m 02s");
+        assert_eq!(format_remaining(Remaining::Left(secs(45))), "~45s");
+        assert_eq!(
+            format_remaining(Remaining::Left(secs(12 * 60 + 30))),
+            "~12m"
+        );
+        assert_eq!(
+            format_remaining(Remaining::Left(secs(3_600 + 5 * 60 + 59))),
+            "~1h 05m"
+        );
+        assert_eq!(format_remaining(Remaining::Over(secs(70))), "+1m 10s");
+    }
+
+    #[test]
     fn each_run_marker_is_the_emoji_of_its_state() {
         let mut board = four_run_board();
         let buffer = render_with(120, 10, &mut board, &Status::default());
@@ -3371,6 +3495,96 @@ mod tests {
             let y = row_holding(&text, pull);
             assert!(text[y].contains("rust-lang/cargo"), "{:?}", text[y]);
             assert_eq!(job_sum_cells(&text, y), "", "the row of {pull}");
+        }
+    }
+
+    /// A board of `timmattison/megarepo` with one finished run whose job
+    /// `TypeScript` on `m1-ts` passed in 300 s, and one active run whose job
+    /// `TypeScript` on `m1-ts` runs since `running_started`. The active run
+    /// is expanded and stands first.
+    fn estimate_board(running_started: &str) -> Board {
+        let runner = || RunnerName::new("m1-ts".to_owned());
+        let mut board = Board::new(Duration::from_hours(8));
+        board.replace(
+            repo("timmattison/megarepo"),
+            vec![
+                run(
+                    9_001,
+                    "timmattison/megarepo",
+                    "CI",
+                    "main",
+                    "done",
+                    RunState::Passed,
+                    "2026-10-14T11:00:00Z",
+                    "2026-10-14T11:10:00Z",
+                ),
+                run(
+                    9_002,
+                    "timmattison/megarepo",
+                    "CI",
+                    "main",
+                    "live",
+                    RunState::Running,
+                    running_started,
+                    "2026-10-14T11:59:00Z",
+                ),
+            ],
+            now(),
+        );
+        board.set_jobs(
+            RunId(9_001),
+            vec![Job {
+                runner: runner(),
+                ..job(
+                    501,
+                    "TypeScript",
+                    RunState::Passed,
+                    Some("2026-10-14T11:00:00Z"),
+                    Some("2026-10-14T11:05:00Z"),
+                )
+            }],
+        );
+        board.set_jobs(
+            RunId(9_002),
+            vec![Job {
+                runner: runner(),
+                ..job(
+                    502,
+                    "TypeScript",
+                    RunState::Running,
+                    Some(running_started),
+                    None,
+                )
+            }],
+        );
+        board.expand(now());
+        board
+    }
+
+    #[test]
+    fn a_running_job_row_shows_its_time_left_under_the_job_sum_header() {
+        for width in [80_u16, 120, 200] {
+            let mut board = estimate_board("2026-10-14T11:58:00Z");
+            let text = lines(&render_with(width, 12, &mut board, &loaded()));
+            let y = row_holding(&text, "502");
+            assert!(
+                text[y].contains('├') || text[y].contains('└'),
+                "width {width}: {:?}",
+                text[y]
+            );
+            assert_eq!(job_sum_cells(&text, y), "~3m 00s", "width {width}");
+            let run_y = row_holding(&text, "9002");
+            assert_eq!(job_sum_cells(&text, run_y), "2m 00s", "width {width}");
+        }
+    }
+
+    #[test]
+    fn a_running_job_row_past_its_estimate_shows_the_time_over() {
+        for width in [80_u16, 120, 200] {
+            let mut board = estimate_board("2026-10-14T11:53:50Z");
+            let text = lines(&render_with(width, 12, &mut board, &loaded()));
+            let y = row_holding(&text, "502");
+            assert_eq!(job_sum_cells(&text, y), "+1m 10s", "width {width}");
         }
     }
 
@@ -6572,8 +6786,8 @@ mod tests {
                     "2026-10-14T11:30:00Z",
                 );
                 for last in [false, true] {
-                    let line = job_line(&job, &run, last, JobCost::Unknown, now(), &utc(), widths)
-                        .to_string();
+                    let (c, tz) = (JobCost::Unknown, utc());
+                    let line = job_line(&job, &run, last, c, None, now(), &tz, widths).to_string();
                     assert_eq!(display_width(&line), usize::from(w), "{state:?}: {line:?}");
                 }
             }

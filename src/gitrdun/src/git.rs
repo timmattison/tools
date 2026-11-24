@@ -97,7 +97,7 @@ fn git_time_to_datetime(time: &Time) -> DateTime<Local> {
 pub fn get_current_branch(repo_path: &Path) -> String {
     if let Ok(repo) = Repository::open(repo_path) {
         if let Ok(head) = repo.head() {
-            if let Some(branch_name) = head.shorthand() {
+            if let Ok(branch_name) = head.shorthand() {
                 return branch_name.to_string();
             }
         }
