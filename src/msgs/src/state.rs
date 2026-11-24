@@ -531,6 +531,49 @@ mod tests {
     }
 
     #[test]
+    fn a_build_that_panics_reports_failed_and_the_next_open_starts_a_build() {
+        let fixture = fixture_with_messages(1);
+        let paths = DataPaths {
+            chat_db: fixture.path().to_path_buf(),
+            cache_db: fixture.dir().join("text-cache.db"),
+        };
+        let state = AppState::new(Ok(paths));
+        let (tx, rx) = mpsc::channel();
+        state
+            .open(move |status| {
+                assert!(
+                    !matches!(status, CacheStatus::Building { .. }),
+                    "a panic in the build thread"
+                );
+                let _ = tx.send(status);
+            })
+            .expect("open");
+        let last = rx
+            .recv_timeout(CALL_TIMEOUT)
+            .expect("the build thread reported nothing after its panic");
+        assert!(matches!(last, CacheStatus::Failed { .. }), "{last:?}");
+        assert!(matches!(
+            state.cache_status().expect("status"),
+            CacheStatus::Failed { .. }
+        ));
+
+        let (tx, rx) = mpsc::channel();
+        state
+            .open(move |status| {
+                let _ = tx.send(status);
+            })
+            .expect("second open");
+        let mut last = None;
+        while let Ok(status) = rx.recv_timeout(CALL_TIMEOUT) {
+            last = Some(status);
+            if matches!(last, Some(CacheStatus::Ready | CacheStatus::Failed { .. })) {
+                break;
+            }
+        }
+        assert_eq!(last, Some(CacheStatus::Ready));
+    }
+
+    #[test]
     fn a_cache_that_cannot_open_fails_while_the_database_works() {
         let fixture = fixture_with_messages(1);
         let blocker = fixture.dir().join("blocker");
