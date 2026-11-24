@@ -219,9 +219,7 @@ fn run_app(
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             break
                         }
-                        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                            state.kill_confirm = KillConfirm::None;
-                        }
+                        // n, Esc, and each other key cancel the dialog.
                         _ => {
                             state.kill_confirm = KillConfirm::None;
                         }
