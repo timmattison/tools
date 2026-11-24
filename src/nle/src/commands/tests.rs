@@ -28,6 +28,19 @@ fn options(input_path: &Path, output_path: &str, format: ExportFormat) -> Export
     }
 }
 
+fn out_path(dir: &tempfile::TempDir, name: &str) -> String {
+    dir.path().join(name).to_string_lossy().to_string()
+}
+
+fn canonical_out(dir: &tempfile::TempDir, name: &str) -> String {
+    dir.path()
+        .canonicalize()
+        .unwrap()
+        .join(name)
+        .to_string_lossy()
+        .to_string()
+}
+
 fn strings(items: &[&str]) -> Vec<String> {
     items.iter().map(ToString::to_string).collect()
 }
@@ -170,7 +183,7 @@ fn video_export_args_lists_every_option_in_order() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("a.json");
     write_fixture(&input, false);
-    let mut opts = options(&input, "out.mp4", ExportFormat::Video);
+    let mut opts = options(&input, &out_path(&dir, "out.mp4"), ExportFormat::Video);
     opts.theme = Some("dark".to_string());
     opts.fps = Some(30);
     opts.resolution = Some("1280x720".to_string());
@@ -181,7 +194,7 @@ fn video_export_args_lists_every_option_in_order() {
     expected.push(canonical);
     expected.extend(strings(&[
         "--output",
-        "out.mp4",
+        &canonical_out(&dir, "out.mp4"),
         "--theme",
         "dark",
         "--fps",
@@ -198,12 +211,12 @@ fn video_export_args_with_no_options_is_the_base_list() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("a.json");
     write_fixture(&input, false);
-    let opts = options(&input, "out.mp4", ExportFormat::Video);
+    let opts = options(&input, &out_path(&dir, "out.mp4"), ExportFormat::Video);
 
     let canonical = input.canonicalize().unwrap().to_string_lossy().to_string();
     let mut expected = strings(&["export", "video"]);
     expected.push(canonical);
-    expected.extend(strings(&["--output", "out.mp4"]));
+    expected.extend(strings(&["--output", &canonical_out(&dir, "out.mp4")]));
     assert_eq!(video_export_args(&opts).unwrap(), expected);
 }
 
@@ -234,7 +247,7 @@ fn web_export_args_lists_every_option_in_order() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("a.json");
     write_fixture(&input, false);
-    let mut opts = options(&input, "out.html", ExportFormat::Web);
+    let mut opts = options(&input, &out_path(&dir, "out.html"), ExportFormat::Web);
     opts.theme = Some("light".to_string());
     opts.compress = Some(true);
 
@@ -243,7 +256,7 @@ fn web_export_args_lists_every_option_in_order() {
     expected.push(canonical);
     expected.extend(strings(&[
         "--output",
-        "out.html",
+        &canonical_out(&dir, "out.html"),
         "--theme",
         "light",
         "--compress",

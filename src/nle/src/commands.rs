@@ -35,7 +35,61 @@ fn load_recording_from(path: &str) -> Result<LoadedRecording, NleError> {
     })
 }
 
+/// File name endings that a saved recording may have.
+const RECORDING_ENDINGS: &[&str] = &[".json", ".json.gz"];
+/// File name endings that a video export may have.
+const VIDEO_ENDINGS: &[&str] = &[".mp4", ".gif"];
+/// File name endings that a web export may have.
+const WEB_ENDINGS: &[&str] = &[".html"];
+
+/// Resolve an output path that nle writes, or that it asks `beta` to write.
+///
+/// It refuses a path whose file name, in lowercase, does not end with one of
+/// `endings`. It refuses a path with no file name, or with no parent
+/// directory, or whose parent directory does not exist. Otherwise it returns
+/// the canonical parent directory joined with the file name. It does not
+/// confine the path: a `..` or a symlink in the parent resolves to wherever it
+/// points. Each error goes through `to_error`.
+fn resolve_output_path(
+    path: &str,
+    endings: &[&str],
+    to_error: fn(String) -> NleError,
+) -> Result<PathBuf, NleError> {
+    let file_path = PathBuf::from(path);
+    let file_name = file_path
+        .file_name()
+        .ok_or_else(|| to_error(format!("Invalid path (no filename): {path}")))?;
+    let lowercase_name = file_name.to_string_lossy().to_lowercase();
+    if !endings
+        .iter()
+        .any(|ending| lowercase_name.ends_with(ending))
+    {
+        return Err(to_error(format!(
+            "Refusing to write {path}: the file name must end in one of {}",
+            endings.join(", ")
+        )));
+    }
+    let parent = file_path
+        .parent()
+        .ok_or_else(|| to_error(format!("Invalid path (no parent directory): {path}")))?;
+    if !parent.exists() {
+        return Err(to_error(format!(
+            "Parent directory does not exist: {}",
+            parent.display()
+        )));
+    }
+    let canonical_parent = parent.canonicalize().map_err(|e| {
+        to_error(format!(
+            "Failed to resolve parent directory {}: {e}",
+            parent.display()
+        ))
+    })?;
+    Ok(canonical_parent.join(file_name))
+}
+
 /// Save a recording to a file path.
+/// The file name must end in `.json` or `.json.gz`, and the parent directory
+/// must exist; any other path is refused.
 /// Uses gzip compression if `compress` is `Some(true)`, plain JSON if `Some(false)`,
 /// or falls back to extension detection (`.gz` suffix) if `None`.
 #[tauri::command]
@@ -47,34 +101,15 @@ pub async fn save_recording(
     save_recording_to(&path, &recording, compress)
 }
 
-/// Save `recording` to `path` after it resolves the parent directory.
+/// Save `recording` to `path`. It refuses a file name that does not end in
+/// `.json` or `.json.gz`, and a parent directory that does not exist.
 /// An absent `compress` falls back to the `.gz` suffix of `path`.
 fn save_recording_to(
     path: &str,
     recording: &Recording,
     compress: Option<bool>,
 ) -> Result<(), NleError> {
-    let file_path = PathBuf::from(path);
-    // Canonicalize the parent directory to prevent path traversal
-    let parent = file_path.parent().ok_or_else(|| {
-        NleError::SaveError(format!("Invalid path (no parent directory): {path}"))
-    })?;
-    if !parent.exists() {
-        return Err(NleError::SaveError(format!(
-            "Parent directory does not exist: {}",
-            parent.display()
-        )));
-    }
-    let canonical_parent = parent.canonicalize().map_err(|e| {
-        NleError::SaveError(format!(
-            "Failed to resolve parent directory {}: {e}",
-            parent.display()
-        ))
-    })?;
-    let file_name = file_path
-        .file_name()
-        .ok_or_else(|| NleError::SaveError(format!("Invalid path (no filename): {path}")))?;
-    let canonical_path = canonical_parent.join(file_name);
+    let canonical_path = resolve_output_path(path, RECORDING_ENDINGS, NleError::SaveError)?;
     let should_compress = compress.unwrap_or_else(|| path.ends_with(".gz"));
     recording.save(&canonical_path, should_compress)
 }
@@ -136,24 +171,29 @@ fn validate_export_input(input_path: &str) -> Result<PathBuf, NleError> {
 }
 
 /// Build the arguments that all `beta export` runs share: the subcommand,
-/// the canonical input path, and the output path.
+/// the canonical input path, and the resolved output path.
+/// The output file name must end in one of `output_endings`.
 fn base_export_args(
     subcommand: &str,
     input_path: &str,
     output_path: &str,
+    output_endings: &[&str],
 ) -> Result<Vec<String>, NleError> {
     let canonical_input = validate_export_input(input_path)?;
+    let resolved_output = resolve_output_path(output_path, output_endings, NleError::ExportError)?;
     Ok(vec![
         "export".to_string(),
         subcommand.to_string(),
         canonical_input.to_string_lossy().to_string(),
         "--output".to_string(),
-        output_path.to_string(),
+        resolved_output.to_string_lossy().to_string(),
     ])
 }
 
 /// Build the full `beta` argument list for a video export.
-/// It fails if the format is not Video or the input file is missing.
+/// It fails if the format is not Video, the input file is missing, or the
+/// output file name does not end in `.mp4` or `.gif`, or the output directory
+/// does not exist.
 fn video_export_args(options: &ExportOptions) -> Result<Vec<String>, NleError> {
     if !matches!(options.format, ExportFormat::Video) {
         return Err(NleError::ExportError(
@@ -161,7 +201,12 @@ fn video_export_args(options: &ExportOptions) -> Result<Vec<String>, NleError> {
         ));
     }
 
-    let mut args = base_export_args("video", &options.input_path, &options.output_path)?;
+    let mut args = base_export_args(
+        "video",
+        &options.input_path,
+        &options.output_path,
+        VIDEO_ENDINGS,
+    )?;
     if let Some(theme) = &options.theme {
         args.push("--theme".to_string());
         args.push(theme.clone());
@@ -181,7 +226,9 @@ fn video_export_args(options: &ExportOptions) -> Result<Vec<String>, NleError> {
 }
 
 /// Build the full `beta` argument list for a web export.
-/// It fails if the format is not Web or the input file is missing.
+/// It fails if the format is not Web, the input file is missing, or the
+/// output file name does not end in `.html`, or the output directory does not
+/// exist.
 fn web_export_args(options: &ExportOptions) -> Result<Vec<String>, NleError> {
     if !matches!(options.format, ExportFormat::Web) {
         return Err(NleError::ExportError(
@@ -189,7 +236,12 @@ fn web_export_args(options: &ExportOptions) -> Result<Vec<String>, NleError> {
         ));
     }
 
-    let mut args = base_export_args("web", &options.input_path, &options.output_path)?;
+    let mut args = base_export_args(
+        "web",
+        &options.input_path,
+        &options.output_path,
+        WEB_ENDINGS,
+    )?;
     if let Some(theme) = &options.theme {
         args.push("--theme".to_string());
         args.push(theme.clone());
