@@ -116,7 +116,7 @@ impl MessageDb {
 
         let rows = stmt.query_map([limit, offset], |row| {
             Ok((
-                row.get::<_, i64>(0)?,           // chat_id
+                row.get::<_, i64>(0)?,            // chat_id
                 row.get::<_, String>(1)?,         // chat_identifier
                 row.get::<_, Option<String>>(2)?, // display_name
                 row.get::<_, i64>(3)?,            // style
@@ -277,7 +277,7 @@ impl MessageDb {
 
         let rows = stmt.query_map([chat_id, limit, offset], |row| {
             Ok((
-                row.get::<_, i64>(0)?,            // message_id
+                row.get::<_, i64>(0)?,             // message_id
                 row.get::<_, Option<String>>(1)?,  // text
                 row.get::<_, Option<Vec<u8>>>(2)?, // attributedBody
                 row.get::<_, bool>(3)?,            // is_from_me
@@ -386,7 +386,15 @@ impl MessageDb {
             WHERE c.ROWID = ?1
             GROUP BY c.ROWID",
             [chat_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )?;
 
         let participants = self.get_participants(chat_id)?;

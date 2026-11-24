@@ -67,8 +67,7 @@ pub fn apple_timestamp_to_datetime(apple_ns: i64) -> Option<DateTime<FixedOffset
     }
     let unix_seconds = apple_ns / 1_000_000_000 + 978_307_200;
     let local = chrono::Local::now().fixed_offset().timezone();
-    chrono::DateTime::from_timestamp(unix_seconds, 0)
-        .map(|dt| dt.with_timezone(&local))
+    chrono::DateTime::from_timestamp(unix_seconds, 0).map(|dt| dt.with_timezone(&local))
 }
 
 /// Truncate a string to max_chars characters, appending "..." if truncated.
@@ -120,7 +119,10 @@ mod tests {
 
     #[test]
     fn test_truncate_long_string() {
-        assert_eq!(truncate_preview("hello world this is long", 10), "hello w...");
+        assert_eq!(
+            truncate_preview("hello world this is long", 10),
+            "hello w..."
+        );
     }
 
     #[test]

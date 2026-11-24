@@ -60,10 +60,9 @@ pub fn list_conversations(
         .inner
         .lock()
         .map_err(|e| MsgsError::DatabaseError(e.to_string()))?;
-    let db = lock
-        .db
-        .as_ref()
-        .ok_or(MsgsError::DatabaseError("Database not initialized".to_string()))?;
+    let db = lock.db.as_ref().ok_or(MsgsError::DatabaseError(
+        "Database not initialized".to_string(),
+    ))?;
     db.list_conversations(offset, limit)
 }
 
@@ -79,10 +78,9 @@ pub fn get_messages(
         .inner
         .lock()
         .map_err(|e| MsgsError::DatabaseError(e.to_string()))?;
-    let db = lock
-        .db
-        .as_ref()
-        .ok_or(MsgsError::DatabaseError("Database not initialized".to_string()))?;
+    let db = lock.db.as_ref().ok_or(MsgsError::DatabaseError(
+        "Database not initialized".to_string(),
+    ))?;
     db.get_messages(chat_id, offset, limit)
 }
 
@@ -105,14 +103,12 @@ pub fn search_messages(
         .inner
         .lock()
         .map_err(|e| MsgsError::DatabaseError(e.to_string()))?;
-    let cache = lock
-        .cache
-        .as_ref()
-        .ok_or(MsgsError::CacheError("Text cache not initialized".to_string()))?;
-    let db = lock
-        .db
-        .as_ref()
-        .ok_or(MsgsError::DatabaseError("Database not initialized".to_string()))?;
+    let cache = lock.cache.as_ref().ok_or(MsgsError::CacheError(
+        "Text cache not initialized".to_string(),
+    ))?;
+    let db = lock.db.as_ref().ok_or(MsgsError::DatabaseError(
+        "Database not initialized".to_string(),
+    ))?;
 
     let hits = cache.search(&query, chat_id, limit, offset)?;
 
@@ -133,10 +129,9 @@ pub fn rebuild_text_cache(state: State<'_, AppState>) -> Result<(), MsgsError> {
         .inner
         .lock()
         .map_err(|e| MsgsError::DatabaseError(e.to_string()))?;
-    let db = lock
-        .db
-        .as_ref()
-        .ok_or(MsgsError::DatabaseError("Database not initialized".to_string()))?;
+    let db = lock.db.as_ref().ok_or(MsgsError::DatabaseError(
+        "Database not initialized".to_string(),
+    ))?;
 
     let cache = TextCache::open()?;
     cache.rebuild(db.connection())?;
@@ -155,10 +150,9 @@ pub fn get_attachment(
         .inner
         .lock()
         .map_err(|e| MsgsError::DatabaseError(e.to_string()))?;
-    let db = lock
-        .db
-        .as_ref()
-        .ok_or(MsgsError::DatabaseError("Database not initialized".to_string()))?;
+    let db = lock.db.as_ref().ok_or(MsgsError::DatabaseError(
+        "Database not initialized".to_string(),
+    ))?;
     db.get_attachment_path(attachment_id)
 }
 
@@ -176,10 +170,9 @@ pub fn export_messages(
         .inner
         .lock()
         .map_err(|e| MsgsError::DatabaseError(e.to_string()))?;
-    let db = lock
-        .db
-        .as_ref()
-        .ok_or(MsgsError::DatabaseError("Database not initialized".to_string()))?;
+    let db = lock.db.as_ref().ok_or(MsgsError::DatabaseError(
+        "Database not initialized".to_string(),
+    ))?;
 
     let export_dir = std::path::Path::new(&export_path);
     export_conversation_range(

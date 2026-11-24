@@ -23,7 +23,10 @@ impl TextCache {
             .join(CACHE_DIR_NAME);
 
         std::fs::create_dir_all(&cache_dir).map_err(|e| {
-            MsgsError::CacheError(format!("Cannot create cache dir {}: {e}", cache_dir.display()))
+            MsgsError::CacheError(format!(
+                "Cannot create cache dir {}: {e}",
+                cache_dir.display()
+            ))
         })?;
 
         let db_path = cache_dir.join(CACHE_DB_NAME);
@@ -139,10 +142,8 @@ impl TextCache {
             let (message_id, chat_id, is_from_me, sender_id, text, body) =
                 row.map_err(|e| MsgsError::DatabaseError(e.to_string()))?;
 
-            let extracted = text.or_else(|| {
-                body.as_deref()
-                    .and_then(extract_text_from_attributed_body)
-            });
+            let extracted =
+                text.or_else(|| body.as_deref().and_then(extract_text_from_attributed_body));
 
             if let Some(ref text_content) = extracted {
                 if !text_content.is_empty() {

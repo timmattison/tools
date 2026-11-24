@@ -19,7 +19,10 @@ pub fn extract_text_from_attributed_body(blob: &[u8]) -> Option<String> {
     let after_marker = marker_pos + NSSTRING_MARKER.len();
 
     if blob.len() < after_marker + HEADER.len() + 2 {
-        log::warn!("attributedBody too short after NSString marker (len={})", blob.len());
+        log::warn!(
+            "attributedBody too short after NSString marker (len={})",
+            blob.len()
+        );
         return None;
     }
 
@@ -97,7 +100,10 @@ mod tests {
             blob.extend_from_slice(&(text_bytes.len() as u32).to_le_bytes());
         } else {
             blob.push(0x2b);
-            #[expect(clippy::cast_possible_truncation, reason = "test helper, length always < 256")]
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "test helper, length always < 256"
+            )]
             blob.push(text_bytes.len() as u8);
         }
         blob.extend_from_slice(text_bytes);
@@ -108,31 +114,46 @@ mod tests {
     #[test]
     fn test_extract_ascii() {
         let blob = build_test_blob("Hello, world!", false);
-        assert_eq!(extract_text_from_attributed_body(&blob), Some("Hello, world!".to_string()));
+        assert_eq!(
+            extract_text_from_attributed_body(&blob),
+            Some("Hello, world!".to_string())
+        );
     }
 
     #[test]
     fn test_extract_empty_string() {
         let blob = build_test_blob("", false);
-        assert_eq!(extract_text_from_attributed_body(&blob), Some(String::new()));
+        assert_eq!(
+            extract_text_from_attributed_body(&blob),
+            Some(String::new())
+        );
     }
 
     #[test]
     fn test_extract_emoji() {
         let blob = build_test_blob("Hey 🎉🎊", false);
-        assert_eq!(extract_text_from_attributed_body(&blob), Some("Hey 🎉🎊".to_string()));
+        assert_eq!(
+            extract_text_from_attributed_body(&blob),
+            Some("Hey 🎉🎊".to_string())
+        );
     }
 
     #[test]
     fn test_extract_japanese() {
         let blob = build_test_blob("日本語メッセージ", false);
-        assert_eq!(extract_text_from_attributed_body(&blob), Some("日本語メッセージ".to_string()));
+        assert_eq!(
+            extract_text_from_attributed_body(&blob),
+            Some("日本語メッセージ".to_string())
+        );
     }
 
     #[test]
     fn test_extract_accented() {
         let blob = build_test_blob("café au lait", false);
-        assert_eq!(extract_text_from_attributed_body(&blob), Some("café au lait".to_string()));
+        assert_eq!(
+            extract_text_from_attributed_body(&blob),
+            Some("café au lait".to_string())
+        );
     }
 
     #[test]
