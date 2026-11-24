@@ -129,6 +129,7 @@ export function selectConversation(chatId: number, el: HTMLElement): void {
 function handleScroll(e: Event): void {
   if (!(e.target instanceof HTMLElement)) return;
   const target = e.target;
+  if (target.dataset.mode === "search") return;
   if (target.scrollTop + target.clientHeight >= target.scrollHeight - 100) {
     loadMore().catch(console.error);
   }
