@@ -534,7 +534,7 @@ fn fetch_item_from_1password(op_path: &OpPath) -> Result<serde_json::Value> {
     })?;
 
     for attempt in 1..=OP_MAX_RETRIES {
-        match Command::new("op")
+        match childenv::command("op")
             .args(["item", "get", item, "--vault", vault, "--format", "json"])
             .output()
         {

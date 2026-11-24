@@ -1,6 +1,6 @@
 use op_cache::ItemField;
 use std::io;
-use std::process::{Command, Output};
+use std::process::Output;
 
 /// A running gluetun container and its WireGuard key.
 #[derive(Debug, Clone)]
@@ -288,7 +288,7 @@ where
 /// command exits non-zero. A docker failure is never reported as an empty
 /// list: a credential handed out on unknown state is worse than no credential.
 pub fn find_running_tunnels() -> Result<Vec<RunningTunnel>, DockerError> {
-    find_running_tunnels_with(|args| Command::new("docker").args(args).output())
+    find_running_tunnels_with(|args| childenv::command("docker").args(args).output())
 }
 
 #[cfg(test)]
