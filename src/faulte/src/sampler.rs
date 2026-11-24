@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::duration::Span;
 use crate::history::{Gap, SampledFrame, Update};
@@ -126,6 +126,16 @@ impl Drop for Sampler {
 /// error.
 type CounterRead = Result<VmCounters, String>;
 
+/// A read of the counters, and when it happened.
+#[derive(Clone)]
+struct TimedCounters {
+    /// The counters, or the text of the error.
+    read: CounterRead,
+    /// When the sampler read the counters, on the monotonic clock. The clock
+    /// of the wall can move back between two reads.
+    at: Instant,
+}
+
 /// The result of a read of the other sources: what they said, or the text of
 /// the error.
 type SourceRead = Result<Sources, String>;
@@ -200,7 +210,7 @@ impl<M: Machine> Run<M> {
 
     /// Reads one stream until it ends or the channel closes.
     fn read(&self, mut stream: Box<dyn FaultStream>, ledger: &mut Ledger) -> Flow {
-        let mut reads: [Option<CounterRead>; 2] = [None, None];
+        let mut reads: [Option<TimedCounters>; 2] = [None, None];
         let mut sources: Option<SourceRead> = None;
         let mut first_header = true;
         loop {
@@ -250,11 +260,14 @@ impl<M: Machine> Run<M> {
         }
     }
 
-    /// Reads the counters of the virtual memory system.
-    fn read_counters(&self) -> CounterRead {
-        self.machine
+    /// Reads the counters of the virtual memory system, and notes when.
+    fn read_counters(&self) -> TimedCounters {
+        let at = Instant::now();
+        let read = self
+            .machine
             .vm_counters()
-            .map_err(|error: MachineError| error.to_string())
+            .map_err(|error: MachineError| error.to_string());
+        TimedCounters { read, at }
     }
 
     /// Reads every source other than the sample.
@@ -267,20 +280,24 @@ impl<M: Machine> Run<M> {
     fn send_sample(
         &self,
         sample: &TimedSample,
-        older: CounterRead,
-        newer: CounterRead,
+        older: TimedCounters,
+        newer: TimedCounters,
         sources: SourceRead,
         ledger: &mut Ledger,
     ) -> bool {
-        let outcome = older.and_then(|before| {
-            newer.and_then(|after| {
+        // The swap delta covers the time between the two reads. A slow read of
+        // the other sources can delay the newer read past the end of the
+        // sample, and the window then holds that delay too.
+        let swap_window = newer.at.saturating_duration_since(older.at);
+        let outcome = older.read.and_then(|before| {
+            newer.read.and_then(|after| {
                 let facts = SampleFacts {
                     interval: self.interval,
                     window: sample_window(self.interval, sample.sample.elapsed, sample.wall),
                     faults: &sample.sample.rows,
                     before,
                     after,
-                    swap_window: sample.wall,
+                    swap_window,
                 };
                 sources.map(|sources| join_sources(&self.machine, &facts, sources))
             })
@@ -776,7 +793,6 @@ mod tests {
                 swapouts: 769
             }
         );
-        assert_eq!(first.observed.swap_window, Duration::from_secs(4));
     }
 
     /// The swap window of a frame is the time between its two reads of the

@@ -236,8 +236,10 @@ pub struct Observed {
     pub usage: SwapUsage,
     /// The size of the compressor in bytes, after the sample.
     pub compressor_bytes: u64,
-    /// The time between the two reads of the counters. It is longer than the
-    /// window of the ranking, because the sampler starts and stops inside it.
+    /// The time between the two reads of the counters. In a run of one
+    /// sample, it is longer than the window of the ranking, because the
+    /// sampler starts and stops inside it. The terminal view reads the
+    /// counters at each header, so a slow read can make it longer too.
     pub swap_window: Duration,
     /// The name of each account that owns a row of the ranking.
     pub accounts: Accounts,
