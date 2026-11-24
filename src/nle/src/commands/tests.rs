@@ -299,6 +299,37 @@ fn save_recording_to_ignores_the_case_of_the_ending() {
 }
 
 #[test]
+fn save_recording_to_gzips_an_uppercase_gz_path_when_compress_is_absent() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("REC.JSON.GZ");
+    save_recording_to(&file.to_string_lossy(), &Recording::test_fixture(), None).unwrap();
+    assert!(is_gzip(&file));
+}
+
+#[test]
+fn list_recordings_in_ignores_the_case_of_the_ending() {
+    let dir = tempfile::tempdir().unwrap();
+    let plain = dir.path().join("A.JSON");
+    let gzipped = dir.path().join("B.Json.Gz");
+    write_fixture(&plain, false);
+    write_fixture(&gzipped, true);
+
+    let mut listed: Vec<String> = list_recordings_in(&dir.path().to_string_lossy())
+        .unwrap()
+        .into_iter()
+        .map(|m| m.file_path)
+        .collect();
+    listed.sort();
+
+    let mut expected = vec![
+        plain.to_string_lossy().into_owned(),
+        gzipped.to_string_lossy().into_owned(),
+    ];
+    expected.sort();
+    assert_eq!(listed, expected);
+}
+
+#[test]
 fn video_export_args_refuses_a_name_without_a_video_ending() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("a.json");
