@@ -180,7 +180,7 @@ reads `.meta.json`, and assembles `SessionTodos`.
 ## Terminal display (`crap todos <uuid>`)
 
 ```
-Session 96281973  ·  /…/muxiavelli-worktrees-issue-99  ·  tasks: 4/5 done
+Session 96281973  ·  /…/muxiavelli-worktrees-issue-99  ·  tasks: 4/5 done (1 active)
 
 main
   ✔ Slice 1: CSS active-panel indicator rule
