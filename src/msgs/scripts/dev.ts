@@ -8,7 +8,6 @@ import { dirname } from "path";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_DIR = join(SCRIPT_DIR, "..");
-const WORKSPACE_ROOT = join(PACKAGE_DIR, "..", "..");
 const FRONTEND_DIR = join(PACKAGE_DIR, "frontend");
 const TAURI_CONF_PATH = join(PACKAGE_DIR, "tauri.conf.json");
 
