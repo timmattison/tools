@@ -14,7 +14,9 @@
 //! search path; a `.git` directory is a repository rather than a worktree, and
 //! a package under one is listed; a submodule, whose `.git` is a file too,
 //! goes with the checkout that holds it, so its package is listed under the
-//! main checkout and left out under a linked worktree; and a run that
+//! main checkout and left out under a linked worktree; any other `.git` file,
+//! such as the one `git init --separate-git-dir` leaves or one that names no
+//! git directory, stops the walk as a `.git` directory does; and a run that
 //! found packages and then filtered every one of them out says so, and names
 //! the flag that would have kept them.
 //!
@@ -515,6 +517,98 @@ fn a_package_inside_a_submodule_of_a_worktree_below_the_search_path_is_left_out(
         vec!["app".to_string(), "vendor/lib".to_string()],
         "a submodule belongs to the checkout of its superproject, so a submodule inside a \
          linked worktree is part of that second checkout and is left out with it:\n{}",
+        said(&output)
+    );
+}
+
+#[test]
+fn a_separate_git_dir_repository_inside_a_worktree_below_the_search_path_is_listed() {
+    let fixture = Fixture::new();
+    let superproject = fixture.repository_at("superproject");
+    let worktree = fixture.worktree_at(&superproject, "superproject/wt/feat");
+
+    // `git init --separate-git-dir` keeps the git directory elsewhere and
+    // leaves a `.git` file, as a linked worktree and a submodule do. Its git
+    // directory is neither one's: it holds no `commondir`, and it lies in no
+    // `modules` directory. The repository is one of its own, as a repository
+    // with a `.git` directory at the same place is.
+    let nested = worktree.join("nested");
+    let separate = fixture.path("separate.git");
+    fixture.git(
+        &worktree,
+        &[
+            "init",
+            "-q",
+            "-b",
+            &unique("main"),
+            "--separate-git-dir",
+            &separate.to_string_lossy(),
+            &nested.to_string_lossy(),
+        ],
+    );
+    fixture.assert_toplevel(&nested);
+    assert!(
+        nested.join(".git").is_file(),
+        "a repository made with --separate-git-dir keeps its git link as a file: {}",
+        nested.join(".git").display()
+    );
+    fixture.package_at(
+        "superproject/wt/feat/nested",
+        "workit-fixture-separate-nested",
+    );
+
+    let output = fixture.workit(&superproject, &[]);
+
+    assert_succeeded(&output);
+    assert_eq!(
+        members_of(&output),
+        vec!["wt/feat/nested".to_string()],
+        "a repository of its own inside a linked worktree holds packages nothing else holds, \
+         whether its git directory sits beside it or elsewhere:\n{}",
+        said(&output)
+    );
+}
+
+#[test]
+fn a_git_file_that_names_no_git_directory_inside_a_worktree_ends_the_walk() {
+    let fixture = Fixture::new();
+    let superproject = fixture.repository_at("superproject");
+    fixture.worktree_at(&superproject, "superproject/wt/feat");
+
+    // Git itself refuses to walk past a `.git` file that it cannot follow: it
+    // stops with "invalid gitfile format", or with "gitfile does not point to
+    // a valid repository". Neither file puts its directory in the checkout
+    // above it.
+    fixture.package_at(
+        "superproject/wt/feat/garbled",
+        "workit-fixture-garbled-link",
+    );
+    std::fs::write(
+        fixture.path("superproject/wt/feat/garbled/.git"),
+        "not a git link\n",
+    )
+    .expect("the garbled git link is written");
+    fixture.package_at(
+        "superproject/wt/feat/dangling",
+        "workit-fixture-dangling-link",
+    );
+    std::fs::write(
+        fixture.path("superproject/wt/feat/dangling/.git"),
+        format!("gitdir: {}\n", fixture.path("missing.git").display()),
+    )
+    .expect("the dangling git link is written");
+
+    let output = fixture.workit(&superproject, &[]);
+
+    assert_succeeded(&output);
+    assert_eq!(
+        members_of(&output),
+        vec![
+            "wt/feat/dangling".to_string(),
+            "wt/feat/garbled".to_string()
+        ],
+        "a `.git` file that names no git directory links no checkout, so the walk stops at it as \
+         git does, and the worktree above it has no say:\n{}",
         said(&output)
     );
 }
