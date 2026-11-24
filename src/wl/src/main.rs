@@ -72,7 +72,13 @@ fn verdict(port: u16, status: Option<PortStatus>) -> Verdict {
             true,
         ),
         Some(PortStatus::Free) => (format!("No processes listening on port {port}"), false),
-        Some(PortStatus::Unknown) | None => (
+        None => (
+            format!(
+                "Cannot tell whether port {port} is in use: wl reads the kernel's list of listening sockets on macOS and Linux only."
+            ),
+            true,
+        ),
+        Some(PortStatus::Unknown) => (
             format!(
                 "Cannot tell whether port {port} is in use: wl could not read the kernel's list of listening sockets."
             ),

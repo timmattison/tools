@@ -25,13 +25,17 @@
 //!
 //! # Every other platform says it cannot tell
 //!
-//! A platform with no reader here answers [`PortStatus::Unknown`] for every
-//! port, because nothing asked. Windows is the one that loses an answer by it.
-//! `listeners::get_all` reads the complete Windows socket table already, so a
-//! port it named no process for really was free, and `wl` now declines to say
-//! so instead. Closing that gap means reading `GetExtendedTcpTable`
-//! (`iphlpapi.h`) here — the same list `netstat` reads — and nobody has written
-//! that yet.
+//! A platform with no reader here gets `None` from [`port_status`]. `wl` then
+//! says that it reads the list on macOS and Linux only. It does not say that a
+//! read failed, because it did not try one.
+//!
+//! `wl` does not take [`PortStatus::Free`] from `listeners` on Windows.
+//! `listeners` 0.2.1 turns a failed `GetExtendedTcpTable` read into an empty
+//! list. It also drops a row whose process the Toolhelp snapshot cannot name.
+//! So its silence does not prove a port free.
+//!
+//! A reader of `GetExtendedTcpTable` (`iphlpapi.h`) here closes the gap.
+//! Nobody has written it.
 
 mod linux;
 mod macos;
