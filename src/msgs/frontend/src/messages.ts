@@ -103,7 +103,6 @@ function createMessageElement(msg: Message): HTMLElement {
   const wrapper = document.createElement("div");
   wrapper.className = `message ${msg.is_from_me ? "sent" : "received"}`;
   wrapper.dataset.messageId = String(msg.message_id);
-  wrapper.dataset.messageDate = msg.date;
 
   const bubble = document.createElement("div");
   bubble.className = "bubble";

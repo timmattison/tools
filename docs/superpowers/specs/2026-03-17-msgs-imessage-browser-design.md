@@ -205,7 +205,7 @@ All commands return `Result<T, MsgsError>`.
 | `list_conversations` | offset, limit, sort_by | `Vec<Conversation>` | Paginated conversation list, sorted by recent |
 | `get_messages` | chat_id, offset, limit | `Vec<Message>` | Paginated messages for a conversation |
 | `search_messages` | query, chat_id (optional), offset, limit | `Vec<SearchResult>` | FTS5 search, global or per-chat |
-| `export_messages` | chat_id, start_message_date, end_message_date, include_attachments | `ExportResult` | Export date range to JSON + attachment folder |
+| `export_messages` | chat_id, start_message_id, end_message_id, include_attachments, export_path | `ExportResult` | Export the messages between two messages to JSON + attachment folder |
 | `get_attachment` | attachment_id | asset URI | Serve attachment via Tauri asset protocol for webview display |
 | `get_version` | (none) | `String` | Version string with git hash and dirty status |
 | `rebuild_text_cache` | (none) | (none) | Force rebuild of the FTS5 text cache |
@@ -216,7 +216,7 @@ Attachments are served via Tauri's asset protocol (`asset://` scheme), which all
 
 ### Export Range
 
-The `export_messages` command uses `start_message_date` and `end_message_date` (Apple Core Data timestamps) rather than message IDs, since message ROWIDs are global (not per-chat) and non-contiguous within a conversation. The query joins through `chat_message_join` filtered by `chat_id` and `message_date BETWEEN start AND end`, ensuring only messages in the target conversation are exported.
+The `export_messages` command takes the ids of the first and the last selected message, in either order, and never a date. A date from the frontend has only whole seconds, so a `BETWEEN` on dates drops the end message and each later message of the same second, and a date in nanoseconds exceeds the exact integer range of a JavaScript number. The backend reads the position of each id in the chat (`message_date`, then `ROWID`) and selects with the row-value range `(message_date, ROWID) BETWEEN (start date, start id) AND (end date, end id)` through `chat_message_join` filtered by `chat_id`. Both ends are included. An id that is not in the chat is an export error.
 
 ## UI Layout
 

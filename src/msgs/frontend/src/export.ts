@@ -5,8 +5,6 @@ import type { ExportResult } from "./types";
 let selectionMode = false;
 let startMessageEl: HTMLElement | null = null;
 let endMessageEl: HTMLElement | null = null;
-let startDate: string | null = null;
-let endDate: string | null = null;
 let currentExportChatId: number | null = null;
 
 let initialized = false;
@@ -47,21 +45,19 @@ function toggleSelectionMode(): void {
 export function handleMessageClick(el: HTMLElement): void {
   if (!selectionMode) return;
 
-  const date = el.dataset.messageDate!;
-
   if (!startMessageEl) {
     startMessageEl = el;
-    startDate = date;
     el.classList.add("export-start");
     updateExportBar();
   } else if (!endMessageEl) {
     endMessageEl = el;
-    endDate = date;
 
-    // Ensure start is before end (compare as epoch timestamps, not strings)
-    if (new Date(startDate!).getTime() > new Date(endDate!).getTime()) {
+    // Ensure start is before end, by position in the list
+    if (
+      startMessageEl.compareDocumentPosition(endMessageEl) &
+      Node.DOCUMENT_POSITION_PRECEDING
+    ) {
       [startMessageEl, endMessageEl] = [endMessageEl, startMessageEl];
-      [startDate, endDate] = [endDate, startDate];
     }
 
     // Highlight range
@@ -71,9 +67,7 @@ export function handleMessageClick(el: HTMLElement): void {
     // Reset and start new selection
     clearHighlights();
     startMessageEl = el;
-    startDate = date;
     endMessageEl = null;
-    endDate = null;
     el.classList.add("export-start");
     updateExportBar();
   }
@@ -120,7 +114,7 @@ function updateExportBar(): void {
 }
 
 async function performExport(): Promise<void> {
-  if (!startDate || !endDate || !currentExportChatId) return;
+  if (!startMessageEl || !endMessageEl || !currentExportChatId) return;
 
   const dir = await save({
     title: "Choose export location",
@@ -132,8 +126,8 @@ async function performExport(): Promise<void> {
   try {
     const result = await invoke<ExportResult>("export_messages", {
       chatId: currentExportChatId,
-      startMessageDate: dateToAppleTimestamp(startDate),
-      endMessageDate: dateToAppleTimestamp(endDate),
+      startMessageId: Number(startMessageEl.dataset.messageId),
+      endMessageId: Number(endMessageEl.dataset.messageId),
       includeAttachments: true,
       exportPath: dir,
     });
@@ -152,14 +146,7 @@ function cancelSelection(): void {
   selectionMode = false;
   startMessageEl = null;
   endMessageEl = null;
-  startDate = null;
-  endDate = null;
   clearHighlights();
   document.getElementById("export-bar")?.classList.add("hidden");
   document.getElementById("message-area")?.classList.remove("selecting");
-}
-
-function dateToAppleTimestamp(isoDate: string): number {
-  const unixSeconds = Math.floor(new Date(isoDate).getTime() / 1000);
-  return (unixSeconds - 978307200) * 1000000000;
 }

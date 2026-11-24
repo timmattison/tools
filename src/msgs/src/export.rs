@@ -6,6 +6,8 @@ use crate::types::ExportResult;
 use crate::util::expand_tilde;
 
 /// Export a range of messages from a conversation to JSON + attachments.
+/// The range runs from the start message to the end message, both included,
+/// in either order.
 ///
 /// # Errors
 ///
@@ -13,8 +15,8 @@ use crate::util::expand_tilde;
 pub fn export_conversation_range(
     db: &MessageDb,
     chat_id: i64,
-    start_date: i64,
-    end_date: i64,
+    start_message_id: i64,
+    end_message_id: i64,
     include_attachments: bool,
     export_dir: &Path,
 ) -> Result<ExportResult, MsgsError> {
@@ -22,8 +24,8 @@ pub fn export_conversation_range(
     std::fs::create_dir_all(export_dir)
         .map_err(|e| MsgsError::ExportError(format!("Cannot create export dir: {e}")))?;
 
-    // Get messages in date range
-    let messages = db.get_messages_in_date_range(chat_id, start_date, end_date)?;
+    // Get the messages from the start message to the end message
+    let messages = db.get_messages_between(chat_id, start_message_id, end_message_id)?;
 
     // Get conversation metadata
     let conversation = db.get_conversation(chat_id)?;
@@ -120,6 +122,7 @@ mod tests {
         let chat = fx.add_chat("chat-export", Some("Export me"), 43);
         let other = fx.add_chat("other", None, 45);
         fx.link_handle(chat, alice);
+        let mut ids = std::collections::HashMap::new();
         for (text, secs, chats) in [
             ("too early", 5, vec![chat]),
             ("first", 10, vec![chat]),
@@ -127,26 +130,21 @@ mod tests {
             ("elsewhere", 15, vec![other]),
             ("too late", 40, vec![chat]),
         ] {
-            fx.add_message(MessageSpec {
+            let id = fx.add_message(MessageSpec {
                 text: Some(text.to_string()),
                 handle: alice,
                 date: apple_ns(BASE + secs, 0),
                 chats,
                 ..MessageSpec::default()
             });
+            ids.insert(text, id);
         }
         let db = fx.open_db();
         let export_dir = fx.dir().join("export").join("nested");
 
-        let result = export_conversation_range(
-            &db,
-            chat,
-            apple_ns(BASE + 10, 0),
-            apple_ns(BASE + 20, 0),
-            false,
-            &export_dir,
-        )
-        .expect("export");
+        let result =
+            export_conversation_range(&db, chat, ids["first"], ids["second"], false, &export_dir)
+                .expect("export");
 
         assert_eq!(result.message_count, 2);
         assert_eq!(result.attachment_count, 0);
@@ -168,12 +166,6 @@ mod tests {
             .map(|m| m["text"].as_str().expect("text"))
             .collect();
         assert_eq!(texts, vec!["first", "second"]);
-    }
-
-    /// The Apple date that the frontend computes from the whole-second date
-    /// of a message.
-    fn frontend_apple_date(message: &crate::types::Message) -> i64 {
-        (message.date.timestamp() - 978_307_200) * 1_000_000_000
     }
 
     #[test]
@@ -200,20 +192,9 @@ mod tests {
         })
         .collect();
         let db = fx.open_db();
-        let page = db.get_messages(chat, 0, 50).expect("page");
-        let oldest = page.iter().min_by_key(|m| m.date).expect("oldest");
-        let newest = page.iter().max_by_key(|m| m.date).expect("newest");
         let export_dir = fx.dir().join("export-subsecond");
 
-        export_conversation_range(
-            &db,
-            chat,
-            frontend_apple_date(oldest),
-            frontend_apple_date(newest),
-            false,
-            &export_dir,
-        )
-        .expect("export");
+        export_conversation_range(&db, chat, ids[0], ids[3], false, &export_dir).expect("export");
 
         let json: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(export_dir.join("messages.json")).expect("read json"),
@@ -226,5 +207,49 @@ mod tests {
             .map(|m| m["message_id"].as_i64().expect("message id"))
             .collect();
         assert_eq!(exported, ids);
+    }
+
+    #[test]
+    fn export_takes_the_ids_in_either_order_and_refuses_a_foreign_id() {
+        let fx = ChatDbFixture::new();
+        let alice = fx.add_handle("alice@example.com");
+        let chat = fx.add_chat("chat-order", None, 45);
+        let other = fx.add_chat("other-order", None, 45);
+        let add = |secs: i64, chats: Vec<i64>| {
+            fx.add_message(MessageSpec {
+                text: Some("x".to_string()),
+                handle: alice,
+                date: apple_ns(BASE + secs, 0),
+                chats,
+                ..MessageSpec::default()
+            })
+        };
+        let first = add(10, vec![chat]);
+        let middle = add(20, vec![chat]);
+        let last = add(30, vec![chat]);
+        let foreign = add(25, vec![other]);
+        let db = fx.open_db();
+
+        let ids_of = |name: &str, a: i64, b: i64| -> Vec<i64> {
+            let dir = fx.dir().join(name);
+            export_conversation_range(&db, chat, a, b, false, &dir).expect("export");
+            let json: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(dir.join("messages.json")).expect("read json"),
+            )
+            .expect("parse json");
+            json["messages"]
+                .as_array()
+                .expect("messages array")
+                .iter()
+                .map(|m| m["message_id"].as_i64().expect("message id"))
+                .collect()
+        };
+        assert_eq!(ids_of("forward", first, last), vec![first, middle, last]);
+        assert_eq!(ids_of("reverse", last, first), vec![first, middle, last]);
+
+        let dir = fx.dir().join("foreign");
+        let error = export_conversation_range(&db, chat, first, foreign, false, &dir)
+            .expect_err("foreign id");
+        assert!(error.to_string().contains(&foreign.to_string()));
     }
 }

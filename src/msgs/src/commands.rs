@@ -161,8 +161,8 @@ pub fn get_attachment(
 pub fn export_messages(
     state: State<'_, AppState>,
     chat_id: i64,
-    start_message_date: i64,
-    end_message_date: i64,
+    start_message_id: i64,
+    end_message_id: i64,
     include_attachments: bool,
     export_path: String,
 ) -> Result<ExportResult, MsgsError> {
@@ -178,8 +178,8 @@ pub fn export_messages(
     export_conversation_range(
         db,
         chat_id,
-        start_message_date,
-        end_message_date,
+        start_message_id,
+        end_message_id,
         include_attachments,
         export_dir,
     )

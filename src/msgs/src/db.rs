@@ -490,24 +490,51 @@ impl MessageDb {
         })
     }
 
-    /// Get all messages in a date range for a conversation (for export).
+    /// Get the messages of a conversation from one message to another, both
+    /// included, oldest first (for export). The order of the two ids does not
+    /// matter. The bounds are the position of each message, its date then its
+    /// ROWID, so a sub-second date cannot drop a message.
     ///
     /// # Errors
     ///
-    /// Returns `MsgsError::DatabaseError` on query failure.
-    pub fn get_messages_in_date_range(
+    /// Returns `MsgsError::ExportError` when an id is not in the chat, and
+    /// `MsgsError::DatabaseError` on query failure.
+    pub fn get_messages_between(
         &self,
         chat_id: i64,
-        start_date: i64,
-        end_date: i64,
+        first_message_id: i64,
+        second_message_id: i64,
     ) -> Result<Vec<Message>, MsgsError> {
+        let position = |message_id: i64| -> Result<(i64, i64), MsgsError> {
+            self.conn
+                .query_row(
+                    "SELECT message_date, message_id FROM chat_message_join
+                     WHERE chat_id = ?1 AND message_id = ?2",
+                    [chat_id, message_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => MsgsError::ExportError(format!(
+                        "Message {message_id} is not in chat {chat_id}"
+                    )),
+                    other => MsgsError::from(other),
+                })
+        };
+        let first = position(first_message_id)?;
+        let second = position(second_message_id)?;
+        let (low, high) = if first <= second {
+            (first, second)
+        } else {
+            (second, first)
+        };
         self.query_messages(
             &format!(
                 "{MESSAGE_SELECT}
-                WHERE cmj.chat_id = ?1 AND cmj.message_date BETWEEN ?2 AND ?3
+                WHERE cmj.chat_id = ?1
+                  AND (cmj.message_date, m.ROWID) BETWEEN (?2, ?3) AND (?4, ?5)
                 ORDER BY cmj.message_date ASC, m.ROWID ASC"
             ),
-            [chat_id, start_date, end_date],
+            [chat_id, low.0, low.1, high.0, high.1],
         )
     }
 
@@ -815,20 +842,25 @@ mod tests {
     }
 
     #[test]
-    fn get_messages_in_date_range_is_inclusive_ascending_and_per_chat() {
+    fn get_messages_between_is_inclusive_ascending_and_per_chat() {
         let fx = ChatDbFixture::new();
         let chat = fx.add_chat("c", None, 45);
         let other = fx.add_chat("other", None, 45);
-        fx.add_message(text_message("before", 5, 0, &[chat]));
-        fx.add_message(text_message("start", 10, 0, &[chat]));
-        fx.add_message(text_message("middle", 15, 0, &[chat]));
-        fx.add_message(text_message("end", 20, 0, &[chat]));
-        fx.add_message(text_message("after", 25, 0, &[chat]));
+        let ids: Vec<i64> = [
+            ("before", 5),
+            ("start", 10),
+            ("middle", 15),
+            ("end", 20),
+            ("after", 25),
+        ]
+        .into_iter()
+        .map(|(text, secs)| fx.add_message(text_message(text, secs, 0, &[chat])))
+        .collect();
         fx.add_message(text_message("foreign", 15, 0, &[other]));
 
         let messages = fx
             .open_db()
-            .get_messages_in_date_range(chat, apple_ns(BASE + 10, 0), apple_ns(BASE + 20, 0))
+            .get_messages_between(chat, ids[1], ids[3])
             .expect("range");
         let texts: Vec<_> = messages.iter().filter_map(|m| m.text.as_deref()).collect();
         assert_eq!(texts, vec!["start", "middle", "end"]);
@@ -937,7 +969,7 @@ mod tests {
     }
 
     #[test]
-    fn get_messages_in_date_range_orders_one_date_by_rowid() {
+    fn get_messages_between_orders_one_date_by_rowid() {
         let fx = ChatDbFixture::new();
         let chat = fx.add_chat("c", None, 45);
         let ids: Vec<i64> = (0..4)
@@ -945,7 +977,7 @@ mod tests {
             .collect();
         let found: Vec<i64> = fx
             .open_db()
-            .get_messages_in_date_range(chat, apple_ns(BASE, 0), apple_ns(BASE + 20, 0))
+            .get_messages_between(chat, ids[0], ids[3])
             .expect("range")
             .iter()
             .map(|m| m.message_id)
