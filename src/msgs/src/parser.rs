@@ -184,4 +184,61 @@ mod tests {
     fn test_extract_empty_blob() {
         assert_eq!(extract_text_from_attributed_body(&[]), None);
     }
+
+    /// Build a blob with the real typedstream length encoding.
+    fn real_blob(text: &str) -> Vec<u8> {
+        let mut blob = Vec::new();
+        blob.extend_from_slice(b"\x04\x0bstreamtyped\x81\xe8\x03\x84\x01@\x84\x84\x84\x12NSAttributedString\x00\x84\x84\x08NSObject\x00\x85\x92\x84\x84\x84\x08NSString");
+        blob.extend_from_slice(&[0x01, 0x94, 0x84, 0x01, 0x2b]);
+        let len = text.len();
+        if len < 0x80 {
+            blob.push(u8::try_from(len).expect("below 128"));
+        } else if len <= 0x7fff {
+            blob.push(0x81);
+            blob.extend_from_slice(&i16::try_from(len).expect("fits i16").to_le_bytes());
+        } else {
+            blob.push(0x82);
+            blob.extend_from_slice(&i32::try_from(len).expect("fits i32").to_le_bytes());
+        }
+        blob.extend_from_slice(text.as_bytes());
+        blob.extend_from_slice(b"\x86\x84\x02iI");
+        blob
+    }
+
+    #[test]
+    fn test_extract_text_of_128_bytes() {
+        let text = "a".repeat(128);
+        assert_eq!(
+            extract_text_from_attributed_body(&real_blob(&text)),
+            Some(text)
+        );
+    }
+
+    #[test]
+    fn test_extract_text_of_300_bytes() {
+        let text = "b".repeat(300);
+        assert_eq!(
+            extract_text_from_attributed_body(&real_blob(&text)),
+            Some(text)
+        );
+    }
+
+    #[test]
+    fn test_extract_text_of_70000_bytes() {
+        let text = "c".repeat(70_000);
+        assert_eq!(
+            extract_text_from_attributed_body(&real_blob(&text)),
+            Some(text)
+        );
+    }
+
+    #[test]
+    fn test_extract_multibyte_text_over_128_bytes() {
+        let text = "日本語🎉".repeat(30);
+        assert!(text.len() > 128);
+        assert_eq!(
+            extract_text_from_attributed_body(&real_blob(&text)),
+            Some(text)
+        );
+    }
 }
