@@ -199,6 +199,20 @@ fn a_default_run_writes_members_with_no_leading_dot_segment() {
 }
 
 #[test]
+fn a_prefix_is_refused_because_each_member_already_names_its_package() {
+    let (_temp, root) = fixture();
+    package_at(&root, "crate-a", "workit-fixture-prefix-refused-crate-a");
+
+    workit_fails(&root, &["--prefix", "src/"]);
+
+    assert!(
+        !root.join("Cargo.toml").exists(),
+        "a member is the exact path from the manifest to its package, so a prefix names a \
+         directory that holds no package, and the run writes no manifest"
+    );
+}
+
+#[test]
 fn a_prefix_lands_directly_on_the_member() {
     let (_temp, root) = fixture();
     package_at(&root, "crate-a", "workit-fixture-prefix-crate-a");
