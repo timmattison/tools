@@ -401,10 +401,17 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
     - To install: `cargo install --git https://github.com/timmattison/tools tvfind`
 - wl
     - Shows which process is listening on a given port. Useful for identifying what program is using a specific port
-      on your system. Supports verbose output to show detailed socket information. Without root it sees only processes
-      owned by you, so run it under `sudo` for a complete answer. When a port is held by a process it cannot see, it
-      says so instead of reporting the port as free. It reads the kernel's list of listening sockets on macOS and Linux;
-      on other platforms it says it cannot tell.
+      on your system. Supports verbose output to show detailed socket information.
+    - Without root, `wl` sees only the processes that you own. Run it under `sudo` for a complete answer. When a run
+      without root names no process, `wl` writes a note about this limit to standard error.
+    - `wl` gives one of these answers:
+        - `PID: … Process: … Socket: …`, one line for each process that it sees on the port.
+        - `Port <port> is in use, but no owning process is visible to the current user.` The kernel's list of
+          listening sockets holds the port, and a process that `wl` cannot see owns it.
+        - `No processes listening on port <port>`. A complete read of that list found no listener on the port.
+        - `Cannot tell whether port <port> is in use`. `wl` reads that list on macOS and Linux only, so this is the
+          answer on each other platform, and also when the read does not complete.
+        - `Error getting listeners`, with exit status 1, when `wl` cannot list the processes at all.
     - To install: `cargo install --git https://github.com/timmattison/tools wl`
 - wolly
     - Wake-on-LAN tool to remotely wake computers by sending magic packets. Features automatic subnet broadcast
