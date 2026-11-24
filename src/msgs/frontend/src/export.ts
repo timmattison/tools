@@ -147,11 +147,20 @@ async function performExport(): Promise<void> {
   }
 }
 
+/**
+ * Leave selection mode and forget the selection: hide the export bar, clear
+ * the marks, and disable the confirm button. Call it when the chat changes.
+ */
+export function resetExport(): void {
+  cancelSelection();
+}
+
 function cancelSelection(): void {
   selectionMode = false;
   startMessageEl = null;
   endMessageEl = null;
   clearHighlights();
+  document.getElementById("btn-export-confirm")?.setAttribute("disabled", "");
   document.getElementById("export-bar")?.classList.add("hidden");
   document.getElementById("message-area")?.classList.remove("selecting");
 }

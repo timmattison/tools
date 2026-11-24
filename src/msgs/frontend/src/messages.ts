@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { Message } from "./bindings";
 import { byId, messageOf, UNKNOWN_DATE_LABEL } from "./utils";
-import { handleMessageClick, initExport } from "./export";
+import { handleMessageClick, initExport, resetExport } from "./export";
 
 const PAGE_SIZE = 50;
 let currentChatId: number | null = null;
@@ -23,6 +23,9 @@ export async function loadConversation(
   identifier: string,
   group: boolean
 ): Promise<void> {
+  // A selection of the old chat must not reach the new chat
+  resetExport();
+
   const generation = ++loadGeneration;
   currentChatId = chatId;
   currentOffset = 0;
