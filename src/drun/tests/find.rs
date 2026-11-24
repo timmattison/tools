@@ -420,3 +420,39 @@ fn a_detached_container_can_be_followed_to_its_result() {
     fixture.inspect(host, "exited 0\n");
     assert_eq!(fixture.run(&["status", name]).stdout, "box-b exited 0\n");
 }
+
+#[test]
+fn a_help_among_the_flags_prints_the_usage_and_asks_no_host() {
+    for args in [
+        &["exec", "-it", "--help"][..],
+        &["logs", "-f", "--help"],
+        &["rm", "-f", "--help"],
+        &["cp", "-a", "--help"],
+        &["rm", "-f", "--help", "job-a"],
+        &["logs", "job-b", "--help"],
+        &["exec", "-i", "--help=false", "--help", "job-a", "sh"],
+    ] {
+        let fixture = fleet();
+        let run = fixture.run(args);
+        assert_eq!(run.code, Some(0), "{args:?}: {}", run.stderr);
+        assert!(run.stdout.contains("drun logs"), "{args:?}: {}", run.stderr);
+        for host in [LOCAL, "box-a", "box-b"] {
+            assert!(
+                fixture.calls(host).is_empty(),
+                "{args:?} called {host}: {}",
+                run.stderr
+            );
+        }
+    }
+}
+
+#[test]
+fn a_help_that_is_off_or_after_the_command_of_exec_does_not_stop_the_command() {
+    let fixture = fleet();
+    let run = fixture.run(&["logs", "-f", "--help", "--help=false", "job-b"]);
+    assert_eq!(run.code, Some(0), "{}", run.stderr);
+    assert_eq!(fixture.calls_of("box-b", "logs").len(), 1);
+    let run = fixture.run(&["exec", "job-a", "ls", "--help"]);
+    assert_eq!(run.code, Some(0), "{}", run.stderr);
+    assert_eq!(fixture.calls_of("box-a", "exec").len(), 1);
+}
