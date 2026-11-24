@@ -396,6 +396,70 @@ printf '%s' '{{"title":"Item","fields":[{{"label":"credential","value":"{value}"
     assert_eq!(records[1]["outcome"], "ok");
 }
 
+#[test]
+fn list_fields_caches_the_field_list_so_a_second_call_runs_no_op() {
+    let fixture = Fixture::new();
+    let value = unique_token("cached-field");
+    fixture.install_fake_op(&format!(
+        r#"printf '%s' '{{"title":"Item","fields":[{{"label":"credential","value":"{value}"}}]}}'"#
+    ));
+    let first = fixture
+        .command()
+        .args(["list-fields", "op://Private/Item"])
+        .output()
+        .expect("run op-cache");
+    assert!(
+        first.status.success(),
+        "the first call failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    fixture.install_fake_op(OP_MUST_NOT_RUN);
+    let second = fixture
+        .command()
+        .args(["list-fields", "op://Private/Item"])
+        .output()
+        .expect("run op-cache");
+
+    assert!(
+        second.status.success(),
+        "the second call asked op again: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(second.stdout, first.stdout);
+    let text = audit_text(&fixture);
+    assert_eq!(
+        records(&text).len(),
+        2,
+        "only the first call may run op: {text}"
+    );
+}
+
+#[test]
+fn list_fields_output_that_is_not_json_fails_at_once_with_no_second_attempt() {
+    let fixture = Fixture::new();
+    fixture.install_fake_op("echo 'this is not json'");
+
+    let output = fixture
+        .command()
+        .args(["list-fields", "op://Private/Item"])
+        .output()
+        .expect("run op-cache");
+
+    assert!(!output.status.success(), "output that is not JSON passed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("invalid JSON from `op item get`"),
+        "the error must name the JSON: {stderr}"
+    );
+    let text = audit_text(&fixture);
+    assert_eq!(
+        records(&text).len(),
+        2,
+        "one attempt is one op_start and one op_end: {text}"
+    );
+}
+
 const OP_MUST_NOT_RUN: &str = "echo 'op must not run' >&2\nexit 1";
 
 #[test]
