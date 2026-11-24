@@ -22,6 +22,7 @@ use chrono::{DateTime, Utc};
 use unicode_width::UnicodeWidthStr;
 
 use crate::cost::{job_cost, run_cost, JobCost, PriceBook, RunCost};
+use crate::estimate::{Estimates, Remaining};
 use crate::job::{Job, JobId, RunnerName};
 use crate::queue::{Departure, History, Outcome, PullNumber, QueueEntry};
 use crate::run::{keep_first_of_each_id, Run, RunId, RunState};
@@ -193,6 +194,11 @@ pub enum Row<'a> {
         run_ended: Option<DateTime<Utc>>,
         /// The estimated list-price cost of the job at the time of the view.
         cost: JobCost,
+        /// The time that the job has left, from the passed jobs of the same
+        /// kind on the same runner in the shown runs (see `Estimates`). It is
+        /// `None` for a job that does not run, for a job with no runner, and
+        /// for a job with no match.
+        remaining: Option<Remaining>,
     },
     /// The row of an expanded run before the first answer: "Loading jobs…".
     JobsLoading,
@@ -1455,6 +1461,7 @@ fn push_jobs<'a>(
                 run,
                 run_ended,
                 cost: cost_of(job),
+                remaining: None,
             }));
         }
         Some(Jobs::Failed { jobs, error }) => {
@@ -1465,6 +1472,7 @@ fn push_jobs<'a>(
                 run,
                 run_ended,
                 cost: cost_of(job),
+                remaining: None,
             }));
             rows.push(Row::JobsError(error));
         }
@@ -5413,5 +5421,123 @@ mod tests {
             run_rows(marked(&board.rows(late_now()))),
             ["Run(41874500000)", "Run(41874496263)*"]
         );
+    }
+
+    /// Builds a job with the name `name`, the state `state`, and the runner
+    /// `runner`. It started `started` seconds before `now()`, and it ended
+    /// `ended` seconds before `now()` (`None` for a job that still runs).
+    fn timed_runner_job(
+        id: u64,
+        name: &str,
+        state: RunState,
+        runner: &str,
+        started: i64,
+        ended: Option<i64>,
+    ) -> Job {
+        Job {
+            name: name.to_owned(),
+            runner: Some(RunnerName::new(runner.to_owned()).expect("a runner name")),
+            started_at: Some(now() - Span::seconds(started)),
+            completed_at: ended.map(|seconds| now() - Span::seconds(seconds)),
+            ..job(id, state)
+        }
+    }
+
+    /// The job ID and the time left of each job row, in the order of the rows.
+    fn job_remaining(rows: &[Row<'_>]) -> Vec<(u64, Option<Remaining>)> {
+        rows.iter()
+            .filter_map(|row| match row {
+                Row::Job { job, remaining, .. } => Some((job.id.0, *remaining)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A board with one passed run (ID 1, 300 s of `TypeScript` on `m1-ts`) and
+    /// one running run (ID 2, `TypeScript` on `m1-ts` for 2 minutes). The passed
+    /// run ended `ended_minutes_ago` minutes before `now()`.
+    fn estimate_board(ended_minutes_ago: i64) -> Board {
+        let mut board = board();
+        board.replace(
+            repo("timmattison/megarepo"),
+            vec![
+                run(
+                    1,
+                    "timmattison/megarepo",
+                    RunState::Passed,
+                    600,
+                    ended_minutes_ago,
+                ),
+                run(2, "timmattison/megarepo", RunState::Running, 5, 1),
+            ],
+            now(),
+        );
+        board.set_jobs(
+            RunId(1),
+            vec![timed_runner_job(
+                11,
+                "TypeScript",
+                RunState::Passed,
+                "m1-ts",
+                900,
+                Some(600),
+            )],
+        );
+        board.set_jobs(
+            RunId(2),
+            vec![timed_runner_job(
+                21,
+                "TypeScript",
+                RunState::Running,
+                "m1-ts",
+                120,
+                None,
+            )],
+        );
+        board
+    }
+
+    #[test]
+    fn a_running_job_row_carries_the_time_left_from_a_passed_match_of_a_shown_run() {
+        let mut board = estimate_board(50);
+        board.expand_all(now());
+        assert_eq!(
+            job_remaining(&board.rows(now())),
+            [
+                (21, Some(Remaining::Left(Duration::from_secs(180)))),
+                (11, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_job_row_of_a_run_with_no_match_carries_no_time_left() {
+        let mut board = board();
+        board.replace(
+            repo("timmattison/megarepo"),
+            vec![run(2, "timmattison/megarepo", RunState::Running, 5, 1)],
+            now(),
+        );
+        board.set_jobs(
+            RunId(2),
+            vec![timed_runner_job(
+                21,
+                "TypeScript",
+                RunState::Running,
+                "m1-ts",
+                120,
+                None,
+            )],
+        );
+        board.expand_all(now());
+        assert_eq!(job_remaining(&board.rows(now())), [(21, None)]);
+    }
+
+    #[test]
+    fn a_match_in_a_run_that_does_not_show_does_not_count() {
+        // The passed run ended more than 8 hours before `now()`, so it does not show.
+        let mut board = estimate_board(9 * 60);
+        board.expand_all(now());
+        assert_eq!(job_remaining(&board.rows(now())), [(21, None)]);
     }
 }
