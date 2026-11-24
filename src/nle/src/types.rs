@@ -524,11 +524,32 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("rec.json");
         Recording::test_fixture().save(&path, false).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        // 0o640 is neither the 0o600 of a temp file nor the 0o644 of a new
+        // file under umask 022, so only a copy of the old mode gives it.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
 
         Recording::test_fixture().save(&path, false).unwrap();
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o644);
+        assert_eq!(mode & 0o777, 0o640);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_save_gives_a_new_file_the_mode_that_file_create_gives() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let reference = dir.path().join("reference.json");
+        std::fs::File::create(&reference).unwrap();
+        let path = dir.path().join("rec.json");
+
+        Recording::test_fixture().save(&path, false).unwrap();
+
+        let mode = |p: &Path| {
+            let mode = std::fs::metadata(p).unwrap().permissions().mode();
+            format!("{:o}", mode & 0o777)
+        };
+        assert_eq!(mode(&path), mode(&reference));
     }
 }
