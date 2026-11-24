@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::Result;
 use buildinfo::version_string;
 use clap::{Parser, Subcommand};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 mod process;
@@ -269,7 +269,7 @@ fn run_app(
 /// `d` does not cancel the dialog that its press opened.
 fn pressed_key(event: Event) -> Option<KeyEvent> {
     match event {
-        Event::Key(key) => Some(key),
+        Event::Key(key) if key.kind == KeyEventKind::Press => Some(key),
         _ => None,
     }
 }
