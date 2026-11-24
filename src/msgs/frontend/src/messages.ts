@@ -44,6 +44,9 @@ function beginOpen(
   group: boolean
 ): number {
   resetExport();
+  // A scroll of the old chat must not load a page of the new chat
+  messageScrollController?.abort();
+  messageScrollController = null;
 
   const generation = ++loadGeneration;
   currentChatId = chatId;
@@ -65,7 +68,6 @@ function beginOpen(
 
 /** Wire the scroll handler and the export mode once the first page is in. */
 function finishOpen(chatId: number, area: HTMLElement): void {
-  // Clean up previous scroll listener
   messageScrollController?.abort();
   messageScrollController = new AbortController();
 
