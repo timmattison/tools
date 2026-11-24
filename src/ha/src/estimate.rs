@@ -53,11 +53,11 @@ type NameKey<'a> = (&'a RepoName, &'a str, &'a str);
 
 /// One term of the estimate of an active run, in whole seconds from now.
 struct Term {
-    /// The end of the run if this job is the last one, with the floor at the
-    /// estimate of the job.
+    /// The end of the run if this job is the last one. A running job past its
+    /// estimate ends now or later, thus its end is now plus the tail.
     end: i64,
-    /// The same end, but without the floor. It is below zero for a job that
-    /// ran past its estimate.
+    /// The end of the run if this job ended at its estimate. This value is
+    /// different from `end` only for a running job past its estimate.
     unfloored: i64,
     /// True when the job waits for a runner.
     waits: bool,
