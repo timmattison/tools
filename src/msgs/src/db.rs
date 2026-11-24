@@ -12,20 +12,58 @@ use crate::types::{
 const CHAT_DB_PATH: &str = "Library/Messages/chat.db";
 const PREVIEW_MAX_CHARS: usize = 100;
 
-/// Row tuple returned by message queries.
-type MessageRow = (
-    i64,
-    Option<String>,
-    Option<Vec<u8>>,
-    bool,
-    String,
-    i64,
-    Option<i64>,
-    bool,
-    Option<String>,
-    Option<String>,
-    bool,
-);
+/// The `FROM` and `JOIN` part and the column list of each message query.
+/// A query adds its own `WHERE` and `ORDER BY`. `MessageRow::from_row` reads
+/// the columns by the aliases that this list gives.
+const MESSAGE_SELECT: &str = "SELECT
+        m.ROWID AS message_id,
+        m.text AS text,
+        m.attributedBody AS attributed_body,
+        m.is_from_me AS is_from_me,
+        COALESCE(h.id, 'Unknown') AS sender_id,
+        m.date AS date,
+        m.date_read AS date_read,
+        m.is_audio_message AS is_audio,
+        m.reply_to_guid AS reply_to_guid,
+        m.associated_message_emoji AS associated_emoji,
+        m.cache_has_attachments AS has_attachments
+    FROM message m
+    JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
+    LEFT JOIN handle h ON m.handle_id = h.ROWID";
+
+/// One row of a query that starts with [`MESSAGE_SELECT`].
+struct MessageRow {
+    message_id: i64,
+    text: Option<String>,
+    attributed_body: Option<Vec<u8>>,
+    is_from_me: bool,
+    sender_id: String,
+    date: i64,
+    date_read: Option<i64>,
+    is_audio: bool,
+    reply_to_guid: Option<String>,
+    associated_emoji: Option<String>,
+    has_attachments: bool,
+}
+
+impl MessageRow {
+    /// Read one row of [`MESSAGE_SELECT`] by column name.
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            message_id: row.get("message_id")?,
+            text: row.get("text")?,
+            attributed_body: row.get("attributed_body")?,
+            is_from_me: row.get("is_from_me")?,
+            sender_id: row.get("sender_id")?,
+            date: row.get("date")?,
+            date_read: row.get("date_read")?,
+            is_audio: row.get("is_audio")?,
+            reply_to_guid: row.get("reply_to_guid")?,
+            associated_emoji: row.get("associated_emoji")?,
+            has_attachments: row.get("has_attachments")?,
+        })
+    }
+}
 
 pub struct MessageDb {
     conn: Connection,
@@ -210,7 +248,7 @@ impl MessageDb {
 
     /// Build a `Message` from raw query row fields.
     fn build_message(&self, row: MessageRow) -> Result<Message, MsgsError> {
-        let (
+        let MessageRow {
             message_id,
             text,
             attributed_body,
@@ -222,7 +260,7 @@ impl MessageDb {
             reply_to_guid,
             associated_emoji,
             has_attachments,
-        ) = row;
+        } = row;
 
         let extracted_text = text.or_else(|| {
             attributed_body
@@ -255,6 +293,22 @@ impl MessageDb {
         })
     }
 
+    /// Run one message query and build each row into a `Message`.
+    /// `sql` starts with [`MESSAGE_SELECT`].
+    fn query_messages(
+        &self,
+        sql: &str,
+        params: impl rusqlite::Params,
+    ) -> Result<Vec<Message>, MsgsError> {
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map(params, MessageRow::from_row)?;
+        let mut messages = Vec::new();
+        for row in rows {
+            messages.push(self.build_message(row?)?);
+        }
+        Ok(messages)
+    }
+
     /// Get paginated messages for a conversation.
     ///
     /// # Errors
@@ -266,49 +320,15 @@ impl MessageDb {
         offset: i64,
         limit: i64,
     ) -> Result<Vec<Message>, MsgsError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT
-                m.ROWID,
-                m.text,
-                m.attributedBody,
-                m.is_from_me,
-                COALESCE(h.id, 'Unknown') as sender_id,
-                m.date,
-                m.date_read,
-                m.is_audio_message,
-                m.reply_to_guid,
-                m.associated_message_emoji,
-                m.cache_has_attachments
-            FROM message m
-            JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
-            LEFT JOIN handle h ON m.handle_id = h.ROWID
-            WHERE cmj.chat_id = ?1
-            ORDER BY cmj.message_date DESC
-            LIMIT ?2 OFFSET ?3",
-        )?;
-
-        let rows = stmt.query_map([chat_id, limit, offset], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,             // message_id
-                row.get::<_, Option<String>>(1)?,  // text
-                row.get::<_, Option<Vec<u8>>>(2)?, // attributedBody
-                row.get::<_, bool>(3)?,            // is_from_me
-                row.get::<_, String>(4)?,          // sender_id
-                row.get::<_, i64>(5)?,             // date
-                row.get::<_, Option<i64>>(6)?,     // date_read
-                row.get::<_, bool>(7)?,            // is_audio
-                row.get::<_, Option<String>>(8)?,  // reply_to_guid
-                row.get::<_, Option<String>>(9)?,  // associated_emoji
-                row.get::<_, bool>(10)?,           // cache_has_attachments
-            ))
-        })?;
-
-        let mut messages = Vec::new();
-        for row in rows {
-            messages.push(self.build_message(row?)?);
-        }
-
-        Ok(messages)
+        self.query_messages(
+            &format!(
+                "{MESSAGE_SELECT}
+                WHERE cmj.chat_id = ?1
+                ORDER BY cmj.message_date DESC
+                LIMIT ?2 OFFSET ?3"
+            ),
+            [chat_id, limit, offset],
+        )
     }
 
     fn get_attachments_for_message(
@@ -472,41 +492,14 @@ impl MessageDb {
         start_date: i64,
         end_date: i64,
     ) -> Result<Vec<Message>, MsgsError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT
-                m.ROWID, m.text, m.attributedBody, m.is_from_me,
-                COALESCE(h.id, 'Unknown') as sender_id,
-                m.date, m.date_read, m.is_audio_message,
-                m.reply_to_guid, m.associated_message_emoji, m.cache_has_attachments
-            FROM message m
-            JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
-            LEFT JOIN handle h ON m.handle_id = h.ROWID
-            WHERE cmj.chat_id = ?1 AND cmj.message_date BETWEEN ?2 AND ?3
-            ORDER BY cmj.message_date ASC",
-        )?;
-
-        let rows = stmt.query_map([chat_id, start_date, end_date], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<Vec<u8>>>(2)?,
-                row.get::<_, bool>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, i64>(5)?,
-                row.get::<_, Option<i64>>(6)?,
-                row.get::<_, bool>(7)?,
-                row.get::<_, Option<String>>(8)?,
-                row.get::<_, Option<String>>(9)?,
-                row.get::<_, bool>(10)?,
-            ))
-        })?;
-
-        let mut messages = Vec::new();
-        for row in rows {
-            messages.push(self.build_message(row?)?);
-        }
-
-        Ok(messages)
+        self.query_messages(
+            &format!(
+                "{MESSAGE_SELECT}
+                WHERE cmj.chat_id = ?1 AND cmj.message_date BETWEEN ?2 AND ?3
+                ORDER BY cmj.message_date ASC"
+            ),
+            [chat_id, start_date, end_date],
+        )
     }
 
     /// Helper for date-based message queries.
@@ -517,41 +510,10 @@ impl MessageDb {
         date_param: i64,
         limit: i64,
     ) -> Result<Vec<Message>, MsgsError> {
-        let sql = format!(
-            "SELECT
-                m.ROWID, m.text, m.attributedBody, m.is_from_me,
-                COALESCE(h.id, 'Unknown'), m.date, m.date_read,
-                m.is_audio_message, m.reply_to_guid, m.associated_message_emoji,
-                m.cache_has_attachments
-            FROM message m
-            JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
-            LEFT JOIN handle h ON m.handle_id = h.ROWID
-            WHERE cmj.chat_id = ?1 AND {where_order}"
-        );
-
-        let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map([chat_id, date_param, limit], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<Vec<u8>>>(2)?,
-                row.get::<_, bool>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, i64>(5)?,
-                row.get::<_, Option<i64>>(6)?,
-                row.get::<_, bool>(7)?,
-                row.get::<_, Option<String>>(8)?,
-                row.get::<_, Option<String>>(9)?,
-                row.get::<_, bool>(10)?,
-            ))
-        })?;
-
-        let mut messages = Vec::new();
-        for row in rows {
-            messages.push(self.build_message(row?)?);
-        }
-
-        Ok(messages)
+        self.query_messages(
+            &format!("{MESSAGE_SELECT} WHERE cmj.chat_id = ?1 AND {where_order}"),
+            [chat_id, date_param, limit],
+        )
     }
 
     /// Get a message with surrounding context for search results.
