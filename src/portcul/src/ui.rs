@@ -522,11 +522,21 @@ mod tests {
 
     #[test]
     fn test_truncate_to_width_emoji() {
-        assert_eq!(truncate_to_width("rocket", 10), "rocket");
+        // Each of these emoji is 2 columns wide.
+        assert_eq!(truncate_to_width("🎉🎊🎁🎈🎂", 10), "🎉🎊🎁🎈🎂");
 
-        let result = truncate_to_width("long-process-name-here", 10);
-        assert!(unicode_width::UnicodeWidthStr::width(result.as_str()) <= 10);
-        assert!(result.ends_with("..."));
+        // 12 columns cut to 8: 5 columns for the text, then "...". The third
+        // emoji would need columns 5 and 6, so the cut falls after the second.
+        let result = truncate_to_width("🎉🎊🎁🎈🎂🎉", 8);
+        assert!(unicode_width::UnicodeWidthStr::width(result.as_str()) <= 8);
+        assert_eq!(result, "🎉🎊...");
+    }
+
+    #[test]
+    fn test_truncate_to_width_accented() {
+        assert_eq!(truncate_to_width("café", 10), "café");
+        // "café au lait" is 12 columns; with max 8, keep 5 columns + "...".
+        assert_eq!(truncate_to_width("café au lait", 8), "café ...");
     }
 
     #[test]
