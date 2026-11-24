@@ -263,3 +263,99 @@ fn web_export_args_rejects_the_video_format() {
         "got {err}"
     );
 }
+
+#[test]
+fn save_recording_to_refuses_a_name_without_a_recording_ending() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["notes.txt", ".zshrc"] {
+        let file = dir.path().join(name);
+        let err = save_recording_to(&file.to_string_lossy(), &Recording::test_fixture(), None)
+            .unwrap_err();
+        assert!(matches!(err, NleError::SaveError(_)), "got {err}");
+        assert!(err.to_string().contains("must end in"), "got {err}");
+        assert!(!file.exists(), "{name} was written");
+    }
+}
+
+#[test]
+fn save_recording_to_ignores_the_case_of_the_ending() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("REC.JSON");
+    save_recording_to(&file.to_string_lossy(), &Recording::test_fixture(), None).unwrap();
+    assert!(file.exists());
+}
+
+#[test]
+fn video_export_args_refuses_a_name_without_a_video_ending() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("a.json");
+    write_fixture(&input, false);
+    let output = dir.path().join("out.txt");
+    let err = video_export_args(&options(
+        &input,
+        &output.to_string_lossy(),
+        ExportFormat::Video,
+    ))
+    .unwrap_err();
+    assert!(matches!(err, NleError::ExportError(_)), "got {err}");
+    assert!(err.to_string().contains("must end in"), "got {err}");
+}
+
+#[test]
+fn video_export_args_refuses_a_missing_output_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("a.json");
+    write_fixture(&input, false);
+    let output = dir.path().join("missing-dir").join("out.mp4");
+    let err = video_export_args(&options(
+        &input,
+        &output.to_string_lossy(),
+        ExportFormat::Video,
+    ))
+    .unwrap_err();
+    assert!(matches!(err, NleError::ExportError(_)), "got {err}");
+    assert!(
+        err.to_string().contains("Parent directory does not exist"),
+        "got {err}"
+    );
+}
+
+#[test]
+fn web_export_args_refuses_a_name_without_a_web_ending() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("a.json");
+    write_fixture(&input, false);
+    let output = dir.path().join("out.mp4");
+    let err = web_export_args(&options(
+        &input,
+        &output.to_string_lossy(),
+        ExportFormat::Web,
+    ))
+    .unwrap_err();
+    assert!(matches!(err, NleError::ExportError(_)), "got {err}");
+    assert!(err.to_string().contains("must end in"), "got {err}");
+}
+
+#[test]
+fn video_export_args_gives_beta_the_canonical_output_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("a.json");
+    write_fixture(&input, false);
+    let output = dir.path().join("sub").join("..").join("out.gif");
+    fs::create_dir(dir.path().join("sub")).unwrap();
+    let args = video_export_args(&options(
+        &input,
+        &output.to_string_lossy(),
+        ExportFormat::Video,
+    ))
+    .unwrap();
+    let expected = dir
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("out.gif")
+        .to_string_lossy()
+        .to_string();
+    let at = args.iter().position(|a| a == "--output").unwrap();
+    assert_eq!(args[at + 1], expected);
+}
