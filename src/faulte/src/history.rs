@@ -2024,6 +2024,44 @@ mod tests {
         assert_eq!(reading.ranking().total_faults, 3);
     }
 
+    /// The sums of a span and of the extent stop at the largest value and do
+    /// not overflow. A bad value of `top` can give a saturated count.
+    #[test]
+    fn the_sums_of_a_span_saturate() {
+        let huge = |secs: u64| {
+            let mut sampled = sample(secs, vec![row(1, u64::MAX)]);
+            let observed = &mut sampled.observed;
+            observed.ranking.window = Duration::MAX;
+            observed.ranking.claude.faults = u64::MAX;
+            observed.ranking.skipped.exited = usize::MAX;
+            observed.ranking.skipped.exited_faults = u64::MAX;
+            observed.swap = VmDelta {
+                swapins: u64::MAX,
+                swapouts: u64::MAX,
+            };
+            observed.swap_window = Duration::MAX;
+            Update::Frame(Box::new(sampled))
+        };
+        let mut history = History::new();
+        history.add(huge(0));
+        let end = history.add(huge(2));
+
+        let reading = history
+            .span(end, SpanWidth::Whole)
+            .expect("the span holds two frames");
+
+        let ranking = reading.ranking();
+        assert_eq!(ranking.total_faults, u64::MAX);
+        assert_eq!(ranking.window, Duration::MAX);
+        assert_eq!(ranking.claude.faults, u64::MAX);
+        assert_eq!(ranking.skipped.exited, usize::MAX);
+        assert_eq!(ranking.skipped.exited_faults, u64::MAX);
+        assert_eq!(reading.header.swap.swapins, u64::MAX);
+        assert_eq!(reading.header.swap.swapouts, u64::MAX);
+        assert_eq!(reading.header.swap_window, Duration::MAX);
+        assert_eq!(history.extent().measured, Duration::MAX);
+    }
+
     /// Makes `count` rows with PIDs from `first`, each with a long command.
     fn long_rows(first: u32, count: u32) -> Vec<RankedRow> {
         (first..first + count)
