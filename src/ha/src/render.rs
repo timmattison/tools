@@ -45,9 +45,10 @@ const STARTED_WIDTH: usize = 11;
 const TIME_WIDTH: usize = 7;
 /// The header word of the job-sum column.
 const JOB_SUM_HEADER: &str = "JOB SUM";
-/// The width of the job-sum column. It is the width of the time column,
-/// because both cells hold a `format_elapsed` text, which is never wider than
-/// 7 columns. The header word fills the cell.
+/// The width of the job-sum column. It is the width of the time column. The
+/// cell holds a `format_elapsed` text on a run row and a `format_remaining`
+/// text on a job row, and neither is wider than 7 columns. The header word
+/// fills the cell.
 const JOB_SUM_WIDTH: usize = TIME_WIDTH;
 /// The header word of the cost column.
 const COST_HEADER: &str = "COST";
@@ -696,12 +697,19 @@ where
 /// a job that waits shows how long it waited, from its creation until `now`,
 /// and is empty when the job has no creation time. The time cell of each other
 /// job shows [`Job::runner_time`], and is empty when that time is `None`. The
-/// cost cell shows `cost`, the cost of the job.
+/// cost cell shows `cost`, the cost of the job. The job-sum cell shows the time
+/// left of a running job (`~`) or its time over the estimate (`+`), from
+/// `remaining`, and is blank when `remaining` is `None`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is a distinct fact of the run row or of the view; a parameter struct would only rename them"
+)]
 fn job_line<Tz: TimeZone>(
     job: &Job,
     run: &Run,
     last: bool,
     cost: JobCost,
+    remaining: Option<Remaining>,
     now: DateTime<Utc>,
     tz: &Tz,
     widths: Widths,
@@ -741,7 +749,7 @@ where
         EndCells {
             started: &started,
             time: &time,
-            job_sum: "",
+            job_sum: &remaining.map(format_remaining).unwrap_or_default(),
             cost: &cost.to_string(),
         },
     )
@@ -1451,8 +1459,12 @@ fn draw_row<Tz: TimeZone>(
             selected,
             run,
             cost,
+            remaining,
             ..
-        } => put_selectable(job_line(job, run, *last, *cost, now, tz, widths), *selected),
+        } => put_selectable(
+            job_line(job, run, *last, *cost, *remaining, now, tz, widths),
+            *selected,
+        ),
         Row::Entry { entry, selected } => {
             put_selectable(entry_line(entry, now, tz, widths), *selected);
         }
@@ -6773,8 +6785,8 @@ mod tests {
                     "2026-10-14T11:30:00Z",
                 );
                 for last in [false, true] {
-                    let line = job_line(&job, &run, last, JobCost::Unknown, now(), &utc(), widths)
-                        .to_string();
+                    let (c, tz) = (JobCost::Unknown, utc());
+                    let line = job_line(&job, &run, last, c, None, now(), &tz, widths).to_string();
                     assert_eq!(display_width(&line), usize::from(w), "{state:?}: {line:?}");
                 }
             }
