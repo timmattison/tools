@@ -24,6 +24,7 @@ tauri-build.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+childenv.workspace = true
 
 [lints]
 workspace = true
