@@ -471,6 +471,54 @@ fn a_package_inside_a_submodule_below_the_search_path_is_listed() {
 }
 
 #[test]
+fn a_package_inside_a_submodule_of_a_worktree_below_the_search_path_is_left_out() {
+    let fixture = Fixture::new();
+
+    let source = fixture.repository_at("source");
+    fixture.package_at("source", "workit-fixture-worktree-submodule-sublib");
+    fixture.commit_all(&source, "add the package");
+
+    let superproject = fixture.repository_at("superproject");
+    fixture.package_at("superproject/app", "workit-fixture-worktree-submodule-app");
+    fixture.submodule_at(&superproject, &source, "vendor/lib");
+    fixture.commit_all(&superproject, "add the app and the submodule");
+
+    // A submodule checked out in a linked worktree keeps its git directory
+    // under `.git/worktrees/<name>/modules`, which holds no `commondir`. Its
+    // package is still a second checkout of the one the superproject holds.
+    let worktree = fixture.worktree_at(&superproject, "superproject/wt/feat");
+    fixture.git(
+        &worktree,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "--quiet",
+            "update",
+            "--init",
+        ],
+    );
+    let checked_out = worktree.join("vendor/lib");
+    fixture.assert_toplevel(&checked_out);
+    assert!(
+        checked_out.join(".git").is_file(),
+        "a submodule in a linked worktree keeps its git link as a file: {}",
+        checked_out.join(".git").display()
+    );
+
+    let output = fixture.workit(&superproject, &[]);
+
+    assert_succeeded(&output);
+    assert_eq!(
+        members_of(&output),
+        vec!["app".to_string(), "vendor/lib".to_string()],
+        "a submodule belongs to the checkout of its superproject, so a submodule inside a \
+         linked worktree is part of that second checkout and is left out with it:\n{}",
+        said(&output)
+    );
+}
+
+#[test]
 fn an_empty_result_the_worktree_filter_caused_names_the_flag() {
     let fixture = Fixture::new();
     let repository = fixture.repository_at("checkout");
