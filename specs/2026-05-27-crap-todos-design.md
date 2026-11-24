@@ -101,7 +101,11 @@ bare `crap <uuid>` still resumes.
 | `crap shell-setup` | `crap --shell-setup` | install shell function |
 
 - `--force` is a flag on `resume` and `here`.
-- `--expand` and `--user <name>` are flags on `resume` and `here`.
+- `--expand` is a flag on `resume` and `here`. `--user <name>` is a flag on
+  `resume`, `here` and `status`. `crap status <id> --user <name>` looks the id
+  up in that account, as `crap --status <id> --user <name>` does now.
+  `crap status` with no id ignores `--user`, because it lists the sessions of
+  the current directory, which belong to the current user.
   `NEW_SESSION_ID` is an optional positional of `here`. `--scan` is a flag on
   `forks`.
 - `--json` is a flag on `status` and `todos`.
@@ -292,8 +296,10 @@ hardcoded paths (parallel-safe per CLAUDE.md):
 - Label truncation: Japanese / emoji / accented inputs (no panic, and the
   `UnicodeWidthStr::width` of the cut label with its `…` is at most the budget).
 - Subcommand routing parser used by the shell function (Rust-level decision
-  table, with both fork shapes), and a shellcheck pass on the emitted
-  `SHELL_CODE`.
+  table, with both fork shapes and `status <id> --user <name>`), and a
+  shellcheck pass on the emitted `SHELL_CODE`.
+- Clap parse: `crap status <id> --user <name>` parses with the id and the
+  user, as `cli_status_user_composes` holds for the old form.
 - Display + JSON formatters: golden-string assertions for a representative
   `SessionTodos` (with and without `--verbose`). A display golden compares
   `testcolor::strip_ansi(&testcolor::with_forced_ansi(...))`, because the
