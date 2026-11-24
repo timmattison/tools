@@ -454,4 +454,45 @@ mod tests {
         assert_eq!(loaded.command, "echo café 🎉");
         assert_eq!(loaded.events[0].data, "出力データ\r\n");
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_save_replaces_an_existing_file_instead_of_writing_into_it() {
+        for compress in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let rec = dir.path().join("rec.json");
+            let link = dir.path().join("link.json");
+            Recording::test_fixture().save(&rec, compress).unwrap();
+            std::fs::hard_link(&rec, &link).unwrap();
+
+            let mut second = Recording::test_fixture();
+            second.title = "Second".to_string();
+            second.save(&rec, compress).unwrap();
+
+            assert_eq!(Recording::load(&link).unwrap().title, "Test Recording");
+            assert_eq!(Recording::load(&rec).unwrap().title, "Second");
+            let mut names: Vec<String> = std::fs::read_dir(dir.path())
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            assert_eq!(names, ["link.json", "rec.json"], "compress={compress}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_save_keeps_the_mode_of_an_existing_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rec.json");
+        Recording::test_fixture().save(&path, false).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        Recording::test_fixture().save(&path, false).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o644);
+    }
 }
