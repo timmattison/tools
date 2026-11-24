@@ -2819,12 +2819,28 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use termgfx::{AnsweredProtocol, PayloadBudget};
 
-    /// Dimensions whose frame size is more than `u32::MAX` bytes give an
-    /// error, not an overflow.
+    /// Dimensions whose frame does not fit in `usize` give the error that
+    /// names them, not an overflow. The size check of `rgb_data_to_image`
+    /// uses the checked frame size.
     #[test]
-    fn rgb_data_to_image_refuses_dimensions_whose_frame_overflows_u32() {
-        let result = rgb_data_to_image(&[], 40_000, 40_000);
-        assert!(result.is_err(), "a 40000x40000 frame must give an error");
+    fn rgb_data_to_image_refuses_dimensions_whose_frame_does_not_fit_in_usize() {
+        let error = rgb_data_to_image(&[], u32::MAX, u32::MAX).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "video dimensions 4294967295x4294967295 are too large"
+        );
+    }
+
+    /// A frame above `u32::MAX` bytes fits in a 64-bit `usize`, so the size
+    /// check compares the data with the exact size of the frame.
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn rgb_data_to_image_compares_the_exact_size_above_u32_max_on_a_64_bit_target() {
+        let error = rgb_data_to_image(&[], 40_000, 40_000).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "RGB data size mismatch: expected 4800000000 bytes, got 0 bytes"
+        );
     }
 
     /// A frame size that does not fit in `usize` is `None`, not a wrapped
