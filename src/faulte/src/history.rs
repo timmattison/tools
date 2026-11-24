@@ -2293,7 +2293,9 @@ mod tests {
     /// with entries alone. The deque of the entries doubles its capacity as it
     /// grows, and its capacity never gets smaller. One doubling must not make
     /// every frame but the newest leave: each add to a full history makes one
-    /// frame leave.
+    /// frame leave. The deque takes at most an eighth of the budget, the share
+    /// that the README states. The test writes the 8 itself, because a bound
+    /// that reads `ENTRY_SHARE_DIVISOR` moves with a change of that constant.
     #[test]
     fn a_full_history_of_small_frames_keeps_more_than_one_frame() {
         let mut history = History::new();
@@ -2316,6 +2318,11 @@ mod tests {
         assert_eq!(
             kept, full,
             "one add to a full history makes one frame leave"
+        );
+        let deque_bytes = history.entries.capacity() * size_of::<Entry>();
+        assert!(
+            deque_bytes <= BUDGET_BYTES / 8,
+            "the deque of the entries holds {deque_bytes} bytes, past an eighth of the budget"
         );
     }
 }
