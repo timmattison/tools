@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use ts_rs::TS;
@@ -17,7 +17,7 @@ pub struct Recording {
     pub duration: f64,
     pub command: String,
     pub title: String,
-    pub env: HashMap<String, String>,
+    pub env: BTreeMap<String, String>,
     pub events: Vec<Event>,
 }
 
@@ -177,7 +177,7 @@ impl Recording {
             duration: 5.0,
             command: "echo hello".to_string(),
             title: "Test Recording".to_string(),
-            env: HashMap::from([("SHELL".to_string(), "/bin/zsh".to_string())]),
+            env: BTreeMap::from([("SHELL".to_string(), "/bin/zsh".to_string())]),
             events: vec![
                 Event {
                     time: 0.0,
