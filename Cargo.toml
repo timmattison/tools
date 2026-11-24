@@ -232,10 +232,9 @@ tauri-plugin-fs = "2"
 # Connection is Send, which is required for Tauri's thread pool.
 rusqlite = { version = "0.32", features = ["bundled"] }
 
-# Type generation
-specta = { version = "=2.0.0-rc.22", features = ["derive", "chrono"] }
-specta-typescript = "0.0.10"
-tauri-specta = { version = "=2.0.0-rc.21", features = ["derive", "typescript"] }
+# Type generation. `function` backs the `#[specta::specta]` attribute on the
+# msgs commands.
+specta = { version = "=2.0.0-rc.22", features = ["derive", "chrono", "function"] }
 
 # Internal crates
 buildinfo = { path = "src/buildinfo" }
