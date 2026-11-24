@@ -52,7 +52,7 @@ fn unreachable_path() -> PathBuf {
 /// long before that spawn, so a refusal is still visible.
 fn run(duration: &str) -> Run {
     collect(
-        Command::new(env!("CARGO_BIN_EXE_thermal-watch"))
+        childenv::fixture_command(env!("CARGO_BIN_EXE_thermal-watch"))
             .arg("--duration")
             .arg(duration)
             .env("PATH", unreachable_path()),
@@ -67,7 +67,7 @@ fn run(duration: &str) -> Run {
 /// its child when it ends.
 fn run_with_powermetrics(duration: &str) -> Run {
     collect(
-        Command::new(env!("CARGO_BIN_EXE_thermal-watch"))
+        childenv::fixture_command(env!("CARGO_BIN_EXE_thermal-watch"))
             .arg("--duration")
             .arg(duration),
     )

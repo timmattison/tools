@@ -3,7 +3,8 @@ use buildinfo::version_string;
 use clap::Parser;
 use image::DynamicImage;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use std::collections::{HashMap, HashSet};
+use proctree::{Pid, ProcessTree, ZellijScan};
+use std::collections::HashSet;
 use std::fs;
 use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -12,7 +13,10 @@ use std::sync::mpsc;
 use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
-use termgfx::{terminal_cells, Budget, Capabilities, Cursor, Request, TerminalType};
+use termgfx::{
+    terminal_cells, Budget, Capabilities, Cursor, MoshImages, Picture, ProtocolBudgets, Request,
+    TerminalType,
+};
 use termion::event::Key;
 use termion::input::TermRead;
 use termion::raw::IntoRawMode;
@@ -21,13 +25,16 @@ use unicode_width::UnicodeWidthStr;
 /// The row that the shell prompt returns to below an image.
 const PROMPT_ROWS: u32 = 1;
 
-/// The placement id of an image that the caller holds the cursor for.
+/// The placement id of one frame of a video.
 ///
-/// `--no-newline` is the flag of video playback, and each frame of a video must
-/// replace the frame before it in place. A Kitty terminal replaces an image
-/// when the new image carries the id of the old one, so every frame of a run
-/// carries this one id and the memory of the renderer stays flat. One run of
-/// `ic` shows one image at a time, so one id covers the whole run.
+/// Each frame of a video must replace the frame before it in place. A Kitty
+/// terminal replaces an image when the new image carries the id of the old one,
+/// so every frame of a run carries this one id and the memory of the renderer
+/// stays flat. One run of `ic` shows one image at a time, so one id covers the
+/// whole run.
+///
+/// A still picture carries no placement id at all, whatever moves the cursor.
+/// It names an image number instead, and `termgfx` states why.
 const HELD_PLACEMENT_ID: u32 = 1;
 
 /// The number of screen rows that `ic` prints above an image.
@@ -182,8 +189,8 @@ struct Args {
     #[clap(long)]
     adaptive_fps: bool,
 
-    /// Monitor directories for new images and display them automatically
-    #[clap(long)]
+    /// Monitor directories for new images and text files, and show them automatically
+    #[clap(long, value_name = "DIR")]
     monitor: Vec<PathBuf>,
 
     /// Report whether this session can display an image, then exit. Exit code 0
@@ -326,7 +333,7 @@ fn monitor_directories(directories: &[PathBuf], args: &Args) -> Result<()> {
         }
     }
 
-    println!("Monitoring directories for new images:");
+    println!("Monitoring directories for new images and text files:");
     for dir in directories {
         println!("  - {}", dir.display());
     }
@@ -346,8 +353,14 @@ fn monitor_directories(directories: &[PathBuf], args: &Args) -> Result<()> {
             .with_context(|| format!("Failed to watch directory: {}", dir.display()))?;
     }
 
-    // Keep track of recently displayed files to avoid duplicates
-    let mut recent_files = HashSet::new();
+    // The monitor decides what one path gives. This loop only gives it the
+    // paths that the watcher reports. The monitor reads the bytes of an image
+    // itself, so the display decodes them and names no path in an error.
+    let mut monitor = Monitor::new(|path: &Path, source: Vec<u8>, header: &[String]| {
+        display_image_with_header(args, header, |capabilities| {
+            decode_image(source, path, capabilities)
+        })
+    });
     let mut last_cleanup = Instant::now();
 
     // Monitor for new files
@@ -358,45 +371,15 @@ fn monitor_directories(directories: &[PathBuf], args: &Args) -> Result<()> {
                     match event.kind {
                         notify::EventKind::Create(_) | notify::EventKind::Modify(_) => {
                             for path in event.paths {
-                                if !recent_files.contains(&path) {
-                                    if is_image_file(&path) {
-                                        // The callee prints the two header
-                                        // rows, so the auto-fit path can count
-                                        // them. The first row is empty, which
-                                        // separates this image from the one
-                                        // before it.
-                                        let header = [
-                                            String::new(),
-                                            format!("Found new image: {}", path.display()),
-                                        ];
-                                        match display_image_from_file(&path, args, &header) {
-                                            Ok(_) => {
-                                                recent_files.insert(path.clone());
-                                            }
-                                            Err(e) => {
-                                                eprintln!(
-                                                    "Failed to display image {}: {}",
-                                                    path.display(),
-                                                    e
-                                                );
-                                            }
-                                        }
-                                    } else if is_text_file(&path) {
-                                        println!("\nFound new text file: {}", path.display());
-                                        match display_text_file(&path) {
-                                            Ok(_) => {
-                                                recent_files.insert(path.clone());
-                                            }
-                                            Err(e) => {
-                                                eprintln!(
-                                                    "Failed to display text file {}: {}",
-                                                    path.display(),
-                                                    e
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
+                                // Each call takes a new handle of standard
+                                // output and holds no lock of it. The image
+                                // display prints with `println!`, which takes
+                                // that lock itself.
+                                monitor
+                                    .handle(&path, &mut io::stdout(), &mut io::stderr())
+                                    .with_context(|| {
+                                        format!("Failed to write the output for {}", path.display())
+                                    })?;
                             }
                         }
                         _ => {}
@@ -404,9 +387,9 @@ fn monitor_directories(directories: &[PathBuf], args: &Args) -> Result<()> {
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                // Clean up old entries from recent_files periodically
+                // Forget the handled paths periodically
                 if last_cleanup.elapsed() > Duration::from_secs(60) {
-                    recent_files.clear();
+                    monitor.forget_all();
                     last_cleanup = Instant::now();
                 }
             }
@@ -417,6 +400,346 @@ fn monitor_directories(directories: &[PathBuf], args: &Args) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// The handling of each path that monitor mode reports, one path at a time.
+///
+/// The watcher loop in [`monitor_directories`] gives each path that it hears
+/// about to [`Monitor::handle`], and it does nothing else with the path. A
+/// test therefore drives the handling of one path directly, with files in a
+/// temporary directory. It needs no watcher, no terminal, and no wait for an
+/// event.
+///
+/// The type parameter is the display of one image. The monitor reads the bytes
+/// of the image itself, and the display decodes those bytes. Production gives a
+/// closure over [`display_image_with_header`] and [`decode_image`], which talks
+/// to the terminal. A test gives a closure that decodes the bytes with
+/// [`decode_image`] and a terminal that the test states.
+struct Monitor<ShowImage> {
+    /// The paths this run already handled.
+    seen: HashSet<PathBuf>,
+    /// Prints the header lines, then decodes the bytes of one image and draws
+    /// it. Production passes a closure over `display_image_with_header` and
+    /// `decode_image`. A test passes a closure that decodes the bytes with
+    /// `decode_image` and a stated terminal.
+    show_image: ShowImage,
+}
+
+impl<ShowImage> Monitor<ShowImage>
+where
+    ShowImage: FnMut(&Path, Vec<u8>, &[String]) -> Result<()>,
+{
+    /// Make a monitor that has handled no path.
+    ///
+    /// # Arguments
+    /// * `show_image` - The display of one image. It takes the path of the
+    ///   image, the bytes that the monitor read from that path, and the header
+    ///   lines to print above the image. It prints the header lines itself, so
+    ///   the auto-fit path can count their rows. It decodes the bytes and does
+    ///   not open the path, and its error does not name the path.
+    ///
+    /// # Returns
+    /// A monitor that has no path in its record.
+    fn new(show_image: ShowImage) -> Self {
+        Self {
+            seen: HashSet::new(),
+            show_image,
+        }
+    }
+
+    /// Handle one path that the watcher reported.
+    ///
+    /// These are the outcomes:
+    ///
+    /// * A path that is in the record gives no output.
+    /// * Monitor mode ignores a path that is not a regular file, such as a
+    ///   directory. It gives no output.
+    /// * Monitor mode ignores a path that is gone. It gives no output. This
+    ///   includes a text file or an image that goes away before its read.
+    /// * Monitor mode ignores a binary file that is not an image. It gives no
+    ///   output. A file is binary when its bytes are not valid UTF-8, or when
+    ///   they hold a control character other than tab, line feed, and
+    ///   carriage return, such as a NUL byte or the escape character.
+    /// * Monitor mode ignores an empty file. It gives no output. The watcher
+    ///   often reports a new file before the program writes to it, and a later
+    ///   event shows the text or the image.
+    /// * Monitor mode ignores a video. It gives no output.
+    /// * The monitor reads the bytes of an image, and the bytes go to the image
+    ///   display.
+    /// * A path that is not an image and not a video is read as text. The text
+    ///   comes after a header line.
+    /// * A display that fails gives one line on `err`. The line names the path
+    ///   one time, and then the whole chain of the error, down to its cause.
+    ///
+    /// The record decides what a later event for the same path gives:
+    ///
+    /// * A path that monitor mode shows goes into the record. A program that
+    ///   writes a file gives many events, and the user sees the file one time.
+    /// * A text file whose read fails goes into the record. A read that fails
+    ///   for a cause such as a missing permission fails again at each later
+    ///   event, so the error prints one time.
+    /// * A path that monitor mode ignores stays out of the record. A later
+    ///   event can find something to show, such as the text or the image that
+    ///   a program writes into a file that was empty.
+    /// * An image whose read or display fails stays out of the record. The
+    ///   watcher reports an image before the program completes the write, and
+    ///   an image that is not complete does not decode. A later event tries the
+    ///   image again, so each failure prints its error.
+    ///
+    /// [`Monitor::forget_all`] empties the record. A path gives its output
+    /// again at the first event after that call.
+    ///
+    /// # Arguments
+    /// * `path` - The path that the watcher reported.
+    /// * `out` - The destination of the header and the content of a text file.
+    /// * `err` - The destination of a failure to display the path.
+    ///
+    /// # Returns
+    /// Nothing when every write succeeds. A failure to display the path is not
+    /// an error of this function. It goes to `err` as one line.
+    ///
+    /// # Errors
+    /// An error when a write to `out` or to `err` fails.
+    fn handle(
+        &mut self,
+        path: &Path,
+        out: &mut impl Write,
+        err: &mut impl Write,
+    ) -> io::Result<()> {
+        if self.seen.contains(path) {
+            return Ok(());
+        }
+
+        // Only a regular file holds an image or text. A directory, a FIFO, a
+        // socket, or a device gives no output, and it does not go into the
+        // record. This check stands before any open of the path, because an
+        // open of a FIFO waits for a writer and monitor mode then stops.
+        // `fs::metadata` follows a symbolic link, so a link to a regular file
+        // counts as a regular file.
+        //
+        // A path that is gone gives no output either. A program often writes
+        // a temporary file and then renames or removes it, so the event for
+        // that file arrives after it is gone. The program can also remove the
+        // file after this check. So each reader of monitor mode applies the
+        // same rule again at its open, through `open_new_file`. A different
+        // failure of this check goes on to the display, and the display
+        // reports it.
+        match fs::metadata(path) {
+            Ok(metadata) if !metadata.is_file() => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Ok(_) | Err(_) => {}
+        }
+
+        let outcome = if is_image_file(path) {
+            self.show_new_image(path)
+        } else if is_text_file(path) {
+            show_new_text_file(path, out)?
+        } else {
+            // A video goes to no display in monitor mode.
+            DisplayOutcome::Ignored
+        };
+
+        // Each display gives its outcome, and this match alone records the
+        // path and reports a failure. The rule of the record and the format
+        // of a failure thus stand in one place.
+        match outcome {
+            DisplayOutcome::Shown => {
+                self.seen.insert(path.to_path_buf());
+            }
+            DisplayOutcome::Ignored => {}
+            DisplayOutcome::Failed {
+                what,
+                error,
+                next_event,
+            } => {
+                // The line shows the whole chain of the error. The plain
+                // format of `anyhow` shows only the outermost context, which
+                // can name the path and no cause.
+                writeln!(
+                    err,
+                    "Failed to display {what} {}: {}",
+                    path.display(),
+                    error_chain_text(&error)
+                )?;
+                if next_event == NextEvent::GivesNoOutput {
+                    self.seen.insert(path.to_path_buf());
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Read one image that monitor mode found, and give its bytes to the image
+    /// display.
+    ///
+    /// The monitor reads the bytes itself, and the display decodes them. The
+    /// line of a failure in [`Monitor::handle`] names the path, so no link of
+    /// the error names it again. A reader of a path puts the path into its
+    /// context, as [`read_image_file`] does, and the user then reads the path
+    /// two times on one line.
+    ///
+    /// # Arguments
+    /// * `path` - The path of the image.
+    ///
+    /// # Returns
+    /// [`DisplayOutcome::Shown`] when the display succeeds.
+    /// [`DisplayOutcome::Ignored`] when the file is gone or empty. A later
+    /// event for an empty file shows the image. [`read_new_image_file`] decides
+    /// which files hold an image to show.
+    /// [`DisplayOutcome::Failed`] when the read or the display fails, and a
+    /// later event tries the image again. The watcher reports an image before
+    /// the program completes the write, and an image that is not complete does
+    /// not decode. A later event decodes the complete image.
+    fn show_new_image(&mut self, path: &Path) -> DisplayOutcome {
+        // A failure of the read and a failure of the display give the same
+        // outcome, so one match holds the rule of the record for both. The
+        // error of the read is the error of the operating system, which does
+        // not name the path.
+        let shown = match read_new_image_file(path) {
+            Ok(Some(source)) => {
+                // The display prints the two header rows itself, so the
+                // auto-fit path can count them. The first row is empty, which
+                // separates this image from the one before it.
+                let header = [
+                    String::new(),
+                    format!("Found new image: {}", path.display()),
+                ];
+                (self.show_image)(path, source, &header)
+            }
+            // An image that is gone or empty gives no header. It stays out of
+            // the record on purpose. A program makes the file before it
+            // writes the bytes, so a later event for the file shows the image.
+            Ok(None) => return DisplayOutcome::Ignored,
+            Err(error) => Err(error.into()),
+        };
+        match shown {
+            Ok(()) => DisplayOutcome::Shown,
+            Err(error) => DisplayOutcome::Failed {
+                what: "image",
+                error,
+                next_event: NextEvent::TriesAgain,
+            },
+        }
+    }
+
+    /// Forget every path that this run handled.
+    ///
+    /// Monitor mode does this every 60 seconds, so the record does not grow
+    /// for the whole length of a long run. A path that changes after this call
+    /// gives its output again.
+    fn forget_all(&mut self) {
+        self.seen.clear();
+    }
+}
+
+/// What the display of one path gave at one event of monitor mode.
+///
+/// Each display in [`Monitor::handle`] gives one of these, and `handle` alone
+/// records the path and reports a failure.
+enum DisplayOutcome {
+    /// The path went to the display. It goes into the record.
+    Shown,
+    /// The path holds nothing to show at this event. It gives no output, and
+    /// it stays out of the record.
+    Ignored,
+    /// The display of the path failed.
+    Failed {
+        /// The kind of the path, as the failure message names it.
+        what: &'static str,
+        /// The failure. The message shows its whole chain through
+        /// [`error_chain_text`].
+        error: anyhow::Error,
+        /// What a later event for the path gives.
+        next_event: NextEvent,
+    },
+}
+
+/// Write the chain of an error as one line, and name each cause one time.
+///
+/// The alternate format of `anyhow` joins every link of the chain with `: `.
+/// Some errors write their cause into their own message and also give the
+/// cause as the next link. The decoder of the `image` crate does this, so the
+/// alternate format prints `Invalid PNG signature.: Invalid PNG signature.`.
+/// This function drops a link when the link before it already ends with the
+/// same text. Such a link tells the user nothing new.
+///
+/// # Arguments
+/// * `error` - The error to write.
+///
+/// # Returns
+/// The links of the chain, from the outermost context to the cause, joined
+/// with `: `.
+fn error_chain_text(error: &anyhow::Error) -> String {
+    let mut links: Vec<String> = Vec::new();
+    for link in error.chain().map(ToString::to_string) {
+        if links
+            .last()
+            .is_some_and(|previous| previous.ends_with(&link))
+        {
+            continue;
+        }
+        links.push(link);
+    }
+
+    links.join(": ")
+}
+
+/// What a later event gives for a path whose display failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NextEvent {
+    /// The path stays out of the record, so a later event tries it again.
+    TriesAgain,
+    /// The path goes into the record, so a later event gives no output.
+    GivesNoOutput,
+}
+
+/// Show a text file that monitor mode found, after a header line.
+///
+/// The header comes after the read, when the bytes are known to be text. A
+/// file can go away between the check in [`Monitor::handle`] and the read, and
+/// an empty file or a binary file holds no text, so none of them gives a
+/// header. [`read_new_text_file`] decides which files hold text to show. It
+/// gives back no text that holds a terminal control character, so the text
+/// goes to `out` unchanged.
+///
+/// # Arguments
+/// * `path` - The path of the file.
+/// * `out` - The destination of the header and the text.
+///
+/// # Returns
+/// [`DisplayOutcome::Shown`] when the header and the text are on `out`.
+/// [`DisplayOutcome::Ignored`] when the file is gone, empty, or binary.
+/// [`DisplayOutcome::Failed`] when the read fails for a different cause, and a
+/// later event gives no output.
+///
+/// # Errors
+/// An error when a write to `out` fails.
+fn show_new_text_file(path: &Path, out: &mut impl Write) -> io::Result<DisplayOutcome> {
+    match read_new_text_file(path) {
+        Ok(Some(contents)) => {
+            writeln!(out, "\nFound new text file: {}", path.display())?;
+            out.write_all(contents.as_bytes())?;
+            out.flush()?;
+            Ok(DisplayOutcome::Shown)
+        }
+        // An empty file and a binary file stay out of the record on purpose.
+        // A program writes a text file after it makes it, so the file can be
+        // empty at its first event. A text file that a program is in the
+        // middle of writing can also end in half of a character of more than
+        // one byte, so that file is not UTF-8 now. A later event for either
+        // file shows it when it is complete.
+        Ok(None) => Ok(DisplayOutcome::Ignored),
+        // A read that fails for a cause such as a missing permission fails
+        // again at each later event, and a program that writes a file gives
+        // many events. So the path goes into the record, and its error prints
+        // one time.
+        Err(error) => Ok(DisplayOutcome::Failed {
+            what: "text file",
+            error: error.into(),
+            next_event: NextEvent::GivesNoOutput,
+        }),
+    }
 }
 
 fn is_video_file(file_path: &Path) -> bool {
@@ -480,7 +803,7 @@ fn is_text_file(file_path: &Path) -> bool {
 }
 
 fn ensure_ffmpeg_available() -> Result<()> {
-    if std::process::Command::new("ffmpeg")
+    if childenv::command("ffmpeg")
         .arg("-version")
         .output()
         .is_err()
@@ -493,7 +816,7 @@ fn ensure_ffmpeg_available() -> Result<()> {
 }
 
 fn ensure_ffprobe_available() -> Result<()> {
-    if std::process::Command::new("ffprobe")
+    if childenv::command("ffprobe")
         .arg("-version")
         .output()
         .is_err()
@@ -512,22 +835,99 @@ fn in_tmux() -> bool {
 
 /// Refuse the run when this session cannot draw an image.
 ///
-/// The gate reads three things: the answer the terminal gave to a query, the
-/// remote transport, and the multiplexer. It gives `Ok` when the session can
-/// show graphics. It gives an error when the session cannot, and that error
-/// carries the reason and the repair for the user to read. `feature` names
-/// what the user asked for, "Image" or "Video", and the messages say that
-/// word.
+/// The gate reads four things: what the environment of a mosh session states
+/// about the images it carries, the answer the terminal gave to a query, the
+/// remote transport, and the multiplexer. `terminal_caps` carries the first
+/// two of them, because one value states the whole terminal of the run. It
+/// gives `Ok` when the session can show graphics. It gives an error when the
+/// session cannot, and that error carries the reason and the repair for the
+/// user to read. `feature` names what the user asked for, "Image" or "Video",
+/// and the messages say that word.
 ///
-/// `in_tmux` arrives as an argument, and the gate does not read `TMUX` itself,
-/// so that the gate is a pure function of its inputs. A test that set `TMUX`
-/// would change the environment of every other test in the process.
+/// `in_tmux` arrives as an argument, the session arrives on `terminal_caps`,
+/// and the gate reads no environment variable that decides a verdict. It reads
+/// `TERM` for one message alone. A test that set `TMUX` would change the
+/// environment of every other test in the process.
 fn validate_terminal_for_graphics(
     terminal_caps: &Capabilities,
     transport: &RemoteTransport,
     in_tmux: bool,
     feature: &str,
 ) -> Result<()> {
+    // The session stands on the capabilities, so the gate and the writer that
+    // draws the picture read one session. `Capabilities::detect` reads it from
+    // the environment for a run, and `Capabilities::in_session` states it for
+    // a test.
+    let session = terminal_caps.session();
+    // A mosh that carries images states so in the environment, and the
+    // environment is the one channel that crosses a multiplexer. The rule
+    // about mosh below reads a process tree, which names the transport and
+    // states nothing about the images that transport carries, and a query
+    // cannot answer the question either: a multiplexer owns the pseudo
+    // terminal of its pane and answers every query itself, so a round trip
+    // inside one tells an upstream mosh, which strips every image sequence,
+    // from a mosh that draws them never. See `termgfx::MoshImages` and
+    // https://github.com/timmattison/mosh-rs/issues/78.
+    //
+    // So this rule reads the environment and the process tree together. The
+    // environment states what the transport carries, and the process tree
+    // states that the transport of this session is a mosh. The variable
+    // outlives the session that wrote it, because it crosses a multiplexer: a
+    // user exports it by hand, and a tmux server or a Zellij server that a
+    // mosh session started hands the whole environment of that session to
+    // every pane it opens after the mosh session ends. A variable that names
+    // no mosh of this session therefore says nothing, and the rules below
+    // answer for the terminal that this session really has.
+    //
+    // This rule lifts the refusal of mosh alone, which is what issue #471
+    // reports: that refusal took every terminal the environment named, because
+    // it stood in front of the rule that reads what a terminal draws. It lifts
+    // no other rule. The statement in the environment is about the transport,
+    // and every rule below states what stands between that transport and the
+    // screen. tmux shows it: the shell that starts the tmux server hands the
+    // environment to the server, and the server hands it to every pane, so
+    // `MOSH_IMAGES` says nothing at all about the tmux in front of the
+    // picture.
+    let mosh_carries_images = *transport == RemoteTransport::Mosh
+        && session.carries_images()
+        && terminal_caps.draws_images();
+    if mosh_carries_images {
+        let delivers = session.delivers();
+        let drawn = terminal_caps.drawn_protocols();
+        if drawn.intersect(&delivers).is_empty() {
+            // The message names the sets that decided the refusal, and it
+            // names no other one. `MoshImages::delivers` reads the set of the
+            // terminal of the user only where that set names a protocol,
+            // because an absent name is no name of an empty set. So a session
+            // that names no terminal of the user took this refusal from two
+            // sets, and a message that named a third one names `none` for a
+            // party that the decision never read.
+            let client = session.client();
+            let (client_sentence, parties) = if client.is_empty() {
+                (String::new(), "one of the two")
+            } else {
+                (
+                    format!(" The terminal of the user draws: {}.", client.names()),
+                    "any one of the three",
+                )
+            };
+            anyhow::bail!(
+                "{} display cannot work here: this session and this terminal share no image protocol.\n\
+                This Mosh carries: {}.{}\n\
+                This terminal draws: {}.\n\
+                A picture in a protocol that {} does not read lands on the screen as text.\n\
+                \n\
+                For {} display, use a terminal that draws one of the protocols this Mosh carries.",
+                feature,
+                session.transport().names(),
+                client_sentence,
+                drawn.names(),
+                parties,
+                feature.to_lowercase()
+            );
+        }
+    }
+
     // A terminal that answered a query is a fact, and every rule below it is a
     // guess about a terminal that answered nothing. A fact outranks a guess.
     //
@@ -545,8 +945,9 @@ fn validate_terminal_for_graphics(
 
     // Check for Mosh, since upstream Mosh strips the escape sequences that
     // every graphics protocol needs. A Mosh that draws them answers the query
-    // above, and this one answered nothing.
-    if *transport == RemoteTransport::Mosh {
+    // above, or it states what it carries in the environment, and this one did
+    // neither.
+    if *transport == RemoteTransport::Mosh && !mosh_carries_images {
         anyhow::bail!(
             "Mosh detected, and this session answered no query about images.\n\
             Upstream Mosh strips the escape sequences that carry an image (Sixel, Kitty, iTerm2).\n\
@@ -614,11 +1015,20 @@ fn validate_terminal_for_graphics(
 /// The question goes to [`validate_terminal_for_graphics`], the same gate the
 /// image path runs. Both callers therefore give one answer, and a session that
 /// passes here cannot be refused by the next `ic picture.png`. The gate asks
-/// about the terminal, the multiplexer, and the remote transport. It does not
-/// ask whether stdout is a terminal, so a redirected stdout does not change
-/// the answer.
+/// about the terminal, the multiplexer, the remote transport, and what the
+/// environment of a mosh session states about the images it carries. It does
+/// not ask whether stdout is a terminal, so a redirected stdout does not
+/// change the answer.
+///
+/// The gate reads the name of the terminal and whether that terminal draws an
+/// image at all, and it reads no size of anything. So this call takes the
+/// entrance that asks about the protocol alone: a run under a terminal that
+/// named itself asks nothing, where the entrance the drawing paths take would
+/// spend a round trip on the size of a character cell that no verdict of this
+/// function reads, and would swallow whatever the user typed while it held the
+/// terminal in raw mode.
 fn report_display_readiness() -> Result<()> {
-    let terminal_caps = Capabilities::detect_by_asking();
+    let terminal_caps = Capabilities::detect_by_asking_the_protocol();
     let transport = detect_remote_transport();
 
     validate_terminal_for_graphics(&terminal_caps, &transport, in_tmux(), "Image")
@@ -764,7 +1174,7 @@ fn handle_frame_timing(
         // if it ever exceeds that bound.
         let time_behind = expected_video_time - current_time;
         let frames_behind_f = (time_behind * fps).clamp(0.0, f64::from(u32::MAX));
-        #[allow(
+        #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
             reason = "frames_behind_f is clamped to [0, u32::MAX] above"
@@ -792,7 +1202,7 @@ fn handle_frame_timing(
     }
 }
 
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "frame display needs image, args, timing, and three pieces of mutable per-call state; bundling into a struct just shifts boilerplate"
 )]
@@ -843,7 +1253,17 @@ fn process_frame_display(
 
     // A video frame gets no header, so the image can use the whole terminal
     // less the row of the prompt.
-    display_image(img, args, true, HeaderRows(0))?;
+    display_image(
+        img,
+        // A frame of a video comes out of the decoder of the video and out of
+        // no file at all, so there are no bytes for the writer to pass on.
+        None,
+        args,
+        Picture::Frame {
+            id: HELD_PLACEMENT_ID,
+        },
+        HeaderRows(0),
+    )?;
 
     // Draw progress bar
     let (term_width, term_height) = current_terminal_size;
@@ -895,30 +1315,6 @@ fn update_adaptive_fps(
     *last_display_time = Instant::now();
 }
 
-/// RAII guard that restores the main screen buffer and shows the cursor on drop.
-/// This ensures terminal state is restored even if video playback panics.
-struct AlternateScreenGuard;
-
-impl AlternateScreenGuard {
-    fn enter() -> Result<Self> {
-        // Switch to alternate screen buffer and hide cursor for clean full-screen rendering.
-        // The alternate screen buffer prevents scrollback accumulation and eliminates
-        // ghost progress bars caused by terminal scrolling during image display.
-        print!("\x1b[?1049h\x1b[?25l");
-        io::stdout().flush()?;
-        Ok(Self)
-    }
-}
-
-impl Drop for AlternateScreenGuard {
-    fn drop(&mut self) {
-        // Restore main screen buffer and show cursor.
-        // Ignore flush errors — best effort during cleanup.
-        print!("\x1b[?25h\x1b[?1049l");
-        let _ = io::stdout().flush();
-    }
-}
-
 fn play_video_simple(
     file_path: &Path,
     _frame_duration: Duration,
@@ -929,7 +1325,8 @@ fn play_video_simple(
     let terminal_caps = Capabilities::detect_by_asking();
     let (_raw_mode, input_rx, _input_handle) = setup_video_controls(&terminal_caps)?;
 
-    let _screen_guard = AlternateScreenGuard::enter()?;
+    // Termion owns raw mode, so the session leaves it alone.
+    let _session = altscreen::Session::enter(altscreen::Options::default().raw_mode(false))?;
 
     play_video_inner(file_path, args, duration, fps, &input_rx)
 }
@@ -969,8 +1366,10 @@ fn play_video_inner(
 
         // Start ffmpeg from current position
         let (video_width, video_height) = get_video_dimensions(file_path)?;
+        // Check the size before the spawn, so an error leaves no ffmpeg child.
+        let frame_size = require_rgb_frame_bytes(video_width, video_height)?;
 
-        let mut ffmpeg_child = std::process::Command::new("ffmpeg")
+        let mut ffmpeg_child = childenv::command("ffmpeg")
             .args([
                 "-i",
                 file_path.to_str().unwrap(),
@@ -995,7 +1394,6 @@ fn play_video_inner(
             .context("Failed to get ffmpeg stdout")?;
 
         let mut reader = BufReader::new(stdout);
-        let frame_size = (video_width * video_height * 3) as usize;
         let mut frame_buffer = vec![0_u8; frame_size];
 
         // Read and display frames until paused, finished, or exit
@@ -1224,9 +1622,32 @@ fn play_video_inner(
     Ok(())
 }
 
+/// Bytes in one pixel of an `rgb24` frame.
+const RGB_BYTES_PER_PIXEL: usize = 3;
+
+/// The number of bytes in one `rgb24` frame of `width` x `height` pixels,
+/// or `None` when the product does not fit in `usize`.
+fn rgb_frame_bytes(width: u32, height: u32) -> Option<usize> {
+    usize::try_from(width)
+        .ok()?
+        .checked_mul(usize::try_from(height).ok()?)?
+        .checked_mul(RGB_BYTES_PER_PIXEL)
+}
+
+/// The same as `rgb_frame_bytes`, but an error that names the dimensions
+/// when the product does not fit in `usize`.
+///
+/// # Errors
+///
+/// Returns an error when the size of the frame does not fit in `usize`.
+fn require_rgb_frame_bytes(width: u32, height: u32) -> Result<usize> {
+    rgb_frame_bytes(width, height)
+        .with_context(|| format!("video dimensions {width}x{height} are too large"))
+}
+
 fn rgb_data_to_image(rgb_data: &[u8], width: u32, height: u32) -> Result<DynamicImage> {
     // Verify the data size matches expected dimensions
-    let expected_size = (width * height * 3) as usize;
+    let expected_size = require_rgb_frame_bytes(width, height)?;
     if rgb_data.len() != expected_size {
         anyhow::bail!(
             "RGB data size mismatch: expected {} bytes, got {} bytes",
@@ -1246,7 +1667,7 @@ fn get_video_dimensions(file_path: &Path) -> Result<(u32, u32)> {
     ensure_ffprobe_available()?;
 
     // Use ffprobe to get video dimensions
-    let output = std::process::Command::new("ffprobe")
+    let output = childenv::command("ffprobe")
         .args([
             // `error` (not `quiet`) so a genuinely unprobeable file still emits a
             // real diagnostic on stderr instead of an empty failure message.
@@ -1319,7 +1740,7 @@ fn get_video_fps(file_path: &Path) -> Result<f64> {
     // recordings, can be a large multiple of the real rate. We keep the keys
     // (no `nokey=1`) because ffprobe emits these fields in its own internal
     // order regardless of the requested order, so position alone is ambiguous.
-    let output = std::process::Command::new("ffprobe")
+    let output = childenv::command("ffprobe")
         .args([
             // `error` (not `quiet`) so a genuinely unprobeable file still emits a
             // real diagnostic on stderr instead of an empty failure message.
@@ -1404,7 +1825,7 @@ fn get_video_duration(file_path: &Path) -> Result<f64> {
     }
 
     // Use ffprobe to get video duration in seconds
-    let output = std::process::Command::new("ffprobe")
+    let output = childenv::command("ffprobe")
         .args([
             // `error` (not `quiet`) so a genuinely unprobeable file still emits a
             // real diagnostic on stderr instead of an empty failure message.
@@ -1481,7 +1902,7 @@ fn draw_progress_bar(
         } else {
             // SAFETY of cast: v is finite and in [0.0, u32::MAX), so truncation
             // toward zero produces a representable u32.
-            #[allow(
+            #[expect(
                 clippy::cast_possible_truncation,
                 clippy::cast_sign_loss,
                 reason = "value is bounded to [0, u32::MAX) above"
@@ -1537,13 +1958,117 @@ fn draw_progress_bar(
     Ok(())
 }
 
+/// Read an image file, and give back the picture and the bytes of the file.
+///
+/// This is the read of the file argument of `main`. It reads the bytes of the
+/// file, and [`decode_image`] makes the picture out of them. Each failure names
+/// the path in its context, because the error of `ic file.png` is the whole
+/// output of the run, and nothing else names the path to the user.
+///
+/// # Arguments
+/// * `file_path` - The path of the image file.
+/// * `capabilities` - What the terminal of this run does. The caller reads the
+///   terminal one time and states it here, so this read never depends on the
+///   terminal of whoever runs it.
+///
+/// # Returns
+/// The picture, and the bytes it came out of for a file that this terminal
+/// takes as it stands. [`None`] in place of the bytes for every other file and
+/// every other terminal. [`decode_image`] holds that rule.
+///
+/// # Errors
+/// An error when the file does not open, or when it holds no image. The
+/// outermost context of each error is `Failed to open image file: <path>`.
+fn read_image_file(
+    file_path: &Path,
+    capabilities: &Capabilities,
+) -> Result<(DynamicImage, Option<Vec<u8>>)> {
+    // One closure gives the context of both failures, so the two texts cannot
+    // drift apart. The closure holds only a reference, so it is `Copy`, and
+    // each `with_context` takes its own copy.
+    let failure = || format!("Failed to open image file: {}", file_path.display());
+
+    let source = fs::read(file_path).with_context(failure)?;
+
+    decode_image(source, file_path, capabilities).with_context(failure)
+}
+
+/// Make a picture out of the bytes of an image file, and keep the bytes when
+/// this terminal sends them as they stand.
+///
+/// The error of this function starts at the error of the decoder, and it does
+/// not name the file. Monitor mode puts the path at the start of its failure
+/// line, so a path in this error names the path two times on one line.
+/// [`read_image_file`] adds the path for the file argument of `main`.
+///
+/// The bytes travel beside the picture because `termgfx` sends a file it can
+/// carry as it stands: a JPEG on a disk is already a JPEG, and an encoder that
+/// read it and wrote it out again would throw a second helping of the picture
+/// away for nothing. See `termgfx::Request::source`.
+///
+/// Two facts decide whether the writer can send this file, and the terminal is
+/// the larger of the two. One of the three protocols carries a whole file, and
+/// the writers of the other two read no byte of a source file at all. The
+/// common case is a terminal of the Kitty protocol, which kitty, Ghostty and
+/// WezTerm all draw, so a rule that read the format alone would keep the bytes
+/// of every PNG and every JPEG on the terminals that never read them. The
+/// format decides after the terminal, because the writer sends two formats as
+/// they stand and encodes every other one.
+///
+/// Bytes that no writer reads are a copy that nothing reads. They stand beside
+/// a decoded picture of the same size for the whole length of the draw, and a
+/// BMP of 4000 by 3000 pixels holds 36 megabytes. This function therefore asks
+/// `termgfx::Capabilities::travels_as_it_stands` what this terminal does with
+/// the file it holds, and it drops the bytes of a file that this terminal
+/// never sends. `termgfx` owns that rule, because a second copy of it here
+/// disagrees with the writer the day the writer takes a third format or a
+/// second protocol carries a file.
+///
+/// # Arguments
+/// * `source` - The bytes of the image file.
+/// * `name` - The path of the image file. The decoder takes the format from
+///   its extension when the first bytes name no format. This function does not
+///   open the path.
+/// * `capabilities` - What the terminal of this run does. The caller reads the
+///   terminal one time and states it here, so this decode never depends on the
+///   terminal of whoever runs it.
+///
+/// # Returns
+/// The picture, and the bytes it came out of for a file that this terminal
+/// takes as it stands. [`None`] in place of the bytes for every other file and
+/// every other terminal.
+///
+/// # Errors
+/// An error when the bytes hold no image. The chain of the error starts at the
+/// error of the decoder, and no link names the path.
+fn decode_image(
+    source: Vec<u8>,
+    name: &Path,
+    capabilities: &Capabilities,
+) -> Result<(DynamicImage, Option<Vec<u8>>)> {
+    // The decoder reads the format out of the first bytes of the file, and it
+    // takes the extension of the name where those bytes name nothing. That is
+    // what `image::open` does with a path, and this reads the same file the
+    // same way out of the memory that already holds it.
+    let mut reader = image::ImageReader::new(io::Cursor::new(&source));
+    if let Ok(format) = image::ImageFormat::from_path(name) {
+        reader.set_format(format);
+    }
+
+    let img = reader.with_guessed_format()?.decode()?;
+
+    // A file that the writer cannot send drops here, at the end of the decode,
+    // and the caller holds the picture alone.
+    let source = capabilities.travels_as_it_stands(&source).then_some(source);
+
+    Ok((img, source))
+}
+
 /// Print a header and then display an image file.
 ///
-/// The function prints the header itself and then counts the rows that it
-/// printed. The count and the print can therefore never drift apart, so a
-/// caller cannot print a header and forget to pay for the rows. A header line
-/// that is wider than the terminal wraps onto more than one row, so the count
-/// comes from the display width of each line and not from the number of lines.
+/// This is the display of the file argument of `main`. It reads the file with
+/// [`read_image_file`], so each error names the path.
+/// [`display_image_with_header`] prints the header and counts its rows.
 ///
 /// # Arguments
 /// * `file_path` - The path of the image file.
@@ -1551,19 +2076,298 @@ fn draw_progress_bar(
 /// * `header` - The lines to print above the image, one line per element.
 ///
 /// # Returns
+/// Nothing when the image is on the terminal.
+///
+/// # Errors
 /// An error when the file does not open as an image, or when the display fails.
 fn display_image_from_file(file_path: &Path, args: &Args, header: &[String]) -> Result<()> {
+    display_image_with_header(args, header, |capabilities| {
+        read_image_file(file_path, capabilities)
+    })
+}
+
+/// Print a header, get a picture from `load`, and then display the picture.
+///
+/// The function prints the header itself and then counts the rows that it
+/// printed. The count and the print can therefore never drift apart, so a
+/// caller cannot print a header and forget to pay for the rows. A header line
+/// that is wider than the terminal wraps onto more than one row, so the count
+/// comes from the display width of each line and not from the number of lines.
+///
+/// The two displays of an image file share this body. The file argument of
+/// `main` gives a `load` that reads the file with [`read_image_file`]. Monitor
+/// mode reads the bytes itself, and it gives a `load` that decodes them with
+/// [`decode_image`]. The header prints before `load` runs, for both callers.
+///
+/// # Arguments
+/// * `args` - The command line arguments.
+/// * `header` - The lines to print above the image, one line per element.
+/// * `load` - Gives the picture, and the bytes it came out of when this
+///   terminal sends them as they stand. It takes what the terminal of this run
+///   does.
+///
+/// # Returns
+/// Nothing when the image is on the terminal.
+///
+/// # Errors
+/// The error of `load` when it gives no picture, or an error when the display
+/// fails.
+fn display_image_with_header(
+    args: &Args,
+    header: &[String],
+    load: impl FnOnce(&Capabilities) -> Result<(DynamicImage, Option<Vec<u8>>)>,
+) -> Result<()> {
     for line in header {
         println!("{line}");
     }
 
-    let img = image::open(file_path)
-        .with_context(|| format!("Failed to open image file: {}", file_path.display()))?;
+    // The read of the terminal happens one time for the whole run, and
+    // `display_image` below takes that same answer out of the memory of
+    // `termgfx`. So this call costs no round trip of its own.
+    let capabilities = Capabilities::detect_by_asking();
+    let (img, source) = load(&capabilities)?;
 
     let (term_width, _) = terminal_cells();
-    display_image(img, args, args.no_newline, header_rows(header, term_width))
+    display_image(
+        img,
+        source.as_deref(),
+        args,
+        Picture::Still,
+        header_rows(header, term_width),
+    )
 }
 
+/// Read a text file that monitor mode found, and decide whether to show it.
+///
+/// Monitor mode hears about each file that a program writes, and many of those
+/// files hold no text to show. Such a file is not a failure. The file argument
+/// of `main` does not come here: a file that the user names must read as text,
+/// or `ic` fails.
+///
+/// A path that is gone at the read holds nothing to show. [`open_new_file`]
+/// holds that rule for each reader of monitor mode. [`read_text_to_show`]
+/// holds the rule for the content of the file. It reads the whole file only
+/// when the first block of the file is text.
+///
+/// # Arguments
+/// * `path` - The path that the watcher reported.
+///
+/// # Returns
+/// `Some` with the content of the file when monitor mode shows it. `None` when
+/// monitor mode ignores the file, because the file is gone, it is empty, or it
+/// is binary.
+///
+/// # Errors
+/// The error of the open or the read when the file does not read for a
+/// different cause, such as a permission that the user does not have. The
+/// error does not name the path, because the caller puts the path in front of
+/// it.
+fn read_new_text_file(path: &Path) -> io::Result<Option<String>> {
+    let Some(file) = open_new_file(path)? else {
+        return Ok(None);
+    };
+    read_text_to_show(file)
+}
+
+/// The number of bytes at the start of a file that the text rule of monitor
+/// mode reads before it reads the rest.
+///
+/// [`read_text_to_show`] decides on this first block, and it reads the rest of
+/// the file only when the block is text. The start of a binary file, such as
+/// an archive or a partial download, holds a NUL byte, a byte that is not
+/// UTF-8, or a control character. So 8 KiB is sufficient to find it.
+const FIRST_BLOCK_BYTES: u64 = 8 * 1024;
+
+/// Read the content of a file that monitor mode found, and decide whether it
+/// is text to show.
+///
+/// Content is text when its bytes are valid UTF-8 and [`is_plain_text`]
+/// accepts the decoded text. All other content is binary, and monitor mode
+/// ignores it. A decode alone is not sufficient. Bytes that are only NUL bytes
+/// are valid UTF-8, and so are the bytes of an escape sequence. The rule thus
+/// looks at each character after the decode.
+///
+/// Empty content holds nothing to show either. A program makes a file before
+/// it writes the text, so the watcher often reports the file while it is
+/// still empty. A later event for the file shows the text.
+///
+/// The rule reads the first [`FIRST_BLOCK_BYTES`] bytes, and it reads the rest
+/// only when [`first_block_can_be_text`] accepts them. A binary file that
+/// grows, such as a `.crdownload` file of a browser, gives an event at each
+/// write. It stays out of the record, so each event reads it again. A read of
+/// the whole file thus used memory to the size of the file at each event.
+/// When the first block is text, the rule applies the full check to the
+/// complete content.
+///
+/// # Arguments
+/// * `reader` - The source of the content, such as a file that is open.
+///
+/// # Returns
+/// `Some` with the content when monitor mode shows it. `None` when monitor
+/// mode ignores the content, because it is empty or it is binary.
+///
+/// # Errors
+/// The error of the read when the content does not read.
+fn read_text_to_show(mut reader: impl Read) -> io::Result<Option<String>> {
+    let mut bytes = Vec::new();
+    Read::by_ref(&mut reader)
+        .take(FIRST_BLOCK_BYTES)
+        .read_to_end(&mut bytes)?;
+
+    if bytes.is_empty() || !first_block_can_be_text(&bytes) {
+        return Ok(None);
+    }
+
+    reader.read_to_end(&mut bytes)?;
+
+    Ok(String::from_utf8(bytes)
+        .ok()
+        .filter(|text| is_plain_text(text)))
+}
+
+/// Decide whether the first block of a file can be the start of text.
+///
+/// The block can end in part of a character of more than one byte, because the
+/// edge of the block does not follow the edges of the characters. The rest of
+/// that character is after the block. So a block that ends in part of a
+/// character is not binary for that cause, and the rule checks the characters
+/// before that part.
+///
+/// # Arguments
+/// * `block` - The bytes at the start of the file.
+///
+/// # Returns
+/// `true` when the block is valid UTF-8, or valid UTF-8 up to a character that
+/// the block cuts at its end, and [`is_plain_text`] accepts the decoded text.
+/// `false` when the block holds bytes that are not UTF-8 or a control
+/// character that plain text does not hold.
+fn first_block_can_be_text(block: &[u8]) -> bool {
+    match std::str::from_utf8(block) {
+        Ok(text) => is_plain_text(text),
+        // An error with no length is a character that the end of the block
+        // cuts. The bytes before `valid_up_to` are valid UTF-8.
+        Err(error) if error.error_len().is_none() => {
+            std::str::from_utf8(&block[..error.valid_up_to()]).is_ok_and(is_plain_text)
+        }
+        Err(_) => false,
+    }
+}
+
+/// Decide whether decoded text is plain text that monitor mode can write to
+/// the terminal.
+///
+/// Text is plain when it holds no control character other than tab, line
+/// feed, and carriage return. A control character is a character of the
+/// Unicode `Cc` category: C0 (U+0000 to U+001F), DEL (U+007F), and C1 (U+0080
+/// to U+009F). A NUL byte is a control character, so plain text never holds
+/// one.
+///
+/// In monitor mode the user does not choose the file. Any program can put a
+/// file in a watched directory, such as `~/Downloads`. The escape character
+/// starts a terminal control sequence, and such a sequence can write the
+/// clipboard, set the title, or move the cursor to fake output. Some
+/// terminals read the C1 characters U+009B and U+009D as the start of such a
+/// sequence in UTF-8 too, so the rule includes C1.
+///
+/// # Arguments
+/// * `text` - The decoded text of a file.
+///
+/// # Returns
+/// `true` when the text holds no control character other than tab, line feed,
+/// and carriage return. `false` when it holds a different control character.
+fn is_plain_text(text: &str) -> bool {
+    !text
+        .chars()
+        .any(|character| character.is_control() && !matches!(character, '\t' | '\n' | '\r'))
+}
+
+/// Read an image that monitor mode found, and decide whether to show it.
+///
+/// A program such as `curl -o`, an editor, or a screenshot tool makes a file
+/// before it writes the bytes. The watcher thus often reports an image while
+/// it is still empty. An empty file holds no image to decode, so it is not a
+/// failure. A later event for the file shows the image.
+///
+/// The decision uses the bytes that the read gave, not a check of the size
+/// before the read. A program can write to the file between such a check and
+/// the read.
+///
+/// A path that is gone at the read holds no image either. The screenshot tool
+/// of macOS writes a temporary file and then renames it, so the event for the
+/// temporary name arrives after the file is gone. [`open_new_file`] holds that
+/// rule for each reader of monitor mode.
+///
+/// # Arguments
+/// * `path` - The path that the watcher reported.
+///
+/// # Returns
+/// `Some` with the bytes of the file when monitor mode shows it. `None` when
+/// monitor mode ignores the file, because the file is gone or it is empty.
+///
+/// # Errors
+/// The error of the open or the read when the file does not read for a
+/// different cause, such as a permission that the user does not have. The
+/// error does not name the path, because the caller puts the path in front of
+/// it.
+fn read_new_image_file(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    let Some(mut file) = open_new_file(path)? else {
+        return Ok(None);
+    };
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(bytes))
+}
+
+/// Open a file that monitor mode found, and ignore a path that is gone.
+///
+/// A program often writes a temporary file and then renames or removes it. The
+/// event for such a file arrives after the file is gone, so a path that is gone
+/// is not a failure. [`Monitor::handle`] checks the path before the read, but
+/// the program can rename or remove the file after that check. So each reader
+/// of monitor mode applies the rule again here, on the result of the open.
+///
+/// The open is the one step where the file can go away. On Unix, a file that
+/// is open stays readable after a rename or a removal of its path. The read
+/// after the open thus gives the bytes of the file.
+///
+/// The rule looks only at the error of this open. An error of kind `NotFound`
+/// from a different step, such as the display, does not show that the path is
+/// gone. Monitor mode reports such an error.
+///
+/// # Arguments
+/// * `path` - The path that the watcher reported.
+///
+/// # Returns
+/// `Some` with the open file. `None` when no file is at the path.
+///
+/// # Errors
+/// The error of the open when the open fails for a different cause, such as a
+/// permission that the user does not have. The error does not name the path,
+/// because the caller puts the path in front of it.
+fn open_new_file(path: &Path) -> io::Result<Option<fs::File>> {
+    match fs::File::open(path) {
+        Ok(file) => Ok(Some(file)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Print the content of a text file to standard output.
+///
+/// # Arguments
+/// * `file_path` - The path of the text file.
+///
+/// # Returns
+/// Nothing when the content is on standard output.
+///
+/// # Errors
+/// An error when the file does not open, when its content is not UTF-8, or
+/// when the flush of standard output fails.
 fn display_text_file(file_path: &Path) -> Result<()> {
     let contents = fs::read_to_string(file_path)
         .with_context(|| format!("Failed to read text file: {}", file_path.display()))?;
@@ -1574,9 +2378,36 @@ fn display_text_file(file_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn display_image_from_stdin(args: &Args) -> Result<()> {
-    let stdin = io::stdin();
-    let mut reader = BufReader::new(stdin.lock());
+/// Read one image out of `reader`, and give back the picture and the bytes.
+///
+/// This is the read of the standard input path, and it keeps the bytes of a
+/// file by the rule that [`decode_image`] keeps them by. One rule serves
+/// both readers: a rule that reached the decoder of a file alone would hold 36
+/// megabytes of dead bytes for `ic < photograph.bmp`, which is the case that
+/// the rule exists for.
+///
+/// The read stands apart from the display of the picture for the reason
+/// [`decode_image`] stands apart from [`display_image_with_header`]: a test
+/// reads a picture out of bytes it built itself, where a test of the display
+/// would draw into the terminal of whoever runs it.
+///
+/// # Arguments
+/// * `reader` - The stream that carries the bytes of one image file.
+/// * `capabilities` - What the terminal of this run does. The caller reads the
+///   terminal one time and states it here, so this read never depends on the
+///   terminal of whoever runs it.
+///
+/// # Returns
+/// The picture, and the bytes it came out of for a file that this terminal
+/// takes as it stands. [`None`] in place of the bytes for every other file and
+/// every other terminal.
+///
+/// # Errors
+/// An error when the stream does not read, or when it holds no image.
+fn picture_from_stdin(
+    mut reader: impl Read,
+    capabilities: &Capabilities,
+) -> Result<(DynamicImage, Option<Vec<u8>>)> {
     let mut buffer = Vec::new();
     reader
         .read_to_end(&mut buffer)
@@ -1584,17 +2415,85 @@ fn display_image_from_stdin(args: &Args) -> Result<()> {
 
     let img = image::load_from_memory(&buffer).context("Failed to decode image from stdin")?;
 
+    // A file that this terminal never sends drops here, at the end of the read,
+    // and the caller holds the picture alone.
+    let source = capabilities.travels_as_it_stands(&buffer).then_some(buffer);
+
+    Ok((img, source))
+}
+
+fn display_image_from_stdin(args: &Args) -> Result<()> {
+    // The read of the terminal happens one time for the whole run, and
+    // `display_image` below takes that same answer out of the memory of
+    // `termgfx`. So this call costs no round trip of its own.
+    let capabilities = Capabilities::detect_by_asking();
+    let stdin = io::stdin();
+    let (img, source) = picture_from_stdin(BufReader::new(stdin.lock()), &capabilities)?;
+
     // This path prints no header, so the image can use the whole terminal less
-    // the row of the prompt.
-    display_image(img, args, args.no_newline, HeaderRows(0))
+    // the row of the prompt. The bytes that arrived travel beside the picture
+    // for a terminal that draws the file as it stands, because such a file
+    // needs no encode.
+    display_image(img, source.as_deref(), args, Picture::Still, HeaderRows(0))
+}
+
+/// The code that a Kitty terminal names for an image store with no room left.
+///
+/// A terminal keeps every image it drew, and it caps the bytes it keeps. mosh
+/// is the case that reaches the cap: it holds every image for the length of the
+/// session, because a client that reconnects holds none.
+///
+/// This is the one refusal that the size of the picture caused, so this is the
+/// one refusal that a smaller picture repairs.
+const IMAGE_STORE_FULL: &str = "ENOSPC";
+
+/// The line that tells a user how to make the picture smaller.
+///
+/// A newline opens it, because it stands below the line that reports what the
+/// terminal said.
+const SIZE_ADVICE: &str =
+    "\nA smaller image can fit where this one did not: try --width, --height or --scale.";
+
+/// The advice that a refusal of `code` earns, or an empty string for a code
+/// that earns none.
+///
+/// [`SIZE_ADVICE`] repairs [`IMAGE_STORE_FULL`] and nothing else. A terminal
+/// that answers `EINVAL`, `ENOTSUPP` or a code of a picture it cannot decode
+/// refused the bytes for a reason that the size of the picture did not cause,
+/// and the same bytes at half the width are the same bytes. A user who follows
+/// the advice there runs the tool again, waits again, and reads the same
+/// refusal. So every other code leaves the words of the terminal by themselves.
+///
+/// # Arguments
+/// * `code` - The code that the terminal named, such as `ENOSPC`.
+///
+/// # Returns
+/// [`SIZE_ADVICE`] for the code of a full image store, and an empty string for
+/// every other code.
+fn size_advice_for(code: &str) -> &'static str {
+    if code == IMAGE_STORE_FULL {
+        SIZE_ADVICE
+    } else {
+        ""
+    }
 }
 
 /// Display an image in the terminal.
 ///
 /// # Arguments
 /// * `img` - The image to display.
+/// * `source` - The bytes of the file that the image came out of, when this
+///   call has them. A file that the terminal draws, that the screen fits and
+///   that the transport carries reaches the terminal as it stands, so no
+///   encoder runs and no pixel changes. The two readers of `ic` state [`None`]
+///   here for a file that this terminal never sends, and
+///   `termgfx::Capabilities::travels_as_it_stands` holds that rule. See
+///   `termgfx::Request::source`.
 /// * `args` - The command line arguments.
-/// * `no_newline` - True when the caller controls the position of the cursor.
+/// * `picture` - Whether this call draws one still picture or one frame of a
+///   video. It names the shape that the image travels in, the answer that the
+///   terminal gives, and whether this call reads that answer. `--no-newline`
+///   states none of the three: it states who moves the cursor.
 /// * `header` - The number of rows that the caller printed above the image. The
 ///   auto-fit path subtracts these rows from the height of the terminal.
 ///
@@ -1602,8 +2501,9 @@ fn display_image_from_stdin(args: &Args) -> Result<()> {
 /// An error when the terminal cannot show graphics, or when the display fails.
 fn display_image(
     img: DynamicImage,
+    source: Option<&[u8]>,
     args: &Args,
-    no_newline: bool,
+    picture: Picture,
     header: HeaderRows,
 ) -> Result<()> {
     let terminal_caps = Capabilities::detect_by_asking();
@@ -1640,13 +2540,13 @@ fn display_image(
         let scale_dim = |dim: u32| -> u32 {
             // Cast u32 -> f32 can lose precision for values above 2^24, but
             // that's fine for image dimensions in this codebase.
-            #[allow(
+            #[expect(
                 clippy::cast_precision_loss,
                 reason = "image dimensions rarely exceed 2^24"
             )]
             let dim_f = dim as f32 * scale_factor;
             // dim_f is finite and in [0.0, dim as f32], so it fits in u32.
-            #[allow(
+            #[expect(
                 clippy::cast_possible_truncation,
                 clippy::cast_sign_loss,
                 reason = "dim_f is non-negative and bounded by the original u32 dimension"
@@ -1671,96 +2571,62 @@ fn display_image(
             columns: scaled_width,
             rows: scaled_height,
         },
-        cursor: if no_newline {
-            Cursor::Held {
-                id: HELD_PLACEMENT_ID,
-            }
-        } else {
-            Cursor::BelowImage
+        source,
+        // The caps of a mosh travel in the environment of the session, and
+        // `Capabilities::detect_by_asking` already read them, so this call
+        // costs no second read either.
+        payload: payload_budget_for(transport, terminal_caps.session()),
+        picture,
+        // A frame of a video always holds the cursor, because the caller puts
+        // the cursor where it wants it before every frame. A still picture
+        // holds it only when the user asks for that with `--no-newline`.
+        cursor: match picture {
+            Picture::Frame { .. } => Cursor::Held,
+            Picture::Still if args.no_newline => Cursor::Held,
+            Picture::Still => Cursor::BelowImage,
         },
         preserve_aspect: args.preserve_aspect,
     };
 
     // `ic` owns standard output for the whole of one image, so it hands the
-    // locked stream to the writer and takes the lock once.
+    // locked stream to the writer and takes the lock once. The lock goes back
+    // before the question below, because that question and its answer travel on
+    // the controlling terminal and not on standard output. A lock held across a
+    // round trip holds every other writer of this process out for the length of
+    // it, and it buys nothing.
     let mut stdout = io::stdout().lock();
     terminal_caps.draw(&mut stdout, &img, &request)?;
+    drop(stdout);
+
+    // A still picture asks the terminal whether it refused, and this is the
+    // read of that answer. `picture` names the two callers apart: a caller that
+    // draws frame after frame holds the terminal in raw mode for the key
+    // presses of the user, so that path asks the terminal for no answer at all
+    // and a read would take a key press out of its hands.
+    //
+    // The flag that holds the cursor names nothing here. A user who types
+    // `ic -n photo.png` draws one still picture, and that picture asks the
+    // terminal for the failures, so this run reads the answer. A report that
+    // nothing reads stays on the descriptor the shell of the user reads next,
+    // and the shell takes the bytes of it for key presses.
+    //
+    // The read gives a refusal of this picture alone. The answer of the run
+    // before this one arrives late, and a second program that draws pictures on
+    // the same terminal answers as well, so a run that reported every refusal
+    // it read would fail for a picture that drew. `termgfx` states how the
+    // image number tells them apart.
+    if matches!(picture, Picture::Still) {
+        if let Some(refusal) = terminal_caps.read_refusal() {
+            anyhow::bail!(
+                "The terminal refused this image and drew nothing: {refusal}\n\
+                \n\
+                The image reached the terminal, and the terminal reported the failure above.{}",
+                size_advice_for(&refusal.code),
+            );
+        }
+    }
 
     Ok(())
-}
-
-/// Process ID newtype for type safety in process tree walking.
-///
-/// Prevents accidentally mixing up pid/ppid values or confusing
-/// process IDs with other u32 values (e.g., loop counters).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct Pid(u32);
-
-/// Maximum depth to walk up the process tree when searching for ancestors.
-/// 64 levels is generous; real-world process trees rarely exceed 20 levels.
-const MAX_ANCESTOR_DEPTH: usize = 64;
-
-/// The basename of the Zellij client program. The match must be exact, so
-/// that `zellij-server` and a wrapper script such as `my-zellij-wrapper` do
-/// not count as clients.
-const ZELLIJ_PROGRAM_NAME: &str = "zellij";
-
-/// Extracts the basename (filename) from a process comm string.
-///
-/// On macOS, `ps -eo comm=` returns the full executable path (e.g.,
-/// `/usr/local/bin/mosh-server`). This function extracts just the
-/// filename component for exact matching.
-fn comm_basename(comm: &str) -> &str {
-    Path::new(comm)
-        .file_name()
-        .and_then(|f| f.to_str())
-        .unwrap_or(comm)
-}
-
-/// Finds the Zellij client processes that are attached to one Zellij session.
-///
-/// Zellij daemonizes its server, so the server reparents to PID 1 and the
-/// chain from the current process to the terminal is broken. The client
-/// process keeps that chain, so the client stands in for the current process
-/// when the transport is detected.
-///
-/// A client must belong to *this* session. A machine can run many Zellij
-/// sessions at the same time, and a client of some other session says nothing
-/// about how this session is viewed.
-///
-/// `ps_args_output` is the output of `ps -eo pid=,args=`. A client is a
-/// process whose `argv[0]` basename is exactly `zellij` and that has the session
-/// name as a complete argument. The forms `zellij a NAME`, `zellij attach
-/// NAME`, `zellij -s NAME`, and `zellij --session NAME` all match. The server
-/// process (`zellij --server /path/.../NAME`) does not match, because the
-/// session name is only a part of its socket path.
-fn zellij_client_pids(ps_args_output: &str, session: &str) -> Vec<Pid> {
-    if session.is_empty() {
-        return Vec::new();
-    }
-
-    let mut clients = Vec::new();
-
-    for line in ps_args_output.lines() {
-        let mut parts = line.split_whitespace();
-        let pid = match parts.next().and_then(|s| s.parse::<u32>().ok()) {
-            Some(p) => Pid(p),
-            None => continue,
-        };
-        let Some(program) = parts.next() else {
-            continue;
-        };
-        if comm_basename(program) != ZELLIJ_PROGRAM_NAME {
-            continue;
-        }
-        // The remaining tokens are the arguments of the client. The session
-        // name must be one complete argument.
-        if parts.any(|arg| arg == session) {
-            clients.push(pid);
-        }
-    }
-
-    clients
 }
 
 /// The type of remote transport detected in the process tree.
@@ -1772,13 +2638,70 @@ enum RemoteTransport {
     /// No remote transport detected (direct terminal or plain SSH).
     None,
     /// Running under Mosh (mosh-server in process tree).
-    /// Mosh strips escape sequences, so graphics protocols cannot work.
+    ///
+    /// Upstream Mosh strips the escape sequences that every graphics protocol
+    /// needs, so an image cannot work there at all. A Mosh that draws them
+    /// answers the query that `validate_terminal_for_graphics` reads, and that
+    /// answer outranks this one, so such a session draws.
+    ///
+    /// A Mosh that draws still keeps every image for the length of the
+    /// session, and it caps what it keeps. The cap is not one number: Mosh
+    /// keeps one cap for each protocol it carries, and it states the three in
+    /// `MOSH_IMAGE_BUDGETS`. A Mosh that states none leaves the careful number
+    /// that `termgfx` holds. That is what [`payload_budget_for`] answers, and
+    /// it is why a transport that cannot draw at all still names a budget.
     Mosh,
     /// Running under Eternal Terminal (ET_VERSION env var or etterminal in process tree).
     /// ET passes escape sequences through but its virtual terminal doesn't
     /// track cursor movement from image protocols, requiring explicit
     /// cursor advancement.
     EternalTerminal,
+}
+
+/// The characters of payload that a picture can spend on `transport`, stated
+/// one time for each of the three inline-image protocols.
+///
+/// A transport that keeps every image it carries caps what it keeps, and a
+/// picture above that cap draws nothing at all. **mosh states those caps in
+/// the environment of the session, and this reads them from there.** A query
+/// cannot ask the question, because a multiplexer owns the pseudo terminal of
+/// the pane and answers every query itself, and the environment is the one
+/// channel that crosses a multiplexer. `termgfx::MoshImages` reads the
+/// variable and `termgfx::MoshImages::budgets` states what it read.
+///
+/// A copy of a number that another project holds goes stale, and the copy that
+/// stood here did: it named one cap for all three protocols, where mosh keeps
+/// one cap for each of the three. A protocol that the session does not name
+/// keeps `termgfx::PayloadBudget::MOSH`, the careful number that `termgfx`
+/// holds, because every mosh built before
+/// <https://github.com/timmattison/mosh-rs/issues/94> states no cap at all and
+/// that number is what keeps a picture drawing there. See
+/// <https://github.com/timmattison/tools/issues/480>.
+///
+/// The answer names all three protocols, because `termgfx` reads the terminal
+/// and picks the protocol after this call.
+///
+/// The session answers for a mosh alone. The variable outlives the session
+/// that wrote it, because a tmux server or a Zellij server that a mosh session
+/// started hands the whole environment of that session to every pane it opens
+/// after the mosh session ends. So the caps that a local terminal reads state
+/// what some transport once carried, and they state nothing about this run.
+///
+/// # Arguments
+/// * `transport` - The remote transport that this session runs over.
+/// * `session` - What the environment of a mosh session states about the
+///   images it carries. It is read for a mosh and for no other transport.
+///
+/// # Returns
+/// The budget of each of the three protocols under that transport.
+fn payload_budget_for(transport: RemoteTransport, session: MoshImages) -> ProtocolBudgets {
+    match transport {
+        RemoteTransport::Mosh => session.budgets(),
+        // A local terminal keeps the resolution it was given, and Eternal
+        // Terminal carries the bytes through. A budget on either one would
+        // cost a picture resolution and buy nothing.
+        RemoteTransport::None | RemoteTransport::EternalTerminal => ProtocolBudgets::UNLIMITED,
+    }
 }
 
 /// Return the cached remote transport, detecting it on first call.
@@ -1802,7 +2725,7 @@ fn detect_remote_transport() -> RemoteTransport {
 /// 3. **Mosh via Zellij heuristic only** (no ET) → Mosh
 /// 4. **Neither** → None
 fn detect_remote_transport_inner() -> RemoteTransport {
-    let comm_output = match run_ps(&["-eo", "pid=,ppid=,comm="]) {
+    let comm_output = match proctree::ps_snapshot() {
         Some(o) => o,
         None => {
             // Can't check process tree; fall back to env var for ET
@@ -1813,9 +2736,7 @@ fn detect_remote_transport_inner() -> RemoteTransport {
         }
     };
 
-    let zellij_session = std::env::var("ZELLIJ")
-        .ok()
-        .map(|_| std::env::var("ZELLIJ_SESSION_NAME").unwrap_or_default());
+    let zellij_session = proctree::zellij_session();
 
     // The argument snapshot is a second `ps` call, because the comm snapshot
     // deliberately treats every token after the PPID as one executable path,
@@ -1824,7 +2745,7 @@ fn detect_remote_transport_inner() -> RemoteTransport {
     // session needs the arguments, so a session outside Zellij does not pay
     // for the second call.
     let args_output = if zellij_session.is_some() {
-        run_ps(&["-eo", "pid=,args="]).unwrap_or_default()
+        proctree::ps_arguments().unwrap_or_default()
     } else {
         String::new()
     };
@@ -1832,23 +2753,10 @@ fn detect_remote_transport_inner() -> RemoteTransport {
     classify_transport(
         &comm_output,
         &args_output,
-        Pid(std::process::id()),
+        Pid::current(),
         zellij_session,
         std::env::var("ET_VERSION").is_ok(),
     )
-}
-
-/// Run `ps` with the given arguments and return its standard output.
-///
-/// Returns `None` when `ps` cannot be run at all.
-fn run_ps(args: &[&str]) -> Option<String> {
-    std::process::Command::new("ps")
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
 }
 
 /// Decide the remote transport from two process snapshots and the environment.
@@ -1866,30 +2774,20 @@ fn classify_transport(
     zellij_session: Option<String>,
     et_version_set: bool,
 ) -> RemoteTransport {
+    let tree = ProcessTree::parse(ps_comm_output);
+    let scan = ZellijScan::for_session(ps_args_output, zellij_session.as_deref());
+
     // Direct Mosh ancestry (Case 1 only, no Zellij heuristic) — the current
     // shell is definitely under Mosh, so images cannot work.
-    if find_ancestor_process(ps_comm_output, current_pid, &ZellijScan::Off, "mosh-server") {
+    if tree.has_ancestor(current_pid, &ZellijScan::Off, "mosh-server") {
         return RemoteTransport::Mosh;
     }
-
-    let scan = match &zellij_session {
-        None => ZellijScan::Off,
-        Some(session) => match ClientPids::new(zellij_client_pids(ps_args_output, session)) {
-            Some(clients) => ZellijScan::Clients(clients),
-            // The session named no client, so the careful answer is the one
-            // that treats every Zellij client on the machine as a candidate.
-            // It can over-report Mosh, which hides an image that would have
-            // worked. The opposite mistake writes escape sequences that Mosh
-            // strips.
-            None => ZellijScan::EveryClient,
-        },
-    };
 
     // ET detected via env var or process tree (including Zellij heuristic).
     // This takes priority over Mosh-via-Zellij because in a multiplexed Zellij
     // session, Mosh and ET may both be attached — ET viewers can display images
     // while Mosh viewers silently strip the escape sequences.
-    if et_version_set || find_ancestor_process(ps_comm_output, current_pid, &scan, "etterminal") {
+    if et_version_set || tree.has_ancestor(current_pid, &scan, "etterminal") {
         return RemoteTransport::EternalTerminal;
     }
 
@@ -1900,12 +2798,11 @@ fn classify_transport(
         // Zellij sends the output of a pane to every attached client. One
         // client that can show images is enough, so Mosh only blocks when
         // every client of this session is a Mosh client.
-        ZellijScan::Clients(clients) => clients.as_slice().iter().all(|&client| {
-            find_ancestor_process(ps_comm_output, client, &ZellijScan::Off, "mosh-server")
-        }),
-        ZellijScan::EveryClient => {
-            find_ancestor_process(ps_comm_output, current_pid, &scan, "mosh-server")
-        }
+        ZellijScan::Clients(clients) => clients
+            .as_slice()
+            .iter()
+            .all(|&client| tree.has_ancestor(client, &ZellijScan::Off, "mosh-server")),
+        ZellijScan::EveryClient => tree.has_ancestor(current_pid, &scan, "mosh-server"),
     };
     if mosh {
         return RemoteTransport::Mosh;
@@ -1914,349 +2811,142 @@ fn classify_transport(
     RemoteTransport::None
 }
 
-/// Holds [`ClientPids`] so that its field stays private to this module. In a
-/// single-module program a private tuple field is still reachable from every
-/// other line of the file, and an invariant that the rest of the file can
-/// bypass is a comment, not a guarantee.
-mod client_pids {
-    use super::Pid;
-
-    /// A list of Zellij clients that holds at least one client.
-    ///
-    /// [`ClientPids::new`] is the only way to build one, so the empty case is
-    /// answered once instead of at every call site. The emptiness matters
-    /// because `classify_transport` asks whether *every* client of the session
-    /// is a Mosh client: `all` over an empty list answers yes, so a session
-    /// with no named client would be reported as Mosh for no reason. That
-    /// session belongs to [`super::ZellijScan::EveryClient`] instead.
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub(crate) struct ClientPids(Vec<Pid>);
-
-    impl ClientPids {
-        /// Wraps `pids`, or answers `None` when there is no client to wrap.
-        pub(crate) fn new(pids: Vec<Pid>) -> Option<Self> {
-            if pids.is_empty() {
-                return None;
-            }
-            Some(Self(pids))
-        }
-
-        /// The clients, in the order `ps` reported them. Never empty.
-        pub(crate) fn as_slice(&self) -> &[Pid] {
-            &self.0
-        }
-    }
-}
-
-use client_pids::ClientPids;
-
-/// Which Zellij clients stand in for the current process during the search.
-///
-/// Zellij daemonizes its server, so the chain from the current process stops
-/// at PID 1 and never reaches a terminal. The client keeps that chain, which
-/// is why the client is searched instead.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ZellijScan {
-    /// Do not stand in for the current process. Used outside Zellij, and for
-    /// the direct-ancestry question, which must not use the workaround.
-    Off,
-    /// Every process on the machine whose basename is exactly `zellij`.
-    ///
-    /// This is the careful answer for a session whose clients cannot be
-    /// named. It can report a transport that belongs to another session.
-    EveryClient,
-    /// The clients that are attached to this session, found by
-    /// [`zellij_client_pids`].
-    ///
-    /// [`ClientPids`] holds at least one client, so `classify_transport` can
-    /// ask whether *every* client is a Mosh client and get an answer that a
-    /// client stands behind. A session with no named client cannot arrive
-    /// here at all: it uses [`ZellijScan::EveryClient`].
-    Clients(ClientPids),
-}
-
-/// Determines whether a target process (identified by basename) is an ancestor
-/// of the current process by analyzing parsed `ps` output.
-///
-/// This handles two cases:
-/// 1. **Direct ancestry**: The target process is a direct ancestor of `current_pid`.
-/// 2. **Zellij workaround**: Zellij daemonizes (reparents to PID 1), breaking the
-///    direct ancestry. In this case, `scan` names the client processes that stand
-///    in for the current process, and the target is searched above each of them.
-fn find_ancestor_process(
-    ps_output: &str,
-    current_pid: Pid,
-    scan: &ZellijScan,
-    target_name: &str,
-) -> bool {
-    let mut parent_of: HashMap<Pid, Pid> = HashMap::new();
-    let mut comm_of: HashMap<Pid, String> = HashMap::new();
-
-    for line in ps_output.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let mut parts = line.split_whitespace();
-        let pid = match parts.next().and_then(|s| s.parse::<u32>().ok()) {
-            Some(p) => Pid(p),
-            None => continue,
-        };
-        let ppid = match parts.next().and_then(|s| s.parse::<u32>().ok()) {
-            Some(p) => Pid(p),
-            None => continue,
-        };
-        // Rejoin remaining tokens to reconstruct paths that contain spaces
-        // (e.g., "/Users/user/my apps/mosh-server"). On macOS, `ps -eo comm=`
-        // returns the full executable path. The kernel's p_comm field is limited
-        // to MAXCOMLEN (16 chars), but `ps` resolves the full path via libproc,
-        // so truncation is not expected. Edge cases (zombie processes, kernel
-        // threads) may show truncated names; "mosh-server" (11 chars) fits.
-        let comm: String = parts.collect::<Vec<&str>>().join(" ");
-        parent_of.insert(pid, ppid);
-        comm_of.insert(pid, comm);
-    }
-
-    // Case 1: Walk up from current PID looking for target (direct ancestry)
-    let mut ancestor = current_pid;
-    for _ in 0..MAX_ANCESTOR_DEPTH {
-        if let Some(comm) = comm_of.get(&ancestor) {
-            if comm_basename(comm) == target_name {
-                return true;
-            }
-        }
-        match parent_of.get(&ancestor) {
-            Some(&ppid) if ppid != Pid(0) && ppid != ancestor => ancestor = ppid,
-            _ => break,
-        }
-    }
-
-    // Case 2: Inside Zellij, which daemonized and broke the ancestry chain.
-    // Search above each client that stands in for the current process.
-    let every_client: Vec<Pid>;
-    let clients: &[Pid] = match scan {
-        ZellijScan::Off => return false,
-        ZellijScan::Clients(clients) => clients.as_slice(),
-        // Any process whose basename is exactly "zellij" (the CLI binary, not
-        // "zellij-server" or other variants).
-        ZellijScan::EveryClient => {
-            every_client = comm_of
-                .iter()
-                .filter(|(_, comm)| comm_basename(comm) == ZELLIJ_PROGRAM_NAME)
-                .map(|(&pid, _)| pid)
-                .collect();
-            &every_client
-        }
-    };
-
-    for &client in clients {
-        let mut ancestor = client;
-        for _ in 0..MAX_ANCESTOR_DEPTH {
-            match parent_of.get(&ancestor) {
-                Some(&ppid) if ppid != Pid(0) && ppid != ancestor => {
-                    if let Some(pcomm) = comm_of.get(&ppid) {
-                        if comm_basename(pcomm) == target_name {
-                            return true;
-                        }
-                    }
-                    ancestor = ppid;
-                }
-                _ => break,
-            }
-        }
-    }
-
-    false
-}
-
-/// Turn the older `in_zellij` flag into a scan. A session whose clients are
-/// not named uses [`ZellijScan::EveryClient`], which is what `in_zellij` meant.
-#[cfg(test)]
-fn scan_for_flag(in_zellij: bool) -> ZellijScan {
-    if in_zellij {
-        ZellijScan::EveryClient
-    } else {
-        ZellijScan::Off
-    }
-}
-
-/// Check if Mosh is in the process tree. Delegates to [`find_ancestor_process`].
-#[cfg(test)]
-fn has_mosh_in_process_tree(ps_output: &str, current_pid: Pid, in_zellij: bool) -> bool {
-    find_ancestor_process(
-        ps_output,
-        current_pid,
-        &scan_for_flag(in_zellij),
-        "mosh-server",
-    )
-}
-
-/// Check if Eternal Terminal is in the process tree. Delegates to [`find_ancestor_process`].
-/// Looks for `etterminal` (the per-session worker), not `etserver` (the daemon),
-/// because `etterminal` is the direct ancestor of the user's shell.
-#[cfg(test)]
-fn has_et_in_process_tree(ps_output: &str, current_pid: Pid, in_zellij: bool) -> bool {
-    find_ancestor_process(
-        ps_output,
-        current_pid,
-        &scan_for_flag(in_zellij),
-        "etterminal",
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use termgfx::AnsweredProtocol;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use termgfx::{AnsweredProtocol, PayloadBudget};
 
-    // =========================================================================
-    // Tests for comm_basename
-    // =========================================================================
-
+    /// Dimensions whose frame does not fit in `usize` give the error that
+    /// names them, not an overflow. The size check of `rgb_data_to_image`
+    /// uses the checked frame size.
     #[test]
-    fn comm_basename_full_path() {
-        assert_eq!(comm_basename("/usr/local/bin/mosh-server"), "mosh-server");
-    }
-
-    #[test]
-    fn comm_basename_bare_name() {
-        assert_eq!(comm_basename("mosh-server"), "mosh-server");
-    }
-
-    #[test]
-    fn comm_basename_path_with_spaces() {
-        // Paths with spaces are reconstructed by the join(" ") in parsing
+    fn rgb_data_to_image_refuses_dimensions_whose_frame_does_not_fit_in_usize() {
+        let error = rgb_data_to_image(&[], u32::MAX, u32::MAX).unwrap_err();
         assert_eq!(
-            comm_basename("/Users/user/my apps/mosh-server"),
-            "mosh-server"
+            error.to_string(),
+            "video dimensions 4294967295x4294967295 are too large"
         );
     }
 
+    /// A frame above `u32::MAX` bytes fits in a 64-bit `usize`, so the size
+    /// check compares the data with the exact size of the frame.
+    #[cfg(target_pointer_width = "64")]
     #[test]
-    fn comm_basename_empty_string() {
-        assert_eq!(comm_basename(""), "");
+    fn rgb_data_to_image_compares_the_exact_size_above_u32_max_on_a_64_bit_target() {
+        let error = rgb_data_to_image(&[], 40_000, 40_000).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "RGB data size mismatch: expected 4800000000 bytes, got 0 bytes"
+        );
     }
 
-    // =========================================================================
-    // Tests for has_mosh_in_process_tree
-    // =========================================================================
-
+    /// A frame size that does not fit in `usize` is `None`, not a wrapped
+    /// value.
     #[test]
-    fn mosh_detected_bare_session() {
-        // Process tree: mosh-server(100) -> bash(200) -> ic(300)
-        let ps_output = "\
-  100     1 /usr/bin/mosh-server
-  200   100 /bin/bash
-  300   200 /usr/local/bin/ic";
-        assert!(has_mosh_in_process_tree(ps_output, Pid(300), false));
+    fn rgb_frame_bytes_is_none_when_the_frame_does_not_fit_in_usize() {
+        assert_eq!(rgb_frame_bytes(2, 3), Some(18));
+        assert_eq!(rgb_frame_bytes(u32::MAX, u32::MAX), None);
     }
 
+    /// A frame above `u32::MAX` bytes fits in a 64-bit `usize`, so its size
+    /// is the exact product and not `None`.
+    #[cfg(target_pointer_width = "64")]
     #[test]
-    fn mosh_detected_bare_name() {
-        // comm is just the bare name, no path
-        let ps_output = "\
-  100     1 mosh-server
-  200   100 bash
-  300   200 ic";
-        assert!(has_mosh_in_process_tree(ps_output, Pid(300), false));
+    fn rgb_frame_bytes_is_exact_above_u32_max_on_a_64_bit_target() {
+        assert_eq!(rgb_frame_bytes(40_000, 40_000), Some(4_800_000_000));
     }
 
+    /// The error for a frame that is too large names its dimensions.
     #[test]
-    fn mosh_detected_in_zellij() {
-        // mosh-server(100) -> zellij CLI(200), but current process(400)
-        // is child of zellij-server(300) which reparented to PID 1
-        let ps_output = "\
-  100     1 /usr/bin/mosh-server
-  200   100 /usr/bin/zellij
-  300     1 /usr/bin/zellij-server
-  400   300 /bin/bash";
-        assert!(has_mosh_in_process_tree(ps_output, Pid(400), true));
+    fn rgb_frame_too_large_for_usize_names_its_dimensions() {
+        let error = require_rgb_frame_bytes(u32::MAX, u32::MAX).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "video dimensions 4294967295x4294967295 are too large"
+        );
     }
 
+    /// A mosh reads the caps off the session, and no other transport names a
+    /// cap.
+    ///
+    /// mosh holds every image for the length of the session, because a client
+    /// that reconnects holds none, and it caps what it holds. The cap is not
+    /// one number. mosh states one cap for each protocol it carries, and it
+    /// states the three in `MOSH_IMAGE_BUDGETS`, because the environment is
+    /// the one channel that crosses a multiplexer. A picture above the cap of
+    /// the protocol that carries it draws nothing at all, and the user reads
+    /// an empty screen and an error.
+    ///
+    /// This crate held a copy of those caps, and the copy went stale. That is
+    /// the defect that <https://github.com/timmattison/tools/issues/480>
+    /// reports, so this test states the session it covers and asserts against
+    /// the caps of that session. A number typed out in an assertion is the
+    /// same copy again, and it goes stale in the same way.
+    ///
+    /// A mosh that states no cap keeps the careful number that this crate
+    /// holds. Every mosh built before
+    /// <https://github.com/timmattison/mosh-rs/issues/94> states none, and the
+    /// careful number is what keeps a picture drawing there.
+    ///
+    /// Nothing else here names a cap. A local terminal keeps the resolution it
+    /// was given, and Eternal Terminal carries the bytes through. Both answer
+    /// the same whatever the session states, because the variable outlives the
+    /// session that wrote it: a tmux server that a mosh session started hands
+    /// that environment to every pane it opens after the mosh session ends,
+    /// and such a pane is no mosh.
     #[test]
-    fn no_mosh_in_normal_session() {
-        let ps_output = "\
-    1     0 /sbin/launchd
-  500     1 /usr/sbin/sshd
-  600   500 /bin/bash
-  700   600 /usr/local/bin/ic";
-        assert!(!has_mosh_in_process_tree(ps_output, Pid(700), false));
-    }
+    fn a_mosh_reads_the_caps_off_the_session_and_no_other_transport_names_a_cap() {
+        /// The cap that the session of this test states for the Kitty
+        /// graphics protocol.
+        const KITTY_CAP: usize = 1_638_400;
 
-    #[test]
-    fn mosh_empty_ps_output() {
-        assert!(!has_mosh_in_process_tree("", Pid(1), false));
-    }
+        /// The cap that the session of this test states for the Sixel
+        /// protocol.
+        const SIXEL_CAP: usize = 1_048_576;
 
-    #[test]
-    fn mosh_malformed_lines_skipped() {
-        let ps_output = "\
-not_a_number  1 /bin/bash
-  100     1 /usr/bin/mosh-server
-  abc   def /foo/bar
-  200   100 /bin/bash";
-        assert!(has_mosh_in_process_tree(ps_output, Pid(200), false));
-    }
+        /// The cap that the session of this test states for the iTerm2
+        /// protocol. The three caps differ, so an answer that reads the wrong
+        /// protocol fails here.
+        const ITERM2_CAP: usize = 524_288;
 
-    #[test]
-    fn mosh_zellij_exact_match_no_false_positive() {
-        // "my-zellij-wrapper" and "zellij-server" must NOT match as zellij CLI
-        let ps_output = "\
-  100     1 /usr/bin/mosh-server
-  200   100 /usr/local/bin/my-zellij-wrapper
-  300     1 /usr/local/bin/zellij-server
-  400   300 /bin/bash";
-        assert!(!has_mosh_in_process_tree(ps_output, Pid(400), true));
-    }
+        let stated = MoshImages::from_env(
+            Some("kitty,sixel,iterm2"),
+            None,
+            Some(&format!(
+                "kitty={KITTY_CAP},sixel={SIXEL_CAP},iterm2={ITERM2_CAP}"
+            )),
+        );
+        assert_eq!(
+            payload_budget_for(RemoteTransport::Mosh, stated),
+            ProtocolBudgets::uniform(PayloadBudget::MOSH)
+                .with_kitty(PayloadBudget::under_command_cap(KITTY_CAP))
+                .with_sixel(PayloadBudget::under_command_cap(SIXEL_CAP))
+                .with_iterm2(PayloadBudget::under_command_cap(ITERM2_CAP)),
+            "a picture under mosh takes the cap that the session states for the protocol that carries it, less the room of the command"
+        );
 
-    #[test]
-    fn mosh_server_exact_match_no_false_positive() {
-        // "mosh-server-wrapper" must NOT match as mosh-server
-        let ps_output = "\
-  100     1 /usr/bin/mosh-server-wrapper
-  200   100 /bin/bash";
-        assert!(!has_mosh_in_process_tree(ps_output, Pid(200), false));
-    }
+        let silent = MoshImages::from_env(Some("kitty,sixel,iterm2"), None, None);
+        assert_eq!(
+            payload_budget_for(RemoteTransport::Mosh, silent),
+            ProtocolBudgets::uniform(PayloadBudget::MOSH),
+            "a mosh that states no cap keeps the careful number, so a mosh built before the caps travelled draws what it drew before"
+        );
 
-    #[test]
-    fn mosh_comm_path_with_spaces() {
-        // Paths with spaces are reconstructed by join(" "),
-        // and comm_basename extracts the correct filename
-        let ps_output = "\
-  100     1 /Users/user/my apps/mosh-server
-  200   100 /bin/bash";
-        assert!(has_mosh_in_process_tree(ps_output, Pid(200), false));
-    }
-
-    #[test]
-    fn mosh_current_pid_not_in_table() {
-        let ps_output = "\
-  100     1 /usr/bin/mosh-server
-  200   100 /bin/bash";
-        // PID 999 is not in the table
-        assert!(!has_mosh_in_process_tree(ps_output, Pid(999), false));
-    }
-
-    #[test]
-    fn mosh_cycle_does_not_loop_forever() {
-        // A process whose parent is itself should not cause infinite loop
-        let ps_output = "\
-  100   100 /bin/bash";
-        assert!(!has_mosh_in_process_tree(ps_output, Pid(100), false));
-    }
-
-    #[test]
-    fn mosh_not_detected_when_zellij_env_unset() {
-        // Even though a zellij process exists under mosh-server,
-        // Case 2 should not trigger when in_zellij is false
-        let ps_output = "\
-  100     1 /usr/bin/mosh-server
-  200   100 /usr/bin/zellij
-  300     1 /usr/bin/zellij-server
-  400   300 /bin/bash";
-        // current PID 400 is not an ancestor of mosh-server via Case 1,
-        // and in_zellij=false disables Case 2
-        assert!(!has_mosh_in_process_tree(ps_output, Pid(400), false));
+        for local in [RemoteTransport::None, RemoteTransport::EternalTerminal] {
+            assert_eq!(
+                payload_budget_for(local, silent),
+                ProtocolBudgets::UNLIMITED,
+                "a local terminal keeps the resolution it was given, and Eternal Terminal carries the bytes through, so neither one names a cap"
+            );
+            assert_eq!(
+                payload_budget_for(local, stated),
+                ProtocolBudgets::UNLIMITED,
+                "and neither one names a cap where the session states caps, because the variable outlives the session that wrote it"
+            );
+        }
     }
 
     // =========================================================================
@@ -2318,6 +3008,236 @@ not_a_number  1 /bin/bash
         );
     }
 
+    /// The environment of a mosh that carries every image protocol.
+    ///
+    /// It names no terminal of the user, which is the session that
+    /// `mosh-server new` starts by hand: the server states what it carries and
+    /// no wrapper stated what the terminal of the user draws.
+    fn a_mosh_that_carries_images() -> MoshImages {
+        MoshImages::from_env(Some("kitty,sixel,iterm2"), None, None)
+    }
+
+    /// A mosh that carries images draws a picture for a terminal that named
+    /// itself.
+    ///
+    /// This is the refusal of issue #471. The rule about mosh stood in front
+    /// of the rule that reads what the terminal draws, so every named terminal
+    /// met the rule about mosh first and took its refusal. A named terminal
+    /// cannot answer that rule with a query, because a multiplexer answers
+    /// every query for the pane it owns, so the environment is the one channel
+    /// that carries the answer across.
+    #[test]
+    fn a_mosh_that_carries_images_draws_a_picture_for_a_named_terminal() {
+        for terminal_type in [TerminalType::Ghostty, TerminalType::Kitty] {
+            let named = Capabilities::new(terminal_type.clone(), true, true)
+                .in_session(a_mosh_that_carries_images());
+            assert!(
+                validate_terminal_for_graphics(&named, &RemoteTransport::Mosh, false, "Image")
+                    .is_ok(),
+                "a mosh that states it carries every protocol carries the one that {terminal_type:?} draws"
+            );
+        }
+    }
+
+    /// The gate reads the session that the capabilities carry.
+    ///
+    /// A run stands in one session, and every party of the run reads that one.
+    /// `Capabilities::detect` reads it from the environment and holds it, so a
+    /// gate that reads a session of its own reads the same environment a
+    /// second time. A test states the session it covers instead, and a gate
+    /// that took a second statement there would take a verdict that no run
+    /// gives.
+    #[test]
+    fn the_gate_reads_the_session_that_the_capabilities_carry() {
+        let named = Capabilities::new(TerminalType::Ghostty, true, true)
+            .in_session(MoshImages::from_env(Some("kitty"), None, None));
+        assert!(
+            validate_terminal_for_graphics(&named, &RemoteTransport::Mosh, false, "Image").is_ok(),
+            "this mosh carries the kitty protocol, and Ghostty draws it"
+        );
+    }
+
+    /// A mosh that carries images still takes the refusal that names tmux.
+    ///
+    /// The statement in the environment is about the transport, and tmux
+    /// stands between that transport and the screen. A tmux that draws no
+    /// image strips every sequence that carries one, and no variable of the
+    /// session says whether this tmux draws one: the shell that starts the
+    /// tmux server hands the whole environment to the server, and the server
+    /// hands it to every pane. So the rule about tmux reads a query, the query
+    /// answered nothing here, and a mosh that carries images lifts the rule
+    /// about mosh alone.
+    #[test]
+    fn a_mosh_that_carries_images_still_takes_the_refusal_that_names_tmux() {
+        let named = Capabilities::new(TerminalType::Ghostty, true, true)
+            .in_session(MoshImages::from_env(Some("kitty"), None, None));
+        let error = validate_terminal_for_graphics(&named, &RemoteTransport::Mosh, true, "Image")
+            .expect_err("a tmux that answered no query must be refused");
+        assert!(
+            error.to_string().contains("tmux"),
+            "and the message must name tmux, which is what strips the picture: {error}"
+        );
+    }
+
+    /// A mosh that states nothing about images is an upstream mosh, and an
+    /// upstream mosh still takes the refusal.
+    ///
+    /// Upstream mosh strips every escape sequence that carries an image, and a
+    /// picture drawn there leaves the user with an empty screen. Only a mosh
+    /// that draws images writes the variable, so a session that carries none
+    /// keeps the refusal that protects that user, and the message keeps the
+    /// repair that works for them.
+    #[test]
+    fn an_upstream_mosh_still_takes_the_refusal_that_names_ssh() {
+        let named = Capabilities::new(TerminalType::Ghostty, true, true);
+        let error = validate_terminal_for_graphics(&named, &RemoteTransport::Mosh, false, "Image")
+            .expect_err("a mosh that states nothing about images must be refused");
+        assert!(
+            error.to_string().contains("ssh user@host"),
+            "and the message must name the repair that works: {error}"
+        );
+    }
+
+    /// A session that delivers no protocol this terminal draws takes a
+    /// refusal, and the message names every set that decided it.
+    ///
+    /// A pane of Zellij answers sixel, because Zellij draws sixel and reads no
+    /// other protocol. A terminal of the user that draws the kitty protocol
+    /// alone therefore shares no protocol with that pane, and a picture in
+    /// either protocol lands on the screen as text. This session names that
+    /// terminal of the user, so three sets decided the refusal and the message
+    /// names the three of them. The reader needs each one to see why, because
+    /// the repair is a different terminal.
+    #[test]
+    fn a_session_that_shares_no_protocol_with_this_terminal_names_both_sets() {
+        let pane = Capabilities::new(TerminalType::Answered(AnsweredProtocol::Sixel), true, true)
+            .in_session(MoshImages::from_env(
+                Some("kitty,sixel,iterm2"),
+                Some("kitty"),
+                None,
+            ));
+        let error = validate_terminal_for_graphics(&pane, &RemoteTransport::Mosh, false, "Image")
+            .expect_err("a session that delivers no protocol this terminal draws must be refused");
+        let message = error.to_string();
+        assert!(
+            message.contains("kitty"),
+            "the message must name what the terminal of the user draws: {message}"
+        );
+        assert!(
+            message.contains("sixel"),
+            "and it must name what this terminal draws: {message}"
+        );
+        assert!(
+            !message.contains("ssh user@host"),
+            "and it must not send the reader to ssh, which carries no more protocols than this mosh does: {message}"
+        );
+    }
+
+    /// A session that names no terminal of the user takes a refusal that names
+    /// two sets, because two sets decided it.
+    ///
+    /// This is the session that `mosh-server new` starts by hand: the server
+    /// states what it carries, and no wrapper stated what the terminal of the
+    /// user draws. [`MoshImages::delivers`] reads that second set only where
+    /// the set names a protocol, because an absent name is no name of an empty
+    /// set. So the transport and this terminal decided this refusal alone, and
+    /// a message that named the second set there names a party that the
+    /// decision never read. It names it `none` as well, which reads as a
+    /// terminal that draws no picture at all.
+    #[test]
+    fn a_session_that_names_no_terminal_of_the_user_names_two_sets() {
+        let kitty = Capabilities::new(TerminalType::Kitty, true, true)
+            .in_session(MoshImages::from_env(Some("sixel"), None, None));
+        let error = validate_terminal_for_graphics(&kitty, &RemoteTransport::Mosh, false, "Image")
+            .expect_err("a session that delivers no protocol this terminal draws must be refused");
+        let message = error.to_string();
+        assert!(
+            message.contains("sixel"),
+            "the message must name what this mosh carries: {message}"
+        );
+        assert!(
+            message.contains("kitty"),
+            "and it must name what this terminal draws: {message}"
+        );
+        assert!(
+            !message.contains("The terminal of the user draws"),
+            "and it must not name a set that this refusal never read: {message}"
+        );
+        assert!(
+            !message.contains("none"),
+            "which it names `none`, a name that reads as a terminal that draws no picture: {message}"
+        );
+    }
+
+    /// A pane of Zellij inside a mosh that carries images draws a picture.
+    ///
+    /// This is the case that issue #471 reports. Zellij answers the query for
+    /// its own pane and names sixel, the terminal of the user draws sixel as
+    /// well, and the transport carries it. Every party of the session reads
+    /// one protocol, so the picture draws.
+    #[test]
+    fn a_pane_of_zellij_inside_a_mosh_that_carries_images_draws_a_picture() {
+        let pane = Capabilities::new(TerminalType::Answered(AnsweredProtocol::Sixel), true, true)
+            .in_session(MoshImages::from_env(
+                Some("kitty,sixel,iterm2"),
+                Some("kitty,sixel"),
+                None,
+            ));
+        assert!(
+            validate_terminal_for_graphics(&pane, &RemoteTransport::Mosh, false, "Image").is_ok(),
+            "every party of this session reads sixel"
+        );
+    }
+
+    /// A session narrows the routine of a terminal of no name, and the gate
+    /// reads the routine that follows.
+    ///
+    /// A terminal that set none of the signals `termgfx` reads states no
+    /// protocol at all, so `termgfx` guesses iTerm2 for it. A mosh that
+    /// carries sixel alone knows more than that guess, and
+    /// `Capabilities::display_routine` takes the statement over the guess. So
+    /// this terminal draws sixel, this transport carries sixel, and the
+    /// picture draws.
+    ///
+    /// A gate that read a session of its own could not reach this path from
+    /// `ic` at all. The capabilities held an empty session there whatever
+    /// session the gate took, the guess of iTerm2 stood, and the gate refused
+    /// a session that carries the one protocol this terminal draws.
+    #[test]
+    fn a_session_narrows_the_routine_of_a_terminal_of_no_name() {
+        let unnamed = Capabilities::new(TerminalType::Unknown, true, true)
+            .in_session(MoshImages::from_env(Some("sixel"), None, None));
+        assert!(
+            validate_terminal_for_graphics(&unnamed, &RemoteTransport::Mosh, false, "Image")
+                .is_ok(),
+            "the session states sixel, and a statement outranks the guess of iterm2 that a terminal of no name takes"
+        );
+    }
+
+    /// A `MOSH_IMAGES` that outlived its session states nothing, and the rules
+    /// under the rule about mosh answer for the session.
+    ///
+    /// The variable crosses a multiplexer, which is what makes it useful, and
+    /// that is what makes it stale as well. A user exports it by hand. A tmux
+    /// server or a Zellij server that a mosh session started keeps the whole
+    /// environment of that session, and it hands that environment to every
+    /// pane it opens after the mosh session ends. So the process tree is what
+    /// says that the statement belongs to this session, and the rule reads the
+    /// transport as well as the variable.
+    ///
+    /// Ghostty draws the kitty protocol, this variable names sixel alone, and
+    /// the two share no protocol. No mosh stands between Ghostty and the
+    /// screen, so the picture still draws.
+    #[test]
+    fn a_stale_mosh_variable_outside_a_mosh_draws_a_picture() {
+        let named = Capabilities::new(TerminalType::Ghostty, true, true)
+            .in_session(MoshImages::from_env(Some("sixel"), None, None));
+        assert!(
+            validate_terminal_for_graphics(&named, &RemoteTransport::None, false, "Image").is_ok(),
+            "a variable that names no transport of this session says nothing about it"
+        );
+    }
+
     #[test]
     fn the_mosh_message_still_offers_ssh() {
         assert!(mosh_refusal_message().contains("ssh user@host"));
@@ -2329,7 +3249,7 @@ not_a_number  1 /bin/bash
 
     /// The PID of the process that asks for the transport. It sits under the
     /// Zellij server of the session named `ic-test`.
-    const CURRENT: Pid = Pid(63481);
+    const CURRENT: Pid = Pid::new(63481);
 
     /// A process table that holds two Zellij sessions.
     ///
@@ -2527,185 +3447,6 @@ not_a_number  1 /bin/bash
     }
 
     // =========================================================================
-    // Tests for zellij_client_pids (session-scoped client discovery)
-    // =========================================================================
-
-    /// A `ps -eo pid=,args=` table with two Zellij sessions and one server.
-    const PS_ARGS_TWO_SESSIONS: &str = "\
-  51648 /Users/t/.local/bin/zellij --server /tmp/zellij-501/contract_version_1/ic-test
-  57053 zellij a ic-test
-  32269 zellij a meshtastic
-  56666 -zsh";
-
-    #[test]
-    fn zellij_client_pids_finds_the_client_of_this_session() {
-        assert_eq!(
-            zellij_client_pids(PS_ARGS_TWO_SESSIONS, "ic-test"),
-            vec![Pid(57053)]
-        );
-    }
-
-    #[test]
-    fn zellij_client_pids_ignores_another_sessions_client() {
-        let found = zellij_client_pids(PS_ARGS_TWO_SESSIONS, "ic-test");
-        assert!(!found.contains(&Pid(32269)));
-    }
-
-    #[test]
-    fn zellij_client_pids_ignores_the_server_of_this_session() {
-        // The server has the session name in its socket path, not as an
-        // argument of its own. It is not a client.
-        let found = zellij_client_pids(PS_ARGS_TWO_SESSIONS, "ic-test");
-        assert!(!found.contains(&Pid(51648)));
-    }
-
-    #[test]
-    fn zellij_client_pids_accepts_every_attach_form() {
-        let ps_args = "\
-  100 zellij a work
-  200 zellij attach work
-  300 zellij -s work
-  400 zellij --session work";
-        assert_eq!(
-            zellij_client_pids(ps_args, "work"),
-            vec![Pid(100), Pid(200), Pid(300), Pid(400)]
-        );
-    }
-
-    #[test]
-    fn zellij_client_pids_requires_a_whole_argument_match() {
-        // "work" must not match the session named "work-tree".
-        let ps_args = "  100 zellij a work-tree";
-        assert!(zellij_client_pids(ps_args, "work").is_empty());
-    }
-
-    #[test]
-    fn zellij_client_pids_requires_an_exact_program_name() {
-        // A wrapper script named "my-zellij-wrapper" is not the Zellij CLI.
-        let ps_args = "\
-  100 /usr/local/bin/my-zellij-wrapper a work
-  200 /usr/local/bin/zellij-server a work";
-        assert!(zellij_client_pids(ps_args, "work").is_empty());
-    }
-
-    #[test]
-    fn zellij_client_pids_is_empty_for_an_unknown_session() {
-        assert!(zellij_client_pids(PS_ARGS_TWO_SESSIONS, "no-such-session").is_empty());
-    }
-
-    #[test]
-    fn zellij_client_pids_handles_empty_input() {
-        assert!(zellij_client_pids("", "ic-test").is_empty());
-    }
-
-    #[test]
-    fn zellij_client_pids_skips_malformed_lines() {
-        let ps_args = "\
-not_a_number zellij a work
-  100 zellij a work";
-        assert_eq!(zellij_client_pids(ps_args, "work"), vec![Pid(100)]);
-    }
-
-    #[test]
-    fn zellij_client_pids_ignores_an_empty_session_name() {
-        // ZELLIJ_SESSION_NAME is unset or empty. No client can be identified.
-        assert!(zellij_client_pids(PS_ARGS_TWO_SESSIONS, "").is_empty());
-    }
-
-    // =========================================================================
-    // Tests for ClientPids (the client list that cannot be empty)
-    // =========================================================================
-
-    #[test]
-    fn client_pids_refuses_an_empty_list() {
-        // An empty list would answer "every client is a Mosh client" for no
-        // reason, so it must not be possible to build one.
-        assert!(ClientPids::new(Vec::new()).is_none());
-    }
-
-    #[test]
-    fn client_pids_keeps_a_non_empty_list_in_order() {
-        let clients =
-            ClientPids::new(vec![Pid(57053), Pid(32269)]).expect("a list with clients is accepted");
-        assert_eq!(clients.as_slice(), [Pid(57053), Pid(32269)]);
-    }
-
-    // =========================================================================
-    // Tests for has_et_in_process_tree (Eternal Terminal detection)
-    // =========================================================================
-
-    #[test]
-    fn et_detected_bare_session() {
-        // Process tree: etterminal(100) -> bash(200) -> ic(300)
-        let ps_output = "\
-  100     1 /usr/bin/etterminal
-  200   100 /bin/bash
-  300   200 /usr/local/bin/ic";
-        assert!(has_et_in_process_tree(ps_output, Pid(300), false));
-    }
-
-    #[test]
-    fn et_detected_bare_name() {
-        // comm is just the bare name, no path
-        let ps_output = "\
-  100     1 etterminal
-  200   100 bash
-  300   200 ic";
-        assert!(has_et_in_process_tree(ps_output, Pid(300), false));
-    }
-
-    #[test]
-    fn et_detected_in_zellij() {
-        // etterminal(100) -> zellij CLI(200), but current process(400)
-        // is child of zellij-server(300) which reparented to PID 1
-        let ps_output = "\
-  100     1 /usr/bin/etterminal
-  200   100 /usr/bin/zellij
-  300     1 /usr/bin/zellij-server
-  400   300 /bin/bash";
-        assert!(has_et_in_process_tree(ps_output, Pid(400), true));
-    }
-
-    #[test]
-    fn no_et_in_normal_session() {
-        let ps_output = "\
-    1     0 /sbin/launchd
-  500     1 /usr/sbin/sshd
-  600   500 /bin/bash
-  700   600 /usr/local/bin/ic";
-        assert!(!has_et_in_process_tree(ps_output, Pid(700), false));
-    }
-
-    #[test]
-    fn et_not_confused_with_mosh() {
-        // mosh-server present but no etterminal
-        let ps_output = "\
-  100     1 /usr/bin/mosh-server
-  200   100 /bin/bash
-  300   200 /usr/local/bin/ic";
-        assert!(!has_et_in_process_tree(ps_output, Pid(300), false));
-    }
-
-    #[test]
-    fn mosh_not_confused_with_et() {
-        // etterminal present but no mosh-server
-        let ps_output = "\
-  100     1 /usr/bin/etterminal
-  200   100 /bin/bash
-  300   200 /usr/local/bin/ic";
-        assert!(!has_mosh_in_process_tree(ps_output, Pid(300), false));
-    }
-
-    #[test]
-    fn et_exact_match_no_false_positive() {
-        // "etterminal-wrapper" must NOT match as etterminal
-        let ps_output = "\
-  100     1 /usr/bin/etterminal-wrapper
-  200   100 /bin/bash";
-        assert!(!has_et_in_process_tree(ps_output, Pid(200), false));
-    }
-
-    // =========================================================================
     // Tests for parse_video_dimensions
     // =========================================================================
 
@@ -2819,20 +3560,1207 @@ not_a_number zellij a work
     }
 
     // =========================================================================
+    // Tests for read_image_file
+    // =========================================================================
+
+    /// A file of the temporary directory that goes away with the test.
+    ///
+    /// A test that removes the path itself removes it on a line of the test
+    /// body, and an assertion that fails above that line panics before the
+    /// removal runs. The file then stays in the temporary directory of the
+    /// machine, and every later run of that test leaves one more file there.
+    /// `Drop` runs on the way out of a panic as well as on the way out of a
+    /// return, so the removal stands here and in no test body.
+    struct TemporaryFile(PathBuf);
+
+    impl TemporaryFile {
+        /// The path that the file stands at.
+        ///
+        /// # Returns
+        /// The path of the file, which holds while the guard lives.
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TemporaryFile {
+        fn drop(&mut self) {
+            // A panic in a drop that a panic started ends the whole test
+            // binary, and a file that another hand removed first is no failure
+            // of this test. So the removal reports to nobody.
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+
+    /// The count of the paths that this process built.
+    ///
+    /// Each call of [`unique_temporary_path`] adds one to this count and puts
+    /// the answer in the name it builds.
+    static NEXT_TEMPORARY_PATH: AtomicU64 = AtomicU64::new(0);
+
+    /// Build a path in the temporary directory that no other test uses.
+    ///
+    /// Two hazards make one name into two names, and the name answers each one
+    /// with a different part of itself (see CLAUDE.md parallel-safety):
+    ///
+    /// * Two test *processes* run at the same time, from the pre-commit hook
+    ///   and from a hand-typed run of the suite. The process id and the
+    ///   nanoseconds of the clock keep those two apart. The counter cannot,
+    ///   because each process starts its count at zero.
+    /// * Two test *threads* of one process run at the same time, because the
+    ///   test binary runs its tests on many threads. Those threads carry one
+    ///   process id, and two of them read the clock in the same nanosecond, so
+    ///   the process id and the nanoseconds keep no thread apart. The counter
+    ///   does, because one add gives one answer to one caller.
+    ///
+    /// # Arguments
+    /// * `stem` - The first part of the file name, which tells a reader of the
+    ///   temporary directory which test made the file.
+    /// * `extension` - The extension of the file name.
+    ///
+    /// # Returns
+    /// The path. The caller makes the file, and no test here makes a file at
+    /// this path more than one time.
+    fn unique_temporary_path(stem: &str, extension: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0);
+        let count = NEXT_TEMPORARY_PATH.fetch_add(1, Ordering::Relaxed);
+
+        std::env::temp_dir().join(format!(
+            "{stem}-{}-{nanos}-{count}.{extension}",
+            std::process::id()
+        ))
+    }
+
+    /// Write `bytes` to a file of this process and give back a guard of it.
+    ///
+    /// # Arguments
+    /// * `bytes` - The bytes to write.
+    /// * `extension` - The extension of the file name.
+    ///
+    /// # Returns
+    /// A [`TemporaryFile`] that names the path and removes the file at the end
+    /// of the test, whether the test passes or fails.
+    fn temporary_file_of(bytes: &[u8], extension: &str) -> TemporaryFile {
+        let path = unique_temporary_path("ic-source", extension);
+        fs::write(&path, bytes).expect("a write to the temporary directory");
+
+        TemporaryFile(path)
+    }
+
+    /// Two threads that build a path at one time build two different paths.
+    ///
+    /// The test binary runs its tests on many threads, and every thread carries
+    /// the process id of the binary. A name that only the clock makes unique
+    /// therefore collides when two threads read the clock in the same
+    /// nanosecond. Both threads then write and remove one file, and the test
+    /// that reads the file reads the bytes of the other test or no bytes at
+    /// all.
+    #[test]
+    fn temporary_paths_built_at_once_are_all_different() {
+        /// The number of threads that build paths at the same time.
+        const THREADS: usize = 8;
+        /// The number of paths that each thread builds.
+        const PATHS_PER_THREAD: usize = 2000;
+
+        let built: Vec<PathBuf> = thread::scope(|scope| {
+            let builders: Vec<_> = (0..THREADS)
+                .map(|_| {
+                    scope.spawn(|| {
+                        (0..PATHS_PER_THREAD)
+                            .map(|_| unique_temporary_path("ic-collision-probe", "png"))
+                            .collect::<Vec<PathBuf>>()
+                    })
+                })
+                .collect();
+
+            builders
+                .into_iter()
+                .flat_map(|builder| {
+                    builder
+                        .join()
+                        .expect("a builder thread ends without a panic")
+                })
+                .collect()
+        });
+
+        let distinct: HashSet<&PathBuf> = built.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            THREADS * PATHS_PER_THREAD,
+            "every path must differ from every other path, but {} of {} threads x {} paths are the same",
+            built.len() - distinct.len(),
+            THREADS,
+            PATHS_PER_THREAD
+        );
+    }
+
+    /// A terminal that carries a whole image file.
+    ///
+    /// The rule that keeps the bytes of a file names the terminal as well as
+    /// the format, and the iTerm2 protocol is the one that carries a file. A
+    /// test that read the terminal of whoever runs the suite would answer with
+    /// that terminal instead, so every test here states the terminal it covers.
+    fn a_terminal_that_sends_a_file() -> Capabilities {
+        Capabilities::new(TerminalType::ITerm2, true, true)
+    }
+
+    /// The reader gives back the bytes of the file it read.
+    ///
+    /// A terminal that carries a whole file takes the bytes that the file
+    /// holds, and not an encoding of the picture inside it. A reader that gives
+    /// back the picture alone leaves the writer nothing to send, and every JPEG
+    /// then reaches such a terminal through a decode and an encode that lose a
+    /// second helping of it.
+    #[test]
+    fn the_reader_gives_back_the_bytes_of_the_file() {
+        let mut file = io::Cursor::new(Vec::new());
+        DynamicImage::ImageRgb8(image::RgbImage::new(4, 3))
+            .write_to(&mut file, image::ImageFormat::Png)
+            .expect("the PNG encoder takes a picture of this size");
+        let written = file.into_inner();
+
+        let png_file = temporary_file_of(&written, "png");
+        let (picture, source) = read_image_file(png_file.path(), &a_terminal_that_sends_a_file())
+            .expect("the file holds a picture");
+        let source = source.expect("the writer sends a PNG as it stands, so the reader keeps it");
+
+        assert_eq!(
+            (picture.width(), picture.height()),
+            (4, 3),
+            "the reader must give back the picture that the file holds"
+        );
+        assert!(
+            source == written,
+            "the reader must give back the bytes of the file, but it gave {} bytes where the file holds {}",
+            source.len(),
+            written.len()
+        );
+    }
+
+    /// Encode a small picture in `format` and give back the bytes.
+    ///
+    /// The picture is the same one in every format, so a test that reads it
+    /// back tells one format from another by the rule of the reader alone.
+    ///
+    /// # Arguments
+    /// * `format` - The format to write.
+    ///
+    /// # Returns
+    /// The bytes of a file of that format.
+    fn picture_bytes_in(format: image::ImageFormat) -> Vec<u8> {
+        let mut file = io::Cursor::new(Vec::new());
+        DynamicImage::ImageRgb8(image::RgbImage::new(4, 3))
+            .write_to(&mut file, format)
+            .expect("the encoder takes a picture of this size");
+
+        file.into_inner()
+    }
+
+    /// The reader drops a file that the writer cannot send as it stands.
+    ///
+    /// This test states the format half of the rule, and it names the one
+    /// terminal that sends a file at all. The terminal half stands in
+    /// [`the_reader_drops_a_file_that_this_terminal_never_sends`], and
+    /// `termgfx::Capabilities::travels_as_it_stands` holds the two of them.
+    ///
+    /// On that terminal, `termgfx` sends a file byte for byte in two formats
+    /// alone, a JPEG and a still PNG. A file of any other format is a copy that
+    /// nothing reads, and it stands beside a decoded picture of the same size
+    /// for the whole length of the draw. A BMP of 4000 by 3000 pixels holds 36
+    /// megabytes, and the picture that comes out of it holds 36 more.
+    ///
+    /// The PNG at the end of this test holds the rule to one format. A reader
+    /// that drops the bytes of every file passes the first half of this test
+    /// and fails the second.
+    #[test]
+    fn the_reader_drops_a_file_that_the_writer_cannot_send() {
+        let bitmap = picture_bytes_in(image::ImageFormat::Bmp);
+        let bitmap_file = temporary_file_of(&bitmap, "bmp");
+        let (_, source) = read_image_file(bitmap_file.path(), &a_terminal_that_sends_a_file())
+            .expect("the file holds a picture");
+
+        assert!(
+            source.is_none(),
+            "the reader must drop the bytes of a BMP, but it kept {} of them",
+            source.map_or(0, |bytes| bytes.len())
+        );
+
+        let png = picture_bytes_in(image::ImageFormat::Png);
+        let png_file = temporary_file_of(&png, "png");
+        let (_, source) = read_image_file(png_file.path(), &a_terminal_that_sends_a_file())
+            .expect("the file holds a picture");
+
+        assert_eq!(
+            source.as_deref(),
+            Some(png.as_slice()),
+            "the reader must keep the bytes of a PNG, because the writer sends them as they stand"
+        );
+    }
+
+    /// The reader drops a file that this terminal never sends.
+    ///
+    /// The iTerm2 writer is the one reader of the bytes of a file. A Kitty
+    /// terminal and a Sixel terminal read no byte of them, so the bytes that a
+    /// reader keeps for one of those terminals are a copy that nothing reads,
+    /// beside a decoded picture of the same size, for the whole length of the
+    /// draw. Ghostty, WezTerm and kitty are the common case, so the rule that
+    /// names the format alone holds the memory of every common run.
+    ///
+    /// The iTerm2 half at the end holds the rule to the terminals that send no
+    /// file. A reader that drops the bytes for every terminal passes the first
+    /// half of this test and fails the second.
+    #[test]
+    fn the_reader_drops_a_file_that_this_terminal_never_sends() {
+        let png = picture_bytes_in(image::ImageFormat::Png);
+        let png_file = temporary_file_of(&png, "png");
+
+        let kitty = Capabilities::new(TerminalType::Kitty, true, true);
+        let (_, source) =
+            read_image_file(png_file.path(), &kitty).expect("the file holds a picture");
+
+        assert!(
+            source.is_none(),
+            "the reader must drop the bytes of a PNG that a Kitty terminal never reads, but it kept {} of them",
+            source.map_or(0, |bytes| bytes.len())
+        );
+
+        let (_, source) = read_image_file(png_file.path(), &a_terminal_that_sends_a_file())
+            .expect("the file holds a picture");
+
+        assert_eq!(
+            source.as_deref(),
+            Some(png.as_slice()),
+            "the reader must keep the bytes of a PNG for the one terminal that sends them as they stand"
+        );
+    }
+
+    /// The reader of standard input drops a file that the writer cannot send.
+    ///
+    /// The two readers of `ic` read one file each, and one rule serves both. A
+    /// rule that reached the reader of a path alone would hold 36 megabytes of
+    /// dead bytes for `ic < photograph.bmp`, which is the case that the rule
+    /// exists for.
+    ///
+    /// The bytes come out of the memory of this test, so the read reaches no
+    /// standard input of the run and no file of the disk.
+    ///
+    /// The PNG at the end holds the rule to one format. A reader that drops
+    /// the bytes of every file passes the first half of this test and fails
+    /// the second.
+    #[test]
+    fn the_reader_of_standard_input_drops_a_file_that_the_writer_cannot_send() {
+        let terminal = a_terminal_that_sends_a_file();
+
+        let bitmap = picture_bytes_in(image::ImageFormat::Bmp);
+        let (_, source) = picture_from_stdin(io::Cursor::new(bitmap.as_slice()), &terminal)
+            .expect("the bytes hold a picture");
+
+        assert!(
+            source.is_none(),
+            "the reader must drop the bytes of a BMP, but it kept {} of them",
+            source.map_or(0, |bytes| bytes.len())
+        );
+
+        let png = picture_bytes_in(image::ImageFormat::Png);
+        let (picture, source) = picture_from_stdin(io::Cursor::new(png.as_slice()), &terminal)
+            .expect("the bytes hold a picture");
+
+        assert_eq!(
+            (picture.width(), picture.height()),
+            (4, 3),
+            "the reader must give back the picture that the bytes hold"
+        );
+        assert_eq!(
+            source.as_deref(),
+            Some(png.as_slice()),
+            "the reader must keep the bytes of a PNG, because the writer sends them as they stand"
+        );
+    }
+
+    // =========================================================================
+    // Tests for Monitor::handle
+    // =========================================================================
+
+    /// A directory of the temporary directory that goes away with the test.
+    ///
+    /// The removal stands in `Drop` for the reason that [`TemporaryFile`]
+    /// gives: an assertion that fails panics before a removal on a later line
+    /// of the test body runs. Each guard makes its own directory, so the files
+    /// of one test never meet the files of a test that runs at the same time.
+    struct TemporaryDirectory(PathBuf);
+
+    impl TemporaryDirectory {
+        /// Make a new, empty directory that no other test uses.
+        ///
+        /// # Returns
+        /// A guard that names the directory and removes it, and all that it
+        /// holds, at the end of the test.
+        fn new() -> Self {
+            let path = unique_temporary_path("ic-monitor", "dir");
+            fs::create_dir(&path).expect("a new directory in the temporary directory");
+
+            Self(path)
+        }
+
+        /// The path that the directory stands at.
+        ///
+        /// # Returns
+        /// The path of the directory, which holds while the guard lives.
+        fn path(&self) -> &Path {
+            &self.0
+        }
+
+        /// Write `bytes` to a file of this directory.
+        ///
+        /// # Arguments
+        /// * `name` - The name of the file in this directory.
+        /// * `bytes` - The bytes to write.
+        ///
+        /// # Returns
+        /// The path of the file.
+        fn file_of(&self, name: &str, bytes: &[u8]) -> PathBuf {
+            let path = self.path().join(name);
+            fs::write(&path, bytes).expect("a write to the temporary directory");
+
+            path
+        }
+
+        /// Make a new, empty directory in this directory.
+        ///
+        /// # Arguments
+        /// * `name` - The name of the new directory in this directory.
+        ///
+        /// # Returns
+        /// The path of the new directory.
+        fn directory(&self, name: &str) -> PathBuf {
+            let path = self.path().join(name);
+            fs::create_dir(&path).expect("a new directory in the temporary directory");
+
+            path
+        }
+    }
+
+    impl Drop for TemporaryDirectory {
+        fn drop(&mut self) {
+            // The removal reports to nobody, for the reason that the `Drop` of
+            // `TemporaryFile` gives.
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// What one call of [`Monitor::handle`] wrote.
+    ///
+    /// The two fields together are the whole output of one path. A test that
+    /// expects no output compares against [`Written::default`], so the
+    /// failure message shows every byte that the path gave.
+    #[derive(Debug, Default, PartialEq, Eq)]
+    struct Written {
+        /// The text that went to standard output.
+        stdout: String,
+        /// The text that went to standard error.
+        stderr: String,
+    }
+
+    /// The display of one image that a test gives to a [`Monitor`]. It takes
+    /// the path of the image, the bytes that the monitor read, and the header
+    /// lines.
+    type ShowImageInTest = Box<dyn FnMut(&Path, Vec<u8>, &[String]) -> Result<()>>;
+
+    /// A [`Monitor`] that a test drives, and a record of each image display.
+    ///
+    /// The display of production asks the terminal of whoever runs the suite
+    /// what it can draw, and then it draws into that terminal. The display here
+    /// decodes the bytes that the monitor read with [`decode_image`] and a
+    /// terminal that the test states, and it draws nothing. Production decodes
+    /// the bytes with the same function. The display here keeps the header
+    /// lines of each call, because the display of production prints them. A test that finds no
+    /// header here thus proves that no image header went to the terminal.
+    ///
+    /// One value of this type keeps its record of handled paths from one call
+    /// of [`MonitorUnderTest::handle`] to the next, as monitor mode does. A
+    /// test that handles one path two times uses one value.
+    struct MonitorUnderTest {
+        /// The monitor that the test drives.
+        monitor: Monitor<ShowImageInTest>,
+        /// The header lines of each call of the image display, in order.
+        image_headers: Rc<RefCell<Vec<Vec<String>>>>,
+    }
+
+    impl MonitorUnderTest {
+        /// Make a monitor that has handled no path and displayed no image.
+        ///
+        /// # Returns
+        /// The monitor, with an empty record of image displays.
+        fn new() -> Self {
+            let image_headers = Rc::new(RefCell::new(Vec::new()));
+            let record = Rc::clone(&image_headers);
+            let show_image: ShowImageInTest =
+                Box::new(move |path: &Path, source: Vec<u8>, header: &[String]| {
+                    record.borrow_mut().push(header.to_vec());
+                    decode_image(source, path, &a_terminal_that_sends_a_file()).map(|_| ())
+                });
+
+            Self {
+                monitor: Monitor::new(show_image),
+                image_headers,
+            }
+        }
+
+        /// Handle one path, and give back what the monitor wrote.
+        ///
+        /// # Arguments
+        /// * `path` - The path that the watcher reports.
+        ///
+        /// # Returns
+        /// The text that went to standard output and to standard error. A
+        /// byte that is not UTF-8 shows as the replacement character, so a
+        /// test that expects no output still prints what it got.
+        fn handle(&mut self, path: &Path) -> Written {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            self.monitor
+                .handle(path, &mut stdout, &mut stderr)
+                .expect("a write to memory succeeds");
+
+            Written {
+                stdout: String::from_utf8_lossy(&stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&stderr).into_owned(),
+            }
+        }
+
+        /// The header lines of each call of the image display.
+        ///
+        /// # Returns
+        /// One element for each call, in the order of the calls. An empty
+        /// list means that no path reached the image display.
+        fn image_headers(&self) -> Vec<Vec<String>> {
+            self.image_headers.borrow().clone()
+        }
+    }
+
+    /// A new text file in monitor mode gives a header and then the text.
+    ///
+    /// This is the outcome that monitor mode exists for, and the fixes of
+    /// <https://github.com/timmattison/tools/issues/526> keep it. A fix that
+    /// ignores too much, such as every path that it does not know, makes this
+    /// test fail. The expected output is exact, so a change to the header or to
+    /// the text makes this test fail too.
+    #[test]
+    fn a_new_text_file_in_monitor_mode_gives_a_header_and_the_text() {
+        let directory = TemporaryDirectory::new();
+        let note = directory.file_of("note.txt", b"hello\n");
+        let mut monitor = MonitorUnderTest::new();
+
+        let written = monitor.handle(&note);
+
+        assert_eq!(
+            written,
+            Written {
+                stdout: format!("\nFound new text file: {}\nhello\n", note.display()),
+                stderr: String::new(),
+            },
+            "a new text file must give its header and its text, and no failure"
+        );
+        assert!(
+            monitor.image_headers().is_empty(),
+            "a text file must not reach the image display, but it got {:?}",
+            monitor.image_headers()
+        );
+    }
+
+    /// A new image in monitor mode goes to the image display with its header.
+    ///
+    /// The image display prints the header itself, so the auto-fit path can
+    /// count its rows. The header is an empty row, which separates this image
+    /// from the one before it, and then the path. A fix that ignores too much,
+    /// such as every path that it does not open as text, makes this test fail.
+    #[test]
+    fn a_new_image_in_monitor_mode_goes_to_the_image_display_with_its_header() {
+        let directory = TemporaryDirectory::new();
+        let picture = directory.file_of("picture.png", &picture_bytes_in(image::ImageFormat::Png));
+        let mut monitor = MonitorUnderTest::new();
+
+        let written = monitor.handle(&picture);
+
+        assert_eq!(
+            written,
+            Written::default(),
+            "an image that displays must give no text of its own"
+        );
+        assert_eq!(
+            monitor.image_headers(),
+            vec![vec![
+                String::new(),
+                format!("Found new image: {}", picture.display())
+            ]],
+            "an image must reach the image display one time, with its header"
+        );
+    }
+
+    /// A new directory in monitor mode gives no output.
+    ///
+    /// The watcher reports a new directory with a create event, as it reports
+    /// a new file. Monitor mode routed each path by its extension alone, so a
+    /// directory went to the text display. That display printed a header and
+    /// then a failure, and each later event for the directory printed the
+    /// failure again. A directory holds no text and no image, so the correct
+    /// outcome is no output at all.
+    ///
+    /// The directory `album.png` holds the rule to the image display too. The
+    /// extension of an image in its name does not make a directory an image.
+    #[test]
+    fn a_new_directory_in_monitor_mode_gives_no_output() {
+        let directory = TemporaryDirectory::new();
+        let mut monitor = MonitorUnderTest::new();
+
+        let written: Vec<(&str, Written)> = ["subdir", "album.png"]
+            .into_iter()
+            .map(|name| (name, monitor.handle(&directory.directory(name))))
+            .collect();
+
+        assert!(
+            written
+                .iter()
+                .all(|(_, output)| *output == Written::default()),
+            "a new directory must give no output, but these directories gave output: {written:#?}"
+        );
+        assert!(
+            monitor.image_headers().is_empty(),
+            "a directory must not reach the image display, but it got {:?}",
+            monitor.image_headers()
+        );
+    }
+
+    /// A path that is gone at the time of its handling gives no output.
+    ///
+    /// A program often writes a temporary file and then renames or removes
+    /// it. macOS writes a screenshot under a hidden temporary name, such as
+    /// `.Screenshot 1.png`, and then renames it. The event for the temporary
+    /// name thus arrives after the file is gone. Monitor mode printed a header
+    /// and a failure for such a text path, and it sent such an image path to
+    /// the image display. A path that is gone holds nothing to show, so the
+    /// correct outcome is no output at all.
+    ///
+    /// The file `note.tmp` holds the rule to the text display, and the file
+    /// `.Screenshot 1.png` holds it to the image display. The test makes each
+    /// file and then removes it, as the program that wrote it does.
+    #[test]
+    fn a_path_that_is_gone_in_monitor_mode_gives_no_output() {
+        let directory = TemporaryDirectory::new();
+        let mut monitor = MonitorUnderTest::new();
+
+        let written: Vec<(&str, Written)> = [
+            ("note.tmp", b"a draft\n".to_vec()),
+            (
+                ".Screenshot 1.png",
+                picture_bytes_in(image::ImageFormat::Png),
+            ),
+        ]
+        .into_iter()
+        .map(|(name, bytes)| {
+            let path = directory.file_of(name, &bytes);
+            fs::remove_file(&path).expect("a removal of a file in the temporary directory");
+            (name, monitor.handle(&path))
+        })
+        .collect();
+
+        assert!(
+            written
+                .iter()
+                .all(|(_, output)| *output == Written::default()),
+            "a path that is gone must give no output, but these paths gave output: {written:#?}"
+        );
+        assert!(
+            monitor.image_headers().is_empty(),
+            "a path that is gone must not reach the image display, but it got {:?}",
+            monitor.image_headers()
+        );
+    }
+
+    /// A new binary file in monitor mode gives no output.
+    ///
+    /// Monitor mode reads each path that is not an image and not a video as
+    /// text. A binary file, such as a database, an archive, or a lock file,
+    /// holds no text to show. Monitor mode reported a failure for a file that
+    /// is not UTF-8, and it printed a header and then the raw bytes for a file
+    /// that holds NUL bytes. Neither output helps the user, so the correct
+    /// outcome is no output at all.
+    ///
+    /// The file `blob.bin` holds bytes that are not valid UTF-8. The file
+    /// `zeros.dat` holds only NUL bytes. These bytes are valid UTF-8, so the
+    /// rule must see a NUL byte as a control character, not only a failure to
+    /// decode.
+    #[test]
+    fn a_new_binary_file_in_monitor_mode_gives_no_output() {
+        let directory = TemporaryDirectory::new();
+        let mut monitor = MonitorUnderTest::new();
+
+        let written: Vec<(&str, Written)> = [
+            (
+                "blob.bin",
+                vec![0xff, 0xfe, 0x80, 0x81, 0xc0, 0xc1, 0xf5, 0x41, 0x0a],
+            ),
+            ("zeros.dat", vec![0x00; 64]),
+        ]
+        .into_iter()
+        .map(|(name, bytes)| (name, monitor.handle(&directory.file_of(name, &bytes))))
+        .collect();
+
+        assert!(
+            written
+                .iter()
+                .all(|(_, output)| *output == Written::default()),
+            "a new binary file must give no output, but these files gave output: {written:#?}"
+        );
+        assert!(
+            monitor.image_headers().is_empty(),
+            "a binary file must not reach the image display, but it got {:?}",
+            monitor.image_headers()
+        );
+    }
+
+    /// A new text file that holds terminal control characters in monitor mode
+    /// gives no output.
+    ///
+    /// Monitor mode wrote the text of a new file to the terminal unchanged. A
+    /// file that holds an escape sequence thus controlled the terminal. In
+    /// monitor mode the user does not choose the file. Any program can put a
+    /// file in a watched directory, such as `~/Downloads`. Such a file can
+    /// write the clipboard, set the title, or move the cursor to fake output.
+    ///
+    /// The file `clipboard.txt` holds OSC 52, which writes the clipboard, and
+    /// OSC 0, which sets the title. The file `cursor.txt` holds CSI sequences
+    /// that clear the screen and move the cursor. The file `c1.txt` holds the
+    /// C1 characters for OSC and ST, encoded in UTF-8. Some terminals read
+    /// them as control characters in UTF-8 too, so the rule must see C1 and
+    /// not only C0. The file `delete.txt` holds DEL, which is a control
+    /// character that is not in C0.
+    #[test]
+    fn a_new_text_file_that_holds_terminal_control_characters_gives_no_output() {
+        let directory = TemporaryDirectory::new();
+        let mut monitor = MonitorUnderTest::new();
+
+        let written: Vec<(&str, Written)> = [
+            (
+                "clipboard.txt",
+                b"note\x1b]52;c;cm0gLXJmIH4K\x07\x1b]0;title\x07\n".to_vec(),
+            ),
+            ("cursor.txt", b"ok\x1b[2J\x1b[1;1Hfake prompt $ \n".to_vec()),
+            ("c1.txt", "a\u{9d}52;c;eA==\u{9c}\n".as_bytes().to_vec()),
+            ("delete.txt", b"a\x7fb\n".to_vec()),
+        ]
+        .into_iter()
+        .map(|(name, bytes)| (name, monitor.handle(&directory.file_of(name, &bytes))))
+        .collect();
+
+        assert!(
+            written
+                .iter()
+                .all(|(_, output)| *output == Written::default()),
+            "a new file that holds terminal control characters must give no output, but these files gave output: {written:#?}"
+        );
+        assert!(
+            monitor.image_headers().is_empty(),
+            "a file that holds terminal control characters must not reach the image display, but it got {:?}",
+            monitor.image_headers()
+        );
+    }
+
+    /// A text file with tabs and CRLF line ends shows in monitor mode.
+    ///
+    /// Tab and carriage return are control characters, but plain text holds
+    /// them. A table uses tabs, and a file from Windows ends each line with a
+    /// carriage return and a line feed. The rule that ignores a file with
+    /// terminal control characters must keep these files. A rule that
+    /// ignores every control character makes this test fail.
+    #[test]
+    fn a_text_file_with_tabs_and_crlf_line_ends_shows_in_monitor_mode() {
+        let directory = TemporaryDirectory::new();
+        let table = directory.file_of("table.txt", b"name\tsize\r\nic\t42\r\n");
+        let mut monitor = MonitorUnderTest::new();
+
+        let written = monitor.handle(&table);
+
+        assert_eq!(
+            written,
+            Written {
+                stdout: format!(
+                    "\nFound new text file: {}\nname\tsize\r\nic\t42\r\n",
+                    table.display()
+                ),
+                stderr: String::new(),
+            },
+            "a text file with tabs and CRLF line ends must give its header and its text"
+        );
+    }
+
+    /// A text file that is empty at its first event shows its text at a later
+    /// event.
+    ///
+    /// A program that writes a file makes it first, and the watcher reports
+    /// the new empty file before the program writes the text. Monitor mode
+    /// showed the empty file as a header with no text, put the path into the
+    /// record, and then ignored the event that the write gave. The user thus
+    /// never saw the text. An empty file holds nothing to show, so the first
+    /// event gives no output, and the path stays out of the record.
+    ///
+    /// One monitor handles the path two times, as monitor mode does. The
+    /// expected output of the second event is exact, so a header without the
+    /// text makes this test fail too.
+    #[test]
+    fn a_text_file_that_is_empty_at_its_first_event_shows_its_text_at_a_later_event() {
+        let directory = TemporaryDirectory::new();
+        let note = directory.file_of("note.txt", b"");
+        let mut monitor = MonitorUnderTest::new();
+
+        let first = monitor.handle(&note);
+        fs::write(&note, b"hello\n").expect("a write to the temporary directory");
+        let second = monitor.handle(&note);
+
+        assert_eq!(
+            first,
+            Written::default(),
+            "an empty text file must give no output"
+        );
+        assert_eq!(
+            second,
+            Written {
+                stdout: format!("\nFound new text file: {}\nhello\n", note.display()),
+                stderr: String::new(),
+            },
+            "a later event must show the text that the file holds now"
+        );
+        assert!(
+            monitor.image_headers().is_empty(),
+            "a text file must not reach the image display, but it got {:?}",
+            monitor.image_headers()
+        );
+    }
+
+    /// An image that is empty at its first event shows at a later event.
+    ///
+    /// A program such as `curl -o shot.png`, an editor, or a screenshot tool
+    /// makes the file first, and the watcher reports the new empty file before
+    /// the program writes the bytes. Monitor mode sent the empty file to the
+    /// image display. Each event then gave a header on standard output and an
+    /// `unexpected end of file` error on standard error. An empty file holds
+    /// nothing to show, so the first event gives no output, and the path stays
+    /// out of the record.
+    ///
+    /// One monitor handles the path two times, as monitor mode does. The
+    /// second event must reach the image display exactly one time. The empty
+    /// event thus did not reach the display, and it did not put the path into
+    /// the record.
+    #[test]
+    fn an_image_that_is_empty_at_its_first_event_shows_at_a_later_event() {
+        let directory = TemporaryDirectory::new();
+        let shot = directory.file_of("shot.png", b"");
+        let mut monitor = MonitorUnderTest::new();
+
+        let first = monitor.handle(&shot);
+        let headers_after_first = monitor.image_headers();
+        fs::write(&shot, picture_bytes_in(image::ImageFormat::Png))
+            .expect("a write to the temporary directory");
+        let second = monitor.handle(&shot);
+
+        assert_eq!(
+            first,
+            Written::default(),
+            "an empty image must give no output"
+        );
+        assert!(
+            headers_after_first.is_empty(),
+            "an empty image must not reach the image display, but it got {headers_after_first:?}"
+        );
+        assert_eq!(
+            second,
+            Written::default(),
+            "an image that displays must give no text of its own"
+        );
+        assert_eq!(
+            monitor.image_headers(),
+            vec![vec![
+                String::new(),
+                format!("Found new image: {}", shot.display())
+            ]],
+            "a later event must reach the image display one time, with its header"
+        );
+    }
+
+    /// A text file that does not read for a different cause gives one error,
+    /// and the error names the cause.
+    ///
+    /// A file that the user has no permission to read is not gone, not empty,
+    /// and not binary, so monitor mode reports it. Monitor mode kept such a
+    /// path out of the record, so each later event for the path printed the
+    /// same error again. A program that writes a file gives many events, so
+    /// the user saw one error many times. The error of one path must print one
+    /// time.
+    ///
+    /// The expected cause is the text that the operating system gives for the
+    /// same read. The test thus does not depend on the words of one operating
+    /// system. A user that ignores permissions, such as root, reads the file,
+    /// and the test then has nothing to prove. It says so and stops.
+    ///
+    /// The directory guard removes the file at the end, because the removal of
+    /// a file needs the permissions of its directory and not those of the file.
+    #[cfg(unix)]
+    #[test]
+    fn a_text_file_that_does_not_read_gives_one_error_that_names_the_cause() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = TemporaryDirectory::new();
+        let secret = directory.file_of("secret.txt", b"hello\n");
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o000))
+            .expect("a change of the permissions of a file in the temporary directory");
+        let cause = match fs::read(&secret) {
+            Ok(_) => {
+                eprintln!(
+                    "skipped: this user reads a file that has no permissions, so the read cannot fail"
+                );
+                return;
+            }
+            Err(error) => error.to_string(),
+        };
+        let mut monitor = MonitorUnderTest::new();
+
+        let first = monitor.handle(&secret);
+        let second = monitor.handle(&secret);
+
+        assert_eq!(
+            first.stdout, "",
+            "a text file that does not read must give no header and no text"
+        );
+        let lines: Vec<&str> = first.stderr.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "a text file that does not read must give exactly one line of error, but it gave {:?}",
+            first.stderr
+        );
+        assert!(
+            lines[0].contains(&secret.display().to_string()) && lines[0].contains(&cause),
+            "the error must name the path {} and the cause {cause:?}, but it is {:?}",
+            secret.display(),
+            lines[0]
+        );
+        assert_eq!(
+            second,
+            Written::default(),
+            "a later event for the same path must not print the error again"
+        );
+    }
+
+    /// An image that does not display gives an error that names the cause,
+    /// and a later event tries the image again.
+    ///
+    /// Monitor mode printed the error of the image display with the plain
+    /// format of `anyhow`, which shows only the outermost context. The user
+    /// thus read `Failed to open image file: <path>` and no cause. The error
+    /// must show the whole chain, down to the cause that the decoder gives.
+    ///
+    /// The expected cause comes from the same decoder that the image display
+    /// of this test uses, so the test does not copy the words of the decoder.
+    /// The file `broken.png` holds text, which starts with no signature of an
+    /// image format. The decoder thus takes the format from the extension,
+    /// and the decode fails.
+    ///
+    /// An image that fails stays out of the record on purpose. A program that
+    /// writes an image gives an event before the write is complete, and the
+    /// part of the image does not decode. A later event decodes the complete
+    /// image. So the second event calls the image display again and reports
+    /// again.
+    #[test]
+    fn an_image_that_does_not_display_gives_an_error_that_names_the_cause_at_each_event() {
+        let directory = TemporaryDirectory::new();
+        let broken = directory.file_of("broken.png", &b"no picture here\n".repeat(4));
+        let cause = read_image_file(&broken, &a_terminal_that_sends_a_file())
+            .expect_err("bytes with no image signature do not decode as a PNG")
+            .root_cause()
+            .to_string();
+        let header = vec![
+            String::new(),
+            format!("Found new image: {}", broken.display()),
+        ];
+        let mut monitor = MonitorUnderTest::new();
+
+        let first = monitor.handle(&broken);
+        let headers_after_first = monitor.image_headers();
+        let second = monitor.handle(&broken);
+
+        assert_eq!(
+            first.stdout, "",
+            "an image that does not display must give no text of its own on stdout"
+        );
+        let lines: Vec<&str> = first.stderr.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "an image that does not display must give exactly one line of error, but it gave {:?}",
+            first.stderr
+        );
+        assert!(
+            lines[0].contains(&broken.display().to_string()) && lines[0].contains(&cause),
+            "the error must name the path {} and the cause {cause:?}, but it is {:?}",
+            broken.display(),
+            lines[0]
+        );
+        assert_eq!(
+            headers_after_first,
+            vec![header.clone()],
+            "the image must reach the image display one time, with its header"
+        );
+        assert_eq!(
+            second, first,
+            "a later event must try the image again and report the same error again"
+        );
+        assert_eq!(
+            monitor.image_headers(),
+            vec![header.clone(), header],
+            "a later event must call the image display again"
+        );
+    }
+
+    /// An image error in monitor mode names its cause one time.
+    ///
+    /// The decoder of the `image` crate writes its cause into its own message,
+    /// such as `Format error decoding Png: Invalid PNG signature.`, and it also
+    /// gives that cause as the next link of the chain. The alternate format of
+    /// `anyhow` prints each link, so the user read the cause two times, as
+    /// `Invalid PNG signature.: Invalid PNG signature.`. A link that only
+    /// repeats the end of the link before it tells the user nothing new.
+    ///
+    /// The expected cause comes from the same decoder that the image display
+    /// of this test uses, so the test does not copy the words of the decoder.
+    #[test]
+    fn an_image_error_in_monitor_mode_names_its_cause_one_time() {
+        let directory = TemporaryDirectory::new();
+        let broken = directory.file_of("broken.png", &b"no picture here\n".repeat(4));
+        let cause = read_image_file(&broken, &a_terminal_that_sends_a_file())
+            .expect_err("bytes with no image signature do not decode as a PNG")
+            .root_cause()
+            .to_string();
+        let mut monitor = MonitorUnderTest::new();
+
+        let written = monitor.handle(&broken);
+
+        assert_eq!(
+            written.stderr.matches(&cause).count(),
+            1,
+            "the error must name the cause {cause:?} one time, but it is {:?}",
+            written.stderr
+        );
+    }
+
+    /// An image error in monitor mode names its path one time.
+    ///
+    /// The line of a failure starts with the path of the image. The chain of
+    /// the error then started with the context of the file reader, which is
+    /// `Failed to open image file: <path>`. So the user read the path two
+    /// times on one long line. The second copy tells the user nothing new.
+    /// The monitor names the path, so the chain of the error must not name it.
+    ///
+    /// The expected cause comes from the same decoder that the image display
+    /// of this test uses, so the test does not copy the words of the decoder.
+    /// The test also checks that the cause stays on the line, so a fix that
+    /// drops the whole chain makes this test fail.
+    #[test]
+    fn an_image_error_in_monitor_mode_names_its_path_one_time() {
+        let directory = TemporaryDirectory::new();
+        let broken = directory.file_of("broken.png", &b"no picture here\n".repeat(4));
+        let cause = read_image_file(&broken, &a_terminal_that_sends_a_file())
+            .expect_err("bytes with no image signature do not decode as a PNG")
+            .root_cause()
+            .to_string();
+        let mut monitor = MonitorUnderTest::new();
+
+        let written = monitor.handle(&broken);
+
+        assert_eq!(
+            written
+                .stderr
+                .matches(&broken.display().to_string())
+                .count(),
+            1,
+            "the error must name the path {} one time, but it is {:?}",
+            broken.display(),
+            written.stderr
+        );
+        assert!(
+            written.stderr.contains(&cause),
+            "the error must still name the cause {cause:?}, but it is {:?}",
+            written.stderr
+        );
+    }
+
+    /// The reader of a new text file ignores a path that is gone at the read.
+    ///
+    /// [`Monitor::handle`] checks the path before the read, and a path that is
+    /// gone at that check gives no output. A program can also remove the file
+    /// after the check and before the read. The reader must then ignore the
+    /// path as the check does, and not report the failure of the read. No test
+    /// of `handle` reaches that gap, because the gap is too short to hit on
+    /// purpose. So this test calls the reader directly, with a path that no
+    /// file holds.
+    #[test]
+    fn the_text_reader_ignores_a_path_that_is_gone_at_the_read() {
+        let directory = TemporaryDirectory::new();
+        let gone = directory.path().join("gone.txt");
+
+        let read = read_new_text_file(&gone);
+
+        assert!(
+            matches!(read, Ok(None)),
+            "a path that is gone at the read must be ignored, but the reader gave {read:?}"
+        );
+    }
+
+    /// The reader of a new image ignores a path that is gone at the read.
+    ///
+    /// [`Monitor::handle`] checks the path before the read, and a path that is
+    /// gone at that check gives no output. A program can also remove or rename
+    /// the file after the check and before the read. The screenshot tool of
+    /// macOS writes a temporary `.Screenshot` file and then renames it. The
+    /// reader must then ignore the path as the check does, and not report the
+    /// failure of the read. No test of `handle` reaches that gap, because the
+    /// gap is too short to hit on purpose. So this test calls the reader
+    /// directly, with a path that no file holds.
+    #[test]
+    fn the_image_reader_ignores_a_path_that_is_gone_at_the_read() {
+        let directory = TemporaryDirectory::new();
+        let gone = directory.path().join(".Screenshot 1.png");
+
+        let read = read_new_image_file(&gone);
+
+        assert!(
+            matches!(read, Ok(None)),
+            "an image that is gone at the read must be ignored, but the reader gave {read:?}"
+        );
+    }
+
+    /// A reader that fails at each read.
+    ///
+    /// A test puts this reader after the bytes that the text rule can take. A
+    /// rule that reads past those bytes thus gets an error.
+    struct ReaderThatFails;
+
+    impl Read for ReaderThatFails {
+        fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::other("the reader read past the first block"))
+        }
+    }
+
+    /// The text rule of monitor mode reads only the first block of a binary
+    /// file.
+    ///
+    /// The rule read the whole file before it decided that the file is binary.
+    /// An ignored file stays out of the record, so a later event reads it
+    /// again. A browser writes a download, such as a `.crdownload` file, in
+    /// many steps, and each step gives an event. So each event read the whole
+    /// partial file again, and memory use rose to the size of the file at each
+    /// event.
+    ///
+    /// Each reader of this test gives a start of 64 KiB and then fails. A rule
+    /// that reads past its first block thus gives an error, not `None`. So
+    /// 64 KiB bounds the size of the first block that the rule can take. Each
+    /// start is binary. The first start holds NUL bytes, as the start of an
+    /// archive or a partial download does. The second start holds bytes that
+    /// are not UTF-8. The third start holds an escape sequence and then text.
+    #[test]
+    fn the_text_rule_reads_only_the_first_block_of_a_binary_file() {
+        const START_BYTES: usize = 64 * 1024;
+        let mut escape = b"\x1b[2J".to_vec();
+        escape.resize(START_BYTES, b'a');
+
+        let reads: Vec<(&str, io::Result<Option<String>>)> = [
+            ("NUL bytes", vec![0_u8; START_BYTES]),
+            ("bytes that are not UTF-8", vec![0xff_u8; START_BYTES]),
+            ("an escape sequence", escape),
+        ]
+        .into_iter()
+        .map(|(name, start)| {
+            (
+                name,
+                read_text_to_show(io::Cursor::new(start).chain(ReaderThatFails)),
+            )
+        })
+        .collect();
+
+        let not_ignored: Vec<&(&str, io::Result<Option<String>>)> = reads
+            .iter()
+            .filter(|(_, read)| !matches!(read, Ok(None)))
+            .collect();
+        assert!(
+            not_ignored.is_empty(),
+            "a binary start must be ignored after the first block, but the rule gave: {not_ignored:#?}"
+        );
+    }
+
+    /// A text file larger than the first block shows whole in monitor mode.
+    ///
+    /// The text rule decides on a first block of the file, and then it reads
+    /// the rest. The text of this file is the character `日`, which is three
+    /// bytes in UTF-8. No power of two divides by three, so a character sits
+    /// across each block edge that is a power of two. A rule that ignores a
+    /// block that ends in part of a character makes this test fail. A rule
+    /// that shows only the first block makes this test fail too.
+    #[test]
+    fn a_text_file_larger_than_the_first_block_shows_whole_in_monitor_mode() {
+        let directory = TemporaryDirectory::new();
+        let text = format!("{}\n", "日".repeat(30_000));
+        let large = directory.file_of("large.txt", text.as_bytes());
+        let mut monitor = MonitorUnderTest::new();
+
+        let written = monitor.handle(&large);
+
+        assert_eq!(
+            written,
+            Written {
+                stdout: format!("\nFound new text file: {}\n{text}", large.display()),
+                stderr: String::new(),
+            },
+            "a text file larger than the first block must give its header and all of its text"
+        );
+    }
+
+    /// A file with text at the start and a NUL byte later gives no output.
+    ///
+    /// The text rule decides on a first block of the file, and a first block
+    /// of text is not sufficient. The NUL byte of this file is after 64 KiB of
+    /// text, so it is not in the first block. The rule must apply the full
+    /// check to the complete content. A rule that decides on the first block
+    /// alone makes this test fail.
+    #[test]
+    fn a_file_with_text_at_the_start_and_a_nul_byte_later_gives_no_output() {
+        let directory = TemporaryDirectory::new();
+        let mut bytes = "a".repeat(64 * 1024).into_bytes();
+        bytes.extend_from_slice(b"\0\n");
+        let late_nul = directory.file_of("late-nul.txt", &bytes);
+        let mut monitor = MonitorUnderTest::new();
+
+        let written = monitor.handle(&late_nul);
+
+        assert_eq!(
+            written,
+            Written::default(),
+            "a file with a NUL byte after its first block must give no output"
+        );
+    }
+
+    // =========================================================================
     // Tests for ensure_file_exists
     // =========================================================================
 
-    /// Build a path that is guaranteed not to exist, keyed on pid + nanos so
-    /// concurrent test runs never collide on it (see CLAUDE.md parallel-safety).
+    /// Build a path that no file holds.
+    ///
+    /// # Returns
+    /// A path in the temporary directory. No test makes a file at this path,
+    /// and [`unique_temporary_path`] keeps the name away from every other test.
     fn nonexistent_path() -> PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        std::env::temp_dir().join(format!(
-            "ic-does-not-exist-{}-{nanos}.mp4",
-            std::process::id()
-        ))
+        unique_temporary_path("ic-does-not-exist", "mp4")
     }
 
     #[test]

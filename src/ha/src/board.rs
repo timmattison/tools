@@ -1,0 +1,5591 @@
+//! The board: the merge queues and the runs of all watched repositories, as
+//! rows for one screen.
+//!
+//! The board holds the last good runs of each repository, the last error of
+//! each repository, the last job answer of each run, the set of expanded runs,
+//! the last good merge queue answer of each repository that has a queue, the
+//! time window, the selection, and the scroll offset.
+//! It does no I/O. Every reader takes the current time as an argument, so a
+//! test uses one fixed time and never reads the clock.
+//!
+//! When a watched repository has a merge queue, the board has two more
+//! sections. The section of the pull requests in the queues stands above the
+//! runs. The section of the pull requests that left a queue inside the window
+//! stands between the active runs and the recent runs. The order from the top
+//! is: queue, active, history, recent. The selection moves through the rows of
+//! all the sections in that order.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
+
+use chrono::{DateTime, Utc};
+use unicode_width::UnicodeWidthStr;
+
+use crate::cost::{job_cost, run_cost, JobCost, PriceBook, RunCost};
+use crate::estimate::{Estimates, Remaining};
+use crate::job::{Job, JobId, RunnerName};
+use crate::queue::{Departure, History, Outcome, PullNumber, QueueEntry};
+use crate::run::{keep_first_of_each_id, Run, RunId, RunState};
+use crate::target::RepoName;
+
+/// One of the lists on the board, in the order that the board shows them:
+/// queue, active, history, recent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Section {
+    /// Pull requests in a merge queue.
+    Queue,
+    /// Runs that wait or run. A run that waits (`⏳`) for more than
+    /// `STUCK_WAIT` (8 hours) does not show, see `Board::is_stuck`.
+    Active,
+    /// Pull requests that left a merge queue inside the window.
+    History,
+    /// Finished runs whose last update (`Run::updated_at`) is inside the
+    /// window.
+    Recent,
+}
+
+/// The title row of a section, with what it counts.
+///
+/// In the history section, the three counts are about pull requests:
+/// `passed` counts the merged ones, `failed` the ones that the queue
+/// removed, and `cancelled` the ones that a person removed. Each one shows
+/// the marker of the run state of the same name. In the active section,
+/// `jobs` counts the jobs of the active runs that show, and `runners` names
+/// the runners that have a job that waits or runs in those runs. A run that
+/// does not show (see `Board::is_stuck`) is in no count and gives no name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Header<'a> {
+    /// The section that the header opens.
+    pub section: Section,
+    /// The number of rows in the section.
+    pub count: usize,
+    /// The number of passed runs, or of merged pull requests. This is 0
+    /// for the queue section and the active section.
+    pub passed: usize,
+    /// The number of failed runs, or of pull requests that the queue
+    /// removed. This is 0 for the queue section and the active section.
+    pub failed: usize,
+    /// The number of cancelled runs, or of pull requests that a person
+    /// removed. This is 0 for the queue section and the active section.
+    pub cancelled: usize,
+    /// The number of jobs in each state that the header of the active
+    /// section counts. This is `JobCounts::default()` for the other
+    /// sections.
+    pub jobs: JobCounts,
+    /// The names of the runners that have a job in the state `Queued` or
+    /// `Running` in the active runs. This is empty for the other sections.
+    pub runners: Vec<&'a RunnerName>,
+}
+
+/// The number of jobs in each state that the header of the active section counts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct JobCounts {
+    /// The number of jobs in the state `Queued`.
+    pub queued: usize,
+    /// The number of jobs in the state `Running`.
+    pub running: usize,
+    /// The number of jobs in the state `Passed`.
+    pub passed: usize,
+    /// The number of jobs in the state `Failed`.
+    pub failed: usize,
+    /// The number of jobs in the state `Skipped`.
+    pub skipped: usize,
+    /// The number of jobs in the state `Cancelled`.
+    pub cancelled: usize,
+}
+
+impl JobCounts {
+    /// Adds one job in `state` to the count of that state. A job in the state
+    /// `Other` is in no count.
+    fn add(&mut self, state: RunState) {
+        match state {
+            RunState::Queued => self.queued += 1,
+            RunState::Running => self.running += 1,
+            RunState::Passed => self.passed += 1,
+            RunState::Failed => self.failed += 1,
+            RunState::Skipped => self.skipped += 1,
+            RunState::Cancelled => self.cancelled += 1,
+            RunState::Other => {}
+        }
+    }
+}
+
+/// The key that orders the runner names in the header of the active section.
+///
+/// The shortest name by display width in terminal columns comes first. Then
+/// the names sort by the text with no difference between capital and small
+/// letters. Then they sort by the exact text, thus equal names are adjacent.
+/// The width comes first because the header line stops at the right edge of
+/// the screen. The long names of the GitHub-hosted runners (`GitHub Actions
+/// 1001`) go last, thus the edge cuts them and keeps the short names of the
+/// local runners.
+fn runner_key(name: &RunnerName) -> (usize, String, &str) {
+    let name = name.as_str();
+    (name.width(), name.to_lowercase(), name)
+}
+
+/// One row of the board.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Row<'a> {
+    /// The title row of a section, see [`Header`].
+    Header(Header<'a>),
+    /// The row that shows an empty section.
+    Empty(Section),
+    /// One pull request in a merge queue.
+    Entry {
+        /// The entry of the queue.
+        entry: &'a QueueEntry,
+        /// True for the one row that the selection marks.
+        selected: bool,
+    },
+    /// One time that a pull request left a merge queue.
+    Departure {
+        /// The departure.
+        departure: &'a Departure,
+        /// True for the one row that the selection marks.
+        selected: bool,
+    },
+    /// One run.
+    Run {
+        /// The run.
+        run: &'a Run,
+        /// The state that the row shows. It comes from
+        /// `RunState::shown_with_jobs` on the state of the run and the job
+        /// states that the board holds for it.
+        state: RunState,
+        /// True for the one row that the selection marks.
+        selected: bool,
+        /// True when the last read of the repository of the run failed or
+        /// was suspect (issue #599). The run is then the last good one, and
+        /// it can be old.
+        stale: bool,
+        /// The sum of the runner times (see `Job::runner_time`) of the jobs
+        /// that the board holds for the run, at the time of the view. It is
+        /// `None` when the board holds no good job for the run: before the
+        /// first answer, after a failed first fetch, and when the answer
+        /// holds no job. A failed fetch after a good one keeps the sum of
+        /// the last good jobs.
+        job_sum: Option<Duration>,
+        /// The end of a finished run (see `run_end`). `None` for an active
+        /// run.
+        ended: Option<DateTime<Utc>>,
+        /// The estimated list-price cost of the jobs that the board holds for
+        /// the run, at the time of the view. It is `None` when the board holds
+        /// no good job for the run: before the first answer, after a failed
+        /// first fetch, and when the answer holds no job. A failed fetch after
+        /// a good one keeps the cost of the last good jobs. The jobs are those
+        /// of the latest attempt, the same jobs that the expanded run shows.
+        cost: Option<RunCost>,
+    },
+    /// One job of an expanded run.
+    Job {
+        /// The job.
+        job: &'a Job,
+        /// True for the last row of the block of its run. The render draws
+        /// `└` for it, and `├` for any other row.
+        last: bool,
+        /// True for the one row that the selection marks.
+        selected: bool,
+        /// The run that the job belongs to. The render reads its state for
+        /// the started cell. The fade reads `run_ended`.
+        run: &'a Run,
+        /// The end of its run (the `ended` of the run row). `None` for a job
+        /// of an active run.
+        run_ended: Option<DateTime<Utc>>,
+        /// The estimated list-price cost of the job at the time of the view.
+        cost: JobCost,
+        /// The time that the job has left, from the passed jobs of the same
+        /// kind on the same runner in the shown runs (see `Estimates`). It is
+        /// `None` for a job that does not run, for a job with no runner, and
+        /// for a job with no match.
+        remaining: Option<Remaining>,
+    },
+    /// The row of an expanded run before the first answer: "Loading jobs…".
+    JobsLoading,
+    /// The row of an expanded run whose answer holds no job: "No jobs yet".
+    NoJobs,
+    /// The error of the last failed fetch of the jobs of an expanded run.
+    JobsError(&'a str),
+}
+
+impl Row<'_> {
+    /// True for a row that the selection can mark, other than a job row: a
+    /// pull request row or a run row.
+    fn is_item(&self) -> bool {
+        matches!(
+            self,
+            Row::Entry { .. } | Row::Departure { .. } | Row::Run { .. }
+        )
+    }
+
+    /// True for a row that the selection can mark: an item row or a job row.
+    fn is_selectable(&self) -> bool {
+        self.is_item() || matches!(self, Row::Job { .. })
+    }
+
+    /// True for the one row that the selection marks.
+    fn is_selected(&self) -> bool {
+        matches!(
+            self,
+            Row::Entry { selected: true, .. }
+                | Row::Departure { selected: true, .. }
+                | Row::Run { selected: true, .. }
+                | Row::Job { selected: true, .. }
+        )
+    }
+}
+
+/// The last job answer that the board holds for one run.
+///
+/// A run with no entry has no answer yet. If such a run is expanded, it shows
+/// a loading row.
+#[derive(Debug)]
+enum Jobs {
+    /// The last good answer.
+    Ready(Vec<Job>),
+    /// The last fetch failed.
+    Failed {
+        /// The last good jobs. The list is empty when there is none.
+        jobs: Vec<Job>,
+        /// The error of the last fetch.
+        error: String,
+    },
+}
+
+/// The last good jobs of the job answer `answer`. A failed fetch keeps the
+/// jobs of the last good answer, and that list is empty when there is none.
+/// No answer gives no job.
+fn last_good_jobs(answer: Option<&Jobs>) -> &[Job] {
+    match answer {
+        Some(Jobs::Ready(jobs) | Jobs::Failed { jobs, .. }) => jobs,
+        None => &[],
+    }
+}
+
+/// The end of the finished run `run`, from its job answer `answer`.
+///
+/// GitHub can change `Run::updated_at` long after the last job ended, thus the
+/// end of a finished run is the end of its last job when the jobs say it. The
+/// function applies five steps in this order:
+///
+/// 1. It takes the last good jobs. A failed fetch after a good fetch keeps
+///    the jobs of the good fetch.
+/// 2. If a held job is active (queued or running), it gives `run.updated_at`.
+///    A job answer from the time when the run was active can still hold a job
+///    that runs. A job in any other state counts as finished. A skipped job
+///    counts as finished, because GitHub gives it the status `completed`.
+/// 3. It takes the latest `completed_at` of the held jobs. If no job has a
+///    `completed_at`, it gives `run.updated_at`. This is also true when there
+///    is no job.
+/// 4. If that time is before `run.started_at`, it gives `run.updated_at`. After
+///    a re-run, the board can hold the jobs of the earlier attempt, and they
+///    ended before the new attempt started.
+/// 5. Else it gives the earlier one of that time and `run.updated_at`. The end
+///    is never later than the last update of the run.
+fn run_end(run: &Run, answer: Option<&Jobs>) -> DateTime<Utc> {
+    let jobs = last_good_jobs(answer);
+    if jobs.iter().any(|job| job.state.is_active()) {
+        return run.updated_at;
+    }
+    match jobs.iter().filter_map(|job| job.completed_at).max() {
+        Some(latest) if latest >= run.started_at => latest.min(run.updated_at),
+        _ => run.updated_at,
+    }
+}
+
+/// One row that the selection can mark, other than a job row, in the order of
+/// the board.
+#[derive(Debug, Clone, Copy)]
+enum Item<'a> {
+    /// A pull request in a merge queue.
+    Entry(&'a QueueEntry),
+    /// A pull request that left a merge queue.
+    Departure(&'a Departure),
+    /// A run.
+    Run(&'a Run),
+}
+
+impl Item<'_> {
+    /// The key that names this item through a refresh.
+    fn key(&self) -> ItemKey {
+        match self {
+            Item::Entry(entry) => ItemKey::Entry(entry.repo.clone(), entry.pull),
+            Item::Departure(departure) => {
+                ItemKey::Departure(departure.repo.clone(), departure.pull, departure.left_at)
+            }
+            Item::Run(run) => ItemKey::Run(run.id),
+        }
+    }
+
+    /// True when `key` names this item. The function makes no copy.
+    fn has_key(&self, key: &ItemKey) -> bool {
+        match (self, key) {
+            (Item::Entry(entry), ItemKey::Entry(repo, pull)) => {
+                entry.pull == *pull && entry.repo == *repo
+            }
+            (Item::Departure(departure), ItemKey::Departure(repo, pull, left_at)) => {
+                departure.pull == *pull && departure.left_at == *left_at && departure.repo == *repo
+            }
+            (Item::Run(run), ItemKey::Run(id)) => run.id == *id,
+            _ => false,
+        }
+    }
+
+    /// The address of the page of the item: the pull request or the run.
+    fn url(&self) -> &str {
+        match self {
+            Item::Entry(entry) => &entry.url,
+            Item::Departure(departure) => &departure.url,
+            Item::Run(run) => &run.url,
+        }
+    }
+}
+
+/// What names one [`Item`] through a refresh.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ItemKey {
+    /// A pull request in the merge queue of a repository.
+    Entry(RepoName, PullNumber),
+    /// A pull request that left the merge queue of a repository at a time. A
+    /// pull request can leave a queue more than one time.
+    Departure(RepoName, PullNumber, DateTime<Utc>),
+    /// A run.
+    Run(RunId),
+}
+
+/// The selected row: one item, and for a run, as an option one job of that
+/// run.
+///
+/// Each level keeps its position. When its key goes away, `settle` falls back
+/// to the row at that position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Selection {
+    /// The key of the item, and its position among the items that show.
+    item: (ItemKey, usize),
+    /// The ID of the job, and its position among the job rows of its run.
+    /// `None` when the item row itself is selected. Only a run has jobs.
+    job: Option<(JobId, usize)>,
+}
+
+impl Selection {
+    /// The run of the selection, or `None` when the selected item is a pull
+    /// request.
+    fn run(&self) -> Option<RunId> {
+        match self.item.0 {
+            ItemKey::Run(id) => Some(id),
+            ItemKey::Entry(..) | ItemKey::Departure(..) => None,
+        }
+    }
+}
+
+/// The rows that fit on the screen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct View<'a> {
+    /// The visible slice of the rows.
+    pub rows: Vec<Row<'a>>,
+    /// The index of the first visible row in the full list of rows.
+    pub first: usize,
+}
+
+/// The state of the board.
+#[derive(Debug)]
+pub struct Board {
+    window: Duration,
+    runs: BTreeMap<RepoName, Vec<Run>>,
+    errors: BTreeMap<RepoName, String>,
+    /// The time of the last good read of each repository.
+    read_at: BTreeMap<RepoName, DateTime<Utc>>,
+    selected: Option<Selection>,
+    offset: usize,
+    /// The height in rows of the last view, or 0 before the first view.
+    height: usize,
+    /// The last job answer of each run that the board holds. A run in this map
+    /// can be expanded or collapsed.
+    jobs: BTreeMap<RunId, Jobs>,
+    /// The runs that show their job rows.
+    expanded: BTreeSet<RunId>,
+    /// The merge queue of each watched repository that has one. The two merge
+    /// sections show while this map holds a repository.
+    queues: BTreeMap<RepoName, QueueBook>,
+    /// The billing prices of each account that `ha` could read.
+    prices: PriceBook,
+}
+
+/// What the board holds for the merge queue of one repository.
+#[derive(Debug, Default)]
+struct QueueBook {
+    /// The last good entries.
+    entries: Vec<QueueEntry>,
+    /// The last good departures.
+    departures: Vec<Departure>,
+    /// The `cut_at` of the last good history.
+    cut_at: Option<DateTime<Utc>>,
+    /// The text of the error of the last answer, when a read of it failed.
+    error: Option<String>,
+}
+
+/// The text before the error of a failed read of the entries of a queue.
+const QUEUE_ERROR_PREFIX: &str = "merge queue: ";
+/// The text before the error of a failed read of the events of a queue.
+const HISTORY_ERROR_PREFIX: &str = "merge history: ";
+
+/// How long a run can wait (`⏳`) and still show in the active section. The
+/// wait starts at the end of the newest finished job of the run, or at the
+/// start of the run when no job finished (see `Board::is_stuck`).
+///
+/// A GitHub outage left runs queued that never start, and they filled the
+/// section. This limit is temporary, and issue #680 removes it. It is not the
+/// window of the finished runs, so a change of that window does not change
+/// which active runs hide.
+const STUCK_WAIT: Duration = Duration::from_hours(8);
+
+impl Board {
+    /// Makes an empty board. A finished run shows while its last update is
+    /// inside `window` (see `Board::sections`). A pull request that left a
+    /// merge queue shows while it left inside `window`.
+    #[must_use]
+    pub fn new(window: Duration) -> Board {
+        Board {
+            window,
+            runs: BTreeMap::new(),
+            errors: BTreeMap::new(),
+            read_at: BTreeMap::new(),
+            selected: None,
+            offset: 0,
+            height: 0,
+            jobs: BTreeMap::new(),
+            expanded: BTreeSet::new(),
+            queues: BTreeMap::new(),
+            prices: PriceBook::default(),
+        }
+    }
+
+    /// Replaces the whole book of billing prices. The book holds the billing
+    /// prices of each account that `ha` could read. A run of an account that
+    /// is not in the book takes the prices of the table in `cost.rs`.
+    pub fn set_prices(&mut self, prices: PriceBook) {
+        self.prices = prices;
+    }
+
+    /// The time window of the finished runs and of the merge history.
+    #[must_use]
+    pub fn window(&self) -> Duration {
+        self.window
+    }
+
+    /// Stores the runs of one repository and clears the error of that repository.
+    /// `read_at` is the time of this good read. A repeated run ID keeps its
+    /// first run only.
+    pub fn replace(&mut self, repo: RepoName, runs: Vec<Run>, read_at: DateTime<Utc>) {
+        self.errors.remove(&repo);
+        self.read_at.insert(repo.clone(), read_at);
+        self.store_runs(repo, runs);
+    }
+
+    /// Stores the runs of one repository and records an error for it, and keeps
+    /// the read time of the repository. The runs are the good recent answer and
+    /// the runs of the last good sweep, which can be old. Thus the repository
+    /// is stale: the rows show the stale mark, and the stale time stays the
+    /// time of the last read in which both answers were good. A new read time
+    /// would hide how old the sweep part is. A repeated run ID keeps its first
+    /// run only.
+    pub fn replace_stale(&mut self, repo: RepoName, runs: Vec<Run>, error: String) {
+        self.errors.insert(repo.clone(), error);
+        self.store_runs(repo, runs);
+    }
+
+    /// Stores the runs of one repository. A repeated run ID keeps its first run only.
+    fn store_runs(&mut self, repo: RepoName, mut runs: Vec<Run>) {
+        keep_first_of_each_id(&mut runs, |run| run.id);
+        self.runs.insert(repo, runs);
+    }
+
+    /// Records an error for one repository. The last good runs stay.
+    pub fn fail(&mut self, repo: RepoName, error: String) {
+        self.errors.insert(repo, error);
+    }
+
+    /// Drops the runs, the errors, the read times, and the merge queue of
+    /// every repository that is not in `repos`.
+    pub fn keep_only(&mut self, repos: &BTreeSet<RepoName>) {
+        self.runs.retain(|repo, _| repos.contains(repo));
+        self.errors.retain(|repo, _| repos.contains(repo));
+        self.read_at.retain(|repo, _| repos.contains(repo));
+        self.queues.retain(|repo, _| repos.contains(repo));
+    }
+
+    /// The stale repositories of issue #599: each repository with an error,
+    /// sorted by repository. The time is the last good read, or `None` when
+    /// the repository never had one.
+    #[must_use]
+    pub fn stale(&self) -> Vec<(&RepoName, Option<DateTime<Utc>>)> {
+        self.errors
+            .keys()
+            .map(|repo| (repo, self.read_at.get(repo).copied()))
+            .collect()
+    }
+
+    /// Keeps the merge queue of each repository of `repos`, and drops the
+    /// merge queue of every other repository. A repository that is new in
+    /// `repos` shows an empty queue until its first answer.
+    pub fn set_queues(&mut self, repos: &BTreeSet<RepoName>) {
+        self.queues.retain(|repo, _| repos.contains(repo));
+        for repo in repos {
+            self.queues.entry(repo.clone()).or_default();
+        }
+    }
+
+    /// Stores the merge queue answer of `repo`.
+    ///
+    /// A good list replaces the last one. A failed read keeps the last good
+    /// list and records its error, which [`Board::errors`] gives. When both
+    /// reads succeed, the error goes away. An answer for a repository whose
+    /// queue the board does not hold is dropped.
+    pub fn set_queue(
+        &mut self,
+        repo: &RepoName,
+        entries: Result<Vec<QueueEntry>, String>,
+        history: Result<History, String>,
+    ) {
+        let Some(book) = self.queues.get_mut(repo) else {
+            return;
+        };
+        let mut error = None;
+        match entries {
+            Ok(entries) => book.entries = entries,
+            Err(text) => {
+                error.get_or_insert(format!("{QUEUE_ERROR_PREFIX}{text}"));
+            }
+        }
+        match history {
+            Ok(history) => {
+                book.departures = history.departures;
+                book.cut_at = history.cut_at;
+            }
+            Err(text) => {
+                error.get_or_insert(format!("{HISTORY_ERROR_PREFIX}{text}"));
+            }
+        }
+        book.error = error;
+    }
+
+    /// The error of each failed repository, sorted by repository. The error
+    /// of the runs of a repository comes before the error of its merge queue.
+    #[must_use]
+    pub fn errors(&self) -> Vec<(&RepoName, &str)> {
+        let mut errors: Vec<(&RepoName, &str)> = self
+            .errors
+            .iter()
+            .map(|(repo, error)| (repo, error.as_str()))
+            .chain(
+                self.queues
+                    .iter()
+                    .filter_map(|(repo, book)| book.error.as_deref().map(|error| (repo, error))),
+            )
+            .collect();
+        errors.sort_by(|left, right| left.0.cmp(right.0));
+        errors
+    }
+
+    /// All rows of the board at time `now`.
+    pub fn rows(&mut self, now: DateTime<Utc>) -> Vec<Row<'_>> {
+        self.settle(now);
+        self.build_rows(now)
+    }
+
+    /// The rows that fit in `height` lines, with the selected row inside.
+    ///
+    /// The selected row is an item row (a pull request or a run) or a job
+    /// row. An item row also keeps its header and the start of its block in
+    /// view. A job row keeps only itself.
+    pub fn view(&mut self, now: DateTime<Utc>, height: usize) -> View<'_> {
+        self.settle(now);
+        self.height = height;
+        if height > 0 {
+            let rows = self.build_rows(now);
+            let selected_row = rows.iter().position(Row::is_selected);
+            let on_item_row = selected_row.is_some_and(|row| rows[row].is_item());
+            let header_above = on_item_row
+                && selected_row.is_some_and(|row| {
+                    row > 0 && matches!(rows.get(row - 1), Some(Row::Header(_)))
+                });
+            let len = rows.len();
+            let below = selected_row.filter(|_| on_item_row).map_or(0, |row| {
+                rows[row + 1..]
+                    .iter()
+                    .take_while(|next| {
+                        !matches!(next, Row::Header(_) | Row::Empty(_)) && !next.is_item()
+                    })
+                    .count()
+            });
+            self.offset = scroll(self.offset, height, len, selected_row, header_above, below);
+        }
+        let rows = self
+            .build_rows(now)
+            .into_iter()
+            .skip(self.offset)
+            .take(height)
+            .collect();
+        View {
+            rows,
+            first: self.offset,
+        }
+    }
+
+    /// The start of the window at `now`: the oldest time that the window holds.
+    fn window_start(&self, now: DateTime<Utc>) -> DateTime<Utc> {
+        chrono::Duration::from_std(self.window)
+            .ok()
+            .and_then(|window| now.checked_sub_signed(window))
+            .unwrap_or(DateTime::<Utc>::MIN_UTC)
+    }
+
+    /// Whether the row of `run` shows the waiting marker and the run waited
+    /// for more than [`STUCK_WAIT`] at `now`. Such a run does not show as
+    /// active.
+    ///
+    /// The wait starts at the later of `run.started_at` and the newest
+    /// `completed_at` of the held jobs of the run. The later time also covers
+    /// a re-run, where the held jobs can be from an earlier attempt. A run
+    /// that waits for exactly [`STUCK_WAIT`] still shows.
+    ///
+    /// The marker comes from `RunState::shown_with_jobs` on the state of the
+    /// run and the job states that the board holds for it, as in the row.
+    /// GitHub reports a run as queued while one of its jobs waits, also when
+    /// another job of the run is in progress. Thus the GitHub state alone
+    /// cannot tell a stuck run from a live run.
+    ///
+    /// The worker still reads the jobs of each active run, also of a run that
+    /// does not show. Thus a hidden run shows again when one of its jobs
+    /// starts, because its marker then changes to the running marker.
+    ///
+    /// `Board::settle` drops the jobs of a hidden run, and the wait then
+    /// starts at `run.started_at`, which is never later than the old wait
+    /// start. Thus a hidden run stays hidden until a job runs.
+    fn is_stuck(&self, run: &Run, now: DateTime<Utc>) -> bool {
+        let cutoff = chrono::Duration::from_std(STUCK_WAIT)
+            .ok()
+            .and_then(|wait| now.checked_sub_signed(wait))
+            .unwrap_or(DateTime::<Utc>::MIN_UTC);
+        let jobs = last_good_jobs(self.jobs.get(&run.id));
+        let marker = run.state.shown_with_jobs(jobs.iter().map(|job| job.state));
+        let wait_start = jobs
+            .iter()
+            .filter_map(|job| job.completed_at)
+            .max()
+            .map_or(run.started_at, |ended| ended.max(run.started_at));
+        marker == RunState::Queued && wait_start < cutoff
+    }
+
+    /// Splits the shown runs into the active list and the recent list.
+    ///
+    /// Both lists are sorted. A run that is not shown at `now` is in neither.
+    /// The active list holds each active run except a stuck run (see
+    /// [`Board::is_stuck`]), in order of the start, oldest first. The recent
+    /// list is in order of the end of each run ([`run_end`]), newest first,
+    /// then by the run ID.
+    ///
+    /// The window does not use the end. A finished run is in the recent list
+    /// while its `updated_at` is inside the window. If the window used the
+    /// end, a run at the oldest edge of the window can leave the list when its
+    /// jobs arrive. [`Board::settle`] then drops the jobs of the run, the run
+    /// comes back with its update as the end, and the worker does not fetch
+    /// the jobs again. Thus such a run keeps its row, and its finish time can
+    /// be older than the start of the window.
+    fn sections(&self, now: DateTime<Utc>) -> (Vec<&Run>, Vec<&Run>) {
+        let mut active: Vec<&Run> = self
+            .runs
+            .values()
+            .flatten()
+            .filter(|run| run.state.is_active() && !self.is_stuck(run, now))
+            .collect();
+        active.sort_by_key(|run| (run.started_at, run.id));
+        let oldest = self.window_start(now);
+        let mut recent: Vec<&Run> = self
+            .runs
+            .values()
+            .flatten()
+            .filter(|run| run.state.is_finished() && run.updated_at >= oldest)
+            .collect();
+        recent.sort_by_cached_key(|run| {
+            std::cmp::Reverse((run_end(run, self.jobs.get(&run.id)), run.id))
+        });
+        (active, recent)
+    }
+
+    /// The oldest time from which the merge history is whole at `now`.
+    ///
+    /// The history of a repository is whole from its own `cut_at` on, thus
+    /// all of them are whole only from the latest `cut_at` on. A history that
+    /// no cut shortened is whole from the start of the window.
+    fn history_start(&self, now: DateTime<Utc>) -> DateTime<Utc> {
+        self.queues
+            .values()
+            .filter_map(|book| book.cut_at)
+            .fold(self.window_start(now), DateTime::max)
+    }
+
+    /// How far back the merge history reaches at `now`, or `None` when it
+    /// reaches the whole window. A page limit of the event read can cut the
+    /// history short of the window. A cut that is older than the start of the
+    /// window falls in the margin of the read and gives `None`.
+    #[must_use]
+    pub fn history_reach(&self, now: DateTime<Utc>) -> Option<Duration> {
+        let start = self.history_start(now);
+        if start > self.window_start(now) {
+            (now - start).to_std().ok()
+        } else {
+            None
+        }
+    }
+
+    /// The entries of all merge queues and the departures that show at `now`.
+    ///
+    /// The entries are sorted by repository, then by position. A departure
+    /// shows while it left the queue inside the window, and the departures
+    /// are sorted newest first. A departure that is older than the reach of
+    /// the history (see [`Board::history_reach`]) does not show.
+    fn queue_sections(&self, now: DateTime<Utc>) -> (Vec<&QueueEntry>, Vec<&Departure>) {
+        let mut entries: Vec<&QueueEntry> = self
+            .queues
+            .values()
+            .flat_map(|book| &book.entries)
+            .collect();
+        entries.sort_by(|left, right| {
+            (&left.repo, left.position, left.pull).cmp(&(&right.repo, right.position, right.pull))
+        });
+        let oldest = self.history_start(now);
+        let mut departures: Vec<&Departure> = self
+            .queues
+            .values()
+            .flat_map(|book| &book.departures)
+            .filter(|departure| departure.left_at >= oldest)
+            .collect();
+        departures.sort_by(|left, right| {
+            (right.left_at, &right.repo, right.pull).cmp(&(left.left_at, &left.repo, left.pull))
+        });
+        (entries, departures)
+    }
+
+    /// All items that show at `now`, in the order of the board: the entries,
+    /// the active runs, the departures, and the recent runs.
+    fn shown_items(&self, now: DateTime<Utc>) -> Vec<Item<'_>> {
+        let (entries, departures) = self.queue_sections(now);
+        let (active, recent) = self.sections(now);
+        entries
+            .into_iter()
+            .map(Item::Entry)
+            .chain(active.into_iter().map(Item::Run))
+            .chain(departures.into_iter().map(Item::Departure))
+            .chain(recent.into_iter().map(Item::Run))
+            .collect()
+    }
+
+    /// All runs that show at `now`, in the order of the board: active, then recent.
+    fn shown_runs(&self, now: DateTime<Utc>) -> Vec<&Run> {
+        let (active, recent) = self.sections(now);
+        active.into_iter().chain(recent).collect()
+    }
+
+    /// The jobs of `run` that show as job rows. The list is empty for a run
+    /// that is not expanded, and for a run that waits for its first answer.
+    fn shown_jobs(&self, run: RunId) -> &[Job] {
+        if !self.expanded.contains(&run) {
+            return &[];
+        }
+        last_good_jobs(self.jobs.get(&run))
+    }
+
+    /// True when some repository list holds a run with the ID `run`.
+    fn holds_run(&self, run: RunId) -> bool {
+        self.runs.values().flatten().any(|held| held.id == run)
+    }
+
+    /// All rows that the selection can mark at `now`, in the order of the board.
+    ///
+    /// Each shown item gives its own slot. Each run then gives one slot for
+    /// each of its job rows.
+    fn selectable_rows(&self, now: DateTime<Utc>) -> Vec<Selection> {
+        let mut slots = Vec::new();
+        for (position, item) in self.shown_items(now).into_iter().enumerate() {
+            let key = item.key();
+            slots.push(Selection {
+                item: (key.clone(), position),
+                job: None,
+            });
+            if let Item::Run(run) = item {
+                slots.extend(
+                    self.shown_jobs(run.id)
+                        .iter()
+                        .enumerate()
+                        .map(|(index, job)| Selection {
+                            item: (key.clone(), position),
+                            job: Some((job.id, index)),
+                        }),
+                );
+            }
+        }
+        slots
+    }
+
+    /// Makes the selection valid for the items that show at `now`.
+    ///
+    /// A run that does not show at `now` loses its expansion and its job
+    /// answer. This is how the board forgets a run that leaves it.
+    ///
+    /// The item comes first. The selection follows its item: a run by its ID,
+    /// a pull request in a queue by its repository and number, and a pull
+    /// request that left a queue by its repository, its number, and the time
+    /// that it left. When the item is gone, the item at the old position is
+    /// selected, or the last item when the old position is past the end, and
+    /// the job part goes away. Thus a pull request that leaves the queue gives
+    /// the selection to the row that takes its position. A board with no item
+    /// has no selection. A new selection is the first item.
+    ///
+    /// The job comes second, for a run only. The selection follows its job
+    /// inside the run. When the job is gone, the job at the old position is
+    /// selected, or the last job when the old position is past the end. A
+    /// re-run gives new job IDs, thus the highlight then stays on the job of
+    /// the same name. When the run shows no job row, the run row is selected.
+    fn settle(&mut self, now: DateTime<Utc>) {
+        let items = self.shown_items(now);
+        let position = match &self.selected {
+            None => 0,
+            Some(Selection {
+                item: (key, old), ..
+            }) => items
+                .iter()
+                .position(|item| item.has_key(key))
+                .unwrap_or_else(|| (*old).min(items.len().saturating_sub(1))),
+        };
+        let old_job = self
+            .selected
+            .as_ref()
+            .filter(|old| {
+                items
+                    .get(position)
+                    .is_some_and(|item| item.has_key(&old.item.0))
+            })
+            .and_then(|old| old.job);
+        let selected = items.get(position).map(|item| Selection {
+            item: (item.key(), position),
+            job: match item {
+                Item::Run(run) => self.settled_job(run.id, old_job),
+                Item::Entry(_) | Item::Departure(_) => None,
+            },
+        });
+        let shown: BTreeSet<RunId> = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Run(run) => Some(run.id),
+                Item::Entry(_) | Item::Departure(_) => None,
+            })
+            .collect();
+        self.selected = selected;
+        self.expanded.retain(|id| shown.contains(id));
+        self.jobs.retain(|id, _| shown.contains(id));
+    }
+
+    /// The job part of the selection for `run`, after `old` was selected.
+    ///
+    /// The job with the old ID wins. Else the job at the old position wins, or
+    /// the last job when the old position is past the end. `None` means that
+    /// the run row is selected: there was no job selected, or the run shows no
+    /// job row.
+    fn settled_job(&self, run: RunId, old: Option<(JobId, usize)>) -> Option<(JobId, usize)> {
+        let jobs = self.shown_jobs(run);
+        let (id, position) = old?;
+        let last = jobs.len().checked_sub(1)?;
+        let index = jobs
+            .iter()
+            .position(|job| job.id == id)
+            .unwrap_or_else(|| position.min(last));
+        Some((jobs[index].id, index))
+    }
+
+    /// Tells if the board shows the two merge sections: the merge queue and
+    /// the merge history.
+    ///
+    /// The answer is true when some watched repository has a merge queue.
+    /// [`Board::build_rows`] and the renderer both use this rule, thus the
+    /// header of the last section and the sections themselves agree.
+    #[must_use]
+    pub fn shows_merge_sections(&self) -> bool {
+        !self.queues.is_empty()
+    }
+
+    /// Builds the full list of rows.
+    ///
+    /// The order of the sections is: the merge queue, the active runs, the
+    /// merge history, and the recent runs. The two merge sections show only
+    /// when [`Board::shows_merge_sections`] is true. The header of the active
+    /// section counts the jobs of the active runs that show by state and names
+    /// the runners of the jobs that wait or run. The selected row carries the
+    /// selection mark. This is the row of the selected item, or the row of its
+    /// selected job. The block of each expanded run follows the row of that
+    /// run. The item rows come in the order of `shown_items`, and the selection
+    /// finds the row of an item by the position of that item in `shown_items`.
+    /// The list also holds header rows, empty rows, and job rows, thus the
+    /// index of a row is not the position of its item. The `job_sum` of each
+    /// run row is the sum of the runner times of its last good jobs at `now`.
+    /// The `cost` of each run row and of each job row is the list-price cost at
+    /// `now`, with the prices of the book from [`Board::set_prices`]. The method
+    /// builds one [`Estimates`] index for the frame from the shown runs and
+    /// their last good jobs. Each job row carries its time left from it.
+    fn build_rows(&self, now: DateTime<Utc>) -> Vec<Row<'_>> {
+        let selected = self.selected.as_ref();
+        let mut rows = Vec::new();
+        let mut first = 0;
+        let has_queue = self.shows_merge_sections();
+        let (entries, departures) = self.queue_sections(now);
+        let (active, recent) = self.sections(now);
+        let estimates = self.estimates(&active, &recent, now);
+        let view = JobView {
+            jobs: &self.jobs,
+            errors: &self.errors,
+            expanded: &self.expanded,
+            prices: &self.prices,
+            now,
+        };
+        if has_queue {
+            rows.push(Row::Header(Header {
+                section: Section::Queue,
+                count: entries.len(),
+                passed: 0,
+                failed: 0,
+                cancelled: 0,
+                jobs: JobCounts::default(),
+                runners: Vec::new(),
+            }));
+            if entries.is_empty() {
+                rows.push(Row::Empty(Section::Queue));
+            }
+            rows.extend(
+                entries
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, &entry)| Row::Entry {
+                        entry,
+                        selected: marks_item(selected, first + offset),
+                    }),
+            );
+            first += entries.len();
+        }
+        rows.push(Row::Header(Header {
+            section: Section::Active,
+            count: active.len(),
+            passed: 0,
+            failed: 0,
+            cancelled: 0,
+            jobs: self.active_job_counts(&active),
+            runners: self.active_runner_names(&active),
+        }));
+        push_runs(
+            &mut rows,
+            &active,
+            Section::Active,
+            first,
+            selected,
+            view,
+            &estimates,
+        );
+        first += active.len();
+        if has_queue {
+            let count_of = |outcome: Outcome| {
+                departures
+                    .iter()
+                    .filter(|departure| departure.outcome == outcome)
+                    .count()
+            };
+            rows.push(Row::Header(Header {
+                section: Section::History,
+                count: departures.len(),
+                passed: count_of(Outcome::Merged),
+                failed: count_of(Outcome::Failed),
+                cancelled: count_of(Outcome::Removed),
+                jobs: JobCounts::default(),
+                runners: Vec::new(),
+            }));
+            if departures.is_empty() {
+                rows.push(Row::Empty(Section::History));
+            }
+            rows.extend(
+                departures
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, &departure)| Row::Departure {
+                        departure,
+                        selected: marks_item(selected, first + offset),
+                    }),
+            );
+            first += departures.len();
+        }
+        rows.push(Row::Header(recent_header(&recent)));
+        push_runs(
+            &mut rows,
+            &recent,
+            Section::Recent,
+            first,
+            selected,
+            view,
+            &estimates,
+        );
+        rows
+    }
+
+    /// The index of the estimates for one frame. It reads the shown runs, the
+    /// `active` and the `recent` ones, with the same last good jobs that the
+    /// job sum and the cost read.
+    fn estimates<'a>(
+        &'a self,
+        active: &[&'a Run],
+        recent: &[&'a Run],
+        now: DateTime<Utc>,
+    ) -> Estimates<'a> {
+        Estimates::new(
+            active
+                .iter()
+                .chain(recent.iter())
+                .map(|&run| (run, last_good_jobs(self.jobs.get(&run.id)))),
+            now,
+        )
+    }
+
+    /// The jobs of the `active` runs. This covers each run of the active list
+    /// of `Board::sections`, expanded or not and in the view or not. A stuck
+    /// run is not in that list (see [`Board::is_stuck`]). A run with no job
+    /// answer gives no job. A run whose last fetch failed gives its last good
+    /// jobs. A run that is not in `active` gives no job.
+    fn active_jobs<'s, 'a>(&'s self, active: &'a [&Run]) -> impl Iterator<Item = &'s Job> + 'a
+    where
+        's: 'a,
+    {
+        active
+            .iter()
+            .flat_map(|run| last_good_jobs(self.jobs.get(&run.id)).iter())
+    }
+
+    /// Counts the jobs of the `active` runs by state, see `active_jobs`.
+    fn active_job_counts(&self, active: &[&Run]) -> JobCounts {
+        let mut counts = JobCounts::default();
+        for job in self.active_jobs(active) {
+            counts.add(job.state);
+        }
+        counts
+    }
+
+    /// The names of the runners that have a job in the state `Queued` or
+    /// `Running` in the `active` runs, see `active_jobs`. A job that finished
+    /// gives no name, because its runner is free. Each name shows one time.
+    fn active_runner_names(&self, active: &[&Run]) -> Vec<&RunnerName> {
+        let mut names: Vec<&RunnerName> = self
+            .active_jobs(active)
+            .filter(|job| matches!(job.state, RunState::Queued | RunState::Running))
+            .filter_map(|job| job.runner.as_ref())
+            .collect();
+        names.sort_by_cached_key(|&name| runner_key(name));
+        names.dedup();
+        names
+    }
+
+    /// Expands the run of the selection. The run shows its jobs at once when
+    /// the board holds an answer for it. Else it shows a loading row until
+    /// `set_jobs` gives its jobs. A run that is already expanded changes
+    /// nothing. On a job row, the run is already expanded. A pull request
+    /// row, or no selection, changes nothing.
+    pub fn expand(&mut self, now: DateTime<Utc>) {
+        self.settle(now);
+        if let Some(id) = self.selected.as_ref().and_then(Selection::run) {
+            self.expanded.insert(id);
+        }
+    }
+
+    /// Expands every run that shows at `now`, in the active section and in the
+    /// section of the finished runs. Each run shows its jobs at once when the
+    /// board holds an answer for it. Else it shows a loading row. The selection
+    /// stays on its row. A run that comes to the board later arrives collapsed.
+    pub fn expand_all(&mut self, now: DateTime<Utc>) {
+        self.settle(now);
+        let shown: Vec<RunId> = self.shown_runs(now).iter().map(|run| run.id).collect();
+        self.expanded.extend(shown);
+    }
+
+    /// Collapses the run of the selection. The board keeps the job answer of
+    /// the run, thus the run row keeps its marker. On a job row, the selection
+    /// goes to the row of that run. A run that is not expanded, a pull request
+    /// row, or no selection changes nothing.
+    pub fn collapse(&mut self, now: DateTime<Utc>) {
+        self.settle(now);
+        if let Some(id) = self.selected.as_ref().and_then(Selection::run) {
+            self.expanded.remove(&id);
+        }
+    }
+
+    /// Collapses every run. The board keeps the job answer of each run, thus
+    /// each run row keeps its marker. On a job row, the selection goes to the
+    /// row of that run.
+    pub fn collapse_all(&mut self, now: DateTime<Utc>) {
+        self.settle(now);
+        self.expanded.clear();
+    }
+
+    /// Stores the jobs of `run` when the board holds the run, expanded or not.
+    /// A late answer for a run that the board does not hold is dropped.
+    ///
+    /// The jobs are sorted by name, with no difference between capital and
+    /// small letters, and then by ID. GitHub gives the jobs in the order of
+    /// their IDs, and it makes most jobs of a run at the same second, thus
+    /// that order has no meaning that a person can see. A re-run gives new
+    /// IDs, thus a re-run job can also move. The order by name stays the same
+    /// through each refresh and each re-run, and it keeps the jobs of one
+    /// matrix together.
+    ///
+    /// A repeated job ID keeps its first job only. The sort comes after this
+    /// step, thus the first job is the first one that the source gave.
+    pub fn set_jobs(&mut self, run: RunId, mut jobs: Vec<Job>) {
+        if self.holds_run(run) {
+            keep_first_of_each_id(&mut jobs, |job| job.id);
+            jobs.sort_by_cached_key(|job| (job.name.to_lowercase(), job.id));
+            self.jobs.insert(run, Jobs::Ready(jobs));
+        }
+    }
+
+    /// Records the error of a failed fetch for `run` when the board holds the
+    /// run, expanded or not. The last good jobs stay, or an empty list when
+    /// there is none. Nothing happens for a run that the board does not hold.
+    pub fn fail_jobs(&mut self, run: RunId, error: String) {
+        if self.holds_run(run) {
+            let jobs = match self.jobs.remove(&run) {
+                None => Vec::new(),
+                Some(Jobs::Ready(jobs) | Jobs::Failed { jobs, .. }) => jobs,
+            };
+            self.jobs.insert(run, Jobs::Failed { jobs, error });
+        }
+    }
+
+    /// The repository and the ID of each expanded run that shows at `now`.
+    /// The app sends this set to the worker each time it changes.
+    pub fn expanded(&mut self, now: DateTime<Utc>) -> BTreeSet<(RepoName, RunId)> {
+        self.settle(now);
+        self.shown_runs(now)
+            .into_iter()
+            .filter(|run| self.expanded.contains(&run.id))
+            .map(|run| (run.repo.clone(), run.id))
+            .collect()
+    }
+
+    /// The repository and the ID of each run that the recent section shows at
+    /// `now`, in the order of the section (the newest finish first).
+    /// `Board::sections` decides the list. The app sends it to the worker each
+    /// time it changes (`Command::RecentRuns`).
+    #[must_use]
+    pub fn recent_runs(&self, now: DateTime<Utc>) -> Vec<(RepoName, RunId)> {
+        self.sections(now)
+            .1
+            .into_iter()
+            .map(|run| (run.repo.clone(), run.id))
+            .collect()
+    }
+
+    /// Moves the selection to the next row: an item row or a job row.
+    pub fn select_next(&mut self, now: DateTime<Utc>) {
+        self.settle(now);
+        self.move_selection(now, |index, rows| (index + 1).min(rows.len() - 1));
+    }
+
+    /// Moves the selection one page down.
+    ///
+    /// A page is the height of the last view minus one row, and at least one
+    /// row. Before the first view, a page is one row. The target is the screen
+    /// row of the selection plus one page. The selection goes to the last row
+    /// that it can mark at or above the target. A target past the end gives
+    /// the last row. When no such row lies below the selection, the selection
+    /// moves one row. The selection stops on the last row and does not wrap.
+    pub fn select_next_page(&mut self, now: DateTime<Utc>) {
+        self.settle(now);
+        let page = self.page();
+        self.move_selection(now, |index, rows| {
+            let target = rows[index] + page;
+            let slot = rows.partition_point(|&row| row <= target) - 1;
+            if slot == index {
+                (index + 1).min(rows.len() - 1)
+            } else {
+                slot
+            }
+        });
+    }
+
+    /// Moves the selection to the previous row: an item row or a job row.
+    pub fn select_previous(&mut self, now: DateTime<Utc>) {
+        self.settle(now);
+        self.move_selection(now, |index, _| index.saturating_sub(1));
+    }
+
+    /// Moves the selection one page up.
+    ///
+    /// A page is the height of the last view minus one row, and at least one
+    /// row. Before the first view, a page is one row. The target is the screen
+    /// row of the selection minus one page. The selection goes to the first
+    /// row that it can mark at or below the target. A target before the start
+    /// gives the first row. When no such row lies above the selection, the
+    /// selection moves one row. The selection stops on the first row and does
+    /// not wrap.
+    pub fn select_previous_page(&mut self, now: DateTime<Utc>) {
+        self.settle(now);
+        let page = self.page();
+        self.move_selection(now, |index, rows| {
+            let target = rows[index].saturating_sub(page);
+            let slot = rows.partition_point(|&row| row < target);
+            if slot == index {
+                index.saturating_sub(1)
+            } else {
+                slot
+            }
+        });
+    }
+
+    /// The number of rows of one page: the height of the last view minus one
+    /// row, and at least one row.
+    fn page(&self) -> usize {
+        self.height.saturating_sub(1).max(1)
+    }
+
+    /// Moves the selection to the row at the position that `target` gives.
+    ///
+    /// `target` gets the current position and the screen row of each row that
+    /// the selection can mark, in order. The screen row is the index in
+    /// `build_rows`. The rows are the item rows and the job rows of the
+    /// expanded runs. When the selection is not among them, it stays.
+    fn move_selection(&mut self, now: DateTime<Utc>, target: impl Fn(usize, &[usize]) -> usize) {
+        let slots = self.selectable_rows(now);
+        let screen_rows: Vec<usize> = self
+            .build_rows(now)
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.is_selectable())
+            .map(|(screen_row, _)| screen_row)
+            .collect();
+        debug_assert_eq!(
+            screen_rows.len(),
+            slots.len(),
+            "each selectable screen row has one slot"
+        );
+        let moved = self
+            .selected
+            .as_ref()
+            .and_then(|current| slots.iter().position(|slot| slot == current))
+            .and_then(|index| slots.get(target(index, &screen_rows)).cloned());
+        if moved.is_some() {
+            self.selected = moved;
+        }
+    }
+
+    /// Gives the item of the selection at `now`, and the job when a job row is
+    /// selected. The value is `None` when the board has no item.
+    fn selected_item(&mut self, now: DateTime<Utc>) -> Option<(Item<'_>, Option<&Job>)> {
+        self.settle(now);
+        let Selection {
+            item: (key, _),
+            job,
+        } = self.selected.clone()?;
+        let item = self
+            .shown_items(now)
+            .into_iter()
+            .find(|item| item.has_key(&key))?;
+        let job = match item {
+            Item::Run(run) => job.and_then(|(_, index)| self.shown_jobs(run.id).get(index)),
+            Item::Entry(_) | Item::Departure(_) => None,
+        };
+        Some((item, job))
+    }
+
+    /// Gives the run of the selection at `now`, and the job when a job row is
+    /// selected. The value is `None` when the board has no item, and when a
+    /// pull request row is selected.
+    ///
+    /// It calls `settle` first, as `selected_url` does.
+    pub fn selected_target(&mut self, now: DateTime<Utc>) -> Option<(&Run, Option<&Job>)> {
+        match self.selected_item(now)? {
+            (Item::Run(run), job) => Some((run, job)),
+            (Item::Entry(_) | Item::Departure(_), _) => None,
+        }
+    }
+
+    /// The number of the pull request of the selected row, or `None` when the
+    /// selected row is not a merge queue row.
+    pub fn selected_pull(&mut self, now: DateTime<Utc>) -> Option<PullNumber> {
+        match self.selected_item(now)?.0 {
+            Item::Entry(entry) => Some(entry.pull),
+            Item::Departure(departure) => Some(departure.pull),
+            Item::Run(_) => None,
+        }
+    }
+
+    /// The address of the selected row, or `None` when the board has no item.
+    ///
+    /// On a pull request row, this is the address of the pull request. On a
+    /// run row, this is the address of the run. On a job row, this is the
+    /// address of the job, and the address of the run when the job has none.
+    pub fn selected_url(&mut self, now: DateTime<Utc>) -> Option<String> {
+        let (item, job) = self.selected_item(now)?;
+        let job_url = job
+            .map(|job| job.url.as_str())
+            .filter(|url| !url.is_empty());
+        Some(job_url.unwrap_or(item.url()).to_owned())
+    }
+}
+
+/// True when `selected` marks the item row at `position` itself, and not one
+/// of its job rows.
+fn marks_item(selected: Option<&Selection>, position: usize) -> bool {
+    selected.is_some_and(|selection| selection.item.1 == position && selection.job.is_none())
+}
+
+/// Finds the scroll offset for a view of `height` rows over `len` rows.
+///
+/// The offset changes as little as possible to put `selected_row` inside the
+/// view. With a `header_above` the selected row and also that header stay
+/// inside, when the view has two rows or more. Then the offset moves as far as
+/// it can to show the `below` rows of the block of the selected run, and the
+/// top row stays inside. The offset never goes past the last full view.
+/// `height` is at least 1.
+fn scroll(
+    offset: usize,
+    height: usize,
+    len: usize,
+    selected_row: Option<usize>,
+    header_above: bool,
+    below: usize,
+) -> usize {
+    let mut offset = offset;
+    if let Some(row) = selected_row {
+        let top = if header_above && height >= 2 {
+            row - 1
+        } else {
+            row
+        };
+        offset = offset.min(top);
+        if row >= offset + height {
+            offset = row + 1 - height;
+        }
+        if row + below >= offset + height {
+            offset = (row + below + 1 - height).min(top);
+        }
+    }
+    offset.min(len.saturating_sub(height))
+}
+
+/// The header row of the section of the finished runs, with the count of each
+/// state in `recent`.
+fn recent_header<'a>(recent: &[&'a Run]) -> Header<'a> {
+    let count_of = |state: RunState| recent.iter().filter(|run| run.state == state).count();
+    Header {
+        section: Section::Recent,
+        count: recent.len(),
+        passed: count_of(RunState::Passed),
+        failed: count_of(RunState::Failed),
+        cancelled: count_of(RunState::Cancelled),
+        jobs: JobCounts::default(),
+        runners: Vec::new(),
+    }
+}
+
+/// The job data that the rows of the board read.
+#[derive(Clone, Copy)]
+struct JobView<'a> {
+    /// The last job answer of each run that the board holds.
+    jobs: &'a BTreeMap<RunId, Jobs>,
+    /// The error of each repository whose last read failed or was suspect.
+    errors: &'a BTreeMap<RepoName, String>,
+    /// The runs that show their job rows.
+    expanded: &'a BTreeSet<RunId>,
+    /// The billing prices of each account that `ha` could read.
+    prices: &'a PriceBook,
+    /// The time of the view. The job sum and the cost of a run read it.
+    now: DateTime<Utc>,
+}
+
+/// The sum of the runner times of `jobs` at `now`, or `None` for no job.
+///
+/// A job that adds nothing (`Job::runner_time` gives `None`) counts as zero.
+/// An empty slice gives `None`, because a run with no good job has no sum.
+fn job_sum(jobs: &[Job], now: DateTime<Utc>) -> Option<Duration> {
+    if jobs.is_empty() {
+        return None;
+    }
+    Some(
+        jobs.iter()
+            .map(|job| job.runner_time(now).unwrap_or(Duration::ZERO))
+            .sum(),
+    )
+}
+
+/// Adds the runs of one section to `rows`, or the empty row when there is none.
+///
+/// `first` is the position of the first run of `runs` among all items. The row
+/// of the run at the position of `selected` gets the mark when the selection
+/// has no job part. Otherwise the job row at the selected job position gets the
+/// mark. The state of each run row comes from the job answer of the run,
+/// expanded or not. The `job_sum` of each run row is the sum of the runner
+/// times of the last good jobs at `view.now`, see `job_sum`. The `cost` of each
+/// run row is the list-price cost of the same jobs, see `run_cost`. The block of jobs
+/// of each run in `view.expanded` follows the row of that run. `estimates` is
+/// the index of the frame, and each job row reads its time left from it.
+fn push_runs<'a>(
+    rows: &mut Vec<Row<'a>>,
+    runs: &[&'a Run],
+    section: Section,
+    first: usize,
+    selected: Option<&Selection>,
+    view: JobView<'a>,
+    estimates: &Estimates<'_>,
+) {
+    if runs.is_empty() {
+        rows.push(Row::Empty(section));
+    }
+    for (offset, &run) in runs.iter().enumerate() {
+        let here = selected.filter(|selection| selection.item.1 == first + offset);
+        let answer = view.jobs.get(&run.id);
+        let jobs = last_good_jobs(answer);
+        let ended = run.state.is_finished().then(|| run_end(run, answer));
+        rows.push(Row::Run {
+            run,
+            state: run.state.shown_with_jobs(jobs.iter().map(|job| job.state)),
+            selected: here.is_some_and(|selection| selection.job.is_none()),
+            stale: view.errors.contains_key(&run.repo),
+            job_sum: job_sum(jobs, view.now),
+            ended,
+            cost: run_cost(
+                jobs,
+                run.visibility,
+                view.prices.of(run.repo.owner()),
+                view.now,
+            ),
+        });
+        if view.expanded.contains(&run.id) {
+            push_jobs(
+                rows,
+                run,
+                ended,
+                answer,
+                here.and_then(|selection| selection.job),
+                view,
+                estimates,
+            );
+        }
+    }
+}
+
+/// Adds the block of rows of one expanded run to `rows`.
+///
+/// `run` is the run that owns the block, and each job row carries it.
+/// `run_ended` is the end of the run (`None` for an active run), and each job
+/// row carries it too. `answer` is the job answer that the board holds for the
+/// run. `None` gives the loading row. The job row at the position of
+/// `selected` gets the mark. The `cost` of each job row is the list-price cost
+/// of the job at `view.now`, with the billing prices of the owner of the run
+/// from `view.prices`. The `remaining` of each job row is its time left from
+/// `estimates`, at `view.now`.
+fn push_jobs<'a>(
+    rows: &mut Vec<Row<'a>>,
+    run: &'a Run,
+    run_ended: Option<DateTime<Utc>>,
+    answer: Option<&'a Jobs>,
+    selected: Option<(JobId, usize)>,
+    view: JobView<'a>,
+    estimates: &Estimates<'_>,
+) {
+    let prices = view.prices.of(run.repo.owner());
+    let cost_of = |job: &Job| job_cost(job, run.visibility, prices, view.now);
+    let marked = |index: usize| selected.is_some_and(|(_, position)| position == index);
+    match answer {
+        None => rows.push(Row::JobsLoading),
+        Some(Jobs::Ready(list)) if list.is_empty() => rows.push(Row::NoJobs),
+        Some(Jobs::Ready(list)) => {
+            rows.extend(list.iter().enumerate().map(|(index, job)| Row::Job {
+                job,
+                last: index + 1 == list.len(),
+                selected: marked(index),
+                run,
+                run_ended,
+                cost: cost_of(job),
+                remaining: estimates.remaining(run, job, view.now),
+            }));
+        }
+        Some(Jobs::Failed { jobs, error }) => {
+            rows.extend(jobs.iter().enumerate().map(|(index, job)| Row::Job {
+                job,
+                last: false,
+                selected: marked(index),
+                run,
+                run_ended,
+                cost: cost_of(job),
+                remaining: estimates.remaining(run, job, view.now),
+            }));
+            rows.push(Row::JobsError(error));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cost::{Prices, Sku};
+    use crate::money::Usd;
+    use crate::queue::{EntryState, Outcome};
+    use crate::target::OwnerName;
+    use chrono::{Duration as Span, TimeZone};
+
+    const HOUR: u64 = 3600;
+
+    fn now() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 10, 14, 12, 0, 0)
+            .single()
+            .expect("a valid time")
+    }
+
+    fn repo(text: &str) -> RepoName {
+        RepoName::parse(text).expect("a valid repository")
+    }
+
+    /// Builds a run. The times are minutes before `now()`.
+    fn run(id: u64, repo_text: &str, state: RunState, started: i64, updated: i64) -> Run {
+        Run {
+            visibility: crate::run::Visibility::Private,
+            id: RunId(id),
+            repo: repo(repo_text),
+            workflow: "ci".to_owned(),
+            branch: "main".to_owned(),
+            title: format!("run {id}"),
+            state,
+            started_at: now() - Span::minutes(started),
+            created_at: now() - Span::minutes(started),
+            updated_at: now() - Span::minutes(updated),
+            url: format!("https://example.test/{repo_text}/runs/{id}"),
+        }
+    }
+
+    /// Builds a job.
+    fn job(id: u64, state: RunState) -> Job {
+        Job {
+            labels: Vec::new(),
+            id: JobId(id),
+            name: format!("job {id}"),
+            state,
+            runner: None,
+            created_at: None,
+            started_at: None,
+            completed_at: None,
+            url: String::new(),
+        }
+    }
+
+    /// Builds a running job with the name `name`.
+    fn named_job(id: u64, name: &str) -> Job {
+        Job {
+            name: name.to_owned(),
+            ..job(id, RunState::Running)
+        }
+    }
+
+    fn board() -> Board {
+        Board::new(Duration::from_secs(8 * HOUR))
+    }
+
+    /// Writes each row as short text: `Header(Active,2,0,0,0)`, `Empty(Recent)`,
+    /// `Run(7)`, `Job(11)`, `LastJob(12)`, `JobsLoading`, `NoJobs`, or
+    /// `JobsError(text)`. The selection mark of a run or a job is left out, see
+    /// `marked`.
+    fn shape(rows: &[Row<'_>]) -> Vec<String> {
+        marked(rows)
+            .into_iter()
+            .map(|row| row.trim_end_matches('*').to_owned())
+            .collect()
+    }
+
+    /// Like `shape`, and a header ends in the counts of passed, failed, and
+    /// cancelled runs. A selected row reads `Run(7)*`, `Job(11)*`, or
+    /// `LastJob(12)*`.
+    fn marked(rows: &[Row<'_>]) -> Vec<String> {
+        rows.iter()
+            .map(|row| match row {
+                Row::Header(Header {
+                    section,
+                    count,
+                    passed,
+                    failed,
+                    cancelled,
+                    ..
+                }) => format!("Header({section:?},{count},{passed},{failed},{cancelled})"),
+                Row::Empty(section) => format!("Empty({section:?})"),
+                Row::Entry { entry, selected } => format!(
+                    "Entry({}#{}){}",
+                    entry.repo,
+                    entry.pull.0,
+                    if *selected { "*" } else { "" }
+                ),
+                Row::Departure {
+                    departure,
+                    selected,
+                } => format!(
+                    "Departure({}#{}){}",
+                    departure.repo,
+                    departure.pull.0,
+                    if *selected { "*" } else { "" }
+                ),
+                Row::Run { run, selected, .. } => {
+                    format!("Run({}){}", run.id.0, if *selected { "*" } else { "" })
+                }
+                Row::Job {
+                    job,
+                    last,
+                    selected,
+                    ..
+                } => format!(
+                    "{}({}){}",
+                    if *last { "LastJob" } else { "Job" },
+                    job.id.0,
+                    if *selected { "*" } else { "" }
+                ),
+                Row::JobsLoading => "JobsLoading".to_owned(),
+                Row::NoJobs => "NoJobs".to_owned(),
+                Row::JobsError(error) => format!("JobsError({error})"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_empty_board_shows_two_empty_sections() {
+        let mut board = board();
+        assert_eq!(
+            shape(&board.rows(now())),
+            [
+                "Header(Active,0,0,0,0)",
+                "Empty(Active)",
+                "Header(Recent,0,0,0,0)",
+                "Empty(Recent)"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_sections_hold_their_runs_and_the_headers_count_them() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 5, 1),
+                run(3, "a/x", RunState::Failed, 40, 10),
+                run(4, "a/x", RunState::Passed, 50, 15),
+                run(2, "a/x", RunState::Passed, 30, 20),
+            ],
+            now(),
+        );
+        let rows = board.rows(now());
+        assert_eq!(
+            shape(&rows),
+            [
+                "Header(Active,1,0,0,0)",
+                "Run(1)",
+                "Header(Recent,3,2,1,0)",
+                "Run(3)",
+                "Run(4)",
+                "Run(2)",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_empty_section_shows_an_empty_row_after_its_header() {
+        let mut only_active = board();
+        only_active.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Running, 5, 1)],
+            now(),
+        );
+        let rows = only_active.rows(now());
+        assert_eq!(
+            shape(&rows)[2..],
+            ["Header(Recent,0,0,0,0)", "Empty(Recent)"]
+        );
+
+        let mut only_recent = board();
+        only_recent.replace(
+            repo("a/x"),
+            vec![run(2, "a/x", RunState::Passed, 30, 20)],
+            now(),
+        );
+        let rows = only_recent.rows(now());
+        assert_eq!(
+            shape(&rows)[..2],
+            ["Header(Active,0,0,0,0)", "Empty(Active)"]
+        );
+    }
+
+    #[test]
+    fn queued_and_running_runs_are_active_and_other_runs_never_show() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Queued, 20, 20),
+                run(2, "a/x", RunState::Running, 10, 5),
+                run(3, "a/x", RunState::Other, 30, 25),
+                run(4, "a/x", RunState::Passed, 40, 30),
+            ],
+            now(),
+        );
+        assert_eq!(
+            shape(&board.rows(now())),
+            [
+                "Header(Active,2,0,0,0)",
+                "Run(1)",
+                "Run(2)",
+                "Header(Recent,1,1,0,0)",
+                "Run(4)",
+            ]
+        );
+    }
+
+    #[test]
+    fn active_runs_are_ordered_oldest_first_and_ties_by_id() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(9, "a/x", RunState::Running, 5, 1),
+                run(8, "a/x", RunState::Queued, 30, 1),
+                run(7, "a/x", RunState::Running, 10, 1),
+                run(5, "a/x", RunState::Running, 10, 1),
+            ],
+            now(),
+        );
+        let rows = board.rows(now());
+        assert_eq!(shape(&rows)[1..5], ["Run(8)", "Run(5)", "Run(7)", "Run(9)"]);
+    }
+
+    #[test]
+    fn recent_runs_are_ordered_newest_first_and_ties_by_id_descending() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Passed, 100, 50),
+                run(2, "a/x", RunState::Failed, 100, 10),
+                run(3, "a/x", RunState::Passed, 100, 30),
+                run(4, "a/x", RunState::Passed, 100, 30),
+            ],
+            now(),
+        );
+        let rows = board.rows(now());
+        assert_eq!(shape(&rows)[3..], ["Run(2)", "Run(4)", "Run(3)", "Run(1)"]);
+    }
+
+    #[test]
+    fn a_cancelled_run_shows_in_the_recent_section_with_the_finished_runs() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 5, 1),
+                run(2, "a/x", RunState::Passed, 50, 30),
+                run(3, "a/x", RunState::Cancelled, 50, 10),
+                run(4, "a/x", RunState::Failed, 50, 20),
+                run(5, "a/x", RunState::Cancelled, 50, 40),
+                run(6, "a/x", RunState::Other, 50, 15),
+            ],
+            now(),
+        );
+        assert_eq!(
+            shape(&board.rows(now())),
+            [
+                "Header(Active,1,0,0,0)",
+                "Run(1)",
+                "Header(Recent,4,1,1,2)",
+                "Run(3)",
+                "Run(4)",
+                "Run(2)",
+                "Run(5)",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_recent_header_counts_add_up_to_the_rows_of_the_section() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Passed, 50, 10),
+                run(2, "a/x", RunState::Passed, 50, 11),
+                run(3, "a/x", RunState::Failed, 50, 12),
+                run(4, "a/x", RunState::Cancelled, 50, 13),
+                run(5, "a/x", RunState::Other, 50, 14),
+            ],
+            now(),
+        );
+        board.replace(
+            repo("b/y"),
+            vec![
+                run(6, "b/y", RunState::Passed, 50, 15),
+                run(7, "b/y", RunState::Cancelled, 50, 16),
+                run(8, "b/y", RunState::Cancelled, 50, 17),
+                run(9, "b/y", RunState::Failed, 50, 18),
+                run(10, "b/y", RunState::Running, 50, 1),
+            ],
+            now(),
+        );
+        let rows = board.rows(now());
+        let position = rows
+            .iter()
+            .position(|row| {
+                matches!(
+                    row,
+                    Row::Header(Header {
+                        section: Section::Recent,
+                        ..
+                    })
+                )
+            })
+            .expect("a recent header");
+        let Row::Header(Header {
+            count,
+            passed,
+            failed,
+            cancelled,
+            ..
+        }) = rows[position]
+        else {
+            panic!("the row is a header");
+        };
+        let run_rows = rows[position + 1..]
+            .iter()
+            .filter(|row| matches!(row, Row::Run { .. }))
+            .count();
+        assert_eq!((passed, failed, cancelled), (3, 2, 3));
+        assert_eq!(passed + failed + cancelled, count);
+        assert_eq!(count, run_rows);
+    }
+
+    #[test]
+    fn skipped_neutral_and_unknown_runs_still_never_show() {
+        let conclusions = [
+            Some("skipped"),
+            Some("neutral"),
+            Some("action_required"),
+            Some("stale"),
+            Some("brand_new"),
+            None,
+        ];
+        let runs = conclusions
+            .iter()
+            .zip(1..)
+            .map(|(conclusion, id)| {
+                finished_run(
+                    id,
+                    RunState::from_github("completed", *conclusion),
+                    600,
+                    300,
+                )
+            })
+            .collect();
+        let mut board = board();
+        board.replace(repo("a/x"), runs, now());
+        assert_eq!(
+            shape(&board.rows(now())),
+            [
+                "Header(Active,0,0,0,0)",
+                "Empty(Active)",
+                "Header(Recent,0,0,0,0)",
+                "Empty(Recent)",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_cancelled_run_shows_for_the_whole_window() {
+        let window = 8 * 3600;
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                finished_run(1, RunState::Cancelled, window + 100, window - 1),
+                finished_run(2, RunState::Cancelled, window + 100, window + 1),
+            ],
+            now(),
+        );
+        assert_eq!(
+            shape(&board.rows(now())),
+            [
+                "Header(Active,0,0,0,0)",
+                "Empty(Active)",
+                "Header(Recent,1,0,0,1)",
+                "Run(1)",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_run_that_is_cancelled_moves_to_the_recent_section_and_stays_selected() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Running, 20, 1),
+                run(3, "a/x", RunState::Passed, 60, 10),
+            ],
+            now(),
+        );
+        board.select_next(now());
+        assert_eq!(
+            marked(&board.rows(now())),
+            [
+                "Header(Active,2,0,0,0)",
+                "Run(1)",
+                "Run(2)*",
+                "Header(Recent,1,1,0,0)",
+                "Run(3)",
+            ]
+        );
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Cancelled, 20, 0),
+                run(3, "a/x", RunState::Passed, 60, 10),
+            ],
+            now(),
+        );
+        assert_eq!(
+            marked(&board.rows(now())),
+            [
+                "Header(Active,1,0,0,0)",
+                "Run(1)",
+                "Header(Recent,2,1,0,1)",
+                "Run(2)*",
+                "Run(3)",
+            ]
+        );
+        assert_eq!(
+            board.selected_url(now()).as_deref(),
+            Some("https://example.test/a/x/runs/2")
+        );
+    }
+
+    /// Makes a run that finished `seconds` before `now()`.
+    fn finished_run(id: u64, state: RunState, started_secs: i64, finished_secs: i64) -> Run {
+        let mut made = run(id, "a/x", state, 0, 0);
+        made.started_at = now() - Span::seconds(started_secs);
+        made.updated_at = now() - Span::seconds(finished_secs);
+        made
+    }
+
+    #[test]
+    fn a_finished_run_shows_while_it_ended_inside_the_window() {
+        let window = 8 * 3600;
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                finished_run(1, RunState::Passed, window + 100, window - 1),
+                finished_run(2, RunState::Passed, window + 100, window + 1),
+                finished_run(3, RunState::Failed, window + 100, window),
+            ],
+            now(),
+        );
+        let rows = board.rows(now());
+        assert_eq!(
+            shape(&rows),
+            [
+                "Header(Active,0,0,0,0)",
+                "Empty(Active)",
+                "Header(Recent,2,1,1,0)",
+                "Run(1)",
+                "Run(3)",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_run_that_started_before_the_window_and_ended_inside_it_shows() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![finished_run(1, RunState::Passed, 9 * 3600, 3600)],
+            now(),
+        );
+        assert_eq!(shape(&board.rows(now()))[3..], ["Run(1)"]);
+    }
+
+    #[test]
+    fn active_runs_show_whatever_the_window_is() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                finished_run(1, RunState::Running, 3 * 24 * 3600, 3 * 24 * 3600),
+                // Run 2 waits for less than `STUCK_WAIT`.
+                finished_run(2, RunState::Queued, 7 * 3600, 7 * 3600),
+            ],
+            now(),
+        );
+        assert_eq!(
+            shape(&board.rows(now()))[..4],
+            [
+                "Header(Active,2,0,0,0)",
+                "Run(1)",
+                "Run(2)",
+                "Header(Recent,0,0,0,0)",
+            ]
+        );
+    }
+
+    /// A run that waits for more than 8 hours does not show in the active section.
+    #[test]
+    fn a_run_that_waits_for_more_than_8_hours_does_not_show_in_running() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Queued, 9 * 60, 1)],
+            now(),
+        );
+        board.set_jobs(
+            RunId(1),
+            vec![
+                runner_job(1, RunState::Queued, "pi5"),
+                job(2, RunState::Passed),
+            ],
+        );
+        let rows = board.rows(now());
+        assert_eq!(
+            shape(&rows)[..2],
+            ["Header(Active,0,0,0,0)", "Empty(Active)"]
+        );
+        assert_eq!(active_header(&rows).jobs, JobCounts::default());
+        assert!(active_runners(&rows).is_empty());
+    }
+
+    /// A run that waits for exactly 8 hours still shows in the active section.
+    #[test]
+    fn a_run_that_waits_for_exactly_8_hours_still_shows_in_running() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Queued, 8 * 60, 1)],
+            now(),
+        );
+        assert_eq!(
+            shape(&board.rows(now()))[..2],
+            ["Header(Active,1,0,0,0)", "Run(1)"]
+        );
+    }
+
+    /// A run that waits for more than 8 hours shows again, with the running
+    /// marker, when one of its jobs starts.
+    #[test]
+    fn a_hidden_run_shows_again_with_the_running_marker_when_a_job_starts() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Queued, 9 * 60, 1)],
+            now(),
+        );
+        assert_eq!(
+            shape(&board.rows(now()))[..2],
+            ["Header(Active,0,0,0,0)", "Empty(Active)"]
+        );
+        board.set_jobs(
+            RunId(1),
+            vec![
+                runner_job(1, RunState::Running, "pi5"),
+                job(2, RunState::Queued),
+            ],
+        );
+        let rows = board.rows(now());
+        assert_eq!(shape(&rows)[..2], ["Header(Active,1,0,0,0)", "Run(1)"]);
+        let marker = rows.iter().find_map(|row| match row {
+            Row::Run { state, .. } => Some(*state),
+            _ => None,
+        });
+        assert_eq!(marker, Some(RunState::Running));
+        assert_eq!(
+            active_header(&rows).jobs,
+            JobCounts {
+                queued: 1,
+                running: 1,
+                ..JobCounts::default()
+            }
+        );
+        assert_eq!(active_runners(&rows), ["pi5"]);
+    }
+
+    /// A run that started more than 8 hours ago, and whose last job ended
+    /// recently, shows while its next job waits for a runner.
+    #[test]
+    fn a_run_whose_last_job_ended_recently_still_shows() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Queued, 9 * 60, 1)],
+            now(),
+        );
+        board.set_jobs(
+            RunId(1),
+            vec![
+                Job {
+                    started_at: Some(now() - Span::minutes(20)),
+                    completed_at: Some(now() - Span::minutes(10)),
+                    ..job(2, RunState::Passed)
+                },
+                runner_job(1, RunState::Queued, "pi5"),
+            ],
+        );
+        let rows = board.rows(now());
+        assert_eq!(shape(&rows)[..2], ["Header(Active,1,0,0,0)", "Run(1)"]);
+        assert_eq!(
+            active_header(&rows).jobs,
+            JobCounts {
+                queued: 1,
+                passed: 1,
+                ..JobCounts::default()
+            }
+        );
+    }
+
+    /// A run whose newest job ended more than 8 hours ago hides while its
+    /// next job waits for a runner.
+    #[test]
+    fn a_run_whose_last_job_ended_over_8_hours_ago_hides() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Queued, 10 * 60, 1)],
+            now(),
+        );
+        board.set_jobs(
+            RunId(1),
+            vec![
+                Job {
+                    started_at: Some(now() - Span::minutes(9 * 60 + 10)),
+                    completed_at: Some(now() - Span::minutes(9 * 60)),
+                    ..job(2, RunState::Passed)
+                },
+                runner_job(1, RunState::Queued, "pi5"),
+            ],
+        );
+        assert_eq!(
+            shape(&board.rows(now()))[..2],
+            ["Header(Active,0,0,0,0)", "Empty(Active)"]
+        );
+    }
+
+    #[test]
+    fn replace_changes_only_the_runs_of_its_repository() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Running, 5, 1)],
+            now(),
+        );
+        board.replace(
+            repo("b/y"),
+            vec![run(2, "b/y", RunState::Running, 4, 1)],
+            now(),
+        );
+        assert_eq!(shape(&board.rows(now()))[1..3], ["Run(1)", "Run(2)"]);
+
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(3, "a/x", RunState::Running, 6, 1),
+                run(4, "a/x", RunState::Passed, 9, 8),
+            ],
+            now(),
+        );
+        let rows = board.rows(now());
+        let shown = shape(&rows);
+        assert_eq!(shown[1], "Run(3)");
+        assert_eq!(shown[2], "Run(2)");
+        assert_eq!(shown[3..], ["Header(Recent,1,1,0,0)", "Run(4)"]);
+        assert_eq!(shown.len(), 5);
+    }
+
+    #[test]
+    fn a_failed_repository_keeps_its_last_good_runs_and_lists_its_error() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Running, 5, 1)],
+            now(),
+        );
+        board.fail(repo("b/y"), "HTTP 404".to_owned());
+        board.fail(repo("a/x"), "timed out".to_owned());
+        board.fail(repo("a/w"), "HTTP 500".to_owned());
+
+        assert_eq!(shape(&board.rows(now()))[1], "Run(1)");
+        let errors = board.errors();
+        let listed: Vec<(String, &str)> = errors
+            .iter()
+            .map(|(repo, error)| (repo.to_string(), *error))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("a/w".to_owned(), "HTTP 500"),
+                ("a/x".to_owned(), "timed out"),
+                ("b/y".to_owned(), "HTTP 404"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_repository_is_stale_from_its_failure_until_its_next_good_read() {
+        let t1 = now() - Span::minutes(30);
+        let mut board = board();
+        board.replace(repo("b/y"), Vec::new(), t1);
+        board.fail(repo("b/y"), "HTTP 500".to_owned());
+        board.fail(repo("a/x"), "HTTP 404".to_owned());
+
+        let stale: Vec<(String, Option<DateTime<Utc>>)> = board
+            .stale()
+            .into_iter()
+            .map(|(repo, at)| (repo.to_string(), at))
+            .collect();
+        assert_eq!(
+            stale,
+            [("a/x".to_owned(), None), ("b/y".to_owned(), Some(t1))]
+        );
+
+        board.replace(repo("b/y"), Vec::new(), now());
+        assert_eq!(board.stale().len(), 1);
+        assert_eq!(board.stale()[0].0.to_string(), "a/x");
+
+        board.keep_only(&BTreeSet::from([repo("b/y")]));
+        assert!(board.stale().is_empty());
+    }
+
+    #[test]
+    fn replace_stale_stores_the_runs_and_the_error_and_keeps_the_read_time() {
+        let t1 = now() - Span::minutes(30);
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Running, 5, 1)],
+            t1,
+        );
+        board.replace_stale(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 5, 1),
+                run(2, "a/x", RunState::Running, 4, 1),
+                run(2, "a/x", RunState::Running, 4, 1),
+            ],
+            "GitHub left out run 9".to_owned(),
+        );
+
+        let shown = shape(&board.rows(now()));
+        let run_rows: Vec<&String> = shown.iter().filter(|row| row.starts_with("Run(")).collect();
+        assert_eq!(run_rows, ["Run(1)", "Run(2)"], "{shown:?}");
+        assert_eq!(board.stale(), [(&repo("a/x"), Some(t1))]);
+        assert_eq!(board.errors()[0].1, "GitHub left out run 9");
+
+        board.replace(repo("a/x"), Vec::new(), now());
+        assert!(board.stale().is_empty());
+    }
+
+    #[test]
+    fn the_run_rows_of_a_failed_repository_are_stale() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Running, 5, 1)],
+            now(),
+        );
+        board.replace(
+            repo("b/y"),
+            vec![run(2, "b/y", RunState::Passed, 30, 20)],
+            now(),
+        );
+        board.fail(repo("a/x"), "HTTP 500".to_owned());
+
+        let stale: Vec<(u64, bool)> = board
+            .rows(now())
+            .iter()
+            .filter_map(|row| match row {
+                Row::Run { run, stale, .. } => Some((run.id.0, *stale)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(stale, [(1, true), (2, false)]);
+    }
+
+    #[test]
+    fn a_later_replace_clears_the_error_of_its_repository() {
+        let mut board = board();
+        board.fail(repo("a/x"), "timed out".to_owned());
+        board.fail(repo("b/y"), "HTTP 404".to_owned());
+        board.replace(repo("a/x"), Vec::new(), now());
+        let errors = board.errors();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].0.to_string(), "b/y");
+    }
+
+    #[test]
+    fn a_repository_that_never_had_runs_can_fail_and_shows_no_run() {
+        let mut board = board();
+        board.fail(repo("a/x"), "HTTP 404".to_owned());
+        assert_eq!(
+            shape(&board.rows(now())),
+            [
+                "Header(Active,0,0,0,0)",
+                "Empty(Active)",
+                "Header(Recent,0,0,0,0)",
+                "Empty(Recent)"
+            ]
+        );
+        assert_eq!(board.errors().len(), 1);
+    }
+
+    #[test]
+    fn keep_only_drops_the_runs_and_errors_of_other_repositories() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Running, 5, 1)],
+            now(),
+        );
+        board.replace(
+            repo("b/y"),
+            vec![run(2, "b/y", RunState::Running, 4, 1)],
+            now(),
+        );
+        board.fail(repo("b/y"), "timed out".to_owned());
+        board.fail(repo("c/z"), "HTTP 404".to_owned());
+        board.fail(repo("a/x"), "HTTP 500".to_owned());
+
+        let keep: BTreeSet<RepoName> = [repo("A/X")].into_iter().collect();
+        board.keep_only(&keep);
+
+        assert_eq!(
+            shape(&board.rows(now()))[..3],
+            ["Header(Active,1,0,0,0)", "Run(1)", "Header(Recent,0,0,0,0)"]
+        );
+        let errors = board.errors();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].1, "HTTP 500");
+    }
+
+    #[test]
+    fn the_first_run_is_selected_at_the_start() {
+        let mut with_active = board();
+        with_active.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 5, 1),
+                run(2, "a/x", RunState::Passed, 30, 20),
+            ],
+            now(),
+        );
+        assert_eq!(
+            marked(&with_active.rows(now())),
+            [
+                "Header(Active,1,0,0,0)",
+                "Run(1)*",
+                "Header(Recent,1,1,0,0)",
+                "Run(2)"
+            ]
+        );
+
+        let mut only_recent = board();
+        only_recent.replace(
+            repo("a/x"),
+            vec![
+                run(3, "a/x", RunState::Passed, 30, 10),
+                run(2, "a/x", RunState::Failed, 30, 20),
+            ],
+            now(),
+        );
+        assert_eq!(
+            marked(&only_recent.rows(now()))[2..],
+            ["Header(Recent,2,1,1,0)", "Run(3)*", "Run(2)"]
+        );
+    }
+
+    #[test]
+    fn an_empty_board_has_no_selection() {
+        let mut board = board();
+        let rows = board.rows(now());
+        assert!(marked(&rows).iter().all(|row| !row.ends_with('*')));
+        assert_eq!(board.selected_url(now()), None);
+    }
+
+    /// The text of the one selected row, or `None` when no row is selected.
+    fn selected_text(board: &mut Board) -> Option<String> {
+        let rows = board.rows(now());
+        let found: Vec<String> = marked(&rows)
+            .into_iter()
+            .filter(|row| row.ends_with('*'))
+            .collect();
+        assert!(found.len() <= 1, "more than one selected row: {found:?}");
+        found.into_iter().next()
+    }
+
+    fn four_runs_in_two_sections() -> Board {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Queued, 20, 1),
+                run(3, "a/x", RunState::Passed, 60, 10),
+                run(4, "a/x", RunState::Failed, 60, 20),
+            ],
+            now(),
+        );
+        board
+    }
+
+    #[test]
+    fn select_next_moves_through_one_list_and_stops_at_the_end() {
+        let mut board = four_runs_in_two_sections();
+        let mut seen = Vec::new();
+        for _ in 0..5 {
+            seen.push(selected_text(&mut board).expect("a selection"));
+            board.select_next(now());
+        }
+        assert_eq!(
+            seen,
+            ["Run(1)*", "Run(2)*", "Run(3)*", "Run(4)*", "Run(4)*"]
+        );
+    }
+
+    #[test]
+    fn a_repeated_run_id_shows_one_row() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(5, "a/x", RunState::Running, 10, 1),
+                run(5, "a/x", RunState::Running, 10, 1),
+                run(4, "a/x", RunState::Running, 5, 1),
+            ],
+            now(),
+        );
+        let rows = board.rows(now());
+        let shown = shape(&rows);
+        assert_eq!(shown.iter().filter(|row| *row == "Run(5)").count(), 1);
+        assert_eq!(shown[0], "Header(Active,2,0,0,0)");
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            seen.push(selected_text(&mut board).expect("a selection"));
+            board.select_next(now());
+        }
+        assert_eq!(seen, ["Run(5)*", "Run(4)*", "Run(4)*"]);
+    }
+
+    #[test]
+    fn select_previous_moves_back_through_one_list_and_stops_at_the_start() {
+        let mut board = four_runs_in_two_sections();
+        for _ in 0..3 {
+            board.select_next(now());
+        }
+        let mut seen = Vec::new();
+        for _ in 0..5 {
+            seen.push(selected_text(&mut board).expect("a selection"));
+            board.select_previous(now());
+        }
+        assert_eq!(
+            seen,
+            ["Run(4)*", "Run(3)*", "Run(2)*", "Run(1)*", "Run(1)*"]
+        );
+    }
+
+    #[test]
+    fn the_selection_moves_on_an_empty_board_without_a_selection() {
+        let mut board = board();
+        board.select_next(now());
+        board.select_previous(now());
+        assert_eq!(selected_text(&mut board), None);
+    }
+
+    #[test]
+    fn selected_url_is_the_url_of_the_selected_run() {
+        let mut board = four_runs_in_two_sections();
+        assert_eq!(
+            board.selected_url(now()).as_deref(),
+            Some("https://example.test/a/x/runs/1")
+        );
+        board.select_next(now());
+        board.select_next(now());
+        assert_eq!(
+            board.selected_url(now()).as_deref(),
+            Some("https://example.test/a/x/runs/3")
+        );
+    }
+
+    #[test]
+    fn the_selection_stays_on_its_run_when_runs_arrive_above_it() {
+        let mut board = four_runs_in_two_sections();
+        board.select_next(now());
+        board.select_next(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(3)*"));
+
+        board.replace(
+            repo("b/y"),
+            vec![
+                run(5, "b/y", RunState::Running, 90, 1),
+                run(6, "b/y", RunState::Passed, 60, 2),
+            ],
+            now(),
+        );
+        let rows = board.rows(now());
+        assert_eq!(
+            marked(&rows),
+            [
+                "Header(Active,3,0,0,0)",
+                "Run(5)",
+                "Run(1)",
+                "Run(2)",
+                "Header(Recent,3,2,1,0)",
+                "Run(6)",
+                "Run(3)*",
+                "Run(4)",
+            ]
+        );
+    }
+
+    fn select_third(board: &mut Board) {
+        board.select_next(now());
+        board.select_next(now());
+        assert_eq!(selected_text(board).as_deref(), Some("Run(3)*"));
+    }
+
+    #[test]
+    fn when_the_selected_run_is_dropped_the_run_at_its_position_is_selected() {
+        let mut board = four_runs_in_two_sections();
+        select_third(&mut board);
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Queued, 20, 1),
+                run(4, "a/x", RunState::Failed, 60, 20),
+            ],
+            now(),
+        );
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(4)*"));
+    }
+
+    #[test]
+    fn when_the_selected_run_was_the_last_the_new_last_run_is_selected() {
+        let mut board = four_runs_in_two_sections();
+        for _ in 0..3 {
+            board.select_next(now());
+        }
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(4)*"));
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Queued, 20, 1),
+                run(3, "a/x", RunState::Passed, 60, 10),
+            ],
+            now(),
+        );
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(3)*"));
+    }
+
+    #[test]
+    fn when_the_selected_run_leaves_the_window_the_nearest_run_is_selected() {
+        // The runs of `four_runs_in_two_sections`, but run 2 runs. The clock
+        // below moves past `STUCK_WAIT`, and a run that waits then hides.
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Running, 20, 1),
+                run(3, "a/x", RunState::Passed, 60, 10),
+                run(4, "a/x", RunState::Failed, 60, 20),
+            ],
+            now(),
+        );
+        select_third(&mut board);
+        let later = now() + Span::hours(8) + Span::minutes(15);
+        let rows = board.rows(later);
+        assert_eq!(
+            marked(&rows),
+            [
+                "Header(Active,2,0,0,0)",
+                "Run(1)",
+                "Run(2)*",
+                "Header(Recent,0,0,0,0)",
+                "Empty(Recent)",
+            ]
+        );
+    }
+
+    #[test]
+    fn with_no_run_left_nothing_is_selected_and_the_first_run_is_selected_again_later() {
+        let mut board = four_runs_in_two_sections();
+        select_third(&mut board);
+        board.replace(repo("a/x"), Vec::new(), now());
+        assert_eq!(selected_text(&mut board), None);
+        assert_eq!(board.selected_url(now()), None);
+
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(7, "a/x", RunState::Running, 30, 1),
+                run(8, "a/x", RunState::Passed, 60, 10),
+            ],
+            now(),
+        );
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(7)*"));
+    }
+
+    #[test]
+    fn a_tall_view_shows_all_rows_from_the_first() {
+        let mut board = four_runs_in_two_sections();
+        let all = marked(&board.rows(now()));
+        let view = board.view(now(), 100);
+        assert_eq!(view.first, 0);
+        assert_eq!(marked(&view.rows), all);
+        assert_eq!(all.len(), 6);
+    }
+
+    #[test]
+    fn a_view_of_height_zero_has_no_rows() {
+        let mut board = four_runs_in_two_sections();
+        let view = board.view(now(), 0);
+        assert!(view.rows.is_empty());
+        assert_eq!(view.first, 0);
+        let mut empty = Board::new(Duration::from_secs(HOUR));
+        assert!(empty.view(now(), 0).rows.is_empty());
+    }
+
+    #[test]
+    fn a_short_view_shows_the_first_rows() {
+        let mut board = four_runs_in_two_sections();
+        let view = board.view(now(), 3);
+        assert_eq!(view.first, 0);
+        assert_eq!(
+            marked(&view.rows),
+            ["Header(Active,2,0,0,0)", "Run(1)*", "Run(2)"]
+        );
+    }
+
+    /// A board with `active` running runs (ids 1.., oldest first) and `recent`
+    /// passed runs (ids 101.., newest first).
+    fn long_board(active: u64, recent: u64) -> Board {
+        let mut board = board();
+        let mut runs = Vec::new();
+        for id in 1..=active {
+            let started = 200 - i64::try_from(id).expect("a small id");
+            runs.push(run(id, "a/x", RunState::Running, started, 1));
+        }
+        for id in 101..101 + recent {
+            let finished = i64::try_from(id).expect("a small id") - 100;
+            runs.push(run(id, "a/x", RunState::Passed, 300, finished));
+        }
+        board.replace(repo("a/x"), runs, now());
+        board
+    }
+
+    /// Moves the selection with `step` and reads the scroll offset after each
+    /// move. The selected row must be inside the view each time.
+    fn offsets_while(
+        board: &mut Board,
+        height: usize,
+        moves: usize,
+        step: fn(&mut Board, DateTime<Utc>),
+    ) -> Vec<usize> {
+        let mut offsets = Vec::new();
+        for _ in 0..moves {
+            step(board, now());
+            let view = board.view(now(), height);
+            assert!(
+                marked(&view.rows).iter().any(|row| row.ends_with('*')),
+                "the selected row is outside the view at first = {}",
+                view.first
+            );
+            offsets.push(view.first);
+        }
+        offsets
+    }
+
+    #[test]
+    fn moving_the_selection_down_scrolls_by_the_least_amount() {
+        let mut board = long_board(10, 0);
+        assert_eq!(board.view(now(), 4).first, 0);
+        let offsets = offsets_while(&mut board, 4, 6, Board::select_next);
+        assert_eq!(offsets, [0, 0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn moving_the_selection_up_scrolls_by_the_least_amount() {
+        let mut board = long_board(10, 0);
+        let down = offsets_while(&mut board, 4, 5, Board::select_next);
+        assert_eq!(down.last(), Some(&3));
+        let up = offsets_while(&mut board, 4, 4, Board::select_previous);
+        assert_eq!(up, [3, 3, 3, 2]);
+    }
+
+    #[test]
+    fn the_header_above_the_selected_row_stays_in_view() {
+        let mut board = long_board(6, 3);
+        let down = offsets_while(&mut board, 3, 8, Board::select_next);
+        assert_eq!(down, [0, 1, 2, 3, 4, 6, 7, 8]);
+        let up = offsets_while(&mut board, 3, 3, Board::select_previous);
+        assert_eq!(up, [8, 7, 6]);
+    }
+
+    #[test]
+    fn a_view_of_one_row_cannot_keep_the_header_too() {
+        let mut board = long_board(6, 3);
+        for _ in 0..6 {
+            board.select_next(now());
+        }
+        let view = board.view(now(), 1);
+        assert_eq!(view.first, 8);
+        assert_eq!(marked(&view.rows), ["Run(101)*"]);
+    }
+
+    #[test]
+    fn a_taller_view_shows_more_rows_above_instead_of_blank_rows_below() {
+        let mut board = long_board(10, 0);
+        for _ in 0..9 {
+            board.select_next(now());
+        }
+        assert_eq!(board.view(now(), 4).first, 7);
+
+        let taller = board.view(now(), 8);
+        assert_eq!(taller.first, 5);
+        assert_eq!(taller.rows.len(), 8);
+        assert!(marked(&taller.rows).contains(&"Run(10)*".to_owned()));
+
+        let everything = board.view(now(), 100);
+        assert_eq!(everything.first, 0);
+        assert_eq!(everything.rows.len(), 13);
+    }
+
+    #[test]
+    fn a_board_that_shrinks_pulls_the_offset_back() {
+        let mut board = long_board(10, 0);
+        for _ in 0..9 {
+            board.select_next(now());
+        }
+        assert_eq!(board.view(now(), 4).first, 7);
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Running, 5, 1)],
+            now(),
+        );
+        let view = board.view(now(), 4);
+        assert_eq!(view.first, 0);
+        assert_eq!(view.rows.len(), 4);
+    }
+
+    /// A board with run 1 (running) and run 2 (passed) in repository `a/x`.
+    fn two_run_board() -> Board {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Passed, 60, 10),
+            ],
+            now(),
+        );
+        board
+    }
+
+    /// Finds the header of the active section.
+    fn active_header<'r, 'a>(rows: &'r [Row<'a>]) -> &'r Header<'a> {
+        rows.iter()
+            .find_map(|row| match row {
+                Row::Header(header) if header.section == Section::Active => Some(header),
+                _ => None,
+            })
+            .expect("an active header")
+    }
+
+    /// A board with two active runs in `a/x`. Run 1 is expanded and run 2 is
+    /// collapsed. Both hold the jobs in `first` and `second`.
+    fn two_active_runs(first: Vec<Job>, second: Vec<Job>) -> Board {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Queued, 20, 1),
+            ],
+            now(),
+        );
+        board.set_jobs(RunId(1), first);
+        board.set_jobs(RunId(2), second);
+        board.expand(now());
+        board
+    }
+
+    #[test]
+    fn the_running_header_counts_the_jobs_of_each_active_run() {
+        let mut board = two_active_runs(
+            vec![
+                job(1, RunState::Queued),
+                job(2, RunState::Running),
+                job(3, RunState::Passed),
+                job(4, RunState::Passed),
+            ],
+            vec![
+                job(5, RunState::Queued),
+                job(6, RunState::Passed),
+                job(7, RunState::Failed),
+                job(8, RunState::Skipped),
+                job(9, RunState::Cancelled),
+            ],
+        );
+        let expected = JobCounts {
+            queued: 2,
+            running: 1,
+            passed: 3,
+            failed: 1,
+            skipped: 1,
+            cancelled: 1,
+        };
+        assert_eq!(active_header(&board.rows(now())).jobs, expected);
+        // Only the header and the selected run are in view. The job rows of
+        // run 1 and the whole of run 2 are below the bottom of the screen.
+        let view = board.view(now(), 2);
+        assert_eq!(view.rows.len(), 2);
+        assert_eq!(active_header(&view.rows).jobs, expected);
+    }
+
+    #[test]
+    fn the_cancelled_jobs_have_a_count_and_a_job_in_the_state_other_is_in_no_count() {
+        let mut board = two_active_runs(
+            vec![job(1, RunState::Cancelled), job(2, RunState::Other)],
+            vec![job(3, RunState::Passed), job(4, RunState::Cancelled)],
+        );
+        let counts = active_header(&board.rows(now())).jobs;
+        assert_eq!(
+            counts,
+            JobCounts {
+                passed: 1,
+                cancelled: 2,
+                ..JobCounts::default()
+            }
+        );
+    }
+
+    #[test]
+    fn a_run_with_no_answer_adds_nothing_and_a_failed_fetch_adds_its_last_good_jobs() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Running, 20, 1),
+                run(3, "a/x", RunState::Running, 10, 1),
+            ],
+            now(),
+        );
+        // Run 1 has no answer. Run 2 has an answer and then a failed fetch.
+        board.set_jobs(
+            RunId(2),
+            vec![job(1, RunState::Running), job(2, RunState::Failed)],
+        );
+        board.fail_jobs(RunId(2), "boom".to_owned());
+        // Run 3 has a failed fetch and no good jobs.
+        board.fail_jobs(RunId(3), "boom".to_owned());
+        assert_eq!(
+            active_header(&board.rows(now())).jobs,
+            JobCounts {
+                running: 1,
+                failed: 1,
+                ..JobCounts::default()
+            }
+        );
+    }
+
+    #[test]
+    fn the_jobs_of_a_finished_run_are_in_no_count() {
+        let mut board = two_run_board();
+        board.set_jobs(RunId(1), vec![job(1, RunState::Running)]);
+        board.set_jobs(
+            RunId(2),
+            vec![job(2, RunState::Passed), job(3, RunState::Failed)],
+        );
+        let rows = board.rows(now());
+        assert_eq!(
+            active_header(&rows).jobs,
+            JobCounts {
+                running: 1,
+                ..JobCounts::default()
+            }
+        );
+        let recent = rows
+            .iter()
+            .find_map(|row| match row {
+                Row::Header(header) if header.section == Section::Recent => Some(header),
+                _ => None,
+            })
+            .expect("a recent header");
+        assert_eq!(recent.jobs, JobCounts::default());
+    }
+
+    /// Builds a job in `state` that has the runner `runner`.
+    fn runner_job(id: u64, state: RunState, runner: &str) -> Job {
+        Job {
+            runner: RunnerName::new(runner.to_owned()),
+            ..job(id, state)
+        }
+    }
+
+    /// The runner names in the header of the active section, as text.
+    fn active_runners<'r>(rows: &'r [Row<'_>]) -> Vec<&'r str> {
+        active_header(rows)
+            .runners
+            .iter()
+            .map(|runner| runner.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn the_runner_names_come_only_from_the_jobs_that_wait_or_run() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Queued, 20, 1),
+                run(3, "a/x", RunState::Passed, 60, 10),
+            ],
+            now(),
+        );
+        // Run 1 is expanded. Run 2 is collapsed, and its names still show.
+        board.set_jobs(
+            RunId(1),
+            vec![
+                runner_job(1, RunState::Queued, "m1"),
+                runner_job(2, RunState::Running, "pi5"),
+                runner_job(3, RunState::Passed, "done-passed"),
+                runner_job(4, RunState::Failed, "done-failed"),
+                runner_job(5, RunState::Skipped, "done-skipped"),
+                runner_job(6, RunState::Cancelled, "done-cancelled"),
+                runner_job(7, RunState::Other, "done-other"),
+                job(8, RunState::Queued),
+            ],
+        );
+        board.set_jobs(
+            RunId(2),
+            vec![
+                runner_job(9, RunState::Running, "pi5"),
+                runner_job(10, RunState::Queued, "zero"),
+                runner_job(11, RunState::Passed, "done-late"),
+            ],
+        );
+        // A finished run adds no name, also when its job is in the state Running.
+        board.set_jobs(RunId(3), vec![runner_job(12, RunState::Running, "ghost")]);
+        board.expand(now());
+        let rows = board.rows(now());
+        assert_eq!(active_runners(&rows), ["m1", "pi5", "zero"]);
+        let recent = rows
+            .iter()
+            .find_map(|row| match row {
+                Row::Header(header) if header.section == Section::Recent => Some(header),
+                _ => None,
+            })
+            .expect("a recent header");
+        assert!(recent.runners.is_empty());
+    }
+
+    #[test]
+    fn the_runner_names_sort_by_width_then_by_name_with_no_case_then_by_exact_text() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Queued, 20, 1),
+            ],
+            now(),
+        );
+        let names = |first_id: u64, names: &[&str]| -> Vec<Job> {
+            names
+                .iter()
+                .zip(first_id..)
+                .map(|(name, id)| {
+                    let state = if id % 2 == 0 {
+                        RunState::Running
+                    } else {
+                        RunState::Queued
+                    };
+                    runner_job(id, state, name)
+                })
+                .collect()
+        };
+        // Widths in columns: 19, 8, 4, 1, 19, 2, 4, 3, 10, 4, 1, 4.
+        board.set_jobs(
+            RunId(1),
+            names(
+                1,
+                &[
+                    "GitHub Actions 1002",
+                    "ランナー",
+                    "mini",
+                    "b",
+                    "GitHub Actions 1001",
+                    "🎉",
+                ],
+            ),
+        );
+        board.set_jobs(
+            RunId(2),
+            names(20, &["Mini", "pi5", "abcdefghij", "café", "A", "mini"]),
+        );
+        assert_eq!(
+            active_runners(&board.rows(now())),
+            [
+                "A",
+                "b",
+                "🎉",
+                "pi5",
+                "café",
+                "Mini",
+                "mini",
+                "ランナー",
+                "abcdefghij",
+                "GitHub Actions 1001",
+                "GitHub Actions 1002",
+            ]
+        );
+    }
+
+    #[test]
+    fn expanding_the_selected_run_shows_a_loading_row_below_it() {
+        let mut board = two_run_board();
+        board.expand(now());
+        assert_eq!(
+            marked(&board.rows(now())),
+            [
+                "Header(Active,1,0,0,0)",
+                "Run(1)*",
+                "JobsLoading",
+                "Header(Recent,1,1,0,0)",
+                "Run(2)",
+            ]
+        );
+    }
+
+    #[test]
+    fn set_jobs_shows_one_row_per_job_and_marks_the_last() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(
+            RunId(1),
+            vec![
+                job(11, RunState::Passed),
+                job(12, RunState::Running),
+                job(13, RunState::Queued),
+            ],
+        );
+        assert_eq!(
+            shape(&board.rows(now()))[1..6],
+            [
+                "Run(1)",
+                "Job(11)",
+                "Job(12)",
+                "LastJob(13)",
+                "Header(Recent,1,1,0,0)"
+            ]
+        );
+    }
+
+    /// GitHub gives the jobs in the order of their IDs, which has no meaning
+    /// that a person can see. The board sorts them by name, with no difference
+    /// between capital and small letters, and then by ID.
+    #[test]
+    fn set_jobs_sorts_the_jobs_by_name_and_then_by_id() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(
+            RunId(1),
+            vec![
+                named_job(21, "test (stable)"),
+                named_job(22, "build"),
+                named_job(23, "Lint"),
+                named_job(24, "Build"),
+                named_job(25, "deploy"),
+                named_job(26, "test (beta)"),
+            ],
+        );
+        assert_eq!(
+            shape(&board.rows(now()))[2..8],
+            [
+                "Job(22)",
+                "Job(24)",
+                "Job(25)",
+                "Job(23)",
+                "Job(26)",
+                "LastJob(21)"
+            ]
+        );
+    }
+
+    /// A re-run gives a job a new ID. The job keeps its row, because the
+    /// order is by name.
+    #[test]
+    fn a_re_run_job_with_a_new_id_keeps_its_row() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(
+            RunId(1),
+            vec![
+                named_job(31, "build"),
+                named_job(32, "lint"),
+                named_job(33, "test"),
+            ],
+        );
+        board.set_jobs(
+            RunId(1),
+            vec![
+                named_job(31, "build"),
+                named_job(33, "test"),
+                named_job(39, "lint"),
+            ],
+        );
+        assert_eq!(
+            shape(&board.rows(now()))[2..5],
+            ["Job(31)", "Job(39)", "LastJob(33)"]
+        );
+    }
+
+    #[test]
+    fn an_answer_with_no_job_shows_a_no_jobs_row() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(RunId(1), Vec::new());
+        assert_eq!(shape(&board.rows(now()))[1..3], ["Run(1)", "NoJobs"]);
+    }
+
+    #[test]
+    fn collapse_removes_the_job_rows_and_keeps_the_jobs() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(RunId(1), vec![job(11, RunState::Passed)]);
+        board.collapse(now());
+        assert_eq!(
+            shape(&board.rows(now())),
+            [
+                "Header(Active,1,0,0,0)",
+                "Run(1)",
+                "Header(Recent,1,1,0,0)",
+                "Run(2)"
+            ]
+        );
+        assert!(board.expanded(now()).is_empty());
+        board.expand(now());
+        assert_eq!(shape(&board.rows(now()))[2], "LastJob(11)");
+    }
+
+    /// The state that the row of run `id` shows, or `None` when no row holds it.
+    fn run_state(rows: &[Row<'_>], id: u64) -> Option<RunState> {
+        rows.iter().find_map(|row| match row {
+            Row::Run { run, state, .. } if run.id == RunId(id) => Some(*state),
+            _ => None,
+        })
+    }
+
+    /// The job sum that the row of run `id` shows. It panics when no row
+    /// holds the run.
+    fn run_job_sum(rows: &[Row<'_>], id: u64) -> Option<Duration> {
+        rows.iter()
+            .find_map(|row| match row {
+                Row::Run { run, job_sum, .. } if run.id == RunId(id) => Some(*job_sum),
+                _ => None,
+            })
+            .expect("a row for the run")
+    }
+
+    /// Builds a job that ran for `seconds` seconds and ended before `now()`.
+    fn finished_job(id: u64, seconds: i64) -> Job {
+        let ended = now() - Span::minutes(5);
+        Job {
+            started_at: Some(ended - Span::seconds(seconds)),
+            completed_at: Some(ended),
+            ..job(id, RunState::Passed)
+        }
+    }
+
+    #[test]
+    fn the_job_sum_of_a_run_is_the_sum_of_the_runner_times_of_its_jobs() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(41_966_278_012, "a/x", RunState::Passed, 60, 10)],
+            now(),
+        );
+        board.set_jobs(
+            RunId(41_966_278_012),
+            vec![finished_job(1, 211), finished_job(2, 897)],
+        );
+        assert_eq!(
+            run_job_sum(&board.rows(now()), 41_966_278_012),
+            Some(Duration::from_secs(1108))
+        );
+    }
+
+    #[test]
+    fn the_job_sum_of_an_active_run_increases_from_one_frame_to_the_next() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Running, 30, 1)],
+            now(),
+        );
+        board.set_jobs(
+            RunId(1),
+            vec![Job {
+                started_at: Some(now() - Span::minutes(10)),
+                ..job(11, RunState::Running)
+            }],
+        );
+        assert_eq!(
+            run_job_sum(&board.rows(now()), 1),
+            Some(Duration::from_secs(600))
+        );
+        assert_eq!(
+            run_job_sum(&board.rows(now() + Span::seconds(1)), 1),
+            Some(Duration::from_secs(601))
+        );
+    }
+
+    #[test]
+    fn a_run_with_no_good_job_has_no_job_sum() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Running, 20, 1),
+                run(3, "a/x", RunState::Running, 10, 1),
+            ],
+            now(),
+        );
+        // Run 1 has no answer. Run 2 has a failed first fetch.
+        board.fail_jobs(RunId(2), "boom".to_owned());
+        // Run 3 has an answer with no job.
+        board.set_jobs(RunId(3), vec![]);
+        let rows = board.rows(now());
+        assert_eq!(run_job_sum(&rows, 1), None);
+        assert_eq!(run_job_sum(&rows, 2), None);
+        assert_eq!(run_job_sum(&rows, 3), None);
+    }
+
+    #[test]
+    fn a_failed_fetch_keeps_the_job_sum_of_the_last_good_jobs() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Passed, 60, 10)],
+            now(),
+        );
+        board.set_jobs(RunId(1), vec![finished_job(1, 211), finished_job(2, 897)]);
+        board.fail_jobs(RunId(1), "boom".to_owned());
+        assert_eq!(
+            run_job_sum(&board.rows(now()), 1),
+            Some(Duration::from_secs(1108))
+        );
+    }
+
+    /// The cost that the row of run `id` shows. It panics when no row holds
+    /// the run.
+    fn run_cost_of(rows: &[Row<'_>], id: u64) -> Option<RunCost> {
+        rows.iter()
+            .find_map(|row| match row {
+                Row::Run { run, cost, .. } if run.id == RunId(id) => Some(*cost),
+                _ => None,
+            })
+            .expect("a row for the run")
+    }
+
+    /// The cost of each job row, in the order of the rows.
+    fn job_costs(rows: &[Row<'_>]) -> Vec<JobCost> {
+        rows.iter()
+            .filter_map(|row| match row {
+                Row::Job { cost, .. } => Some(*cost),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Builds a finished job that ran for `seconds` seconds on a runner with
+    /// the label `label`.
+    fn labelled_job(id: u64, label: &str, seconds: i64) -> Job {
+        Job {
+            labels: vec![label.to_owned()],
+            runner: RunnerName::new("GitHub Actions 1".to_owned()),
+            ..finished_job(id, seconds)
+        }
+    }
+
+    /// Builds a price in thousandths of a dollar.
+    fn mills(count: u32) -> Usd {
+        Usd::from_mills(count)
+    }
+
+    #[test]
+    fn the_cost_of_a_run_is_the_sum_of_the_costs_of_its_jobs() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(41_966_278_012, "a/x", RunState::Passed, 60, 10)],
+            now(),
+        );
+        board.set_jobs(
+            RunId(41_966_278_012),
+            vec![
+                labelled_job(1, "ubuntu-latest", 211),
+                labelled_job(2, "windows-latest", 897),
+            ],
+        );
+        assert_eq!(
+            run_cost_of(&board.rows(now()), 41_966_278_012),
+            Some(RunCost {
+                amount: mills(174),
+                partial: false
+            })
+        );
+    }
+
+    #[test]
+    fn a_run_with_a_job_of_an_unknown_label_has_a_partial_cost() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Passed, 60, 10)],
+            now(),
+        );
+        board.set_jobs(
+            RunId(1),
+            vec![
+                labelled_job(1, "ubuntu-latest", 211),
+                labelled_job(2, "mystery-runner", 897),
+            ],
+        );
+        assert_eq!(
+            run_cost_of(&board.rows(now()), 1),
+            Some(RunCost {
+                amount: mills(24),
+                partial: true
+            })
+        );
+    }
+
+    #[test]
+    fn a_run_with_no_good_job_has_no_cost() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Running, 20, 1),
+                run(3, "a/x", RunState::Running, 10, 1),
+            ],
+            now(),
+        );
+        // Run 1 has no answer. Run 2 has a failed first fetch.
+        board.fail_jobs(RunId(2), "boom".to_owned());
+        // Run 3 has an answer with no job.
+        board.set_jobs(RunId(3), vec![]);
+        let rows = board.rows(now());
+        assert_eq!(run_cost_of(&rows, 1), None);
+        assert_eq!(run_cost_of(&rows, 2), None);
+        assert_eq!(run_cost_of(&rows, 3), None);
+    }
+
+    #[test]
+    fn a_failed_fetch_keeps_the_cost_of_the_last_good_jobs() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Passed, 60, 10)],
+            now(),
+        );
+        board.set_jobs(RunId(1), vec![labelled_job(1, "ubuntu-latest", 211)]);
+        board.fail_jobs(RunId(1), "boom".to_owned());
+        assert_eq!(
+            run_cost_of(&board.rows(now()), 1),
+            Some(RunCost {
+                amount: mills(24),
+                partial: false
+            })
+        );
+    }
+
+    #[test]
+    fn the_job_rows_of_an_expanded_run_carry_the_cost_of_each_job() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Passed, 60, 10)],
+            now(),
+        );
+        board.expand(now());
+        board.set_jobs(
+            RunId(1),
+            vec![
+                labelled_job(1, "ubuntu-latest", 211),
+                labelled_job(2, "mystery-runner", 897),
+            ],
+        );
+        assert_eq!(
+            job_costs(&board.rows(now())),
+            [JobCost::Known(mills(24)), JobCost::Unknown]
+        );
+    }
+
+    #[test]
+    fn the_job_rows_after_a_failed_fetch_carry_the_cost_of_each_job() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Passed, 60, 10)],
+            now(),
+        );
+        board.expand(now());
+        board.set_jobs(RunId(1), vec![labelled_job(1, "ubuntu-latest", 211)]);
+        board.fail_jobs(RunId(1), "boom".to_owned());
+        assert_eq!(job_costs(&board.rows(now())), [JobCost::Known(mills(24))]);
+    }
+
+    #[test]
+    fn a_job_of_a_public_run_on_a_standard_runner_costs_nothing() {
+        let mut board = board();
+        let public = Run {
+            visibility: crate::run::Visibility::Public,
+            ..run(1, "a/x", RunState::Passed, 60, 10)
+        };
+        board.replace(repo("a/x"), vec![public], now());
+        board.expand(now());
+        board.set_jobs(RunId(1), vec![labelled_job(1, "ubuntu-latest", 211)]);
+        let rows = board.rows(now());
+        assert_eq!(job_costs(&rows), [JobCost::Known(Usd::ZERO)]);
+        assert_eq!(
+            run_cost_of(&rows, 1),
+            Some(RunCost {
+                amount: Usd::ZERO,
+                partial: false
+            })
+        );
+    }
+
+    #[test]
+    fn the_cost_of_an_active_run_increases_at_the_start_of_the_next_minute() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Running, 30, 1)],
+            now(),
+        );
+        board.set_jobs(
+            RunId(1),
+            vec![Job {
+                labels: vec!["ubuntu-latest".to_owned()],
+                runner: RunnerName::new("GitHub Actions 1".to_owned()),
+                started_at: Some(now()),
+                ..job(11, RunState::Running)
+            }],
+        );
+        let mut amount_at = |seconds: i64| {
+            run_cost_of(&board.rows(now() + Span::seconds(seconds)), 1).map(|cost| cost.amount)
+        };
+        assert_eq!(amount_at(60), Some(mills(6)));
+        assert_eq!(amount_at(61), Some(mills(12)));
+    }
+
+    /// Builds a book that gives `owner` the price `price` for the Linux SKU.
+    fn linux_book(owner: &str, price: Usd) -> PriceBook {
+        let mut prices = Prices::default();
+        prices.set(Sku::Linux, price);
+        let mut book = PriceBook::default();
+        book.insert(OwnerName::parse(owner).expect("a valid owner"), prices);
+        book
+    }
+
+    /// Builds a board with an expanded private run of `a/x` and one
+    /// `ubuntu-latest` job of 211 seconds (4 billed minutes).
+    fn linux_board() -> Board {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Passed, 60, 10)],
+            now(),
+        );
+        board.expand(now());
+        board.set_jobs(RunId(1), vec![labelled_job(1, "ubuntu-latest", 211)]);
+        board
+    }
+
+    #[test]
+    fn a_billing_price_of_the_owner_wins_over_the_table() {
+        let mut board = linux_board();
+        board.set_prices(linux_book("a", mills(8)));
+        let rows = board.rows(now());
+        assert_eq!(job_costs(&rows), [JobCost::Known(mills(32))]);
+        assert_eq!(
+            run_cost_of(&rows, 1),
+            Some(RunCost {
+                amount: mills(32),
+                partial: false
+            })
+        );
+    }
+
+    #[test]
+    fn a_book_for_another_owner_leaves_the_table_price() {
+        let mut board = linux_board();
+        board.set_prices(linux_book("b", mills(8)));
+        let rows = board.rows(now());
+        assert_eq!(job_costs(&rows), [JobCost::Known(mills(24))]);
+        assert_eq!(
+            run_cost_of(&rows, 1),
+            Some(RunCost {
+                amount: mills(24),
+                partial: false
+            })
+        );
+    }
+
+    #[test]
+    fn a_new_book_replaces_the_whole_old_book() {
+        let mut board = linux_board();
+        board.set_prices(linux_book("a", mills(8)));
+        board.set_prices(PriceBook::default());
+        assert_eq!(job_costs(&board.rows(now())), [JobCost::Known(mills(24))]);
+    }
+
+    #[test]
+    fn a_collapsed_run_keeps_the_running_marker_of_its_jobs() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Queued, 30, 1)],
+            now(),
+        );
+        board.expand(now());
+        board.set_jobs(
+            RunId(1),
+            vec![job(11, RunState::Running), job(12, RunState::Queued)],
+        );
+        board.collapse(now());
+        let rows = board.rows(now());
+        assert_eq!(
+            shape(&rows),
+            [
+                "Header(Active,1,0,0,0)",
+                "Run(1)",
+                "Header(Recent,0,0,0,0)",
+                "Empty(Recent)"
+            ]
+        );
+        assert_eq!(run_state(&rows, 1), Some(RunState::Running));
+    }
+
+    #[test]
+    fn a_run_that_never_was_expanded_shows_the_running_marker_of_its_jobs() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Queued, 30, 1)],
+            now(),
+        );
+        board.set_jobs(RunId(1), vec![job(11, RunState::Running)]);
+        let rows = board.rows(now());
+        assert_eq!(
+            shape(&rows),
+            [
+                "Header(Active,1,0,0,0)",
+                "Run(1)",
+                "Header(Recent,0,0,0,0)",
+                "Empty(Recent)"
+            ]
+        );
+        assert_eq!(run_state(&rows, 1), Some(RunState::Running));
+    }
+
+    #[test]
+    fn a_run_that_leaves_the_board_loses_its_job_states() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Queued, 30, 1)],
+            now(),
+        );
+        board.set_jobs(RunId(1), vec![job(11, RunState::Running)]);
+        board.replace(repo("a/x"), Vec::new(), now());
+        board.rows(now());
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Queued, 30, 1)],
+            now(),
+        );
+        let rows = board.rows(now());
+        assert_eq!(run_state(&rows, 1), Some(RunState::Queued));
+    }
+
+    #[test]
+    fn expanding_a_run_twice_keeps_its_jobs() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(RunId(1), vec![job(11, RunState::Passed)]);
+        board.expand(now());
+        assert_eq!(shape(&board.rows(now()))[1..3], ["Run(1)", "LastJob(11)"]);
+    }
+
+    #[test]
+    fn collapse_of_a_run_that_is_not_expanded_changes_nothing() {
+        let mut board = two_run_board();
+        let before = shape(&board.rows(now()));
+        board.collapse(now());
+        assert_eq!(shape(&board.rows(now())), before);
+        assert!(board.expanded(now()).is_empty());
+    }
+
+    #[test]
+    fn expand_and_collapse_on_an_empty_board_do_nothing() {
+        let mut board = board();
+        board.expand(now());
+        board.collapse(now());
+        assert!(board.expanded(now()).is_empty());
+        assert_eq!(shape(&board.rows(now())).len(), 4);
+    }
+
+    #[test]
+    fn the_answers_for_a_collapsed_run_show_after_an_expand() {
+        let mut board = two_run_board();
+        board.set_jobs(RunId(1), vec![job(11, RunState::Passed)]);
+        board.fail_jobs(RunId(1), "HTTP 500".to_owned());
+        board.set_jobs(RunId(99), vec![job(12, RunState::Passed)]);
+        assert_eq!(shape(&board.rows(now())).len(), 4);
+        board.expand(now());
+        assert_eq!(
+            shape(&board.rows(now()))[1..4],
+            ["Run(1)", "Job(11)", "JobsError(HTTP 500)"]
+        );
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(99, "a/x", RunState::Running, 20, 1),
+                run(2, "a/x", RunState::Passed, 60, 10),
+            ],
+            now(),
+        );
+        board.select_next(now());
+        board.select_next(now());
+        board.expand(now());
+        assert_eq!(
+            shape(&board.rows(now()))[1..6],
+            [
+                "Run(1)",
+                "Job(11)",
+                "JobsError(HTTP 500)",
+                "Run(99)",
+                "JobsLoading"
+            ]
+        );
+    }
+
+    #[test]
+    fn more_than_one_run_can_be_expanded() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(RunId(1), vec![job(11, RunState::Passed)]);
+        board.select_next(now());
+        board.select_next(now());
+        board.expand(now());
+        assert_eq!(
+            marked(&board.rows(now())),
+            [
+                "Header(Active,1,0,0,0)",
+                "Run(1)",
+                "LastJob(11)",
+                "Header(Recent,1,1,0,0)",
+                "Run(2)*",
+                "JobsLoading",
+            ]
+        );
+    }
+
+    /// Reads the text of the selected row, then moves with `step` `moves`
+    /// times and reads the text again after each move.
+    fn walk(board: &mut Board, moves: usize, step: fn(&mut Board, DateTime<Utc>)) -> Vec<String> {
+        let mut seen = vec![selected_text(board).expect("a selection")];
+        for _ in 0..moves {
+            step(board, now());
+            seen.push(selected_text(board).expect("a selection"));
+        }
+        seen
+    }
+
+    #[test]
+    fn up_and_down_move_through_the_job_rows_of_an_expanded_run() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(
+            RunId(1),
+            vec![job(11, RunState::Passed), job(12, RunState::Running)],
+        );
+        assert_eq!(
+            walk(&mut board, 4, Board::select_next),
+            ["Run(1)*", "Job(11)*", "LastJob(12)*", "Run(2)*", "Run(2)*"]
+        );
+        assert_eq!(
+            walk(&mut board, 4, Board::select_previous),
+            ["Run(2)*", "LastJob(12)*", "Job(11)*", "Run(1)*", "Run(1)*"]
+        );
+    }
+
+    #[test]
+    fn a_selected_job_row_is_the_only_marked_row() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(
+            RunId(1),
+            vec![job(11, RunState::Passed), job(12, RunState::Running)],
+        );
+        board.select_next(now());
+        assert_eq!(
+            marked(&board.rows(now())),
+            [
+                "Header(Active,1,0,0,0)",
+                "Run(1)",
+                "Job(11)*",
+                "LastJob(12)",
+                "Header(Recent,1,1,0,0)",
+                "Run(2)",
+            ]
+        );
+    }
+
+    #[test]
+    fn up_and_down_skip_the_loading_the_no_jobs_and_the_error_rows() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Running, 20, 1),
+                run(3, "a/x", RunState::Running, 10, 1),
+                run(4, "a/x", RunState::Running, 5, 1),
+            ],
+            now(),
+        );
+        board.expand(now());
+        board.select_next(now());
+        board.expand(now());
+        board.set_jobs(RunId(2), Vec::new());
+        board.select_next(now());
+        board.expand(now());
+        board.fail_jobs(RunId(3), "HTTP 500".to_owned());
+        assert_eq!(
+            shape(&board.rows(now()))[1..8],
+            [
+                "Run(1)",
+                "JobsLoading",
+                "Run(2)",
+                "NoJobs",
+                "Run(3)",
+                "JobsError(HTTP 500)",
+                "Run(4)"
+            ]
+        );
+        board.select_previous(now());
+        board.select_previous(now());
+        board.select_previous(now());
+        assert_eq!(
+            walk(&mut board, 3, Board::select_next),
+            ["Run(1)*", "Run(2)*", "Run(3)*", "Run(4)*"]
+        );
+        assert_eq!(
+            walk(&mut board, 3, Board::select_previous),
+            ["Run(4)*", "Run(3)*", "Run(2)*", "Run(1)*"]
+        );
+    }
+
+    #[test]
+    fn the_job_rows_above_an_error_row_are_selectable() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(
+            RunId(1),
+            vec![job(11, RunState::Passed), job(12, RunState::Running)],
+        );
+        board.fail_jobs(RunId(1), "HTTP 500".to_owned());
+        assert_eq!(
+            walk(&mut board, 3, Board::select_next),
+            ["Run(1)*", "Job(11)*", "Job(12)*", "Run(2)*"]
+        );
+    }
+
+    /// Expands run 1, gives it `jobs` as pairs of an ID and a name, and
+    /// selects the job at `index` among them.
+    fn select_job(board: &mut Board, jobs: &[(u64, &str)], index: usize) {
+        board.expand(now());
+        board.set_jobs(
+            RunId(1),
+            jobs.iter().map(|&(id, name)| named_job(id, name)).collect(),
+        );
+        for _ in 0..=index {
+            board.select_next(now());
+        }
+    }
+
+    #[test]
+    fn a_repeated_job_id_shows_one_row() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(
+            RunId(1),
+            vec![named_job(5, "b"), named_job(5, "a"), named_job(6, "c")],
+        );
+        let rows = board.rows(now());
+        assert_eq!(marked(&rows)[1..4], ["Run(1)*", "Job(5)", "LastJob(6)"]);
+        let names: Vec<&str> = rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Job { job, .. } => Some(job.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, ["b", "c"]);
+    }
+
+    #[test]
+    fn down_moves_past_a_repeated_job_id_to_the_next_run() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(RunId(1), vec![named_job(5, "a"), named_job(5, "b")]);
+        let mut seen = vec![selected_text(&mut board).expect("a selection")];
+        for _ in 0..2 {
+            board.select_next(now());
+            seen.push(selected_text(&mut board).expect("a selection"));
+        }
+        assert_eq!(seen, ["Run(1)*", "LastJob(5)*", "Run(2)*"]);
+    }
+
+    #[test]
+    fn a_refresh_keeps_the_selected_job_by_its_id() {
+        let mut board = two_run_board();
+        select_job(&mut board, &[(12, "b"), (13, "c")], 1);
+        assert_eq!(selected_text(&mut board).as_deref(), Some("LastJob(13)*"));
+        board.set_jobs(
+            RunId(1),
+            vec![named_job(19, "a"), named_job(12, "b"), named_job(13, "c")],
+        );
+        assert_eq!(
+            marked(&board.rows(now()))[1..5],
+            ["Run(1)", "Job(19)", "Job(12)", "LastJob(13)*"]
+        );
+    }
+
+    #[test]
+    fn a_re_run_that_gives_every_job_a_new_id_keeps_the_highlight_on_the_same_row() {
+        let mut board = two_run_board();
+        select_job(&mut board, &[(11, "a"), (12, "b"), (13, "c")], 1);
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Job(12)*"));
+        board.set_jobs(
+            RunId(1),
+            vec![named_job(21, "a"), named_job(22, "b"), named_job(23, "c")],
+        );
+        assert_eq!(
+            marked(&board.rows(now()))[1..5],
+            ["Run(1)", "Job(21)", "Job(22)*", "LastJob(23)"]
+        );
+    }
+
+    #[test]
+    fn a_shorter_list_selects_the_last_job_when_the_old_position_is_past_the_end() {
+        let mut board = two_run_board();
+        select_job(&mut board, &[(11, "a"), (12, "b"), (13, "c")], 2);
+        assert_eq!(selected_text(&mut board).as_deref(), Some("LastJob(13)*"));
+        board.set_jobs(RunId(1), vec![named_job(21, "a"), named_job(22, "b")]);
+        assert_eq!(
+            marked(&board.rows(now()))[1..4],
+            ["Run(1)", "Job(21)", "LastJob(22)*"]
+        );
+    }
+
+    #[test]
+    fn an_answer_with_no_job_selects_the_run_row() {
+        let mut board = two_run_board();
+        select_job(&mut board, &[(11, "a"), (12, "b")], 1);
+        board.set_jobs(RunId(1), Vec::new());
+        assert_eq!(marked(&board.rows(now()))[1..3], ["Run(1)*", "NoJobs"]);
+    }
+
+    #[test]
+    fn a_failed_fetch_after_an_answer_keeps_the_selected_job() {
+        let mut board = two_run_board();
+        select_job(&mut board, &[(11, "a"), (12, "b")], 1);
+        board.fail_jobs(RunId(1), "HTTP 500".to_owned());
+        assert_eq!(
+            marked(&board.rows(now()))[1..5],
+            ["Run(1)", "Job(11)", "Job(12)*", "JobsError(HTTP 500)"]
+        );
+    }
+
+    #[test]
+    fn a_run_that_leaves_the_board_takes_the_selected_job_with_it() {
+        let mut board = two_run_board();
+        select_job(&mut board, &[(11, "a"), (12, "b")], 1);
+        board.select_next(now());
+        board.expand(now());
+        board.set_jobs(RunId(2), vec![named_job(21, "c"), named_job(22, "d")]);
+        board.select_previous(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("LastJob(12)*"));
+        board.replace(
+            repo("a/x"),
+            vec![run(2, "a/x", RunState::Passed, 60, 10)],
+            now(),
+        );
+        assert_eq!(
+            marked(&board.rows(now())),
+            [
+                "Header(Active,0,0,0,0)",
+                "Empty(Active)",
+                "Header(Recent,1,1,0,0)",
+                "Run(2)*",
+                "Job(21)",
+                "LastJob(22)",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_run_that_moves_to_the_recent_section_keeps_its_selected_job() {
+        let mut board = two_run_board();
+        select_job(&mut board, &[(11, "a"), (12, "b")], 1);
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Passed, 30, 1),
+                run(2, "a/x", RunState::Passed, 60, 10),
+            ],
+            now(),
+        );
+        assert_eq!(
+            marked(&board.rows(now()))[3..7],
+            ["Run(1)", "Job(11)", "LastJob(12)*", "Run(2)"]
+        );
+    }
+
+    #[test]
+    fn expanded_gives_the_repository_and_the_id_of_each_expanded_run() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Running, 30, 1)],
+            now(),
+        );
+        board.replace(
+            repo("b/y"),
+            vec![run(2, "b/y", RunState::Running, 20, 1)],
+            now(),
+        );
+        board.expand(now());
+        board.select_next(now());
+        board.expand(now());
+        let expected: BTreeSet<(RepoName, RunId)> =
+            [(repo("a/x"), RunId(1)), (repo("b/y"), RunId(2))]
+                .into_iter()
+                .collect();
+        assert_eq!(board.expanded(now()), expected);
+    }
+
+    #[test]
+    fn recent_runs_gives_the_finished_runs_of_the_window_newest_finish_first() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Passed, 100, 60),
+                run(2, "a/x", RunState::Running, 30, 1),
+                run(3, "a/x", RunState::Failed, 600, 540),
+            ],
+            now(),
+        );
+        board.replace(
+            repo("b/y"),
+            vec![run(4, "b/y", RunState::Failed, 50, 10)],
+            now(),
+        );
+        assert_eq!(
+            board.recent_runs(now()),
+            [(repo("b/y"), RunId(4)), (repo("a/x"), RunId(1))]
+        );
+    }
+
+    #[test]
+    fn a_failed_fetch_after_an_answer_keeps_the_jobs_and_adds_the_error() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(
+            RunId(1),
+            vec![job(11, RunState::Passed), job(12, RunState::Running)],
+        );
+        board.fail_jobs(RunId(1), "HTTP 500".to_owned());
+        assert_eq!(
+            shape(&board.rows(now()))[1..5],
+            ["Run(1)", "Job(11)", "Job(12)", "JobsError(HTTP 500)"]
+        );
+        board.fail_jobs(RunId(1), "timed out".to_owned());
+        assert_eq!(
+            shape(&board.rows(now()))[1..5],
+            ["Run(1)", "Job(11)", "Job(12)", "JobsError(timed out)"]
+        );
+    }
+
+    #[test]
+    fn a_failed_fetch_before_any_answer_shows_the_error_only() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.fail_jobs(RunId(1), "HTTP 404".to_owned());
+        assert_eq!(
+            shape(&board.rows(now()))[1..3],
+            ["Run(1)", "JobsError(HTTP 404)"]
+        );
+    }
+
+    #[test]
+    fn a_later_answer_clears_the_error() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(RunId(1), vec![job(11, RunState::Passed)]);
+        board.fail_jobs(RunId(1), "HTTP 500".to_owned());
+        board.set_jobs(RunId(1), vec![job(13, RunState::Passed)]);
+        assert_eq!(shape(&board.rows(now()))[1..3], ["Run(1)", "LastJob(13)"]);
+    }
+
+    #[test]
+    fn a_run_that_moves_to_the_recent_section_stays_expanded() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(RunId(1), vec![job(11, RunState::Passed)]);
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Passed, 30, 1),
+                run(2, "a/x", RunState::Passed, 60, 10),
+            ],
+            now(),
+        );
+        assert_eq!(
+            marked(&board.rows(now())),
+            [
+                "Header(Active,0,0,0,0)",
+                "Empty(Active)",
+                "Header(Recent,2,2,0,0)",
+                "Run(1)*",
+                "LastJob(11)",
+                "Run(2)",
+            ]
+        );
+        assert_eq!(board.expanded(now()).len(), 1);
+    }
+
+    #[test]
+    fn a_run_that_replace_drops_loses_its_expansion() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(RunId(1), vec![job(11, RunState::Passed)]);
+        board.replace(repo("a/x"), Vec::new(), now());
+        assert!(board.expanded(now()).is_empty());
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Running, 30, 1)],
+            now(),
+        );
+        assert_eq!(shape(&board.rows(now())).len(), 4);
+    }
+
+    #[test]
+    fn a_repository_that_keep_only_drops_loses_its_expansion() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.keep_only(&BTreeSet::new());
+        assert!(board.expanded(now()).is_empty());
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Running, 30, 1)],
+            now(),
+        );
+        assert_eq!(shape(&board.rows(now())).len(), 4);
+    }
+
+    #[test]
+    fn a_run_that_leaves_the_window_loses_its_expansion() {
+        let mut board = two_run_board();
+        board.select_next(now());
+        board.expand(now());
+        let later = now() + Span::hours(8) + Span::minutes(15);
+        assert!(board.expanded(later).is_empty());
+        assert_eq!(
+            shape(&board.rows(now())),
+            [
+                "Header(Active,1,0,0,0)",
+                "Run(1)",
+                "Header(Recent,1,1,0,0)",
+                "Run(2)"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_run_that_becomes_other_loses_its_expansion() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Other, 30, 1),
+                run(2, "a/x", RunState::Passed, 60, 10),
+            ],
+            now(),
+        );
+        assert!(board.expanded(now()).is_empty());
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Passed, 60, 10),
+            ],
+            now(),
+        );
+        assert_eq!(shape(&board.rows(now())).len(), 4);
+    }
+
+    /// Gives run `id` a block of `count` jobs. The run must be selected.
+    fn expand_with_jobs(board: &mut Board, id: u64, count: u64) {
+        board.expand(now());
+        let jobs = (1..=count)
+            .map(|n| job(id * 100 + n, RunState::Passed))
+            .collect();
+        board.set_jobs(RunId(id), jobs);
+    }
+
+    #[test]
+    fn an_expanded_run_at_the_bottom_of_the_view_scrolls_to_show_its_jobs() {
+        let mut board = long_board(6, 0);
+        for _ in 0..5 {
+            board.select_next(now());
+        }
+        expand_with_jobs(&mut board, 6, 2);
+        let view = board.view(now(), 4);
+        assert_eq!(view.first, 5);
+        assert_eq!(
+            marked(&view.rows),
+            ["Run(5)", "Run(6)*", "Job(601)", "LastJob(602)"]
+        );
+    }
+
+    #[test]
+    fn many_jobs_keep_the_run_and_its_header_in_view() {
+        let mut board = long_board(3, 3);
+        for _ in 0..3 {
+            board.select_next(now());
+        }
+        assert_eq!(board.view(now(), 4).first, 2);
+        expand_with_jobs(&mut board, 101, 10);
+        let view = board.view(now(), 4);
+        assert_eq!(view.first, 4);
+        assert_eq!(
+            marked(&view.rows),
+            [
+                "Header(Recent,3,3,0,0)",
+                "Run(101)*",
+                "Job(10101)",
+                "Job(10102)"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_view_of_one_row_shows_the_run_row_and_not_its_jobs() {
+        let mut board = long_board(3, 3);
+        for _ in 0..3 {
+            board.select_next(now());
+        }
+        expand_with_jobs(&mut board, 101, 10);
+        let view = board.view(now(), 1);
+        assert_eq!(view.first, 5);
+        assert_eq!(marked(&view.rows), ["Run(101)*"]);
+    }
+
+    #[test]
+    fn left_on_a_job_row_collapses_its_run_and_selects_the_run_row() {
+        let mut board = two_run_board();
+        select_job(&mut board, &[(11, "a"), (12, "b")], 1);
+        assert_eq!(selected_text(&mut board).as_deref(), Some("LastJob(12)*"));
+        board.collapse(now());
+        assert_eq!(
+            shape(&board.rows(now())),
+            [
+                "Header(Active,1,0,0,0)",
+                "Run(1)",
+                "Header(Recent,1,1,0,0)",
+                "Run(2)"
+            ]
+        );
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(1)*"));
+        assert!(board.expanded(now()).is_empty());
+    }
+
+    #[test]
+    fn right_on_a_job_row_changes_nothing() {
+        let mut board = two_run_board();
+        select_job(&mut board, &[(11, "a"), (12, "b")], 0);
+        let before = marked(&board.rows(now()));
+        board.expand(now());
+        assert_eq!(marked(&board.rows(now())), before);
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Job(11)*"));
+        let expanded = board.expanded(now());
+        assert_eq!(expanded.len(), 1);
+        assert!(expanded.contains(&(repo("a/x"), RunId(1))));
+    }
+
+    #[test]
+    fn selected_target_on_a_run_row_is_the_run_without_a_job() {
+        let mut board = two_run_board();
+        let (selected, job) = board.selected_target(now()).expect("a selected run");
+        assert_eq!(selected.id, RunId(1));
+        assert_eq!(job, None);
+    }
+
+    #[test]
+    fn selected_target_on_a_job_row_is_the_run_and_the_job() {
+        let mut board = two_run_board();
+        select_job(&mut board, &[(11, "a"), (12, "b")], 1);
+        let (selected, job) = board.selected_target(now()).expect("a selected run");
+        assert_eq!(selected.id, RunId(1));
+        assert_eq!(job.map(|job| job.id), Some(JobId(12)));
+    }
+
+    #[test]
+    fn selected_target_on_an_empty_board_is_none() {
+        let mut board = board();
+        assert_eq!(board.selected_target(now()), None);
+    }
+
+    #[test]
+    fn selected_target_follows_the_settle_after_the_selected_run_leaves() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Passed, 60, 10),
+                run(3, "a/x", RunState::Passed, 70, 20),
+            ],
+            now(),
+        );
+        board.select_next(now());
+        assert_eq!(
+            board.selected_target(now()).map(|(run, _)| run.id),
+            Some(RunId(2))
+        );
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(3, "a/x", RunState::Passed, 70, 20),
+            ],
+            now(),
+        );
+        assert_eq!(
+            board.selected_target(now()).map(|(run, _)| run.id),
+            Some(RunId(3))
+        );
+    }
+
+    #[test]
+    fn selected_url_on_a_job_row_is_the_url_of_the_job() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(
+            RunId(1),
+            vec![
+                Job {
+                    url: "https://example.test/a/x/runs/1/job/11".to_owned(),
+                    ..named_job(11, "a")
+                },
+                Job {
+                    url: "https://example.test/a/x/runs/1/job/12".to_owned(),
+                    ..named_job(12, "b")
+                },
+            ],
+        );
+        board.select_next(now());
+        board.select_next(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("LastJob(12)*"));
+        assert_eq!(
+            board.selected_url(now()).as_deref(),
+            Some("https://example.test/a/x/runs/1/job/12")
+        );
+    }
+
+    #[test]
+    fn selected_url_on_a_job_row_without_a_url_is_the_url_of_the_run() {
+        let mut board = two_run_board();
+        select_job(&mut board, &[(11, "a")], 0);
+        assert_eq!(selected_text(&mut board).as_deref(), Some("LastJob(11)*"));
+        assert_eq!(
+            board.selected_url(now()).as_deref(),
+            Some("https://example.test/a/x/runs/1")
+        );
+    }
+
+    /// A board with run 101 expanded to ten jobs and selected, and a view of
+    /// four rows that shows its header, its row, and its first two jobs.
+    fn board_on_a_long_block() -> Board {
+        let mut board = long_board(3, 3);
+        for _ in 0..3 {
+            board.select_next(now());
+        }
+        expand_with_jobs(&mut board, 101, 10);
+        assert_eq!(board.view(now(), 4).first, 4);
+        board
+    }
+
+    #[test]
+    fn moving_down_through_the_jobs_scrolls_by_one_row_at_the_bottom_of_the_view() {
+        let mut board = board_on_a_long_block();
+        let offsets = offsets_while(&mut board, 4, 5, Board::select_next);
+        assert_eq!(offsets, [4, 4, 5, 6, 7]);
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Job(10105)*"));
+    }
+
+    #[test]
+    fn moving_up_through_the_jobs_scrolls_by_one_row_at_the_top_of_the_view() {
+        let mut board = board_on_a_long_block();
+        offsets_while(&mut board, 4, 5, Board::select_next);
+        let offsets = offsets_while(&mut board, 4, 4, Board::select_previous);
+        assert_eq!(offsets, [7, 7, 7, 6]);
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Job(10101)*"));
+    }
+
+    /// An entry of the queue of `repo_text` for pull request `pull` at
+    /// `position`. It joined the queue `minutes` before `now()`.
+    fn queue_entry(repo_text: &str, pull: u64, position: u32, minutes: i64) -> QueueEntry {
+        QueueEntry {
+            repo: repo(repo_text),
+            pull: PullNumber(pull),
+            title: format!("pull {pull}"),
+            branch: format!("issue-{pull}"),
+            position,
+            state: EntryState::Queued,
+            enqueued_at: now() - Span::minutes(minutes),
+            url: format!("https://github.com/{repo_text}/pull/{pull}"),
+        }
+    }
+
+    /// A departure of pull request `pull` from the queue of `repo_text`,
+    /// `minutes` before `now()`. It joined the queue 10 minutes before that.
+    fn departure(repo_text: &str, pull: u64, outcome: Outcome, minutes: i64) -> Departure {
+        Departure {
+            repo: repo(repo_text),
+            pull: PullNumber(pull),
+            title: format!("pull {pull}"),
+            branch: format!("issue-{pull}"),
+            outcome,
+            enqueued_at: Some(now() - Span::minutes(minutes + 10)),
+            left_at: now() - Span::minutes(minutes),
+            url: format!("https://github.com/{repo_text}/pull/{pull}"),
+        }
+    }
+
+    /// A history that the page limit did not cut.
+    fn whole(departures: Vec<Departure>) -> History {
+        History {
+            departures,
+            cut_at: None,
+        }
+    }
+
+    /// A board on which `a/x` has a merge queue with these entries and departures.
+    fn queue_board(entries: Vec<QueueEntry>, departures: Vec<Departure>) -> Board {
+        let mut board = board();
+        board.set_queues(&BTreeSet::from([repo("a/x")]));
+        board.set_queue(&repo("a/x"), Ok(entries), Ok(whole(departures)));
+        board
+    }
+
+    /// A board with one entry, one departure, one active run, and one recent run.
+    fn mixed_board() -> Board {
+        let mut board = queue_board(
+            vec![queue_entry("a/x", 7, 1, 3)],
+            vec![departure("a/x", 2, Outcome::Merged, 10)],
+        );
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 5, 1),
+                run(3, "a/x", RunState::Passed, 60, 10),
+            ],
+            now(),
+        );
+        board
+    }
+
+    #[test]
+    fn with_no_merge_queue_the_board_shows_only_the_run_sections() {
+        let mut board = board();
+        board.set_queues(&BTreeSet::new());
+        assert_eq!(
+            shape(&board.rows(now())),
+            [
+                "Header(Active,0,0,0,0)",
+                "Empty(Active)",
+                "Header(Recent,0,0,0,0)",
+                "Empty(Recent)"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_repository_with_a_merge_queue_puts_the_queue_above_the_runs_and_the_history_below_them() {
+        let mut board = board();
+        board.set_queues(&BTreeSet::from([repo("a/x")]));
+        assert_eq!(
+            shape(&board.rows(now())),
+            [
+                "Header(Queue,0,0,0,0)",
+                "Empty(Queue)",
+                "Header(Active,0,0,0,0)",
+                "Empty(Active)",
+                "Header(History,0,0,0,0)",
+                "Empty(History)",
+                "Header(Recent,0,0,0,0)",
+                "Empty(Recent)"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_sections_stand_in_the_order_queue_running_history_last() {
+        let mut board = mixed_board();
+        assert_eq!(
+            shape(&board.rows(now())),
+            [
+                "Header(Queue,1,0,0,0)",
+                "Entry(a/x#7)",
+                "Header(Active,1,0,0,0)",
+                "Run(1)",
+                "Header(History,1,1,0,0)",
+                "Departure(a/x#2)",
+                "Header(Recent,1,1,0,0)",
+                "Run(3)"
+            ]
+        );
+    }
+
+    /// A board with one entry, two active runs, two departures, and one recent run.
+    fn wide_mixed_board() -> Board {
+        let mut board = queue_board(
+            vec![queue_entry("a/x", 7, 1, 3)],
+            vec![
+                departure("a/x", 2, Outcome::Merged, 10),
+                departure("a/x", 4, Outcome::Failed, 20),
+            ],
+        );
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 5, 1),
+                run(2, "a/x", RunState::Running, 6, 2),
+                run(3, "a/x", RunState::Passed, 60, 10),
+            ],
+            now(),
+        );
+        board
+    }
+
+    #[test]
+    fn the_highlight_goes_from_the_running_runs_to_the_history_and_then_to_the_last_runs() {
+        let mut board = wide_mixed_board();
+        assert_eq!(
+            walk(&mut board, 6, Board::select_next),
+            [
+                "Entry(a/x#7)*",
+                "Run(2)*",
+                "Run(1)*",
+                "Departure(a/x#2)*",
+                "Departure(a/x#4)*",
+                "Run(3)*",
+                "Run(3)*"
+            ]
+        );
+        assert_eq!(
+            walk(&mut board, 6, Board::select_previous),
+            [
+                "Run(3)*",
+                "Departure(a/x#4)*",
+                "Departure(a/x#2)*",
+                "Run(1)*",
+                "Run(2)*",
+                "Entry(a/x#7)*",
+                "Entry(a/x#7)*"
+            ]
+        );
+    }
+
+    #[test]
+    fn page_down_and_page_up_use_the_order_of_the_board() {
+        let mut board = mixed_board();
+        assert_eq!(
+            walk(&mut board, 4, Board::select_next_page),
+            [
+                "Entry(a/x#7)*",
+                "Run(1)*",
+                "Departure(a/x#2)*",
+                "Run(3)*",
+                "Run(3)*"
+            ]
+        );
+        assert_eq!(
+            walk(&mut board, 4, Board::select_previous_page),
+            [
+                "Run(3)*",
+                "Departure(a/x#2)*",
+                "Run(1)*",
+                "Entry(a/x#7)*",
+                "Entry(a/x#7)*"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_queue_shows_the_entries_of_each_repository_in_queue_order() {
+        let mut board = board();
+        board.set_queues(&BTreeSet::from([repo("a/x"), repo("b/y")]));
+        board.set_queue(
+            &repo("b/y"),
+            Ok(vec![queue_entry("b/y", 9, 1, 5)]),
+            Ok(History::default()),
+        );
+        board.set_queue(
+            &repo("a/x"),
+            Ok(vec![
+                queue_entry("a/x", 7, 2, 3),
+                queue_entry("a/x", 8, 1, 4),
+            ]),
+            Ok(History::default()),
+        );
+        assert_eq!(
+            shape(&board.rows(now()))[..4],
+            [
+                "Header(Queue,3,0,0,0)",
+                "Entry(a/x#8)",
+                "Entry(a/x#7)",
+                "Entry(b/y#9)"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_history_shows_the_departures_of_the_window_newest_first_and_counts_them() {
+        let mut board = queue_board(
+            Vec::new(),
+            vec![
+                departure("a/x", 1, Outcome::Removed, 30),
+                departure("a/x", 2, Outcome::Merged, 10),
+                departure("a/x", 3, Outcome::Merged, 9 * 60),
+                departure("a/x", 4, Outcome::Failed, 20),
+            ],
+        );
+        assert_eq!(
+            shape(&board.rows(now()))[..8],
+            [
+                "Header(Queue,0,0,0,0)",
+                "Empty(Queue)",
+                "Header(Active,0,0,0,0)",
+                "Empty(Active)",
+                "Header(History,3,1,1,1)",
+                "Departure(a/x#2)",
+                "Departure(a/x#4)",
+                "Departure(a/x#1)"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_departure_leaves_the_history_when_it_leaves_the_window() {
+        let mut board = queue_board(
+            Vec::new(),
+            vec![departure("a/x", 2, Outcome::Merged, 8 * 60 - 1)],
+        );
+        let shown = |board: &mut Board, at: DateTime<Utc>| {
+            shape(&board.rows(at)).contains(&"Departure(a/x#2)".to_owned())
+        };
+        assert!(shown(&mut board, now()));
+        assert!(!shown(&mut board, now() + Span::minutes(2)));
+    }
+
+    #[test]
+    fn a_failed_entry_read_keeps_the_last_entries_and_lists_its_error() {
+        let mut board = queue_board(vec![queue_entry("a/x", 7, 1, 3)], Vec::new());
+        board.set_queue(&repo("a/x"), Err("boom".to_owned()), Ok(History::default()));
+        assert!(shape(&board.rows(now())).contains(&"Entry(a/x#7)".to_owned()));
+        assert_eq!(board.errors(), [(&repo("a/x"), "merge queue: boom")]);
+    }
+
+    #[test]
+    fn a_failed_event_read_keeps_the_last_departures_and_lists_its_error() {
+        let mut board = queue_board(Vec::new(), vec![departure("a/x", 2, Outcome::Merged, 10)]);
+        board.set_queue(&repo("a/x"), Ok(Vec::new()), Err("boom".to_owned()));
+        assert!(shape(&board.rows(now())).contains(&"Departure(a/x#2)".to_owned()));
+        assert_eq!(board.errors(), [(&repo("a/x"), "merge history: boom")]);
+    }
+
+    #[test]
+    fn a_good_answer_clears_the_error_of_the_queue() {
+        let mut board = queue_board(Vec::new(), Vec::new());
+        board.set_queue(&repo("a/x"), Err("boom".to_owned()), Ok(History::default()));
+        board.set_queue(&repo("a/x"), Ok(Vec::new()), Ok(History::default()));
+        assert!(board.errors().is_empty(), "{:?}", board.errors());
+    }
+
+    #[test]
+    fn the_error_of_a_queue_follows_the_error_of_the_runs_of_its_repository() {
+        let mut board = board();
+        board.set_queues(&BTreeSet::from([repo("a/x"), repo("b/y")]));
+        board.set_queue(&repo("b/y"), Err("late".to_owned()), Ok(History::default()));
+        board.set_queue(&repo("a/x"), Err("boom".to_owned()), Ok(History::default()));
+        board.fail(repo("a/x"), "runs down".to_owned());
+        assert_eq!(
+            board.errors(),
+            [
+                (&repo("a/x"), "runs down"),
+                (&repo("a/x"), "merge queue: boom"),
+                (&repo("b/y"), "merge queue: late"),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_answer_for_a_repository_with_no_queue_is_dropped() {
+        let mut board = board();
+        board.set_queue(
+            &repo("a/x"),
+            Ok(vec![queue_entry("a/x", 7, 1, 3)]),
+            Err("boom".to_owned()),
+        );
+        assert_eq!(shape(&board.rows(now()))[0], "Header(Active,0,0,0,0)");
+        assert!(board.errors().is_empty());
+    }
+
+    /// A history of `departures` that the page limit cut `minutes` before `now()`.
+    fn cut(departures: Vec<Departure>, minutes: i64) -> History {
+        History {
+            departures,
+            cut_at: Some(now() - Span::minutes(minutes)),
+        }
+    }
+
+    /// A board with a queue for `a/x` and `b/y`.
+    fn two_queue_board() -> Board {
+        let mut board = board();
+        board.set_queues(&BTreeSet::from([repo("a/x"), repo("b/y")]));
+        board
+    }
+
+    const TWO_HOURS: Duration = Duration::from_hours(2);
+
+    #[test]
+    fn the_history_shows_only_the_span_in_which_every_repository_is_whole() {
+        let mut board = two_queue_board();
+        board.set_queue(
+            &repo("a/x"),
+            Ok(Vec::new()),
+            Ok(cut(vec![departure("a/x", 1, Outcome::Merged, 90)], 120)),
+        );
+        board.set_queue(
+            &repo("b/y"),
+            Ok(Vec::new()),
+            Ok(whole(vec![
+                departure("b/y", 2, Outcome::Failed, 60),
+                departure("b/y", 3, Outcome::Merged, 180),
+            ])),
+        );
+        assert_eq!(
+            shape(&board.rows(now()))[4..7],
+            [
+                "Header(History,2,1,1,0)",
+                "Departure(b/y#2)",
+                "Departure(a/x#1)"
+            ]
+        );
+        assert_eq!(board.history_reach(now()), Some(TWO_HOURS));
+    }
+
+    #[test]
+    fn a_history_that_no_page_limit_cut_has_no_reach() {
+        let board = queue_board(Vec::new(), vec![departure("a/x", 1, Outcome::Merged, 10)]);
+        assert_eq!(board.history_reach(now()), None);
+    }
+
+    #[test]
+    fn a_cut_older_than_the_window_start_hides_nothing_and_gives_no_reach() {
+        let mut board = queue_board(Vec::new(), Vec::new());
+        board.set_queue(
+            &repo("a/x"),
+            Ok(Vec::new()),
+            Ok(cut(
+                vec![departure("a/x", 1, Outcome::Merged, 8 * 60 - 1)],
+                9 * 60,
+            )),
+        );
+        assert_eq!(board.history_reach(now()), None);
+        assert!(shape(&board.rows(now())).contains(&"Departure(a/x#1)".to_owned()));
+    }
+
+    #[test]
+    fn a_failed_event_read_keeps_the_last_cut() {
+        let mut board = queue_board(Vec::new(), Vec::new());
+        board.set_queue(&repo("a/x"), Ok(Vec::new()), Ok(cut(Vec::new(), 120)));
+        board.set_queue(&repo("a/x"), Ok(Vec::new()), Err("boom".to_owned()));
+        assert_eq!(board.history_reach(now()), Some(TWO_HOURS));
+    }
+
+    #[test]
+    fn the_reach_goes_away_with_the_cut_repository() {
+        let mut board = two_queue_board();
+        board.set_queue(&repo("a/x"), Ok(Vec::new()), Ok(cut(Vec::new(), 120)));
+        board.set_queue(&repo("b/y"), Ok(Vec::new()), Ok(History::default()));
+        assert_eq!(board.history_reach(now()), Some(TWO_HOURS));
+        board.set_queues(&BTreeSet::from([repo("b/y")]));
+        assert_eq!(board.history_reach(now()), None);
+    }
+
+    #[test]
+    fn set_queues_drops_the_queue_of_a_repository_that_has_none_now() {
+        let mut board = board();
+        board.set_queues(&BTreeSet::from([repo("a/x"), repo("b/y")]));
+        board.set_queue(
+            &repo("a/x"),
+            Ok(vec![queue_entry("a/x", 7, 1, 3)]),
+            Err("boom".to_owned()),
+        );
+        board.set_queue(
+            &repo("b/y"),
+            Ok(vec![queue_entry("b/y", 9, 1, 3)]),
+            Ok(History::default()),
+        );
+        board.set_queues(&BTreeSet::from([repo("b/y")]));
+        assert_eq!(
+            shape(&board.rows(now()))[..2],
+            ["Header(Queue,1,0,0,0)", "Entry(b/y#9)"]
+        );
+        assert!(board.errors().is_empty());
+        board.set_queues(&BTreeSet::new());
+        assert_eq!(shape(&board.rows(now()))[0], "Header(Active,0,0,0,0)");
+    }
+
+    #[test]
+    fn set_queues_keeps_the_answer_of_a_repository_that_still_has_a_queue() {
+        let mut board = queue_board(vec![queue_entry("a/x", 7, 1, 3)], Vec::new());
+        board.set_queues(&BTreeSet::from([repo("a/x"), repo("b/y")]));
+        assert_eq!(
+            shape(&board.rows(now()))[..2],
+            ["Header(Queue,1,0,0,0)", "Entry(a/x#7)"]
+        );
+    }
+
+    #[test]
+    fn keep_only_drops_the_queue_of_a_repository_that_is_not_watched() {
+        let mut board = queue_board(vec![queue_entry("a/x", 7, 1, 3)], Vec::new());
+        board.keep_only(&BTreeSet::from([repo("b/y")]));
+        assert_eq!(shape(&board.rows(now()))[0], "Header(Active,0,0,0,0)");
+    }
+
+    #[test]
+    fn the_first_queue_row_is_selected_at_the_start() {
+        let mut board = mixed_board();
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Entry(a/x#7)*"));
+    }
+
+    #[test]
+    fn up_and_down_move_through_the_queue_the_running_runs_the_history_and_the_last_runs() {
+        let mut board = mixed_board();
+        assert_eq!(
+            walk(&mut board, 4, Board::select_next),
+            [
+                "Entry(a/x#7)*",
+                "Run(1)*",
+                "Departure(a/x#2)*",
+                "Run(3)*",
+                "Run(3)*"
+            ]
+        );
+        assert_eq!(
+            walk(&mut board, 4, Board::select_previous),
+            [
+                "Run(3)*",
+                "Departure(a/x#2)*",
+                "Run(1)*",
+                "Entry(a/x#7)*",
+                "Entry(a/x#7)*"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_address_of_a_queue_row_is_the_page_of_its_pull_request() {
+        let mut board = mixed_board();
+        assert_eq!(
+            board.selected_url(now()).as_deref(),
+            Some("https://github.com/a/x/pull/7")
+        );
+        board.select_next(now());
+        board.select_next(now());
+        assert_eq!(
+            board.selected_url(now()).as_deref(),
+            Some("https://github.com/a/x/pull/2")
+        );
+    }
+
+    #[test]
+    fn a_queue_row_gives_its_pull_request_and_no_run() {
+        let mut board = mixed_board();
+        assert_eq!(board.selected_pull(now()), Some(PullNumber(7)));
+        assert!(board.selected_target(now()).is_none());
+        board.select_next(now());
+        assert_eq!(board.selected_pull(now()), None);
+        assert_eq!(
+            board.selected_target(now()).map(|(run, _)| run.id),
+            Some(RunId(1))
+        );
+        board.select_next(now());
+        assert_eq!(board.selected_pull(now()), Some(PullNumber(2)));
+        assert!(board.selected_target(now()).is_none());
+    }
+
+    #[test]
+    fn right_on_a_queue_row_expands_nothing() {
+        let mut board = mixed_board();
+        board.expand(now());
+        assert!(board.expanded(now()).is_empty());
+        assert!(!shape(&board.rows(now())).contains(&"JobsLoading".to_owned()));
+    }
+
+    #[test]
+    fn left_on_a_queue_row_collapses_nothing() {
+        let mut board = mixed_board();
+        board.select_next(now());
+        board.expand(now());
+        board.select_previous(now());
+        board.collapse(now());
+        assert_eq!(
+            board.expanded(now()),
+            BTreeSet::from([(repo("a/x"), RunId(1))])
+        );
+    }
+
+    #[test]
+    fn the_selection_stays_on_its_pull_request_when_rows_arrive_above_it() {
+        let mut board = queue_board(vec![queue_entry("a/x", 7, 1, 3)], Vec::new());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Entry(a/x#7)*"));
+        board.set_queue(
+            &repo("a/x"),
+            Ok(vec![
+                queue_entry("a/x", 6, 1, 9),
+                queue_entry("a/x", 7, 2, 3),
+            ]),
+            Ok(History::default()),
+        );
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Entry(a/x#7)*"));
+    }
+
+    #[test]
+    fn the_selected_departure_stays_selected_through_a_refresh() {
+        let mut board = mixed_board();
+        board.select_next(now());
+        board.select_next(now());
+        board.set_queue(
+            &repo("a/x"),
+            Ok(Vec::new()),
+            Ok(whole(vec![
+                departure("a/x", 4, Outcome::Failed, 1),
+                departure("a/x", 2, Outcome::Merged, 10),
+            ])),
+        );
+        assert_eq!(
+            selected_text(&mut board).as_deref(),
+            Some("Departure(a/x#2)*")
+        );
+    }
+
+    #[test]
+    fn when_the_selected_entry_leaves_the_queue_the_row_at_its_position_is_selected() {
+        let mut board = queue_board(
+            vec![queue_entry("a/x", 7, 1, 3), queue_entry("a/x", 8, 2, 2)],
+            Vec::new(),
+        );
+        board.select_next(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Entry(a/x#8)*"));
+        board.set_queue(
+            &repo("a/x"),
+            Ok(vec![queue_entry("a/x", 7, 1, 3)]),
+            Ok(whole(vec![departure("a/x", 8, Outcome::Merged, 0)])),
+        );
+        assert_eq!(
+            selected_text(&mut board).as_deref(),
+            Some("Departure(a/x#8)*")
+        );
+    }
+
+    #[test]
+    fn the_selected_run_stays_selected_when_a_queue_appears_above_it() {
+        let mut board = four_runs_in_two_sections();
+        board.select_next(now());
+        board.select_next(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(3)*"));
+        board.set_queues(&BTreeSet::from([repo("a/x")]));
+        board.set_queue(
+            &repo("a/x"),
+            Ok(vec![queue_entry("a/x", 7, 1, 3)]),
+            Ok(whole(vec![departure("a/x", 2, Outcome::Merged, 10)])),
+        );
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(3)*"));
+    }
+
+    #[test]
+    fn the_header_of_a_merge_section_stays_in_view_above_its_first_row() {
+        let mut board = mixed_board();
+        let view = board.view(now(), 2);
+        assert_eq!(view.first, 0);
+        assert_eq!(
+            marked(&view.rows),
+            ["Header(Queue,1,0,0,0)", "Entry(a/x#7)*"]
+        );
+        board.select_next(now());
+        board.select_next(now());
+        let view = board.view(now(), 2);
+        assert_eq!(view.first, 4);
+        assert_eq!(
+            marked(&view.rows),
+            ["Header(History,1,1,0,0)", "Departure(a/x#2)*"]
+        );
+    }
+
+    /// Page Down from the top row, with no header in the page.
+    #[test]
+    fn select_next_page_highlights_the_row_one_page_down() {
+        let mut board = long_board(10, 0);
+        let rows = shape(&board.rows(now()));
+        assert_eq!(rows[0], "Header(Active,10,0,0,0)");
+        board.view(now(), 4);
+        board.select_next_page(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(4)*"));
+    }
+
+    /// A header inside the page does not count as a row to select. A step of
+    /// two selectable rows would end on `Run(101)`.
+    #[test]
+    fn select_next_page_stops_on_the_last_selectable_row_above_the_target() {
+        let mut board = long_board(3, 3);
+        assert_eq!(
+            shape(&board.rows(now()))[..5],
+            [
+                "Header(Active,3,0,0,0)",
+                "Run(1)",
+                "Run(2)",
+                "Run(3)",
+                "Header(Recent,3,3,0,0)"
+            ]
+        );
+        board.select_next(now());
+        board.view(now(), 3);
+        board.select_next_page(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(3)*"));
+    }
+
+    /// Page 1 from `Run(3)` reaches the header at screen row 4. No selectable
+    /// row lies in between, so the highlight moves one row.
+    #[test]
+    fn select_next_page_moves_one_row_when_no_row_lies_before_the_target() {
+        let mut board = long_board(3, 3);
+        for _ in 0..2 {
+            board.select_next(now());
+        }
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(3)*"));
+        board.view(now(), 2);
+        board.select_next_page(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(101)*"));
+    }
+
+    /// Page Up from `Run(4)`, with no header in the page.
+    #[test]
+    fn select_previous_page_highlights_the_row_one_page_up() {
+        let mut board = long_board(10, 0);
+        for _ in 0..3 {
+            board.select_next(now());
+        }
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(4)*"));
+        board.view(now(), 3);
+        board.select_previous_page(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(2)*"));
+    }
+
+    /// Page 2 up from `Run(102)` at screen row 6 aims at the header at row 4.
+    /// A step of two selectable rows would end on `Run(3)`.
+    #[test]
+    fn select_previous_page_stops_on_the_first_selectable_row_below_the_target() {
+        let mut board = long_board(3, 3);
+        for _ in 0..4 {
+            board.select_next(now());
+        }
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(102)*"));
+        board.view(now(), 3);
+        board.select_previous_page(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(101)*"));
+    }
+
+    /// Page 1 up from `Run(101)` aims at the header at screen row 4. No
+    /// selectable row lies in between, so the highlight moves one row.
+    #[test]
+    fn select_previous_page_moves_one_row_when_no_row_lies_after_the_target() {
+        let mut board = long_board(3, 3);
+        for _ in 0..3 {
+            board.select_next(now());
+        }
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(101)*"));
+        board.view(now(), 2);
+        board.select_previous_page(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(3)*"));
+    }
+
+    #[test]
+    fn select_next_page_stops_on_the_last_selectable_row() {
+        let mut board = long_board(3, 3);
+        board.view(now(), 4);
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            board.select_next_page(now());
+            seen.push(selected_text(&mut board).expect("a selection"));
+        }
+        assert_eq!(seen.last().map(String::as_str), Some("Run(103)*"));
+        assert_eq!(seen[seen.len() - 2], "Run(103)*");
+    }
+
+    #[test]
+    fn select_previous_page_stops_on_the_first_selectable_row() {
+        let mut board = long_board(3, 3);
+        for _ in 0..5 {
+            board.select_next(now());
+        }
+        board.view(now(), 4);
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            board.select_previous_page(now());
+            seen.push(selected_text(&mut board).expect("a selection"));
+        }
+        assert_eq!(seen.last().map(String::as_str), Some("Run(1)*"));
+        assert_eq!(seen[seen.len() - 2], "Run(1)*");
+    }
+
+    /// Run 1 has three jobs. Run 2 has no answer yet, so it shows `JobsLoading`.
+    #[test]
+    fn the_page_keys_move_through_job_rows_and_skip_the_loading_row() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(
+            RunId(1),
+            vec![
+                job(11, RunState::Passed),
+                job(12, RunState::Running),
+                job(13, RunState::Queued),
+            ],
+        );
+        board.select_next(now());
+        board.select_next(now());
+        board.select_next(now());
+        board.select_next(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(2)*"));
+        board.expand(now());
+        assert_eq!(
+            shape(&board.rows(now()))[5..],
+            ["Header(Recent,1,1,0,0)", "Run(2)", "JobsLoading"]
+        );
+        board.view(now(), 4);
+        board.select_previous_page(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Job(12)*"));
+        board.select_previous_page(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(1)*"));
+        board.select_next_page(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("LastJob(13)*"));
+        board.select_next_page(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(2)*"));
+        board.select_next_page(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(2)*"));
+    }
+
+    #[test]
+    fn a_page_key_moves_one_row_before_the_first_view() {
+        let mut board = long_board(10, 0);
+        board.select_next_page(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(2)*"));
+        board.select_next_page(now());
+        board.select_previous_page(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(2)*"));
+    }
+
+    #[test]
+    fn a_page_key_moves_one_row_in_a_view_of_one_row() {
+        let mut board = long_board(10, 0);
+        board.view(now(), 1);
+        board.select_next_page(now());
+        board.select_next_page(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(3)*"));
+        board.select_previous_page(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(2)*"));
+    }
+
+    /// Parses the RFC 3339 time `text`.
+    fn at(text: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(text)
+            .expect("a valid time")
+            .with_timezone(&Utc)
+    }
+
+    /// The time now in the tests of the late run, 2026-11-04 at 18:00:00 UTC.
+    /// It is after the run ended.
+    fn late_now() -> DateTime<Utc> {
+        at("2026-11-04T18:00:00Z")
+    }
+
+    /// Run 41874496263 of `Lock-Free-Labs/nvr-tools`. It passed. GitHub
+    /// changed its `updated_at` 18 minutes after the last job ended.
+    fn late_run() -> Run {
+        Run {
+            visibility: crate::run::Visibility::Private,
+            id: RunId(41_874_496_263),
+            repo: repo("Lock-Free-Labs/nvr-tools"),
+            workflow: "ci".to_owned(),
+            branch: "main".to_owned(),
+            title: "late run".to_owned(),
+            state: RunState::Passed,
+            started_at: at("2026-11-04T17:07:48Z"),
+            created_at: at("2026-11-04T17:07:48Z"),
+            updated_at: at("2026-11-04T17:40:55Z"),
+            url: "https://example.test/Lock-Free-Labs/nvr-tools/runs/41874496263".to_owned(),
+        }
+    }
+
+    /// Builds a job with a name and optional start and finish times, as
+    /// RFC 3339 text.
+    fn timed_job(
+        id: u64,
+        name: &str,
+        state: RunState,
+        started: Option<&str>,
+        completed: Option<&str>,
+    ) -> Job {
+        Job {
+            name: name.to_owned(),
+            started_at: started.map(at),
+            completed_at: completed.map(at),
+            ..job(id, state)
+        }
+    }
+
+    /// The two jobs of `late_run`. The last one ends at 17:22:45.
+    fn late_jobs() -> Vec<Job> {
+        vec![
+            timed_job(
+                126_730_108_923,
+                "Full check list (Linux)",
+                RunState::Passed,
+                Some("2026-11-04T17:07:51Z"),
+                Some("2026-11-04T17:22:45Z"),
+            ),
+            timed_job(
+                126_730_109_123,
+                "Clippy (Windows)",
+                RunState::Passed,
+                Some("2026-11-04T17:07:53Z"),
+                Some("2026-11-04T17:12:05Z"),
+            ),
+        ]
+    }
+
+    /// The `ended` value of the row of run `id` at `now`. The function panics
+    /// when the board shows no row of that run.
+    fn ended(board: &mut Board, now: DateTime<Utc>, id: RunId) -> Option<DateTime<Utc>> {
+        board
+            .rows(now)
+            .into_iter()
+            .find_map(|row| match row {
+                Row::Run { run, ended, .. } if run.id == id => Some(ended),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the board shows no row of run {}", id.0))
+    }
+
+    /// A board that holds the run `run` and the jobs `jobs`, at the time
+    /// [`late_now`]. With no `jobs`, the board holds no jobs of the run.
+    fn late_board(run: Run, jobs: Option<Vec<Job>>) -> Board {
+        let mut board = board();
+        let id = run.id;
+        board.replace(repo("Lock-Free-Labs/nvr-tools"), vec![run], late_now());
+        if let Some(jobs) = jobs {
+            board.set_jobs(id, jobs);
+        }
+        board
+    }
+
+    #[test]
+    fn a_finished_run_ends_when_its_last_job_ends() {
+        let run = late_run();
+        let id = run.id;
+        let mut board = late_board(run, Some(late_jobs()));
+        assert_eq!(
+            ended(&mut board, late_now(), id),
+            Some(at("2026-11-04T17:22:45Z"))
+        );
+    }
+
+    #[test]
+    fn a_finished_run_with_no_jobs_ends_at_its_update() {
+        let run = late_run();
+        let id = run.id;
+        let mut board = late_board(run, None);
+        assert_eq!(
+            ended(&mut board, late_now(), id),
+            Some(at("2026-11-04T17:40:55Z"))
+        );
+    }
+
+    #[test]
+    fn a_failed_fetch_keeps_the_end_of_the_last_good_jobs() {
+        let run = late_run();
+        let id = run.id;
+        let mut board = late_board(run, Some(late_jobs()));
+        board.fail_jobs(id, "HTTP 502".to_owned());
+        assert_eq!(
+            ended(&mut board, late_now(), id),
+            Some(at("2026-11-04T17:22:45Z"))
+        );
+    }
+
+    #[test]
+    fn a_job_that_still_runs_gives_no_end() {
+        let run = late_run();
+        let id = run.id;
+        let mut jobs = late_jobs();
+        jobs.push(timed_job(
+            126_730_109_999,
+            "Deploy",
+            RunState::Running,
+            Some("2026-11-04T17:20:00Z"),
+            None,
+        ));
+        let mut board = late_board(run, Some(jobs));
+        assert_eq!(
+            ended(&mut board, late_now(), id),
+            Some(at("2026-11-04T17:40:55Z"))
+        );
+    }
+
+    #[test]
+    fn a_skipped_job_does_not_hold_back_the_end() {
+        let run = late_run();
+        let id = run.id;
+        let mut jobs = late_jobs();
+        // GitHub gives a skipped job the status `completed`, thus it is finished.
+        jobs.push(timed_job(
+            126_730_109_888,
+            "Release",
+            RunState::Skipped,
+            Some("2026-11-04T17:07:50Z"),
+            Some("2026-11-04T17:07:50Z"),
+        ));
+        let mut board = late_board(run, Some(jobs));
+        assert_eq!(
+            ended(&mut board, late_now(), id),
+            Some(at("2026-11-04T17:22:45Z"))
+        );
+    }
+
+    #[test]
+    fn jobs_with_no_finish_time_give_no_end() {
+        let run = late_run();
+        let id = run.id;
+        let jobs = vec![
+            timed_job(
+                126_730_108_923,
+                "Full check list (Linux)",
+                RunState::Passed,
+                Some("2026-11-04T17:07:51Z"),
+                None,
+            ),
+            timed_job(
+                126_730_109_123,
+                "Clippy (Windows)",
+                RunState::Passed,
+                Some("2026-11-04T17:07:53Z"),
+                None,
+            ),
+        ];
+        let mut board = late_board(run, Some(jobs));
+        assert_eq!(
+            ended(&mut board, late_now(), id),
+            Some(at("2026-11-04T17:40:55Z"))
+        );
+    }
+
+    #[test]
+    fn the_jobs_of_an_earlier_attempt_give_no_end() {
+        // A re-run starts at 17:30:00. The board still holds the jobs of the
+        // first attempt, and the last of them ended at 17:22:45.
+        let run = Run {
+            started_at: at("2026-11-04T17:30:00Z"),
+            ..late_run()
+        };
+        let id = run.id;
+        let mut board = late_board(run, Some(late_jobs()));
+        assert_eq!(
+            ended(&mut board, late_now(), id),
+            Some(at("2026-11-04T17:40:55Z"))
+        );
+    }
+
+    #[test]
+    fn the_end_is_never_later_than_the_update() {
+        let run = Run {
+            updated_at: at("2026-11-04T17:20:00Z"),
+            ..late_run()
+        };
+        let id = run.id;
+        let mut board = late_board(run, Some(late_jobs()));
+        assert_eq!(
+            ended(&mut board, late_now(), id),
+            Some(at("2026-11-04T17:20:00Z"))
+        );
+    }
+
+    /// Run 41874500000 of `Lock-Free-Labs/nvr-tools`. It passed, and its
+    /// `updated_at` is 17:30:00. It holds no jobs in the tests, thus it ends
+    /// at its update, after the end of `late_run` with `late_jobs`.
+    fn later_run() -> Run {
+        Run {
+            id: RunId(41_874_500_000),
+            started_at: at("2026-11-04T17:10:00Z"),
+            created_at: at("2026-11-04T17:10:00Z"),
+            updated_at: at("2026-11-04T17:30:00Z"),
+            ..late_run()
+        }
+    }
+
+    /// The IDs of the run rows of `rows`, as `shape` writes them.
+    fn run_rows(rows: Vec<String>) -> Vec<String> {
+        rows.into_iter()
+            .filter(|row| row.starts_with("Run("))
+            .collect()
+    }
+
+    #[test]
+    fn the_recent_runs_are_in_order_of_their_end() {
+        let mut board = late_board(late_run(), Some(late_jobs()));
+        board.replace(
+            repo("Lock-Free-Labs/nvr-tools"),
+            vec![late_run(), later_run()],
+            late_now(),
+        );
+        // By `updated_at` the first run is newer. By the end it is older.
+        assert_eq!(
+            run_rows(shape(&board.rows(late_now()))),
+            ["Run(41874500000)", "Run(41874496263)"]
+        );
+    }
+
+    #[test]
+    fn a_run_that_ended_before_the_window_stays_while_its_update_is_in_it() {
+        // The window is 8 hours, thus at `late_now` it starts at 10:00:00.
+        let run = Run {
+            id: RunId(41_874_600_000),
+            started_at: at("2026-11-04T09:40:00Z"),
+            created_at: at("2026-11-04T09:40:00Z"),
+            updated_at: at("2026-11-04T10:30:00Z"),
+            ..late_run()
+        };
+        let id = run.id;
+        let mut board = late_board(run, None);
+        assert_eq!(
+            ended(&mut board, late_now(), id),
+            Some(at("2026-11-04T10:30:00Z"))
+        );
+        board.set_jobs(
+            id,
+            vec![timed_job(
+                1,
+                "job",
+                RunState::Passed,
+                Some("2026-11-04T09:41:00Z"),
+                Some("2026-11-04T09:50:00Z"),
+            )],
+        );
+        // If the window used the end, the first call finds the run outside the
+        // window, and `Board::settle` drops its jobs. The same call then shows
+        // the run again, with its update as the end, and the worker does not
+        // fetch the jobs again. The second call makes sure that the jobs stay.
+        for _ in 0..2 {
+            assert_eq!(
+                ended(&mut board, late_now(), id),
+                Some(at("2026-11-04T09:50:00Z"))
+            );
+        }
+    }
+
+    #[test]
+    fn the_highlight_follows_its_run_when_its_jobs_move_its_row() {
+        let mut board = board();
+        board.replace(
+            repo("Lock-Free-Labs/nvr-tools"),
+            vec![late_run(), later_run()],
+            late_now(),
+        );
+        assert_eq!(
+            run_rows(marked(&board.rows(late_now()))),
+            ["Run(41874496263)*", "Run(41874500000)"]
+        );
+        // The end of the first run is now 17:22:45. Its row moves below the
+        // other row.
+        board.set_jobs(RunId(41_874_496_263), late_jobs());
+        assert_eq!(
+            run_rows(marked(&board.rows(late_now()))),
+            ["Run(41874500000)", "Run(41874496263)*"]
+        );
+    }
+
+    /// Builds a job with the name `name`, the state `state`, and the runner
+    /// `runner`. It started `started` seconds before `now()`, and it ended
+    /// `ended` seconds before `now()` (`None` for a job that still runs).
+    fn timed_runner_job(
+        id: u64,
+        name: &str,
+        state: RunState,
+        runner: &str,
+        started: i64,
+        ended: Option<i64>,
+    ) -> Job {
+        Job {
+            name: name.to_owned(),
+            runner: Some(RunnerName::new(runner.to_owned()).expect("a runner name")),
+            started_at: Some(now() - Span::seconds(started)),
+            completed_at: ended.map(|seconds| now() - Span::seconds(seconds)),
+            ..job(id, state)
+        }
+    }
+
+    /// The job ID and the time left of each job row, in the order of the rows.
+    fn job_remaining(rows: &[Row<'_>]) -> Vec<(u64, Option<Remaining>)> {
+        rows.iter()
+            .filter_map(|row| match row {
+                Row::Job { job, remaining, .. } => Some((job.id.0, *remaining)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A board with one passed run (ID 1, 300 s of `TypeScript` on `m1-ts`) and
+    /// one running run (ID 2, `TypeScript` on `m1-ts` for 2 minutes). The passed
+    /// run ended `ended_minutes_ago` minutes before `now()`.
+    fn estimate_board(ended_minutes_ago: i64) -> Board {
+        let mut board = board();
+        board.replace(
+            repo("timmattison/megarepo"),
+            vec![
+                run(
+                    1,
+                    "timmattison/megarepo",
+                    RunState::Passed,
+                    600,
+                    ended_minutes_ago,
+                ),
+                run(2, "timmattison/megarepo", RunState::Running, 5, 1),
+            ],
+            now(),
+        );
+        board.set_jobs(
+            RunId(1),
+            vec![timed_runner_job(
+                11,
+                "TypeScript",
+                RunState::Passed,
+                "m1-ts",
+                900,
+                Some(600),
+            )],
+        );
+        board.set_jobs(
+            RunId(2),
+            vec![timed_runner_job(
+                21,
+                "TypeScript",
+                RunState::Running,
+                "m1-ts",
+                120,
+                None,
+            )],
+        );
+        board
+    }
+
+    #[test]
+    fn a_running_job_row_carries_the_time_left_from_a_passed_match_of_a_shown_run() {
+        let mut board = estimate_board(50);
+        board.expand_all(now());
+        assert_eq!(
+            job_remaining(&board.rows(now())),
+            [
+                (21, Some(Remaining::Left(Duration::from_secs(180)))),
+                (11, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_job_row_of_a_run_with_no_match_carries_no_time_left() {
+        let mut board = board();
+        board.replace(
+            repo("timmattison/megarepo"),
+            vec![run(2, "timmattison/megarepo", RunState::Running, 5, 1)],
+            now(),
+        );
+        board.set_jobs(
+            RunId(2),
+            vec![timed_runner_job(
+                21,
+                "TypeScript",
+                RunState::Running,
+                "m1-ts",
+                120,
+                None,
+            )],
+        );
+        board.expand_all(now());
+        assert_eq!(job_remaining(&board.rows(now())), [(21, None)]);
+    }
+
+    #[test]
+    fn a_match_in_a_run_that_does_not_show_does_not_count() {
+        // The passed run ended more than 8 hours before `now()`, so it does not show.
+        let mut board = estimate_board(9 * 60);
+        board.expand_all(now());
+        assert_eq!(job_remaining(&board.rows(now())), [(21, None)]);
+    }
+}

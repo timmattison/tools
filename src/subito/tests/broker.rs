@@ -224,7 +224,7 @@ impl Broker {
     ///
     /// The listener stays with the caller, so a test that watches a session
     /// reconnect accepts a second connection on the same port.
-    #[allow(
+    #[expect(
         clippy::result_large_err,
         reason = "the `Callback` trait of `tungstenite` states the answer of a handshake callback, and its `Err` variant is a whole HTTP response. This callback never builds one: it adds the subprotocol header and gives the response back"
     )]

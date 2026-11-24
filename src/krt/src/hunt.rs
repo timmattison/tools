@@ -3622,7 +3622,7 @@ mod tests {
     impl std::io::Write for Sink {
         /// Takes the bytes of a record, until the sink holds the number of
         /// records that it takes.
-        #[allow(
+        #[expect(
             clippy::naive_bytecount,
             reason = "the sink of a test holds a few hundred bytes, which is no reason to take the bytecount crate as a dependency"
         )]

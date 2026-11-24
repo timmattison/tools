@@ -1,10 +1,6 @@
 use anyhow::Result;
 use chrono::{DateTime, Local};
-use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use parking_lot::Mutex;
 use ratatui::{
     backend::CrosstermBackend,
@@ -162,21 +158,10 @@ impl ProgressDisplay {
     /// # Errors
     ///
     /// Returns an error if terminal setup fails or if the UI loop encounters an error.
+    /// The session restores the terminal on every exit, an error and a panic included.
     pub fn run_interactive(&self) -> Result<()> {
-        enable_raw_mode()?;
-        let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen)?;
-        let backend = CrosstermBackend::new(stdout);
-        let mut terminal = Terminal::new(backend)?;
-
-        let result = self.run_ui_loop(&mut terminal);
-
-        // Cleanup
-        disable_raw_mode()?;
-        execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-        terminal.show_cursor()?;
-
-        result
+        let mut session = altscreen::RatatuiSession::enter(altscreen::Options::default())?;
+        self.run_ui_loop(session.terminal())
     }
 
     fn run_ui_loop(&self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {

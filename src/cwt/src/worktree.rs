@@ -2,7 +2,6 @@
 //! and nothing about how `cwt` presents or selects one.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// Number of characters of a commit hash to show (git uses 7 by default).
 const SHORT_COMMIT_HASH_LENGTH: usize = 7;
@@ -121,7 +120,7 @@ pub struct RepoWorktrees {
 
 /// Gets all worktrees for the repository at the given root.
 pub fn list_worktrees(repo_root: &Path) -> Result<RepoWorktrees, String> {
-    let output = Command::new("git")
+    let output = childenv::command("git")
         .args(["worktree", "list", "--porcelain"])
         .current_dir(repo_root)
         .output()
@@ -144,18 +143,6 @@ pub fn list_worktrees(repo_root: &Path) -> Result<RepoWorktrees, String> {
         main,
         all: parse_worktree_list(&stdout),
     })
-}
-
-/// The name git gives the marker it puts at the root of a checkout.
-const GIT_MARKER: &str = ".git";
-
-/// True when `dir` is a checkout: a repository, or one of its linked worktrees.
-///
-/// Git marks the main worktree with a `.git` directory and a linked worktree
-/// with a `.git` file, so the presence of the name — not what it is — is what
-/// tells a checkout from a plain directory.
-pub fn is_checkout(dir: &Path) -> bool {
-    dir.join(GIT_MARKER).exists()
 }
 
 /// The resolved form of a path, falling back to the path itself when it cannot

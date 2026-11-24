@@ -67,7 +67,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             // Render a malformed `PORTPLZ_UID` through `Display` so the user gets
             // the helpful message rather than its `Debug` form.
             let user = portplz_core::UserSalt::current().map_err(|e| e.to_string())?;
-            portplz_core::derive(port_basis(&root), false, &user)?
+            portplz_core::derive(port_basis(&root), false, &user, None)?
                 .port
                 .get()
         }

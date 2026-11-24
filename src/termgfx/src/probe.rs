@@ -31,6 +31,57 @@
 //! silence, and a read that waited for that silence would spend the whole
 //! budget on every run.
 //!
+//! # The third question, which is how big one character cell is
+//!
+//! A terminal lays text out in cells and it draws a picture in pixels, so a
+//! tool that wants a picture of a given number of cells has to convert. The
+//! `TIOCGWINSZ` ioctl carries that measure, and a mosh session carries none:
+//! the mosh wire protocol resizes with a width and a height in cells and
+//! nothing else, so the server writes a zero into both pixel fields of the
+//! pseudo terminal. A pane of Zellij and a ttyd panel report none either.
+//!
+//! The xterm window operations carry the answer. [`CELL_SIZE_REQUEST`] names
+//! one cell directly, and [`TEXT_AREA_REQUEST`] names the whole text area,
+//! which measures a cell after a division by the cell counts of that same
+//! window. [`read_cell`] puts the two in order.
+//!
+//! **Both questions ride in [`IMAGE_QUERY`], in front of the attributes
+//! request.** A terminal answers in the order it reads, so their answers stand
+//! in front of the answer that ends the read, and the two of them cost no
+//! extra round trip and no extra wait. GitHub issue #468 reports what the
+//! estimate of a cell did to a mosh session: `ic` drew a picture about 7
+//! percent too narrow.
+//!
+//! # The second question, which the picture itself asks
+//!
+//! A kitty terminal also answers a picture that it refused, and it names a
+//! code such as `ENOSPC` in the place where `OK` stands. mosh is the case that
+//! pays for this question as well: the image store of a mosh session holds a
+//! fixed number of bytes, and it refuses a transmission above that number. A
+//! tool that reads no refusal writes the picture, ends with no error, and
+//! leaves the user in front of an empty screen.
+//!
+//! That question needs no query of its own, because the picture is the
+//! question. So [`ask_for_a_refusal`] writes [`ATTRIBUTES_REQUEST`] alone. A
+//! terminal answers in the order it reads, so the refusal of the picture that
+//! went before stands in front of the answer that ends the read, and a picture
+//! that drew costs no wait at all.
+//!
+//! # Which picture a refusal is about
+//!
+//! The read takes every byte that stands in front of that answer, and the
+//! refusal of the picture that went before is not the only thing there. The
+//! answer of the run before this one arrives late, and a second program that
+//! draws kitty pictures on the same terminal writes an answer of its own. A
+//! reader that took the first refusal it saw would report a failure for a
+//! picture that drew, and a false failure over a good picture is worse than
+//! the silence that issue #465 reports.
+//!
+//! Every still picture carries an image number of its own, and the terminal
+//! writes that number in the control keys of the answer. So
+//! [`ask_for_a_refusal`] takes the number of the picture that went before, and
+//! [`read_refusal`] walks past every refusal that names another one.
+//!
 //! # The run that owns no terminal
 //!
 //! The question needs raw mode, and the call that asks for raw mode sends
@@ -44,24 +95,92 @@
 //! The budget ends the read, and it ends no answer of a terminal. A terminal
 //! that answers late writes those bytes to the descriptor the shell of the
 //! user reads next, and the shell takes them for keystrokes. So the budget is
-//! generous enough that a terminal on the far side of a network reaches it,
-//! and the probe runs only for a terminal that carries no name at all.
+//! generous enough that a terminal on the far side of a network reaches it.
+//!
+//! The two questions about a cell add no shape to that risk. A terminal
+//! answers in the order it reads, and both of them stand in front of the
+//! request that ends the read, so a terminal that answers at all writes their
+//! answers before the one the read waits for. A terminal that answers neither
+//! writes nothing for them, and the read still ends on the attributes.
+//!
+//! **What the two questions do change is how many runs ask anything.** The
+//! probe used to run for a terminal that carried no name at all. It now runs
+//! for every window that reports no pixel size, a named terminal included, so
+//! a mosh session and a pane of Zellij reach it. Those runs carry the risk
+//! that a run of an unnamed terminal always carried, and they carry it for the
+//! same budget. The trade is a picture of the right size against a terminal
+//! that answers nothing writing nothing late, and issue #468 measured what the
+//! guess costs: a picture about 7 percent too narrow.
 
 use crate::detect::AnsweredProtocol;
+use crate::draw::{ImageNumber, KITTY_IMAGE_NUMBER_KEY};
+use crate::geometry::CellPixels;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::time::{Duration, Instant};
 
-/// The bytes [`ask_the_terminal`] writes.
+/// The query action of the kitty graphics protocol.
 ///
-/// The first is the query action of the kitty graphics protocol: a
-/// transmission of one pixel that the terminal answers and never draws. The
-/// second is the request of the primary device attributes, which every
-/// terminal answers and which therefore ends the read.
-pub(crate) const IMAGE_QUERY: &[u8] = b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[c";
+/// It is a transmission of one pixel that the terminal answers and never
+/// draws. A terminal that reads the protocol answers `OK`, and one that reads
+/// none of it answers nothing at all.
+const KITTY_QUERY: &[u8] = b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\";
 
-/// How long [`ask_the_terminal`] waits for the answer.
+/// The questions [`ask_the_terminal`] writes, in the order it writes them.
+///
+/// They leave in one write, so the whole set costs one round trip. A terminal
+/// answers in the order it reads, so each answer arrives in the order of this
+/// list.
+///
+/// **The attributes request stands last, and it must stay last.** Every
+/// terminal answers it, so its answer is what ends the read. A question in
+/// front of it costs no extra round trip and no extra wait, because its answer
+/// arrives in front of the one the read waits for. A question behind it would
+/// answer after the read had already stopped, and those bytes would land on
+/// the descriptor the shell of the user reads next. The order is a property of
+/// this list, and `the_query_asks_every_question_and_ends_with_the_attributes_request`
+/// holds it.
+pub(crate) const IMAGE_QUERY: [&[u8]; 4] = [
+    KITTY_QUERY,
+    CELL_SIZE_REQUEST,
+    TEXT_AREA_REQUEST,
+    ATTRIBUTES_REQUEST,
+];
+
+/// The request of the primary device attributes.
+///
+/// Every terminal answers this request, so its answer is what ends a read.
+/// [`IMAGE_QUERY`] ends with it, and [`ask_for_a_refusal`] writes it alone.
+const ATTRIBUTES_REQUEST: &[u8] = b"\x1b[c";
+
+/// The request of the size of one character cell in pixels.
+///
+/// This is window operation 16 of xterm, and a terminal answers it with
+/// `CSI 6 ; height ; width t`. It names one cell directly, so it is the best
+/// answer a terminal gives to the question this crate asks about a cell.
+const CELL_SIZE_REQUEST: &[u8] = b"\x1b[16t";
+
+/// The first parameter of the answer to [`CELL_SIZE_REQUEST`].
+const CELL_SIZE_ANSWER: &[u8] = b"6";
+
+/// The request of the size of the text area in pixels.
+///
+/// This is window operation 14 of xterm, and a terminal answers it with
+/// `CSI 4 ; height ; width t`. It names the whole text area and not one cell,
+/// so a reader of it divides by the cell counts of that same window. It is the
+/// fallback of [`CELL_SIZE_REQUEST`], because a terminal that answers the
+/// older of the two operations answers this one.
+const TEXT_AREA_REQUEST: &[u8] = b"\x1b[14t";
+
+/// The first parameter of the answer to [`TEXT_AREA_REQUEST`].
+const TEXT_AREA_ANSWER: &[u8] = b"4";
+
+/// How long a reader of the terminal waits for the answer.
+///
+/// Two readers take this budget. [`ask_the_terminal`] waits this long for the
+/// answer to a protocol query. [`ask_for_a_refusal`] waits this long for the
+/// answer that says whether the terminal refused the picture that went before.
 pub(crate) const QUERY_BUDGET: Duration = Duration::from_millis(500);
 
 /// The protocol the answer of a terminal names, or [`None`] for an answer that
@@ -78,6 +197,157 @@ pub(crate) fn read_answer(answer: &[u8]) -> Option<AnsweredProtocol> {
     } else {
         None
     }
+}
+
+/// The cell that the terminal named, from the best answer it gave.
+///
+/// A terminal gives two answers about a cell, and they can both arrive in one
+/// buffer. [`CELL_SIZE_REQUEST`] names one cell directly, and
+/// [`TEXT_AREA_REQUEST`] names the whole text area, which measures a cell only
+/// after a division that rounds. So the first one outranks the second, and
+/// this function is the one place that says so.
+///
+/// # Arguments
+/// * `answer` - Every byte the terminal wrote before the answer that ended the
+///   read.
+/// * `cells` - The columns and the rows of the window the answers are about,
+///   or `None` for a run that measured no window.
+///
+/// # Returns
+/// The cell the terminal named, or `None` when it named none. A terminal that
+/// reads no window operation answers neither question, and it reaches this
+/// function as silence.
+pub(crate) fn read_cell(answer: &[u8], cells: Option<(u32, u32)>) -> Option<CellPixels> {
+    read_cell_size(answer).or_else(|| read_text_area_cell(answer, cells))
+}
+
+/// The size of one character cell that a terminal named in its answer to
+/// [`CELL_SIZE_REQUEST`].
+///
+/// The answer is `CSI 6 ; height ; width t`. **The height stands first**, and
+/// nothing in the bytes says so, which is why [`CellPixels::measured`] takes
+/// the two numbers by name.
+///
+/// # Arguments
+/// * `answer` - Every byte the terminal wrote before the answer that ended the
+///   read.
+///
+/// # Returns
+/// The cell that the terminal named, or `None` for an answer that names none.
+fn read_cell_size(answer: &[u8]) -> Option<CellPixels> {
+    let parameters = window_operation_parameters(answer, CELL_SIZE_ANSWER)?;
+    // The answer carries three parameters and no other count is this answer.
+    // A request to resize a window carries three of its own behind another
+    // first parameter, and the guard above already put that one aside.
+    let [_, height, width] = parameters.as_slice() else {
+        return None;
+    };
+    CellPixels::measured(number(width)?, number(height)?)
+}
+
+/// The size of one character cell that the answer to [`TEXT_AREA_REQUEST`]
+/// measures.
+///
+/// The answer names the whole text area, so one cell is the pixel width over
+/// the column count and the pixel height over the row count. The division uses
+/// the cell counts of the **same** window that the answer is about, which the
+/// caller measured in the one read it made before it asked anything.
+///
+/// # Arguments
+/// * `answer` - Every byte the terminal wrote before the answer that ended the
+///   read.
+/// * `cells` - The columns and the rows of that same window, or `None` for a
+///   run that measured no window.
+///
+/// # Returns
+/// The cell that the division measures, or `None` for an answer that names no
+/// text area, for a run that measured no window to divide by, and for a
+/// quotient that is no cell.
+fn read_text_area_cell(answer: &[u8], cells: Option<(u32, u32)>) -> Option<CellPixels> {
+    let (columns, rows) = cells?;
+    let parameters = window_operation_parameters(answer, TEXT_AREA_ANSWER)?;
+    let [_, height, width] = parameters.as_slice() else {
+        return None;
+    };
+    // `Window::measured` makes no window of zero columns and no window of zero
+    // rows, so no caller of a measured window reaches a division by zero here.
+    // The signature takes a bare pair all the same, so the division is a
+    // checked one and a zero gives no cell instead of a panic.
+    // `CellPixels::measured` then refuses a quotient of no pixels, which is
+    // what a text area smaller than its own grid gives.
+    CellPixels::measured(
+        number(width)?.checked_div(columns)?,
+        number(height)?.checked_div(rows)?,
+    )
+}
+
+/// The opener of a control sequence.
+///
+/// This is not [`ATTRIBUTES_OPENER`], which carries the `?` that opens a
+/// private answer. A window operation answers with no private byte, so a
+/// reader of one starts here.
+const CSI_OPENER: &[u8] = b"\x1b[";
+
+/// The final byte of every window operation and of every answer to one.
+const WINDOW_OPERATION_FINAL: u8 = b't';
+
+/// The parameters of the first window operation of `answer` whose first
+/// parameter is `kind`.
+///
+/// The buffer holds every byte the terminal wrote before the answer that ended
+/// the read, so it holds the answers of the other questions of
+/// [`IMAGE_QUERY`] as well. This walk therefore passes over every sequence
+/// that is not the one asked for, instead of reading the first sequence it
+/// finds.
+///
+/// # Arguments
+/// * `answer` - Every byte the terminal wrote.
+/// * `kind` - The first parameter that names the answer, such as
+///   [`CELL_SIZE_ANSWER`].
+///
+/// # Returns
+/// Every parameter of that answer, the first one included, or `None` when the
+/// buffer holds no such answer and when a sequence is cut short before its
+/// final byte.
+fn window_operation_parameters<'a>(answer: &'a [u8], kind: &[u8]) -> Option<Vec<&'a [u8]>> {
+    let mut rest = answer;
+    while let Some(start) = position_of(rest, CSI_OPENER) {
+        let body = &rest[start + CSI_OPENER.len()..];
+        // A control sequence ends at its final byte, which stands above every
+        // parameter byte. A sequence with no final byte was cut short, and the
+        // walk below reads the rest of the buffer all the same.
+        if let Some(end) = body.iter().position(|byte| (0x40..=0x7e).contains(byte)) {
+            if body[end] == WINDOW_OPERATION_FINAL {
+                let parameters: Vec<&[u8]> = body[..end]
+                    .split(|byte| *byte == PARAMETER_SEPARATOR)
+                    .collect();
+                if parameters.first() == Some(&kind) {
+                    return Some(parameters);
+                }
+            }
+        }
+        // The walk goes on from the body of the sequence it just refused, and
+        // not from behind the final byte of it. A sequence that was cut short
+        // holds the opener of the next one inside what would otherwise be its
+        // parameters, and that opener stands in front of the final byte. The
+        // body is two bytes shorter than `rest` on every turn, so the walk ends.
+        rest = body;
+    }
+    None
+}
+
+/// The number that `bytes` spells, for a run of ASCII digits and nothing else.
+///
+/// A parameter of a control sequence is a run of digits. Every other shape is
+/// no number of this protocol, and `None` is the answer for it. That includes
+/// an empty parameter, which a terminal writes for a value it left out, and a
+/// number that no `u32` holds. The bound that a font has stands elsewhere:
+/// [`crate::geometry::CellPixels::measured`] refuses a cell above it.
+fn number(bytes: &[u8]) -> Option<u32> {
+    if bytes.is_empty() || !bytes.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    std::str::from_utf8(bytes).ok()?.parse().ok()
 }
 
 /// The opener of an application-program command, which carries a kitty answer.
@@ -112,30 +382,212 @@ const KITTY_GRAPHICS: u8 = b'G';
 /// The byte that divides the control block of a kitty answer from its message.
 const KITTY_SEPARATOR: u8 = b';';
 
-/// Whether the terminal carried out the query of [`IMAGE_QUERY`].
+/// The byte that divides one control key of a kitty answer from the next.
+const KEY_SEPARATOR: u8 = b',';
+
+/// The byte that divides the name of a control key from its value.
+const KEY_VALUE_SEPARATOR: u8 = b'=';
+
+/// One graphics answer of a kitty terminal.
 ///
-/// The answer is `ESC _ G <keys> ; <message> ESC \`, and the message is `OK`
-/// for a query the terminal carried out. A terminal that refused it writes a
-/// code such as `ENOTSUPP` in the same place, which is no answer of yes.
-fn kitty_said_ok(answer: &[u8]) -> bool {
+/// The two halves arrive together, because a reader that knows what a terminal
+/// said also has to know which picture the terminal said it about.
+struct KittyAnswer<'a> {
+    /// The control keys, without the `G` that opens the block.
+    ///
+    /// They are `<name>=<value>` pairs that a comma divides, such as
+    /// `i=31,I=12`.
+    keys: &'a [u8],
+    /// What the terminal said about the command: `OK` for a command it carried
+    /// out, and a code such as `ENOSPC` for one it refused.
+    message: &'a [u8],
+}
+
+impl KittyAnswer<'_> {
+    /// The image number that the control keys name, or [`None`] for keys that
+    /// name none.
+    ///
+    /// The name is a capital `I`, which the crate states one time in
+    /// [`KITTY_IMAGE_NUMBER_KEY`]. A lower case `i` is an image id, which names
+    /// a different thing: the terminal picks an id itself for a picture that
+    /// named none, so an id says nothing about which picture of this process
+    /// the terminal answers.
+    ///
+    /// The whole value is read, so keys of `I=12` give 12 and never 1.
+    fn image_number(&self) -> Option<ImageNumber> {
+        let value = self
+            .keys
+            .split(|byte| *byte == KEY_SEPARATOR)
+            .find_map(|pair| {
+                let divide = pair.iter().position(|byte| *byte == KEY_VALUE_SEPARATOR)?;
+                let (name, value) = pair.split_at(divide);
+                // The value opens with the byte that divided it from the name.
+                (name == KITTY_IMAGE_NUMBER_KEY.as_bytes()).then_some(&value[1..])
+            })?;
+        ImageNumber::new(std::str::from_utf8(value).ok()?.parse().ok()?)
+    }
+
+    /// Whether this answer could speak about the picture that carried `number`.
+    ///
+    /// An answer that names another image number belongs to another picture:
+    /// to the picture of the run before this one, which the terminal answered
+    /// late, or to the picture of a second program that draws on the same
+    /// terminal. This call refuses that one.
+    ///
+    /// **An answer that names no image number at all is taken.** A strict rule
+    /// would refuse it, and a terminal that reports a failure without the
+    /// number of the picture would then go silent. That silence is the defect
+    /// of issue #465, so the strict rule takes a report away that this crate
+    /// makes today. The rule here takes none away, and it still takes the
+    /// misattribution away.
+    ///
+    /// # Arguments
+    /// * `number` - The image number that the picture of this process carried.
+    ///
+    /// # Returns
+    /// True for an answer of that number and for an answer of no number.
+    fn could_be_for(&self, number: ImageNumber) -> bool {
+        self.image_number().is_none_or(|named| named == number)
+    }
+}
+
+/// Every kitty graphics answer that `answer` carries, in the order the terminal
+/// wrote them.
+///
+/// One answer is `ESC _ G <control keys> ; <message> ESC \`, and the walk gives
+/// both halves of it. [`read_refusal`] reads the control keys, because the
+/// image number in them says which picture the terminal is speaking about.
+///
+/// **This is the one walk over those blocks.** [`kitty_said_ok`] reads it to
+/// learn that a query drew, and [`read_refusal`] reads it to learn that a
+/// picture did not. A second walk would part company with this one the day
+/// either learned something about the shape, and no test would say so.
+///
+/// The walk ends at a block that no string terminator closes, because such a
+/// block is half of an answer that arrived late, and the bytes of the other
+/// half say nothing yet.
+fn kitty_messages(answer: &[u8]) -> impl Iterator<Item = KittyAnswer<'_>> + '_ {
     let mut rest = answer;
-    while let Some(start) = position_of(rest, APC_OPENER) {
-        let body = &rest[start + APC_OPENER.len()..];
-        let Some(end) = position_of(body, STRING_TERMINATOR) else {
-            return false;
-        };
-        let block = &body[..end];
-        if block.first() == Some(&KITTY_GRAPHICS) {
-            let separator = block.iter().position(|byte| *byte == KITTY_SEPARATOR);
-            if let Some(separator) = separator {
-                if block[separator + 1..].starts_with(KITTY_OK) {
-                    return true;
-                }
+    std::iter::from_fn(move || {
+        while let Some(start) = position_of(rest, APC_OPENER) {
+            let body = &rest[start + APC_OPENER.len()..];
+            let end = position_of(body, STRING_TERMINATOR)?;
+            let block = &body[..end];
+            rest = &body[end + STRING_TERMINATOR.len()..];
+            // The `G` opens the block and belongs to neither half, so the keys
+            // start behind it.
+            let Some((&KITTY_GRAPHICS, keys_and_message)) = block.split_first() else {
+                continue;
+            };
+            if let Some(separator) = keys_and_message
+                .iter()
+                .position(|byte| *byte == KITTY_SEPARATOR)
+            {
+                return Some(KittyAnswer {
+                    keys: &keys_and_message[..separator],
+                    message: &keys_and_message[separator + 1..],
+                });
             }
         }
-        rest = &body[end + STRING_TERMINATOR.len()..];
+        None
+    })
+}
+
+/// Whether the terminal carried out the query of [`IMAGE_QUERY`].
+///
+/// The message of the answer is `OK` for a query the terminal carried out. A
+/// terminal that refused it writes a code such as `ENOTSUPP` in the same
+/// place, which is no answer of yes.
+fn kitty_said_ok(answer: &[u8]) -> bool {
+    kitty_messages(answer).any(|block| block.message.starts_with(KITTY_OK))
+}
+
+/// A kitty graphics command that the terminal refused, in the words of the
+/// terminal.
+///
+/// A refusal carries a code such as `ENOSPC`, and it carries a detailed
+/// message behind that code when the terminal wrote one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refusal {
+    /// The code the terminal named, such as `ENOSPC` or `ETOODEEP`.
+    pub code: String,
+    /// What the terminal said behind that code, or an empty string for a code
+    /// that arrived alone.
+    pub message: String,
+}
+
+impl std::fmt::Display for Refusal {
+    /// Write the code, and the detailed message behind it when the terminal
+    /// wrote one.
+    ///
+    /// A colon and a space divide the two, because a user reads this line and
+    /// the code alone sends that user to a search engine.
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.message.is_empty() {
+            write!(out, "{}", self.code)
+        } else {
+            write!(out, "{}: {}", self.code, self.message)
+        }
     }
-    false
+}
+
+/// The byte that divides the code of a refusal from its detailed message.
+const REFUSAL_SEPARATOR: u8 = b':';
+
+/// The first refusal in `answer` that could be about the picture of `number`,
+/// or [`None`] for an answer that carries none.
+///
+/// The walk gives the first one, and it walks every block to find it. A picture
+/// travels in more than one command, so the block that reports the refusal
+/// stands behind blocks that report success.
+///
+/// A block that names another image number is walked past, and
+/// [`KittyAnswer::could_be_for`] states which blocks those are. Such a block
+/// holds the refusal of another picture, and a report of it would name a
+/// picture that drew.
+///
+/// # Arguments
+/// * `answer` - The bytes that the terminal wrote.
+/// * `number` - The image number that the picture of this process carried.
+///
+/// # Returns
+/// The refusal of that picture, for an answer that carries one.
+fn read_refusal(answer: &[u8], number: ImageNumber) -> Option<Refusal> {
+    kitty_messages(answer)
+        .filter(|block| block.could_be_for(number))
+        .find_map(|block| refusal_in(block.message))
+}
+
+/// The refusal that one message carries, or [`None`] for a message that
+/// reports no failure.
+///
+/// The message is `OK` for a command the terminal carried out, and a code such
+/// as `ENOSPC` for one it refused. The code stands alone or a colon divides it
+/// from a detailed message, so a message with no colon in it is a whole
+/// refusal and the detail of it is empty.
+fn refusal_in(message: &[u8]) -> Option<Refusal> {
+    let divide = message
+        .iter()
+        .position(|byte| *byte == REFUSAL_SEPARATOR)
+        .unwrap_or(message.len());
+    let code = &message[..divide];
+    if code.is_empty() || code == KITTY_OK {
+        return None;
+    }
+    Some(Refusal {
+        code: text_of(code),
+        message: text_of(message.get(divide + 1..).unwrap_or_default()),
+    })
+}
+
+/// The text of `bytes`, with every byte that stands for no character replaced.
+///
+/// The specification gives a message printable ASCII characters and spaces
+/// alone. A terminal that writes something else writes it into a line that a
+/// user reads, and a lossy read puts that line in front of the user where a
+/// strict one would take the refusal away and report nothing at all.
+fn text_of(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
 }
 
 /// Whether an answer of the primary device attributes names sixel.
@@ -180,13 +632,53 @@ fn position_of(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-/// Ask the controlling terminal which image protocol it draws.
+/// What one terminal said for the whole of [`IMAGE_QUERY`].
 ///
-/// Gives [`None`] when there is no controlling terminal, when this run stands
-/// in a background process group and therefore owns no terminal to ask (see
-/// [`owns_the_terminal`]), when the terminal answers nothing inside `budget`,
-/// or when the answer names neither protocol.
-pub(crate) fn ask_the_terminal(budget: Duration) -> Option<AnsweredProtocol> {
+/// The two answers travel together because one write asked for both, and a
+/// caller that took them one at a time would read the terminal twice for one
+/// picture.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct TerminalAnswer {
+    /// The image protocol the terminal named, or `None` when it named none.
+    pub(crate) protocol: Option<AnsweredProtocol>,
+    /// The character cell the terminal named, or `None` when it named none.
+    pub(crate) cell: Option<CellPixels>,
+}
+
+/// Ask the controlling terminal which image protocol it draws and how big one
+/// character cell is.
+///
+/// # Arguments
+/// * `budget` - The longest that the read waits.
+/// * `cells` - The columns and the rows of the window that the caller
+///   measured, or `None` when it measured none. The answer of
+///   [`TEXT_AREA_REQUEST`] divides by this pair, so the measure and the answer
+///   are about one window.
+///
+/// # Returns
+/// What the terminal said. Every field is `None` when there is no controlling
+/// terminal, when this run stands in a background process group and therefore
+/// owns no terminal to ask (see [`owns_the_terminal`]), when the terminal
+/// answers nothing inside `budget`, and when the answer names neither thing.
+pub(crate) fn ask_the_terminal(budget: Duration, cells: Option<(u32, u32)>) -> TerminalAnswer {
+    let Some(answer) = query_the_terminal(budget) else {
+        return TerminalAnswer::default();
+    };
+    TerminalAnswer {
+        protocol: read_answer(&answer),
+        cell: read_cell(&answer, cells),
+    }
+}
+
+/// Write [`IMAGE_QUERY`] to the controlling terminal and read what comes back.
+///
+/// The read of the terminal stands apart from the reading of the bytes, so
+/// every parser above is a function of its input alone.
+///
+/// # Returns
+/// Every byte the terminal wrote before the answer that ended the read, or
+/// `None` when this run has no terminal to ask.
+fn query_the_terminal(budget: Duration) -> Option<Vec<u8>> {
     let terminal = OpenOptions::new()
         .read(true)
         .write(true)
@@ -194,9 +686,49 @@ pub(crate) fn ask_the_terminal(budget: Duration) -> Option<AnsweredProtocol> {
         .ok()?;
     let fd = terminal.as_raw_fd();
     let _raw = RawMode::of(fd)?;
-    (&terminal).write_all(IMAGE_QUERY).ok()?;
+    // The questions leave in one write. A terminal reads them in the order of
+    // the list, and its answers come back in that order.
+    (&terminal).write_all(&IMAGE_QUERY.concat()).ok()?;
     (&terminal).flush().ok()?;
-    read_answer(&drain(fd, budget))
+    Some(drain(fd, budget))
+}
+
+/// Ask the controlling terminal whether it refused the picture that went
+/// before this call.
+///
+/// The picture is the question, so this call writes [`ATTRIBUTES_REQUEST`] and
+/// no picture of its own. Every terminal answers that request, and a terminal
+/// answers in the order it reads, so a refusal stands in front of the answer
+/// that ends the read. A terminal that refused nothing answers the request
+/// alone, and the read ends there instead of spending the whole budget on
+/// silence.
+///
+/// The answer of the terminal also carries every answer that arrived late, so
+/// `number` says which picture this call asks about. A refusal that names
+/// another image number belongs to another picture, and [`read_refusal`] walks
+/// past it.
+///
+/// # Arguments
+/// * `budget` - The longest that the read waits.
+/// * `number` - The image number that the picture of this process carried.
+///
+/// # Returns
+/// Gives [`None`] when there is no controlling terminal, when this run stands
+/// in a background process group and therefore owns no terminal to ask (see
+/// [`owns_the_terminal`]), when the terminal answers nothing inside `budget`,
+/// when the answer reports no failure, and when every failure it reports names
+/// another picture.
+pub(crate) fn ask_for_a_refusal(budget: Duration, number: ImageNumber) -> Option<Refusal> {
+    let terminal = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(CONTROLLING_TERMINAL)
+        .ok()?;
+    let fd = terminal.as_raw_fd();
+    let _raw = RawMode::of(fd)?;
+    (&terminal).write_all(ATTRIBUTES_REQUEST).ok()?;
+    (&terminal).flush().ok()?;
+    read_refusal(&drain(fd, budget), number)
 }
 
 /// The terminal a program asks, whatever its standard output was pointed at.
@@ -204,8 +736,15 @@ const CONTROLLING_TERMINAL: &str = "/dev/tty";
 
 /// The largest answer this module keeps.
 ///
-/// Every answer of [`IMAGE_QUERY`] is far below this. The cap is here so that
-/// a terminal which writes without stopping cannot grow the buffer.
+/// A refusal is the larger of the two answers this module reads. The terminal
+/// writes a detailed message of its own behind the refusal code, and the
+/// terminal alone decides the length of that message. Every answer of
+/// [`IMAGE_QUERY`] is far below the cap.
+///
+/// The cap is here so that a terminal that does not stop cannot grow the
+/// buffer. It truncates such an answer, and it fails nothing: a refusal longer
+/// than the cap arrives cut short, because [`drain`] stops at the cap, and
+/// [`read_refusal`] then reads a message with no tail.
 const ANSWER_LIMIT: usize = 1024;
 
 /// How much of an answer one read takes.
@@ -365,6 +904,145 @@ impl Drop for RawMode {
 mod tests {
     use super::*;
 
+    /// The height of the cell that the answers of these tests name, in pixels.
+    ///
+    /// It stands **first** in the answer of a terminal, and second in every
+    /// call of [`CellPixels::measured`]. The two numbers differ, so an answer
+    /// read the wrong way round fails the test instead of passing it.
+    const ANSWERED_CELL_HEIGHT: u32 = 30;
+
+    /// The width of that same cell, in pixels.
+    const ANSWERED_CELL_WIDTH: u32 = 14;
+
+    #[test]
+    fn the_answer_of_the_cell_size_names_the_height_first() {
+        // Kitty 0.42 answers this shape, and so does xterm. The height stands
+        // in the first parameter and the width in the second, which is the
+        // order of every window operation of xterm.
+        assert_eq!(
+            read_cell_size(b"\x1b[6;30;14t"),
+            CellPixels::measured(ANSWERED_CELL_WIDTH, ANSWERED_CELL_HEIGHT),
+            "the answer names the height first, so a reader that swaps the two measures a cell of the wrong shape"
+        );
+    }
+
+    /// The answer of a terminal that names the cell of these tests.
+    const CELL_SIZE_ANSWER_BYTES: &[u8] = b"\x1b[6;30;14t";
+
+    #[test]
+    fn one_answer_of_each_shape_that_names_no_cell_gives_no_cell() {
+        // One case for each syntactic form that reaches this parser and names
+        // no cell. A parser that reads a number out of any of them measures a
+        // cell that no terminal reported, and every picture of the run comes
+        // out at that size.
+        for (answer, form) in [
+            (
+                &b"\x1b[8;24;80t"[..],
+                "a request to resize the window, which carries three parameters of its own behind another first one",
+            ),
+            (&b"\x1b[6;16t"[..], "one parameter short"),
+            (&b"\x1b[6;16;8;4t"[..], "one parameter long"),
+            (&b"\x1b[6;0;14t"[..], "a height of no pixels"),
+            (&b"\x1b[6;30;0t"[..], "a width of no pixels"),
+            (
+                &b"\x1b[6;99999;99999t"[..],
+                "a cell far above the largest font",
+            ),
+            (&b"\x1b[6;;14t"[..], "a height the terminal left out"),
+            (&b"\x1b[6;30;14"[..], "an answer cut short of its final byte"),
+            (&b""[..], "a terminal that answered nothing at all"),
+        ] {
+            assert_eq!(
+                read_cell_size(answer),
+                None,
+                "an answer of {form} names no cell, and the measure must fall through to the next source"
+            );
+        }
+    }
+
+    #[test]
+    fn a_sequence_cut_short_in_front_of_the_answer_does_not_take_the_answer_with_it() {
+        // The buffer holds every byte that stood in front of the answer which
+        // ended the read, and a terminal that answered the run before this one
+        // late leaves a part of a sequence there. The opener of the real answer
+        // stands inside what those bytes would otherwise claim as parameters.
+        let mut answer = b"\x1b[999".to_vec();
+        answer.extend_from_slice(CELL_SIZE_ANSWER_BYTES);
+
+        assert_eq!(
+            read_cell_size(&answer),
+            CellPixels::measured(ANSWERED_CELL_WIDTH, ANSWERED_CELL_HEIGHT),
+            "a walk that steps over the final byte of a sequence cut short steps over the opener of the next one with it"
+        );
+    }
+
+    /// The columns and the rows of the window that the tests of the text area
+    /// divide by.
+    const ANSWERED_WINDOW_CELLS: (u32, u32) = (80, 24);
+
+    #[test]
+    fn the_answer_of_the_text_area_divides_by_the_cells_of_the_same_window() {
+        // 640 pixels over 80 columns is a cell 8 pixels wide, and 384 pixels
+        // over 24 rows is a cell 16 pixels tall. The height stands first in
+        // this answer as well.
+        assert_eq!(
+            read_text_area_cell(b"\x1b[4;384;640t", Some(ANSWERED_WINDOW_CELLS)),
+            CellPixels::measured(8, 16),
+            "the answer names the whole text area, and the cell counts of that same window name one cell"
+        );
+        assert_eq!(
+            read_text_area_cell(b"\x1b[4;384;640t", None),
+            None,
+            "a run that measured no window holds nothing to divide by, so it measures no cell"
+        );
+        // A text area smaller than its own grid. 40 pixels over 80 columns is
+        // a cell of no width, and 12 pixels over 24 rows is a cell of no
+        // height.
+        assert_eq!(
+            read_text_area_cell(b"\x1b[4;12;40t", Some(ANSWERED_WINDOW_CELLS)),
+            None,
+            "`CellPixels::measured` refuses a quotient of no pixels, and a cell of no width holds no pixel of a picture"
+        );
+        // A count of zero reaches no caller that measured a window, because
+        // `Window::measured` makes no window of zero columns and no window of
+        // zero rows. It reaches this function because the signature takes a
+        // bare pair, and the division is a checked one for that reason.
+        assert_eq!(
+            read_text_area_cell(b"\x1b[4;384;640t", Some((0, ANSWERED_WINDOW_CELLS.1))),
+            None,
+            "the checked division gives no cell for a column count of zero, where a plain division panics"
+        );
+        assert_eq!(
+            read_text_area_cell(b"\x1b[4;384;640t", Some((ANSWERED_WINDOW_CELLS.0, 0))),
+            None,
+            "the checked division gives no cell for a row count of zero, where a plain division panics"
+        );
+    }
+
+    #[test]
+    fn the_cell_that_the_cell_size_names_outranks_the_one_the_text_area_measures() {
+        // The two answers arrive in one buffer, because the query asks both
+        // questions in one write. They disagree here, so the order of the two
+        // sources is the whole of what this test measures.
+        let both = b"\x1b[6;30;14t\x1b[4;384;640t";
+
+        assert_eq!(
+            read_cell(both, Some(ANSWERED_WINDOW_CELLS)),
+            CellPixels::measured(ANSWERED_CELL_WIDTH, ANSWERED_CELL_HEIGHT),
+            "the answer of the cell size names one cell directly, and the text area names one only after a division that rounds"
+        );
+        assert_eq!(
+            read_cell(b"\x1b[4;384;640t", Some(ANSWERED_WINDOW_CELLS)),
+            CellPixels::measured(8, 16),
+            "a terminal that answers the text area alone still measures a cell"
+        );
+        assert_eq!(
+            read_cell(b"\x1b[?62;4c", Some(ANSWERED_WINDOW_CELLS)),
+            None,
+            "a terminal that reads no window operation answers neither question, and it names no cell"
+        );
+    }
+
     #[test]
     fn an_answer_that_names_sixel_gives_sixel() {
         // tmux 3.7c answers this, measured 2026-09-06. Parameter 4 names sixel.
@@ -471,14 +1149,24 @@ mod tests {
         );
     }
 
-    /// The request of the primary device attributes, which ends [`IMAGE_QUERY`].
-    const ATTRIBUTES_REQUEST: &[u8] = b"\x1b[c";
-
     #[test]
-    fn the_query_ends_with_the_attributes_request() {
+    fn the_query_asks_every_question_and_ends_with_the_attributes_request() {
         assert!(
-            IMAGE_QUERY.ends_with(ATTRIBUTES_REQUEST),
-            "the answer of the attributes request is what ends the read"
+            IMAGE_QUERY.contains(&CELL_SIZE_REQUEST),
+            "the question about one cell rides in the same write, so it costs no round trip of its own"
+        );
+        assert!(
+            IMAGE_QUERY.contains(&TEXT_AREA_REQUEST),
+            "the question about the text area rides there too, for a terminal that reads the older window operation alone"
+        );
+        assert_eq!(
+            IMAGE_QUERY.last(),
+            Some(&ATTRIBUTES_REQUEST),
+            "the answer of the attributes request is what ends the read, so its request stands last"
+        );
+        assert!(
+            IMAGE_QUERY.concat().ends_with(ATTRIBUTES_REQUEST),
+            "the bytes that reach the terminal end with it as well"
         );
     }
 
@@ -606,7 +1294,7 @@ mod tests {
             if libc::setsid() == -1 {
                 libc::_exit(FAILED);
             }
-            #[allow(
+            #[expect(
                 clippy::disallowed_methods,
                 reason = "the ban covers the read of a window, and `TIOCSCTTY` reads none. It claims the pseudo-terminal as the controlling terminal of this child, and termsize offers no call for that"
             )]
@@ -633,7 +1321,7 @@ mod tests {
                 if libc::setpgid(0, 0) == -1 {
                     libc::_exit(FAILED);
                 }
-                let _answer = ask_the_terminal(BACKGROUND_BUDGET);
+                let _answer = ask_the_terminal(BACKGROUND_BUDGET, None);
                 libc::_exit(0);
             }
 
@@ -869,7 +1557,7 @@ mod tests {
             if libc::setsid() == -1 {
                 leave(FAILED);
             }
-            #[allow(
+            #[expect(
                 clippy::disallowed_methods,
                 reason = "the ban covers the read of a window, and `TIOCSCTTY` reads none. It claims the pseudo-terminal as the controlling terminal of this child, and termsize offers no call for that"
             )]
@@ -1055,7 +1743,7 @@ mod tests {
         // child reads nothing of it. The test holds the other copy, and the
         // answer arrives on that one.
         unsafe { libc::close(master) };
-        leave(match ask_the_terminal(ROUND_TRIP_BUDGET) {
+        leave(match ask_the_terminal(ROUND_TRIP_BUDGET, None).protocol {
             Some(AnsweredProtocol::Sixel) => NAMED_SIXEL,
             Some(AnsweredProtocol::Kitty) => NAMED_KITTY,
             None => NAMED_NOTHING,
@@ -1123,7 +1811,8 @@ mod tests {
         }
 
         assert_eq!(
-            query, IMAGE_QUERY,
+            query,
+            IMAGE_QUERY.concat(),
             "the probe writes the whole query to the terminal it asks"
         );
         assert_eq!(
@@ -1144,6 +1833,315 @@ mod tests {
             "the probe must read the answer the terminal wrote. {NAMED_NOTHING} \
              says it read no answer at all, {NAMED_KITTY} says it named the \
              other protocol, and {FAILED} says a call of the child failed"
+        );
+    }
+
+    /// A refusal of the image store, and the answer of the attributes behind
+    /// it.
+    ///
+    /// This is the shape that mosh writes. The image store of a mosh session
+    /// holds a fixed number of bytes, and a transmission above that number
+    /// arrives as `ENOSPC`.
+    const REFUSAL_ANSWER: &[u8] = b"\x1b_Gi=31;ENOSPC:the image store is full\x1b\\\x1b[?62;4c";
+
+    /// The code that [`REFUSAL_ANSWER`] carries.
+    const REFUSED_CODE: &str = "ENOSPC";
+
+    /// The detailed message that [`REFUSAL_ANSWER`] carries behind that code.
+    const REFUSED_DETAIL: &str = "the image store is full";
+
+    /// The image number that the picture of these tests carried.
+    ///
+    /// A minted number belongs to the run that minted it and no test can
+    /// predict one, so these tests state a number of their own and answer for
+    /// a terminal that speaks about it.
+    const THIS_PICTURE_NUMBER: u32 = 7;
+
+    /// The image number of the picture that these tests drew.
+    fn this_picture() -> ImageNumber {
+        ImageNumber::new(THIS_PICTURE_NUMBER).expect("the number of a test picture is above zero")
+    }
+
+    #[test]
+    fn a_refusal_gives_the_code_and_the_detail() {
+        // The code names what went wrong and the detail says it in words. A
+        // reader of the refusal prints both, because the code alone sends the
+        // user to a search engine.
+        assert_eq!(
+            read_refusal(REFUSAL_ANSWER, this_picture()),
+            Some(Refusal {
+                code: REFUSED_CODE.to_owned(),
+                message: REFUSED_DETAIL.to_owned(),
+            }),
+            "the colon divides the code of a refusal from its detail"
+        );
+    }
+
+    #[test]
+    fn a_refusal_with_no_detail_gives_the_code_alone() {
+        // The specification makes the detail optional, so a code stands as a
+        // whole refusal. A parser that waited for a colon would read this one
+        // as no refusal at all, and the picture would go missing in silence.
+        assert_eq!(
+            read_refusal(b"\x1b_Gi=31;ETOODEEP\x1b\\\x1b[?62;4c", this_picture()),
+            Some(Refusal {
+                code: "ETOODEEP".to_owned(),
+                message: String::new(),
+            }),
+            "a code with no colon behind it is a whole refusal"
+        );
+    }
+
+    #[test]
+    fn an_ok_answer_is_no_refusal() {
+        // `OK` is what a terminal writes for a command it carried out. A
+        // reader that took it for a refusal would report a failure for every
+        // picture that drew.
+        assert_eq!(
+            read_refusal(b"\x1b_Gi=99,I=7;OK\x1b\\", this_picture()),
+            None
+        );
+    }
+
+    #[test]
+    fn an_answer_of_the_attributes_alone_is_no_refusal() {
+        // The request of the attributes is what ends the read, so its answer
+        // stands in the bytes of every round trip. It is no APC block, and the
+        // reader must walk past it.
+        assert_eq!(read_refusal(b"\x1b[?62;4c", this_picture()), None);
+    }
+
+    #[test]
+    fn silence_is_no_refusal() {
+        // A terminal that answers nothing refused nothing that this crate can
+        // report. A run that owns no terminal reads the same silence.
+        assert_eq!(read_refusal(b"", this_picture()), None);
+    }
+
+    #[test]
+    fn a_refusal_behind_an_ok_still_arrives() {
+        // A terminal answers every command it reads, and a picture travels in
+        // more than one command. So the block that reports the refusal stands
+        // behind blocks that report success, and a reader that stopped at the
+        // first block would report that the picture drew.
+        assert_eq!(
+            read_refusal(
+                b"\x1b_Gi=31;OK\x1b\\\x1b_Gi=31;ENOSPC\x1b\\\x1b[?62;4c",
+                this_picture()
+            ),
+            Some(Refusal {
+                code: REFUSED_CODE.to_owned(),
+                message: String::new(),
+            }),
+            "the reader walks every block and gives the first refusal"
+        );
+    }
+
+    #[test]
+    fn a_refusal_that_names_another_picture_is_no_refusal_of_this_one() {
+        // The answer of a terminal reaches whoever reads that terminal next.
+        // The run before this one is answered late, and a second program that
+        // draws kitty pictures on the same terminal writes an answer of its
+        // own. Both name another image number, and a reader that reported them
+        // would fail a picture that drew.
+        assert_eq!(
+            read_refusal(
+                b"\x1b_Gi=31,I=999999;ENOSPC:the image store is full\x1b\\\x1b[?62;4c",
+                this_picture()
+            ),
+            None,
+            "a refusal of image number 999999 says nothing about picture {THIS_PICTURE_NUMBER}"
+        );
+    }
+
+    #[test]
+    fn a_refusal_that_names_this_picture_arrives() {
+        // The other half of the rule. A reader that refused every numbered
+        // refusal would report nothing at all, which is the defect of issue
+        // #465.
+        assert_eq!(
+            read_refusal(
+                b"\x1b_Gi=31,I=7;ENOSPC:the image store is full\x1b\\\x1b[?62;4c",
+                this_picture()
+            ),
+            Some(Refusal {
+                code: REFUSED_CODE.to_owned(),
+                message: REFUSED_DETAIL.to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_refusal_that_names_no_picture_arrives() {
+        // A terminal that reports a failure and echoes no image number is
+        // still a terminal that refused the picture of this run. A strict rule
+        // would take that report away, and the user would then stand in front
+        // of an empty screen with no word about why.
+        assert_eq!(
+            read_refusal(b"\x1b_G;ENOSPC\x1b\\\x1b[?62;4c", this_picture()),
+            Some(Refusal {
+                code: REFUSED_CODE.to_owned(),
+                message: String::new(),
+            }),
+            "a refusal with no image number could be the refusal of this picture"
+        );
+    }
+
+    #[test]
+    fn an_image_number_is_read_whole() {
+        // A reader that compared the first character of the value would take
+        // 12 for 1. The picture of this test is number 1, and the answer names
+        // number 12.
+        let first_picture = ImageNumber::new(1).expect("one is above zero");
+        assert_eq!(
+            read_refusal(b"\x1b_Gi=31,I=12;ENOSPC\x1b\\\x1b[?62;4c", first_picture),
+            None,
+            "image number 12 is another picture than image number 1"
+        );
+    }
+
+    #[test]
+    fn the_image_id_of_an_answer_names_no_picture() {
+        // The two keys are a capital `I` for an image number and a lower case
+        // `i` for an image id. A terminal picks the id itself for a picture
+        // that named none, so an id says nothing about which picture of this
+        // process the terminal answers. A reader of the wrong key would take
+        // the refusal below, whose image number names another picture.
+        assert_eq!(
+            read_refusal(b"\x1b_Gi=7,I=999;ENOSPC\x1b\\\x1b[?62;4c", this_picture()),
+            None,
+            "the image id of 7 is no image number of 7"
+        );
+    }
+
+    #[test]
+    fn the_refusal_of_this_picture_arrives_behind_the_refusal_of_another() {
+        // Both refusals stand in the same read: the late answer of the run
+        // before this one, and then the answer of this picture. A reader that
+        // stopped at the first refusal it saw would report the wrong code.
+        assert_eq!(
+            read_refusal(
+                b"\x1b_GI=999;ENOSPC\x1b\\\x1b_GI=7;ETOODEEP\x1b\\\x1b[?62;4c",
+                this_picture()
+            ),
+            Some(Refusal {
+                code: "ETOODEEP".to_owned(),
+                message: String::new(),
+            }),
+            "the reader walks past the refusal of another picture and reads on"
+        );
+    }
+
+    #[test]
+    fn the_display_of_a_refusal_names_the_code_and_the_detail() {
+        // The user reads this line, and it is the whole of what the tool knows
+        // about why the picture is missing.
+        let refusal = Refusal {
+            code: REFUSED_CODE.to_owned(),
+            message: REFUSED_DETAIL.to_owned(),
+        };
+        assert_eq!(refusal.to_string(), "ENOSPC: the image store is full");
+
+        let bare = Refusal {
+            code: "ETOODEEP".to_owned(),
+            message: String::new(),
+        };
+        assert_eq!(
+            bare.to_string(),
+            "ETOODEEP",
+            "a refusal with no detail names its code and nothing else"
+        );
+    }
+
+    /// What the child of the refusal round trip exits with for the refusal
+    /// that this test wrote back.
+    const NAMED_THE_REFUSAL: libc::c_int = 51;
+
+    /// What it exits with when the probe read no refusal at all.
+    const NAMED_NO_REFUSAL: libc::c_int = 53;
+
+    /// What it exits with when the probe read some other refusal.
+    const NAMED_ANOTHER_REFUSAL: libc::c_int = 55;
+
+    /// Ask the controlling terminal of this child for a refusal, and exit with
+    /// what the probe read.
+    ///
+    /// This runs in a child of a fork of a test binary that holds many
+    /// threads, and it leaves through [`leave`].
+    fn report_the_refusal_round_trip(terminal: RawFd, master: RawFd) -> ! {
+        claim_the_terminal(terminal);
+        // SAFETY: the fork gave this child a copy of the master end, and this
+        // child reads nothing of it. The test holds the other copy, and the
+        // answer arrives on that one.
+        unsafe { libc::close(master) };
+        leave(match ask_for_a_refusal(ROUND_TRIP_BUDGET, this_picture()) {
+            Some(refusal) => {
+                if refusal.code == REFUSED_CODE && refusal.message == REFUSED_DETAIL {
+                    NAMED_THE_REFUSAL
+                } else {
+                    NAMED_ANOTHER_REFUSAL
+                }
+            }
+            None => NAMED_NO_REFUSAL,
+        })
+    }
+
+    #[test]
+    fn the_probe_reads_the_refusal_that_a_terminal_wrote() {
+        // The whole round trip, over a terminal that this test answers for.
+        // The probe writes the request of the attributes, because every
+        // terminal answers that one and its answer is what ends the read. A
+        // terminal that refused the picture writes the refusal first, since a
+        // terminal answers in the order it reads.
+        let (master, slave) = open_a_pseudo_terminal();
+
+        // SAFETY: fork(2) reads nothing of this process. The child leaves
+        // through `_exit` alone, so it runs no destructor of this one.
+        let child = unsafe { libc::fork() };
+        assert!(child != -1, "fork(2) must give a child");
+        if child == 0 {
+            report_the_refusal_round_trip(slave, master);
+        }
+
+        let query = read_the_query(master, REPORT_BUDGET);
+        // SAFETY: the buffer is owned here and the length is its own.
+        let put =
+            unsafe { libc::write(master, REFUSAL_ANSWER.as_ptr().cast(), REFUSAL_ANSWER.len()) };
+
+        let status = wait_for_the_child(child);
+
+        // Both descriptors go back before the assertions, because a failed
+        // assertion leaves this test through a panic.
+        // SAFETY: this test opened the two descriptors and nothing else holds
+        // them.
+        unsafe {
+            libc::close(slave);
+            libc::close(master);
+        }
+
+        assert_eq!(
+            query, ATTRIBUTES_REQUEST,
+            "the probe asks for the attributes alone, and it sends no second picture"
+        );
+        assert_eq!(
+            put,
+            isize::try_from(REFUSAL_ANSWER.len())
+                .expect("the answer is far below the size of a read"),
+            "the whole of the answer reaches the terminal"
+        );
+
+        let status = status.expect("the child must report inside the budget");
+        assert!(
+            libc::WIFEXITED(status),
+            "the child must exit, and it exited for a signal instead"
+        );
+        assert_eq!(
+            libc::WEXITSTATUS(status),
+            NAMED_THE_REFUSAL,
+            "the probe must read the refusal the terminal wrote. \
+             {NAMED_NO_REFUSAL} says it read no refusal at all, \
+             {NAMED_ANOTHER_REFUSAL} says it read another one, and {FAILED} \
+             says a call of the child failed"
         );
     }
 }

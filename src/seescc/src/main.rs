@@ -132,13 +132,13 @@ fn main() -> Result<()> {
     let columns_env: Option<usize> = std::env::var("COLUMNS").ok().and_then(|s| s.parse().ok());
     let no_color_env = std::env::var_os("NO_COLOR").is_some();
     if no_color_env {
-        #[allow(
+        #[expect(
             clippy::disallowed_methods,
             reason = "this process decides its own color output at startup; the ban covers the tests, which must go through testcolor::with_forced_ansi"
         )]
         colored::control::set_override(false);
     } else if watch::should_force_colors(stdout_is_tty, columns_env.is_some(), no_color_env) {
-        #[allow(
+        #[expect(
             clippy::disallowed_methods,
             reason = "this process decides its own color output at startup; the ban covers the tests, which must go through testcolor::with_forced_ansi"
         )]
@@ -226,7 +226,7 @@ fn run_stats_process(bin: &str, timeout: Duration) -> Result<String> {
 
     use wait_timeout::ChildExt;
 
-    let mut child = std::process::Command::new(bin)
+    let mut child = childenv::command(bin)
         .args(["--show-stats", "--stats-format=json"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

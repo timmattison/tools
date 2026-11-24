@@ -1,9 +1,9 @@
 use anyhow::Result;
 use crossterm::{
-    cursor::{Hide, MoveTo, Show},
+    cursor::MoveTo,
     event::{self, Event as TermEvent, KeyCode},
     execute,
-    terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{self, Clear, ClearType},
 };
 use std::io::{stdout, Write};
 use std::path::PathBuf;
@@ -12,16 +12,6 @@ use tokio::time::{interval, Instant};
 use tokio_stream::StreamExt;
 
 use crate::{EventType, Recording};
-
-/// RAII guard to restore terminal state on drop (including on error/panic).
-struct PlayerTerminalGuard;
-
-impl Drop for PlayerTerminalGuard {
-    fn drop(&mut self) {
-        let _ = execute!(stdout(), Show, LeaveAlternateScreen);
-        let _ = terminal::disable_raw_mode();
-    }
-}
 
 pub async fn play(file_path: PathBuf, speed: f64, paused: bool) -> Result<()> {
     let recording = Recording::load(&file_path)?;
@@ -40,18 +30,13 @@ pub async fn play(file_path: PathBuf, speed: f64, paused: bool) -> Result<()> {
     println!("Press any key to start...");
 
     terminal::enable_raw_mode()?;
-    event::read()?;
+    if let Err(error) = event::read() {
+        let _ = terminal::disable_raw_mode();
+        return Err(error.into());
+    }
 
-    execute!(
-        stdout(),
-        EnterAlternateScreen,
-        Clear(ClearType::All),
-        MoveTo(0, 0),
-        Hide
-    )?;
-
-    // Guard ensures terminal is restored even if we return early via `?`
-    let _guard = PlayerTerminalGuard;
+    // The session restores the terminal on every exit, including `?` and panics.
+    let session = altscreen::Session::enter(altscreen::Options::default())?;
 
     let mut current_event_idx = 0;
     let mut is_paused = paused;
@@ -131,8 +116,8 @@ pub async fn play(file_path: PathBuf, speed: f64, paused: bool) -> Result<()> {
         }
     }
 
-    // Guard handles cleanup on drop, but we print status after it
-    drop(_guard);
+    // The session restores the terminal on drop, and the status prints after it.
+    drop(session);
 
     if current_event_idx >= recording.events.len() {
         println!("\nPlayback complete!");

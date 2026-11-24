@@ -13,20 +13,15 @@ use crate::stats::HopTable;
 use crate::ui;
 use crate::ui::render_duration;
 use crate::{counted, HOP, NEVER_REACHED, REACHED, ROUND, ROW, SUMMARY_SEPARATOR};
-use crossterm::cursor::{Hide, MoveTo, Show};
+use crossterm::cursor::MoveTo;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
-};
-use crossterm::{execute, queue};
+use crossterm::queue;
+use crossterm::terminal::{Clear, ClearType};
 use image::DynamicImage;
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::net::IpAddr;
 use std::path::PathBuf;
-#[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// What one key press asks for.
@@ -42,6 +37,10 @@ pub(crate) enum Command {
     Reset,
     /// Show the list of the keys, or hide it.
     Help,
+    /// Show the page of the rows of the path above the rows that the frame shows.
+    PageUp,
+    /// Show the page of the rows of the path below the rows that the frame shows.
+    PageDown,
 }
 
 /// What one key press means, or nothing.
@@ -53,6 +52,7 @@ pub(crate) enum Command {
 ///   that ignored it would need a second terminal to stop.
 /// - `p` holds the display, `n` turns the names on or off, `r` empties the
 ///   table of the display, and `?` shows the list of the keys.
+/// - Page Up and Page Down scroll the rows of the path by one page.
 /// - Every other key means nothing.
 pub(crate) fn classify(key: KeyEvent) -> Option<Command> {
     let KeyEvent {
@@ -78,6 +78,8 @@ pub(crate) fn classify(key: KeyEvent) -> Option<Command> {
         KeyCode::Char('n') => Some(Command::Names),
         KeyCode::Char('r') => Some(Command::Reset),
         KeyCode::Char('?') => Some(Command::Help),
+        KeyCode::PageUp => Some(Command::PageUp),
+        KeyCode::PageDown => Some(Command::PageDown),
         _ => None,
     }
 }
@@ -89,8 +91,11 @@ pub(crate) fn classify(key: KeyEvent) -> Option<Command> {
 /// front of them. One word answers that.
 const PAUSED: &str = "paused";
 
-/// The number of keys that a live table reads.
-const KEY_COUNT: usize = 5;
+/// The number of entries of [`KEYS`].
+///
+/// One entry can name two keys that do one thing, as `q` and Ctrl-C do. This
+/// number thus counts the entries and not the keys.
+const KEY_COUNT: usize = 6;
 
 /// The key that shows the list of the keys, and hides it again.
 ///
@@ -112,6 +117,7 @@ const KEYS: [(&str, &str); KEY_COUNT] = [
     ("p", "hold the table, or let it move"),
     ("n", "show the names, or show the addresses"),
     ("r", "empty the table"),
+    ("PgUp, PgDn", "scroll the rows of the path"),
     (KEY_THAT_LISTS_THE_KEYS, "show these keys, or hide them"),
 ];
 
@@ -142,20 +148,49 @@ fn key_lines() -> Vec<String> {
 /// hold.
 const MORE_MARK: &str = "+";
 
-/// The lines of one frame that a window holds, and the number of rows of the
-/// path that reached that frame.
+/// The first row of the path that each page key asks for.
 ///
-/// The count travels with the lines, because a caller that draws an image over
+/// One page is the number of rows that the frame shows, minus one row, and at
+/// least one row. The last row that the frame shows becomes the first row of
+/// the page below, so the reader keeps one row of context across the move.
+///
+/// The two keys measure different frames. Page Down measures the frame that
+/// shows now. Page Up measures the frame that Page Up shows, so Page Up undoes
+/// Page Down: the first row that the frame shows becomes the last row of the
+/// page above. A frame that fits, or a window too short to hold one row between
+/// two count lines, scrolls nowhere, and both keys then ask for the first row.
+///
+/// A row past the last full window is fine for `down`. The next fit clamps it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Pages {
+    /// The first row of the page that Page Up asks for.
+    up: usize,
+    /// The first row of the page that Page Down asks for.
+    down: usize,
+}
+
+/// The lines of one frame that a window holds, the rows of the path that reached
+/// that frame, and the pages that the page keys ask for.
+///
+/// The range travels with the lines, because a caller that draws an image over
 /// one row of the path must draw no image for a row that went out of the frame.
 /// Such an image would stand over the footer of the frame, or over a line of
 /// another frame, and nothing on the screen would say which row it belongs to.
 /// A caller that counted the rows itself would count the rows of the table and
-/// not the rows of the window.
+/// not the rows of the window. The start of the range is the row that the frame
+/// scrolled to, and a caller keeps it as the place of the next frame.
 struct Fitted {
     /// The lines of the frame, head first.
     lines: Vec<String>,
-    /// The number of rows of the path that the frame holds.
-    rows: usize,
+    /// The rows of the path that the frame holds, as indexes into the body.
+    rows: std::ops::Range<usize>,
+    /// The index in `lines` of the line that holds the first shown row.
+    ///
+    /// An image of that row stands on this line. A caller reads it here so that
+    /// it does not count the lines of the head itself.
+    top: usize,
+    /// The first row of each page that the page keys ask for.
+    pages: Pages,
 }
 
 /// The lines of one frame that fit a window of `rows` rows.
@@ -164,13 +199,16 @@ struct Fitted {
 /// destination, the count of the rounds, the size of the recorded file, and
 /// every column of the table, and the footer holds the mark of the pause and
 /// the list of the keys, which are what a key press of the reader asked for.
-/// The rows of the path take the lines that those two leave, and one line then
-/// says how many rows went out of the frame.
+/// The rows of the path take the lines that those two leave. One line above
+/// them says how many rows went out of the frame at the top, and one line below
+/// them says how many went out at the foot. A line of a count shows only while
+/// its count is more than zero.
 ///
-/// The frame drops the TTLs farthest from the source, which is the end that
-/// `traceroute` and `mtr` drop as well. The numbering of the rows then starts
-/// under the column header and runs down the window, so a reader of a short
-/// frame still reads the hops that answer first.
+/// `first` is the first row of the path that the caller asks for. The frame
+/// starts at the nearest row it can hold: a `first` past the last full window
+/// stops at that window, and the top of the path shows the hops that answer
+/// first, which is the end that `traceroute` and `mtr` show. A frame that fits
+/// ignores `first`, because it has no row to scroll.
 ///
 /// A window that no probe measured holds every line. Such a run knows no height
 /// to fit a frame to, and the terminal decides what it shows.
@@ -179,37 +217,82 @@ struct Fitted {
 /// together. A frame that ran past the foot of the window would scroll the
 /// window by the lines that ran past it, and the head of the frame goes off the
 /// top of an alternate screen that keeps no scrollback.
-fn fitted(head: Vec<String>, body: Vec<String>, footer: Vec<String>, rows: Option<u16>) -> Fitted {
+fn fitted(
+    head: Vec<String>,
+    body: Vec<String>,
+    footer: Vec<String>,
+    rows: Option<u16>,
+    first: usize,
+) -> Fitted {
     let budget = rows.map_or(usize::MAX, usize::from);
     let mut lines = head;
     if lines.len() + body.len() + footer.len() <= budget {
-        let rows = body.len();
+        let rows = 0..body.len();
+        let top = lines.len();
         lines.extend(body);
         lines.extend(footer);
-        return Fitted { lines, rows };
+        return Fitted {
+            lines,
+            rows,
+            top,
+            pages: Pages { up: 0, down: 0 },
+        };
     }
-    // The head, the footer, and the one line that counts the rows which went
-    // out of the frame keep their lines. The rows of the path take what is
-    // left.
-    let kept = budget.saturating_sub(lines.len() + footer.len() + 1);
-    let dropped = body.len() - kept.min(body.len());
-    // The count of the rows that reached the frame reads the same number that
-    // the take below reads. The truncate at the foot of this function cuts the
-    // head, the count of the dropped rows, and the footer, and it reaches no
-    // row of the path: a window too short for the head takes no row of the path
-    // at all, because `kept` is then zero.
-    let reached = kept.min(body.len());
-    lines.extend(body.into_iter().take(kept));
+    // The head and the footer keep their lines. The rows of the path and the
+    // lines that count the rows take what is left.
+    let room = budget.saturating_sub(lines.len() + footer.len());
+    // A scroll needs room for one row between two count lines. The frame did
+    // not fit, so the body is longer than the room. At the last first row, one
+    // count line stands above and the rows reach the foot of the window.
+    let scrolls = room >= 3;
+    let last = if scrolls {
+        body.len().saturating_sub(room - 1)
+    } else {
+        0
+    };
+    let first = first.min(last);
+    let end = if first == 0 {
+        room.saturating_sub(1).min(body.len())
+    } else if first == last {
+        body.len()
+    } else {
+        first + room - 2
+    };
     // A table of no row leaves no row out, and a line that counted zero rows
     // would name a table the reader can already see the whole of.
-    if dropped > 0 {
-        lines.push(format!("{MORE_MARK}{}", counted(dropped, ROW)));
+    if first > 0 {
+        lines.push(format!("{MORE_MARK}{}", counted(first, ROW)));
+    }
+    let top = lines.len();
+    lines.extend(body[first..end].iter().cloned());
+    if end < body.len() {
+        lines.push(format!("{MORE_MARK}{}", counted(body.len() - end, ROW)));
     }
     lines.extend(footer);
+    // The truncate at the foot cuts the head, the count lines, and the footer,
+    // and it reaches no row of the path: a window too short for the head takes
+    // no row of the path at all, because `room` is then zero.
     lines.truncate(budget);
+    let pages = if scrolls {
+        Pages {
+            // The page above is a middle page of room - 2 rows, or the top
+            // page of room - 1 rows. The first row of this frame becomes the
+            // last row of that page, and the move is one row at least.
+            up: if first < room - 1 {
+                0
+            } else {
+                first - (room - 3).max(1)
+            },
+            down: first + (end - first).saturating_sub(1).max(1),
+        }
+    } else {
+        Pages { up: 0, down: 0 }
+    };
     Fitted {
         lines,
-        rows: reached,
+        rows: first..end,
+        top,
+        pages,
     }
 }
 
@@ -394,12 +477,15 @@ pub(crate) struct Graphics {
 struct Drawn {
     /// The lines of the frame, head first.
     lines: Vec<String>,
-    /// The number of lines of the frame that stand above the rows of the path.
+    /// The number of lines of the frame that stand above the first row of the
+    /// path that the frame shows. The count line above those rows is one of
+    /// them, when the frame scrolled.
     ///
-    /// The count comes off the render and not off a constant of this file. A
-    /// narrow window takes the header of a frame onto more than one line, and
-    /// an image that stood on a line this file counted itself would then cover
-    /// the heading of the Recent column.
+    /// The count comes off `fitted`, which names the line of the first shown
+    /// row, and not off a constant of this file. A narrow window takes the
+    /// header of a frame onto more than one line, and an image that stood on a
+    /// line this file counted itself would then cover the heading of the Recent
+    /// column.
     head: u16,
     /// The Recent column of the frame, and the history of every row of the path
     /// that reached it.
@@ -409,16 +495,28 @@ struct Drawn {
     /// and reads nothing else. And a narrow terminal that dropped the column
     /// names no place for an image to stand.
     recent: Option<ui::RecentColumn>,
+    /// The rows of the path that the frame shows, as indexes into the rows of
+    /// the table.
+    ///
+    /// The start of the range is the row that the frame scrolled to. The table
+    /// keeps it as the place of the next frame.
+    rows: std::ops::Range<usize>,
+    /// The first row of each page that the page keys ask for.
+    pages: Pages,
 }
 
 /// Writes one image for each row of the path of a frame.
 ///
-/// The image of the row at `index` stands over the Recent column of the line
-/// that the row draws in, which is `head` plus that index. The cursor moves
-/// there first, and the image carries a placement id of its own:
-/// every image of one frame therefore replaces the image of that same row in
-/// the frame before it, where one id for every row would put the last row of
-/// the frame over the first one.
+/// The image of the row at `index` among the shown rows stands over the Recent
+/// column of the line that the row draws in, which is `head` plus that index.
+/// When the frame scrolled, `head` counts the line that counts the rows above,
+/// so the image of the first shown row stands under that line. The cursor moves
+/// there first.
+///
+/// Each image carries the id of its line among the shown rows, so no two images
+/// of one frame share an id. One id for every row would put the last row of the
+/// frame over the first one. After a scroll, an id thus names a line of the
+/// frame and not a hop.
 ///
 /// The image is as wide as the Recent column and as tall as one line of the
 /// table, in the pixels that the terminal reports for one character cell.
@@ -433,8 +531,9 @@ struct Drawn {
 /// * `graphics` - The terminal, and the pixel size of one character cell.
 /// * `recent` - Where the Recent column stands, and the history of every row of
 ///   the path that reached the frame.
-/// * `head` - The number of lines of the frame that stand above the rows of the
-///   path, which the render of that frame answered.
+/// * `head` - The number of lines of the frame that stand above the first row
+///   of the path that the frame shows. `fitted` names that line, and the count
+///   line above the rows is one of the lines above it when it shows.
 /// * `window_rows` - The number of rows that the window of the terminal holds,
 ///   and `None` for a window that no probe measured. A line at or past that
 ///   count stands under the foot of the window, and an image there would scroll
@@ -480,9 +579,18 @@ fn write_images(
                 columns: Some(columns),
                 rows: Some(1),
             },
-            cursor: termgfx::Cursor::Held {
+            // The graph is drawn here, hop by hop, and it comes out of no file
+            // at all, so there are no source bytes for the writer to pass on.
+            source: None,
+            // A hop graph is `ui::RECENT_WIDTH` cells by one row, which is
+            // nine by one. A cell of 20 pixels by 40 makes that 7200 pixels,
+            // or 28800 characters of raw payload, so it stands far under the
+            // smallest cap that a transport states.
+            payload: termgfx::ProtocolBudgets::UNLIMITED,
+            picture: termgfx::Picture::Frame {
                 id: u32::try_from(index).unwrap_or(u32::MAX).saturating_add(1),
             },
+            cursor: termgfx::Cursor::Held,
             preserve_aspect: false,
         };
         if graphics.capabilities.draw(frame, &image, &request).is_err() {
@@ -504,9 +612,11 @@ fn write_images(
 /// walks down the screen one column further to the right for each line of it.
 ///
 /// The frame fits the window of the terminal. A frame of more lines than that
-/// window holds keeps its head and its footer and drops the rows of the highest
-/// TTLs, because a frame that ran past the foot of the window scrolls its own
-/// header line off the top of an alternate screen that keeps no scrollback.
+/// window holds keeps its head and its footer and shows a part of the rows of
+/// the path, because a frame that ran past the foot of the window scrolls its
+/// own header line off the top of an alternate screen that keeps no scrollback.
+/// The part starts at the nearest TTLs, and Page Down and Page Up move it. A
+/// count line above and below the rows says how many rows the frame left out.
 pub(crate) struct Table<W: Write, K: Keys> {
     /// The facts of the run that the header line names.
     facts: RunFacts,
@@ -535,6 +645,13 @@ pub(crate) struct Table<W: Write, K: Keys> {
     named: bool,
     /// Whether the list of the keys stands under the table.
     help: bool,
+    /// The first row of the path that the frame shows.
+    ///
+    /// The page keys move it. Each draw stores back the row that the frame
+    /// really started at, so a key on a frame that fits leaves nothing behind,
+    /// and the reset of the table goes back to the first row without a line of
+    /// its own.
+    first: usize,
     /// Where the frames go.
     sink: W,
     /// Where the commands come from.
@@ -581,6 +698,7 @@ impl<W: Write, K: Keys> Table<W, K> {
             paused: false,
             named: true,
             help: false,
+            first: 0,
             sink,
             keys,
             window,
@@ -606,7 +724,9 @@ impl<W: Write, K: Keys> Table<W, K> {
     /// as a part of the table.
     ///
     /// The lines then fit the window, in the three parts that [`fitted`] takes:
-    /// the head of the frame, the rows of the path, and that footer.
+    /// the head of the frame, the rows of the path, and that footer. The first
+    /// row of the path that the frame shows is the row that the page keys last
+    /// moved to.
     ///
     /// A run that draws the Recent column as an image asks the render for blank
     /// body cells in that column. The block elements are one picture of a hop
@@ -656,18 +776,26 @@ impl<W: Write, K: Keys> Table<W, K> {
         let head: Vec<String> = body
             .drain(..usize::from(rendered.head).min(body.len()))
             .collect();
-        let fitted = fitted(head, body, self.footer(), self.window.rows);
+        let fitted = fitted(head, body, self.footer(), self.window.rows, self.first);
         Drawn {
             lines: fitted.lines,
-            head: rendered.head,
+            // The head of the images is the line that `fitted` names for the
+            // first shown row. Any line above that row, a count line included,
+            // is a line of the head for an image.
+            head: u16::try_from(fitted.top).unwrap_or(u16::MAX),
             // A row that went out of the frame draws no image. Such an image
             // would stand over the line that counts the rows which went out, or
             // over a line of another frame, and nothing on the screen would say
             // which row it belongs to.
             recent: rendered.recent.map(|mut recent| {
-                recent.rows.truncate(fitted.rows);
+                recent.rows.truncate(fitted.rows.end);
+                recent
+                    .rows
+                    .drain(..fitted.rows.start.min(recent.rows.len()));
                 recent
             }),
+            rows: fitted.rows,
+            pages: fitted.pages,
         }
     }
 
@@ -689,6 +817,11 @@ impl<W: Write, K: Keys> Table<W, K> {
     }
 
     /// Acts on one command, and answers whether that command stops the run.
+    ///
+    /// A page key reads the pages of the frame that the fold gives at the
+    /// current first row, and not a copy of an older frame. Two page keys of
+    /// one turn therefore move two pages. The draw that follows the turn stores
+    /// back the row that the frame really starts at.
     fn apply(&mut self, command: Command) -> bool {
         match command {
             Command::Pause => self.paused = !self.paused,
@@ -702,6 +835,10 @@ impl<W: Write, K: Keys> Table<W, K> {
                 self.rounds = 0;
             }
             Command::Help => self.help = !self.help,
+            // The frame of the fold at the current first row names the pages,
+            // so two presses of one turn move two pages.
+            Command::PageUp => self.first = self.drawn().pages.up,
+            Command::PageDown => self.first = self.drawn().pages.down,
             // No field of the table holds the stop. The run loop owns it,
             // because the loop is what closes the recorded file with its `end`
             // record, and a display that stopped the process itself would
@@ -713,11 +850,17 @@ impl<W: Write, K: Keys> Table<W, K> {
 
     /// Puts one frame on the screen, over the frame that stands there.
     ///
+    /// The table keeps the first row of the path that this frame shows. A page
+    /// key on a frame that fits leaves no scroll behind, a reset goes back to
+    /// the first row because the empty table fits, and a frame that clamped a
+    /// row past the last full window holds the last full window.
+    ///
     /// A frame that does not print stops nothing. The recording is the purpose
     /// of the tool, and the frame is one view of it, so a run whose terminal
     /// goes away loses the display and keeps the recording.
     fn draw(&mut self) {
         let drawn = self.drawn();
+        self.first = drawn.rows.start;
         drop(self.paint(&drawn));
     }
 
@@ -945,160 +1088,11 @@ impl<W: Write, C: Clock> Screen for Headless<W, C> {
     }
 }
 
-/// A panic hook, of the kind that [`std::panic::take_hook`] answers.
-///
-/// The hook stands in an [`Arc`], because two holders read the one hook: the
-/// hook that a live run installs chains to it, and the guard of that run puts
-/// it back.
-type PanicHook = Arc<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send>;
-
-/// The number of times that this process put the terminal back.
-///
-/// A test holds no terminal, so it reads nothing of what a restoration writes.
-/// This count is what such a test reads in the place of that, and it says
-/// whether the panic hook of a live run still stands. Only the tests of that
-/// hook read the count, and they hold one lock while they do, so no two
-/// readers of it race. The count is a part of a test build and no part of a
-/// build that ships.
-#[cfg(test)]
-static RESTORATIONS: AtomicUsize = AtomicUsize::new(0);
-
-/// Puts the terminal back the way it stood before a live run took it.
-///
-/// Each step stands on its own, and a step that fails leaves the steps after it
-/// alone: a terminal that took one part of the entry and refused the next one
-/// must come all the way back anyway. The function also runs two times on the
-/// path of a panic, because the hook of the panic runs it and the unwind then
-/// drops the guard, and each of those two runs is safe.
-fn restore_terminal() {
-    #[cfg(test)]
-    RESTORATIONS.fetch_add(1, Ordering::SeqCst);
-    drop(disable_raw_mode());
-    drop(execute!(std::io::stdout(), Show, LeaveAlternateScreen));
-}
-
-/// Installs the hook that puts the terminal back before a panic message prints,
-/// and answers the hook that stood before it.
-///
-/// A live run holds the terminal in raw mode on the alternate screen. A panic
-/// of such a run prints its message on that alternate screen, and the process
-/// then dies and takes the alternate screen away with it. The reader of that
-/// terminal reads no message at all, and a raw terminal is what stays in front
-/// of them. The hook therefore puts the terminal back first, and the message of
-/// the panic then lands on the screen that the reader keeps.
-///
-/// The hook chains, and it puts the terminal back in front of that chain. The
-/// hook of the machine prints the message of a panic, and a test binary holds a
-/// hook that collects one. A hook that replaced either of them takes the report
-/// of every panic away from the reader who needs it most.
-///
-/// # Panics
-///
-/// Panics on a thread that is already panicking, because
-/// `std::panic::take_hook` refuses such a thread. The guard of a live run takes
-/// the terminal at the start of that run, where no panic of the run stands.
-/// [`restore_panic_hook`] reads the thread for the same rule, because the drop
-/// of that guard does stand on the path of a panic.
-fn install_panic_hook() -> PanicHook {
-    let previous: PanicHook = Arc::from(std::panic::take_hook());
-    let chained = Arc::clone(&previous);
-    std::panic::set_hook(Box::new(move |info| {
-        restore_terminal();
-        (*chained)(info);
-    }));
-    previous
-}
-
-/// Puts a hook back.
-///
-/// The hook that [`install_panic_hook`] answers goes back here, at the end of
-/// the live run that installed it. The hook of a live run puts a terminal back,
-/// and no part of the process that follows that run holds one, so a hook that
-/// outlived its run acts on a panic that it knows nothing about.
-///
-/// A thread that panics puts no hook back. `std::panic::set_hook` refuses such
-/// a thread, and it refuses with a panic of its own, which aborts the process
-/// on the spot. The guard of a live run reaches this call on the path of every
-/// panic of that run, and the hook of the live run already put the terminal
-/// back by then. That hook therefore stands on for the little of the process
-/// that is left, and the message of the panic reaches the reader.
-fn restore_panic_hook(previous: PanicHook) {
-    if std::thread::panicking() {
-        return;
-    }
-    std::panic::set_hook(Box::new(move |info| (*previous)(info)));
-}
-
-/// The hold of a live run on the terminal of that run.
-///
-/// The guard takes the terminal at the start of the live run and puts it back
-/// at the end. It is a local of the run, so every way out of that run gives the
-/// terminal back: the stop that the user asked for, the fault that ends the run
-/// early, and the panic that nobody asked for.
-///
-/// No test of this file builds this guard. `crossterm` takes raw mode of the
-/// terminal of the process, and a test that took the terminal of `cargo test`
-/// takes the terminal of the reader who started it. The pseudo terminal of
-/// `tests/terminal.rs` is what drives the guard. The panic hook of the guard
-/// holds no terminal, and the tests above drive that hook on its own.
-pub(crate) struct TerminalGuard {
-    /// The panic hook that stood before [`TerminalGuard::enter`] wrapped it.
-    ///
-    /// An `Option`, so the drop moves the hook out of it and back into the
-    /// process.
-    previous_hook: Option<PanicHook>,
-}
-
-impl TerminalGuard {
-    /// Takes the terminal for a live run.
-    ///
-    /// Raw mode sends the bytes of every key straight to this process, which is
-    /// what lets a key of the reader reach the run. The alternate screen holds
-    /// the frames of the run, so the lines that stood in the terminal come back
-    /// at the end of it. The cursor goes away, because a table that redraws
-    /// itself ten times each second drags a cursor across itself.
-    ///
-    /// The panic hook comes last. A panic of a live run prints its message on
-    /// the alternate screen in raw mode, and the process then dies and takes
-    /// that screen away with it, so the reader reads no message at all. The
-    /// hook puts the terminal back in front of the message.
-    ///
-    /// # Errors
-    ///
-    /// Answers the fault of a terminal that refused raw mode, or that refused
-    /// the alternate screen. A terminal that refused the second of the two
-    /// comes all the way back before the fault answers, so a run that stops
-    /// here leaves no terminal in raw mode.
-    pub(crate) fn enter() -> std::io::Result<Self> {
-        enable_raw_mode()?;
-        if let Err(fault) = execute!(std::io::stdout(), EnterAlternateScreen, Hide) {
-            restore_terminal();
-            return Err(fault);
-        }
-        Ok(Self {
-            previous_hook: Some(install_panic_hook()),
-        })
-    }
-}
-
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
-        restore_terminal();
-        // The hook of the live run goes off the process with the run that
-        // installed it. A hook that stood on holds a terminal that no part of
-        // the process holds.
-        if let Some(previous) = self.previous_hook.take() {
-            restore_panic_hook(previous);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        classify, install_panic_hook, restore_panic_hook, status_line, Clock, Command, Graphics,
-        Headless, Keys, Look, NoKeys, PanicHook, RunFacts, Screen, SystemClock, Table, Window,
-        KEY_THAT_LISTS_THE_KEYS,
+        classify, status_line, Clock, Command, Graphics, Headless, Keys, Look, NoKeys, RunFacts,
+        Screen, SystemClock, Table, Window, KEY_THAT_LISTS_THE_KEYS,
     };
     use crate::record::{NameRecord, RoundRecord, RunId};
     use crate::testing::{address, round, FakeClock, FakeKeys};
@@ -1109,8 +1103,6 @@ mod tests {
     use std::io::Write;
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     /// Builds the press of a key that no modifier holds.
@@ -1557,16 +1549,16 @@ mod tests {
     /// The number of rows of the window of a common terminal.
     ///
     /// The head and the tall path take every one of these 24 rows. The pause
-    /// and the list of the keys take eight lines more, so a frame that carries
+    /// and the list of the keys take nine lines more, so a frame that carries
     /// both of them runs past the foot of this window.
     const WINDOW_ROWS: u16 = 24;
 
     /// The line that closes the rows of that crowded frame.
     ///
-    /// The head takes four rows, the pause and the list of the keys take eight,
-    /// and this line takes one, so eleven of the twenty rows of the path stand
-    /// and nine go out of the frame.
-    const CROWDED_LINE: &str = "+9 rows";
+    /// The head takes four rows, the pause and the list of the keys take nine,
+    /// and this line takes one, so ten of the twenty rows of the path stand
+    /// and ten go out of the frame.
+    const CROWDED_LINE: &str = "+10 rows";
 
     /// The mark that opens the line which counts the rows that a frame left
     /// out.
@@ -1619,6 +1611,55 @@ mod tests {
         screen.round(&a_tall_round());
         screen
     }
+
+    /// The number of rows of a window that the scroll tests use.
+    ///
+    /// The head takes four rows (see [`SHORT_ROWS`] for why four), so seven
+    /// lines remain for the rows of the path and their count lines.
+    const SCROLL_ROWS: u16 = 11;
+
+    /// The lines of a frame under its head, in a form that one `assert_eq!`
+    /// compares.
+    ///
+    /// A count line stays as its text. A row of the tall path becomes `row N`
+    /// for its TTL `N`. Any other line, such as the blank line of a footer,
+    /// stays as it is. A test then reads the rows that a frame shows without
+    /// the width of the columns in the way.
+    fn under_the_head(lines: &[String]) -> Vec<String> {
+        lines[head_lines(lines)..]
+            .iter()
+            .map(|line| {
+                (TTL..=TALL_PATH)
+                    .find(|ttl| line.starts_with(&tall_row(*ttl)))
+                    .map_or_else(|| line.clone(), |ttl| format!("row {ttl}"))
+            })
+            .collect()
+    }
+
+    /// The lines that [`under_the_head`] gives for a frame that shows the rows
+    /// `from` to `to` of the tall path, with an optional count line on each
+    /// side.
+    fn shown(above: Option<&str>, from: u8, to: u8, below: Option<&str>) -> Vec<String> {
+        above
+            .map(str::to_owned)
+            .into_iter()
+            .chain((from..=to).map(|ttl| format!("row {ttl}")))
+            .chain(below.map(str::to_owned))
+            .collect()
+    }
+
+    /// The number of rows of a window with no room for a scroll.
+    ///
+    /// The head takes four rows, so two lines remain for the rows of the path.
+    /// A scroll needs three: one row between two count lines.
+    const TINY_ROWS: u16 = 6;
+
+    /// The number of rows of a window where the list of the keys changes the
+    /// room of the scroll.
+    ///
+    /// Without the list, fourteen lines remain for the rows of the path and
+    /// their count lines. The list takes seven lines, and seven remain.
+    const HELP_SCROLL_ROWS: u16 = 18;
 
     /// The TTL that the destination answered at.
     const TARGET_TTL: u8 = 2;
@@ -1723,12 +1764,13 @@ mod tests {
     /// one table of pairs. That is on purpose, as the word of the pause is: a
     /// test that read the table of the module would agree with every list the
     /// module ever holds, and this list is what a reader of the screen sees.
-    const HELP_LINES: [&str; 5] = [
-        "q, Ctrl-C  stop the run",
-        "p          hold the table, or let it move",
-        "n          show the names, or show the addresses",
-        "r          empty the table",
-        "?          show these keys, or hide them",
+    const HELP_LINES: [&str; 6] = [
+        "q, Ctrl-C   stop the run",
+        "p           hold the table, or let it move",
+        "n           show the names, or show the addresses",
+        "r           empty the table",
+        "PgUp, PgDn  scroll the rows of the path",
+        "?           show these keys, or hide them",
     ];
 
     /// The pixel size of one character cell of the terminal that the tests of
@@ -1781,11 +1823,15 @@ mod tests {
     /// builds the terminal, so this table needs no terminal of its own.
     ///
     /// The sink comes back empty, for the reason that [`table_at`] states.
-    fn graphics_table(columns: u16, rows: Option<u16>) -> Table<Vec<u8>, FakeKeys> {
+    fn graphics_table(
+        columns: u16,
+        rows: Option<u16>,
+        script: &[&[Command]],
+    ) -> Table<Vec<u8>, FakeKeys> {
         let mut table = Table::new(
             facts_at(temp_path("graphics")),
             Vec::new(),
-            FakeKeys::of(&[]),
+            FakeKeys::of(script),
             Window::new(columns, rows),
             image_look(termgfx::Capabilities::new(
                 termgfx::TerminalType::Kitty,
@@ -1858,7 +1904,7 @@ mod tests {
         // not delete would stack a thousand images over a run of a thousand
         // rounds. The delete stands at the head of the frame, in front of the
         // clear, so nothing of the frame that follows it goes away with it.
-        let mut screen = graphics_table(WIDTH, NO_ROWS);
+        let mut screen = graphics_table(WIDTH, NO_ROWS, &[]);
         screen.round(&one_round());
         let drawn = String::from_utf8_lossy(&screen.sink).into_owned();
 
@@ -1895,7 +1941,7 @@ mod tests {
         //
         // The heading stays, because it names the column and it is no picture of
         // a hop.
-        let mut screen = graphics_table(WIDTH, NO_ROWS);
+        let mut screen = graphics_table(WIDTH, NO_ROWS, &[]);
         screen.round(&one_round());
         let lines = painted(&screen.sink);
 
@@ -1987,7 +2033,7 @@ mod tests {
         // The image of a row stands over the Recent column of that row, and the
         // row at index `i` stands on the line under the head of the frame plus
         // `i`.
-        let mut screen = graphics_table(WIDTH, NO_ROWS);
+        let mut screen = graphics_table(WIDTH, NO_ROWS, &[]);
         screen.round(&a_tall_round());
         let drawn = String::from_utf8_lossy(&screen.sink).into_owned();
         let lines = painted(&screen.sink);
@@ -2042,7 +2088,7 @@ mod tests {
         // wraps such a line, every line under it stands one row lower, and an
         // image that counted the lines of the frame then stands over the
         // heading of the Recent column and never over the last row of the path.
-        let mut screen = graphics_table(WIDTH, NO_ROWS);
+        let mut screen = graphics_table(WIDTH, NO_ROWS, &[]);
         screen.round(&one_round());
         let drawn = String::from_utf8_lossy(&screen.sink).into_owned();
         let lines = painted(&screen.sink);
@@ -2075,7 +2121,7 @@ mod tests {
         // highest TTLs. An image of one of those rows would stand over the line
         // that counts them, or over a line of another frame, and nothing on the
         // screen would say which row it belongs to.
-        let mut screen = graphics_table(WIDTH, Some(SHORT_ROWS));
+        let mut screen = graphics_table(WIDTH, Some(SHORT_ROWS), &[]);
         screen.round(&a_tall_round());
         let drawn = String::from_utf8_lossy(&screen.sink).into_owned();
         let lines = painted(&screen.sink);
@@ -2088,6 +2134,77 @@ mod tests {
         assert!(
             !drawn.contains(&moved_to(&lines, usize::from(LAST_KEPT_TTL))),
             "and no image stands on the line under the last row that the window held: {drawn:?}"
+        );
+    }
+
+    #[test]
+    fn a_scrolled_frame_draws_each_image_on_the_line_of_its_row_and_none_on_a_count_line() {
+        // A scrolled frame shows a count line above the first row of the path.
+        // An image on that line, or on the line of the row above, would show a
+        // history beside the wrong hop, and the reader would trust it.
+        let mut screen = graphics_table(WIDTH, Some(SCROLL_ROWS), &[&[Command::PageDown]]);
+        screen.round(&a_tall_round());
+        screen.sink.clear();
+        screen.poll();
+        let drawn = String::from_utf8_lossy(&screen.sink).into_owned();
+        let lines = painted(&screen.sink);
+
+        assert_eq!(
+            image_count(&screen.sink),
+            5,
+            "one image stands for each row that the frame shows: {drawn:?}"
+        );
+        for index in 0..5 {
+            assert!(
+                drawn.contains(&format!("{}{KITTY_IMAGE}", moved_to(&lines, index + 1))),
+                "the image of the row at index {index} stands under the count line: {drawn:?}"
+            );
+        }
+        assert!(
+            !drawn.contains(&moved_to(&lines, 0)),
+            "no image stands on the line that counts the rows above: {drawn:?}"
+        );
+        assert!(
+            !drawn.contains(&moved_to(&lines, 6)),
+            "and no image stands on the line that counts the rows below: {drawn:?}"
+        );
+    }
+
+    #[test]
+    fn the_last_full_window_draws_an_image_on_each_of_its_rows() {
+        // The last full window has a count line above and none below. A head
+        // that counted the wrong number of lines there would put the images
+        // of the far hops of the path beside the wrong rows.
+        let mut screen = graphics_table(
+            WIDTH,
+            Some(SCROLL_ROWS),
+            &[&[
+                Command::PageDown,
+                Command::PageDown,
+                Command::PageDown,
+                Command::PageDown,
+            ]],
+        );
+        screen.round(&a_tall_round());
+        screen.sink.clear();
+        screen.poll();
+        let drawn = String::from_utf8_lossy(&screen.sink).into_owned();
+        let lines = painted(&screen.sink);
+
+        assert_eq!(
+            image_count(&screen.sink),
+            6,
+            "one image stands for each of the six rows that the frame shows: {drawn:?}"
+        );
+        for index in 1..=6 {
+            assert!(
+                drawn.contains(&format!("{}{KITTY_IMAGE}", moved_to(&lines, index))),
+                "the image of the row at line {index} under the head stands there: {drawn:?}"
+            );
+        }
+        assert!(
+            !drawn.contains(&moved_to(&lines, 0)),
+            "no image stands on the line that counts the rows above: {drawn:?}"
         );
     }
 
@@ -2119,7 +2236,7 @@ mod tests {
         // A narrow terminal drops the Recent column, and a column that no line
         // of the frame holds is a column that no image can stand over. The
         // render says so: it names no place for a column that went away.
-        let mut screen = graphics_table(NO_RECENT_COLUMN, NO_ROWS);
+        let mut screen = graphics_table(NO_RECENT_COLUMN, NO_ROWS, &[]);
         screen.round(&one_round());
         let drawn = String::from_utf8_lossy(&screen.sink).into_owned();
 
@@ -2173,7 +2290,7 @@ mod tests {
 
     #[test]
     fn a_frame_that_its_window_holds_whole_keeps_every_row_of_the_path() {
-        let fitted = super::fitted(a_head(), a_body(A_PATH), Vec::new(), Some(A_TALL_WINDOW));
+        let fitted = super::fitted(a_head(), a_body(A_PATH), Vec::new(), Some(A_TALL_WINDOW), 0);
 
         assert_eq!(
             fitted.lines.len(),
@@ -2182,9 +2299,33 @@ mod tests {
             fitted.lines
         );
         assert_eq!(
-            fitted.rows, A_PATH,
+            fitted.rows,
+            0..A_PATH,
             "and it says that every row of the path reached it"
         );
+    }
+
+    #[test]
+    fn the_top_of_a_fit_is_the_line_of_the_first_shown_row() {
+        // A frame that fits, a frame at the first row that scrolls, and a frame
+        // scrolled past the first row with a count line above it.
+        for (window, first) in [
+            (A_TALL_WINDOW, 0),
+            (A_SHORT_WINDOW, 0),
+            (A_SHORT_WINDOW, 3),
+            (A_SHORT_WINDOW, A_PATH),
+        ] {
+            let body = a_body(A_PATH);
+            let fitted = super::fitted(a_head(), body.clone(), Vec::new(), Some(window), first);
+
+            assert_eq!(
+                fitted.lines[fitted.top],
+                body[fitted.rows.start],
+                "the line at top is the first shown row of {:?} at window {window}, first {first}: {:?}",
+                fitted.rows,
+                fitted.lines
+            );
+        }
     }
 
     #[test]
@@ -2193,10 +2334,17 @@ mod tests {
         // image for a row that went out of the frame. Such an image would stand
         // over the footer of the frame, and nothing on the screen would say
         // which row it belongs to.
-        let fitted = super::fitted(a_head(), a_body(A_PATH), Vec::new(), Some(A_SHORT_WINDOW));
+        let fitted = super::fitted(
+            a_head(),
+            a_body(A_PATH),
+            Vec::new(),
+            Some(A_SHORT_WINDOW),
+            0,
+        );
 
         assert_eq!(
-            fitted.rows, KEPT_ROWS,
+            fitted.rows,
+            0..KEPT_ROWS,
             "the count names the rows of the path that the window held: {:?}",
             fitted.lines
         );
@@ -2331,6 +2479,335 @@ mod tests {
             last_lines(&lines, 1),
             [DROPPED_LINE],
             "and one line says how many rows the frame left out: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn page_down_scrolls_the_rows_of_the_path_by_one_page() {
+        // A path that is longer than the window hides its far hops. The reader
+        // has to reach them with a key, and the rows that stood above must
+        // stay counted so the reader knows where in the path the frame is.
+        let mut screen = tall_table(Some(SCROLL_ROWS), &[&[Command::PageDown]]);
+        screen.sink.clear();
+        screen.poll();
+        let lines = painted(&screen.sink);
+
+        assert_eq!(
+            under_the_head(&lines),
+            shown(Some("+5 rows"), 6, 10, Some("+10 rows")),
+            "one page down shows rows 6 to 10: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn two_page_down_keys_of_one_turn_scroll_two_pages() {
+        // A reader who holds the key sends several presses in one turn. Each
+        // press has to move one page, and not the same page twice.
+        let mut screen = tall_table(
+            Some(SCROLL_ROWS),
+            &[&[Command::PageDown, Command::PageDown]],
+        );
+        screen.sink.clear();
+        screen.poll();
+        let lines = painted(&screen.sink);
+
+        assert_eq!(
+            under_the_head(&lines),
+            shown(Some("+9 rows"), 10, 14, Some("+6 rows")),
+            "two pages down show rows 10 to 14: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn page_down_stops_at_the_last_full_window() {
+        // The reader must see the far hops of the path. Past the last full
+        // window the frame would show less than it can, so the scroll stops
+        // there and the count line under the rows goes away.
+        let mut screen = tall_table(
+            Some(SCROLL_ROWS),
+            &[
+                &[
+                    Command::PageDown,
+                    Command::PageDown,
+                    Command::PageDown,
+                    Command::PageDown,
+                ],
+                &[Command::PageDown],
+            ],
+        );
+        screen.sink.clear();
+        screen.poll();
+        let first = under_the_head(&painted(&screen.sink));
+        screen.sink.clear();
+        screen.poll();
+        let second = under_the_head(&painted(&screen.sink));
+
+        assert_eq!(
+            first,
+            shown(Some("+14 rows"), 15, 20, None),
+            "four pages down reach the last full window"
+        );
+        assert_eq!(second, first, "and one more page down holds that window");
+    }
+
+    #[test]
+    fn page_up_scrolls_back_by_the_page_that_page_down_took() {
+        // A reader who went too far must come back to the rows they passed.
+        // Page Up undoes Page Down, so the first row of the frame becomes the
+        // last row of the frame above.
+        let mut screen = tall_table(
+            Some(SCROLL_ROWS),
+            &[
+                &[
+                    Command::PageDown,
+                    Command::PageDown,
+                    Command::PageDown,
+                    Command::PageDown,
+                ],
+                &[Command::PageUp],
+            ],
+        );
+        screen.poll();
+        screen.sink.clear();
+        screen.poll();
+        let lines = painted(&screen.sink);
+
+        assert_eq!(
+            under_the_head(&lines),
+            shown(Some("+10 rows"), 11, 15, Some("+5 rows")),
+            "one page up from the last window shows rows 11 to 15: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn page_up_after_page_down_shows_the_first_frame_again() {
+        // The top of the path is where a reader starts. One page up from the
+        // second page must land there, with no count line above the rows.
+        let mut screen = tall_table(
+            Some(SCROLL_ROWS),
+            &[&[Command::PageDown], &[Command::PageUp]],
+        );
+        screen.poll();
+        screen.sink.clear();
+        screen.poll();
+        let lines = painted(&screen.sink);
+
+        assert_eq!(
+            under_the_head(&lines),
+            shown(None, 1, 6, Some("+14 rows")),
+            "the first frame stands again: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn page_up_on_the_first_frame_changes_nothing() {
+        // There is no page above the first rows. The key must leave the frame
+        // as it is and not scroll to a row that does not exist.
+        let mut screen = tall_table(Some(SCROLL_ROWS), &[&[Command::PageUp]]);
+        screen.sink.clear();
+        screen.poll();
+        let lines = painted(&screen.sink);
+
+        assert_eq!(
+            under_the_head(&lines),
+            shown(None, 1, 6, Some("+14 rows")),
+            "the first frame stays: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn the_reset_key_takes_the_scroll_back_to_the_first_row() {
+        // A reset empties the table. The next rounds must show the top of the
+        // path, and a scroll that survived would hide the near hops of a path
+        // that the reader just started to watch again.
+        let mut screen = tall_table(
+            Some(SCROLL_ROWS),
+            &[&[Command::PageDown], &[Command::Reset]],
+        );
+        screen.poll();
+        screen.poll();
+        screen.sink.clear();
+        screen.round(&a_tall_round());
+        let lines = painted(&screen.sink);
+
+        assert_eq!(
+            under_the_head(&lines),
+            shown(None, 1, 6, Some("+14 rows")),
+            "the first frame stands after the reset: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_page_key_on_a_frame_that_fits_leaves_no_scroll_behind() {
+        // A key that did nothing must also leave nothing. A scroll that waited
+        // inside the table would jump the frame the moment the path grew past
+        // the window.
+        let mut screen = table_in(Some(SCROLL_ROWS), &[&[Command::PageDown]]);
+        screen.round(&one_round());
+        let before = painted(&screen.sink);
+        screen.sink.clear();
+        screen.poll();
+        let after = painted(&screen.sink);
+        screen.sink.clear();
+        screen.round(&a_tall_round());
+        let lines = painted(&screen.sink);
+
+        assert_eq!(after, before, "the frame that fits does not move");
+        assert_eq!(
+            under_the_head(&lines),
+            shown(None, 1, 6, Some("+14 rows")),
+            "and the longer path starts at its first row: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_page_key_does_nothing_in_a_window_that_no_probe_measured() {
+        // Such a run draws every line and lets the terminal scroll. A page key
+        // has no frame to move.
+        let mut screen = tall_table(NO_ROWS, &[&[Command::PageDown]]);
+        let before = painted(&screen.sink);
+        screen.sink.clear();
+        screen.poll();
+        let after = painted(&screen.sink);
+
+        assert_eq!(after, before, "the frame does not move");
+    }
+
+    #[test]
+    fn the_names_key_keeps_the_scroll() {
+        // The key changes the text of the hosts and not the rows. The reader
+        // must stay on the rows they scrolled to.
+        let mut screen = tall_table(
+            Some(SCROLL_ROWS),
+            &[&[Command::PageDown], &[Command::Names]],
+        );
+        screen.poll();
+        screen.sink.clear();
+        screen.poll();
+        let lines = painted(&screen.sink);
+
+        assert_eq!(
+            under_the_head(&lines),
+            shown(Some("+5 rows"), 6, 10, Some("+10 rows")),
+            "the same rows stand: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_window_too_short_for_a_scroll_ignores_the_page_keys() {
+        // A scroll needs one row between two count lines. A window that has
+        // less room than that must keep its frame inside the window, and not
+        // draw count lines that cover the head.
+        let mut screen = tall_table(Some(TINY_ROWS), &[&[Command::PageDown]]);
+        let before = painted(&screen.sink);
+        screen.sink.clear();
+        screen.poll();
+        let after = painted(&screen.sink);
+
+        assert_eq!(after, before, "the frame does not move: {after:?}");
+        assert!(
+            after.len() <= usize::from(TINY_ROWS),
+            "and it stands inside the {TINY_ROWS} rows of the window: {after:?}"
+        );
+        assert_eq!(
+            under_the_head(&after),
+            shown(None, 1, 1, Some("+19 rows")),
+            "one row and one count line stand: {after:?}"
+        );
+    }
+
+    #[test]
+    fn a_page_key_while_the_table_holds_scrolls_the_frame_of_the_fold() {
+        // The pause holds the screen, and a page key still has to draw. The
+        // frame it draws reads the fold, so it names the round that arrived
+        // during the pause.
+        let mut screen = tall_table(
+            Some(SCROLL_ROWS),
+            &[&[Command::Pause], &[Command::PageDown]],
+        );
+        screen.poll();
+        screen.round(&a_tall_round());
+        screen.sink.clear();
+        screen.poll();
+        let lines = painted(&screen.sink);
+
+        let mut wanted = shown(Some("+3 rows"), 4, 6, Some("+14 rows"));
+        wanted.extend(["", PAUSED].map(str::to_owned));
+        assert_eq!(
+            under_the_head(&lines),
+            wanted,
+            "the pause takes two lines, so three rows stand: {lines:?}"
+        );
+        assert!(
+            header_text(&lines).contains("round 2"),
+            "and the header counts the round of the pause: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn the_help_key_keeps_the_first_row_of_the_scroll() {
+        // The list of the keys takes lines from the rows of the path. The
+        // reader must stay on the rows they scrolled to, and not jump to the
+        // top of the path.
+        let mut screen = tall_table(
+            Some(HELP_SCROLL_ROWS),
+            &[&[Command::PageDown], &[Command::Help]],
+        );
+        screen.sink.clear();
+        screen.poll();
+        let first = under_the_head(&painted(&screen.sink));
+        screen.sink.clear();
+        screen.poll();
+        let second = under_the_head(&painted(&screen.sink));
+
+        assert_eq!(
+            first,
+            shown(Some("+7 rows"), 8, 20, None),
+            "the page down reaches the last full window"
+        );
+        let mut wanted = shown(Some("+7 rows"), 8, 12, Some("+8 rows"));
+        wanted.push(String::new());
+        wanted.extend(HELP_LINES.map(str::to_owned));
+        assert_eq!(
+            second, wanted,
+            "and the list of the keys keeps the first row"
+        );
+    }
+
+    #[test]
+    fn hiding_the_list_of_the_keys_stops_the_scroll_at_the_last_full_window() {
+        // The list of the keys gave the scroll a longer reach. When it goes
+        // away, the first row can lie past the last full window, and the frame
+        // must not show a half-empty window.
+        let mut screen = tall_table(
+            Some(HELP_SCROLL_ROWS),
+            &[
+                &[Command::Help],
+                &[
+                    Command::PageDown,
+                    Command::PageDown,
+                    Command::PageDown,
+                    Command::PageDown,
+                ],
+                &[Command::Help],
+            ],
+        );
+        screen.poll();
+        screen.sink.clear();
+        screen.poll();
+        let before = under_the_head(&painted(&screen.sink));
+        screen.sink.clear();
+        screen.poll();
+        let after = under_the_head(&painted(&screen.sink));
+
+        let mut held = shown(Some("+14 rows"), 15, 20, None);
+        held.push(String::new());
+        held.extend(HELP_LINES.map(str::to_owned));
+        assert_eq!(before, held, "four pages down reach the last window");
+        assert_eq!(
+            after,
+            shown(Some("+7 rows"), 8, 20, None),
+            "the new last full window stands"
         );
     }
 
@@ -2754,6 +3231,33 @@ mod tests {
     }
 
     #[test]
+    fn the_page_up_key_asks_for_the_page_above() {
+        // A reader of a short window sees only some rows of the path. This key
+        // is how that reader asks for the rows above them.
+        assert_eq!(classify(press(KeyCode::PageUp)), Some(Command::PageUp));
+    }
+
+    #[test]
+    fn the_page_down_key_asks_for_the_page_below() {
+        // The reader who went up needs a key to come back down to the rows
+        // that the frame cut off at its foot.
+        assert_eq!(classify(press(KeyCode::PageDown)), Some(Command::PageDown));
+    }
+
+    #[test]
+    fn a_release_of_a_page_key_asks_for_nothing() {
+        // A kitty terminal and a Windows terminal both report a release. Only a
+        // press acts, or one press of a page key scrolls two pages.
+        for code in [KeyCode::PageUp, KeyCode::PageDown] {
+            let release = KeyEvent {
+                kind: KeyEventKind::Release,
+                ..press(code)
+            };
+            assert_eq!(classify(release), None);
+        }
+    }
+
+    #[test]
     fn a_release_of_a_mapped_key_asks_for_nothing() {
         // A kitty terminal and a Windows terminal both report a release. Only a
         // press acts, or one press of `q` stops the run two times.
@@ -2783,218 +3287,5 @@ mod tests {
     #[test]
     fn a_key_that_carries_no_letter_asks_for_nothing() {
         assert_eq!(classify(press(KeyCode::Enter)), None);
-    }
-
-    /// The lock of every test that changes the panic hook.
-    ///
-    /// The panic hook is one setting of the whole process, and `cargo test`
-    /// runs the tests of one binary on many threads. A test that set the hook
-    /// while another test held it takes the hook of that test away, and that
-    /// test then reads the answer of a hook it never installed. The lock keeps
-    /// the tests below apart from each other, and it keeps each of them apart
-    /// from a second run of itself. The count of the restorations reads true
-    /// under the same lock, for the same reason.
-    static HOOK_LOCK: Mutex<()> = Mutex::new(());
-
-    /// The message of the panic that each test of the hook raises.
-    const THE_TEST_PANIC: &str = "the panic that a test of the hook raises";
-
-    /// Holds the panic hook of the process while one test changes it.
-    ///
-    /// The guard takes the lock of the hook, and it takes the hook that stood
-    /// in front of the test. The drop puts that hook back and lets the lock go
-    /// after it.
-    ///
-    /// Each test below reads its answers into locals and drops this guard
-    /// before it asserts on them. `std::panic::set_hook` refuses a thread that
-    /// is panicking, and it refuses with a panic of its own, which aborts the
-    /// process and takes the report of every other test with it. A failed
-    /// assertion of a test that still held the guard is such a thread.
-    struct HookGuard {
-        /// The hook that stood before the test. An `Option`, so the drop moves
-        /// the hook out of it.
-        previous: Option<PanicHook>,
-        /// The lock, which the drop lets go last of all.
-        _lock: MutexGuard<'static, ()>,
-    }
-
-    impl HookGuard {
-        /// Takes the lock, and the hook that stands now.
-        ///
-        /// A poisoned lock still guards. The state under it is the panic hook
-        /// of the process, and this guard puts a whole hook back whatever the
-        /// test in front of it did.
-        fn take() -> Self {
-            let lock = HOOK_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-            Self {
-                previous: Some(Arc::from(std::panic::take_hook())),
-                _lock: lock,
-            }
-        }
-    }
-
-    impl Drop for HookGuard {
-        fn drop(&mut self) {
-            // The panic that no test asked for reaches this drop while the
-            // thread panics, and a hook that goes back there aborts the
-            // process. The hook of the test stands on for that run, which
-            // costs the report of a panic and keeps the report of every test.
-            if std::thread::panicking() {
-                return;
-            }
-            if let Some(previous) = self.previous.take() {
-                std::panic::set_hook(Box::new(move |info| (*previous)(info)));
-            }
-        }
-    }
-
-    /// What the hook of a test read.
-    struct Marked {
-        /// Whether the hook read a panic.
-        read: Arc<AtomicBool>,
-        /// Whether the terminal came back before the hook read that panic.
-        restored_first: Arc<AtomicBool>,
-    }
-
-    /// The number of times that this process put the terminal back.
-    fn restorations() -> usize {
-        super::RESTORATIONS.load(Ordering::SeqCst)
-    }
-
-    /// Installs the hook of a test, and answers what that hook reads.
-    ///
-    /// The hook prints nothing. Each test below raises a panic on purpose, and
-    /// the hook of the machine prints the message of every panic it reads, so a
-    /// test that left that hook standing writes the message of a panic that the
-    /// test asked for.
-    fn mark() -> Marked {
-        let read = Arc::new(AtomicBool::new(false));
-        let restored_first = Arc::new(AtomicBool::new(false));
-        let read_in_hook = Arc::clone(&read);
-        let restored_in_hook = Arc::clone(&restored_first);
-        let before = restorations();
-        std::panic::set_hook(Box::new(move |_info| {
-            restored_in_hook.store(restorations() > before, Ordering::SeqCst);
-            read_in_hook.store(true, Ordering::SeqCst);
-        }));
-        Marked {
-            read,
-            restored_first,
-        }
-    }
-
-    #[test]
-    fn the_panic_hook_of_a_live_run_chains_to_the_hook_it_replaced() {
-        // A hook that replaced the hook of the process takes the report of
-        // every panic away from the reader of it. The hook of a live run
-        // therefore puts the terminal back and hands the panic on.
-        let hooks = HookGuard::take();
-        let marked = mark();
-
-        // The guard of the test puts a whole hook back, so the answer of the
-        // installation goes nowhere here. The test below reads that answer.
-        drop(install_panic_hook());
-        let outcome = std::panic::catch_unwind(|| panic!("{THE_TEST_PANIC}"));
-        let read = marked.read.load(Ordering::SeqCst);
-        let restored_first = marked.restored_first.load(Ordering::SeqCst);
-        drop(hooks);
-
-        assert!(outcome.is_err(), "the body of the test raised its panic");
-        assert!(
-            read,
-            "the hook of a live run chains to the hook that stood before it"
-        );
-        assert!(
-            restored_first,
-            "and it puts the terminal back first, so the message of the panic lands on the screen that the reader keeps"
-        );
-    }
-
-    #[test]
-    fn a_live_run_puts_back_the_hook_that_stood_before_it() {
-        // The panic hook is one setting of the whole process. A live run that
-        // ended and left its own hook standing puts a terminal back for every
-        // panic of every part of the process that follows it, and no part of
-        // that process holds a terminal.
-        let hooks = HookGuard::take();
-        let marked = mark();
-
-        let previous = install_panic_hook();
-        restore_panic_hook(previous);
-        let before = restorations();
-        let outcome = std::panic::catch_unwind(|| panic!("{THE_TEST_PANIC}"));
-        let read = marked.read.load(Ordering::SeqCst);
-        let after = restorations();
-        drop(hooks);
-
-        assert!(outcome.is_err(), "the body of the test raised its panic");
-        assert!(
-            read,
-            "the hook that stood in front of the live run reads the panic on its own"
-        );
-        assert_eq!(
-            after, before,
-            "and the hook of the live run puts back no terminal, because that hook no longer stands"
-        );
-    }
-
-    /// Puts a hook back on the way out, as the guard of a live run does.
-    struct Restorer {
-        /// The hook to put back. An `Option`, so the drop moves it out.
-        previous: Option<PanicHook>,
-        /// Whether the restoration raised a panic of its own.
-        refused: Arc<AtomicBool>,
-    }
-
-    impl Drop for Restorer {
-        fn drop(&mut self) {
-            let Some(previous) = self.previous.take() else {
-                return;
-            };
-            // This drop runs while the thread panics, and a panic of the
-            // restoration on that path ends the whole process. The catch holds
-            // such a panic long enough for the test to read that it happened.
-            // The test asserts that there is nothing to catch.
-            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                restore_panic_hook(previous);
-            }));
-            self.refused.store(outcome.is_err(), Ordering::SeqCst);
-        }
-    }
-
-    #[test]
-    fn a_live_run_that_panics_puts_back_no_hook_and_the_process_lives() {
-        // `std::panic::set_hook` refuses a thread that panics, and it refuses
-        // with a panic of its own. A second panic on the path of a first one
-        // aborts the process. The guard of a live run reaches its drop on the
-        // path of every panic of that run, so a restoration that reads the
-        // thread of no such panic turns each of them into an abort. The hook
-        // of the live run already put the terminal back by then, and the
-        // message of the panic is what the reader waits for.
-        let hooks = HookGuard::take();
-        let marked = mark();
-        let refused = Arc::new(AtomicBool::new(false));
-        let refused_in_run = Arc::clone(&refused);
-
-        let outcome = std::panic::catch_unwind(move || {
-            let _restorer = Restorer {
-                previous: Some(install_panic_hook()),
-                refused: refused_in_run,
-            };
-            panic!("{THE_TEST_PANIC}");
-        });
-        let read = marked.read.load(Ordering::SeqCst);
-        let refused_now = refused.load(Ordering::SeqCst);
-        drop(hooks);
-
-        assert!(outcome.is_err(), "the body of the test raised its panic");
-        assert!(
-            read,
-            "the hook of the live run read that panic and handed it on"
-        );
-        assert!(
-            !refused_now,
-            "and the restoration of the hook raises no panic of its own on the path of a panic"
-        );
     }
 }

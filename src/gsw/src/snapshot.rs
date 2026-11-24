@@ -11,7 +11,7 @@ use crate::render::{RenderEntry, Snapshot};
 ///
 /// `staged_numstat` and `unstaged_numstat` are keyed on the post-rename path.
 /// `ages` maps file path → mtime age; missing entries become `None`.
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "build_snapshot fans in five distinct inputs; grouping them obscures rather than clarifies"
 )]
@@ -65,9 +65,16 @@ pub fn build_snapshot(
         commits_behind,
         files,
         log: Vec::new(),
+        log_complete: false,
+        log_start: None,
         upstream: None,
         operation: None,
         push_remote: None,
+        // The walk of one worktree cannot know the other worktrees. Watch
+        // mode puts the badge on the snapshot after the walk.
+        worktree: None,
+        off_start_branch: false,
+        pull: None,
     }
 }
 

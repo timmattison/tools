@@ -12,19 +12,23 @@
 //! that started `cargo test` happened to export, and `COLUMNS` and `NO_COLOR`
 //! both change what the tool prints.
 //!
-//! That environment names [`NO_CLIPBOARD_ENV`] in every test but one. A child
-//! of a test reads `/dev/null` on standard input, which is not a terminal and
-//! holds no text, so a run with no chain argument walks on to the clipboard.
-//! The clipboard is one shared resource of the whole machine: a test that reads
-//! it races the person at the keyboard. The variable turns that last step off
-//! for the other children of this file, which is a mechanism rather than a rule
-//! each test must remember.
+//! That environment names [`NO_CLIPBOARD_ENV`] in every test. A child of a test
+//! reads `/dev/null` on standard input, which is not a terminal and holds no
+//! text, so a run with no chain argument walks on to the clipboard. The
+//! clipboard is one shared resource of the whole machine: a test that reads it
+//! races the person at the keyboard, and a test that writes it destroys what
+//! the person copied. The variable turns that last step off for the children of
+//! this file, which is a mechanism rather than a rule each test must remember.
 //!
-//! The one exception is `the_run_with_no_argument_reads_the_clipboard`, which
-//! leaves the variable out because it is the test that holds the clipboard in
-//! the run at all. It reads the clipboard, it writes nothing to it, and it
-//! asserts only which path the run took, so it takes nothing away from the
-//! person at the keyboard.
+//! The tests that hold the clipboard in the run go through
+//! `run_through_shims`. It takes the variable out again, and it sets
+//! `MOSH_OPEN_SOCKET` to a path in the temporary directory of the test. The
+//! fake `gh` of the test then holds the fake `pbcopy` and `pbpaste` of
+//! `sysclip::testing::FakeShims`, which keep the clipboard in a file of that
+//! directory. In a session with that
+//! variable `sysclip` runs the two commands from `PATH` and never opens the
+//! clipboard of the machine. So no child of this file reaches the clipboard of
+//! the machine: each child turns the clipboard off, or goes through the shims.
 //!
 //! A plan of parallel work is many lines, and `Command::output` hands the
 //! child a standard input that holds nothing. So the tests that walk a plan go
@@ -53,6 +57,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
+use sysclip::testing::FakeShims;
 use unicode_width::UnicodeWidthStr;
 
 /// The repository the fake `gh` answers for.
@@ -64,7 +69,8 @@ const START_COMMAND_ENV: &str = "WN_START_COMMAND";
 /// The variable that turns the clipboard fallback off.
 ///
 /// Every child of this file gets it, because no test of a command line may
-/// touch the clipboard of the machine that runs it.
+/// touch the clipboard of the machine that runs it. `run_through_shims` takes
+/// it out again and puts the fake commands in the place of the clipboard.
 const NO_CLIPBOARD_ENV: &str = "WN_NO_CLIPBOARD";
 
 /// The value [`NO_CLIPBOARD_ENV`] carries. Any value with a character in it
@@ -104,6 +110,14 @@ const THREE_ISSUES: &str = r#"{"data":{"repository":{
 /// The chain the start-command tests walk. Two of the three issues, so the
 /// answer names #278 whichever command it prints.
 const ONE_OPEN_CHAIN: &str = "#277 → #278";
+
+/// What GitHub says about `#515` when it is an open pull request.
+///
+/// A pull request is work that already exists, so the answer of a chain that
+/// names it tells the reader to finish it and names no command that starts it.
+const ONE_OPEN_PULL_REQUEST: &str = r#"{"data":{"repository":{
+"i515":{"__typename":"PullRequest","number":515,"title":"The finished work","state":"OPEN"}
+}}}"#;
 
 /// A plan of three streams, as a record for each stream.
 ///
@@ -176,8 +190,9 @@ const BOX_TABLE: &str = include_str!("../fixtures/plan-parallel-work.txt");
 
 /// What GitHub says about every number of [`BOX_TABLE`].
 ///
-/// Three of the ten are done, so each of the four streams has one issue to
-/// start and none of them is the first step of its stream in every case.
+/// Three of the ten are done, so each of the four streams has one step
+/// somebody can take now and none of them is the first step of its stream in
+/// every case. The step of stream A is the open pull request `#15`.
 const BOX_ISSUES: &str = r#"{"data":{"repository":{
 "i15":{"__typename":"PullRequest","number":15,"title":"The visualizer branch","state":"OPEN"},
 "i4":{"__typename":"Issue","number":4,"title":"The visualizers","state":"OPEN","stateReason":null},
@@ -192,11 +207,17 @@ const BOX_ISSUES: &str = r#"{"data":{"repository":{
 }}}"#;
 
 /// The answer [`BOX_TABLE`] earns: one block for each of the four streams,
-/// and one summary that names an issue to start in each of them.
+/// and one summary that names the next step of each of them.
+///
+/// The next step of stream A is the open pull request `#15`, which closes
+/// `#4`. Its row writes the pair as the plan writes it, `PR#15 (#4)`. Its work
+/// exists already, so the tail of A tells the reader to review it and merge
+/// it, and names no start command. The other three tails name an issue to
+/// start. The words of A and the command of each issue start in one column.
 const BOX_ANSWER: &str = concat!(
     "A — visualizers\n",
-    "  → #15 (#4)  The visualizer branch\n",
-    "  · #7        Keep or delete\n",
+    "  → PR#15 (#4)  The visualizer branch\n",
+    "  · #7          Keep or delete\n",
     "\n",
     "B — audio engine\n",
     "  ✓ #11  The oscillator\n",
@@ -212,10 +233,10 @@ const BOX_ANSWER: &str = concat!(
     "  → #6  The manifest\n",
     "\n",
     "Take one from each stream:\n",
-    "  A — visualizers   → #15  si 15\n",
-    "  B — audio engine  → #5   si 5\n",
-    "  C — MIDI array    → #12  si 12\n",
-    "  D — manifest      → #6   si 6\n",
+    "  A — visualizers   → PR #15 (closes #4)  review it and merge it\n",
+    "  B — audio engine  → #5                  si 5\n",
+    "  C — MIDI array    → #12                 si 12\n",
+    "  D — manifest      → #6                  si 6\n",
 );
 
 /// A plan drawn as a picture: two streams that join.
@@ -413,11 +434,12 @@ const JSON_ISSUES: &str = r#"{"data":{"repository":{
 ///
 /// The report of a graph, because a JSON plan is a graph: one row for each
 /// step in the order of the work, and one start line for each issue somebody
-/// can begin now. `#96` is the one of them.
+/// can begin now. `#96` is the one of them. The row of the pull request writes
+/// the pair as the plan writes it, `PR#102 (#94)`.
 const JSON_ANSWER: &str = concat!(
-    "→ #96         The daemon leak\n",
-    "· #91         The lifecycle    waits for #96\n",
-    "· #102 (#94)  The shell init   waits for #91\n",
+    "→ #96           The daemon leak\n",
+    "· #91           The lifecycle    waits for #96\n",
+    "· PR#102 (#94)  The shell init   waits for #91\n",
     "\n",
     "Start #96 next with 'si 96'\n",
 );
@@ -432,12 +454,71 @@ const JSON_ISSUES_ONE_DONE: &str = r#"{"data":{"repository":{
 
 /// The answer [`JSON_PLAN`] earns once `#96` is done: `#91` is free.
 const JSON_ANSWER_ONE_DONE: &str = concat!(
-    "✓ #96         The daemon leak\n",
-    "→ #91         The lifecycle\n",
-    "· #102 (#94)  The shell init   waits for #91\n",
+    "✓ #96           The daemon leak\n",
+    "→ #91           The lifecycle\n",
+    "· PR#102 (#94)  The shell init   waits for #91\n",
     "\n",
     "Start #91 next with 'si 91'\n",
 );
+
+/// A JSON plan of three streams that wait for nothing, two of which hold an
+/// open pull request.
+///
+/// The reproduction of issue #516. `S1` holds the pull request `#515`, which
+/// closes `#512`, and `S2` holds `#514`, which closes `#510`. `S3` holds the
+/// plain issue `#6`, so one answer line still names a start command.
+const JSON_PLAN_OF_PULL_REQUESTS: &str = r#"{
+  "version": 1,
+  "streams": [
+    { "id": "S1", "order": [{ "issue": 512, "pr": 515 }] },
+    { "id": "S2", "order": [{ "issue": 510, "pr": 514 }] },
+    { "id": "S3", "order": [{ "issue": 6 }] }
+  ]
+}"#;
+
+/// What GitHub says about every number of [`JSON_PLAN_OF_PULL_REQUESTS`]:
+/// two open pull requests, the two open issues they close, and one more open
+/// issue.
+const PULL_REQUEST_ISSUES: &str = r#"{"data":{"repository":{
+"i515":{"__typename":"PullRequest","number":515,"title":"The finished work","state":"OPEN"},
+"i512":{"__typename":"Issue","number":512,"title":"The work it closes","state":"OPEN","stateReason":null},
+"i514":{"__typename":"PullRequest","number":514,"title":"The other finished work","state":"OPEN"},
+"i510":{"__typename":"Issue","number":510,"title":"The other work it closes","state":"OPEN","stateReason":null},
+"i6":{"__typename":"Issue","number":6,"title":"The work nobody began","state":"OPEN","stateReason":null}
+}}}"#;
+
+/// A plan of two streams that name one piece of work two ways.
+///
+/// Stream `A` writes the pair `PR#515 (#512)`, and stream `B` writes the bare
+/// `#512`. [`PULL_REQUEST_ISSUES`] says `#515` is open, so both streams name
+/// work that is in flight.
+const PLAN_OF_A_PAIR_AND_ITS_ISSUE: &str = "\
+Stream: A pair
+Order: PR#515 (#512)
+
+Stream: B bare issue
+Order: #512 → #6
+";
+
+/// The same two streams, as a JSON plan.
+const JSON_PLAN_OF_A_PAIR_AND_ITS_ISSUE: &str = r#"{
+  "version": 1,
+  "streams": [
+    { "id": "A", "order": [{ "issue": 512, "pr": 515 }] },
+    { "id": "B", "order": [{ "issue": 512 }, { "issue": 6 }] }
+  ]
+}"#;
+
+/// What GitHub says about [`PLAN_OF_A_PAIR_AND_ITS_ISSUE`] once `#515` is
+/// merged and `#512` is still open.
+///
+/// A merged pull request is no work in flight, so the bare `#512` is work to
+/// start again.
+const MERGED_PULL_REQUEST_ISSUES: &str = r#"{"data":{"repository":{
+"i515":{"__typename":"PullRequest","number":515,"title":"The finished work","state":"MERGED"},
+"i512":{"__typename":"Issue","number":512,"title":"The work it closes","state":"OPEN","stateReason":null},
+"i6":{"__typename":"Issue","number":6,"title":"The work nobody began","state":"OPEN","stateReason":null}
+}}}"#;
 
 /// A JSON plan whose two streams wait for each other.
 ///
@@ -500,6 +581,10 @@ const CLAUDE_ARGS_FILE: &str = "claude-args";
 /// The file the fake `claude` writes the prompt it was handed into.
 const PROMPT_FILE: &str = "prompt";
 
+/// What the refusing `pbpaste` writes on standard error, the way the shim of a
+/// mosh-rs session does when the client allows no paste.
+const REFUSED_PASTE: &str = "mosh-open: did not paste: the client allows no paste";
+
 /// The file the fake `gh` records the arguments of every call in.
 ///
 /// It appears on the first call, so its absence is a run that never reached
@@ -509,6 +594,8 @@ const ARGS_FILE: &str = "args";
 /// A fake `gh` in a temporary directory of its own.
 struct FakeGh {
     dir: tempfile::TempDir,
+    /// The fake `pbcopy` and `pbpaste`, after [`FakeGh::with_shims`].
+    shims: Option<FakeShims>,
 }
 
 impl FakeGh {
@@ -543,7 +630,7 @@ exit {status}
         let gh = dir.path().join("gh");
         std::fs::write(&gh, script).unwrap();
         std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
-        Self { dir }
+        Self { dir, shims: None }
     }
 
     /// Write a `gh` that can name no repository for the current directory.
@@ -565,7 +652,7 @@ exit 1
         let gh = dir.path().join("gh");
         std::fs::write(&gh, script).unwrap();
         std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
-        Self { dir }
+        Self { dir, shims: None }
     }
 
     /// Write a `claude` beside the `gh`.
@@ -616,6 +703,39 @@ cat > '{prompt}'
     /// a file that never appeared is a run that never reached `claude`.
     fn never_ran_claude(&self) -> bool {
         !self.dir.path().join(CLAUDE_ARGS_FILE).exists()
+    }
+
+    /// Write a `pbcopy` and a `pbpaste` beside the `gh`, and a clipboard file
+    /// that holds `held`.
+    ///
+    /// The two commands are the fake shims of a mosh-rs session, from
+    /// `sysclip::testing::FakeShims`. The directory of the fake `gh` is first
+    /// on `PATH`, so a run that goes through them never reaches the clipboard
+    /// of the machine.
+    fn with_shims(mut self, held: &str) -> Self {
+        let shims = FakeShims::install(self.dir.path());
+        shims.hold(held);
+        self.shims = Some(shims);
+        self
+    }
+
+    /// Write a `pbpaste` that refuses, the way the shim does when the client
+    /// allows no paste. It replaces the one of [`FakeGh::with_shims`].
+    fn with_refusing_pbpaste(self) -> Self {
+        self.shims().refuse_paste(REFUSED_PASTE);
+        self
+    }
+
+    /// What the clipboard file holds now.
+    fn recorded_clipboard(&self) -> String {
+        self.shims().held()
+    }
+
+    /// The fake shims of [`FakeGh::with_shims`].
+    fn shims(&self) -> &FakeShims {
+        self.shims
+            .as_ref()
+            .expect("the test installs the shims first")
     }
 
     fn path(&self) -> &Path {
@@ -721,7 +841,7 @@ fn run_with_stdin_and_start(
 /// rule.
 fn wn(gh: &FakeGh, args: &[&str], columns: &str, color: bool, start: Option<&str>) -> Command {
     let path = format!("{}:/usr/bin:/bin", gh.path().display());
-    let mut command = Command::new(env!("CARGO_BIN_EXE_wn"));
+    let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_wn"));
     command
         .env_clear()
         .env("PATH", path)
@@ -753,6 +873,35 @@ fn run_building(gh: &FakeGh, args: &[&str], env: &[(&str, &str)]) -> Output {
     command.env_remove(NO_CLAUDE_ENV);
     for (name, value) in env {
         command.env(name, value);
+    }
+    command.output().unwrap()
+}
+
+/// Whether a run of [`run_through_shims`] can run the fake `claude`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Claude {
+    /// [`NO_CLAUDE_ENV`] stays in the environment, as [`wn`] sets it.
+    Off,
+    /// [`NO_CLAUDE_ENV`] goes out, as [`run_building`] takes it out.
+    On,
+}
+
+/// Run `wn` in a mosh-rs session whose clipboard is the pair of fake commands
+/// of `gh`.
+///
+/// It starts from the environment of [`wn`], takes [`NO_CLIPBOARD_ENV`] out and
+/// sets `MOSH_OPEN_SOCKET` to the socket path of the fake shims. The
+/// socket does not exist, and it need not: `sysclip` runs `pbcopy` and
+/// `pbpaste` from `PATH` in such a session and opens no socket and no
+/// clipboard. The run then reads and writes the files of the fake and never the
+/// clipboard of the machine.
+fn run_through_shims(gh: &FakeGh, args: &[&str], claude: Claude) -> Output {
+    let mut command = wn(gh, args, "80", false, None);
+    command
+        .env_remove(NO_CLIPBOARD_ENV)
+        .env(sysclip::MOSH_OPEN_SOCKET_ENV, gh.shims().socket());
+    if claude == Claude::On {
+        command.env_remove(NO_CLAUDE_ENV);
     }
     command.output().unwrap()
 }
@@ -817,6 +966,25 @@ fn walks_the_chain_and_names_the_issue_to_start() {
             "\n",
             "Start #278 next with 'si 278'\n",
         )
+    );
+}
+
+#[test]
+fn an_open_pull_request_of_a_chain_is_work_to_finish_and_not_to_start() {
+    // The work of an open pull request exists already. A start command for
+    // its number sends the reader to begin that work a second time, so the
+    // answer tells them to review it and merge it instead.
+    let gh = FakeGh::new(ONE_OPEN_PULL_REQUEST);
+    let output = run(&gh, &["--repo", REPO, "#515"], "80", false);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let text = stdout(&output);
+    assert!(
+        text.ends_with("Finish PR #515 next: review it and merge it\n"),
+        "the answer tells the reader to finish the pull request, in {text}"
+    );
+    assert!(
+        !text.contains("si 515"),
+        "the answer names no command that starts the pull request, in {text}"
     );
 }
 
@@ -955,7 +1123,7 @@ fn asks_about_the_whole_chain_in_one_query() {
 fn takes_the_chain_from_standard_input() {
     let gh = FakeGh::new(THREE_ISSUES);
     let path = format!("{}:/usr/bin:/bin", gh.path().display());
-    let output = Command::new("sh")
+    let output = childenv::fixture_command("sh")
         .env_clear()
         .env("PATH", path)
         .env("COLUMNS", "80")
@@ -1006,7 +1174,7 @@ fn an_empty_pipe_reaches_the_clipboard_step() {
     // standard input would report a chain error about empty text instead.
     let gh = FakeGh::new(THREE_ISSUES);
     let path = format!("{}:/usr/bin:/bin", gh.path().display());
-    let output = Command::new("sh")
+    let output = childenv::fixture_command("sh")
         .env_clear()
         .env("PATH", path)
         .env("COLUMNS", "80")
@@ -1027,47 +1195,35 @@ fn an_empty_pipe_reaches_the_clipboard_step() {
 }
 
 #[test]
-fn the_run_with_no_argument_reads_the_clipboard() {
-    // The one test of this file that leaves the switch out, and the one test
-    // that holds the headline behavior: `wn` alone answers the chain the reader
-    // just copied. Every other test here turns the clipboard off, and every
-    // unit test gives `Sources` a reader of its own, so the line in `run` that
-    // names the real clipboard could read `None` and the whole suite stays
-    // green.
-    //
-    // The assertion reads which path the run took. It never reads what the
-    // clipboard holds. `no chain given` is the error of a run whose inputs left
-    // the clipboard out, and it is the only error that says so: an empty
-    // clipboard, a clipboard that does not open, a clipboard of prose, and a
-    // clipboard that holds a real chain each take a path of its own. The run is
-    // therefore deterministic although it reads a resource of the whole machine
-    // that this test does not own, and the assertion fails if and only if the
-    // run stops wiring the clipboard in.
-    //
-    // `env_clear` takes `DISPLAY` and `WAYLAND_DISPLAY` out as well. On Linux
-    // `arboard` then opens nothing, and the run reports `the clipboard could not
-    // be read (…)`. That is still not the `no chain given` path, so the
-    // assertion holds on a machine with no display exactly as it holds on a
-    // desktop.
-    //
-    // The run reads the clipboard and writes nothing to it, so it keeps what
-    // the person at the keyboard copied.
-    let gh = FakeGh::new(THREE_ISSUES);
-    let path = format!("{}:/usr/bin:/bin", gh.path().display());
-    let output = Command::new(env!("CARGO_BIN_EXE_wn"))
-        .env_clear()
-        .env("PATH", path)
-        .env("COLUMNS", "80")
-        .env("NO_COLOR", "1")
-        // NO_CLIPBOARD_ENV stays out of this environment on purpose. A child of
-        // `output` reads `/dev/null` on standard input, so the run walks past
-        // the argument and past the pipe and arrives at the clipboard.
-        .args(["--repo", REPO])
-        .output()
-        .unwrap();
+fn a_mosh_session_reads_the_chain_through_pbpaste() {
+    // The headline behavior: `wn` alone answers the chain the reader just
+    // copied. The clipboard here is the fake `pbpaste` of a mosh-rs session,
+    // so the run reads a file of this test and never the clipboard of the
+    // machine.
+    let gh = FakeGh::new(THREE_ISSUES).with_shims(ONE_OPEN_CHAIN);
+    let output = run_through_shims(&gh, &["--repo", REPO], Claude::Off);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
     assert!(
-        !stderr(&output).contains(NO_CHAIN),
-        "the clipboard is one of the inputs of the run, in {}",
+        stdout(&output).ends_with("Start #278 next with 'si 278'\n"),
+        "the chain on the clipboard is the chain of the run, in {}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn a_refused_paste_in_a_mosh_session_names_the_shim() {
+    // The shim fails and the run says so. It never falls back to the clipboard
+    // of the machine, and the first line of the shim is the cause.
+    let gh = FakeGh::new(THREE_ISSUES)
+        .with_shims(ONE_OPEN_CHAIN)
+        .with_refusing_pbpaste();
+    let output = run_through_shims(&gh, &["--repo", REPO], Claude::Off);
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    assert!(
+        stderr(&output).contains(
+            "the clipboard could not be read (mosh-open: did not paste: the client allows no paste)"
+        ),
+        "{}",
         stderr(&output)
     );
 }
@@ -1183,7 +1339,7 @@ fn reports_a_number_github_would_not_answer_for() {
 #[test]
 fn says_so_when_the_github_cli_is_not_installed() {
     let dir = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_wn"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_wn"))
         .env_clear()
         .env("PATH", dir.path())
         .env("COLUMNS", "80")
@@ -1213,7 +1369,7 @@ fn a_machine_with_no_gh_is_not_told_to_name_a_repository() {
     // reason. Advice that leads the reader to a second failure is worse than
     // no advice.
     let dir = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_wn"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_wn"))
         .env_clear()
         .env("PATH", dir.path())
         .env("COLUMNS", "80")
@@ -1399,8 +1555,9 @@ fn refuses_a_plan_that_names_no_order_field() {
 
 #[test]
 fn a_number_that_stands_in_two_streams_is_asked_about_once() {
-    // The whole plan is one query, as one chain is. #330 stands in both
-    // streams, and it costs one alias and is reported in both.
+    // Every number of this plan goes in one query, as the numbers of a chain
+    // do. #330 stands in both streams, and it costs one alias and is reported
+    // in both.
     let gh = FakeGh::new(PLAN_ISSUES);
     let output = run_with_stdin(
         &gh,
@@ -1431,9 +1588,10 @@ fn a_number_that_stands_in_two_streams_is_asked_about_once() {
 
 #[test]
 fn a_pull_request_and_the_issue_it_closes_are_one_row() {
-    // `PR#344 (#341)` is one step and not two. The state of the row is the
-    // state of the pull request, so a merged 344 is walked past although 341
-    // is still open — and the two states that disagree earn a note.
+    // `PR#344 (#341)` is one step and not two, and the row writes it as the
+    // plan wrote it. The state of the row is the state of the pull request,
+    // so a merged 344 is walked past although 341 is still open — and the two
+    // states that disagree earn a note.
     let body = r#"{"data":{"repository":{
 "i344":{"__typename":"PullRequest","number":344,"title":"First thing","state":"MERGED"},
 "i341":{"__typename":"Issue","number":341,"title":"The bug","state":"OPEN","stateReason":null},
@@ -1451,8 +1609,8 @@ fn a_pull_request_and_the_issue_it_closes_are_one_row() {
         stdout(&output),
         concat!(
             "S1 gitscratch\n",
-            "  ✓ #344 (#341)  First thing\n",
-            "  → #330         Second thing\n",
+            "  ✓ PR#344 (#341)  First thing\n",
+            "  → #330           Second thing\n",
             "\n",
             "  #344 is closed and #341 is open.\n",
             "\n",
@@ -1465,10 +1623,13 @@ fn a_pull_request_and_the_issue_it_closes_are_one_row() {
 #[test]
 fn answers_the_paste_of_the_plan_parallel_work_skill() {
     // The whole point of the feature: copy the report of the skill out of a
-    // terminal, type `wn`, and read the issue to start in each stream. The
-    // paste draws its table with `│` and `┌─┬─┐`, it wraps two of its rows
-    // onto a second line, and its Order fields annotate two steps in
-    // parentheses.
+    // terminal, type `wn`, and read what to do next in each stream. The paste
+    // draws its table with `│` and `┌─┬─┐`, it wraps two of its rows onto a
+    // second line, and its Order fields annotate two steps in parentheses.
+    //
+    // The plan says the work of stream A is in flight as the pull request
+    // #15. So the tail of A tells the reader to finish that work, and does
+    // not tell them to start it a second time with `si 15`.
     let gh = FakeGh::new(BOX_ISSUES);
     let output = run_with_stdin(&gh, &["--repo", REPO], "80", BOX_TABLE);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
@@ -1478,9 +1639,10 @@ fn answers_the_paste_of_the_plan_parallel_work_skill() {
 #[test]
 fn a_pull_request_an_annotation_names_is_the_work_of_its_step() {
     // `#4 (in flight, PR #15)` is the issue #4 whose work is the pull request
-    // #15, so the row is the pull request and the state of the row is the
-    // state of it. A merged pull request over an open issue earns the same
-    // note the `PR#344 (#341)` order earns, because it is the same step.
+    // #15, so the row is the pull request, written `PR#15 (#4)`, and the state
+    // of the row is the state of it. A merged pull request over an open issue
+    // earns the same note the `PR#344 (#341)` order earns, because it is the
+    // same step.
     let body = r#"{"data":{"repository":{
 "i15":{"__typename":"PullRequest","number":15,"title":"The visualizer branch","state":"MERGED"},
 "i4":{"__typename":"Issue","number":4,"title":"The visualizers","state":"OPEN","stateReason":null},
@@ -1498,8 +1660,8 @@ fn a_pull_request_an_annotation_names_is_the_work_of_its_step() {
         stdout(&output),
         concat!(
             "A visualizers\n",
-            "  ✓ #15 (#4)  The visualizer branch\n",
-            "  → #7        Keep or delete\n",
+            "  ✓ PR#15 (#4)  The visualizer branch\n",
+            "  → #7          Keep or delete\n",
             "\n",
             "  #15 is closed and #4 is open.\n",
             "\n",
@@ -1958,16 +2120,118 @@ fn a_finished_step_of_a_json_plan_frees_the_step_that_waited_for_it() {
 #[test]
 fn a_pull_request_of_a_json_step_is_the_pair_the_row_writes() {
     // `"pr": 102` on the step of `#94` is the pair `PR#102 (#94)` writes, and
-    // the state of the row is the state of the pull request, because the pull
-    // request is the work.
+    // the row writes it that way. The state of the row is the state of the
+    // pull request, because the pull request is the work.
     let gh = FakeGh::new(JSON_ISSUES);
     let output = run_with_stdin(&gh, &["--repo", REPO], "80", JSON_PLAN);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     let answer = stdout(&output);
     assert!(
-        answer.contains("#102 (#94)  The shell init"),
+        answer.contains("· PR#102 (#94)  The shell init"),
         "the row writes the pair and the title of the work, in {answer}"
     );
+}
+
+#[test]
+fn an_open_pull_request_of_a_picture_is_work_to_finish_and_not_to_start() {
+    // A JSON plan is a graph, and the answer of a graph writes one line for
+    // each ready step. A ready open pull request is work that exists already,
+    // so its line tells the reader to finish it, and names the issue it
+    // closes. No line names the start command for either number of a pair.
+    let gh = FakeGh::new(PULL_REQUEST_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", JSON_PLAN_OF_PULL_REQUESTS);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let text = stdout(&output);
+    assert!(
+        text.ends_with(concat!(
+            "Finish PR #515 (closes #512) next: review it and merge it\n",
+            "Finish PR #514 (closes #510) next: review it and merge it\n",
+            "Start #6 next with 'si 6'\n",
+        )),
+        "each ready pull request is work to finish and the issue is work to start, in {text}"
+    );
+    for command in ["si 515", "si 512", "si 514", "si 510"] {
+        assert!(
+            !text.contains(command),
+            "no line names the command {command:?}, in {text}"
+        );
+    }
+}
+
+#[test]
+fn the_issue_of_an_open_pull_request_is_work_to_finish_in_every_stream() {
+    // Stream B names only `#512`, and stream A says that the open pull request
+    // #515 does that work. So the tail of B tells the reader to finish #515,
+    // as the tail of A does, and no tail starts the work a second time with
+    // `si 512`. The rows stay as the plan wrote them.
+    let gh = FakeGh::new(PULL_REQUEST_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", PLAN_OF_A_PAIR_AND_ITS_ISSUE);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "A pair\n",
+            "  → PR#515 (#512)  The finished work\n",
+            "\n",
+            "B bare issue\n",
+            "  → #512  The work it closes\n",
+            "  · #6    The work nobody began\n",
+            "\n",
+            "Take one from each stream:\n",
+            "  A pair        → PR #515 (closes #512)  review it and merge it\n",
+            "  B bare issue  → PR #515 (closes #512)  review it and merge it\n",
+        )
+    );
+}
+
+#[test]
+fn the_issue_of_an_open_pull_request_earns_no_start_line_in_a_json_plan() {
+    // A JSON plan is a graph, and both the pair and the bare `#512` are ready
+    // rows. The two rows name one piece of work that is in flight, so the
+    // answer writes one line that tells the reader to finish it, and no line
+    // that starts it.
+    let gh = FakeGh::new(PULL_REQUEST_ISSUES);
+    let output = run_with_stdin(
+        &gh,
+        &["--repo", REPO],
+        "80",
+        JSON_PLAN_OF_A_PAIR_AND_ITS_ISSUE,
+    );
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "→ PR#515 (#512)  The finished work\n",
+            "→ #512           The work it closes\n",
+            "· #6             The work nobody began  waits for #512\n",
+            "\n",
+            "Finish PR #515 (closes #512) next: review it and merge it\n",
+        )
+    );
+}
+
+#[test]
+fn the_issue_of_a_merged_pull_request_is_still_work_to_start() {
+    // The boundary of the rule above. A merged pull request is no work in
+    // flight, so the bare `#512` of stream B keeps its start command in each
+    // form of the plan.
+    let gh = FakeGh::new(MERGED_PULL_REQUEST_ISSUES);
+    for plan in [
+        PLAN_OF_A_PAIR_AND_ITS_ISSUE,
+        JSON_PLAN_OF_A_PAIR_AND_ITS_ISSUE,
+    ] {
+        let output = run_with_stdin(&gh, &["--repo", REPO], "80", plan);
+        assert!(output.status.success(), "stderr: {}", stderr(&output));
+        let text = stdout(&output);
+        assert!(
+            text.contains("si 512"),
+            "the bare #512 is work to start, in {text}"
+        );
+        assert!(
+            !text.contains("PR #515"),
+            "no line tells the reader to finish the merged #515, in {text}"
+        );
+    }
 }
 
 #[test]
@@ -2174,6 +2438,26 @@ fn a_run_with_nothing_to_read_builds_a_plan_with_claude() {
     // The line that says a run is happening goes to standard error, so the
     // answer above reaches a pipe alone.
     assert!(stderr(&output).contains("claude"), "{}", stderr(&output));
+}
+
+#[test]
+fn a_mosh_session_keeps_the_plan_through_pbcopy() {
+    // The plan goes on the clipboard, and in a mosh-rs session the clipboard is
+    // the fake `pbcopy`. The file it writes holds the text of the plan that the
+    // fake `claude` printed.
+    let gh = FakeGh::new(JSON_ISSUES)
+        .with_shims("")
+        .with_claude(&prints_the_plan());
+    let output = run_through_shims(&gh, &["--repo", REPO], Claude::On);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    // The answer, then the note that says the plan is on the clipboard.
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "{JSON_ANSWER}\nThe plan is on the clipboard. Run wn --refresh to build a new one.\n"
+        )
+    );
+    assert_eq!(gh.recorded_clipboard(), undated(JSON_PLAN));
 }
 
 #[test]
@@ -2608,6 +2892,60 @@ fn a_directory_that_is_in_no_repository_costs_no_run() {
     assert!(message.contains("not a git repository"), "{message}");
     assert!(!message.contains("Name the repository with"), "{message}");
     assert!(gh.never_ran_claude(), "{}", gh.recorded_claude_args());
+}
+
+/// A repository that is not [`REPO`], which the fake `gh` names for the current
+/// directory.
+const OTHER_REPO: &str = "owner/other";
+
+#[test]
+fn a_run_that_builds_refuses_a_repo_for_another_repository_before_it_runs_claude() {
+    // The skill plans the repository of the current directory, and `wn` asks
+    // GitHub about the repository `--repo` names. A build under a `--repo` for
+    // another repository answers the numbers of one repository with the issues
+    // of the other. The refusal stands before the run, so it costs no money and
+    // no minute. A run with nothing to read and a run with `--refresh` both
+    // build, so both are refused.
+    let empty: &[&str] = &["--repo", OTHER_REPO];
+    let refresh: &[&str] = &["--refresh", "--repo", OTHER_REPO, ONE_OPEN_CHAIN];
+    for args in [empty, refresh] {
+        let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints_the_plan());
+        let output = run_building(&gh, args, &[]);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{args:?}: the run could not answer"
+        );
+        let message = stderr(&output);
+        assert!(
+            message.starts_with(&format!(
+                "wn: a plan is built for the repository of this directory, which is {REPO}, and \
+                 --repo names another repository, {OTHER_REPO}."
+            )),
+            "{args:?}: {message}"
+        );
+        // `wn --refresh` builds for this directory as well, so it is no repair.
+        assert!(!message.contains("--refresh"), "{args:?}: {message}");
+        // The line that says a run is happening never printed.
+        assert!(!message.contains("with claude"), "{args:?}: {message}");
+        assert!(gh.never_ran_claude(), "{}", gh.recorded_claude_args());
+        assert!(
+            gh.sent_no_query(),
+            "{args:?}: the refusal asks about no issue, and it asked {}",
+            gh.recorded_args()
+        );
+        assert_eq!(stdout(&output), "", "{args:?}: no rows");
+    }
+}
+
+#[test]
+fn a_run_that_builds_under_a_repo_for_this_directory_in_other_letter_case_answers() {
+    // GitHub names a repository without regard to letter case, so this
+    // `--repo` names the repository the fake `gh` names for this directory.
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints_the_plan());
+    let output = run_building(&gh, &["--repo", "TimMattison/Tools"], &[]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), JSON_ANSWER);
 }
 
 #[test]
@@ -3249,4 +3587,420 @@ fn the_line_never_runs_past_the_window_it_is_painted_in() {
             frame.width()
         );
     }
+}
+
+/// What GitHub says about the slices of the wave tank, with the body of each.
+///
+/// `#170` says under `Blocked by` that `#168` comes first, and its body names
+/// `#169` in prose as well, which blocks nothing. `#168` says `#167` comes
+/// first, and `#167` is done. Three marks close the raw string, because a body
+/// holds `"##`.
+///
+/// One answer serves every query of a run. The query names the numbers it
+/// wants, and the reader of the answer reads those numbers and no others, so a
+/// run that asks about `#167` alone reads `#167` out of this.
+const WAVE_ISSUES: &str = r###"{"data":{"repository":{
+"i170":{"__typename":"Issue","number":170,"title":"The cell slider","state":"OPEN","stateReason":null,
+        "body":"## Parent\n\n#166\n\n## Blocked by\n\n- #168\n\nIt can run beside #169."},
+"i168":{"__typename":"Issue","number":168,"title":"The slope","state":"OPEN","stateReason":null,
+        "body":"## Blocked by\n\n- #167\n"},
+"i167":{"__typename":"Issue","number":167,"title":"The flat tank","state":"CLOSED","stateReason":"COMPLETED",
+        "body":""}
+}}}"###;
+
+/// The plan of the wave tank as the run of the skill wrote it: `#170` first.
+const WAVE_PLAN_REVERSED: &str = "\
+| Stream | Order | Zone |
+|--------|-------|------|
+| S2 — wave tank | #170 → #168 | src/components/experiments/wave-* |
+";
+
+/// The same plan, written as the JSON document the run printed.
+const WAVE_DOCUMENT_REVERSED: &str = r#"{
+  "version": 1,
+  "streams": [
+    { "id": "S2", "name": "wave tank",
+      "order": [{ "issue": 170, "waitsFor": [] }, { "issue": 168, "waitsFor": [] }] }
+  ]
+}"#;
+
+/// The plan of the wave tank in the order its issues say.
+const WAVE_PLAN: &str = "\
+| Stream | Order | Zone |
+|--------|-------|------|
+| S2 — wave tank | #168 → #170 | src/components/experiments/wave-* |
+";
+
+/// The two slices as two streams that stand apart, which is the plan that
+/// leaves the blocker out rather than putting it after the slice it blocks.
+const WAVE_PLAN_APART: &str = "\
+| Stream | Order | Zone |
+|--------|-------|------|
+| S2 — slope | #168 | src/components/experiments/wave-* |
+| S3 — slider | #170 | src/components/viz/viz-shell.tsx |
+";
+
+/// The answer a plan earns once a blocker it left out joins it: the step
+/// waits, the blocker is the one issue to start, and a note says which of the
+/// two claims named the wait.
+const WAVE_LEFT_OUT_ANSWER: &str = concat!(
+    "→ #168  The slope\n",
+    "· #170  The cell slider  waits for #168\n",
+    "\n",
+    "#170 waits for #168: the issue says so, and the order does not.\n",
+    "Start #168 next with 'si 168'\n",
+);
+
+/// The sentence a plan that puts `#170` before `#168` is refused with.
+const WAVE_REFUSAL: &str = "the order puts #170 before #168, but #170 says it is blocked by #168. \
+                            Fix the order, or run wn --refresh to build a new plan";
+
+/// The count of GraphQL queries the fake `gh` was sent.
+fn queries_sent(gh: &FakeGh) -> usize {
+    if gh.asked_nothing() {
+        return 0;
+    }
+    gh.recorded_args()
+        .lines()
+        .filter(|line| *line == "graphql")
+        .count()
+}
+
+#[test]
+fn refuses_a_plan_that_puts_an_issue_before_its_own_blocker() {
+    // The plan that sent a reader to #170. The issue says #168 comes first, so
+    // an answer to this plan names work that cannot start, and the run names
+    // the pair instead.
+    let gh = FakeGh::new(WAVE_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", WAVE_PLAN_REVERSED);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "the run could not answer, stdout: {}",
+        stdout(&output)
+    );
+    assert!(
+        stderr(&output).contains(WAVE_REFUSAL),
+        "the refusal names the pair, in {}",
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "", "nothing was printed as an answer");
+}
+
+#[test]
+fn refuses_a_json_plan_that_puts_an_issue_before_its_own_blocker() {
+    // The same plan in the shape the run of the skill hands back, which is the
+    // shape it arrived in on the day it sent a reader to #170.
+    let gh = FakeGh::new(WAVE_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", WAVE_DOCUMENT_REVERSED);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "the run could not answer, stdout: {}",
+        stdout(&output)
+    );
+    assert!(
+        stderr(&output).contains(WAVE_REFUSAL),
+        "the refusal names the pair, in {}",
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "", "nothing was printed as an answer");
+}
+
+#[test]
+fn a_plan_in_the_order_its_issues_say_answers_as_it_always_did() {
+    // Every blocker the issues name stands before the issue, so the plan
+    // reader answers, and no row carries the column of a graph.
+    let gh = FakeGh::new(WAVE_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", WAVE_PLAN);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let answer = stdout(&output);
+    assert!(
+        answer.contains(SUMMARY_HEADING),
+        "the plan reader answered, in {answer}"
+    );
+    assert!(
+        !answer.contains(WAITS_FOR),
+        "no row waits for anything, in {answer}"
+    );
+    assert!(
+        answer.contains("si 168"),
+        "the answer names #168, in {answer}"
+    );
+    assert!(
+        !answer.contains("si 170"),
+        "the answer never names #170, in {answer}"
+    );
+}
+
+#[test]
+fn a_blocker_the_plan_left_out_joins_the_answer() {
+    // Two streams that stand apart would name #168 and #170 both. #170 says
+    // #168 comes first, so the answer waits, names #168 alone, and says the
+    // wait came from the issue.
+    let gh = FakeGh::new(WAVE_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", WAVE_PLAN_APART);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), WAVE_LEFT_OUT_ANSWER);
+}
+
+#[test]
+fn an_open_blocker_outside_the_chain_joins_the_answer() {
+    // The chain names #170 alone. #170 says #168 comes first, and #168 stands
+    // nowhere in the chain, so the run asks about it. It is open, so it joins
+    // the answer. It says #167 comes first, so the run asks about that too, and
+    // #167 is done, so it changes nothing. Three rounds are three queries.
+    let gh = FakeGh::new(WAVE_ISSUES);
+    let output = run(&gh, &["--repo", REPO, "#170"], "80", false);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), WAVE_LEFT_OUT_ANSWER);
+    assert_eq!(queries_sent(&gh), 3, "asked {}", gh.recorded_args());
+}
+
+#[test]
+fn a_finished_blocker_outside_the_chain_changes_nothing() {
+    // #168 says #167 comes first, and #167 is done. The run asks about #167
+    // once and then answers the chain exactly as a chain is answered.
+    let gh = FakeGh::new(WAVE_ISSUES);
+    let output = run(&gh, &["--repo", REPO, "#168"], "80", false);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let answer = stdout(&output);
+    assert!(
+        !answer.contains(WAITS_FOR),
+        "no row waits for anything, in {answer}"
+    );
+    assert!(
+        answer.contains("Start #168 next with 'si 168'"),
+        "the chain names #168, in {answer}"
+    );
+    assert!(
+        !answer.contains("#167"),
+        "the answer names no #167, in {answer}"
+    );
+    assert_eq!(queries_sent(&gh), 2, "asked {}", gh.recorded_args());
+}
+
+/// What GitHub says about `#50`, whose body names its blocker by the URL of
+/// `#51` in [`REPO`], and about `#51`, which is open. Three marks close the raw
+/// string, because a body holds `"##`.
+const URL_BLOCKER_ISSUES: &str = r###"{"data":{"repository":{
+"i50":{"__typename":"Issue","number":50,"title":"The fiftieth","state":"OPEN","stateReason":null,
+       "body":"## Blocked by\n\n- https://github.com/timmattison/tools/issues/51\n"},
+"i51":{"__typename":"Issue","number":51,"title":"The fifty-first","state":"OPEN","stateReason":null,"body":""}
+}}}"###;
+
+#[test]
+fn a_blocker_named_by_the_url_of_its_issue_joins_the_answer() {
+    // A pasted URL is a common way to name an issue, and GitHub renders it as
+    // a link to #51. So #50 waits for #51, and the run names #51 first. The run
+    // asks about #50, reads the URL, and then asks about #51.
+    let gh = FakeGh::new(URL_BLOCKER_ISSUES);
+    let output = run(&gh, &["--repo", REPO, "#50"], "80", false);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let answer = stdout(&output);
+    assert!(
+        answer.contains("Start #51 next with 'si 51'"),
+        "the answer names #51, in {answer}"
+    );
+    assert!(
+        !answer.contains("Start #50"),
+        "the answer does not name #50, in {answer}"
+    );
+    assert!(
+        answer.contains(&format!("{WAITS_FOR}#51")),
+        "#50 waits for #51, in {answer}"
+    );
+    assert_eq!(queries_sent(&gh), 2, "asked {}", gh.recorded_args());
+}
+
+/// A plan of streams that names `#1` and `#2` in two orders, and a third
+/// stream that holds `#5` alone.
+const KNOTTED_PLAN: &str = "\
+| Stream | Order | Zone |
+|--------|-------|------|
+| S1 — first | #1 → #2 | src/first |
+| S2 — second | #2 → #1 | src/second |
+| S3 — third | #5 | src/third |
+";
+
+/// What GitHub says about the knotted plan when `#5` says under `Blocked by`
+/// that `#6` comes first. `#6` stands nowhere in the plan, and it is open.
+const KNOTTED_ISSUES_WAITING: &str = r###"{"data":{"repository":{
+"i1":{"__typename":"Issue","number":1,"title":"The first","state":"OPEN","stateReason":null,"body":""},
+"i2":{"__typename":"Issue","number":2,"title":"The second","state":"OPEN","stateReason":null,"body":""},
+"i5":{"__typename":"Issue","number":5,"title":"The fifth","state":"OPEN","stateReason":null,
+      "body":"## Blocked by\n\n- #6\n"},
+"i6":{"__typename":"Issue","number":6,"title":"The sixth","state":"OPEN","stateReason":null,"body":""}
+}}}"###;
+
+/// What GitHub says about the knotted plan when no issue names a blocker.
+const KNOTTED_ISSUES_APART: &str = r###"{"data":{"repository":{
+"i1":{"__typename":"Issue","number":1,"title":"The first","state":"OPEN","stateReason":null,"body":""},
+"i2":{"__typename":"Issue","number":2,"title":"The second","state":"OPEN","stateReason":null,"body":""},
+"i5":{"__typename":"Issue","number":5,"title":"The fifth","state":"OPEN","stateReason":null,"body":""}
+}}}"###;
+
+/// The sentence the knotted plan is refused with once `#5` waits for `#6`.
+const KNOTTED_REFUSAL: &str = "the order returns to #1 and #2, and #5 waits for #6, \
+                               which only an order with no cycle can show. \
+                               Fix the order, or run wn --refresh to build a new plan";
+
+#[test]
+fn a_knotted_order_with_no_wait_the_issues_add_answers_as_streams() {
+    // The reader of streams answers each stream on its own, so the two orders
+    // of #1 and #2 hold nothing back while no issue names a blocker.
+    let gh = FakeGh::new(KNOTTED_ISSUES_APART);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", KNOTTED_PLAN);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(
+        stdout(&output).contains(SUMMARY_HEADING),
+        "the plan reader answered, in {}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn refuses_a_knotted_order_once_the_issues_add_a_wait_and_names_both() {
+    // The same plan, and #5 now says #6 comes first. An answer of streams
+    // would name #5 while #6 is open, and a graph cannot hold the knot of #1
+    // and #2. So the run refuses, and the refusal names the wait as well as
+    // the knot, because the wait is why a plan that answered now refuses.
+    let gh = FakeGh::new(KNOTTED_ISSUES_WAITING);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", KNOTTED_PLAN);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "the run could not answer, stdout: {}",
+        stdout(&output)
+    );
+    assert!(
+        stderr(&output).contains(KNOTTED_REFUSAL),
+        "the refusal names the knot and the wait, in {}",
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "", "nothing was printed as an answer");
+}
+
+/// What GitHub says about the knotted plan when `#1` says under `Blocked by`
+/// that `#2` comes first, and no other issue names a blocker.
+const KNOTTED_ISSUES_BLOCKED_INSIDE: &str = r###"{"data":{"repository":{
+"i1":{"__typename":"Issue","number":1,"title":"The first","state":"OPEN","stateReason":null,
+      "body":"## Blocked by\n\n- #2\n"},
+"i2":{"__typename":"Issue","number":2,"title":"The second","state":"OPEN","stateReason":null,"body":""},
+"i5":{"__typename":"Issue","number":5,"title":"The fifth","state":"OPEN","stateReason":null,"body":""}
+}}}"###;
+
+/// The sentence the knotted plan is refused with once `#1` says `#2` blocks
+/// it.
+const KNOTTED_REVERSED_REFUSAL: &str =
+    "the order puts #1 before #2, but #1 says it is blocked by #2. \
+     Fix the order, or run wn --refresh to build a new plan";
+
+#[test]
+fn refuses_a_blocker_inside_a_knot_that_one_order_puts_after_its_step() {
+    // S2 walks from #2 to #1, and S1 puts #1 before #2. The answer of S1 names
+    // #1 while #2 is open, and #1 says #2 blocks it. So the run refuses the
+    // order of S1, and it answers nothing.
+    let gh = FakeGh::new(KNOTTED_ISSUES_BLOCKED_INSIDE);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", KNOTTED_PLAN);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "the run could not answer, stdout: {}",
+        stdout(&output)
+    );
+    assert!(
+        stderr(&output).contains(KNOTTED_REVERSED_REFUSAL),
+        "the refusal names the pair, in {}",
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "", "nothing was printed as an answer");
+}
+
+/// A plan of streams that puts `#10` before `#30` in one stream, and `#20`
+/// before `#10` in another.
+const FINISHED_BETWEEN_PLAN: &str = "\
+| Stream | Order | Zone |
+|--------|-------|------|
+| S1 — first | #10 → #30 | src/first |
+| S2 — second | #20 → #10 | src/second |
+";
+
+/// What GitHub says about [`FINISHED_BETWEEN_PLAN`]: `#10` is done, `#20` is
+/// open, and `#30` says under `Blocked by` that `#20` comes first.
+const FINISHED_BETWEEN_ISSUES: &str = r###"{"data":{"repository":{
+"i10":{"__typename":"Issue","number":10,"title":"The tenth","state":"CLOSED","stateReason":"COMPLETED","body":""},
+"i30":{"__typename":"Issue","number":30,"title":"The thirtieth","state":"OPEN","stateReason":null,
+       "body":"## Blocked by\n\n- #20\n"},
+"i20":{"__typename":"Issue","number":20,"title":"The twentieth","state":"OPEN","stateReason":null,"body":""}
+}}}"###;
+
+#[test]
+fn a_blocker_held_only_through_another_stream_and_finished_work_joins_the_answer() {
+    // S1 names #30 once #10 is done, and only S2 holds #20. The walk from #20
+    // through #10 to #30 holds nothing back, because #10 is done. So #30 waits
+    // for #20, and the run names #20 alone.
+    let gh = FakeGh::new(FINISHED_BETWEEN_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", FINISHED_BETWEEN_PLAN);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let answer = stdout(&output);
+    assert!(
+        answer.contains("#10 is already closed, out of order."),
+        "the answer still says #10 closed out of order, in {answer}"
+    );
+    assert!(
+        answer.contains("Start #20 next with 'si 20'"),
+        "the answer names #20, in {answer}"
+    );
+    assert!(
+        !answer.contains("si 30"),
+        "the answer never names #30, in {answer}"
+    );
+    assert!(
+        answer
+            .lines()
+            .any(|row| row.contains("The thirtieth") && row.contains(&format!("{WAITS_FOR}#20"))),
+        "the row of #30 waits for #20, in {answer}"
+    );
+}
+
+/// A plan of streams that puts `#20` before `#30` in one stream, and that holds
+/// `#30` alone in another.
+const ONE_STREAM_HOLDS_PLAN: &str = "\
+| Stream | Order | Zone |
+|--------|-------|------|
+| S1 — first | #20 → #30 | src/first |
+| S2 — second | #30 | src/second |
+";
+
+/// What GitHub says about [`ONE_STREAM_HOLDS_PLAN`]: `#20` is open, and `#30`
+/// says under `Blocked by` that `#20` comes first.
+const ONE_STREAM_HOLDS_ISSUES: &str = r###"{"data":{"repository":{
+"i20":{"__typename":"Issue","number":20,"title":"The twentieth","state":"OPEN","stateReason":null,"body":""},
+"i30":{"__typename":"Issue","number":30,"title":"The thirtieth","state":"OPEN","stateReason":null,
+       "body":"## Blocked by\n\n- #20\n"}
+}}}"###;
+
+#[test]
+fn a_blocker_that_one_stream_holds_and_another_does_not_joins_the_answer() {
+    // The reader of streams answers S2 on its own, and S2 names #30 while #20
+    // is open. So #30 waits for #20, and the run names #20 alone.
+    let gh = FakeGh::new(ONE_STREAM_HOLDS_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", ONE_STREAM_HOLDS_PLAN);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let answer = stdout(&output);
+    assert!(
+        answer.contains("Start #20 next with 'si 20'"),
+        "the answer names #20, in {answer}"
+    );
+    assert!(
+        !answer.contains("si 30"),
+        "the answer never names #30, in {answer}"
+    );
+    assert!(
+        answer
+            .lines()
+            .any(|row| row.contains("The thirtieth") && row.contains(&format!("{WAITS_FOR}#20"))),
+        "the row of #30 waits for #20, in {answer}"
+    );
 }

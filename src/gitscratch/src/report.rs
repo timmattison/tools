@@ -13,9 +13,13 @@
 //! spec-sanctioned acceptance of a little presentation logic in a library: the
 //! alternative is two copies of it.
 //!
-//! The only difference the two tools are allowed is captured by
-//! [`Report::without_stops`] - a merge halts exactly once, so printing the
-//! number would be noise.
+//! The only difference the two tools are allowed is [`Report::without_stops`].
+//! A merge halts exactly once, so its stop count is noise, and so is the stop
+//! heading above its halt diff. `without_stops` removes both.
+//!
+//! [`Report::render_diffs`] writes the halt diffs of a replay, for a tool that
+//! runs with `--diff`. They are text for the same reader, from the same two
+//! tools, so their renderer is here for the same reason.
 //!
 //! Two types, because a verdict is worded in two steps and only the second step
 //! makes something to print. [`Report::for_tool`] names the tool and hands back
@@ -26,8 +30,10 @@
 
 use std::path::Path;
 
+use colored::{ColoredString, Colorize};
 use unicode_width::UnicodeWidthStr;
 
+use crate::diffs::HaltDiffs;
 use crate::metrics::Uncommitted;
 use crate::scratch::Conflicts;
 
@@ -48,6 +54,10 @@ const FILE_INDENT: &str = "  ";
 /// on a terminal wide enough is the widest name there is. A name wider than
 /// that takes a row of its own - see [`Report::render_within`].
 const COUNT_GAP: usize = 4;
+
+/// The words that open the section of a halt where git gave no diff. The
+/// message from git follows them.
+const DIFF_NOT_AVAILABLE: &str = "diff not available: ";
 
 /// A tool that has named itself and has not yet said what it did.
 ///
@@ -203,12 +213,18 @@ impl<'a> Report<'a> {
         UnwordedReport { tool }
     }
 
-    /// Drop the stop count from the summary.
+    /// Drop the stop count from the summary, and the stop headings from the
+    /// halt diffs.
     ///
     /// A merge halts exactly once, so the number carries no information for
     /// `grime` and printing it would invite a reader to compare a constant
     /// against `grind`'s real measurement. [`Conflicts`] still records it; this
     /// only decides whether it is worth saying out loud.
+    ///
+    /// The heading above each halt diff that [`Report::render_diffs`] writes
+    /// carries the same number. A merge has one halt and no stopped commit, so
+    /// its heading, `stop 1 of 1`, tells the reader nothing. This removes the
+    /// headings, and each other line of the halt diffs stays.
     ///
     /// Takes `self` and leaves the original usable, because [`Report`] is
     /// `Copy`: a caller wanting both wordings of the same verdict gets them
@@ -330,6 +346,348 @@ impl<'a> Report<'a> {
 
         lines.join("\n")
     }
+
+    /// The halt diffs of a replay, as the text that follows the verdict, or
+    /// `None` when the replay did not halt.
+    ///
+    /// `None` and not an empty string, because a replay that did not halt has
+    /// no halt diff. So a clean run prints the same bytes with `--diff` and
+    /// without it.
+    ///
+    /// The text starts with an empty line, which separates the halt diffs from
+    /// the breakdown above them. It has one section for each halt, in halt
+    /// order, with one empty line between two sections. It ends with no
+    /// newline, because [`Console::verdict`](crate::Console::verdict) writes
+    /// one after it.
+    ///
+    /// A section starts with a heading that names the stop and the stopped
+    /// commit: `stop 2 of 3 - 9910691 feat two`. A merge has no stopped
+    /// commit, so the heading of its halt is `stop 1 of 1`. [`without_stops`]
+    /// removes the headings and no other line. A merge halts exactly once, so
+    /// `grime` prints its halt diff alone.
+    ///
+    /// Under the heading is the text `git diff` showed at the halt. The last
+    /// newline of that text goes, and no other character. A trim removes more:
+    /// a line of a diff can end in spaces, and an empty context line of a
+    /// combined diff is two spaces. Where git gave no diff, the section holds
+    /// `diff not available: ` and the message from git in its place. The
+    /// heading stays, and the replay counts that halt as it counts each other
+    /// halt.
+    ///
+    /// A control character in the heading, in the diff, or in the message
+    /// comes out as `\u{...}`, the form the breakdown writes for a name. File
+    /// content can hold an ESC, and so can a commit subject. So no escape
+    /// sequence out of the repository gets to the terminal of the person who
+    /// ran the tool. A newline and a tab stay, because a diff is lines of text.
+    /// A carriage return immediately before a newline stays too, because that
+    /// pair is a CRLF line ending. Each other carriage return comes out as
+    /// `\u{d}`. Bytes that are not UTF-8 come out as U+FFFD, as they do in a
+    /// name.
+    ///
+    /// Each line gets the color that git gives it on a terminal. A header line
+    /// of a file is bold, a hunk header is cyan, a content line with a `+` in
+    /// a prefix column is green, a content line with a `-` is red, and a stop
+    /// heading is yellow. Each other line is plain. The mode line of a
+    /// combined diff stands in the header of a file, but it is plain too,
+    /// because git gives it no color. The painter reads the part that a line
+    /// plays from where the line stands, and not from its text alone, because
+    /// a content line can start with the same characters as a header line.
+    ///
+    /// Each line opens and closes its own color codes, so no code spans a
+    /// newline. This method does not ask whether color is on. The `colored`
+    /// crate decides that as it formats each line, from the environment and
+    /// from whether stdout is a terminal. So a run whose stdout is a pipe gets
+    /// the same text and no code, unless the environment or the tool forces
+    /// color on. The escape runs before the paint, so each ESC byte in the
+    /// text is a code that the painter wrote.
+    ///
+    /// [`without_stops`]: Report::without_stops
+    #[must_use]
+    pub fn render_diffs(&self, diffs: &HaltDiffs) -> Option<String> {
+        let painted = self.paint_diffs(diffs)?;
+        // `colored` decides here, as it formats each line, whether to write
+        // the codes of its paint. A plain line gets no code either way.
+        let lines: Vec<String> = painted.iter().map(ToString::to_string).collect();
+
+        Some(lines.join("\n"))
+    }
+
+    /// The lines of [`Report::render_diffs`], each one painted on its own, or
+    /// `None` when the replay did not halt.
+    ///
+    /// The paint of a line is a value here: a [`ColoredString`] holds the text
+    /// of the line, its color, and its style. So a test reads the paint of
+    /// each line off that value, as the tests of `gsw` and `seescc` do, and it
+    /// forces no color code on to read it. [`Report::render_diffs`] joins the
+    /// lines into the text that a tool prints.
+    fn paint_diffs(&self, diffs: &HaltDiffs) -> Option<Vec<ColoredString>> {
+        if diffs.is_empty() {
+            return None;
+        }
+
+        let stops = diffs.len();
+        let mut lines = Vec::new();
+        for (index, halt) in diffs.iter().enumerate() {
+            lines.push(DiffLine::Gap.paint());
+
+            if self.show_stops {
+                let stop = index + 1;
+                let heading = match halt.stopped() {
+                    Some(stopped) => format!("stop {stop} of {stops} - {stopped}"),
+                    None => format!("stop {stop} of {stops}"),
+                };
+                let heading = printable_diff(&heading);
+                lines.push(DiffLine::Heading(&heading).paint());
+            }
+
+            match halt.diff() {
+                Ok(bytes) => {
+                    let escaped = printable_diff(&String::from_utf8_lossy(bytes));
+                    // One newline goes, the one git ends the diff with, and
+                    // never a trim: a line of a diff can end in spaces. The
+                    // escape runs first, so the last line of a CRLF file keeps
+                    // its carriage return.
+                    let body = escaped.strip_suffix('\n').unwrap_or(&escaped);
+                    // The position starts over for each halt diff, because
+                    // each one is the whole output of one `git diff` call.
+                    let mut position = Position::Outside;
+                    lines.extend(
+                        body.split('\n')
+                            .map(|line| position.classify(line))
+                            .map(DiffLine::paint),
+                    );
+                }
+                Err(message) => {
+                    let unavailable = printable_diff(&format!("{DIFF_NOT_AVAILABLE}{message}"));
+                    lines.extend(
+                        unavailable
+                            .split('\n')
+                            .map(DiffLine::Unavailable)
+                            .map(DiffLine::paint),
+                    );
+                }
+            }
+        }
+
+        Some(lines)
+    }
+}
+
+/// One line of the halt diff block, named by the part it plays there.
+///
+/// [`Report::paint_diffs`] builds the block one line at a time, and each line
+/// gets its paint in one place, [`DiffLine::paint`]. So one change there gives
+/// each part of the block its own look. A line holds no newline, so what
+/// `paint` writes around one line cannot reach into the next line.
+#[derive(Debug, Clone, Copy)]
+enum DiffLine<'a> {
+    /// The empty line above a section. It separates the first section from
+    /// the breakdown, and each other section from the section before it.
+    Gap,
+    /// The heading of a section, which names the stop and the stopped commit.
+    /// It is one line, because git writes the subject of a commit on one line.
+    /// Yellow, the default of `color.diff.commit`, which is the color of a
+    /// commit line in `git log`.
+    Heading(&'a str),
+    /// A header line of a file: `diff --cc`, `index`, `---`, `+++`, and each
+    /// other line between the `diff ` line of a file and the line that ends
+    /// its header, except the mode line of a combined diff. Bold, the default
+    /// of `color.diff.meta`.
+    FileHeader(&'a str),
+    /// The mode line of a combined diff, `mode <parent modes>..<result mode>`,
+    /// for example `mode 100755,100644..100755`. Git writes it in the header
+    /// of a file when the mode of a parent is not the mode of the result. The
+    /// `---` line and the `+++` line come after it, so it does not end the
+    /// header. Plain, because git gives it no color. A `new file mode` line
+    /// and a `deleted file mode` line are header lines, and git paints them
+    /// bold.
+    Mode(&'a str),
+    /// The line that git writes in place of the hunks of a binary file:
+    /// `Binary files differ` in a combined diff, and
+    /// `Binary files a/<name> and b/<name> differ` in a diff of two files.
+    /// Git writes no hunk for that file after it, so it ends the header of
+    /// the file. Plain, because git gives it no color.
+    Binary(&'a str),
+    /// The header of a hunk: `@@@ ... @@@` in a combined diff, `@@ ... @@` in
+    /// a diff of two files. Cyan, the default of `color.diff.frag`.
+    HunkHeader(&'a str),
+    /// A content line with a `+` in a prefix column. The marker lines of a
+    /// conflict region are such lines. Green, the default of `color.diff.new`.
+    Added(&'a str),
+    /// A content line with a `-` in a prefix column. Red, the default of
+    /// `color.diff.old`.
+    Removed(&'a str),
+    /// A content line with no `+` and no `-` in its prefix columns. Plain, the
+    /// default of `color.diff.context`.
+    Context(&'a str),
+    /// The marker `\ No newline at end of file`, which git writes in a hunk
+    /// under a content line whose file ends without a newline. It belongs to
+    /// the hunk, so the lines after it are still content. Plain, because git
+    /// paints it with the color of context.
+    NoNewline(&'a str),
+    /// A line of the halt diff that stands outside each file, such as
+    /// `* Unmerged path <name>`. Plain, because no setting of git colors it.
+    Outside(&'a str),
+    /// One line of the text that stands in place of a halt diff that git did
+    /// not give: `diff not available: `, then the message from git. Plain.
+    Unavailable(&'a str),
+}
+
+impl DiffLine<'_> {
+    /// This line, painted with the palette of git.
+    ///
+    /// The palette copies the defaults of git, so the halt diffs look like
+    /// `git diff` on a terminal. The paint is a value that holds the text of
+    /// the line, its color, and its style.
+    fn paint(self) -> ColoredString {
+        match self {
+            Self::Gap => ColoredString::default(),
+            Self::Heading(text) => text.yellow(),
+            Self::FileHeader(text) => text.bold(),
+            Self::HunkHeader(text) => text.cyan(),
+            Self::Added(text) => text.green(),
+            Self::Removed(text) => text.red(),
+            Self::Mode(text)
+            | Self::Binary(text)
+            | Self::Context(text)
+            | Self::NoNewline(text)
+            | Self::Outside(text)
+            | Self::Unavailable(text) => text.normal(),
+        }
+    }
+}
+
+/// Where a line of a halt diff stands: outside each file, in the header of a
+/// file, or in a hunk.
+///
+/// A content line can start with the same characters as a header line. In a
+/// combined diff, a line that both parents hold and the result does not starts
+/// with `--`, so a removed line whose text is `- a/f.txt` reads `--- a/f.txt`.
+/// So the part that a line plays comes from where it stands, and not from its
+/// text alone. The header lines of a file stand between its `diff ` line and
+/// the line that ends its header. Inside a hunk, the prefix columns decide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Position {
+    /// Before the first file of the halt diff, or after the end of a file.
+    /// A binary line ends a file. A `* Unmerged path` line ends a header
+    /// that has no hunk. A line that is not content ends a hunk.
+    Outside,
+    /// Between the `diff ` line of a file and the line that ends its header:
+    /// its first hunk header, its binary line, or a `* Unmerged path` line.
+    Header,
+    /// In a hunk, whose content lines have the number of prefix columns that
+    /// this holds.
+    Hunk(usize),
+}
+
+impl Position {
+    /// The part that `line` plays, read from where it stands. The position
+    /// then moves to where the next line stands.
+    ///
+    /// Outside each file, a `diff ` line opens a file, and each other line
+    /// stays outside.
+    ///
+    /// In the header of a file, a line that starts with `@@` opens a hunk. A
+    /// line that starts with `Binary files ` is the binary line, and git
+    /// writes no hunk for that file after it. Git does not translate these
+    /// two words, so they identify the line in each language that git
+    /// speaks. A line that starts with `* ` stands outside each file. Git
+    /// writes such a line, `* Unmerged path <name>`, after the last file, so
+    /// it can come directly after a header that has no hunk. Each of these
+    /// two lines ends the header. A line that starts with `mode ` is the mode
+    /// line of a combined diff, and git does not translate that word either.
+    /// The mode line does not end the header, because the `---` line and the
+    /// `+++` line come after it. Each other line in the header is a header
+    /// line.
+    ///
+    /// In a hunk, a line that starts with `@@` opens the next hunk, and the
+    /// prefix columns of each other line decide its part. The marker of a
+    /// last line with no newline stays in the hunk. A line that is neither
+    /// content nor that marker ends the hunk, and the painter reads it again
+    /// as a line outside each file. So a `diff ` line after a hunk opens the
+    /// next file.
+    fn classify<'a>(&mut self, line: &'a str) -> DiffLine<'a> {
+        match (*self, hunk_columns(line)) {
+            (Self::Header | Self::Hunk(_), Some(columns)) => {
+                *self = Self::Hunk(columns);
+                DiffLine::HunkHeader(line)
+            }
+            (Self::Outside, _) if line.starts_with("diff ") => {
+                *self = Self::Header;
+                DiffLine::FileHeader(line)
+            }
+            (Self::Outside, _) => DiffLine::Outside(line),
+            (Self::Header, None) if line.starts_with("Binary files ") => {
+                *self = Self::Outside;
+                DiffLine::Binary(line)
+            }
+            (Self::Header, None) if line.starts_with("* ") => {
+                *self = Self::Outside;
+                DiffLine::Outside(line)
+            }
+            (Self::Header, None) if line.starts_with("mode ") => DiffLine::Mode(line),
+            (Self::Header, None) => DiffLine::FileHeader(line),
+            (Self::Hunk(columns), None) => content(line, columns)
+                .or_else(|| no_newline_marker(line))
+                .unwrap_or_else(|| {
+                    *self = Self::Outside;
+                    self.classify(line)
+                }),
+        }
+    }
+}
+
+/// `line` as the marker of a last line with no newline, or `None` when it is
+/// not that marker.
+///
+/// In a diff of two files, git writes `\ No newline at end of file` under a
+/// content line whose file ends without a newline, and the hunk continues after
+/// it. The backslash is what identifies the marker, and not the words after it,
+/// because git can translate the words. A content line starts with a space, a
+/// `+`, or a `-`, so a line in a hunk that starts with a backslash is never
+/// content.
+fn no_newline_marker(line: &str) -> Option<DiffLine<'_>> {
+    line.starts_with('\\').then_some(DiffLine::NoNewline(line))
+}
+
+/// The number of prefix columns of the hunk that `line` opens, or `None` when
+/// `line` opens no hunk.
+///
+/// A hunk header opens with one `@` more than its hunk has prefix columns:
+/// `@@@` in a combined diff of two parents, which has two columns, and `@@` in
+/// a diff of two files, which has one. A line with one `@` or none opens no
+/// hunk.
+fn hunk_columns(line: &str) -> Option<usize> {
+    let ats = line
+        .chars()
+        .take_while(|character| *character == '@')
+        .count();
+    ats.checked_sub(1).filter(|columns| *columns > 0)
+}
+
+/// `line` as a content line of a hunk with `columns` prefix columns, or `None`
+/// when it is not one.
+///
+/// A content line has one prefix column for each parent: two in a combined
+/// diff, one in a diff of two files. Each column holds a space, a `+`, or a
+/// `-`. A `+` in a column means that the result holds the line and that parent
+/// does not. A `-` means that the parent holds the line and the result does
+/// not. An empty line holds no character that breaks this rule, so it is
+/// context.
+fn content(line: &str, columns: usize) -> Option<DiffLine<'_>> {
+    let prefix: Vec<char> = line.chars().take(columns).collect();
+    if !prefix
+        .iter()
+        .all(|column| matches!(column, ' ' | '+' | '-'))
+    {
+        None
+    } else if prefix.contains(&'+') {
+        Some(DiffLine::Added(line))
+    } else if prefix.contains(&'-') {
+        Some(DiffLine::Removed(line))
+    } else {
+        Some(DiffLine::Context(line))
+    }
 }
 
 /// `name` as text a terminal can be handed, with every control character
@@ -361,21 +719,47 @@ impl<'a> Report<'a> {
 /// by an `n`, and this escape leaves that backslash alone, so `\n` on screen
 /// would name two different files. `\u{a}` names one.
 fn printable(name: &Path) -> String {
-    let text = name.to_string_lossy();
-    if !text.contains(char::is_control) {
-        return text.into_owned();
-    }
+    spell_out_controls(&name.to_string_lossy(), |_, _| false)
+}
 
-    let mut escaped = String::with_capacity(text.len());
-    for character in text.chars() {
-        if character.is_control() {
-            escaped.push_str(&format!("\\u{{{:x}}}", character as u32));
+/// Text from a halt diff, as text a terminal can be handed.
+///
+/// The rule of `printable`, with three characters kept, because a diff is
+/// lines of text and a name is not. A newline ends a line of a diff, and a tab
+/// is the indent of a line of code. A carriage return immediately before a
+/// newline is a CRLF line ending, which a file written on Windows carries on
+/// each line. Each other carriage return comes out as `\u{d}`. A lone one moves
+/// the cursor back to the start of the line, and the text after it then writes
+/// over the text before it. That includes a carriage return at the very end of
+/// the text, which no newline follows.
+fn printable_diff(text: &str) -> String {
+    spell_out_controls(text, |control, next| match control {
+        '\n' | '\t' => true,
+        '\r' => next == Some('\n'),
+        _ => false,
+    })
+}
+
+/// `text` with each control character spelled out as `\u{...}`, except each
+/// one that `keeps` names.
+///
+/// One loop and one form for the two callers, `printable` for a name and
+/// `printable_diff` for the text of a halt diff, so the two cannot spell one
+/// character two ways. `keeps` gets the control character and the character
+/// after it, or `None` at the end of the text, because a carriage return is a
+/// line ending or not by what follows it.
+fn spell_out_controls(text: &str, keeps: impl Fn(char, Option<char>) -> bool) -> String {
+    let mut spelled = String::with_capacity(text.len());
+    let mut characters = text.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character.is_control() && !keeps(character, characters.peek().copied()) {
+            spelled.push_str(&format!("\\u{{{:x}}}", character as u32));
         } else {
-            escaped.push(character);
+            spelled.push(character);
         }
     }
 
-    escaped
+    spelled
 }
 
 #[cfg(test)]
@@ -383,9 +767,11 @@ mod tests {
     use std::num::NonZeroUsize;
     use std::path::PathBuf;
 
+    use colored::{ColoredString, Colorize};
     use unicode_width::UnicodeWidthStr;
 
     use super::{Report, FILE_INDENT};
+    use crate::diffs::{HaltDiff, HaltDiffs};
     use crate::metrics::{Stops, Uncommitted};
     use crate::scratch::Conflicts;
 
@@ -477,6 +863,337 @@ mod tests {
             [file("src/lib.rs", 3), file("src/main.rs", 1)],
             Stops::new(3),
         )
+    }
+
+    /// The stopped commit of stop 1 in the example of GitHub issue #475.
+    const STOP_ONE: &str = "6ee2c41 feat one";
+
+    /// The stopped commit of stop 2 in the same example.
+    const STOP_TWO: &str = "9910691 feat two";
+
+    /// The halt diff of stop 1 in the example of GitHub issue #475, as git
+    /// 2.55 wrote it, less its last newline.
+    ///
+    /// Real output and not a sketch of it, so the tests hold the shapes that a
+    /// combined diff really has: two prefix columns, a context line that
+    /// starts with two spaces, and a `* Unmerged path` line after the last
+    /// hunk.
+    const STOP_ONE_DIFF: &str = concat!(
+        "diff --cc f.txt\n",
+        "index a5f1be7,60b32f6..0000000\n",
+        "--- a/f.txt\n",
+        "+++ b/f.txt\n",
+        "@@@ -1,5 -1,5 +1,9 @@@\n",
+        "  a\n",
+        "++<<<<<<< HEAD\n",
+        " +MAIN\n",
+        "++=======\n",
+        "+ FEAT1\n",
+        "++>>>>>>> 6ee2c41 (feat one)\n",
+        "  c\n",
+        "  d\n",
+        "  e\n",
+        "* Unmerged path g.txt",
+    );
+
+    /// The halt diff of stop 2 in the same example, less its last newline.
+    ///
+    /// The markers that the replay staged at stop 1 are content here: the
+    /// lines with one `+`.
+    const STOP_TWO_DIFF: &str = concat!(
+        "diff --cc f.txt\n",
+        "index 1edf9f2,a1ec13b..0000000\n",
+        "--- a/f.txt\n",
+        "+++ b/f.txt\n",
+        "@@@ -1,9 -1,5 +1,13 @@@\n",
+        "  a\n",
+        " +<<<<<<< HEAD\n",
+        "++<<<<<<< HEAD\n",
+        " +MAIN\n",
+        " +=======\n",
+        " +FEAT1\n",
+        " +>>>>>>> 6ee2c41 (feat one)\n",
+        "++=======\n",
+        "+ FEAT2\n",
+        "++>>>>>>> 9910691 (feat two)\n",
+        "  c\n",
+        "  d\n",
+        "  e",
+    );
+
+    /// A halt diff as git writes it: `text`, then the newline that ends its
+    /// last line.
+    fn as_git_wrote_it(stopped: Option<&str>, text: &str) -> HaltDiff {
+        HaltDiff::from_parts(stopped, Ok(format!("{text}\n").as_bytes()))
+    }
+
+    /// The two stops of the rebase in the example of GitHub issue #475, in
+    /// stop order.
+    fn two_stops() -> HaltDiffs {
+        HaltDiffs::from_halts([
+            as_git_wrote_it(Some(STOP_ONE), STOP_ONE_DIFF),
+            as_git_wrote_it(Some(STOP_TWO), STOP_TWO_DIFF),
+        ])
+    }
+
+    /// The halt diff of the one halt of the merge in the example of GitHub
+    /// issue #475, as git 2.55 wrote it, less its last newline.
+    const MERGE_DIFF: &str = concat!(
+        "diff --cc f.txt\n",
+        "index a5f1be7,a1ec13b..0000000\n",
+        "--- a/f.txt\n",
+        "+++ b/f.txt\n",
+        "@@@ -1,5 -1,5 +1,9 @@@\n",
+        "  a\n",
+        "++<<<<<<< HEAD\n",
+        " +MAIN\n",
+        "++=======\n",
+        "+ FEAT2\n",
+        "++>>>>>>> feature\n",
+        "  c\n",
+        "  d\n",
+        "  e\n",
+        "* Unmerged path g.txt",
+    );
+
+    /// The stopped commit of a rebase stop whose halt diff holds each kind of
+    /// line that the painter tells apart in a conflict of a text file.
+    const EVERY_KIND_STOP: &str = "9d6c330 feat one";
+
+    /// The halt diff of that stop, as git 2.55 wrote it, less its last
+    /// newline.
+    ///
+    /// Real output and not a sketch of it. It has two hunks, so a hunk header
+    /// follows a hunk. The first hunk is an ordinary conflict region, with a
+    /// line added against one parent in each of the two prefix columns. The
+    /// second hunk is a conflict on a last line that has no newline. Git
+    /// removes the line of each parent, one in each column, and adds each line
+    /// of the region against both parents. A `* Unmerged path` line follows,
+    /// for a file that one side deleted.
+    const EVERY_KIND_DIFF: &str = concat!(
+        "diff --cc f.txt\n",
+        "index 989b198,a4e431d..0000000\n",
+        "--- a/f.txt\n",
+        "+++ b/f.txt\n",
+        "@@@ -1,5 -1,5 +1,9 @@@\n",
+        "  a\n",
+        "++<<<<<<< HEAD\n",
+        " +MAIN\n",
+        "++=======\n",
+        "+ FEAT\n",
+        "++>>>>>>> 9d6c330 (feat one)\n",
+        "  c\n",
+        "  d\n",
+        "  e\n",
+        "@@@ -8,4 -8,4 +12,8 @@@\n",
+        "  h\n",
+        "  i\n",
+        "  j\n",
+        "- main end\n",
+        " -feat end\n",
+        "++<<<<<<< HEAD\n",
+        "++main end\n",
+        "++=======\n",
+        "++feat end\n",
+        "++>>>>>>> 9d6c330 (feat one)\n",
+        "* Unmerged path g.txt",
+    );
+
+    /// The message of a halt where git gave no diff: the line that names the
+    /// call, then the output of git.
+    const NO_DIFF_MESSAGE: &str =
+        "git diff --no-color --diff-filter=U failed:\nfatal: unable to read files to diff";
+
+    /// Two stops of a rebase: the stop whose halt diff holds each kind of
+    /// line, then a stop where git gave no diff.
+    fn every_kind() -> HaltDiffs {
+        HaltDiffs::from_halts([
+            as_git_wrote_it(Some(EVERY_KIND_STOP), EVERY_KIND_DIFF),
+            HaltDiff::from_parts(Some(STOP_TWO), Err(NO_DIFF_MESSAGE)),
+        ])
+    }
+
+    /// The halt diff of a merge that conflicts in two files and stops on a
+    /// third file that one side deleted, as git 2.55 wrote it, less its last
+    /// newline.
+    ///
+    /// Real output. The `diff --cc` line of the second file follows the last
+    /// context line of the first file with no line between them. The
+    /// `* Unmerged path` line follows the hunk of the second file.
+    const THREE_FILES_DIFF: &str = concat!(
+        "diff --cc f.txt\n",
+        "index af70335,ac05874..0000000\n",
+        "--- a/f.txt\n",
+        "+++ b/f.txt\n",
+        "@@@ -1,3 -1,3 +1,7 @@@\n",
+        "  a\n",
+        "++<<<<<<< HEAD\n",
+        " +MAIN\n",
+        "++=======\n",
+        "+ FEAT\n",
+        "++>>>>>>> feature\n",
+        "  c\n",
+        "diff --cc g.txt\n",
+        "index 3402964,a741a09..0000000\n",
+        "--- a/g.txt\n",
+        "+++ b/g.txt\n",
+        "@@@ -1,3 -1,3 +1,7 @@@\n",
+        "  x\n",
+        "++<<<<<<< HEAD\n",
+        " +MAING\n",
+        "++=======\n",
+        "+ FEATG\n",
+        "++>>>>>>> feature\n",
+        "  z\n",
+        "* Unmerged path h.txt",
+    );
+
+    /// The stopped commit of a rebase stop on a file with CRLF line endings.
+    const CRLF_STOP: &str = "e36de0b feat crlf";
+
+    /// The halt diff of that stop, as git 2.55 wrote it, less its last
+    /// newline.
+    ///
+    /// Real output. Git ends each line of its own with a newline alone, and
+    /// each line out of the file keeps the carriage return that the file
+    /// holds. So each content line ends with `\r`, and no header line does.
+    const CRLF_DIFF: &str = concat!(
+        "diff --cc f.txt\n",
+        "index ee2d4be,f832060..0000000\n",
+        "--- a/f.txt\n",
+        "+++ b/f.txt\n",
+        "@@@ -1,5 -1,5 +1,9 @@@\n",
+        "  a\r\n",
+        "++<<<<<<< HEAD\r\n",
+        " +MAIN\r\n",
+        "++=======\r\n",
+        "+ FEAT\r\n",
+        "++>>>>>>> e36de0b (feat crlf)\r\n",
+        "  c\r\n",
+        "  d\r\n",
+        "  e\r",
+    );
+
+    /// The halt diff of a rebase stop that conflicts on a binary file and on a
+    /// file that one side deleted, as git 2.55 wrote it, less its last
+    /// newline.
+    ///
+    /// Real output. Git writes `Binary files differ` in place of the hunks of
+    /// the binary file `z.dat`, and it writes no `---` line and no `+++` line
+    /// for that file. Git writes the `* Unmerged path` line after the last
+    /// file, although `c.txt` sorts before `z.dat`. So that line comes
+    /// directly after the binary line.
+    const BINARY_LAST_DIFF: &str = concat!(
+        "diff --cc z.dat\n",
+        "index 25b3410,1323b0a..0000000\n",
+        "Binary files differ\n",
+        "* Unmerged path c.txt",
+    );
+
+    /// The halt diff of a merge that conflicts on a binary file and on a text
+    /// file whose name sorts after it, as git 2.55 wrote it, less its last
+    /// newline.
+    ///
+    /// Real output. The `diff --cc` line of the text file `b.txt` comes
+    /// directly after the binary line of `a.dat`.
+    const BINARY_FIRST_DIFF: &str = concat!(
+        "diff --cc a.dat\n",
+        "index 1323b0a,299f349..0000000\n",
+        "Binary files differ\n",
+        "diff --cc b.txt\n",
+        "index af70335,ac05874..0000000\n",
+        "--- a/b.txt\n",
+        "+++ b/b.txt\n",
+        "@@@ -1,3 -1,3 +1,7 @@@\n",
+        "  a\n",
+        "++<<<<<<< HEAD\n",
+        " +MAIN\n",
+        "++=======\n",
+        "+ FEAT\n",
+        "++>>>>>>> feature\n",
+        "  c",
+    );
+
+    /// The halt diff of a merge where each side adds a symbolic link `l` with
+    /// a different target, and one side deletes a file that the other side
+    /// changes, as git 2.55 wrote it, less its last newline.
+    ///
+    /// Real output. The header of `l` has no hunk after it. The working tree
+    /// holds the link of HEAD, and a `--cc` diff shows no hunk where the
+    /// result is the same as one parent. So the `* Unmerged path` line comes
+    /// directly after the `+++` line.
+    const NO_HUNK_DIFF: &str = concat!(
+        "diff --cc l\n",
+        "index 64c5e58,43dd47e..0000000\n",
+        "--- a/l\n",
+        "+++ b/l\n",
+        "* Unmerged path g.txt",
+    );
+
+    /// The halt diff of a rebase stop on a file whose mode one side changed,
+    /// as git 2.55 wrote it, less its last newline.
+    ///
+    /// Real output and not a sketch of it. The branch `side` makes `f.sh`
+    /// executable and changes its second line. The replayed commit changes
+    /// the same line and keeps the mode. So the mode of one parent is not the
+    /// mode of the result, and git writes the mode line,
+    /// `mode <parent modes>..<result mode>`, between the `index` line and the
+    /// `---` line.
+    const MODE_LINE_DIFF: &str = concat!(
+        "diff --cc f.sh\n",
+        "index f794161,af70335..0000000\n",
+        "mode 100755,100644..100755\n",
+        "--- a/f.sh\n",
+        "+++ b/f.sh\n",
+        "@@@ -1,3 -1,3 +1,7 @@@\n",
+        "  a\n",
+        "++<<<<<<< HEAD\n",
+        " +SIDE\n",
+        "++=======\n",
+        "+ MAIN\n",
+        "++>>>>>>> 7d81fd2 (main edit)\n",
+        "  c",
+    );
+
+    /// Each line of the halt diffs as `report` paints it: its text, its color,
+    /// and its style.
+    ///
+    /// Read off the typed [`ColoredString`] of each line, as the tests of
+    /// `gsw` and `seescc` do. So a test that reads the paint forces no color
+    /// code on, waits for no lock, and gets the same answer on each terminal.
+    fn painted(report: Report, diffs: &HaltDiffs) -> Vec<ColoredString> {
+        report
+            .paint_diffs(diffs)
+            .expect("a replay that halted paints its halt diffs")
+    }
+
+    /// Assert that `actual` is the paint `expected` names, one line at a time,
+    /// so that a failure names the first line whose paint is wrong.
+    fn assert_paint(actual: &[ColoredString], expected: &[ColoredString]) {
+        for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+            assert_eq!(actual, expected, "line {index} of the halt diffs");
+        }
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "the halt diffs have {} lines, and the expected paint names {}",
+            actual.len(),
+            expected.len()
+        );
+    }
+
+    /// The halt diffs as `report` renders them with color forced on, less
+    /// each color code: the glyphs that a reader sees.
+    ///
+    /// `colored` decides at format time whether to write the codes, and one
+    /// input to that decision is whether stdout is a terminal. So a test that
+    /// compares the rendered text with plain text passes when the run writes
+    /// to a file and fails when it writes to a terminal. This forces the codes
+    /// on and takes them back out, so the answer is the same on each terminal,
+    /// and the comparison covers the painted text that a reader sees.
+    fn glyphs(report: Report, diffs: &HaltDiffs) -> Option<String> {
+        testcolor::with_forced_ansi(|| report.render_diffs(diffs))
+            .map(|painted| testcolor::strip_ansi(&painted))
     }
 
     #[test]
@@ -912,6 +1629,881 @@ mod tests {
         assert_eq!(
             grind.dirty_note(Uncommitted::new(3)).as_deref(),
             Some("grind: note: 3 uncommitted files are not included; simulating from HEAD")
+        );
+    }
+
+    /// A replay that did not halt has no halt diff, so it gets no text at all.
+    ///
+    /// `None` and not an empty string. A caller prints the text only when there
+    /// is some, so a clean run prints the same bytes with `--diff` and without
+    /// it. An empty string gives that caller an empty line to print for nothing.
+    /// Both wordings are asserted, because a report without stops renders
+    /// through the same method.
+    #[test]
+    fn a_replay_that_did_not_halt_renders_no_halt_diffs() {
+        let grind = Report::for_tool("grind").describing("replaying HEAD onto main");
+        let grime = Report::for_tool("grime")
+            .describing("merging feature into HEAD")
+            .without_stops();
+        let nothing = HaltDiffs::from_halts([]);
+
+        assert_eq!(grind.render_diffs(&nothing), None);
+        assert_eq!(grime.render_diffs(&nothing), None);
+    }
+
+    /// Each halt gets one section, in halt order: its heading, then the text
+    /// `git diff` showed there.
+    ///
+    /// Asserted as one block, as the verdict is, because the empty lines are
+    /// the contract as much as the words. The block starts with an empty line,
+    /// which separates it from the breakdown. One empty line separates two
+    /// sections. The block ends with no newline, because `Console::verdict`
+    /// writes one. The last newline of each halt diff goes, so a section ends
+    /// on the last line that git wrote.
+    #[test]
+    fn each_halt_gets_a_section_with_its_heading_and_its_diff_in_halt_order() {
+        let report = Report::for_tool("grind").describing("replaying HEAD onto main");
+
+        let expected = [
+            String::new(),
+            format!("stop 1 of 2 - {STOP_ONE}"),
+            STOP_ONE_DIFF.to_owned(),
+            String::new(),
+            format!("stop 2 of 2 - {STOP_TWO}"),
+            STOP_TWO_DIFF.to_owned(),
+        ]
+        .join("\n");
+
+        assert_eq!(glyphs(report, &two_stops()), Some(expected));
+    }
+
+    /// `without_stops` takes the stop headings out of the block, and each
+    /// other line stays where it was.
+    ///
+    /// Measured against the block with the headings, not against a second
+    /// golden. The block with the headings, less exactly its heading lines,
+    /// has to be the block without them. So a `without_stops` that also takes
+    /// an empty line, or a line of a diff, fails here. The count of heading
+    /// lines is the control: a block with no heading to take out proves
+    /// nothing.
+    #[test]
+    fn dropping_the_stop_count_removes_the_stop_headings_and_nothing_else() {
+        let report = Report::for_tool("grind").describing("replaying HEAD onto main");
+        let headings = [
+            format!("stop 1 of 2 - {STOP_ONE}"),
+            format!("stop 2 of 2 - {STOP_TWO}"),
+        ];
+        let is_heading = |line: &&str| headings.iter().any(|heading| heading == line);
+
+        let with_headings = glyphs(report, &two_stops())
+            .expect("a replay that halted twice renders its halt diffs");
+        let without_headings = glyphs(report.without_stops(), &two_stops())
+            .expect("a replay that halted twice renders its halt diffs");
+
+        assert_eq!(
+            with_headings.split('\n').filter(is_heading).count(),
+            headings.len(),
+            "the block with stops has to hold each heading, or there is nothing to take \
+             out:\n{with_headings}"
+        );
+        let rest: Vec<&str> = with_headings
+            .split('\n')
+            .filter(|line| !is_heading(line))
+            .collect();
+        assert_eq!(
+            without_headings,
+            rest.join("\n"),
+            "without stops, the block has to be the block with stops less its headings"
+        );
+    }
+
+    /// A merge halts once and has no stopped commit, so `grime` prints its
+    /// halt diff alone, under the empty line that separates it from the
+    /// breakdown.
+    ///
+    /// This is the `grime --diff` example of GitHub issue #475, to the byte.
+    #[test]
+    fn a_merge_halt_without_stops_renders_its_diff_alone() {
+        let report = Report::for_tool("grime")
+            .describing("merging feature into HEAD")
+            .without_stops();
+        let merge = HaltDiffs::from_halts([as_git_wrote_it(None, MERGE_DIFF)]);
+
+        assert_eq!(glyphs(report, &merge), Some(format!("\n{MERGE_DIFF}")));
+    }
+
+    /// A halt with no stopped commit, on a report that shows stops, gets a
+    /// heading that names the stop alone.
+    ///
+    /// A merge has no stopped commit. `grime` removes the headings, but a
+    /// report that shows stops still words the heading of such a halt. The
+    /// text `stop 1 of 1 - ` with nothing after the dash is a hole in the
+    /// line, the same defect that an unworded report cannot print.
+    #[test]
+    fn a_halt_with_no_stopped_commit_gets_a_heading_that_names_the_stop_alone() {
+        let report = Report::for_tool("grime").describing("merging feature into HEAD");
+        let merge = HaltDiffs::from_halts([as_git_wrote_it(None, MERGE_DIFF)]);
+
+        assert_eq!(
+            glyphs(report, &merge),
+            Some(format!("\nstop 1 of 1\n{MERGE_DIFF}"))
+        );
+    }
+
+    /// A control character in a halt diff comes out as `\u{...}`, and each
+    /// character that makes a diff lines of text stays.
+    ///
+    /// File content can hold any byte. An ESC in a file is an escape sequence
+    /// that the file hands to the terminal of the person who ran the tool. So
+    /// the rule of the breakdown applies, and each control character comes out
+    /// as `\u{...}`. Three characters stay, because a diff is lines of text: a
+    /// newline, a tab, and a carriage return immediately before a newline,
+    /// which is a CRLF line ending. Each other carriage return comes out as
+    /// `\u{d}`, the one at the very end of a halt diff too. Bytes that are not
+    /// UTF-8 come out as U+FFFD, and nothing panics.
+    #[test]
+    fn a_control_character_in_a_halt_diff_is_escaped_and_each_line_ending_stays() {
+        let report = Report::for_tool("grind")
+            .describing("replaying HEAD onto main")
+            .without_stops();
+        let captured: &[u8] = b"+esc \x1b[31mred\x1b[m\n\
+            +tab\there\n\
+            +crlf\r\n\
+            +lone\rreturn\n\
+            +bad \xff byte\n";
+        let diffs = HaltDiffs::from_halts([
+            HaltDiff::from_parts(None, Ok(captured)),
+            HaltDiff::from_parts(None, Ok(b"+end\r")),
+        ]);
+
+        let rendered =
+            glyphs(report, &diffs).expect("a replay that halted twice renders its halt diffs");
+
+        assert_eq!(
+            rendered,
+            [
+                "",
+                r"+esc \u{1b}[31mred\u{1b}[m",
+                "+tab\there",
+                "+crlf\r",
+                r"+lone\u{d}return",
+                "+bad \u{fffd} byte",
+                "",
+                r"+end\u{d}",
+            ]
+            .join("\n")
+        );
+        assert!(
+            !rendered.contains('\u{1b}'),
+            "an ESC out of a repository is spelled out, so no ESC byte is left once the \
+             color codes go: {rendered:?}"
+        );
+    }
+
+    /// A control character in the subject of a stopped commit comes out as
+    /// `\u{...}` in the heading.
+    ///
+    /// A commit subject can hold an ESC, and the heading prints that subject
+    /// to the terminal of the person who ran the tool. This subject holds the
+    /// sequence that sets the title of a terminal window. So the heading gets
+    /// the escape that the body gets, and no ESC out of the subject reaches
+    /// the output. Each ESC byte in the output is a color code that the
+    /// painter wrote, so the test reads the text less those codes.
+    #[test]
+    fn a_control_character_in_a_commit_subject_is_escaped_in_the_heading() {
+        let report = Report::for_tool("grind").describing("replaying HEAD onto main");
+        let diffs = HaltDiffs::from_halts([as_git_wrote_it(
+            Some("abc1234 \x1b]0;owned\x07 subject"),
+            "+x",
+        )]);
+
+        let rendered =
+            glyphs(report, &diffs).expect("a replay that halted once renders its halt diff");
+
+        assert_eq!(
+            rendered,
+            [
+                "",
+                r"stop 1 of 1 - abc1234 \u{1b}]0;owned\u{7} subject",
+                "+x",
+            ]
+            .join("\n")
+        );
+        assert!(
+            !rendered.contains('\u{1b}'),
+            "an ESC in a commit subject is spelled out, so no ESC byte is left once the \
+             color codes go: {rendered:?}"
+        );
+    }
+
+    /// A halt where git gave no diff says so under its heading, in the words
+    /// of git, and the section after it does not change.
+    ///
+    /// The capture never fails the replay, so a diff call that fails leaves
+    /// its message in the halt diff. The section then holds
+    /// `diff not available: ` and that message. The message spans lines: the
+    /// line that names the call, then the output of git. The newlines stay.
+    /// The output of git can hold what git read out of the repository, so the
+    /// message gets the escape too.
+    #[test]
+    fn a_halt_where_git_gave_no_diff_says_so_under_its_heading() {
+        let report = Report::for_tool("grind").describing("replaying HEAD onto main");
+        let message =
+            "git diff --no-color --diff-filter=U failed:\n\nfatal: unable to read \x1b[2J files";
+        let diffs = HaltDiffs::from_halts([
+            HaltDiff::from_parts(Some(STOP_ONE), Err(message)),
+            as_git_wrote_it(Some(STOP_TWO), STOP_TWO_DIFF),
+        ]);
+
+        let expected = [
+            String::new(),
+            format!("stop 1 of 2 - {STOP_ONE}"),
+            "diff not available: git diff --no-color --diff-filter=U failed:".to_owned(),
+            String::new(),
+            r"fatal: unable to read \u{1b}[2J files".to_owned(),
+            String::new(),
+            format!("stop 2 of 2 - {STOP_TWO}"),
+            STOP_TWO_DIFF.to_owned(),
+        ]
+        .join("\n");
+
+        assert_eq!(glyphs(report, &diffs), Some(expected));
+    }
+
+    /// The last newline of a halt diff goes, and no other character.
+    ///
+    /// Git ends the text of a diff with a newline, and `Console::verdict`
+    /// writes one after the block, so the last newline of the halt diff has to
+    /// go. A trim removes more. A halt diff whose last line is empty keeps that
+    /// line. The empty context line of a combined diff is two spaces, and both
+    /// stay. A halt diff that ends with no newline loses nothing. The last line
+    /// of a CRLF file keeps its carriage return, because the escape runs before
+    /// the newline goes. The newline after the block then makes the CRLF again.
+    #[test]
+    fn a_halt_diff_loses_its_last_newline_and_nothing_else() {
+        let report = Report::for_tool("grind")
+            .describing("replaying HEAD onto main")
+            .without_stops();
+        let cases: [(&[u8], &str); 4] = [
+            (b"x\n\n", "\nx\n"),
+            (b"x", "\nx"),
+            (b"  a\n  \n", "\n  a\n  "),
+            (b"+last\r\n", "\n+last\r"),
+        ];
+
+        for (captured, expected) in cases {
+            let diffs = HaltDiffs::from_halts([HaltDiff::from_parts(None, Ok(captured))]);
+
+            assert_eq!(
+                glyphs(report, &diffs).as_deref(),
+                Some(expected),
+                "the halt diff {:?} has to lose its last newline and nothing else",
+                String::from_utf8_lossy(captured)
+            );
+        }
+    }
+
+    /// Multi-byte text reaches the output intact, in a halt diff and in its
+    /// heading.
+    ///
+    /// A path holds `日本語.txt` as readily as `f.txt`, and a commit subject
+    /// holds an emoji. Each of those characters is three or four bytes. The
+    /// escape walks characters, not bytes, so it cuts no character and reads
+    /// no part of one as a control character. A control character between two
+    /// multi-byte characters is where a walk over bytes goes wrong, so the body
+    /// holds one.
+    #[test]
+    fn multi_byte_text_survives_in_a_halt_diff_and_in_its_heading() {
+        let report = Report::for_tool("grind").describing("replaying HEAD onto main");
+        let diffs = HaltDiffs::from_halts([as_git_wrote_it(
+            Some("abc1234 日本語 \u{1f389}"),
+            "diff --cc 日本語.txt\n+ café \u{1f389}\n+ 語\x1b語\r\n+ 日本",
+        )]);
+
+        assert_eq!(
+            glyphs(report, &diffs),
+            Some(
+                [
+                    "",
+                    "stop 1 of 1 - abc1234 日本語 \u{1f389}",
+                    "diff --cc 日本語.txt",
+                    "+ café \u{1f389}",
+                    "+ 語\\u{1b}語\r",
+                    "+ 日本",
+                ]
+                .join("\n")
+            )
+        );
+    }
+
+    /// Each kind of line in the halt diffs gets the color that git gives it.
+    ///
+    /// The palette is a copy of the defaults of git, so the halt diffs look
+    /// like `git diff` on a terminal. A header line of a file is bold, which
+    /// is `color.diff.meta`. A hunk header is cyan, which is
+    /// `color.diff.frag`. A content line with a `+` in a prefix column is
+    /// green, which is `color.diff.new`, and the marker lines of a region are
+    /// such lines. A content line with a `-` in a prefix column is red, which
+    /// is `color.diff.old`. A context line is plain, which is
+    /// `color.diff.context`. The stop heading is yellow, which is
+    /// `color.diff.commit`, the color of a commit line in `git log`. The
+    /// `* Unmerged path` line, the empty line above a section, and the text
+    /// that stands in place of a halt diff that git did not give are plain.
+    ///
+    /// Asserted on the typed paint of each line and not on color codes, as
+    /// the tests of `gsw` and `seescc` do. So the test forces no color code
+    /// on, and the terminal of the run changes nothing.
+    #[test]
+    fn each_kind_of_line_gets_the_color_that_git_gives_it() {
+        let report = Report::for_tool("grind").describing("replaying HEAD onto main");
+
+        assert_paint(
+            &painted(report, &every_kind()),
+            &[
+                "".normal(),
+                format!("stop 1 of 2 - {EVERY_KIND_STOP}").as_str().yellow(),
+                "diff --cc f.txt".bold(),
+                "index 989b198,a4e431d..0000000".bold(),
+                "--- a/f.txt".bold(),
+                "+++ b/f.txt".bold(),
+                "@@@ -1,5 -1,5 +1,9 @@@".cyan(),
+                "  a".normal(),
+                "++<<<<<<< HEAD".green(),
+                " +MAIN".green(),
+                "++=======".green(),
+                "+ FEAT".green(),
+                "++>>>>>>> 9d6c330 (feat one)".green(),
+                "  c".normal(),
+                "  d".normal(),
+                "  e".normal(),
+                "@@@ -8,4 -8,4 +12,8 @@@".cyan(),
+                "  h".normal(),
+                "  i".normal(),
+                "  j".normal(),
+                "- main end".red(),
+                " -feat end".red(),
+                "++<<<<<<< HEAD".green(),
+                "++main end".green(),
+                "++=======".green(),
+                "++feat end".green(),
+                "++>>>>>>> 9d6c330 (feat one)".green(),
+                "* Unmerged path g.txt".normal(),
+                "".normal(),
+                format!("stop 2 of 2 - {STOP_TWO}").as_str().yellow(),
+                "diff not available: git diff --no-color --diff-filter=U failed:".normal(),
+                "fatal: unable to read files to diff".normal(),
+            ],
+        );
+    }
+
+    /// Inside a hunk, a content line whose text reads like a header line gets
+    /// the color of content.
+    ///
+    /// A content line starts with its prefix columns, and its text follows
+    /// them. So a line removed from both parents whose text is `- a/f.txt`
+    /// prints as `--- a/f.txt`. A line added against both parents whose text
+    /// is `+ b/f.txt` prints as `+++ b/f.txt`. Each one reads like a header
+    /// line of a file. Only the position of a line tells them apart: the
+    /// header lines stand between a `diff ` line and the first hunk header,
+    /// and inside a hunk the prefix columns decide. A painter that reads the
+    /// text of one line paints both lines bold, and a test of the usual lines
+    /// does not see it.
+    ///
+    /// The halt diff has the shape of a real one, and the two lines in its
+    /// hunk are written by hand. Git writes such a line only for a file whose
+    /// text reads like a header, and no other fixture here holds one.
+    #[test]
+    fn inside_a_hunk_a_line_that_reads_like_a_header_gets_the_color_of_content() {
+        let report = Report::for_tool("grind")
+            .describing("replaying HEAD onto main")
+            .without_stops();
+        let diffs = HaltDiffs::from_halts([as_git_wrote_it(
+            None,
+            concat!(
+                "diff --cc f.txt\n",
+                "index 989b198,a4e431d..0000000\n",
+                "--- a/f.txt\n",
+                "+++ b/f.txt\n",
+                "@@@ -1,3 -1,3 +1,3 @@@\n",
+                "  a\n",
+                "--- a/f.txt\n",
+                "+++ b/f.txt\n",
+                "  c",
+            ),
+        )]);
+
+        assert_paint(
+            &painted(report, &diffs),
+            &[
+                "".normal(),
+                "diff --cc f.txt".bold(),
+                "index 989b198,a4e431d..0000000".bold(),
+                "--- a/f.txt".bold(),
+                "+++ b/f.txt".bold(),
+                "@@@ -1,3 -1,3 +1,3 @@@".cyan(),
+                "  a".normal(),
+                "--- a/f.txt".red(),
+                "+++ b/f.txt".green(),
+                "  c".normal(),
+            ],
+        );
+    }
+
+    /// A hunk ends at the first line that is not content, and the painter
+    /// reads that line again as a line outside each file.
+    ///
+    /// A halt diff that names two conflicted files puts the `diff --cc` line
+    /// of the second file straight after the last line of the first file. Git
+    /// writes no empty line between them, so a hunk has no end line of its
+    /// own. It ends at the first line whose prefix columns hold a character
+    /// that is not a space, a `+`, or a `-`. The `diff --cc` line then opens
+    /// the next file, and each header line of that file is bold. A painter
+    /// that stays in the hunk paints the `---` line red and the `+++` line
+    /// green. A `* Unmerged path` line after a hunk stands outside each file,
+    /// and it is plain.
+    #[test]
+    fn a_hunk_ends_at_the_first_line_that_is_not_content() {
+        let report = Report::for_tool("grime")
+            .describing("merging feature into HEAD")
+            .without_stops();
+        let diffs = HaltDiffs::from_halts([as_git_wrote_it(None, THREE_FILES_DIFF)]);
+
+        assert_paint(
+            &painted(report, &diffs),
+            &[
+                "".normal(),
+                "diff --cc f.txt".bold(),
+                "index af70335,ac05874..0000000".bold(),
+                "--- a/f.txt".bold(),
+                "+++ b/f.txt".bold(),
+                "@@@ -1,3 -1,3 +1,7 @@@".cyan(),
+                "  a".normal(),
+                "++<<<<<<< HEAD".green(),
+                " +MAIN".green(),
+                "++=======".green(),
+                "+ FEAT".green(),
+                "++>>>>>>> feature".green(),
+                "  c".normal(),
+                "diff --cc g.txt".bold(),
+                "index 3402964,a741a09..0000000".bold(),
+                "--- a/g.txt".bold(),
+                "+++ b/g.txt".bold(),
+                "@@@ -1,3 -1,3 +1,7 @@@".cyan(),
+                "  x".normal(),
+                "++<<<<<<< HEAD".green(),
+                " +MAING".green(),
+                "++=======".green(),
+                "+ FEATG".green(),
+                "++>>>>>>> feature".green(),
+                "  z".normal(),
+                "* Unmerged path h.txt".normal(),
+            ],
+        );
+    }
+
+    /// The hunk header says how many prefix columns a content line has.
+    ///
+    /// A combined diff has one prefix column for each parent, and its hunk
+    /// header opens with one `@` more than that: `@@@` for two parents. A diff
+    /// of two files has one prefix column, and its hunk header opens with
+    /// `@@`. So the count of leading `@` less one is the count of prefix
+    /// columns. In a hunk of one column, `+x` is added, `-x` is removed, and
+    /// ` x` is context. ` -x` and ` +x` are context too, with text that starts
+    /// with a sign. A painter that reads two columns paints ` -x` red and
+    /// ` +x` green, and it reads `-x` and `+x` as lines that are not content.
+    ///
+    /// The halt diff is written by hand. It is a diff of two files, which has
+    /// the one-column hunk that the rule has to read.
+    #[test]
+    fn the_hunk_header_says_how_many_prefix_columns_a_content_line_has() {
+        let report = Report::for_tool("grind")
+            .describing("replaying HEAD onto main")
+            .without_stops();
+        let diffs = HaltDiffs::from_halts([as_git_wrote_it(
+            None,
+            concat!(
+                "diff --git a/f.txt b/f.txt\n",
+                "index 1111111..2222222 100644\n",
+                "--- a/f.txt\n",
+                "+++ b/f.txt\n",
+                "@@ -1,4 +1,4 @@\n",
+                " x\n",
+                "-x\n",
+                "+x\n",
+                " -x\n",
+                " +x",
+            ),
+        )]);
+
+        assert_paint(
+            &painted(report, &diffs),
+            &[
+                "".normal(),
+                "diff --git a/f.txt b/f.txt".bold(),
+                "index 1111111..2222222 100644".bold(),
+                "--- a/f.txt".bold(),
+                "+++ b/f.txt".bold(),
+                "@@ -1,4 +1,4 @@".cyan(),
+                " x".normal(),
+                "-x".red(),
+                "+x".green(),
+                " -x".normal(),
+                " +x".normal(),
+            ],
+        );
+    }
+
+    /// The marker of a last line with no newline belongs to its hunk.
+    ///
+    /// In a diff of two files, git writes `\ No newline at end of file` under a
+    /// content line whose file ends without a newline. The lines after the
+    /// marker are still content of the same hunk: here the added line comes
+    /// after the marker of the removed one. A painter that ends the hunk at the
+    /// marker paints that added line plain, as a line outside each file.
+    ///
+    /// A content line starts with a space, a `+`, or a `-`, so a line that
+    /// starts with a backslash is never content. Git paints the marker with the
+    /// color of context, which is plain.
+    ///
+    /// The halt diff is written by hand. Git 2.55 writes no such marker in a
+    /// combined diff, so a halt diff that git captured cannot hold one.
+    #[test]
+    fn the_marker_of_a_last_line_with_no_newline_does_not_end_the_hunk() {
+        let report = Report::for_tool("grind")
+            .describing("replaying HEAD onto main")
+            .without_stops();
+        let diffs = HaltDiffs::from_halts([as_git_wrote_it(
+            None,
+            concat!(
+                "diff --git a/f.txt b/f.txt\n",
+                "index 1111111..2222222 100644\n",
+                "--- a/f.txt\n",
+                "+++ b/f.txt\n",
+                "@@ -1 +1 @@\n",
+                "-old\n",
+                "\\ No newline at end of file\n",
+                "+new\n",
+                "\\ No newline at end of file",
+            ),
+        )]);
+
+        assert_paint(
+            &painted(report, &diffs),
+            &[
+                "".normal(),
+                "diff --git a/f.txt b/f.txt".bold(),
+                "index 1111111..2222222 100644".bold(),
+                "--- a/f.txt".bold(),
+                "+++ b/f.txt".bold(),
+                "@@ -1 +1 @@".cyan(),
+                "-old".red(),
+                "\\ No newline at end of file".normal(),
+                "+new".green(),
+                "\\ No newline at end of file".normal(),
+            ],
+        );
+    }
+
+    /// The binary line of a file is plain, and it ends the header of that
+    /// file.
+    ///
+    /// Git writes `Binary files differ` in place of the hunks of a binary
+    /// file, and it gives that line no color. No hunk of that file comes
+    /// after it. Here the binary file is the last file of the halt diff, and
+    /// a file that one side deleted conflicts too. So the `* Unmerged path`
+    /// line comes directly after the binary line. That line stands outside
+    /// each file, and git gives it no color. A painter that stays in the
+    /// header of the file until a hunk header comes paints both lines bold.
+    #[test]
+    fn the_binary_line_of_a_file_is_plain_and_ends_the_header_of_that_file() {
+        let report = Report::for_tool("grind")
+            .describing("replaying HEAD onto side")
+            .without_stops();
+        let diffs = HaltDiffs::from_halts([as_git_wrote_it(None, BINARY_LAST_DIFF)]);
+
+        assert_paint(
+            &painted(report, &diffs),
+            &[
+                "".normal(),
+                "diff --cc z.dat".bold(),
+                "index 25b3410,1323b0a..0000000".bold(),
+                "Binary files differ".normal(),
+                "* Unmerged path c.txt".normal(),
+            ],
+        );
+    }
+
+    /// The file after a binary file gets the paint of each other file.
+    ///
+    /// The `diff --cc` line of the next file comes directly after the binary
+    /// line, and it opens that file. So each header line of that file is
+    /// bold, and its hunk header is cyan. The prefix columns of each content
+    /// line decide its color.
+    #[test]
+    fn the_file_after_a_binary_file_gets_the_paint_of_each_other_file() {
+        let report = Report::for_tool("grime")
+            .describing("merging feature into HEAD")
+            .without_stops();
+        let diffs = HaltDiffs::from_halts([as_git_wrote_it(None, BINARY_FIRST_DIFF)]);
+
+        assert_paint(
+            &painted(report, &diffs),
+            &[
+                "".normal(),
+                "diff --cc a.dat".bold(),
+                "index 1323b0a,299f349..0000000".bold(),
+                "Binary files differ".normal(),
+                "diff --cc b.txt".bold(),
+                "index af70335,ac05874..0000000".bold(),
+                "--- a/b.txt".bold(),
+                "+++ b/b.txt".bold(),
+                "@@@ -1,3 -1,3 +1,7 @@@".cyan(),
+                "  a".normal(),
+                "++<<<<<<< HEAD".green(),
+                " +MAIN".green(),
+                "++=======".green(),
+                "+ FEAT".green(),
+                "++>>>>>>> feature".green(),
+                "  c".normal(),
+            ],
+        );
+    }
+
+    /// A `* Unmerged path` line ends a header that has no hunk.
+    ///
+    /// Git can write the header of a file and no hunk. For a conflict on a
+    /// symbolic link, the working tree holds the link of one side, and a
+    /// `--cc` diff shows no hunk for it. Then the `* Unmerged path` line of
+    /// another conflict comes directly after the header. That line stands
+    /// outside each file, and git gives it no color. A painter that stays in
+    /// the header of the file until a hunk header comes paints it bold.
+    #[test]
+    fn an_unmerged_path_line_ends_a_header_that_has_no_hunk() {
+        let report = Report::for_tool("grime")
+            .describing("merging side into HEAD")
+            .without_stops();
+        let diffs = HaltDiffs::from_halts([as_git_wrote_it(None, NO_HUNK_DIFF)]);
+
+        assert_paint(
+            &painted(report, &diffs),
+            &[
+                "".normal(),
+                "diff --cc l".bold(),
+                "index 64c5e58,43dd47e..0000000".bold(),
+                "--- a/l".bold(),
+                "+++ b/l".bold(),
+                "* Unmerged path g.txt".normal(),
+            ],
+        );
+    }
+
+    /// The mode line of a combined diff is plain, and the header of the file
+    /// continues after it.
+    ///
+    /// When the mode of a parent is not the mode of the result, git writes
+    /// `mode <parent modes>..<result mode>` in the header of a combined diff.
+    /// Git paints each other line of that header bold, which is
+    /// `color.diff.meta`, but it gives the mode line no color. The `---` line
+    /// and the `+++` line come after the mode line, and git paints them bold.
+    /// So the mode line does not end the header. A painter that paints each
+    /// line of the header bold paints the mode line bold. A painter that ends
+    /// the header at the mode line paints each line after it plain.
+    ///
+    /// Git 2.55 painted each line of this halt diff as the expected paint
+    /// says, under `color.diff=always`.
+    #[test]
+    fn the_mode_line_of_a_combined_diff_is_plain_and_the_header_goes_on_after_it() {
+        let report = Report::for_tool("grind")
+            .describing("replaying HEAD onto side")
+            .without_stops();
+        let diffs = HaltDiffs::from_halts([as_git_wrote_it(None, MODE_LINE_DIFF)]);
+
+        assert_paint(
+            &painted(report, &diffs),
+            &[
+                "".normal(),
+                "diff --cc f.sh".bold(),
+                "index f794161,af70335..0000000".bold(),
+                "mode 100755,100644..100755".normal(),
+                "--- a/f.sh".bold(),
+                "+++ b/f.sh".bold(),
+                "@@@ -1,3 -1,3 +1,7 @@@".cyan(),
+                "  a".normal(),
+                "++<<<<<<< HEAD".green(),
+                " +SIDE".green(),
+                "++=======".green(),
+                "+ MAIN".green(),
+                "++>>>>>>> 7d81fd2 (main edit)".green(),
+                "  c".normal(),
+            ],
+        );
+    }
+
+    /// The first byte of each color code, and of each other escape sequence.
+    const ESC: char = '\u{1b}';
+
+    /// The code that `colored` writes after the text of each painted line. It
+    /// resets the color and the style.
+    const RESET: &str = "\u{1b}[0m";
+
+    /// Each painted line of the halt diffs opens and closes its own color
+    /// codes, so no code spans a newline.
+    ///
+    /// A color code stays in effect until the next code. A line that leaves
+    /// its code open paints the lines after it, and a tool that cuts the
+    /// output into lines, such as `grep` or `head`, gets a line with no reset.
+    /// So the painter paints each line on its own. A painted line starts with
+    /// the code that opens it and ends with the reset, and those are the only
+    /// two ESC bytes on it. A plain line holds no code.
+    ///
+    /// Color is forced on, so the codes are there whatever the run writes to.
+    /// Which lines have paint comes from the typed paint of each line. So the
+    /// test compares the text that `render_diffs` writes with the paint that
+    /// `paint_diffs` gives.
+    #[test]
+    fn each_painted_line_opens_and_closes_its_own_color_codes() {
+        let report = Report::for_tool("grind").describing("replaying HEAD onto main");
+        let diffs = every_kind();
+
+        let paint = painted(report, &diffs);
+        let rendered = testcolor::with_forced_ansi(|| report.render_diffs(&diffs))
+            .expect("a replay that halted renders its halt diffs");
+        let lines: Vec<&str> = rendered.split('\n').collect();
+
+        assert_eq!(
+            lines.len(),
+            paint.len(),
+            "one printed line for each painted line:\n{rendered:?}"
+        );
+        for (printed, painted_line) in lines.iter().zip(&paint) {
+            if painted_line.is_plain() {
+                assert!(
+                    !printed.contains(ESC),
+                    "a plain line holds no color code: {printed:?}"
+                );
+            } else {
+                assert!(
+                    printed.starts_with("\u{1b}["),
+                    "a painted line opens its own code: {printed:?}"
+                );
+                assert!(
+                    printed.ends_with(RESET),
+                    "a painted line closes its own code: {printed:?}"
+                );
+                assert_eq!(
+                    printed.matches(ESC).count(),
+                    2,
+                    "a painted line holds the code that opens it and the reset, and no \
+                     other ESC: {printed:?}"
+                );
+            }
+        }
+    }
+
+    /// Painting a halt diff changes no character of it.
+    ///
+    /// The paint of a line is codes around its text, and nothing more. So the
+    /// text with color forced on, less each color code, is the text with no
+    /// color, to the byte. The halt diffs are the two stops of the
+    /// `grind --diff` example in GitHub issue #475, then a stop on a file with
+    /// CRLF line endings, where each content line holds its carriage return
+    /// inside its paint. The control is that the painted text is not the plain
+    /// text: a painter that writes no code has nothing to take out, and it
+    /// passes the comparison for no reason.
+    #[test]
+    fn painting_a_halt_diff_changes_no_character_of_it() {
+        let report = Report::for_tool("grind").describing("replaying HEAD onto main");
+        let diffs = HaltDiffs::from_halts([
+            as_git_wrote_it(Some(STOP_ONE), STOP_ONE_DIFF),
+            as_git_wrote_it(Some(STOP_TWO), STOP_TWO_DIFF),
+            as_git_wrote_it(Some(CRLF_STOP), CRLF_DIFF),
+        ]);
+        let plain = [
+            String::new(),
+            format!("stop 1 of 3 - {STOP_ONE}"),
+            STOP_ONE_DIFF.to_owned(),
+            String::new(),
+            format!("stop 2 of 3 - {STOP_TWO}"),
+            STOP_TWO_DIFF.to_owned(),
+            String::new(),
+            format!("stop 3 of 3 - {CRLF_STOP}"),
+            CRLF_DIFF.to_owned(),
+        ]
+        .join("\n");
+
+        let rendered = testcolor::with_forced_ansi(|| report.render_diffs(&diffs))
+            .expect("a replay that halted three times renders its halt diffs");
+
+        assert_ne!(
+            rendered, plain,
+            "the painter has to write codes, or there is nothing to take out"
+        );
+        assert_eq!(testcolor::strip_ansi(&rendered), plain);
+    }
+
+    /// An ESC in file content stays spelled out on a painted line, and the
+    /// only ESC bytes on that line are the codes of its paint.
+    ///
+    /// The escape runs first and the painter second. So an ESC out of the file
+    /// is the text `\u{1b}` when the painter puts the color codes around the
+    /// line. A painter that ran first puts its codes into a line that the
+    /// escape then spells out, and the terminal prints them as text. The line
+    /// here is added against one parent, so it is green, and its typed paint
+    /// is the control. With color forced on, the printed line holds two ESC
+    /// bytes: the code that opens the green and the reset. With the codes
+    /// taken out, the literal `\u{1b}` is still there, and no ESC byte is
+    /// left.
+    #[test]
+    fn an_esc_in_file_content_stays_escaped_on_a_painted_line() {
+        /// The line of the halt diff that holds the ESC, as the escape spells
+        /// it.
+        const SPELLED: &str = r" +esc \u{1b}[31mred\u{1b}[m";
+
+        let report = Report::for_tool("grind")
+            .describing("replaying HEAD onto main")
+            .without_stops();
+        let diffs = HaltDiffs::from_halts([as_git_wrote_it(
+            None,
+            concat!(
+                "diff --cc f.txt\n",
+                "index 989b198,a4e431d..0000000\n",
+                "--- a/f.txt\n",
+                "+++ b/f.txt\n",
+                "@@@ -1,1 -1,1 +1,5 @@@\n",
+                "++<<<<<<< HEAD\n",
+                " +esc \x1b[31mred\x1b[m\n",
+                "++=======\n",
+                "+ FEAT\n",
+                "++>>>>>>> 9d6c330 (feat one)",
+            ),
+        )]);
+
+        assert!(
+            painted(report, &diffs).contains(&SPELLED.green()),
+            "the line that holds the ESC is content with a `+`, so it is green"
+        );
+
+        let rendered = testcolor::with_forced_ansi(|| report.render_diffs(&diffs))
+            .expect("a replay that halted renders its halt diff");
+        let printed = rendered
+            .split('\n')
+            .find(|line| testcolor::strip_ansi(line) == SPELLED)
+            .unwrap_or_else(|| panic!("no printed line reads {SPELLED:?}:\n{rendered:?}"));
+        assert_eq!(
+            printed.matches(ESC).count(),
+            2,
+            "the ESC bytes on the line are the code that opens the green and the reset, \
+             and no ESC out of the file: {printed:?}"
+        );
+
+        let visible = testcolor::strip_ansi(&rendered);
+        assert!(
+            visible.contains(SPELLED),
+            "the literal \\u{{1b}} is still there once the codes go: {visible:?}"
+        );
+        assert!(
+            !visible.contains(ESC),
+            "no ESC byte is left once the codes go: {visible:?}"
         );
     }
 }

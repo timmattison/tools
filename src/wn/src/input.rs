@@ -44,6 +44,7 @@ use thiserror::Error;
 
 use crate::build::{BuildError, NO_CLAUDE_ENV};
 use crate::chain::Snippet;
+use crate::github::Repo;
 
 /// The variable that turns the clipboard fallback off. Any value with a
 /// character in it turns it off.
@@ -89,9 +90,9 @@ impl ClipboardUnavailable {
     ///
     /// The space around the cause is dropped, and so is a period at the end of
     /// it. A cause is a clause of a longer sentence here — the message puts it
-    /// in parentheses and then goes on with the instruction — and `arboard`
-    /// writes a whole sentence with a period on it. Keeping that period gives
-    /// the reader `.).` in the middle of one line. A cause that is nothing but
+    /// in parentheses and then goes on with the instruction — and a clipboard
+    /// library can write a whole sentence with a period on it. Keeping that
+    /// period gives the reader `.).` in the middle of one line. A cause that is nothing but
     /// a period is kept as it is, because an error that names no cause at all
     /// reads as a bug in the tool rather than as a state of the machine.
     #[must_use]
@@ -247,6 +248,59 @@ The next run builds a new one."
 The first line of it is {line:?}.",
                 line = first_line(&self.text)
             ),
+        }
+    }
+
+    /// Refuse a plan on the clipboard that is for a repository other than the
+    /// repository of this run.
+    ///
+    /// The clipboard became the cache of a plan in #438. A cache with no key
+    /// answers for every repository. A reader builds a plan in one checkout,
+    /// changes to a checkout of another repository, and types `wn`. The plan
+    /// is still on the clipboard, and its numbers name other issues in the
+    /// second repository. GitHub answers for those numbers, and nothing in the
+    /// answer shows that it is for the wrong repository.
+    ///
+    /// This module still never reads the text. `named` is the repository the
+    /// caller found in the text, and it is `None` for a text that names no
+    /// repository. `run` is the repository this run asks GitHub about.
+    /// [`Repo::is_same_repository`] compares the two, because GitHub names a
+    /// repository without regard to letter case.
+    ///
+    /// Only a text from the clipboard is refused. The reader typed an argument
+    /// and built a pipe on purpose, and `wn --refresh` does not replace such a
+    /// text, so it is not the repair for one. A plan this run built is not
+    /// refused. A run that builds refuses a `--repo` for another repository
+    /// before it runs `claude`, with [`crate::build::refuse_another_repository`],
+    /// so a built plan is for the repository of the run. The skill can still
+    /// write a name `gh` does not give, such as the old name of a renamed
+    /// repository, and such a plan is true. A text that names no repository is
+    /// not refused either. A chain, a table, a picture,
+    /// and a JSON document without `repo` say nothing about the repository,
+    /// and `wn` has no way to find out which repository such a text is for.
+    ///
+    /// The message writes nothing out of the clipboard except the repository
+    /// the plan names. This is the rule of [`Chain::blame`]: the clipboard
+    /// holds a password or a token as readily as it holds a plan.
+    ///
+    /// # Errors
+    ///
+    /// Gives [`InputError::AnotherRepository`] for a plan on the clipboard
+    /// that names a repository other than `run`.
+    pub fn refuse_another_repository(
+        &self,
+        named: Option<&Repo>,
+        run: &Repo,
+    ) -> Result<(), InputError> {
+        if self.source != Source::Clipboard {
+            return Ok(());
+        }
+        match named {
+            Some(plan) if !plan.is_same_repository(run) => Err(InputError::AnotherRepository {
+                plan: plan.clone(),
+                run: run.clone(),
+            }),
+            _ => Ok(()),
         }
     }
 }
@@ -421,6 +475,26 @@ pub enum InputError {
          Unset it to build one. {PASS_IT_AS_AN_ARGUMENT}"
     )]
     RefreshWithoutClaude,
+    /// The clipboard holds a plan for one repository, and this run is for
+    /// another repository.
+    ///
+    /// The caution stands before the step it warns about. The last line does
+    /// not name the repository of the run beside `wn --refresh`: that run
+    /// builds a plan for the current directory, and it refuses a `--repo` that
+    /// names another repository. The first line already names the repository
+    /// of the run.
+    #[error(
+        "the plan on the clipboard is for {plan}, and this run is for {run}.\n\
+         CAUTION: wn --refresh REPLACES WHAT IS ON THE CLIPBOARD. WHAT IS ON IT NOW IS LOST.\n\
+         Run wn --refresh to build a new plan, or run wn --repo {plan} to answer the plan \
+         on the clipboard."
+    )]
+    AnotherRepository {
+        /// The repository the plan names.
+        plan: Repo,
+        /// The repository this run asks GitHub about.
+        run: Repo,
+    },
 }
 
 /// Whether `value`, the value of [`NO_CLIPBOARD_ENV`], turns the fallback off.
@@ -439,18 +513,30 @@ pub fn clipboard_is_off(value: Option<&str>) -> bool {
 
 /// Read the system clipboard.
 ///
+/// The clipboard comes from `sysclip`. In a mosh-rs session
+/// (`MOSH_OPEN_SOCKET` is set) the text comes through the `pbpaste` shim from
+/// the clipboard of the client. `Ok(None)` is a clipboard with no text.
+///
 /// # Errors
 ///
 /// Gives [`ClipboardUnavailable`] when the clipboard could not be opened or
-/// could not be read. A machine with no display is such a machine, and so is a
-/// session over SSH.
+/// could not be read. The open fails when the clipboard of the machine cannot
+/// be opened and `PATH` holds no `pbcopy` and no `pbpaste`, for example on a
+/// Linux server with no display.
 pub fn system_clipboard() -> ClipboardRead {
     let mut clipboard =
-        arboard::Clipboard::new().map_err(|cause| ClipboardUnavailable::new(&cause))?;
-    from_arboard(clipboard.get_text())
+        sysclip::Clipboard::open().map_err(|cause| ClipboardUnavailable::new(&cause))?;
+    let text = clipboard
+        .read()
+        .map_err(|cause| ClipboardUnavailable::new(&cause))?;
+    Ok((!text.is_empty()).then_some(text))
 }
 
 /// Write `text` to the system clipboard.
+///
+/// The clipboard comes from `sysclip`. In a mosh-rs session
+/// (`MOSH_OPEN_SOCKET` is set) the text goes through the `pbcopy` shim to the
+/// clipboard of the client.
 ///
 /// A write that answers `Ok` is a write the machine took. On X11 a clipboard
 /// belongs to the process that set it, so a tool that exits at once can lose
@@ -463,35 +549,15 @@ pub fn system_clipboard() -> ClipboardRead {
 /// # Errors
 ///
 /// Gives [`ClipboardUnavailable`] when the clipboard could not be opened or
-/// could not be written. A machine with no display is such a machine, and so
-/// is a session over SSH.
+/// could not be written. The open fails when the clipboard of the machine
+/// cannot be opened and `PATH` holds no `pbcopy` and no `pbpaste`, for example
+/// on a Linux server with no display.
 pub fn write_system_clipboard(text: &str) -> ClipboardWrite {
     let mut clipboard =
-        arboard::Clipboard::new().map_err(|cause| ClipboardUnavailable::new(&cause))?;
+        sysclip::Clipboard::open().map_err(|cause| ClipboardUnavailable::new(&cause))?;
     clipboard
-        .set_text(text)
+        .write(text)
         .map_err(|cause| ClipboardUnavailable::new(&cause))
-}
-
-/// The read `result` as a [`ClipboardRead`].
-///
-/// Pure, so the mapping is tested without a clipboard. The one judgment in it
-/// is `ContentNotAvailable`: `arboard` says that for a clipboard with nothing
-/// in it and for a clipboard that holds an image, and neither of them is a
-/// failure to a tool that wants a chain.
-///
-/// # Errors
-///
-/// Gives [`ClipboardUnavailable`] for every other failure.
-fn from_arboard(result: Result<String, arboard::Error>) -> ClipboardRead {
-    match result {
-        Ok(text) => Ok(Some(text)),
-        Err(arboard::Error::ContentNotAvailable) => Ok(None),
-        // `arboard::Error` is `#[non_exhaustive]`, so this arm is required and
-        // a new variant of a later version arrives here as a failure that
-        // names itself, rather than as a build that stops.
-        Err(cause) => Err(ClipboardUnavailable::new(&cause)),
-    }
 }
 
 #[cfg(test)]
@@ -707,8 +773,9 @@ Pass it as an argument, in quotes: wn \"#277 → #278\""
 
     #[test]
     fn a_cause_that_ends_with_a_period_loses_it() {
-        // `arboard` writes a whole sentence, period included: "The selected
-        // clipboard is not supported with the current system configuration."
+        // A clipboard library writes a whole sentence, period included: "The
+        // selected clipboard is not supported with the current system
+        // configuration."
         // The message puts the cause in parentheses and then continues, so a
         // period the cause carries reads as ".)." to the person at the
         // terminal.
@@ -1220,6 +1287,90 @@ Unset it to build one. Pass it as an argument, in quotes: wn \"#277 → #278\""
         assert!(!message.contains("clipboard"), "{message}");
     }
 
+    /// A plan written as JSON for `owner/a`.
+    ///
+    /// This module never reads the text, so the tests hand the repository to
+    /// the check themselves. The text only shows what such a clipboard holds.
+    const PLAN_FOR_A: &str = "{\"version\": 1, \"repo\": \"owner/a\", \"streams\": []}";
+
+    /// The repository `spec` names.
+    fn repository(spec: &str) -> Repo {
+        Repo::parse(spec).expect("the test names a repository")
+    }
+
+    #[test]
+    fn a_plan_on_the_clipboard_for_another_repository_is_refused() {
+        let plan = repository("owner/a");
+        let run = repository("owner/b");
+        assert_eq!(
+            clipboard_chain(PLAN_FOR_A).refuse_another_repository(Some(&plan), &run),
+            Err(InputError::AnotherRepository {
+                plan: plan.clone(),
+                run: run.clone(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_plan_that_names_the_repository_of_the_run_in_other_letter_case_is_not_refused() {
+        // GitHub names a repository without regard to letter case, so these
+        // two names are one repository. A refusal here sends the reader to
+        // replace a plan that is true.
+        assert_eq!(
+            clipboard_chain(PLAN_FOR_A).refuse_another_repository(
+                Some(&repository("TimMattison/Tools")),
+                &repository("timmattison/tools")
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_plan_for_another_repository_that_the_reader_typed_or_piped_is_not_refused() {
+        // The reader chose this text on purpose, so it is the plan they want
+        // answered. `wn --refresh` does not replace an argument or a pipe, so
+        // a refusal would name a repair that repairs nothing.
+        let plan = repository("owner/a");
+        let run = repository("owner/b");
+        let argument = arguments(&[PLAN_FOR_A]);
+        let typed = Sources {
+            argument: &argument,
+            stdin: None,
+            clipboard: None,
+            plan: None,
+            refresh: false,
+        }
+        .chain()
+        .expect("the argument holds the plan");
+        assert_eq!(typed.refuse_another_repository(Some(&plan), &run), Ok(()));
+
+        let stdin = || -> std::io::Result<String> { Ok(PLAN_FOR_A.to_string()) };
+        let piped = Sources {
+            argument: &[],
+            stdin: Some(&stdin),
+            clipboard: None,
+            plan: None,
+            refresh: false,
+        }
+        .chain()
+        .expect("the pipe holds the plan");
+        assert_eq!(piped.refuse_another_repository(Some(&plan), &run), Ok(()));
+    }
+
+    #[test]
+    fn a_plan_for_another_repository_that_this_run_built_is_not_refused() {
+        // A run that builds refuses a `--repo` for another repository before it
+        // runs `claude`, so a plan this run built is for the repository of the
+        // run. The skill can still write a name `gh` does not give, such as
+        // the old name of a renamed repository, and a refusal of that plan
+        // would refuse a plan that is true.
+        assert_eq!(
+            built_chain(PLAN_FOR_A)
+                .refuse_another_repository(Some(&repository("owner/a")), &repository("owner/b")),
+            Ok(())
+        );
+    }
+
     #[test]
     fn a_value_with_a_character_in_it_turns_the_clipboard_off() {
         assert!(!clipboard_is_off(None));
@@ -1227,37 +1378,5 @@ Unset it to build one. Pass it as an argument, in quotes: wn \"#277 → #278\""
         assert!(!clipboard_is_off(Some("   ")));
         assert!(clipboard_is_off(Some("1")));
         assert!(clipboard_is_off(Some("no")));
-    }
-
-    #[test]
-    fn text_from_the_clipboard_arrives_whole() {
-        assert_eq!(
-            from_arboard(Ok(CHAIN.to_string())),
-            Ok(Some(CHAIN.to_string()))
-        );
-    }
-
-    #[test]
-    fn a_clipboard_with_no_content_is_an_empty_clipboard() {
-        assert_eq!(
-            from_arboard(Err(arboard::Error::ContentNotAvailable)),
-            Ok(None)
-        );
-    }
-
-    #[test]
-    fn a_platform_with_no_clipboard_cannot_be_read() {
-        let read = from_arboard(Err(arboard::Error::ClipboardNotSupported));
-        let cause = read.expect_err("the platform has no clipboard").to_string();
-        assert!(cause.contains("not supported"), "{cause}");
-    }
-
-    #[test]
-    fn an_unknown_failure_carries_its_description() {
-        let read = from_arboard(Err(arboard::Error::Unknown {
-            description: "the window server said no".to_string(),
-        }));
-        let cause = read.expect_err("the read failed").to_string();
-        assert!(cause.contains("the window server said no"), "{cause}");
     }
 }
