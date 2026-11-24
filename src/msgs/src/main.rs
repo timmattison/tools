@@ -15,6 +15,14 @@ use commands::{AppState, AppStateInner};
 use std::sync::Mutex;
 
 fn main() {
+    if std::env::args()
+        .skip(1)
+        .any(|arg| arg == "--version" || arg == "-V")
+    {
+        println!("msgs {}", buildinfo::version_string!());
+        return;
+    }
+
     env_logger::init();
 
     tauri::Builder::default()
