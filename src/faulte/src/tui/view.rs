@@ -561,8 +561,6 @@ where
     text
 }
 
-/// Paints one screen.
-///
 /// Gives the style of the banner.
 ///
 /// A past frame has a background that a live frame does not have, because a
@@ -592,9 +590,11 @@ fn paint_banner<Tz: TimeZone>(
     );
 }
 
-/// The function sets the page size of `app` from the size of the table, and
-/// changes nothing else. A screen of any size is valid: a part with no room
-/// draws nothing.
+/// Paints one screen.
+///
+/// The function tells `app` the room that the screen gave: the rows of the
+/// table, and the lines of the command in the detail view. It changes nothing
+/// else. A screen of any size is valid: a part with no room draws nothing.
 pub fn draw<Tz: TimeZone>(frame: &mut Frame<'_>, app: &mut App, context: &ViewContext<'_, Tz>)
 where
     Tz::Offset: Display,

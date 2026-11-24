@@ -1,8 +1,8 @@
 //! The state of the view of `faulte tui`.
 //!
-//! [`App`] is one pure value. A key or an update changes it, and nothing else
-//! does. It holds no terminal and no clock, so a test drives it with plain
-//! data and reads the result.
+//! [`App`] is one pure value. A key, an update, or the room that the draw
+//! reports changes it, and nothing else does. It holds no terminal and no
+//! clock, so a test drives it with plain data and reads the result.
 
 use std::time::Duration;
 

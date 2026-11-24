@@ -3,7 +3,7 @@
 //! - [`app`] — the state of the view. One pure value takes a key or an update
 //!   and changes. It holds no terminal and no clock.
 //! - [`view`] — the paint of one screen. One function reads the state and
-//!   draws it. It changes nothing but the page size of the state.
+//!   draws it. It changes nothing but the room that the state knows of.
 
 pub mod app;
 pub mod view;
