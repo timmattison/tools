@@ -85,6 +85,26 @@ pub struct MessageDb {
     conn: Connection,
 }
 
+/// Map a `SQLite` error from the open or the probe query to a `MsgsError`.
+///
+/// A refused open or a denied access means Full Disk Access is missing. The
+/// result code decides, not the text of the message.
+fn classify_open_error(e: rusqlite::Error) -> MsgsError {
+    match &e {
+        rusqlite::Error::SqliteFailure(err, _)
+            if matches!(
+                err.code,
+                rusqlite::ErrorCode::CannotOpen
+                    | rusqlite::ErrorCode::PermissionDenied
+                    | rusqlite::ErrorCode::AuthorizationForStatementDenied
+            ) =>
+        {
+            MsgsError::NoFullDiskAccess
+        }
+        _ => MsgsError::DatabaseError(e.to_string()),
+    }
+}
+
 impl MessageDb {
     /// Open chat.db in read-only mode.
     ///
@@ -107,34 +127,23 @@ impl MessageDb {
     /// Returns `MsgsError::NoFullDiskAccess` if permission is denied.
     /// Returns `MsgsError::DatabaseError` for any other failure.
     pub fn open_at(db_path: &Path) -> Result<Self, MsgsError> {
-        if !db_path.exists() {
-            return Err(MsgsError::DatabaseNotFound);
+        match std::fs::metadata(db_path) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(MsgsError::DatabaseNotFound);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                return Err(MsgsError::NoFullDiskAccess);
+            }
+            Err(e) => return Err(MsgsError::DatabaseError(e.to_string())),
         }
 
-        let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(
-            |e| {
-                let msg = e.to_string();
-                if msg.contains("unable to open") || msg.contains("permission") {
-                    MsgsError::NoFullDiskAccess
-                } else {
-                    MsgsError::DatabaseError(msg)
-                }
-            },
-        )?;
+        let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(classify_open_error)?;
 
         // Verify we can actually query (use query_row, not execute_batch, for SELECT)
         conn.query_row("SELECT 1 FROM message LIMIT 1", [], |_| Ok(()))
-            .map_err(|e| {
-                let msg = e.to_string();
-                if msg.contains("authorization denied")
-                    || msg.contains("unable to open")
-                    || msg.contains("not authorized")
-                {
-                    MsgsError::NoFullDiskAccess
-                } else {
-                    MsgsError::DatabaseError(msg)
-                }
-            })?;
+            .map_err(classify_open_error)?;
 
         Ok(Self { conn })
     }
