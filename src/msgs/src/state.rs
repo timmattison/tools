@@ -238,3 +238,120 @@ impl AppState {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use super::*;
+    use crate::test_fixture::{apple_ns, ChatDbFixture, MessageSpec};
+
+    /// How long a test waits for a call that must not wait for the build.
+    const CALL_TIMEOUT: Duration = Duration::from_secs(20);
+
+    /// An app state whose cache build stops at its first `Building` status
+    /// until the test drops this value.
+    struct HeldBuild {
+        state: Arc<AppState>,
+        /// Dropping the sender lets the held build go on.
+        _release: mpsc::Sender<()>,
+        open_result: mpsc::Receiver<Result<DbStatus, MsgsError>>,
+        entered: mpsc::Receiver<()>,
+        _fixture: ChatDbFixture,
+    }
+
+    impl HeldBuild {
+        fn start() -> Self {
+            let fixture = ChatDbFixture::new();
+            let chat = fixture.add_chat("friend", Some("Friend"), 45);
+            fixture.add_message(MessageSpec {
+                text: Some("lunch at noon".to_string()),
+                date: apple_ns(1_700_000_000, 0),
+                chats: vec![chat],
+                ..MessageSpec::default()
+            });
+            let paths = DataPaths {
+                chat_db: fixture.path().to_path_buf(),
+                cache_db: fixture.dir().join("text-cache.db"),
+            };
+            let state = Arc::new(AppState::new(Ok(paths)));
+            let (release, gate) = mpsc::channel::<()>();
+            let (entered_tx, entered) = mpsc::channel::<()>();
+            let (result_tx, open_result) = mpsc::channel();
+            let opener = Arc::clone(&state);
+            std::thread::spawn(move || {
+                let result = opener.open(move |status| {
+                    if matches!(status, CacheStatus::Building { .. }) {
+                        let _ = entered_tx.send(());
+                        // Returns when the test drops the sender.
+                        let _ = gate.recv();
+                    }
+                });
+                let _ = result_tx.send(result);
+            });
+            Self {
+                state,
+                _release: release,
+                open_result,
+                entered,
+                _fixture: fixture,
+            }
+        }
+
+        /// Wait until the build has started and stands at the gate.
+        fn wait_for_build(&self) {
+            self.entered
+                .recv_timeout(CALL_TIMEOUT)
+                .expect("the build never started");
+        }
+
+        /// Run `call` on its own thread and fail when it waits for the build.
+        fn answers<T: Send + 'static>(
+            &self,
+            what: &str,
+            call: impl FnOnce(&AppState) -> T + Send + 'static,
+        ) -> T {
+            let (tx, rx) = mpsc::channel();
+            let state = Arc::clone(&self.state);
+            std::thread::spawn(move || {
+                let _ = tx.send(call(&state));
+            });
+            rx.recv_timeout(CALL_TIMEOUT)
+                .unwrap_or_else(|_| panic!("{what} waited for the cache build"))
+        }
+    }
+
+    #[test]
+    fn open_returns_before_the_cache_build_ends() {
+        let held = HeldBuild::start();
+        held.wait_for_build();
+        let status = held
+            .open_result
+            .recv_timeout(CALL_TIMEOUT)
+            .expect("open waited for the cache build")
+            .expect("open");
+        assert!(status.accessible);
+    }
+
+    #[test]
+    fn the_database_answers_while_the_cache_builds() {
+        let held = HeldBuild::start();
+        held.wait_for_build();
+        let chats = held
+            .answers("list_conversations", |s| s.list_conversations(0, 50))
+            .expect("list conversations");
+        assert_eq!(chats.len(), 1);
+    }
+
+    #[test]
+    fn search_reports_that_the_index_is_building() {
+        let held = HeldBuild::start();
+        held.wait_for_build();
+        let result = held.answers("search", |s| s.search("lunch", None, 0, 50));
+        match result {
+            Err(MsgsError::CacheError(text)) => assert!(text.contains("building"), "{text}"),
+            other => panic!("expected a building error, got {other:?}"),
+        }
+    }
+}
