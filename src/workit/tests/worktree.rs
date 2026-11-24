@@ -530,10 +530,16 @@ fn a_separate_git_dir_repository_inside_a_worktree_below_the_search_path_is_list
     // `git init --separate-git-dir` keeps the git directory elsewhere and
     // leaves a `.git` file, as a linked worktree and a submodule do. Its git
     // directory is neither one's: it holds no `commondir`, and it lies in no
-    // `modules` directory. The repository is one of its own, as a repository
-    // with a `.git` directory at the same place is.
+    // `modules` directory of another git directory. The repository is one of
+    // its own, as a repository with a `.git` directory at the same place is.
+    //
+    // The git directory lies in a directory named `modules` all the same,
+    // beside no `HEAD` file, so a walk that read the name alone would call
+    // this repository a submodule.
     let nested = worktree.join("nested");
-    let separate = fixture.path("separate.git");
+    let separate = fixture.path("modules/separate.git");
+    std::fs::create_dir_all(fixture.path("modules"))
+        .expect("the directory that holds the separate git directory is created");
     fixture.git(
         &worktree,
         &[
