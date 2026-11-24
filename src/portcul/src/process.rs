@@ -138,8 +138,9 @@ pub fn escape_controls(name: &str) -> String {
 
 /// Collects all processes currently listening on ports.
 ///
-/// Uses the `listeners` crate which wraps platform-specific APIs
-/// (lsof on macOS, /proc on Linux) to discover listening sockets.
+/// Uses the `listeners` crate, which reads the kernel directly to find the
+/// listening sockets: libproc through FFI on macOS, and `/proc` on Linux. It
+/// starts no external program.
 ///
 /// # Errors
 ///
