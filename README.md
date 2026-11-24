@@ -3369,10 +3369,10 @@ structs.
 frontend that a bundler must build first. To run it from a checkout:
 
 ```bash
-./src/nle/run-nle.sh
+./src/nle/scripts/dev.ts
 ```
 
-The script installs the frontend dependencies, asks `portplz` for a free port,
-and starts the development server with the application pointed at it.
+The script installs the frontend dependencies. It asks `portplz` for a free
+port. Then it starts `cargo tauri dev` with Vite on that port.
 
 To build the desktop application, run `cargo tauri build` from `src/nle`.
