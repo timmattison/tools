@@ -103,6 +103,24 @@ fn workit(root: &Path) {
     );
 }
 
+/// Runs the binary over `root` as `workit` does and returns its output, after
+/// it asserts that the run refused the manifest.
+fn workit_fails(root: &Path) -> std::process::Output {
+    let output = Command::new(env!("CARGO_BIN_EXE_workit"))
+        .current_dir(root)
+        .arg("--path")
+        .arg(root)
+        .output()
+        .expect("the workit binary runs");
+
+    assert!(
+        !output.status.success(),
+        "the run succeeded and has to refuse the manifest, stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    output
+}
+
 /// The text of the manifest at the root of `root`.
 fn manifest_text(root: &Path) -> String {
     let manifest = root.join("Cargo.toml");
@@ -166,6 +184,76 @@ fn a_resolver_the_user_chose_is_not_overwritten() {
         !after.contains("resolver = \"2\""),
         "and supplying it twice would leave the manifest naming two resolvers: {after}"
     );
+}
+
+#[test]
+fn an_existing_workspace_written_as_an_inline_table_is_updated() {
+    let (_temp, root) = fixture();
+    package_at(&root, "crate-a", "workit-fixture-inline-crate-a");
+    write_manifest(&root, "workspace = { members = [\"stale\"] }\n");
+
+    workit(&root);
+
+    let after = manifest_text(&root);
+    let doc = after
+        .parse::<toml_edit::DocumentMut>()
+        .unwrap_or_else(|e| panic!("the rewritten manifest parses: {e}\n{after}"));
+    let members: Vec<&str> = doc["workspace"]["members"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the workspace still carries a members array:\n{after}"))
+        .iter()
+        .filter_map(toml_edit::Value::as_str)
+        .collect();
+    assert_eq!(
+        members,
+        vec!["crate-a"],
+        "cargo loads a workspace written as an inline table, so the run edits it rather \
+         than refusing it:\n{after}"
+    );
+}
+
+#[test]
+fn a_workspace_key_that_is_not_a_table_is_refused_by_name() {
+    let (_temp, root) = fixture();
+    package_at(
+        &root,
+        "crate-a",
+        "workit-fixture-workspace-not-table-crate-a",
+    );
+    let before = "workspace = 5\n";
+    write_manifest(&root, before);
+
+    let output = workit_fails(&root);
+    let complaint = String::from_utf8_lossy(&output.stderr);
+
+    let manifest = root.join("Cargo.toml");
+    assert!(
+        complaint.contains("The workspace key in")
+            && complaint.contains(&manifest.display().to_string()),
+        "the refusal names the key and the file, so the reader knows what to repair; \
+         stderr was {complaint:?}"
+    );
+    assert_eq!(manifest_text(&root), before, "a refused run writes nothing");
+}
+
+#[test]
+fn a_members_key_that_is_not_an_array_is_refused_by_name() {
+    let (_temp, root) = fixture();
+    package_at(&root, "crate-a", "workit-fixture-members-not-array-crate-a");
+    let before = "[workspace]\nmembers = \"crate-a\"\n";
+    write_manifest(&root, before);
+
+    let output = workit_fails(&root);
+    let complaint = String::from_utf8_lossy(&output.stderr);
+
+    let manifest = root.join("Cargo.toml");
+    assert!(
+        complaint.contains("The workspace.members key in")
+            && complaint.contains(&manifest.display().to_string()),
+        "the refusal names the key and the file, so the reader knows what to repair; \
+         stderr was {complaint:?}"
+    );
+    assert_eq!(manifest_text(&root), before, "a refused run writes nothing");
 }
 
 #[test]
