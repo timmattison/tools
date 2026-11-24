@@ -294,15 +294,19 @@ struct FakeRecording {
 const CALL_MARKER: &str = "--- call: ";
 
 /// Make a fake `program` in a new directory. It records its environment and its
-/// arguments, then exits zero.
-fn install_fake_program(dir: &Path, program: &str) -> FakeRecording {
+/// arguments. It exits 1 when its arguments start with `fails_on`, and else
+/// zero.
+fn install_fake_program(dir: &Path, program: &str, fails_on: Option<&str>) -> FakeRecording {
     use std::os::unix::fs::PermissionsExt;
 
     let bin_dir = dir.join("fake-bin");
     fs::create_dir_all(&bin_dir).expect("create fake bin dir");
     let log = dir.join(format!("{program}-recording.txt"));
+    let failure = fails_on
+        .map(|prefix| format!("case \"$*\" in '{prefix}'*) exit 1 ;; esac\n"))
+        .unwrap_or_default();
     let script = format!(
-        "#!/bin/sh\nenv >> '{log}'\necho '{CALL_MARKER}'\"$*\" >> '{log}'\nexit 0\n",
+        "#!/bin/sh\nenv >> '{log}'\necho '{CALL_MARKER}'\"$*\" >> '{log}'\n{failure}exit 0\n",
         log = log.display()
     );
     let fake = bin_dir.join(program);
@@ -315,7 +319,7 @@ fn install_fake_program(dir: &Path, program: &str) -> FakeRecording {
 /// Make a fake `cargo`. It exits zero for `cargo install` too, so the
 /// `cargo-machete` branch of the hook cannot reach the network.
 fn install_fake_cargo(dir: &Path) -> FakeRecording {
-    install_fake_program(dir, "cargo")
+    install_fake_program(dir, "cargo", None)
 }
 
 /// The `PATH` for a child: the fake directory first, the real `PATH` after it.
@@ -482,7 +486,7 @@ fn plugin_block_runs_claude_without_git_variables() {
         let dir = unique_fixture_dir();
         write_fixture_plugin(&dir);
         git_init_and_stage(&dir, &[staged]);
-        let claude = install_fake_program(&dir, "claude");
+        let claude = install_fake_program(&dir, "claude", None);
 
         let HookRun { passed, output } = run_hook_with_planted_git_variables(&dir, &claude);
         let calls = read_recording(&claude);
@@ -502,4 +506,81 @@ fn plugin_block_runs_claude_without_git_variables() {
             calls.git_lines
         );
     }
+}
+
+/// The start of the line that the hook prints when no claude CLI is on `PATH`.
+const NO_CLAUDE_REFUSAL: &str = "pre-commit: the claude CLI is not on PATH";
+
+/// Make a directory that holds a link to each of `programs` and nothing else.
+/// Each link points at the first match on the inherited `PATH`.
+fn directory_of_links(dir: &Path, programs: &[&str]) -> PathBuf {
+    let bin_dir = dir.join("links-bin");
+    fs::create_dir_all(&bin_dir).expect("create links bin dir");
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    for program in programs {
+        let target = std::env::split_paths(&inherited)
+            .map(|path| path.join(program))
+            .find(|candidate| candidate.is_file())
+            .unwrap_or_else(|| panic!("{program} is not on PATH"));
+        std::os::unix::fs::symlink(&target, bin_dir.join(program))
+            .unwrap_or_else(|e| panic!("link {program} to {}: {e}", target.display()));
+    }
+    bin_dir
+}
+
+/// With no claude CLI on `PATH`, a staged file of a plugin must fail the commit
+/// and name the fix. A gate that skips the checks would report a plugin that it
+/// never read as clean.
+///
+/// `PATH` holds only the programs that the hook runs before its check for the
+/// CLI, so a claude CLI that is installed on this machine cannot be found.
+/// Proven able to fail by mutation: with `exit 0` in place of the `exit 1` of
+/// the check, the hook passes and this test fails.
+#[test]
+fn plugin_block_without_claude_fails_the_commit() {
+    let dir = unique_fixture_dir();
+    write_fixture_plugin(&dir);
+    git_init_and_stage(&dir, &[FIXTURE_PLUGIN_FILE]);
+    let bin_dir = directory_of_links(&dir, &["bash", "dirname", "git", "grep"]);
+
+    let HookRun { passed, output } = run_hook_configured(&dir, |command| {
+        command.env("PATH", &bin_dir);
+    });
+    cleanup(&dir);
+
+    assert!(
+        !passed,
+        "a staged plugin file with no claude CLI must fail the commit: {output}"
+    );
+    assert!(
+        output.contains(NO_CLAUDE_REFUSAL),
+        "the refusal must name the missing claude CLI: {output}"
+    );
+}
+
+/// A failed `claude plugin test` must fail the commit. The fake `claude` passes
+/// each validation and fails only the tests, so the hook reaches the last call
+/// of the block. Proven able to fail by mutation: with `|| true` after the
+/// `claude plugin test` line of the hook, the hook passes and this test fails.
+#[test]
+fn failed_plugin_test_fails_the_commit() {
+    let dir = unique_fixture_dir();
+    write_fixture_plugin(&dir);
+    git_init_and_stage(&dir, &[FIXTURE_PLUGIN_FILE]);
+    let claude = install_fake_program(&dir, "claude", Some("plugin test"));
+
+    let HookRun { passed, output } = run_hook_configured(&dir, |command| {
+        command.env("PATH", path_with_fake_first(&claude.bin_dir));
+    });
+    let calls = read_recording(&claude);
+    cleanup(&dir);
+
+    assert_eq!(
+        calls.arguments, EXPECTED_CLAUDE_CALLS,
+        "the hook must reach claude plugin test: {output}"
+    );
+    assert!(
+        !passed,
+        "a failed claude plugin test must fail the commit: {output}"
+    );
 }
