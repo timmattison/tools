@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod bindings_check;
 mod commands;
 mod error;
 mod types;

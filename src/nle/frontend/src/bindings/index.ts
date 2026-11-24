@@ -1,5 +1,5 @@
 // Barrel re-exports of ts-rs generated bindings.
-// Run `cargo test -p nle` to regenerate the generated files.
+// Run `NLE_UPDATE_BINDINGS=1 cargo test -p nle` to regenerate the generated files.
 // When adding new types in Rust, add a re-export line here.
 
 export type { Event } from "./Event";

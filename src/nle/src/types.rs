@@ -8,7 +8,7 @@ use crate::error::NleError;
 
 /// A terminal recording, compatible with the beta recorder format.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../frontend/src/bindings/")]
+#[ts(export_to = "../frontend/src/bindings/")]
 pub struct Recording {
     pub version: u32,
     pub width: u16,
@@ -23,7 +23,7 @@ pub struct Recording {
 
 /// A single event in a recording (output or input).
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../frontend/src/bindings/")]
+#[ts(export_to = "../frontend/src/bindings/")]
 pub struct Event {
     pub time: f64,
     #[serde(rename = "type")]
@@ -33,7 +33,7 @@ pub struct Event {
 
 /// The type of a recording event.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../frontend/src/bindings/")]
+#[ts(export_to = "../frontend/src/bindings/")]
 pub enum EventType {
     #[serde(rename = "o")]
     Output,
@@ -43,7 +43,7 @@ pub enum EventType {
 
 /// Options for exporting a recording.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../frontend/src/bindings/")]
+#[ts(export_to = "../frontend/src/bindings/")]
 pub struct ExportOptions {
     pub input_path: String,
     pub output_path: String,
@@ -57,7 +57,7 @@ pub struct ExportOptions {
 
 /// The format to export a recording to.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../frontend/src/bindings/")]
+#[ts(export_to = "../frontend/src/bindings/")]
 pub enum ExportFormat {
     Video,
     Web,
@@ -65,7 +65,7 @@ pub enum ExportFormat {
 
 /// Response from loading a recording, includes both data and metadata.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../frontend/src/bindings/")]
+#[ts(export_to = "../frontend/src/bindings/")]
 pub struct LoadedRecording {
     pub recording: Recording,
     pub metadata: RecordingMetadata,
@@ -73,7 +73,7 @@ pub struct LoadedRecording {
 
 /// Summary metadata about a loaded recording.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../frontend/src/bindings/")]
+#[ts(export_to = "../frontend/src/bindings/")]
 pub struct RecordingMetadata {
     pub file_path: String,
     pub title: String,
