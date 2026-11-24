@@ -4,7 +4,7 @@
 //! approved nor rejected. It exits with `ERR_PNPM_IGNORED_BUILDS`, and every `pnpm`
 //! script in the package fails with it, because `pnpm run` does a dependency check
 //! first. That failure stops `pnpm dev`, which stops the Tauri `beforeDevCommand`,
-//! which stops `src/nle/run-nle.sh`.
+//! which stops `src/nle/scripts/dev.ts`.
 //!
 //! `pnpm` writes the `allowBuilds` key with the placeholder text
 //! "set this to true or false" when it finds such a dependency. A person must then
@@ -54,7 +54,7 @@ fn every_allow_builds_entry_holds_a_boolean() {
             "pnpm-workspace.yaml leaves the build script of `{package}` undecided \
              (its allowBuilds value is {decision:?}, not true or false). \
              pnpm then fails every command in the frontend with ERR_PNPM_IGNORED_BUILDS, \
-             which breaks src/nle/run-nle.sh."
+             which breaks src/nle/scripts/dev.ts."
         );
     }
 }

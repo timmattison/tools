@@ -19,5 +19,5 @@
     "forceConsistentCasingInFileNames": true,
     "types": ["node"]
   },
-  "include": ["vite.config.ts", "dev-port.ts", "dev-port.test.ts"]
+  "include": ["vite.config.ts", "../scripts/*.ts"]
 }
