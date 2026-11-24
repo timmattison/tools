@@ -119,10 +119,15 @@ bare `crap <uuid>` still resumes.
 ## Shell-function rewrite (highest-risk change)
 
 The installed `crap()` shell function currently branches on **flags**. It must
-branch on the **subcommand** (`$1`):
+branch on the **subcommand** (`$1`), and keep one flag match:
 
-- `todos | status | forks | shell-setup | help | --help | -h | --version | -V`
-  → run straight through `command crap "$@"` and return (print, never `cd`).
+- `--help`, `-h`, `--version` or `-V` at **any** position → run straight
+  through `command crap "$@"` and return. `SHELL_CODE` matches them with
+  `case " $* "` now, and the rewrite keeps that match. Thus
+  `crap resume --help`, `crap here <id> -h` and `crap <uuid> --help` print the
+  help of clap and do not parse it as a `<id>\n<dir>` reply.
+- `todos | status | forks | shell-setup | help` as `$1` → run straight through
+  `command crap "$@"` and return (print, never `cd`).
 - `resume`, `here`, or a bare UUID (default) → route the reply by its first
   line, as `SHELL_CODE` does now. The subcommand cannot select the shape,
   because a cross-user `resume` and `--expand` also fork:
@@ -131,7 +136,7 @@ branch on the **subcommand** (`$1`):
     the function asks `command crap --status "$__crap_newid"` whether Claude
     saved the fork, and prints `Resume this fork with: crap <new-id>` only
     then. `--status` is not a flag after the rewrite, and the call sends
-    stderr to `/dev/null`, thus the hint would stop with no error. The
+    stderr to `/dev/null`, thus the hint stops and nothing reports it. The
     rewrite changes the call to `command crap status "$__crap_newid"`.
   - `__CRAP_FORK_AT__` → `<session>\n<new-id>\n<link>\n<dir>`: `cd` into
     `<dir>`, then the same fork flow.
@@ -301,8 +306,9 @@ hardcoded paths (parallel-safe per CLAUDE.md):
 - Label truncation: Japanese / emoji / accented inputs (no panic, and the
   `UnicodeWidthStr::width` of the cut label with its `…` is at most the budget).
 - Subcommand routing parser used by the shell function (Rust-level decision
-  table, with both fork shapes and `status <id> --user <name>`), and a
-  shellcheck pass on the emitted `SHELL_CODE`.
+  table, with both fork shapes, `status <id> --user <name>`,
+  `resume --help`, `here <id> -h` and `<uuid> --help`), and a shellcheck pass
+  on the emitted `SHELL_CODE`.
 - Clap parse: `crap status <id> --user <name>` parses with the id and the
   user, as `cli_status_user_composes` holds for the old form.
 - Shell function, with a fake `crap` and a fake launcher: after a fork that
