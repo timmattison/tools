@@ -45,20 +45,10 @@ const EXIT_NOT_STARTED: u8 = 125;
 /// The exit status when `drun check-flags` finds a difference.
 const EXIT_DIFFERENCES: u8 = 1;
 
-/// The commands of `drun`, for `drun <command> --help`.
-const COMMANDS: &[&str] = &[
-    "run",
-    "ps",
-    "status",
-    "logs",
-    "wait",
-    "exec",
-    "cp",
-    "rm",
-    "hosts",
-    "pick",
-    "check-flags",
-];
+/// The commands of `drun` that take no docker flags, for
+/// `drun <command> --help`. The parsers of `run`, `logs`, `exec`, `cp`, and
+/// `rm` read the help among the flags, and the last `--help` wins.
+const COMMANDS_WITHOUT_FLAGS: &[&str] = &["ps", "status", "wait", "hosts", "pick", "check-flags"];
 
 /// Why a command of `drun` stopped before it could hand over to docker.
 #[derive(Debug)]
@@ -108,7 +98,9 @@ fn dispatch(
 ) -> Result<ExitCode, Failure> {
     let name = command.to_str().unwrap_or_default();
     let wants_help = args.first().is_some_and(|first| first == "--help");
-    if matches!(name, "-h" | "--help" | "help") || (wants_help && COMMANDS.contains(&name)) {
+    if matches!(name, "-h" | "--help" | "help")
+        || (wants_help && COMMANDS_WITHOUT_FLAGS.contains(&name))
+    {
         return Ok(print_usage(environment));
     }
     match name {
