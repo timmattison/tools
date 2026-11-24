@@ -1,10 +1,22 @@
-//! The time that a running job has left, from the jobs of the same kind that
-//! passed on the same runner.
+//! The time that a running job, or an active run, has left, from the jobs of
+//! the same kind that passed.
 //!
 //! Two jobs are of the same kind when they have the same repository, the same
 //! workflow, the same job name, and the same runner. The estimate of a kind is
 //! the mean runner time of its newest passed jobs. A job with no such match has
 //! no estimate.
+//!
+//! The estimate of an active run uses two more values. Both are keyed on the
+//! repository, the workflow, and the job name. The first is the mean runner
+//! time of the newest passed jobs on any runner. A job that waits uses it,
+//! because a waiting job has no sure runner. The second is the tail of a job
+//! name. The tail is the time from the end of a job to the end of its passed
+//! run. The end of a run is the latest end of any of its jobs. The mean tail of
+//! the newest passed runs is the tail of the name.
+//!
+//! Each job of the active run gives one term: the time from now to the end of
+//! the run, if this job is the last one. The latest term is the estimate of the
+//! run.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -12,7 +24,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 
 use crate::job::{Job, JobId, RunnerName};
-use crate::run::{Run, RunState};
+use crate::run::{span, Run, RunId, RunState};
 use crate::target::RepoName;
 
 /// How many of the newest matches an estimate reads.
@@ -36,10 +48,52 @@ pub enum Remaining {
 /// The kind of a job: repository, workflow, job name, and runner.
 type Key<'a> = (&'a RepoName, &'a str, &'a str, &'a RunnerName);
 
+/// The name of a job: repository, workflow, and job name.
+type NameKey<'a> = (&'a RepoName, &'a str, &'a str);
+
+/// One term of the estimate of an active run, in whole seconds from now.
+struct Term {
+    /// The end of the run if this job is the last one, with the floor at the
+    /// estimate of the job.
+    end: i64,
+    /// The same end, but without the floor. It is below zero for a job that
+    /// ran past its estimate.
+    unfloored: i64,
+    /// True when the job waits for a runner.
+    waits: bool,
+}
+
 /// The estimates of one frame, built one time from the shown runs.
 #[derive(Debug)]
 pub struct Estimates<'a> {
     means: HashMap<Key<'a>, Duration>,
+    any_runner: HashMap<NameKey<'a>, Duration>,
+    tails: HashMap<NameKey<'a>, Duration>,
+}
+
+/// The mean of the newest [`MATCHES_PER_ESTIMATE`] of `matches`.
+///
+/// Each match is a time, an ID, and a number of seconds. The newest match has
+/// the latest time. A tie goes to the higher ID. The mean drops the remainder.
+/// The result is `None` for no matches.
+fn mean_of_newest<I: Ord>(mut matches: Vec<(DateTime<Utc>, I, u64)>) -> Option<Duration> {
+    matches.sort_unstable_by(|left, right| (&right.0, &right.1).cmp(&(&left.0, &left.1)));
+    matches.truncate(MATCHES_PER_ESTIMATE);
+    let count = u64::try_from(matches.len()).ok()?;
+    let total = matches
+        .iter()
+        .fold(0_u64, |sum, entry| sum.saturating_add(entry.2));
+    total.checked_div(count).map(Duration::from_secs)
+}
+
+/// Whole seconds as a signed number. A value that is too large saturates.
+fn signed(seconds: u64) -> i64 {
+    i64::try_from(seconds).unwrap_or(i64::MAX)
+}
+
+/// The signed whole seconds from `now` to `time`.
+fn seconds_from(now: DateTime<Utc>, time: DateTime<Utc>) -> i64 {
+    (time - now).num_seconds()
 }
 
 impl<'a> Estimates<'a> {
@@ -50,11 +104,22 @@ impl<'a> Estimates<'a> {
     /// [`MATCHES_PER_ESTIMATE`] matches by end time. A tie goes to the higher job
     /// ID. The mean of a kind is the sum of those runner times in whole seconds,
     /// divided by their count, with the remainder dropped.
+    ///
+    /// The same matches, with the runner ignored, give the any-runner duration
+    /// of each job name. A run that passed gives one tail for each job name that
+    /// passed in it. The end of that run is the latest end time of all of its
+    /// jobs, in any state. The tail is the time from the latest end of the name
+    /// to the end of the run. Each job name keeps the newest
+    /// [`MATCHES_PER_ESTIMATE`] runs by end of run, and a tie goes to the higher
+    /// run ID. A run that did not pass gives no tail.
     pub fn new(
         runs: impl IntoIterator<Item = (&'a Run, &'a [Job])>,
         now: DateTime<Utc>,
     ) -> Estimates<'a> {
         let mut groups: HashMap<Key<'a>, Vec<(DateTime<Utc>, JobId, u64)>> = HashMap::new();
+        let mut any_groups: HashMap<NameKey<'a>, Vec<(DateTime<Utc>, JobId, u64)>> = HashMap::new();
+        let mut tail_groups: HashMap<NameKey<'a>, Vec<(DateTime<Utc>, RunId, u64)>> =
+            HashMap::new();
         for (run, jobs) in runs {
             for job in jobs {
                 if job.state != RunState::Passed {
@@ -65,26 +130,49 @@ impl<'a> Estimates<'a> {
                 else {
                     continue;
                 };
+                let name = (&run.repo, run.workflow.as_str(), job.name.as_str());
+                let entry = (completed, job.id, time.as_secs());
                 groups
-                    .entry((&run.repo, run.workflow.as_str(), job.name.as_str(), runner))
+                    .entry((name.0, name.1, name.2, runner))
                     .or_default()
-                    .push((completed, job.id, time.as_secs()));
+                    .push(entry);
+                any_groups.entry(name).or_default().push(entry);
+            }
+            if run.state != RunState::Passed {
+                continue;
+            }
+            let Some(end) = jobs.iter().filter_map(|job| job.completed_at).max() else {
+                continue;
+            };
+            let mut latest: HashMap<&str, DateTime<Utc>> = HashMap::new();
+            for job in jobs.iter().filter(|job| job.state == RunState::Passed) {
+                if let Some(completed) = job.completed_at {
+                    let slot = latest.entry(job.name.as_str()).or_insert(completed);
+                    *slot = (*slot).max(completed);
+                }
+            }
+            for (job_name, completed) in latest {
+                tail_groups
+                    .entry((&run.repo, run.workflow.as_str(), job_name))
+                    .or_default()
+                    .push((end, run.id, span(completed, end).as_secs()));
             }
         }
-        let means = groups
+        Estimates {
+            means: Self::means_of(groups),
+            any_runner: Self::means_of(any_groups),
+            tails: Self::means_of(tail_groups),
+        }
+    }
+
+    /// The mean of the newest matches of each key.
+    fn means_of<K: std::hash::Hash + Eq, I: Ord>(
+        groups: HashMap<K, Vec<(DateTime<Utc>, I, u64)>>,
+    ) -> HashMap<K, Duration> {
+        groups
             .into_iter()
-            .filter_map(|(key, mut matches)| {
-                matches.sort_unstable_by_key(|entry| std::cmp::Reverse((entry.0, entry.1)));
-                matches.truncate(MATCHES_PER_ESTIMATE);
-                let count = u64::try_from(matches.len()).ok()?;
-                let total = matches
-                    .iter()
-                    .fold(0_u64, |sum, entry| sum.saturating_add(entry.2));
-                let mean = total.checked_div(count)?;
-                Some((key, Duration::from_secs(mean)))
-            })
-            .collect();
-        Estimates { means }
+            .filter_map(|(key, matches)| Some((key, mean_of_newest(matches)?)))
+            .collect()
     }
 
     /// The time left of `job` of `run` at `now`, or `None`.
@@ -114,17 +202,110 @@ impl<'a> Estimates<'a> {
     /// The time until an active run finishes, at `now`, or `None`.
     ///
     /// `jobs` are the jobs of `run`. The result is `None` for a run that is not
-    /// active, and for a run with no jobs. It is also `None` when one job that
-    /// counts has no estimate. See the module documentation for the rule.
+    /// active, and for a run with no jobs. A job that passed, runs, or waits
+    /// gives one term. A job in any other state gives no term. The result is
+    /// `None` when one job that gives a term has no estimate, so the run never
+    /// claims more than its job rows.
+    ///
+    /// The term of a job that passed is its end time plus the tail of its name.
+    /// The term of a job that runs is its time left plus the tail. A job past
+    /// its estimate gives only the tail, and the time over lowers its term
+    /// without the floor. The term of a job that waits is the any-runner
+    /// duration of its name plus the tail, because its start is unknown.
+    ///
+    /// The latest term is the result. It is [`Remaining::AtLeast`] when a job
+    /// that waits gives the latest term, also in a tie. Else it is
+    /// [`Remaining::Left`]. When no term is after now, the result is
+    /// [`Remaining::Over`] by the greatest term without the floor. A run that is
+    /// exactly at its estimate gives a left time of zero, never an over time of
+    /// zero.
     #[must_use]
-    pub fn run_remaining(
-        &self,
-        run: &Run,
-        jobs: &[Job],
-        now: DateTime<Utc>,
-    ) -> Option<Remaining> {
-        let _ = (run, jobs, now);
-        None
+    pub fn run_remaining(&self, run: &Run, jobs: &[Job], now: DateTime<Utc>) -> Option<Remaining> {
+        if !run.state.is_active() || jobs.is_empty() {
+            return None;
+        }
+        let mut terms = Vec::new();
+        for job in jobs {
+            if let Some(term) = self.term(run, job, now)? {
+                terms.push(term);
+            }
+        }
+        let latest = terms.iter().map(|term| term.end).max()?;
+        let from_queued = terms.iter().any(|term| term.end == latest && term.waits);
+        let wrap = |seconds: i64| {
+            let time = Duration::from_secs(u64::try_from(seconds).unwrap_or(0));
+            if from_queued {
+                Remaining::AtLeast(time)
+            } else {
+                Remaining::Left(time)
+            }
+        };
+        if latest > 0 {
+            return Some(wrap(latest));
+        }
+        let over = terms
+            .iter()
+            .map(|term| term.unfloored)
+            .max()?
+            .saturating_neg();
+        if over > 0 {
+            Some(Remaining::Over(Duration::from_secs(
+                u64::try_from(over).unwrap_or(0),
+            )))
+        } else {
+            Some(wrap(0))
+        }
+    }
+
+    /// The term of one job of an active run.
+    ///
+    /// The outer `None` means that the run has no estimate. The inner `None`
+    /// means that the job gives no term.
+    fn term(&self, run: &Run, job: &Job, now: DateTime<Utc>) -> Option<Option<Term>> {
+        let name = (&run.repo, run.workflow.as_str(), job.name.as_str());
+        let tail = |this: &Self| this.tails.get(&name).map(|time| signed(time.as_secs()));
+        let term = match job.state {
+            RunState::Passed => {
+                let completed = job.completed_at?;
+                let end = seconds_from(now, completed).saturating_add(tail(self)?);
+                Term {
+                    end,
+                    unfloored: end,
+                    waits: false,
+                }
+            }
+            RunState::Running => {
+                let tail = tail(self)?;
+                match self.remaining(run, job, now)? {
+                    Remaining::Left(time) | Remaining::AtLeast(time) => {
+                        let end = signed(time.as_secs()).saturating_add(tail);
+                        Term {
+                            end,
+                            unfloored: end,
+                            waits: false,
+                        }
+                    }
+                    Remaining::Over(time) => Term {
+                        end: tail,
+                        unfloored: tail.saturating_sub(signed(time.as_secs())),
+                        waits: false,
+                    },
+                }
+            }
+            RunState::Queued => {
+                let duration = signed(self.any_runner.get(&name)?.as_secs());
+                let end = duration.saturating_add(tail(self)?);
+                Term {
+                    end,
+                    unfloored: end,
+                    waits: true,
+                }
+            }
+            RunState::Failed | RunState::Cancelled | RunState::Skipped | RunState::Other => {
+                return Some(None);
+            }
+        };
+        Some(Some(term))
     }
 }
 
