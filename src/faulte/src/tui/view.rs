@@ -797,6 +797,43 @@ mod tests {
         );
     }
 
+    /// When the selected past frame leaves the history, the banner says that
+    /// the view moved to the oldest frame, directly after `PAST`. The next key
+    /// clears the note.
+    #[test]
+    fn the_banner_says_when_the_selected_frame_left_the_history() {
+        let fill = |history: &mut History| {
+            for step in 0..3 {
+                history.add(frame(step * 2, vec![row(1, 1), row(2, 2)]));
+            }
+        };
+        let mut probe = History::with_budget(usize::MAX);
+        fill(&mut probe);
+        let mut history = History::with_budget(probe.bytes_used());
+        fill(&mut history);
+        let mut app = crate::tui::app::App::new(history);
+        app.on_key(press(KeyCode::Home));
+
+        app.on_update(frame(6, vec![row(1, 1), row(2, 2)]));
+        let moved = screen(&paint(&mut app, 300, 24, 10));
+        app.on_key(press(KeyCode::Char('x')));
+        let after_a_key = screen(&paint(&mut app, 300, 24, 10));
+
+        assert!(
+            moved[0].starts_with(
+                "PAST · the selected frame left the history, so the view moved to the oldest \
+                 frame · NOT LIVE · frame of "
+            ),
+            "{}",
+            moved[0]
+        );
+        assert!(
+            after_a_key[0].starts_with("PAST · NOT LIVE · frame of "),
+            "{}",
+            after_a_key[0]
+        );
+    }
+
     /// The header lines of a frame are the lines of the reading, directly
     /// under the banner.
     #[test]
