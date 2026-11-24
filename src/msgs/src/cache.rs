@@ -12,6 +12,47 @@ const CACHE_DIR_NAME: &str = "msgs";
 /// file with a different version is dropped and made again.
 const CACHE_SCHEMA_VERSION: i64 = 1;
 
+/// The metadata key that holds the source fingerprint of the last rebuild.
+const FINGERPRINT_KEY: &str = "source_fingerprint";
+
+/// A fingerprint of the rows that the rebuild reads from `chat_db`:
+/// `"{joined}:{max_rowid}:{max_edited}"`. `joined` is the count of
+/// `message JOIN chat_message_join` rows, `max_rowid` is the highest message
+/// ROWID of that join, and `max_edited` is the latest `date_edited` (0 when the
+/// column is absent in an old chat.db). An insert, a delete, and an edit each
+/// change it.
+fn source_fingerprint(chat_db: &Connection) -> Result<String, MsgsError> {
+    let db_error = |e: rusqlite::Error| MsgsError::DatabaseError(e.to_string());
+    let (joined, max_rowid): (i64, i64) = chat_db
+        .query_row(
+            "SELECT COUNT(*), COALESCE(MAX(m.ROWID), 0)
+             FROM message m
+             JOIN chat_message_join cmj ON m.ROWID = cmj.message_id",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(db_error)?;
+    let has_edited: i64 = chat_db
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('message') WHERE name = 'date_edited'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(db_error)?;
+    let max_edited: i64 = if has_edited > 0 {
+        chat_db
+            .query_row(
+                "SELECT COALESCE(MAX(date_edited), 0) FROM message",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(db_error)?
+    } else {
+        0
+    };
+    Ok(format!("{joined}:{max_rowid}:{max_edited}"))
+}
+
 /// FTS5 text cache for searchable message text.
 pub struct TextCache {
     conn: Connection,
@@ -76,26 +117,25 @@ impl TextCache {
         Ok(Self { conn })
     }
 
-    /// Check if the cache needs rebuilding by comparing message counts.
+    /// Check if the cache needs rebuilding by comparing the stored source
+    /// fingerprint of `chat_db` with the current one. A cache with no stored
+    /// fingerprint needs a rebuild.
     ///
     /// # Errors
     ///
-    /// Returns `MsgsError::CacheError` on query failure.
-    pub fn needs_rebuild(&self, source_count: i64) -> Result<bool, MsgsError> {
-        let cached_count: Option<String> = self
+    /// Returns `MsgsError::DatabaseError` when the fingerprint query fails.
+    pub fn needs_rebuild(&self, chat_db: &Connection) -> Result<bool, MsgsError> {
+        let stored: Option<String> = self
             .conn
             .query_row(
-                "SELECT value FROM metadata WHERE key = 'message_count'",
-                [],
+                "SELECT value FROM metadata WHERE key = ?1",
+                [FINGERPRINT_KEY],
                 |row| row.get(0),
             )
             .ok();
 
-        match cached_count {
-            Some(count_str) => {
-                let cached: i64 = count_str.parse().unwrap_or(0);
-                Ok(cached != source_count)
-            }
+        match stored {
+            Some(stored) => Ok(stored != source_fingerprint(chat_db)?),
             None => Ok(true),
         }
     }
@@ -125,7 +165,7 @@ impl TextCache {
     }
 
     /// Replace the rows of the cache with the text of each message in
-    /// `chat_db`, and store the count for the staleness check. The caller
+    /// `chat_db`, and store the source fingerprint for the staleness check. The caller
     /// holds the transaction.
     fn fill(cache: &Connection, chat_db: &Connection) -> Result<i64, MsgsError> {
         cache
@@ -187,8 +227,8 @@ impl TextCache {
 
         cache
             .execute(
-                "INSERT OR REPLACE INTO metadata (key, value) VALUES ('message_count', ?1)",
-                [count.to_string()],
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?1, ?2)",
+                [FINGERPRINT_KEY, &source_fingerprint(chat_db)?],
             )
             .map_err(|e| MsgsError::CacheError(format!("Cannot update metadata: {e}")))?;
 
@@ -260,42 +300,53 @@ mod tests {
     use crate::test_fixture::{apple_ns, ChatDbFixture, MessageSpec};
 
     #[test]
-    fn rebuild_stores_the_joined_row_count() {
+    fn rebuild_stores_the_source_fingerprint() {
         let fx = ChatDbFixture::new();
         let chat_a = fx.add_chat("a", None, 45);
-        let chat_b = fx.add_chat("b", None, 45);
-        // One message in two chats makes two joined rows; the count is of
-        // joined rows, and a message with no text still counts.
         fx.add_message(MessageSpec {
-            text: Some("shared".to_string()),
+            text: Some("one".to_string()),
             date: apple_ns(1_700_000_010, 0),
-            chats: vec![chat_a, chat_b],
-            ..MessageSpec::default()
-        });
-        fx.add_message(MessageSpec {
-            date: apple_ns(1_700_000_020, 0),
             chats: vec![chat_a],
             ..MessageSpec::default()
         });
         let db = fx.open_db();
-        let cache_path = fx.dir().join("text-cache.db");
-        let cache = TextCache::open_at(&cache_path).expect("open cache");
+        let cache = TextCache::open_at(&fx.dir().join("text-cache.db")).expect("open cache");
 
-        assert!(cache.needs_rebuild(3).expect("needs before"));
+        assert!(cache.needs_rebuild(db.connection()).expect("needs before"));
         cache.rebuild(db.connection()).expect("rebuild");
-        assert!(!cache.needs_rebuild(3).expect("needs after"));
-        assert!(cache.needs_rebuild(2).expect("needs with other count"));
+        assert!(!cache.needs_rebuild(db.connection()).expect("needs after"));
     }
 
-    /// The staleness check as `check_db_access` runs it: the message count
-    /// of `check_access` goes to `needs_rebuild`.
+    #[test]
+    fn a_rebuild_after_an_edit_stores_the_new_fingerprint() {
+        let (fx, _chat_a, _chat_b, lunch_a, _lunch_b) = two_chat_fixture();
+        let db = fx.open_db();
+        let cache = rebuilt_cache(&fx, &db);
+        fx.execute(
+            "UPDATE message SET text = 'lunch at one', date_edited = ?1 WHERE ROWID = ?2",
+            rusqlite::params![apple_ns(1_700_000_100, 0), lunch_a],
+        );
+        assert!(needs_rebuild_as_the_command_does(&cache, &db));
+        cache.rebuild(db.connection()).expect("second rebuild");
+        assert!(!needs_rebuild_as_the_command_does(&cache, &db));
+    }
+
+    #[test]
+    fn a_chat_db_without_date_edited_still_has_a_fingerprint() {
+        let old = Connection::open_in_memory().expect("open old chat.db");
+        old.execute_batch(
+            "CREATE TABLE message (ROWID INTEGER PRIMARY KEY, text TEXT);
+             CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);
+             INSERT INTO message (ROWID, text) VALUES (1, 'x');
+             INSERT INTO chat_message_join VALUES (1, 1);",
+        )
+        .expect("create old schema");
+        assert_eq!(source_fingerprint(&old).expect("fingerprint"), "1:1:0");
+    }
+
+    /// The staleness check as `check_db_access` runs it.
     fn needs_rebuild_as_the_command_does(cache: &TextCache, db: &crate::db::MessageDb) -> bool {
-        let count = db
-            .check_access()
-            .expect("check access")
-            .message_count
-            .unwrap_or(0);
-        cache.needs_rebuild(count).expect("needs rebuild")
+        cache.needs_rebuild(db.connection()).expect("needs rebuild")
     }
 
     fn rebuilt_cache(fx: &ChatDbFixture, db: &crate::db::MessageDb) -> TextCache {

@@ -32,7 +32,7 @@ pub fn check_db_access(state: State<'_, AppState>) -> Result<DbStatus, MsgsError
 
                 // Auto-initialize the text cache so search works immediately
                 let cache = TextCache::open()?;
-                if cache.needs_rebuild(status.message_count.unwrap_or(0))? {
+                if cache.needs_rebuild(db.connection())? {
                     cache.rebuild(db.connection())?;
                 }
 
