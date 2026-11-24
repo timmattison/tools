@@ -21,10 +21,10 @@
 //! [`vm_counters`], [`swap_usage`] and [`read_sysctl`] are public. One reader
 //! of each fact keeps the two tools in agreement.
 //!
-//! Nothing here is a pure function, so no unit test covers this module. The
-//! one test that reads this Mac runs the built binary and holds the shape of
-//! the output. Every rule that this module feeds is a pure function with tests
-//! of its own.
+//! Almost nothing here is a pure function, so only `kill_target` has a unit
+//! test in this module. The one test that reads this Mac runs the built binary
+//! and holds the shape of the output. Every rule that this module feeds is a
+//! pure function with tests of its own.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -38,6 +38,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use occ::{classify, gather_processes, Role, SessionRecord, SessionRegistry};
 
+use crate::check::{CheckCounters, CheckSource};
 use crate::duration::Span;
 use crate::machine::{Machine, MachineError, Signal};
 use crate::pid::{Pid, Uid};
@@ -59,6 +60,12 @@ const SWAP_USAGE: &str = "vm.swapusage";
 
 /// The call that gives the counters of the virtual memory system.
 const VM_STATISTICS: &str = "host_statistics64(HOST_VM_INFO64)";
+
+/// The call that gives the CPU ticks of all cores.
+const CPU_STATISTICS: &str = "host_statistics(HOST_CPU_LOAD_INFO)";
+
+/// The command that `faulte check` starts to learn the newest process number.
+const NEWEST_PID_PROGRAM: &str = "/usr/bin/true";
 
 /// The size of a page of memory that `faulte` takes when `sysconf` gives none.
 ///
@@ -232,13 +239,9 @@ impl Machine for Mac {
             Signal::Kill => (libc::SIGKILL, KILL),
         };
         let call = || format!("{KILL_CALL}({pid}, {name})");
-        // The kernel counts a PID as a signed number, and a PID of a Mac is
-        // far below the largest one. A number that does not fit is not a PID
-        // at all, and a negative first argument of `kill` names a group of
-        // processes.
-        let target = libc::pid_t::try_from(pid.get()).map_err(|_| MachineError::SignalFailed {
+        let target = kill_target(pid).map_err(|reason| MachineError::SignalFailed {
             call: call(),
-            reason: format!("the number {pid} is not a PID"),
+            reason,
         })?;
         // SAFETY: `kill` takes two numbers of the C language. It takes no
         // pointer and writes no memory of this process.
@@ -255,6 +258,32 @@ impl Machine for Mac {
     fn sleep(&self, how_long: Duration) {
         thread::sleep(how_long);
     }
+}
+
+/// Gives the first argument of `kill` for `pid`, or the reason why `pid` names
+/// no single process.
+///
+/// The kernel counts a PID as a signed number, and a PID of a Mac is far below
+/// the largest one. A number that does not fit is not a PID at all, and a
+/// negative first argument of `kill` names a group of processes. A first
+/// argument of 0 names each process of the process group of the caller. That
+/// group holds `faulte` itself, and it can hold the script or the hook that
+/// started `faulte`. A [`Pid`] holds 0 when it is built by default, thus this
+/// function refuses 0 before any signal goes out.
+///
+/// # Errors
+///
+/// Gives the reason as text, which becomes the reason of
+/// [`MachineError::SignalFailed`].
+fn kill_target(pid: Pid) -> Result<libc::pid_t, String> {
+    let target =
+        libc::pid_t::try_from(pid.get()).map_err(|_| format!("the number {pid} is not a PID"))?;
+    if target == 0 {
+        return Err(format!(
+            "the number {pid} names each process of the process group of faulte, not one process"
+        ));
+    }
+    Ok(target)
 }
 
 /// Reads the counters of the virtual memory system of this Mac, from
@@ -383,6 +412,89 @@ fn read_vm_statistics() -> Result<libc::vm_statistics64, MachineError> {
     Ok(unsafe { statistics.assume_init() })
 }
 
+/// Reads the CPU ticks of all cores of this Mac.
+fn read_cpu_load() -> Result<libc::host_cpu_load_info, MachineError> {
+    let mut count = libc::HOST_CPU_LOAD_INFO_COUNT;
+    // A structure of zeros is a valid value of its one array of counters.
+    let mut load = MaybeUninit::<libc::host_cpu_load_info>::zeroed();
+    #[expect(
+        deprecated,
+        reason = "libc asks for the mach2 crate, which this workspace does not take. The call is the one entrance to the CPU ticks of this host"
+    )]
+    // SAFETY: `mach_host_self` gives the port of this host, which is the port
+    // that `host_statistics` takes. The pointer names one whole structure of
+    // this function, and `count` states its size in the units that the call
+    // reads. The call writes no more than that.
+    let answer = unsafe {
+        libc::host_statistics(
+            libc::mach_host_self(),
+            libc::HOST_CPU_LOAD_INFO,
+            load.as_mut_ptr().cast::<libc::integer_t>(),
+            &mut count,
+        )
+    };
+    if answer != libc::KERN_SUCCESS {
+        return Err(MachineError::KernelRead {
+            call: CPU_STATISTICS.to_owned(),
+            reason: format!("the call ended with {answer}"),
+        });
+    }
+    // SAFETY: the call answered with success, and every field that it did not
+    // write holds the zero that this function wrote first.
+    Ok(unsafe { load.assume_init() })
+}
+
+/// Starts one process that does nothing, and gives its number.
+///
+/// macOS gives each new process the next number, and it has no call that gives
+/// the newest number. One short process in each sample costs nothing beside
+/// the hundreds of processes that this rate measures.
+fn newest_pid() -> Result<Pid, MachineError> {
+    let mut child = childenv::command(NEWEST_PID_PROGRAM)
+        .spawn()
+        .map_err(|error| MachineError::CommandDidNotStart {
+            program: NEWEST_PID_PROGRAM.to_owned(),
+            reason: error.to_string(),
+        })?;
+    let pid = child.id();
+    child
+        .wait()
+        .map_err(|error| MachineError::CommandDidNotStart {
+            program: NEWEST_PID_PROGRAM.to_owned(),
+            reason: error.to_string(),
+        })?;
+    Ok(Pid::new(pid))
+}
+
+impl CheckSource for Mac {
+    fn counters(&self) -> Result<CheckCounters, MachineError> {
+        // The process starts first, thus the read of the clock in `Sampler`
+        // comes directly after the reads of the kernel.
+        let newest_pid = newest_pid()?;
+        let statistics = read_vm_statistics()?;
+        // The kernel orders the array as `CPU_STATE_USER`, `CPU_STATE_SYSTEM`,
+        // `CPU_STATE_IDLE`, and `CPU_STATE_NICE`.
+        let [user_ticks, system_ticks, idle_ticks, nice_ticks] = read_cpu_load()?.cpu_ticks;
+        Ok(CheckCounters {
+            user_ticks,
+            nice_ticks,
+            system_ticks,
+            idle_ticks,
+            compressions: statistics.compressions,
+            decompressions: statistics.decompressions,
+            newest_pid,
+        })
+    }
+
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
+    fn sleep(&self, span: Duration) {
+        thread::sleep(span);
+    }
+}
+
 /// Reads the value of the `sysctl` `name`.
 ///
 /// `whyslow` reads `kern.memorystatus_vm_pressure_level` and `hw.ncpu` through
@@ -502,4 +614,30 @@ unsafe fn text_of(pointer: *const libc::c_char) -> Option<String> {
     // a zero byte.
     let text = unsafe { CStr::from_ptr(pointer) };
     Some(text.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::kill_target;
+    use crate::pid::Pid;
+
+    /// A usual PID is the first argument of `kill` as it stands.
+    #[test]
+    fn a_usual_pid_is_its_own_kill_target() {
+        assert_eq!(kill_target(Pid::new(45_646)), Ok(45_646));
+    }
+
+    /// A number that does not fit in a signed PID is no PID.
+    #[test]
+    fn a_pid_that_does_not_fit_names_no_process() {
+        assert!(kill_target(Pid::new(u32::MAX)).is_err());
+    }
+
+    /// `kill` reads 0 as each process of the process group of the caller. The
+    /// test calls the pure function and sends no signal.
+    #[test]
+    fn a_pid_of_zero_names_no_single_process() {
+        let reason = kill_target(Pid::new(0)).expect_err("0 names a group");
+        assert!(reason.contains("process group"), "reason was: {reason}");
+    }
 }
