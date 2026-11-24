@@ -333,8 +333,10 @@ impl AppState {
         let guard = lock(&self.db)?;
         let db = guard.as_ref().ok_or_else(not_initialized)?;
         let mut results = Vec::new();
+        // A hit whose message chat.db no longer holds is skipped. Each other
+        // error fails the search.
         for (message_id, hit_chat_id) in hits {
-            if let Ok(context) = db.get_message_with_context(message_id, hit_chat_id) {
+            if let Some(context) = db.get_message_with_context(message_id, hit_chat_id)? {
                 results.push(context);
             }
         }

@@ -532,7 +532,9 @@ impl MessageDb {
         )
     }
 
-    /// Get a message with surrounding context for search results.
+    /// Get a message with surrounding context for search results. Gives
+    /// `None` when the message is not in the chat, for example when chat.db
+    /// lost the message after the search index was built.
     ///
     /// # Errors
     ///
@@ -541,20 +543,16 @@ impl MessageDb {
         &self,
         message_id: i64,
         chat_id: i64,
-    ) -> Result<SearchResult, MsgsError> {
-        let target_row = self
-            .conn
-            .query_row(
-                &format!("{MESSAGE_SELECT} WHERE cmj.chat_id = ?1 AND m.ROWID = ?2"),
-                [chat_id, message_id],
-                MessageRow::from_row,
-            )
-            .map_err(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => MsgsError::DatabaseError(format!(
-                    "Message {message_id} is not in chat {chat_id}"
-                )),
-                other => MsgsError::from(other),
-            })?;
+    ) -> Result<Option<SearchResult>, MsgsError> {
+        let target_row = match self.conn.query_row(
+            &format!("{MESSAGE_SELECT} WHERE cmj.chat_id = ?1 AND m.ROWID = ?2"),
+            [chat_id, message_id],
+            MessageRow::from_row,
+        ) {
+            Ok(row) => row,
+            Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+            Err(other) => return Err(MsgsError::from(other)),
+        };
         let target = self.build_message(target_row)?;
         // The context orders by the date of the join row, as the list does.
         let target_date: i64 = self.conn.query_row(
@@ -588,12 +586,12 @@ impl MessageDb {
         // Get conversation info
         let conversation = self.get_conversation(chat_id)?;
 
-        Ok(SearchResult {
+        Ok(Some(SearchResult {
             message: target,
             conversation,
             context_before,
             context_after,
-        })
+        }))
     }
 }
 
@@ -903,7 +901,8 @@ mod tests {
         let result = fx
             .open_db()
             .get_message_with_context(ids[3], chat)
-            .expect("context");
+            .expect("context")
+            .expect("the message is in the chat");
         assert_eq!(result.message.message_id, ids[3]);
         let before: Vec<i64> = result.context_before.iter().map(|m| m.message_id).collect();
         let after: Vec<i64> = result.context_after.iter().map(|m| m.message_id).collect();
@@ -949,7 +948,8 @@ mod tests {
         let result = fx
             .open_db()
             .get_message_with_context(ids[4], chat)
-            .expect("context");
+            .expect("context")
+            .expect("the message is in the chat");
         assert_eq!(result.message.message_id, ids[4]);
         let before: Vec<i64> = result.context_before.iter().map(|m| m.message_id).collect();
         let after: Vec<i64> = result.context_after.iter().map(|m| m.message_id).collect();
@@ -958,7 +958,7 @@ mod tests {
     }
 
     #[test]
-    fn get_message_with_context_errors_when_the_message_is_not_in_the_chat() {
+    fn get_message_with_context_gives_none_when_the_message_is_not_in_the_chat() {
         let fx = ChatDbFixture::new();
         let chat = fx.add_chat("c", None, 45);
         let other = fx.add_chat("other", None, 45);
@@ -966,9 +966,9 @@ mod tests {
         let elsewhere = fx.add_message(text_message("there", 20, 0, &[other]));
 
         let result = fx.open_db().get_message_with_context(elsewhere, chat);
-        assert!(matches!(result, Err(MsgsError::DatabaseError(_))));
+        assert!(matches!(result, Ok(None)), "{result:?}");
         let missing = fx.open_db().get_message_with_context(9_999, chat);
-        assert!(matches!(missing, Err(MsgsError::DatabaseError(_))));
+        assert!(matches!(missing, Ok(None)), "{missing:?}");
     }
 
     #[test]
