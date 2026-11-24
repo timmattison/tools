@@ -157,12 +157,16 @@ impl TextCache {
     /// Replace the rows of the cache with the text of each message in
     /// `chat_db`, and store the source fingerprint for the staleness check. The caller
     /// holds the transaction.
+    ///
+    /// The fingerprint is read before the rows. A message that arrives during
+    /// the read then changes the fingerprint, and the next start rebuilds.
     fn fill(
         cache: &Connection,
         chat_db: &Connection,
         report_every: i64,
         progress: &mut dyn FnMut(i64, i64),
     ) -> Result<i64, MsgsError> {
+        let fingerprint = source_fingerprint(chat_db)?;
         cache
             .execute_batch("DELETE FROM message_text;")
             .map_err(|e| MsgsError::CacheError(format!("Cannot clear cache: {e}")))?;
@@ -241,7 +245,7 @@ impl TextCache {
         cache
             .execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?1, ?2)",
-                [FINGERPRINT_KEY, &source_fingerprint(chat_db)?],
+                [FINGERPRINT_KEY, &fingerprint],
             )
             .map_err(|e| MsgsError::CacheError(format!("Cannot update metadata: {e}")))?;
 
