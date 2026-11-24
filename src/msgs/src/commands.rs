@@ -42,6 +42,15 @@ pub fn get_messages(
 }
 
 #[tauri::command(async)]
+pub fn get_message_position(
+    state: State<'_, AppState>,
+    chat_id: i64,
+    message_id: i64,
+) -> Result<i64, MsgsError> {
+    state.message_position(chat_id, message_id)
+}
+
+#[tauri::command(async)]
 pub fn get_version() -> String {
     buildinfo::version_string!().to_string()
 }

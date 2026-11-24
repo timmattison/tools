@@ -260,6 +260,20 @@ impl AppState {
             .get_messages(chat_id, offset, limit)
     }
 
+    /// The position of a message in the newest-first order of `get_messages`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MsgsError` when the database is not open, the message is not
+    /// in the chat, or the query fails.
+    pub fn message_position(&self, chat_id: i64, message_id: i64) -> Result<i64, MsgsError> {
+        let guard = lock(&self.db)?;
+        guard
+            .as_ref()
+            .ok_or_else(not_initialized)?
+            .message_position(chat_id, message_id)
+    }
+
     /// Search the text of the messages.
     ///
     /// # Errors

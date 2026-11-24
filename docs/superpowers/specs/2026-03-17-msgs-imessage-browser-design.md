@@ -205,6 +205,7 @@ All commands return `Result<T, MsgsError>`.
 | `get_cache_status` | (none) | `CacheStatus` | State of the search index: `not_started`, `building` (`indexed`, `total`), `ready`, or `failed` (`error`) |
 | `list_conversations` | offset, limit, sort_by | `Vec<Conversation>` | Paginated conversation list, sorted by recent |
 | `get_messages` | chat_id, offset, limit | `Vec<Message>` | Paginated messages for a conversation |
+| `get_message_position` | chat_id, message_id | `i64` | The count of messages that come before the message in the newest-first order of `get_messages`, so `get_messages(chat_id, position, 1)` returns it. A click on a search result uses it to open the chat around the hit and highlight it. Fails when the message is not in the chat |
 | `search_messages` | query, chat_id (optional), offset, limit | `Vec<SearchResult>` | FTS5 search. The first version of the UI searches all chats |
 | `export_messages` | chat_id, start_message_id, end_message_id, include_attachments, export_path | `ExportResult` | Export the messages between two messages to JSON + attachment folder |
 | `get_version` | (none) | `String` | Version string with git hash and dirty status |

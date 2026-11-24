@@ -374,8 +374,26 @@ impl MessageDb {
     /// Returns `MsgsError::DatabaseError` when the message is not in the chat
     /// or the query fails.
     pub fn message_position(&self, chat_id: i64, message_id: i64) -> Result<i64, MsgsError> {
-        let _ = (chat_id, message_id);
-        Ok(0)
+        let (date, rowid): (i64, i64) = self
+            .conn
+            .query_row(
+                "SELECT message_date, message_id FROM chat_message_join
+                 WHERE chat_id = ?1 AND message_id = ?2",
+                [chat_id, message_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => MsgsError::DatabaseError(format!(
+                    "Message {message_id} is not in chat {chat_id}"
+                )),
+                other => MsgsError::from(other),
+            })?;
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM chat_message_join
+             WHERE chat_id = ?1 AND (message_date, message_id) > (?2, ?3)",
+            [chat_id, date, rowid],
+            |row| row.get(0),
+        )?)
     }
 
     fn get_attachments_for_message(
