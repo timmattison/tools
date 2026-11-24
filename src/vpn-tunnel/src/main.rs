@@ -607,4 +607,14 @@ mod tests {
             ))
         );
     }
+
+    #[test]
+    fn the_all_in_use_error_names_the_invalidate_command_with_the_quoted_item_path() {
+        let text = all_in_use_message(&two_in_use(), "op://Private/ProtonVPN WireGuard key");
+        assert!(
+            text.lines()
+                .any(|line| line == "  op-cache invalidate 'op://Private/ProtonVPN WireGuard key'"),
+            "the text names no invalidate command:\n{text}"
+        );
+    }
 }
