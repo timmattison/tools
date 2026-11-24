@@ -9,7 +9,7 @@
 //! pre-commit hook's and yours) never share a path. A private path is only half
 //! of it, though: a `cargo test` run *from* the pre-commit hook inherits the
 //! hook's git environment, which names the developer's real repository, so every
-//! spawn here goes through [`NoInheritedGitEnvironment`] as well.
+//! spawn here goes through [`childenv::fixture_command`] as well.
 //!
 //! The same hook exports who is committing, and an identity variable outranks
 //! the `user.name` [`TestRepo::init`] configures — so a fixture built under a
@@ -18,12 +18,14 @@
 //! off too, because the rule it applies is the `GIT_` prefix rather than a list
 //! of names.
 
+use std::collections::BTreeMap;
+use std::ffi::OsString;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use tempfile::TempDir;
 
-use crate::git::NoInheritedGitEnvironment;
 use crate::repo::Repo;
 use crate::scratch::Scratch;
 
@@ -34,11 +36,39 @@ use crate::scratch::Scratch;
 #[cfg(unix)]
 pub mod pty;
 
+/// A `git` on `PATH` that logs each call and can pause before a subcommand, so a
+/// test sees which git processes a replay starts. `gitscratch` sheds `GIT_*`, so
+/// only a `git` on `PATH` sees the calls.
+///
+/// Unix only, because the shim is a shell script.
+#[cfg(unix)]
+pub mod git_shim;
+
 /// The name every fixture commit is authored and committed under.
 const FIXTURE_USER_NAME: &str = "gitscratch test";
 
 /// The email every fixture commit is authored and committed under.
 const FIXTURE_USER_EMAIL: &str = "gitscratch@example.com";
+
+/// The `git config` settings that every fixture repository gets, as
+/// `(key, value)` pairs. Both fixture inits apply this one list.
+///
+/// - `user.email` and `user.name` give each fixture commit an author.
+/// - `commit.gpgsign` is `false` because a commit-signing config in the
+///   developer's global gitconfig would otherwise make every fixture commit
+///   prompt or fail.
+/// - `maintenance.auto` is `false` because each `git commit` starts a detached
+///   `git maintenance run --auto`. That process holds
+///   `.git/objects/maintenance.lock` for some milliseconds after the commit
+///   returns, so a test that reads the `.git` directory before and after a run
+///   sees a file come and go. `src/kitchen-sync/tests/production-git-env-isolation.rs`
+///   and `src/nwt/tests/support/mod.rs` carry the same fix for the same race.
+const FIXTURE_CONFIG: [(&str, &str); 4] = [
+    ("user.email", FIXTURE_USER_EMAIL),
+    ("user.name", FIXTURE_USER_NAME),
+    ("commit.gpgsign", "false"),
+    ("maintenance.auto", "false"),
+];
 
 /// A throwaway repository that deletes itself when dropped.
 pub struct TestRepo {
@@ -57,11 +87,9 @@ impl TestRepo {
         let repo = Self { dir };
 
         repo.git(&["init", "-q", "-b", "main"]);
-        repo.git(&["config", "user.email", FIXTURE_USER_EMAIL]);
-        repo.git(&["config", "user.name", FIXTURE_USER_NAME]);
-        // A commit-signing config in the developer's global gitconfig would
-        // otherwise make every fixture commit prompt or fail.
-        repo.git(&["config", "commit.gpgsign", "false"]);
+        for (key, value) in FIXTURE_CONFIG {
+            repo.git(&["config", key, value]);
+        }
 
         repo
     }
@@ -82,7 +110,7 @@ impl TestRepo {
     }
 
     fn git_in(&self, cwd: &Path, args: &[&str]) -> String {
-        let mut command = Command::new("git");
+        let mut command = childenv::fixture_command("git");
         let output = command
             .args(args)
             .current_dir(cwd)
@@ -93,7 +121,6 @@ impl TestRepo {
             // linked worktree's `.git` is a file, so a fixture that keeps it
             // cannot add one at all - it fails before the code under test is
             // ever reached.
-            .without_inherited_git_environment()
             .output()
             .unwrap_or_else(|e| panic!("failed to spawn git {args:?}: {e}"));
 
@@ -138,11 +165,8 @@ impl TestRepo {
     /// Panics if `git` cannot be spawned at all — most likely because it is not
     /// installed. A non-zero exit is not a panic; it is the answer.
     pub fn try_git(&self, args: &[&str], env: &[(&str, &str)]) -> Output {
-        let mut command = Command::new("git");
-        command
-            .args(args)
-            .current_dir(self.dir.path())
-            .without_inherited_git_environment();
+        let mut command = childenv::fixture_command("git");
+        command.args(args).current_dir(self.dir.path());
 
         // After the sweep, never before it - see the note above on why the
         // order decides whether a caller's `GIT_`-prefixed variable survives.
@@ -240,7 +264,7 @@ impl TestRepo {
     fn git_with_stdin(&self, args: &[&str], stdin: &[u8]) -> String {
         use std::io::Write as _;
 
-        let mut command = Command::new("git");
+        let mut command = childenv::fixture_command("git");
         let mut child = command
             .args(args)
             .current_dir(self.dir.path())
@@ -249,7 +273,6 @@ impl TestRepo {
             // `GIT_INDEX_FILE` writes its objects into the developer's real
             // repository instead of this one. `tests/isolation.rs` reaches this
             // spawn through `commit_file_named_by_bytes`.
-            .without_inherited_git_environment()
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -450,10 +473,9 @@ impl NotARepo {
 pub fn not_a_repository() -> NotARepo {
     let dir = TempDir::new().expect("create temp dir");
 
-    let probe = Command::new("git")
+    let probe = childenv::fixture_command("git")
         .args(["rev-parse", "--git-dir"])
         .current_dir(dir.path())
-        .without_inherited_git_environment()
         .output()
         .expect("failed to spawn git rev-parse --git-dir");
 
@@ -679,6 +701,62 @@ pub fn stacked_branches_repo() -> TestRepo {
     repo.commit_file("shared.txt", &stacked, "built on top");
 
     repo.checkout("main");
+    repo
+}
+
+/// A stacked branch whose parent landed in `main` as a squash merge.
+///
+/// `parent` rewrites one line of `shared.txt` in two commits. `main` holds
+/// them as one squash commit with a different patch. A plain rebase of either
+/// child onto `main` thus replays both commits of `parent` and stops on false
+/// conflicts in `shared.txt`.
+///
+/// `child` adds its own file, so `git rebase --onto main parent` from it is
+/// clean. `contested-child` rewrites the line of `stacked.txt` that `main` also
+/// rewrote, so `git rebase --onto main parent` from it stops once, in
+/// `stacked.txt` only.
+///
+/// # Panics
+///
+/// Panics if the repository cannot be built — git missing, or a command failing.
+pub fn squash_merged_parent_repo() -> TestRepo {
+    const CONTESTED_LINE: usize = 15;
+
+    let repo = TestRepo::init();
+    let base = numbered_lines(30);
+    repo.commit_files(&[("shared.txt", &base), ("stacked.txt", &base)], "base");
+
+    repo.branch("parent");
+    repo.commit_file(
+        "shared.txt",
+        &replace_line(&base, CONTESTED_LINE, "parent-v1"),
+        "parent rewrites line 15",
+    );
+    repo.commit_file(
+        "shared.txt",
+        &replace_line(&base, CONTESTED_LINE, "parent-v2"),
+        "parent rewrites line 15 again",
+    );
+
+    repo.branch("child");
+    repo.commit_file("child.txt", "child work\n", "child adds its own file");
+
+    repo.checkout("parent");
+    repo.branch("contested-child");
+    repo.commit_file(
+        "stacked.txt",
+        &replace_line(&base, CONTESTED_LINE, "contested-child-edit"),
+        "contested-child rewrites line 15 of stacked.txt",
+    );
+
+    repo.checkout("main");
+    repo.git(&["merge", "-q", "--squash", "parent"]);
+    repo.git(&["commit", "-q", "-m", "parent squashed"]);
+    repo.commit_file(
+        "stacked.txt",
+        &replace_line(&base, CONTESTED_LINE, "main-edit"),
+        "main rewrites line 15 of stacked.txt",
+    );
     repo
 }
 
@@ -1582,11 +1660,9 @@ impl DetachedGitDirRepo {
         // git directory is the only place that records which work tree it
         // belongs to.
         repo.git(&["config", "core.worktree", &work_tree_path]);
-        repo.git(&["config", "user.email", "gitscratch@example.com"]);
-        repo.git(&["config", "user.name", "gitscratch test"]);
-        // A commit-signing config in the developer's global gitconfig would
-        // otherwise make every fixture commit prompt or fail.
-        repo.git(&["config", "commit.gpgsign", "false"]);
+        for (key, value) in FIXTURE_CONFIG {
+            repo.git(&["config", key, value]);
+        }
 
         std::fs::write(
             repo.work_tree.join(DETACHED_TRACKED_FILE),
@@ -1601,7 +1677,7 @@ impl DetachedGitDirRepo {
 
     /// Run git in `cwd`, panicking on failure.
     fn run(&self, cwd: &Path, args: &[&str]) -> String {
-        let mut command = Command::new("git");
+        let mut command = childenv::fixture_command("git");
         let output = command
             .args(args)
             .current_dir(cwd)
@@ -1614,7 +1690,6 @@ impl DetachedGitDirRepo {
             // so the sweep is the whole of the guard against this fixture's own
             // `git add` landing in the developer's index. `tests/isolation.rs`
             // reaches this spawn.
-            .without_inherited_git_environment()
             .output()
             .unwrap_or_else(|e| panic!("failed to spawn git {args:?}: {e}"));
 
@@ -1834,7 +1909,9 @@ pub fn child_ran() {
 /// Panics if the path of the running test binary cannot be read, or if the
 /// child cannot be spawned.
 pub fn run_child_half(filter: &str, configure: impl FnOnce(&mut Command)) -> Result<(), String> {
-    let mut child = Command::new(std::env::current_exe().expect("path of the running test binary"));
+    let mut child = childenv::fixture_command(
+        std::env::current_exe().expect("path of the running test binary"),
+    );
     child.args([filter, "--exact", "--nocapture"]);
     configure(&mut child);
 
@@ -1858,6 +1935,194 @@ pub fn run_child_half(filter: &str, configure: impl FnOnce(&mut Command)) -> Res
     }
 
     Ok(())
+}
+
+/// What one path of a [`DecoyRepository`] snapshot holds.
+///
+/// A directory carries no content of its own. A file carries its bytes. A link
+/// carries the path that it names. The snapshot reads a link and never follows
+/// it, so a snapshot is a statement about the decoy alone.
+#[derive(Debug, Eq, PartialEq)]
+enum Held {
+    Directory,
+    File(Vec<u8>),
+    Link(PathBuf),
+}
+
+/// Every path under one directory, with what each path holds.
+///
+/// The map keys on the relative path and orders by it. A difference between
+/// two snapshots thus reads in path order on every run.
+type Snapshot = BTreeMap<String, Held>;
+
+/// A repository that a hostile environment points at, and that nothing may
+/// touch.
+///
+/// Take the snapshot with [`DecoyRepository::of`]. Run the tool under test with
+/// the variables of [`DecoyRepository::hostile_environment`], or call
+/// [`DecoyRepository::aim`] on the command. A tool that sheds the inherited
+/// `GIT_` variables never reads the decoy. A tool that does not shed them
+/// writes to it. [`DecoyRepository::assert_untouched`] then names each path that
+/// appeared, vanished, or changed.
+pub struct DecoyRepository {
+    repo: TestRepo,
+    before: Snapshot,
+}
+
+impl DecoyRepository {
+    /// Turn `repo` into a decoy and take the first snapshot of it.
+    ///
+    /// This call sets `maintenance.auto` to `false` in the repository. Without
+    /// that setting, `git commit` starts a detached `git maintenance run
+    /// --auto`. That process takes `.git/objects/maintenance.lock` and drops it
+    /// a few milliseconds later, so the lock file appears and vanishes on its
+    /// own and a snapshot sees a change that no tool made.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the configuration cannot be written or if a path of the
+    /// repository cannot be read.
+    pub fn of(repo: TestRepo) -> Self {
+        repo.git(&["config", "maintenance.auto", "false"]);
+        let before = snapshot(repo.path());
+
+        Self { repo, before }
+    }
+
+    /// The working directory of the decoy.
+    pub fn path(&self) -> &Path {
+        self.repo.path()
+    }
+
+    /// The four variables that aim git at the decoy.
+    ///
+    /// They are `GIT_DIR`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, and
+    /// `GIT_CONFIG_PARAMETERS`. A hook exports all four. The last one carries
+    /// the probe setting `gitscratch.envleakprobe=leaked`, with the single
+    /// quotes that git writes into that variable.
+    pub fn hostile_environment(&self) -> [(&'static str, OsString); 4] {
+        let git_dir = self.repo.path().join(".git");
+
+        [
+            ("GIT_DIR", git_dir.clone().into_os_string()),
+            ("GIT_INDEX_FILE", git_dir.join("index").into_os_string()),
+            (
+                "GIT_OBJECT_DIRECTORY",
+                git_dir.join("objects").into_os_string(),
+            ),
+            (
+                "GIT_CONFIG_PARAMETERS",
+                OsString::from("'gitscratch.envleakprobe=leaked'"),
+            ),
+        ]
+    }
+
+    /// Set the four hostile variables on `command`.
+    pub fn aim(&self, command: &mut Command) {
+        for (name, value) in self.hostile_environment() {
+            command.env(name, value);
+        }
+    }
+
+    /// Take a new snapshot and compare it with the first one.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the decoy differs from its first snapshot. The message names
+    /// `tool` and lists each path that appeared, vanished, or changed.
+    pub fn assert_untouched(&self, tool: &str) {
+        let after = snapshot(self.repo.path());
+        let lines = difference(&self.before, &after);
+
+        assert!(
+            lines.is_empty(),
+            "{tool} touched the decoy repository at {}:\n{}",
+            self.repo.path().display(),
+            lines.join("\n"),
+        );
+    }
+}
+
+/// How `after` differs from `before`, one line per path, in path order.
+///
+/// An empty list means the two snapshots are equal. Each line says whether a
+/// path appeared, vanished, or changed.
+fn difference(before: &Snapshot, after: &Snapshot) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    for (path, held) in after {
+        match before.get(path) {
+            None => lines.push(format!("appeared: {path}")),
+            Some(was) if was != held => lines.push(format!("changed:  {path}")),
+            Some(_) => {}
+        }
+    }
+
+    for path in before.keys() {
+        if !after.contains_key(path) {
+            lines.push(format!("vanished: {path}"));
+        }
+    }
+
+    lines.sort();
+    lines
+}
+
+/// The path of `path` under `root`, spelled with forward slashes.
+///
+/// # Panics
+///
+/// Panics if `path` does not lie under `root`.
+fn relative_name(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or_else(|e| panic!("{} lies under {}: {e}", path.display(), root.display()))
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Record every path under `dir` into `into`, and descend into each directory.
+///
+/// # Panics
+///
+/// Panics if a directory cannot be read or if a file cannot be read back.
+fn record(root: &Path, dir: &Path, into: &mut Snapshot) {
+    for entry in fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display())) {
+        let path = entry
+            .unwrap_or_else(|e| panic!("read an entry of {}: {e}", dir.display()))
+            .path();
+        let name = relative_name(root, &path);
+
+        // `symlink_metadata` reads the entry itself. `metadata` follows a link,
+        // so a link that points outside the decoy would put the bytes of
+        // another directory into the snapshot of this one.
+        let kind = fs::symlink_metadata(&path)
+            .unwrap_or_else(|e| panic!("stat {}: {e}", path.display()))
+            .file_type();
+
+        if kind.is_dir() {
+            into.insert(name, Held::Directory);
+            record(root, &path, into);
+        } else if kind.is_symlink() {
+            let target =
+                fs::read_link(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            into.insert(name, Held::Link(target));
+        } else {
+            let bytes = fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            into.insert(name, Held::File(bytes));
+        }
+    }
+}
+
+/// Every path under `root`, with the bytes of every file.
+///
+/// A count of refs or objects cannot show that a repository is untouched. A
+/// write that replaces one object with another keeps the count.
+fn snapshot(root: &Path) -> Snapshot {
+    let mut held = Snapshot::new();
+    record(root, root, &mut held);
+    held
 }
 
 #[cfg(test)]

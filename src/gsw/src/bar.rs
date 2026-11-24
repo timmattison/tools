@@ -19,7 +19,7 @@ pub fn render_bar(value: u32, max: u32, width: usize) -> String {
     let clamped = value.min(max);
     let ratio = f64::from(clamped) / f64::from(max);
     // Total eighth-cells to fill across the bar.
-    #[allow(
+    #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         reason = "ratio is clamped to [0,1], so the result fits in usize for any sensible width"

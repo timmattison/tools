@@ -95,7 +95,7 @@ fn main() -> ExitCode {
 /// itself.
 fn decide_color() {
     if termwindow::should_force_colors_here() {
-        #[allow(
+        #[expect(
             clippy::disallowed_methods,
             reason = "this process decides its own color output at startup; the ban covers the tests, which must go through testcolor::with_forced_ansi"
         )]
@@ -195,7 +195,12 @@ fn run(args: &Args, console: &Console) -> Result<Conflicts> {
     // already words as no note at all.
     let dirty_note = unworded.dirty_note(repo.uncommitted_files().unwrap_or_default());
 
-    let scratch = repo.scratch("HEAD")?;
+    // The display reports the three phases of the merge and no commit count,
+    // because git counts no steps in a merge.
+    // `Console` decides whether it shows (a terminal, no `-q`, the delay) and
+    // clears it before the note and the verdict, so this call site decides
+    // nothing.
+    let scratch = repo.scratch_with_progress("HEAD", console.progress(&action))?;
     // `--diff` asks for the capture. Without it, the merge captures nothing
     // and costs what it cost before the flag existed.
     let (conflicts, diffs) = if args.diff {

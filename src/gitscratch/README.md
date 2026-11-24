@@ -84,9 +84,33 @@ branch name that resolves to nothing is the other — because that sentence is t
 only part of the answer that says which refusal this was. `replay_rebase`
 refuses the same shape of state for the same reason.
 
+A rebase has two roles that `replay_rebase` gives to one revision. The upstream
+sets which commits git replays, which are the commits of `upstream..HEAD`. The
+new base sets where they land. `replay_rebase(upstream)` uses one revision for
+both, as `git rebase <upstream>` does. `replay_rebase_onto(new_base, upstream)`
+gives the two roles to two revisions, as `git rebase --onto <new_base>
+<upstream>` does:
+
+```rust
+// `feature` started on `parent`, and `parent` got a squash merge into `main`.
+// The squash commit holds the change of each commit of `parent` under a
+// different patch, so git does not drop them, and a plain replay onto `main`
+// stops on each one. With `parent` as the upstream, only the commits of
+// `feature` replay.
+scratch.check_out_detached("feature")?;
+let conflicts = scratch.replay_rebase_onto("main", "parent")?;
+```
+
+The arguments come in the order git takes them. The new base goes to git joined
+to its option, as `--onto=<new_base>`, so the value binds to the option whatever
+its first character is. The upstream goes after `--end-of-options`, as it does
+in the one-revision form. Both forms run the same loop, so they count stops,
+hunks and files by the same rules.
+
 A replay can also capture the **halt diff** of each halt: the text `git diff`
-shows at that halt in a real rebase or merge. Two entrances capture it, one
-beside each plain entrance:
+shows at that halt in a real rebase or merge. Three entrances capture it, one
+beside each plain entrance — `replay_rebase_with_diffs`,
+`replay_rebase_onto_with_diffs` and `replay_merge_with_diffs`:
 
 ```rust
 let (conflicts, diffs) = scratch.replay_rebase_with_diffs("main")?;
@@ -192,7 +216,9 @@ A `compile_fail` doc-test holds the derive out — see **Testing** below.
 `Scratch` is the only way to get a worktree, and `Repo::scratch` is the only way
 to get a `Scratch`. A `Scratch` answers the operations it names —
 `check_out_detached`, `replay_rebase`, `replay_rebase_with_diffs`,
-`replay_merge`, `replay_merge_with_diffs`, `head_tree`, `commit_tree` — and
+`replay_rebase_onto`, `replay_rebase_onto_with_diffs`, `replay_merge`,
+`replay_merge_with_diffs`, `head_tree`, `commit_tree`,
+`apply_patch`, `apply_patch_three_way`, `restore`, `bisect_all`, `bisect_steps` — and
 each of them builds its own git call under the whole safety configuration. So there is no way to get a worktree from here without also
 getting the hardening — nor without first having established that the directory
 is a repository at all, which is the pre-flight's job below.
@@ -306,6 +332,29 @@ it: `run` trims and decodes, the list readers split on NUL, and `path` removes
 a newline. `Report::render_diffs` decodes the diff at print time, and it
 escapes the diff, so no escape sequence in it gets to the terminal.
 
+A caller that wants progress builds its scratch worktree with
+`Repo::scratch_with_progress`. The observer gets one report at the start of each
+phase. A rebase also sends the position of the commit that git replays now.
+`Repo::scratch` sends no reports, so `gsw`, `grist`, and `bibibi` show no
+progress:
+
+```rust
+use gitscratch::{ReplayObserver, ReplayProgress, Repo};
+
+struct Print;
+
+impl ReplayObserver for Print {
+    // The call must return fast, because the replay waits for it.
+    fn report(&self, progress: ReplayProgress) {
+        eprintln!("{progress:?}");
+    }
+}
+
+let scratch = Repo::open(repo_path)?.scratch_with_progress("main", Print)?;
+```
+
+A report never changes the answer of a replay. The observer only listens.
+
 ## The pre-flight
 
 Not every question is worth a worktree. `Repo` answers the cheap ones first, so
@@ -318,9 +367,24 @@ use gitscratch::Repo;
 let repo = Repo::open(cwd)?;           // any directory *inside* one; errors if there is none
 let onto = repo.resolve("main")?;      // errors naming the revision that did not resolve
 let dirty = repo.uncommitted_files()?; // an `Uncommitted`: staged + unstaged + untracked, per file
+let patch = repo.patch_of(&onto)?;     // the change of one commit, as bytes for `git apply`
 
 let scratch = repo.scratch(&onto)?;    // the only way to a worktree
 ```
+
+`Repo::patch_of` reads the change of one commit as a patch that `git apply`
+accepts. It uses `git diff-tree`, not `git diff`, because `git diff` obeys
+`color.ui` and `diff.noprefix` and the patch then breaks.
+
+`Repo::subject` reads the subject line of one commit, so a progress line can
+name the commit it is about.
+
+`Repo::parents` lists the parents of one commit, so a caller can tell a root
+commit (none) and a merge commit (two or more) from a plain one.
+
+`Repo::is_ancestor` tells whether one commit is reachable from another. It is
+also true for the same commit, so a caller that needs a strict ancestor checks
+the equality first.
 
 `Repo::resolve` puts the question to git in the one form git can refuse. A bare
 `git rev-parse <revision>` prints an argument it cannot place straight back and
@@ -739,10 +803,29 @@ above and exits `101`: a fourth code no README publishes, out of the one kind of
 tool whose whole contract is that its exit code is the answer. The words are
 what a broken pipe costs, never the answer.
 
-The width of the terminal stays with the tool, which is what `render_within`
-above already says: measuring a terminal is a decision about one program's
-output. `grist` settles it — it is built on this crate, prints no breakdown at
-all, and must not carry a terminal-size dependency it would never read.
+`Console::progress` gives the observer that draws the progress display. It sits
+behind the cargo feature `progress`, so a tool that does not draw takes no
+code for it. `grind` and `grime` turn the feature on. A tool passes the result
+to `Repo::scratch_with_progress`, and the display shows the phases and, for a
+rebase, a bar of commit N of M.
+
+The display writes to stderr only. It shows only when stderr is a terminal and
+`-q` is absent. It waits for `PROGRESS_DELAY`, which is 500 ms, so a fast run
+writes no byte of it. `Console::answer` uses that delay.
+`Console::answer_with_progress_delay` takes the delay as an argument, so a test
+does not wait for it.
+
+Each write of the console clears the display first. So the note, the verdict,
+and the error line never hold a part of it.
+
+A failure of the display costs the display. It never costs the verdict or the
+exit code, the same rule as for each other write of the console.
+
+The width of the terminal for the breakdown stays with the tool, which is what
+`render_within` above already says: measuring a terminal is a decision about one
+program's output. The progress display measures the terminal itself, but only
+behind the `progress` feature. `grist` does not turn that feature on, so it
+still carries no dependency on the terminal size.
 
 ## Three ways a rebase halts, and why the third one matters
 
@@ -824,7 +907,7 @@ because it quietly discarded the work.
 | `core.hooksPath` → an empty directory | No hook fires. An empty *value* is not "hooks off" — git joins the configured directory onto the hook name, so an empty one resolves `pre-commit` to `/pre-commit`, at the root of the file system, which is one hooks directory for every repository on the machine — so the path is a real, empty, temporary directory, validated once at creation, and `Git::new` refuses the empty value outright. `Repo`'s read-only pre-flight points it at a relative path this crate never creates instead: reads fire no hooks, and rejecting a typo must not be able to fail for want of a writable temp directory. |
 | `core.fsmonitor=false` | The one program git runs that the row above cannot take away. The filesystem monitor is executed directly rather than resolved through the hooks directory, so the classic `core.fsmonitor=.git/hooks/fsmonitor-watchman` survives the redirect verbatim and every index refresh a replay performs would run it — in the developer's repository and in the scratch worktree both. `core.fsmonitor=true` costs more than that: git starts a daemon that watches a temporary directory the replay is about to delete. A freshly created scratch worktree gains nothing from a monitor, so the pin costs the replay nothing. Read from git's settings resolution rather than executed; what the test executes is the pin. |
 | `GIT_EDITOR`, `GIT_SEQUENCE_EDITOR`, `GIT_TERMINAL_PROMPT` | A halted rebase would otherwise open an editor and hang forever. |
-| The inherited git environment, shed | The guard that decides *which* repository every other row protects, and who its commits belong to. Git obeys `GIT_DIR`, `GIT_WORK_TREE` and `GIT_INDEX_FILE` before it obeys the directory it was pointed at, and it exports them into every hook it runs — `GIT_INDEX_FILE` often the *relative* `.git/index`, which silently re-anchors on whichever directory each command runs in. It exports `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL`/`GIT_AUTHOR_DATE` and their committer siblings too, and an identity variable outranks every config source, `-c` included. Run from a `pre-push` gate, `git bisect run`, `rebase --exec`, or `cargo test` from `.husky/pre-commit`, an unscrubbed simulation aims itself at the hook's repository and stamps the developer's own name on what it commits there. The rule is the `GIT_` prefix and never a list of names: a list strips nothing new the day git adds a variable, and it goes on returning the same clean-looking answer as a list that works — which is how `GIT_CONFIG_PARAMETERS`, a variable git exports to every hook that injects arbitrary configuration, walked through the fifteen-name list this used to carry. Shed at the single place a git process is created, at every fixture spawn, and — via the public `shed_inherited_git_environment` and `NoInheritedGitEnvironment` — at the consumers' own fixture spawns, so the rule cannot drift between them. A consumer's *production* spawn takes `shed_inherited_git_environment_keeping_user_intent` instead, which sheds the same prefix and keeps the six names of `USER_INTENT_GIT_ENVIRONMENT` — the two configuration files and the four that decide how git authenticates — because a person states each of those on purpose. A replay keeps the blanket rule, because it has no user whose intent to honor. |
+| The inherited git environment, shed | The guard that decides *which* repository every other row protects, and who its commits belong to. Git obeys `GIT_DIR`, `GIT_WORK_TREE` and `GIT_INDEX_FILE` before it obeys the directory it was pointed at, and it exports them into every hook it runs — `GIT_INDEX_FILE` often the *relative* `.git/index`, which silently re-anchors on whichever directory each command runs in. It exports `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL`/`GIT_AUTHOR_DATE` and their committer siblings too, and an identity variable outranks every config source, `-c` included. Run from a `pre-push` gate, `git bisect run`, `rebase --exec`, or `cargo test` from `.husky/pre-commit`, an unscrubbed simulation aims itself at the hook's repository and stamps the developer's own name on what it commits there. The rule is the `GIT_` prefix and never a list of names: a list strips nothing new the day git adds a variable, and it goes on returning the same clean-looking answer as a list that works — which is how `GIT_CONFIG_PARAMETERS`, a variable git exports to every hook that injects arbitrary configuration, walked through the fifteen-name list this used to carry. Shed at the single place a git process is created and at every fixture spawn through `childenv::fixture_command`, and the consumers' spawns take the same crate, so the rule cannot drift between them. A consumer's *production* spawn takes `childenv::command` instead, which sheds the same prefix and keeps the six names of `childenv::USER_INTENT_GIT_ENVIRONMENT` — the two configuration files and the four that decide how git authenticates — because a person states each of those on purpose. A replay keeps the blanket rule, because it has no user whose intent to honor. |
 | `commit.gpgsign=false` | A signing config in the developer's global gitconfig would otherwise prompt or fail mid-replay. |
 | `gpg.format=openpgp` | Belt to `commit.gpgsign`'s braces. `gpg.format = ssh` is a different signing backend entirely, with its own key and helper program; pinning the format back to git's default means that configuration is never consulted, so signing cannot be attempted through it. |
 | `gc.auto=0` | Simulated commits are loose and nothing references them yet; an opportunistic gc could collect one out from under the run. This covers the gc task and nothing else, which is narrower than it reads: the switch on the rest of automatic maintenance is the row below. |
@@ -858,6 +941,17 @@ worktree on an unmounted drive or a sleeping network mount. A dry run must not
 cost the developer a worktree.
 
 ## Testing
+
+`tests/replay-progress.rs` holds the reports of a replay. A merge reports its
+three phases in order and no commit position. A halt at 3 of 5 reports that
+position. A rebase of 30 commits ends at 30/30. No test asserts how many
+reports arrive between the first and the last, because the poll depends on
+timing.
+
+`tests/console-progress.rs` holds the display on a pseudo-terminal of a size
+that the test chose, with a delay of zero. The bar shows, and the rows of the
+verdict, the note, and the error hold no part of it. A run with `-q`, a delay
+of one hour, or stderr on a pipe writes no byte of the display.
 
 `tests/safety.rs` pins nine properties across eight tests, each verified by
 mutation — break the guard, watch that specific test fail, put it back. The two
@@ -1533,10 +1627,13 @@ stop count that disagree about whether anything conflicted, in both directions:
 stops with no files would otherwise render the clean line and swallow them, and
 files with no stops would report a replay that never halted.
 
-`tests/diffs.rs` covers the halt diffs that the two capturing entrances give
+`tests/diffs.rs` covers the halt diffs that the three capturing entrances give
 beside the counts. A rebase replay of `contested_region_repo()` gives three
 halt diffs in stop order. Each one names its own stopped commit and holds the
 markers of its own region, and the counts equal those of the plain entrance.
+An `--onto` replay of `squash_merged_parent_repo()` from `contested-child` gives
+one halt diff that names `stacked.txt` only, and its counts equal those of the
+plain `--onto` entrance.
 The test on the markers is the one that fails when the capture moves below
 `git add -A`, because after that line `git diff` shows nothing. Each halt diff
 of `equal_hunks_unequal_stops_repo()` names the files the breakdown counted at
@@ -1647,7 +1744,9 @@ it. `Pty::give_as_controlling_terminal` makes the terminal the controlling
 terminal of a child. A tool that measures `/dev/tty` then measures a known
 window, and not the window of whoever typed `cargo test`.
 `Pty::run_with_stdout_on_terminal` also puts standard output of the child on
-the terminal, and gives back a `std::process::Output`. So a test of `grind` or
+the terminal, and gives back a `std::process::Output`.
+`Pty::run_with_output_on_terminal` puts standard error on the terminal too, so a
+test sees the display that a person sees. So a test of `grind` or
 `grime` sees the color that a person at a terminal sees. Output processing is
 off, so the bytes come back as the child wrote them. The master end is read on
 a thread of its own, so output of any size comes back whole. The helper lives
@@ -1657,10 +1756,21 @@ company. `tests/pty.rs` holds the helper to those claims.
 standard streams alone. It is a target of its own, because a second test in its
 process can open a terminal before the close-on-exec flag is set.
 
+It also holds `gitscratch::testing::git_shim`, a `git` that goes first on
+`PATH`. The shim logs each call, one record for each call and one field for each
+argument, and then runs the real git. `GitShim::calls` reads the log back, and
+`GitShim::path_variable` gives the `PATH` for a child process. The shim can
+also pause for one second before a subcommand that a test names, so a display
+that waits for its delay has time to show. The terminal tests of `grind` and
+`grime` use that pause. It exists because gitscratch sheds
+every `GIT_*` variable from its children, so `GIT_TRACE` logs nothing. Only a
+`git` on `PATH` sees which git processes a replay starts.
+
 | Fixture | Shape |
 | --- | --- |
 | `contested_region_repo()` | `iterated` rewrites one region across three commits, `single` touches it once — the asymmetry that makes a stop count worth printing. |
 | `stacked_branches_repo()` | `built-on-top` branched from `groundwork`, not from main. |
+| `squash_merged_parent_repo()` | `child` and `contested-child` branched from `parent`, and `parent` got a squash merge into `main`. `parent` rewrote one line of `shared.txt` in two commits, and the squash commit holds them under a different patch, so a plain rebase of either child onto `main` stops on each of them. `child` adds its own file, so `--onto main parent` replays it clean. `contested-child` rewrites the line of `stacked.txt` that `main` also rewrote, so `--onto main parent` stops once, in `stacked.txt` only. |
 | `equal_hunks_unequal_stops_repo()` | Two branches making the same two edits, packaged as one commit and as two, so they tie on hunks and differ on stops. |
 | `independent_branches_repo()` | Two branches that each add a file of their own, so nothing can conflict. |
 | `conflicting_repo()` | Two branches rewriting the same line, so a replay is guaranteed to conflict and resolve. |
@@ -1691,3 +1801,5 @@ gitscratch = { workspace = true, features = ["testing"] }
   and by how much?
 - [`grime`](../grime/README.md) — would merging this branch into HEAD conflict,
   and by how much?
+- [`bibibi`](../../README.md#bibibi-bye-bye-bye) — which commit caused this
+  regression, found with a test from a later commit?

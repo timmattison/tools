@@ -30,7 +30,6 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 use shellquote::shell_quote;
 
@@ -257,7 +256,7 @@ pub fn build_check_plan(target: &Path, config_root: Option<&Path>) -> Option<Vec
 /// counts as a failure, not as a reason to abandon the check.
 fn stream_check(cmd: &str, cwd: &Path) -> bool {
     eprint!("\n  $ {cmd}\n");
-    Command::new(SHELL)
+    childenv::command(SHELL)
         .arg(SHELL_COMMAND_FLAG)
         .arg(cmd)
         // Inherited stdio is the point: the check's own output is the progress
@@ -738,7 +737,6 @@ mod tests {
     #[test]
     fn a_config_root_with_a_space_and_a_quote_runs_under_sh_c() {
         use std::os::unix::fs::PermissionsExt;
-        use std::process::Command;
 
         let holder = fixture(&[]);
         let config_root = holder.path().join("wei'rd $config root");
@@ -752,7 +750,7 @@ mod tests {
             build_check_plan(target.path(), Some(&config_root)).expect("override yields a plan");
         assert_eq!(plan, vec![quoted(&script)]);
 
-        let status = Command::new("sh")
+        let status = childenv::fixture_command("sh")
             .arg("-c")
             .arg(&plan[0])
             .current_dir(target.path())

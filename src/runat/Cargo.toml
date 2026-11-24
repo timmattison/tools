@@ -8,7 +8,9 @@ name = "runat"
 path = "src/main.rs"
 
 [dependencies]
+altscreen = { workspace = true, features = ["ratatui"] }
 buildinfo.workspace = true
+childenv.workspace = true
 chrono.workspace = true
 clap.workspace = true
 crossterm.workspace = true

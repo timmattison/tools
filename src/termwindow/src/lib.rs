@@ -187,15 +187,15 @@ const CLICOLOR_VARIABLE: &str = "CLICOLOR";
 /// itself. It also wins over `CLICOLOR_FORCE`.
 ///
 /// The call stays in the tool, with
-/// `#[allow(clippy::disallowed_methods, reason = "...")]` at the call site. The
+/// `#[expect(clippy::disallowed_methods, reason = "...")]` at the call site. The
 /// workspace bans `set_override`, because a test that calls it changes the
 /// color of each test in its process. A tool that decides its own color at
-/// startup is the one legitimate caller, and the allow says so in the file of
+/// startup is the one legitimate caller, and the expectation says so in the file of
 /// that tool. Only the decision stands here.
 ///
 /// ```ignore
 /// if termwindow::should_force_colors_here() {
-///     #[allow(clippy::disallowed_methods, reason = "...")]
+///     #[expect(clippy::disallowed_methods, reason = "...")]
 ///     colored::control::set_override(true);
 /// }
 /// ```

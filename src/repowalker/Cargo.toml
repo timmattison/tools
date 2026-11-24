@@ -4,11 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 
 [dependencies]
-# For `shed_inherited_git_environment`. This crate asks git which repository a
-# directory belongs to, and an inherited `GIT_DIR` answers with a different
-# repository. Which variables carry that danger is knowledge that lives in
-# gitscratch rather than being copied here to drift.
-gitscratch.workspace = true
+childenv.workspace = true
 ignore.workspace = true
 walkdir.workspace = true
 

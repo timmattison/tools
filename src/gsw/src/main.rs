@@ -26,6 +26,8 @@ mod git;
 mod issue;
 /// Cutting a child process's byte chunks into lines that are safe to paint.
 mod lines;
+/// The pull-request indicator of the watch-mode header.
+mod pull;
 mod push;
 /// Deciding whether the person who reads this screen sits at this machine.
 mod remote;
@@ -34,6 +36,9 @@ mod repo;
 /// The shell that runs a command the user supplies, for every key that runs one.
 mod shell;
 mod snapshot;
+/// Putting the number of the pull request of the branch on the tab title, through a
+/// command the user supplies, for the `T` key.
+mod tab;
 /// Shared git fixtures for the unit tests. Test-only: it shells out to `git` to
 /// build throwaway repositories, which the shipped binary never does.
 #[cfg(test)]
@@ -52,16 +57,41 @@ mod worktrees;
     about = "Compact git status watch — event-driven, self-refreshing branch-state view",
     long_about = "Prints a compact, color-coded view of the current branch's state: \
                   commits ahead of (and behind) the base branch, a recent-commit log, and a \
-                  per-file list showing a magnitude bar, +/- counts, and recency. On a TTY it \
+                  per-file list showing a magnitude bar, +/- counts, and recency. In the log, \
+                  a blue ▎ in the left column marks each commit that is only on the current \
+                  branch: the commits that the ahead count counts. The mark is a glyph, so it \
+                  stays visible with no color. On a TTY it \
                   runs as a self-refreshing watch that repaints on filesystem changes and \
                   re-walks the repository every --refresh-interval seconds, with the \
                   separator under the header showing how stale the screen is and how long \
                   until the next refresh; with `--one-shot` (or when its output is piped) \
                   it renders once and exits.\n\n\
+                  In watch mode, the right end of the header row shows whether the branch on \
+                  the screen has an open pull request on GitHub. PR #690 in bold green means \
+                  one open pull request, and PR #690 +1 means two or more: the lowest number, \
+                  then the count of the others. A draft pull request counts as open. no PR, \
+                  dim, means none. PR ?, dim, means that no answer came yet or that the last \
+                  lookup failed. The pull request is the one whose head is the branch that \
+                  branch.<name>.merge names, in the repository of the remote of the branch. A \
+                  branch that tracks nothing asks about its own name, in the remote that p \
+                  pushes a new branch to. gsw asks GitHub through gh api, with REST and an \
+                  ETag, so an answer that did not change costs nothing against the rate limit. \
+                  It asks after the first frame, at each timed refresh, when r refreshes, and \
+                  when the branch or the worktree on the screen changes. It never asks because \
+                  of a filesystem event. One lookup runs at a time, for at most 10 seconds. A \
+                  rate limit shows PR ? and stops the lookups until GitHub lets them start \
+                  again. The name of the branch outranks the indicator: in a pane too narrow \
+                  for both, the indicator goes. There is no indicator in one-shot mode, with \
+                  --no-pr, without gh on PATH, on a detached HEAD, and for a remote that is \
+                  not on GitHub. GH_HOST names one more GitHub host.\n\n\
                   Watch-mode keys: q or Ctrl-C quits, r refreshes now, p pushes the current \
                   branch after a confirmation that names what it will do — a branch not yet on \
-                  the remote is confirmed as creating one — G opens the issue the branch \
-                  names, R rebases the branch onto the base and pushes it, M merges the base \
+                  the remote is confirmed as creating one — P does the same push with \
+                  --no-verify, so the pre-push hook of the repository does not run, G opens the \
+                  pull request of the \
+                  branch, or the issue the branch names when there is no pull request, T puts \
+                  the number of the pull request of the branch on the zellij tab title, R \
+                  rebases the branch onto the base and pushes it, M merges the base \
                   into the branch and pushes it, m measures a rebase and a merge against the \
                   default branch, and the arrow keys move the watch between the worktrees of \
                   the repository. \
@@ -71,20 +101,49 @@ mod worktrees;
                   you state on purpose, and the check that reads the branch gets none either. \
                   So a gsw started from inside a git hook still pushes the repository on the \
                   screen. p never force-pushes.\n\n\
-                  G runs one command in your own interactive shell, with the work tree as its \
-                  current directory. GSW_ISSUE_COMMAND holds that command and it defaults to \
-                  `ggs`; set it to an empty string to turn the key off. The value is a whole \
-                  command line, so it can carry arguments — `gh issue view --web` works. gsw \
-                  asks your shell about the first word and runs the whole line, so the first \
-                  word is what has to exist and the shell reads the rest the way it reads \
-                  arguments at a prompt. The command is usually a shell function, so gsw asks \
-                  your shell once at startup whether it exists. Where it does not, G does \
-                  nothing and says nothing, the way an unbound key does — and a function you \
-                  add to your rc file after gsw started needs a restart. A run that works opens a browser and costs the frame no row; a run \
-                  that fails puts the last line it wrote under the frame, where it waits for a \
-                  key. A run gets a minute: after that gsw stops waiting, says so under the \
-                  frame, and gives the key back — the command itself keeps running, because it \
-                  is yours, and it can be the process that holds the browser open.\n\n\
+                  G runs up to two commands in your own interactive shell, with the work tree \
+                  as their current directory. GSW_PR_COMMAND holds the command that runs \
+                  first, and it defaults to `ggsp`. GSW_ISSUE_COMMAND holds the command that \
+                  runs only when the first one fails, and it defaults to `ggs`. So G opens the \
+                  pull request of the branch, and the issue when the branch has no pull \
+                  request. Set a variable to an empty string to remove its step, and set both \
+                  to turn the key off. Each value is a whole command line, so it can carry \
+                  arguments — `gh issue view --web` works. gsw asks your shell about the first \
+                  word and runs the whole line, so the first word is what has to exist and the \
+                  shell reads the rest the way it reads arguments at a prompt. Each command is \
+                  usually a shell function, so gsw asks your shell once at startup whether \
+                  each one exists. Where only one exists, G runs that one alone. Where neither \
+                  exists, G does nothing and says nothing, the way an unbound key does — and a \
+                  function you add to your rc file after gsw started needs a restart. A press \
+                  that opens a page costs the frame no row, and the failure of the first step \
+                  shows nothing. A press where both steps fail puts the last line of the issue \
+                  command under the frame, where it waits for a key. A press gets a minute, \
+                  and its two steps share it: after that gsw stops waiting, says so under the \
+                  frame, starts no second step, and gives the key back — the command itself \
+                  keeps running, because it is yours, and it can be the process that holds \
+                  the browser open.\n\n\
+                  T runs one command in your own interactive shell, with the worktree on the \
+                  screen as its current directory. GSW_TAB_COMMAND holds the command, and it \
+                  defaults to `stp`: a shell function that puts the number of the open pull \
+                  request of the branch at the front of the zellij tab title, and keeps the \
+                  rest of the title. This repository ships no `stp`. The value is a whole \
+                  command line, as the value of GSW_ISSUE_COMMAND is, and gsw adds no argument \
+                  to it. Set it to an empty string to turn the key off, and gsw then asks no \
+                  shell about it. Where the command does not exist, T does nothing and says \
+                  nothing, the way G does. T asks nothing first, because a tab title is not the \
+                  repository, and it asks for no second press on a remote shell, because the \
+                  rename goes through the zellij server. One run at a time: T does nothing \
+                  while a run of T is in flight, and it acts while a push, R, or M runs, as G \
+                  does. A run that worked puts the last line the command wrote under the frame, \
+                  where it fades after a minute, and a run that wrote nothing posts nothing. A \
+                  run that failed puts its last line under the frame in red, where it waits for \
+                  a key. A press gets a minute: after that gsw stops waiting, says so under the \
+                  frame, and gives the key back. Two limits apply. T works in zellij only: in \
+                  tmux and in a bare terminal the title changes through an escape sequence on \
+                  the standard output of the command, and gsw reads that output and does not \
+                  forward the sequence. And the worktree on the screen gives the number, but \
+                  the tab is always the tab of the gsw pane: after Left or Right moves the \
+                  watch, T puts the number of that worktree on the tab of gsw.\n\n\
                   m measures what grind and grime measure, in this process: a rebase of HEAD \
                   onto the default branch (main, else master) and a merge of that branch into \
                   HEAD. The bottom row says `Running grind and grime against main…` until the \
@@ -120,7 +179,7 @@ mod worktrees;
                   neither command fetches, so the base is your local branch. While the command \
                   runs, its output shows live in the window under the frame that a push uses, \
                   and the notice counts the time. The run has no deadline, because a pre-push \
-                  hook of this workspace runs for minutes. While it runs, p, R, M, and m do \
+                  hook of this workspace runs for minutes. While it runs, p, P, R, M, and m do \
                   nothing, and G still acts. A run that worked leaves the sentence of gsw \
                   and, under it, the last line the command wrote, because grp and gmp report a \
                   push they skipped only there. A run that failed leaves the last lines of the \
@@ -139,9 +198,21 @@ mod worktrees;
                   Up goes to the home worktree, where gsw started. Left and Right go to the \
                   previous and the next worktree in path order, which is the order of cwt, and \
                   they wrap. Down opens a list of the worktrees: Up and Down move the cursor, \
-                  Enter goes to the worktree under it, and Esc or q closes the list. While the \
+                  Page Up and Page Down move it one page, Enter goes to the worktree under it, \
+                  and Esc or q closes the list. A page is one row less than the rows of the \
+                  list that the pane shows, so the row at the edge stays in view. While the \
                   repository has more than one worktree, the header shows the position of the \
-                  worktree and marks the home worktree with ⌂. A switch walks the new worktree \
+                  worktree and marks the home worktree with ⌂. The name in the header is red \
+                  while it is not the branch where gsw started, and bold again when it is. A \
+                  rebase of that branch keeps it bold. While the name is red, two presses of \
+                  Esc go back to that branch. The first Esc shows Hit Escape again to go back \
+                  to <branch> for 3 seconds. An Esc in that time goes to the home worktree when \
+                  it is on the branch, or else to the worktree that is on it. When no worktree \
+                  is on it, gsw goes home and runs git switch --no-guess <branch> there, with \
+                  its output live under the frame. gsw never forces the switch: when git \
+                  refuses, the last lines of git stay in red until a key. Another key between the \
+                  two presses makes the next Esc a first press, and so does another line that \
+                  takes the place of the hint under the frame. A switch walks the new worktree \
                   at once and removes every line under the frame. The arrow keys do nothing \
                   while a push runs or while the push question is up. When the worktree on the \
                   screen is removed, gsw goes back to the home worktree. gsw does not change the \
@@ -158,6 +229,11 @@ struct Cli {
     /// is piped/captured (not a TTY) always falls back to this single render.
     #[arg(long)]
     one_shot: bool,
+
+    /// Turn the pull-request indicator of watch mode off. gsw then shows no
+    /// indicator and starts no `gh`. One-shot mode never shows the indicator.
+    #[arg(long)]
+    no_pr: bool,
 
     /// Strip ANSI color codes from output.
     #[arg(long)]
@@ -280,6 +356,22 @@ fn effective_truecolor(
     }
 }
 
+impl Cli {
+    /// The settings of the pull-request lookups that watch mode starts.
+    ///
+    /// `path_var` is the value of `PATH`, and `gh_host` is the value of
+    /// `GH_HOST`. Returns `None` when the user gave `--no-pr`, and when no
+    /// `gh` that the user can run is on the search path. Watch mode then shows
+    /// no indicator and starts no `gh`.
+    fn pull_settings(
+        &self,
+        path_var: Option<&std::ffi::OsStr>,
+        gh_host: Option<String>,
+    ) -> Option<pull::PullSettings> {
+        pull::PullSettings::from_environment(self.no_pr, path_var, gh_host)
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -296,7 +388,7 @@ fn main() -> Result<()> {
     );
 
     if cli.no_color {
-        #[allow(
+        #[expect(
             clippy::disallowed_methods,
             reason = "this process decides its own color output at startup; the ban covers the tests, which must go through testcolor::with_forced_ansi"
         )]
@@ -305,7 +397,7 @@ fn main() -> Result<()> {
         // A watch-like wrapper (e.g. viddy) is rendering our output inside
         // its own TTY-backed UI. The colored crate would otherwise strip
         // colors because our stdout is a pipe.
-        #[allow(
+        #[expect(
             clippy::disallowed_methods,
             reason = "this process decides its own color output at startup; the ban covers the tests, which must go through testcolor::with_forced_ansi"
         )]
@@ -320,7 +412,7 @@ fn main() -> Result<()> {
     // Everything the renderer needs that doesn't depend on the live terminal
     // size. In watch mode this is computed once and reused for every repaint.
     let cfg = RenderConfig {
-        base: cli.base,
+        base: cli.base.clone(),
         max_files: cli.max_files,
         bar_width: cli.bar_width,
         log: LogDemand::from_cli(cli.no_log, cli.log_lines),
@@ -354,7 +446,14 @@ fn main() -> Result<()> {
         }
         // Hand the handle over: watch mode owns the repository from here and
         // re-opens it on every refresh.
-        watch::Mode::Watch => watch::run(handle, &cfg),
+        watch::Mode::Watch => watch::run(
+            handle,
+            &cfg,
+            cli.pull_settings(
+                std::env::var_os(pull::PATH_VARIABLE).as_deref(),
+                std::env::var(pull::GH_HOST_VARIABLE).ok(),
+            ),
+        ),
     }
 }
 
@@ -591,6 +690,13 @@ pub(crate) fn build_output(
 /// reached the end of the history at or before that limit
 /// ([`Snapshot::log_complete`]), and the commit that its log started from
 /// ([`Snapshot::log_start`]), at every limit.
+///
+/// The log is read first. Its start holds the one walk of the commits that
+/// only the branch has. The counts against the base come from that start
+/// ([`repo::base_status`]), so they and the log share one read of HEAD. The
+/// ahead count is the size of the set that the log marks from, and the behind
+/// count is one more walk. The branch name and the upstream counts read HEAD on
+/// their own.
 pub(crate) fn collect_snapshot(
     repo: &gix::Repository,
     cfg: &RenderConfig,
@@ -599,7 +705,11 @@ pub(crate) fn collect_snapshot(
     let branch = repo::branch_name(repo);
 
     let base = cfg.base.clone().unwrap_or_else(|| repo::resolve_base(repo));
-    let base_status = repo::base_status(repo, &base);
+    // The log comes first. Its start holds the one walk of `base..HEAD`, and
+    // the counts against the base come from that start. So the base counts and
+    // the log read HEAD one time, and they agree.
+    let fetched = fetch_head_log(repo, &base, log_limit);
+    let base_status = repo::base_status(repo, fetched.start.as_ref());
 
     let repo::Changes {
         entries,
@@ -620,7 +730,6 @@ pub(crate) fn collect_snapshot(
         &ages,
     );
 
-    let fetched = fetch_head_log(repo, log_limit);
     snapshot.log = fetched.entries;
     snapshot.log_complete = fetched.complete;
     snapshot.log_start = fetched.start;
@@ -811,8 +920,9 @@ pub(crate) fn render_list_frame(
 /// commits of its history up to the limit of the read, and whether the history
 /// ended at or before that limit.
 ///
-/// [`fetch_head_log`] reads from the commit that HEAD names, and
-/// [`collect_snapshot`] puts all three on the [`Snapshot`]. Watch mode reads
+/// [`fetch_head_log`] reads from the commit that HEAD names, and makes the
+/// start with its one walk of the branch commits. [`collect_snapshot`] puts
+/// all three on the [`Snapshot`]. Watch mode reads
 /// from the start that the snapshot recorded, through [`fetch_log_from`], on a
 /// resize.
 #[derive(Debug, Clone)]
@@ -820,7 +930,9 @@ pub(crate) struct FetchedLog {
     /// The commit that the read started from ([`Snapshot::log_start`]).
     /// `None` when HEAD named no commit.
     pub(crate) start: Option<repo::LogStart>,
-    /// The commits, newest first.
+    /// The commits, newest first. Each entry tells whether its commit is only
+    /// on the branch ([`LogEntry::on_branch`]). The set of branch commits that
+    /// `start` keeps decides that mark.
     pub(crate) entries: Vec<LogEntry>,
     /// `entries` is complete: the walk of the history of `start` reached its
     /// end at or before the limit, so a read from `start` with a higher limit
@@ -829,10 +941,17 @@ pub(crate) struct FetchedLog {
 }
 
 /// Fetch the `n` most recent commits from HEAD as [`LogEntry`] records via
-/// gix, with the commit that HEAD names.
+/// gix, with the start of the walk: the commit that HEAD names, the commit
+/// that `base` names, and the set of the commits that only the branch has
+/// ([`repo::LogStart`]). This call makes the one walk of that set.
 ///
 /// Returns an empty list when `n == 0` or the repo has no commits. The start
 /// is known at `n == 0` too, as [`repo::recent_log`] resolves it.
+///
+/// An entry is marked when its commit is only on the branch: HEAD reaches it,
+/// and `base` does not ([`LogEntry::on_branch`]). These are the commits that
+/// the header counts as ahead of the base. No entry is marked when HEAD is on
+/// the base, or when `base` does not resolve.
 ///
 /// [`FetchedLog::complete`] tells whether the walk reached the end of the
 /// history, as [`repo::recent_log`] finds it. A history of exactly `n` commits
@@ -847,9 +966,9 @@ pub(crate) struct FetchedLog {
 ///
 /// Each age is measured at the instant of this call. [`collect_snapshot`]
 /// calls it for each walk, and nothing else reads the log from HEAD.
-fn fetch_head_log(repo: &gix::Repository, n: usize) -> FetchedLog {
+fn fetch_head_log(repo: &gix::Repository, base: &str, n: usize) -> FetchedLog {
     let now = SystemTime::now();
-    fetched_at(repo::recent_log(repo, n), now)
+    fetched_at(repo::recent_log(repo, base, n), now)
 }
 
 /// Fetch the `n` most recent commits of the history of `start` as
@@ -863,6 +982,12 @@ fn fetch_head_log(repo: &gix::Repository, n: usize) -> FetchedLog {
 /// and more commits of the same history after them
 /// ([`repo::recent_log_from`]). Each age is measured at the instant of this
 /// call.
+///
+/// The marks of the entries ([`LogEntry::on_branch`]) come from the set of
+/// branch commits that `start` keeps, and not from the commit that the base
+/// names now. So the read gives the commits of the walk with the marks of the
+/// walk, also when the base moved after the walk. The read walks no more than
+/// its rows, and it never walks the commits of the branch again.
 pub(crate) fn fetch_log_from(
     repo: &gix::Repository,
     start: repo::LogStart,
@@ -873,17 +998,23 @@ pub(crate) fn fetch_log_from(
 }
 
 /// The [`FetchedLog`] of `recent`, with the age of each commit measured at
-/// `now`.
+/// `now`. Each entry keeps the mark of its commit
+/// ([`repo::LogCommit::on_branch`]).
 fn fetched_at(recent: repo::RecentLog, now: SystemTime) -> FetchedLog {
     let entries = recent
         .commits
         .into_iter()
-        .map(|(hash, secs, subject)| {
-            let age = u64::try_from(secs)
+        .map(|commit| {
+            let age = u64::try_from(commit.secs)
                 .ok()
                 .map(|s| SystemTime::UNIX_EPOCH + Duration::from_secs(s))
                 .and_then(|when| now.duration_since(when).ok());
-            LogEntry { hash, subject, age }
+            LogEntry {
+                hash: commit.hash,
+                subject: commit.summary,
+                age,
+                on_branch: commit.on_branch,
+            }
         })
         .collect();
     FetchedLog {
@@ -1008,6 +1139,31 @@ mod tests {
             refresh_interval(explicit.refresh_interval),
             Some(Duration::from_secs(5)),
         );
+    }
+
+    #[test]
+    fn the_no_pr_flag_turns_the_pull_lookups_of_watch_mode_off() {
+        // Issue #676: with `--no-pr`, watch mode shows no indicator and starts
+        // no `gh`, also when a `gh` that the user can run is on the path.
+        let bin = pull::dir_with_gh(0o755);
+        let path = std::env::join_paths([bin.path()]).expect("join the path");
+        assert_eq!(
+            Cli::parse_from(["gsw", "--no-pr"]).pull_settings(Some(&path), None),
+            None,
+        );
+    }
+
+    #[test]
+    fn with_no_flag_watch_mode_looks_up_pull_requests_through_gh() {
+        // The same path as the test of `--no-pr` gives settings when the flag
+        // is absent, so that test is not true only because of its fixture.
+        let bin = pull::dir_with_gh(0o755);
+        let path = std::env::join_paths([bin.path()]).expect("join the path");
+        let settings = Cli::parse_from(["gsw"])
+            .pull_settings(Some(&path), Some("ghe.example.com".to_string()))
+            .expect("gh is on the path");
+        assert!(settings.program().starts_with(bin.path()));
+        assert_eq!(settings.extra_host(), Some("ghe.example.com"));
     }
 
     /// The demand of the log that `args` state on the command line.
@@ -1139,6 +1295,8 @@ mod tests {
             operation: Some(Operation::Merge { conflicts: 1 }),
             push_remote: None,
             worktree: None,
+            off_start_branch: false,
+            pull: None,
         };
         let frame = render_frame(&snap, &cfg, dims, FrameTiming::at_walk(None));
         let lines = frame.output.lines().count();
@@ -1152,7 +1310,8 @@ mod tests {
     }
 
     /// The start of the hash of each log row that [`snapshot_of`] makes. The
-    /// header and the file rows never start with it.
+    /// hash follows the gutter of the row. The header and the file rows never
+    /// hold it there.
     const SWEEP_HASH_PREFIX: &str = "lg";
 
     /// A snapshot with `files` changed files and `commits` log rows, for the
@@ -1165,6 +1324,7 @@ mod tests {
                 hash: format!("{SWEEP_HASH_PREFIX}{n:05}"),
                 subject: format!("commit {n}"),
                 age: Some(Duration::from_secs(90)),
+                on_branch: false,
             })
             .collect();
         snap
@@ -1207,7 +1367,10 @@ mod tests {
                     if lines.len() < height {
                         let log_rows = lines
                             .iter()
-                            .filter(|line| line.starts_with(SWEEP_HASH_PREFIX))
+                            .filter(|line| {
+                                crate::render::after_log_gutter(line)
+                                    .is_some_and(|row| row.starts_with(SWEEP_HASH_PREFIX))
+                            })
                             .count();
                         let file_rows = lines.iter().filter(|line| line.contains(".rs")).count();
                         assert_eq!(
@@ -1367,6 +1530,24 @@ mod tests {
             refresh_interval: None,
             width_offset: 0,
         }
+    }
+
+    #[test]
+    fn a_one_shot_snapshot_is_never_off_the_start_branch() {
+        // A guard, not red-first: the field is `false` by construction, and
+        // this test keeps it so. One-shot mode draws one frame, so no frame
+        // comes after the start, and the header must not paint the name red.
+        let dir = crate::testrepo::init_repo();
+        let walk = |dir: &std::path::Path| {
+            let repo = gix::open(dir).expect("open the repository");
+            collect_snapshot(&repo, &render_config(), 0).expect("walk the repository")
+        };
+        assert!(!walk(dir.path()).off_start_branch);
+
+        crate::testrepo::git(dir.path(), &["switch", "-q", "-c", "elsewhere"]);
+        let moved = walk(dir.path());
+        assert_eq!(moved.branch, "elsewhere", "the fixture switched branch");
+        assert!(!moved.off_start_branch);
     }
 
     /// The rows of the list frame, as visible glyphs.
@@ -1772,6 +1953,7 @@ mod tests {
                     hash: "abc1234".into(),
                     subject: "the newest commit".into(),
                     age: Some(age),
+                    on_branch: false,
                 }]
             })
             .unwrap_or_default();
@@ -1802,6 +1984,8 @@ mod tests {
             operation: None,
             push_remote: None,
             worktree: None,
+            off_start_branch: false,
+            pull: None,
         }
     }
 
@@ -1871,11 +2055,13 @@ mod tests {
                 hash: "abc1234".into(),
                 subject: "the newest commit".into(),
                 age: Some(Duration::from_secs(10)),
+                on_branch: false,
             },
             LogEntry {
                 hash: "def5678".into(),
                 subject: "an older commit".into(),
                 age: Some(Duration::from_secs(900)),
+                on_branch: false,
             },
         ];
         assert_eq!(
@@ -1920,6 +2106,7 @@ mod tests {
                 hash: "abc1234".into(),
                 subject: "the newest commit".into(),
                 age: Some(Duration::from_secs(10)),
+                on_branch: false,
             }],
             log_complete: false,
             log_start: None,
@@ -1927,6 +2114,8 @@ mod tests {
             operation: None,
             push_remote: None,
             worktree: None,
+            off_start_branch: false,
+            pull: None,
         };
         let cfg = RenderConfig {
             base: None,

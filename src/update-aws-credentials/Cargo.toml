@@ -7,13 +7,18 @@ description = "Takes AWS credentials from clipboard and updates AWS credentials 
 
 [dependencies]
 anyhow.workspace = true
-arboard.workspace = true
 aws-config.workspace = true
 aws-credential-types.workspace = true
 aws-sdk-sts.workspace = true
 buildinfo.workspace = true
 dirs.workspace = true
+sysclip.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+childenv.workspace = true
+sysclip = { workspace = true, features = ["testing"] }
+tempfile.workspace = true
 
 [lints]
 workspace = true

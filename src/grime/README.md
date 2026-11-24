@@ -390,6 +390,29 @@ $ CLICOLOR_FORCE=1 grime --diff feature | less -R
 
 There is no flag for color. The variables above are the interface.
 
+## Progress on stderr
+
+A run that takes more than 500 ms shows a spinner on stderr, with the elapsed
+time:
+
+```console
+grime: merging feature into HEAD  ⠙  0:01
+```
+
+The spinner names the phase that runs now. There are three phases:
+`creating the scratch worktree`, `merging BRANCH into HEAD`, and
+`counting the conflict hunks`.
+
+There is no percentage. Git counts no steps in a merge, and it writes no state
+file with a position. A bar would need a number that does not exist. `grind`
+shows a bar because a rebase keeps `rebase-merge/msgnum` and `rebase-merge/end`.
+
+The display clears itself before the note, the verdict, or an error. It goes to
+stderr only, so stdout stays the verdict that a script reads. It shows only when
+stderr is a terminal, and `-q` hides it. A run with `-q`, or with stderr on a
+pipe or a file, writes the same bytes as before. There is no flag for the
+display.
+
 ## Uncommitted work
 
 ```console

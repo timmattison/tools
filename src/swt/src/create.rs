@@ -406,7 +406,7 @@ mod tests {
     use crate::green_check::Outcome;
     use std::collections::BTreeSet;
     use std::path::Path;
-    use std::process::Command;
+
     use tempfile::TempDir;
 
     /// The toplevel of a parent worktree for the naming tests.
@@ -450,8 +450,7 @@ mod tests {
     /// pre-commit hook exports `GIT_DIR` and `GIT_INDEX_FILE` into the tests
     /// that it runs.
     fn git_accepts_branch(dir: &Path, branch: &str) -> bool {
-        let mut command = Command::new("git");
-        gitscratch::shed_inherited_git_environment(&mut command);
+        let mut command = childenv::fixture_command("git");
         command
             .args(["check-ref-format", "--branch", branch])
             .current_dir(dir)

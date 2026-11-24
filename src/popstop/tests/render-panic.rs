@@ -12,13 +12,17 @@
 // Core Audio exists on macOS only.
 #![cfg(target_os = "macos")]
 
+#[path = "shared/device-turn.rs"]
+mod device_turn;
+
 use std::env;
 use std::io::Read;
 use std::os::unix::process::ExitStatusExt;
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use device_turn::DeviceTurn;
 use popstop::output::{OutputUnit, Render};
 use popstop::signal::SampleRate;
 
@@ -102,8 +106,11 @@ fn wait_for_end(helper: &mut Helper, timeout: Duration) -> (ExitStatus, String) 
 
 #[test]
 fn a_renderer_that_panics_aborts_the_process_and_says_why() {
+    // The helper is another process, and it takes no turn: its lock would
+    // wait for the lock of this test, which waits for the helper.
+    let _turn = DeviceTurn::take();
     let mut helper = Helper(
-        Command::new(env::current_exe().expect("the path of this test binary"))
+        childenv::fixture_command(env::current_exe().expect("the path of this test binary"))
             .args(["--exact", HELPER_TEST_NAME, "--ignored", "--nocapture"])
             .env(HELPER_VARIABLE, "1")
             .stdin(Stdio::null())

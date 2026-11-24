@@ -25,9 +25,7 @@
 //! directory, so no `go.mod` exists anywhere `repotidy` can reach.
 
 use std::path::Path;
-use std::process::Command;
 
-use gitscratch::shed_inherited_git_environment;
 use gitscratch::testing::{path_at_or_above, DetachedGitDirRepo};
 
 /// The exit code `repotidy` leaves behind when it finds no repository.
@@ -39,13 +37,12 @@ const NO_REPOSITORY_MESSAGE: &str = "Could not find git repository";
 /// Run `repotidy` in `dir` and hand back its exit code and its whole output.
 ///
 /// The inherited `GIT_*` family goes, through
-/// [`gitscratch::shed_inherited_git_environment`]. This suite runs under a
+/// [`childenv::fixture_command`]. This suite runs under a
 /// pre-commit hook that exports `GIT_DIR` and its kin, and `GIT_DIR` beats the
 /// working directory, so a leaked one points anything that asks git at the
 /// repository being committed to.
 fn run_repotidy_in(dir: &Path) -> (Option<i32>, String) {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_repotidy"));
-    shed_inherited_git_environment(&mut command);
+    let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_repotidy"));
 
     let output = command
         .current_dir(dir)

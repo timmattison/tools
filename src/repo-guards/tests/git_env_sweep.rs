@@ -26,7 +26,6 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use repo_guards::git_env_sweep::{self, GitEnvSweepError};
 use tempfile::TempDir;
@@ -619,7 +618,7 @@ fn the_read_set_holds_every_target_root_cargo_builds() {
 /// what turns "the guard found nothing wrong" into a claim about the code that
 /// exists, rather than about the code the guard happened to open.
 fn cargo_target_roots(repo_root: &Path) -> BTreeSet<PathBuf> {
-    let output = Command::new(env!("CARGO"))
+    let output = childenv::fixture_command(env!("CARGO"))
         .args(["metadata", "--no-deps", "--format-version", "1"])
         .current_dir(repo_root)
         .output()

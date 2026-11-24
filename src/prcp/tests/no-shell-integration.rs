@@ -36,7 +36,7 @@ use std::panic;
 use std::path::Path;
 #[cfg(unix)]
 use std::process::ExitStatus;
-use std::process::{Command, Output};
+use std::process::Output;
 use tempfile::TempDir;
 
 /// The shell config files `shellsetup` writes, named relative to the home
@@ -73,7 +73,7 @@ const EXIT_CODE_ONE_WAIT_STATUS: i32 = 1 << 8;
 /// must stay alive while the caller reads it.
 fn run_with_isolated_home(args: &[&str]) -> (Output, TempDir) {
     let home = tempfile::tempdir().expect("the test makes a temporary home directory");
-    let output = Command::new(env!("CARGO_BIN_EXE_prcp"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_prcp"))
         .env("HOME", home.path())
         .env("SHELL", "/bin/zsh")
         .args(args)

@@ -15,31 +15,32 @@ impl GitOpStats {
         }
     }
 
+    /// Record one operation that took `duration`.
+    ///
+    /// The count and the total stop at their largest values instead of
+    /// overflowing.
     pub fn record(&mut self, duration: Duration) {
-        self.count += 1;
-        self.total_duration += duration;
+        self.count = self.count.saturating_add(1);
+        self.total_duration = self.total_duration.saturating_add(duration);
     }
 
     /// Calculate the average duration per operation.
     ///
     /// Uses nanosecond arithmetic to correctly handle counts exceeding `u32::MAX`.
-    ///
-    /// # Panics
-    ///
-    /// This function uses `expect()` internally but cannot actually panic because
-    /// the average of durations cannot exceed `Duration::MAX`, which fits in a `u64`.
+    /// This function does not panic, also for a total as large as `Duration::MAX`.
     pub fn average(&self) -> Duration {
+        const NANOS_PER_SECOND: u128 = 1_000_000_000;
         if self.count == 0 {
             Duration::ZERO
         } else {
             // Use nanoseconds to avoid u32 overflow issues with Duration::div
-            let total_nanos = self.total_duration.as_nanos();
-            let avg_nanos = total_nanos / u128::from(self.count);
-            // The average of durations cannot exceed the maximum individual duration,
-            // and Duration::MAX (about 584 years) fits in u64 nanoseconds.
-            Duration::from_nanos(u64::try_from(avg_nanos).expect(
-                "average duration cannot exceed Duration::MAX which fits in u64 nanoseconds",
-            ))
+            let average_nanos = self.total_duration.as_nanos() / u128::from(self.count);
+            // The average is not more than the total, and the total is not more than
+            // `Duration::MAX`, so the whole seconds fit in a `u64`.
+            let seconds = u64::try_from(average_nanos / NANOS_PER_SECOND).unwrap_or(u64::MAX);
+            // The remainder of a division by one billion is less than one billion.
+            let subsecond_nanos = u32::try_from(average_nanos % NANOS_PER_SECOND).unwrap_or(0);
+            Duration::new(seconds, subsecond_nanos)
         }
     }
 
@@ -166,6 +167,32 @@ mod tests {
         stats.record(Duration::from_nanos(12));
         // Average: 33 / 3 = 11 nanoseconds
         assert_eq!(stats.average(), Duration::from_nanos(11));
+    }
+
+    #[test]
+    fn git_op_stats_average_of_one_max_duration_is_max() {
+        let mut stats = GitOpStats::new();
+        stats.record(Duration::MAX);
+        assert_eq!(stats.average(), Duration::MAX);
+    }
+
+    #[test]
+    fn git_op_stats_total_stops_at_max() {
+        let mut stats = GitOpStats::new();
+        stats.record(Duration::MAX);
+        stats.record(Duration::MAX);
+        assert_eq!(stats.count(), 2);
+        assert_eq!(stats.average(), Duration::MAX / 2);
+    }
+
+    #[test]
+    fn git_op_stats_count_stops_at_max() {
+        let mut stats = GitOpStats {
+            count: u64::MAX,
+            total_duration: Duration::ZERO,
+        };
+        stats.record(Duration::from_secs(1));
+        assert_eq!(stats.count(), u64::MAX);
     }
 
     #[test]

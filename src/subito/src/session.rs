@@ -213,7 +213,7 @@ where
 /// # Errors
 ///
 /// Gives the failures of [`run_forever`].
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "the eight arguments are the whole of one supervised run: what to connect to, which topics to ask for, which quality of service, whether a payload of JSON gets indentation, where the messages go, where the reports go, what ends the run, and how long each wait is. A struct that held them would hide nothing, because every caller states every one of them, and it would add a name for each field to the name each argument carries already. `run_forever` is the entrance the binary takes, and it takes seven"
 )]
