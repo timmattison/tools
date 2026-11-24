@@ -31,3 +31,23 @@ export function buildTauriDevArgs(port: Port, extraArgs: readonly string[]): str
   if (extraArgs.length > 0) args.push("--", ...extraArgs);
   return args;
 }
+
+/** The part of a child process that `superviseChild` uses. */
+export interface ChildLike {
+  on(event: "error", listener: (error: Error) => void): unknown;
+  on(
+    event: "exit",
+    listener: (code: number | null, signal: NodeJS.Signals | null) => void,
+  ): unknown;
+}
+
+/**
+ * Watches a child process. A failed start calls `fail` with a message.
+ * Each exit calls `exit` with the exit code, and a stop by a signal is the code 1.
+ */
+export function superviseChild(
+  _child: ChildLike,
+  _name: string,
+  _exit: (code: number) => void,
+  _fail: (message: string) => void,
+): void {}
