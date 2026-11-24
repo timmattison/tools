@@ -56,8 +56,11 @@ fn unique_branch(label: &str) -> String {
 ///
 /// `home`, when it is there, becomes the home directory of the child. Git
 /// expands a leading `~` in a path value against that directory, so a test of
-/// the expansion names a temporary directory and never writes into the home
-/// directory of whoever runs the suite.
+/// the expansion names a temporary directory that it owns, and can read the
+/// answer out of it. Without `home`, the child gets the private home of
+/// `support::nwt_command`, so no run writes into the home directory of whoever
+/// runs the suite. `home` wins over that private home, because this call sets
+/// `HOME` after `nwt_command` sets it.
 fn run_nwt(from: &Path, branch: &str, home: Option<&Path>) -> Output {
     let mut command = nwt_command(from);
     command.args(["-b", branch, "--no-copy-env", "--no-bootstrap-hooks"]);

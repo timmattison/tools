@@ -142,7 +142,7 @@ const WINDOW: Window = Window {
 /// A command with the environment, the pipes and the session of the tests
 /// already set.
 fn ic_command(pty: &Pty, args: &[&str]) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ic"));
+    let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_ic"));
     command
         .args(args)
         .env_clear()

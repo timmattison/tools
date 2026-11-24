@@ -563,7 +563,16 @@ impl Terminal {
                 pixel_height,
             })
             .expect("the pseudo terminal must open");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "portable-pty has no entrance in childenv, so the loop below applies its rule by name"
+        )]
         let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_krt"));
+        for name in
+            childenv::inherited_git_variables(childenv::InheritedGitEnvironment::ShedEverything)
+        {
+            command.env_remove(name);
+        }
         for argument in arguments {
             command.arg(argument);
         }
@@ -1251,7 +1260,7 @@ fn a_live_run_whose_standard_output_is_a_pipe_draws_no_table() {
     let output = recording.argument();
     // `wait_with_output` waits with no deadline, and the round limit of
     // [`ONE_ROUND_OF_ONE_TTL`] is what bounds it: the run stops on its own.
-    let finished = process::Command::new(env!("CARGO_BIN_EXE_krt"))
+    let finished = childenv::fixture_command(env!("CARGO_BIN_EXE_krt"))
         .args(live_arguments(LOOPBACK, &output, &ONE_ROUND_OF_ONE_TTL))
         .stdin(process::Stdio::null())
         .stdout(process::Stdio::piped())
@@ -1648,7 +1657,7 @@ fn two_live_runs_of(name: &str, protocol: &str) {
     ]
     .iter()
     .map(|(destination, output)| {
-        process::Command::new(env!("CARGO_BIN_EXE_krt"))
+        childenv::fixture_command(env!("CARGO_BIN_EXE_krt"))
             .args(live_arguments(destination, output, &flags))
             .stdin(process::Stdio::null())
             .stdout(process::Stdio::piped())
@@ -1780,7 +1789,7 @@ fn a_live_udp_run_stands_while_another_program_holds_the_port_of_a_traceroute() 
         FLAG_HEADLESS,
     ];
 
-    let finished = process::Command::new(env!("CARGO_BIN_EXE_krt"))
+    let finished = childenv::fixture_command(env!("CARGO_BIN_EXE_krt"))
         .args(live_arguments(LOOPBACK, &output, &flags))
         .stdin(process::Stdio::null())
         .stdout(process::Stdio::piped())

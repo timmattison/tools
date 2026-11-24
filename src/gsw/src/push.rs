@@ -7,6 +7,14 @@
 //! be tested without a network or a pty. Only [`run_push`], the blocking half of
 //! [`spawn`], starts a process: the push itself, and the read of HEAD that
 //! checks the repository is still on the branch the confirmation named.
+//!
+//! **The row under the frame is here too, and it is not the push's alone.**
+//! [`PushUi`] owns every question watch mode asks, every run it shows in
+//! flight, and the input mode that goes with each — for `p`, and for the keys
+//! that rebase the branch onto the base or merge the base into it
+//! ([`crate::update`]). One owner, because one row can carry one question at a
+//! time, and because a second owner could disagree with the first about which
+//! question the user is looking at.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -16,10 +24,14 @@ use std::time::{Duration, Instant};
 use colored::{ColoredString, Colorize};
 
 use crate::age::{format_age_detailed, scale_rgb};
+use crate::child::detach_from_terminal;
 use crate::lines::LineSplitter;
 use crate::render::{Snapshot, UpstreamStatus};
 use crate::repo::DETACHED_HEAD;
-use crate::watch::{Dimensions, InputMode};
+use crate::shell::ShellCommand;
+use crate::update::{base_update_prompt_for, BaseUpdate, BaseUpdateCommand};
+use crate::watch::{Dimensions, InputMode, RunKind};
+use crate::worktrees::WorktreeList;
 use textfit::truncate_right;
 
 /// Most rows a status message is allowed to occupy under the frame.
@@ -28,7 +40,10 @@ use textfit::truncate_right;
 /// what the user is actually watching. Three rows is enough for git's
 /// `To <remote>` / `! [rejected] …` / `error: failed to push …` triple, which
 /// is the part that says what went wrong — and enough, when a pre-push hook
-/// failed instead, for the line that failed and git's verdict on it.
+/// failed instead, for the line that failed and git's verdict on it. After a
+/// rebase or a merge that stopped, it is enough for the `CONFLICT` line of git,
+/// the last line of git, and the sentence of gsw. [`failure_lines`] picks the
+/// three.
 ///
 /// A ceiling, not a promise: a pane with fewer than four rows cannot spare
 /// three and still show a frame, so [`PushUi::overlay`] clips the message
@@ -47,11 +62,37 @@ const MAX_STATUS_ROWS: usize = 3;
 /// cannot spare six, and drops the oldest rather than the newest when it does.
 const MAX_PUSH_OUTPUT_ROWS: usize = 6;
 
+/// Most messages from another feature the row holds while a push or a question
+/// owns it.
+///
+/// `G` acts while a push runs, and a push with a pre-push hook takes minutes.
+/// Each `G` in those minutes can refuse, and each refusal costs the user one
+/// key to clear it. A queue with no bound thus turns one long push into a row
+/// the user must press through. Four covers the times a user reaches for the
+/// key during a single push, and four is small enough that the clearance is
+/// not a job of its own.
+///
+/// **A full queue drops the newest message and keeps the oldest.** That is the
+/// opposite of what [`failure_lines`] does, and the difference is deliberate.
+/// There the lines are the output of one command, and git's verdict comes
+/// last. Here the messages are separate runs of the same command: the first
+/// refusal tells the user what went wrong, and each refusal after it is
+/// usually that same refusal again.
+const MAX_HELD_MESSAGES: usize = 4;
+
 /// Git's prefix for advice lines. They follow the real error and explain
 /// general remedies, so they are the first thing to drop when the message has
 /// to fit in [`MAX_STATUS_ROWS`]. A lexical prefix is the right matcher here:
 /// this is git's own output convention, not a syntactic property of anything.
 const HINT_PREFIX: &str = "hint:";
+
+/// Git's prefix for the line that names a file a rebase or a merge left
+/// conflicted, such as `CONFLICT (content): Merge conflict in a.txt`. The user
+/// needs that name to finish the work by hand, so these lines outrank every
+/// other line but the last when the message has to fit in [`MAX_STATUS_ROWS`].
+/// A lexical prefix is the right matcher here, as for [`HINT_PREFIX`]: this is
+/// git's own output convention, not a syntactic property of anything.
+const CONFLICT_PREFIX: &str = "CONFLICT (";
 
 /// What pressing `p` will actually do, resolved from the snapshot *before* the
 /// confirmation appears — so the prompt describes the command that will run
@@ -145,37 +186,137 @@ impl PushCommand {
     }
 }
 
-/// What the watch loop does when the user presses `p`.
+/// What a confirmation runs: a push of gsw's own, or a command of the user's
+/// that brings the branch up to date with the base.
 ///
-/// This is the whole interface [`prompt_for`] hands back, and it is deliberately
-/// two cases rather than five: the caller asks a question or shows a message,
-/// and never learns which plan produced either. A [`PushPlan`] variant added
-/// later — a rejected force push, a protected branch — changes the wording here
-/// without touching the loop that displays it.
+/// One value, because one row asks every question of watch mode and one key
+/// answers each of them. `y` means "run what the question described", and the
+/// question is the only thing that knows what that is — so the answer carries
+/// the work itself rather than a name the loop would have to look the work up
+/// by. A second value beside this one would be a second thing for `y` to
+/// consult, and the two could disagree about which question is on the screen.
+///
+/// Each variant is built only by the function that composes its own question,
+/// so a command nobody confirmed cannot be assembled somewhere else and handed
+/// to a runner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Confirmed {
+    /// A push, as [`prompt_for`] planned it.
+    Push(PushCommand),
+    /// A rebase onto the base or a merge of the base, as
+    /// [`crate::update::base_update_prompt_for`] planned it. The command is the
+    /// user's own, and it pushes the branch itself once it has finished.
+    BaseUpdate(BaseUpdateCommand),
+}
+
+/// What the row says about a command that worked.
+///
+/// Two cases, because two kinds of command report differently. A push is gsw's
+/// own work, so gsw's sentence is the whole of what happened. `grp` and `gmp`
+/// are the user's, and each of them reports a push it skipped only in its last
+/// line — so gsw's sentence alone would tell the user that the branch is on the
+/// remote when it is not.
+///
+/// The question composes this, beside the sentence and the notice, so the act
+/// that was confirmed is the act that is reported. A flag that
+/// [`PushUi::finished`] read instead would put the choice in the one place that
+/// no longer knows which question was asked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SuccessReport {
+    /// gsw's sentence, and nothing under it.
+    Alone {
+        /// What gsw says the command did.
+        sentence: String,
+    },
+    /// gsw's sentence, and under it the last line with text that the command
+    /// wrote.
+    WithLastLine {
+        /// What gsw says the command did.
+        sentence: String,
+    },
+}
+
+impl SuccessReport {
+    /// The rows this report puts under the frame, for a command that wrote
+    /// `output`.
+    ///
+    /// The last line with text in it, by the rule
+    /// [`crate::shell::last_with_text`] states: a command says what it was
+    /// doing and then says why it stopped, and a command that ends its last
+    /// line with a newline leaves an empty line after it. A run that said
+    /// nothing leaves gsw's sentence alone, because a blank row under the frame
+    /// reads as a run that said something not worth showing.
+    ///
+    /// The row is indented by [`WINDOW_INDENT`], as the rows of the window of a
+    /// run in flight are, because it is the command speaking inside gsw's
+    /// frame.
+    fn rows(self, output: &str) -> Vec<String> {
+        match self {
+            Self::Alone { sentence } => vec![sentence],
+            Self::WithLastLine { sentence } => {
+                let mut rows = vec![sentence];
+                rows.extend(
+                    crate::shell::last_with_text(output.lines())
+                        .map(|last| format!("{WINDOW_INDENT}{last}")),
+                );
+                rows
+            }
+        }
+    }
+}
+
+/// What the watch loop does when the user presses a key that runs something.
+///
+/// This is the whole interface [`prompt_for`] hands back, and
+/// [`crate::update::base_update_prompt_for`] hands back the same thing for the
+/// keys that rebase onto the base or merge it in. It is deliberately two cases
+/// rather than one for each plan: the caller asks a question or shows a
+/// message, and never learns which plan produced either. A [`PushPlan`] variant
+/// added later — a rejected force push, a protected branch — changes the
+/// wording here without touching the loop that displays it.
 ///
 /// [`PushPrompt::Confirm`] carries the command with the question, so the
-/// arguments cannot be requested for a push that must never run. The invariant
-/// is structural: there is no way to hold a `Confirm` without holding the exact
-/// [`PushCommand`] the confirmation described — the argument list *and* the
-/// branch it was written for, which is what the runner re-checks before it
-/// pushes.
+/// arguments cannot be requested for a command that must never run. The
+/// invariant is structural: there is no way to hold a `Confirm` without holding
+/// the exact [`Confirmed`] the question described — for a push, the argument
+/// list *and* the branch it was written for, which is what the runner re-checks
+/// before it pushes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PushPrompt {
-    /// Ask before running the push.
+    /// Ask before running the command.
     Confirm {
-        /// The question, without the key hint — the display layer owns the
-        /// `[y/N]` convention.
+        /// The question, without the key hint, which is the value below.
         question: String,
-        /// Whether this push creates a branch on the remote. The display layer
-        /// colors this case differently, so a create can never be mistaken for
-        /// a routine update at a glance.
-        creates_remote_branch: bool,
-        /// The branch and the arguments this question described.
-        command: PushCommand,
-        /// What to show once this push succeeds. Composed here, with the
+        /// The keys that answer the question, and what each one does, as
+        /// [`confirm_hint`] spells them. It rides with the question because
+        /// four keys ask one now, and each of them binds Enter to an act of
+        /// its own — so the hint is a fact about the question rather than a
+        /// convention the row can hold on its own.
+        hint: String,
+        /// Whether this question deserves the color of one the user must read
+        /// twice.
+        ///
+        /// Three acts earn it, and for the same reason. A push that creates a
+        /// remote branch puts something on a shared remote that nobody has
+        /// seen, a rebase rewrites every commit of the branch and then
+        /// force-pushes the result, and a push that skips the hook skips a
+        /// check that the repository asks for. None of them can be allowed to
+        /// look like the routine act beside it, and the color is what carries
+        /// that in the half second before the words are read.
+        caution: bool,
+        /// The command this question described, and what `y` runs.
+        command: Confirmed,
+        /// What the row says while that command runs, without its age.
+        ///
+        /// Composed here, with the question, because the sentence names the
+        /// act that was confirmed: a press of `R` reports a rebase, and only
+        /// the question knows it was one. [`PushUi::overlay`] puts the age
+        /// after it.
+        running_notice: String,
+        /// What to show once this command succeeds. Composed here, with the
         /// question, so the two sentences describe the same act — a push
         /// confirmed as a create reports itself as a create.
-        success_message: String,
+        success: SuccessReport,
     },
     /// Run nothing and show this instead. Not an error: the common cause is a
     /// branch that is already fully pushed.
@@ -185,7 +326,90 @@ pub(crate) enum PushPrompt {
     },
 }
 
-/// Decide what pressing `p` does, given the branch state gsw already renders.
+/// How a push treats the repository's `pre-push` hook.
+///
+/// A type and not a `bool`, so a call site says which policy it means. The
+/// policy is about how a push runs and not about which push runs, so
+/// [`PushPlan`] does not carry it. `--no-verify` skips only the local
+/// `pre-push` hook. Server-side hooks and branch protection still apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PushHooks {
+    /// `p`: the push runs the hook, as a plain `git push` does.
+    Run,
+    /// `P`: the push runs `git push --no-verify`, and the hook does not run.
+    Skip,
+}
+
+impl PushHooks {
+    /// The arguments of `git push` for this policy: `push`, then the flag the
+    /// policy needs, then `rest`. The flag sits directly after `push` so it
+    /// cannot be read as the value of another option.
+    fn push_args(self, rest: Vec<String>) -> Vec<String> {
+        let mut args = vec!["push".to_string()];
+        if self == Self::Skip {
+            args.push(NO_VERIFY_FLAG.to_string());
+        }
+        args.extend(rest);
+        args
+    }
+
+    /// What the question adds after the act, so the sentence says the hook
+    /// does not run. Empty for `Run`, which keeps the plain question.
+    fn question_suffix(self) -> &'static str {
+        match self {
+            Self::Run => "",
+            Self::Skip => SKIP_QUESTION_SUFFIX,
+        }
+    }
+
+    /// What the success sentence adds after the act. Empty for `Run`.
+    fn success_suffix(self) -> &'static str {
+        match self {
+            Self::Run => "",
+            Self::Skip => SKIP_SUCCESS_SUFFIX,
+        }
+    }
+
+    /// The act, as [`confirm_hint`] names it under the question.
+    fn hint(self) -> String {
+        match self {
+            Self::Run => confirm_hint(PUSH_VERB),
+            Self::Skip => confirm_hint(SKIP_VERB),
+        }
+    }
+
+    /// What the row says while the push runs, without its age.
+    fn running_notice(self) -> &'static str {
+        match self {
+            Self::Run => RUNNING_NOTICE,
+            Self::Skip => SKIP_RUNNING_NOTICE,
+        }
+    }
+
+    /// Whether the policy alone earns the caution color. A push that skips the
+    /// hook skips a check the repository asks for.
+    fn is_cautious(self) -> bool {
+        self == Self::Skip
+    }
+}
+
+/// The `git push` flag that skips the local `pre-push` hook.
+const NO_VERIFY_FLAG: &str = "--no-verify";
+
+/// What a question says after the act when the hook does not run.
+const SKIP_QUESTION_SUFFIX: &str = " without the pre-push hook";
+
+/// What a success sentence says after the act when the hook did not run.
+const SKIP_SUCCESS_SUFFIX: &str = ", pre-push hook skipped";
+
+/// The verb of the key hint for a push that skips the hook.
+const SKIP_VERB: &str = "push without hook";
+
+/// What a running push says when the hook does not run.
+const SKIP_RUNNING_NOTICE: &str = "Pushing without the pre-push hook…";
+
+/// Decide what pressing `p` or `P` does, given the branch state gsw already
+/// renders.
 ///
 /// The one way into this module. Callers pass what the snapshot holds and get
 /// back either a question with its command or a message — never a plan they
@@ -196,10 +420,18 @@ pub(crate) enum PushPrompt {
 /// upstream is configured *and* its remote-tracking ref resolves. That is
 /// exactly the signal the wording needs: a branch whose remote ref is missing
 /// gets the create wording, because a push really will create it.
+///
+/// `hooks` is the policy for the repository's `pre-push` hook: `p` passes
+/// [`PushHooks::Run`] and `P` passes [`PushHooks::Skip`]. The policy is applied
+/// here and nowhere else. The question, the hint, the caution flag, the running
+/// notice, the success sentence, and the arguments all come from this one
+/// value, so a question that says the hook is skipped cannot run a command that
+/// runs it.
 pub(crate) fn prompt_for(
     branch: &str,
     remote: Option<&str>,
     upstream: Option<&UpstreamStatus>,
+    hooks: PushHooks,
 ) -> PushPrompt {
     // One match, so a plan's wording and the command that carries it out are
     // written side by side. The variants that never push return here, which is
@@ -210,33 +442,50 @@ pub(crate) fn prompt_for(
         // forward, and the sentence has to be the thing that says so — the user
         // reads it in the half second before pressing `y`.
         PushPlan::Create { remote, branch } => {
-            let question = format!("Create new remote branch {remote}/{branch}?");
-            let success_message = format!("Created {remote}/{branch}");
+            let question = format!(
+                "Create new remote branch {remote}/{branch}{}?",
+                hooks.question_suffix()
+            );
+            let success = SuccessReport::Alone {
+                sentence: format!("Created {remote}/{branch}{}", hooks.success_suffix()),
+            };
             PushPrompt::Confirm {
                 question,
-                creates_remote_branch: true,
+                hint: hooks.hint(),
+                caution: true,
                 // `-u` records the new remote branch as the upstream, so the
                 // push after this one is a plain update.
-                command: PushCommand::new(
+                command: Confirmed::Push(PushCommand::new(
                     branch.clone(),
-                    vec!["push".to_string(), "-u".to_string(), remote, branch],
-                ),
-                success_message,
+                    hooks.push_args(vec!["-u".to_string(), remote, branch]),
+                )),
+                running_notice: hooks.running_notice().to_string(),
+                success,
             }
         }
         PushPlan::Update { target, commits } => {
             let unit = if commits == 1 { "commit" } else { "commits" };
             PushPrompt::Confirm {
-                question: format!("Push {commits} {unit} to {target}?"),
-                creates_remote_branch: false,
+                question: format!(
+                    "Push {commits} {unit} to {target}{}?",
+                    hooks.question_suffix()
+                ),
+                hint: hooks.hint(),
+                caution: hooks.is_cautious(),
                 // Bare `push`: git reads the remote and the refspec out of the
                 // branch config, so a branch tracking something other than the
                 // repository's default remote still goes to the right place.
                 // Which branch's config it reads is decided by HEAD at exec
                 // time, which is why the command carries the branch this
                 // question was written for.
-                command: PushCommand::new(branch, vec!["push".to_string()]),
-                success_message: format!("Pushed {commits} {unit} to {target}"),
+                command: Confirmed::Push(PushCommand::new(branch, hooks.push_args(Vec::new()))),
+                running_notice: hooks.running_notice().to_string(),
+                success: SuccessReport::Alone {
+                    sentence: format!(
+                        "Pushed {commits} {unit} to {target}{}",
+                        hooks.success_suffix()
+                    ),
+                },
             }
         }
         PushPlan::UpToDate { target } => PushPrompt::Refuse {
@@ -274,6 +523,21 @@ where
     std::thread::spawn(move || on_finish(run_push(&command, &workdir, &on_line)));
 }
 
+/// Run `child` on a thread of its own, through [`run_streamed`], and hand the
+/// outcome to `on_finish`.
+///
+/// The thread is the reason for this function, and it is the reason for
+/// [`spawn`] too: a run takes as long as git takes, and the watch loop must
+/// keep drawing meanwhile. `on_line` and `on_finish` run on that thread, so the
+/// production caller sends each of them down the channel of the loop.
+pub(crate) fn spawn_streamed<L, F>(child: Command, name: String, on_line: L, on_finish: F)
+where
+    L: Fn(String) + Send + Sync + 'static,
+    F: FnOnce(PushOutcome) + Send + 'static,
+{
+    std::thread::spawn(move || on_finish(run_streamed(child, &name, &on_line)));
+}
+
 /// What a refused push tells the user to do. Pressing `p` again re-resolves the
 /// plan against the branch that is checked out now, so the next question
 /// describes the repository as it actually stands — which is the whole remedy.
@@ -293,9 +557,24 @@ const RETRY_ADVICE: &str = "press p again";
 /// own is microseconds rather than seconds; nothing here can close it entirely,
 /// short of a lock git does not offer.
 ///
-/// Three things are forced on the child, and all of them matter because gsw is
-/// holding the alternate screen in raw mode:
+/// Four things are forced on the child. Three of them matter because gsw is
+/// holding the alternate screen in raw mode, and the first one matters because
+/// git obeys the environment before it obeys the directory it was pointed at:
 ///
+/// - **The git environment gsw inherited is shed**
+///   ([`childenv::command`]). A
+///   `gsw` started from inside a pre-commit hook holds `GIT_DIR`,
+///   `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY` and `GIT_CONFIG_PARAMETERS`, and
+///   the user asked for none of them. A child that carried one would send a
+///   branch of the repository being committed to. The guard above reads the
+///   same environment, so it would agree with itself and refuse nothing — a
+///   guard that reads the same wrong place as the thing it guards is worse
+///   than no guard, because it reports success. The rule is the `GIT_` prefix
+///   and never a list of names. The six names of
+///   [`childenv::USER_INTENT_GIT_ENVIRONMENT`] stay, because this child acts
+///   for the user and nothing states them again. gsw spawns git itself, so no
+///   rc file runs between the sweep and the push, and a user who holds a
+///   non-default key cannot authenticate without `GIT_SSH_COMMAND`.
 /// - **The child is detached from the terminal** ([`detach_from_terminal`]) —
 ///   its own session on Unix, no inherited console on Windows — so the terminal
 ///   device cannot be opened by it or by anything it runs. This is the part
@@ -310,7 +589,10 @@ const RETRY_ADVICE: &str = "press p again";
 ///   descendant, credential helpers included, which is why this is done to the
 ///   process rather than to one transport.
 /// - **stdin is closed** and **`GIT_TERMINAL_PROMPT=0`**, which is git's own
-///   half of the same rule: git asks for HTTP usernames and passwords itself,
+///   half of the same rule. **The pin comes after the sweep, and that order is
+///   the whole of why it survives.** `GIT_TERMINAL_PROMPT` is one of the six
+///   names the sweep keeps, so a pin ahead of the sweep leaves with the value
+///   the user holds. git asks for HTTP usernames and passwords itself,
 ///   and this refuses those before the detachment has to. Disabled, git fails
 ///   immediately and says why, which lands in the status rows like any other
 ///   error. Credential helpers and a GUI `SSH_ASKPASS` are untouched — they do
@@ -338,25 +620,71 @@ fn run_push(
         }
     }
 
-    let mut child = Command::new("git");
+    let mut child = childenv::command("git");
     child
         .args(command.args())
         .current_dir(workdir)
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
         .env("GIT_TERMINAL_PROMPT", "0");
     detach_from_terminal(&mut child);
 
+    // The words of a push for the failures of the run itself stay as they
+    // were: `git` for a program that cannot start, and `git push` for a
+    // failure that left no words.
+    stream_child(child, "git", "git push", on_line)
+}
+
+/// Run `child` to completion with both of its pipes captured, report each line
+/// as it lands, and describe how the run went.
+///
+/// The blocking half of [`spawn_streamed`], separated so a test can run it
+/// against a real repository without a thread or a channel in the way. The
+/// caller builds `child` completely: this function sets the two output
+/// streams to pipes, as the run needs, and sets nothing else. The shed of the
+/// git environment, the working directory, the closed stdin, and the
+/// detachment from the terminal are the caller's, and [`run_push`] shows how
+/// each is done and why.
+///
+/// `name` is how a failure of the run itself names the program: it gives
+/// `cannot run {name}: ...` where the program cannot start, `cannot wait for
+/// {name}: ...` where the wait fails, and `{name} failed (...)` where the
+/// program fails and says nothing.
+///
+/// The lines go to `on_line` in the order that they arrive, and the outcome
+/// holds the same lines, joined with a newline between each. See
+/// [`stream_child`].
+pub(crate) fn run_streamed(
+    child: Command,
+    name: &str,
+    on_line: &(dyn Fn(String) + Sync),
+) -> PushOutcome {
+    stream_child(child, name, name, on_line)
+}
+
+/// The run that [`run_push`] and [`run_streamed`] share.
+///
+/// `program` names the program in `cannot run {program}` and `cannot wait for
+/// {program}`. `failed` names it in `{failed} failed (...)`. A push says `git`
+/// in the first two and `git push` in the third, and each message of a push
+/// stays as it was before the run was shared. Any other caller gives one name
+/// for all three, through [`run_streamed`].
+fn stream_child(
+    mut child: Command,
+    program: &str,
+    failed: &str,
+    on_line: &(dyn Fn(String) + Sync),
+) -> PushOutcome {
+    child.stdout(Stdio::piped()).stderr(Stdio::piped());
+
     let mut child = match child.spawn() {
         Ok(child) => child,
-        // git is missing, or not executable. Rare, and worth saying plainly:
-        // every other failure here is git's own words, and this one would
-        // otherwise arrive as an empty message.
+        // The program is missing, or not executable. Rare, and worth saying
+        // plainly: every other failure here is git's own words, and this one
+        // would otherwise arrive as an empty message.
         Err(error) => {
             return PushOutcome {
                 success: false,
-                output: format!("cannot run git: {error}"),
+                output: format!("cannot run {program}: {error}"),
             }
         }
     };
@@ -433,7 +761,7 @@ fn run_push(
         Err(error) => {
             return PushOutcome {
                 success: false,
-                output: format!("cannot wait for git: {error}"),
+                output: format!("cannot wait for {program}: {error}"),
             }
         }
     };
@@ -448,7 +776,7 @@ fn run_push(
     if !success && text.trim().is_empty() {
         // A failure with nothing to show would render as a blank row, which
         // reads as success. The exit status is all git left us.
-        text = format!("git push failed ({status})");
+        text = format!("{failed} failed ({status})");
     }
 
     PushOutcome {
@@ -509,96 +837,6 @@ fn drain(stream: Option<impl std::io::Read>, report: &(dyn Fn(String) + Sync)) {
     }
 }
 
-/// Arrange for `command`'s child to run detached from the terminal, so nothing
-/// in its process tree can reach the keyboard gsw is reading.
-///
-/// Each platform names the terminal differently, so each gets its own arm: a
-/// session of its own on Unix, no inherited console on Windows. Both deny the
-/// same thing — the direct path to the terminal device, the one a closed stdin
-/// and captured output streams do not cover, because it bypasses the inherited
-/// descriptors entirely.
-///
-/// The Unix half asks for a new session before the exec. A session leader has
-/// no controlling terminal until it deliberately acquires one, and no program
-/// git runs does that — so `open("/dev/tty")` returns `ENXIO` for the child,
-/// for ssh, and for every credential helper below them. Refused it, OpenSSH
-/// sets `use_askpass` and either runs `SSH_ASKPASS` (a GUI prompt, which is
-/// fine — it does not touch the pane gsw is drawing on) or gives up at once
-/// with a message that reaches the status rows.
-#[cfg(unix)]
-fn detach_from_terminal(command: &mut Command) {
-    use std::os::unix::process::CommandExt;
-
-    // SAFETY: the closure runs in the forked child, between `fork` and `exec`,
-    // where only async-signal-safe functions may be called. `setsid` is one
-    // (POSIX.1-2017, "Signal Concepts"); it is a bare syscall that allocates
-    // nothing and takes no lock the parent's other threads could be holding.
-    unsafe {
-        command.pre_exec(|| {
-            // The return value is deliberately dropped. `setsid` fails with
-            // EPERM when the caller is already a process group leader, which
-            // means a new session was not available — harmless, and not worth
-            // failing a push over: the terminal defenses below it still stand,
-            // and returning an error here would abort the exec and report a
-            // push failure to a user who has done nothing wrong. There is no
-            // other failure mode.
-            let _ = libc::setsid();
-            Ok(())
-        });
-    }
-}
-
-/// `CreateProcess`'s `DETACHED_PROCESS`: the new process does not inherit the
-/// console of the process that started it, and Windows will not give it one of
-/// its own. Deliberately not combined with `CREATE_NEW_CONSOLE`, which is its
-/// opposite and which `CreateProcess` rejects alongside it, and not written as
-/// `CREATE_NO_WINDOW`, which only hides a console the child still has and can
-/// still read from.
-///
-/// Spelled out here rather than pulled in from `windows-sys` or `winapi`: it is
-/// one integer fixed by the Win32 ABI, and a dependency the whole crate would
-/// carry for it is a worse trade than a constant with its value written down.
-#[cfg(windows)]
-const DETACHED_PROCESS: u32 = 0x0000_0008;
-
-/// See the Unix half above. Windows has no `/dev/tty`, but it has the same
-/// hazard by a different door: a console. OpenSSH for Windows asks for a key
-/// passphrase or an unknown-host-key answer by opening `CONIN$` itself, which
-/// reaches the console the child inherited no matter what was done to its
-/// standard handles — so a closed stdin and captured output streams leave the
-/// push free to paint a prompt over gsw's alternate screen and race the event
-/// thread for the user's keystrokes, with no timeout to end it.
-///
-/// [`DETACHED_PROCESS`] closes that door the way `setsid` closes the Unix one.
-/// The child inherits no console and cannot be assigned one, so `CONIN$` and
-/// `CONOUT$` fail to open for it, for ssh, and for every credential helper
-/// below them. Denied the console, OpenSSH does what it does on Unix: it falls
-/// back to `SSH_ASKPASS` (a GUI prompt, which does not touch the pane gsw is
-/// drawing on) or fails immediately with a message that arrives on the captured
-/// stderr and lands in the status rows like any other error. The pipes are
-/// unaffected — the flag governs the console, not the standard handles, which
-/// the caller has already set.
-///
-/// **Not covered by any test in this repository.** The Unix half has a runtime
-/// test, `the_push_child_cannot_open_the_controlling_terminal`, which plants a
-/// fake ssh and asserts the child was refused the terminal. There is no Windows
-/// equivalent: no Windows host runs these tests and this repository has no CI,
-/// so such a test would be one nobody has ever seen pass or fail. This arm is
-/// verified by compiling for `x86_64-pc-windows-msvc` and by nothing else.
-#[cfg(windows)]
-fn detach_from_terminal(command: &mut Command) {
-    use std::os::windows::process::CommandExt;
-
-    command.creation_flags(DETACHED_PROCESS);
-}
-
-/// Neither Unix nor Windows, so there is no terminal this code knows how to
-/// take away. The arm exists so the crate still builds for such a target rather
-/// than failing to find `detach_from_terminal`; on one, `GIT_TERMINAL_PROMPT=0`
-/// and the closed stdin are the whole defense.
-#[cfg(not(any(unix, windows)))]
-fn detach_from_terminal(_command: &mut Command) {}
-
 /// The branch checked out in `workdir` right now, or [`DETACHED_HEAD`] when
 /// there is none. `None` only when `git` could not be run at all.
 ///
@@ -616,8 +854,18 @@ fn detach_from_terminal(_command: &mut Command) {}
 /// [`crate::repo::branch_name`] and the header gsw draws. git refuses `HEAD` as
 /// a branch name, so it can never equal a branch a confirmation named — a
 /// detached checkout always reads as a change.
-fn current_branch(workdir: &Path) -> Option<String> {
-    let output = Command::new("git")
+///
+/// **The child sheds the inherited git environment.** git obeys the environment
+/// before it obeys the directory it was pointed at, so a `gsw` started from
+/// inside a hook holds a `GIT_DIR` that answers this question about the
+/// repository being committed to. That answer is some other branch, or no
+/// branch at all, and every confirmation would then be refused as a checkout
+/// that never happened. The rule is the `GIT_` prefix and never a list of
+/// names, and the six names of [`childenv::USER_INTENT_GIT_ENVIRONMENT`] stay
+/// because a person sets each of those on purpose — this runs for that person.
+pub(crate) fn current_branch(workdir: &Path) -> Option<String> {
+    let mut command = childenv::command("git");
+    let output = command
         .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
         .current_dir(workdir)
         .stdin(Stdio::null())
@@ -633,33 +881,99 @@ fn current_branch(workdir: &Path) -> Option<String> {
     Some(name)
 }
 
-/// How a finished `git push` came out.
+/// How a finished run came out: a `git push`, or the user's own command behind
+/// `R` or `M`.
 ///
-/// `output` is everything the child said on both pipes, in the order it was
+/// One type for both, because the row reports both the same way — a command
+/// that either worked or wrote a reason — and because the words that report
+/// each of them come from the question rather than from here (see
+/// [`SuccessReport`]).
+///
+/// `output` is everything the child said on both streams, in the order it was
 /// read, kept whole: choosing which of it to show is [`PushUi`]'s job, and a
 /// runner that pre-digested it would decide the wording from a place with no
 /// idea how many rows are free.
 ///
-/// The order is load-bearing. [`failure_lines`] shows the last lines, and on a
-/// failed pre-push hook the last line is git's verdict on stderr — which comes
-/// after a hook that wrote to stdout, and only after.
+/// The order is load-bearing. [`failure_lines`] always keeps the last line,
+/// and on a failed pre-push hook the last line is git's verdict on stderr —
+/// which comes after a hook that wrote to stdout, and only after. The report
+/// of a run that worked reads the last line for the same reason: `grp` says
+/// there that it skipped the push.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PushOutcome {
-    /// Whether `git push` exited zero.
+    /// Whether the command worked.
+    ///
+    /// For a push, whether git exited zero. For a rebase or a merge of the
+    /// base, whether the command exited zero and left no operation that git
+    /// holds: a command can stop a rebase and still exit zero. See
+    /// [`crate::update`].
     pub success: bool,
-    /// Everything git wrote, both streams, in the order they were captured.
+    /// Everything the command wrote, both streams, in the order they were
+    /// captured.
+    ///
+    /// A rebase or a merge of the base whose command left an operation
+    /// stopped also gets a sentence of gsw as the last line, which says what
+    /// gsw did with that operation. An abort that git refused puts the lines
+    /// of git between the lines of the command and that sentence. See
+    /// [`crate::update`].
     pub output: String,
 }
 
-/// Everything the push feature puts on screen, and the input mode that goes
+/// Everything watch mode puts under the frame, and the input mode that goes
 /// with it.
+///
+/// The name says `Push` because the push is the act every state below was
+/// written for: a question, a run in flight, and the outcome of one. It is
+/// **not** the push's alone, and it owns two other kinds of thing.
+///
+/// A question of any key comes through one of two doors — [`PushUi::request`]
+/// for `p` and `P`, [`PushUi::request_base_update`] for the keys that rebase
+/// the branch onto the base or merge the base into it — and each question
+/// carries its own words: the hint that names what Enter does, the notice its
+/// run shows, and the report it leaves behind. The states below therefore never
+/// learn which key asked, and a new key that asks a question adds no state
+/// here.
+///
+/// A message from a feature that asks nothing comes through
+/// [`PushUi::post_error`], [`PushUi::post_notice`] or
+/// [`PushUi::post_progress`] — the `G` key runs a command of the user's own,
+/// and a command that refuses says why. Those doors are what keeps the features
+/// from painting over each other.
 ///
 /// Watch mode holds one of these and asks it two questions — what mode are we
 /// in, and what does the pane show. It never learns whether a prompt or an
 /// error is up, so the states below can grow without the render loop growing a
 /// branch for each one.
+///
+/// The list of the worktrees lives here too, and it is not the push's either.
+/// It takes the pane, so it owns the row as a question does, and
+/// [`PushUi::mode`] stays the one source of what the keys mean. The loop asks
+/// one more question for it, [`PushUi::list`], because the open list replaces
+/// the frame and does not go under it.
 pub(crate) struct PushUi {
     state: State,
+    /// Messages from another feature that arrived while the push, a question,
+    /// or the open list owned the row, oldest first, each one waiting for the
+    /// row to be free.
+    ///
+    /// A push is the one thing here that takes minutes, and its own outcome is
+    /// what the user is waiting to read. So a message that arrives mid-push is
+    /// held rather than posted, and [`PushUi::overlay`] posts the oldest one on
+    /// the first frame that finds nothing else on the row. Dropping it instead
+    /// would make a failure silent, and silence belongs to one case only: a
+    /// command that does not exist.
+    ///
+    /// **A queue rather than one slot, because minutes hold more than one
+    /// message.** `G` acts during a push, and the run it starts frees the key
+    /// again the moment it ends, so a second `G` refuses with the first
+    /// refusal still waiting. One slot made the second message overwrite the
+    /// first, which is the silence the rule above forbids. Each message here
+    /// reaches the user in turn, and each gets the row to itself for a life of
+    /// its own — a key for an error, the clock for a notice.
+    ///
+    /// The queue holds [`MAX_HELD_MESSAGES`] messages. A full one drops the
+    /// newest and keeps the oldest — see that constant for why that end.
+    held: VecDeque<HeldMessage>,
     /// Whether the terminal takes 24-bit color, as [`crate::RenderConfig`]
     /// resolved it from the CLI flags and `COLORTERM`. Carried here because the
     /// status message fades, and a fade
@@ -669,8 +983,9 @@ pub(crate) struct PushUi {
     truecolor: bool,
 }
 
-/// What the push feature is currently doing. Private: the loop drives this
-/// through [`PushUi`]'s methods and reads it only through
+/// What the row under the frame is currently doing: for a push, for a rebase
+/// onto the base, and for a merge of the base alike. Private: the loop drives
+/// this through [`PushUi`]'s methods and reads it only through
 /// [`PushUi::mode`]/[`PushUi::overlay`].
 enum State {
     /// Nothing on screen and nothing pending.
@@ -690,17 +1005,29 @@ enum State {
     /// mode below can never promise a question the user was not shown.
     Asking {
         question: String,
-        creates_remote_branch: bool,
-        command: PushCommand,
-        success_message: String,
+        hint: String,
+        caution: bool,
+        command: Confirmed,
+        running_notice: String,
+        success: SuccessReport,
     },
-    /// `git push` is running, and this is what it has said so far.
+    /// The command a question described is running, and this is what it has
+    /// said so far.
     Running {
-        success_message: String,
-        /// When the push started, against the watch loop's injected clock. The
+        /// What the row says about the run, without its age. It comes from the
+        /// question, so the act that was confirmed is the act that is reported.
+        notice: String,
+        /// What the row says once the command has worked, as the question
+        /// composed it.
+        success: SuccessReport,
+        /// When the run started, against the watch loop's injected clock. The
         /// notice reports the age from it, so a hook that takes minutes looks
-        /// like a push in progress rather than like a hang.
+        /// like a run in progress rather than like a hang. A rebase reaches
+        /// that same hook, because it pushes what it rewrote.
         started_at: Instant,
+        /// Which command runs. [`PushUi::mode`] reports it, because `m` acts
+        /// during a push and not during a rebase or a merge.
+        run: RunKind,
         /// The most recent output lines, oldest first, capped at
         /// [`MAX_PUSH_OUTPUT_ROWS`].
         ///
@@ -710,6 +1037,17 @@ enum State {
         /// that prints thousands.
         recent: VecDeque<String>,
     },
+    /// The list of the worktrees is open, and takes the pane. It owns the row
+    /// as a question does: nothing is painted under the frame, and a message
+    /// that arrives waits until the list closes.
+    ///
+    /// It is a state here, beside the states of the push, so that
+    /// [`PushUi::mode`] stays the one source of what the keys mean. A second
+    /// source could disagree with the first about one key.
+    Listing {
+        /// The open list, with its cursor and its scroll.
+        list: WorktreeList,
+    },
 }
 
 /// How long a [`State::Status`] message stays under the frame, and how it is
@@ -717,25 +1055,46 @@ enum State {
 ///
 /// The split is between what gsw said and what git said, and it is one decision
 /// rather than two because the two halves are the same fact. Everything gsw
-/// composes itself — a push that worked, a push it would not run — is a
-/// *report*: the user pressed a key, the answer came back, and a monitor that
-/// holds it on screen for the rest of the session is spending a row on news.
-/// git's error text is a *remedy*: the user has to read it and act on it, so
-/// gsw must not take it away while they are looking at another pane.
+/// composes itself about work that has ended — a push that worked, a push it
+/// would not run — is a *report*: the user pressed a key, the answer came back,
+/// and a monitor that holds it on screen for the rest of the session is
+/// spending a row on news. git's error text is a *remedy*: the user has to read
+/// it and act on it, so gsw must not take it away while they are looking at
+/// another pane. gsw's news about work still in flight is neither, and
+/// [`Life::UntilReplaced`] says how long it stays.
 ///
 /// The age and the fade ride on this enum rather than on a flag beside it,
 /// because a message that goes away on its own has to say how old it is — or it
 /// is a sentence that quietly stops being true — and a message that stays has
 /// no countdown to report. There is no third combination to represent.
 enum Life {
-    /// Stays until the user presses a key. git's own words about a push that
-    /// failed, drawn red, and the one message gsw will not remove by itself.
+    /// Stays until the user presses a key. The words a failed run wrote —
+    /// git's own, or those of the command behind `R` or `M` — drawn red, and
+    /// the one message gsw will not remove by itself.
     UntilDismissed,
     /// Says how long ago it was posted, fades toward black across
     /// [`STATUS_LIFETIME`], and then takes itself off the screen.
     Fading {
         /// When the message was posted, against the watch loop's injected
         /// clock — the same clock [`PushUi::overlay`] is later given.
+        posted_at: Instant,
+    },
+    /// Stays until the next message takes the row. gsw's own words about work
+    /// that is still in flight, posted through [`PushUi::post_progress`].
+    ///
+    /// Neither a key nor the clock removes it, because the words stay true
+    /// until the work ends, and the end of the work posts a message of its
+    /// own. It shows no age for the same reason. It is drawn as a report at
+    /// age zero, because it is gsw's news and that news is current.
+    UntilReplaced,
+    /// gsw's own words that ask for a second press of a key, posted through
+    /// [`PushUi::post_hint`].
+    ///
+    /// It shows no age and does not fade, because it is a request and not news.
+    /// It leaves the row by itself, [`RETURN_HINT_LIFETIME`] after it was posted.
+    /// While it is on the row, the key is armed. See [`PushUi::shows_hint`].
+    Hint {
+        /// When the hint was posted, against the watch loop's injected clock.
         posted_at: Instant,
     },
 }
@@ -751,10 +1110,109 @@ impl Life {
     /// rather than report the zero age it plainly has.
     fn elapsed(&self, now: Instant) -> Option<Duration> {
         match self {
-            Self::UntilDismissed => None,
-            Self::Fading { posted_at } => Some(now.saturating_duration_since(*posted_at)),
+            Self::UntilDismissed | Self::UntilReplaced => None,
+            Self::Fading { posted_at } | Self::Hint { posted_at } => {
+                Some(now.saturating_duration_since(*posted_at))
+            }
         }
     }
+
+    /// How long a message of this life stays on the row, or `None` for one that
+    /// no clock takes away.
+    ///
+    /// The one rule for every life that ends by itself: [`PushUi::expire`] takes
+    /// the message off when [`Life::elapsed`] reaches this.
+    fn lifetime(&self) -> Option<Duration> {
+        match self {
+            Self::Fading { .. } => Some(STATUS_LIFETIME),
+            Self::Hint { .. } => Some(RETURN_HINT_LIFETIME),
+            Self::UntilDismissed | Self::UntilReplaced => None,
+        }
+    }
+
+    /// What is left of this life for a message that must wait for the row, or
+    /// `None` for a message that must not wait.
+    ///
+    /// The instant goes on purpose, and [`HeldLife`] says why: it is the
+    /// instant the message was posted, and a message that waits reaches the
+    /// row later than that.
+    ///
+    /// [`Life::UntilReplaced`] gives `None`. Its words are true only while
+    /// the work they describe is in flight, and a message that waits reaches
+    /// the row after an unknown time. So a busy row drops such a message.
+    ///
+    /// [`Life::Hint`] gives `None` for a like reason. It asks for a press now,
+    /// and a request that reaches the row later asks for a press the user was
+    /// never given a reason for.
+    fn kind(&self) -> Option<HeldLife> {
+        match self {
+            Self::UntilDismissed => Some(HeldLife::UntilDismissed),
+            Self::Fading { .. } => Some(HeldLife::Fading),
+            Self::UntilReplaced | Self::Hint { .. } => None,
+        }
+    }
+}
+
+/// A message that is waiting for the row, and how long it stays once it has it.
+///
+/// The two travel together because the frame that frees the row knows nothing
+/// about which door the message came through. A queue of lines beside a queue
+/// of lives, or beside a flag, is two things that can get one step out of
+/// order — and the message would then take the wrong life.
+struct HeldMessage {
+    /// The line to put on the row.
+    line: String,
+    /// What takes it off the row again.
+    life: HeldLife,
+}
+
+/// How long a held message stays once the row frees up.
+///
+/// [`Life::Fading`] carries the instant a message was posted, and a held
+/// message is posted when the row frees up rather than when it arrived. So the
+/// queue holds the kind alone, and [`PushUi::post_held`] reads the clock that
+/// puts it on the row. A message that waited three minutes for a push then
+/// gets its whole life in front of the user, and not the end of one.
+enum HeldLife {
+    /// Becomes [`Life::Fading`], posted at the instant it reaches the row.
+    Fading,
+    /// Becomes [`Life::UntilDismissed`], which has no instant to carry.
+    UntilDismissed,
+}
+
+impl HeldLife {
+    /// The life a message of this kind takes when it reaches the row at `now`.
+    fn at(&self, now: Instant) -> Life {
+        match self {
+            Self::Fading => Life::Fading { posted_at: now },
+            Self::UntilDismissed => Life::UntilDismissed,
+        }
+    }
+}
+
+/// Where a posted message landed: on the row, or in the queue behind it.
+///
+/// The doors into the row answer this because the row is not always free,
+/// and a caller can have work that only the first answer justifies. The `G`
+/// key is that caller: the message it posts asks for a second press, and the
+/// offer of that press stands exactly as long as the message on the row does.
+/// A message that waits for a push is a message nobody has read, so a key
+/// armed by it would take a press the user never gave a reason for. Esc
+/// needs no such answer, because it asks the row itself: [`PushUi::shows_hint`].
+///
+/// An enum rather than a `bool`, because the two answers are two places and
+/// not the presence and absence of one thing. `Posted::Held` at
+/// [`MAX_HELD_MESSAGES`] is the message that was dropped as well as the one
+/// that waits — neither took the row, which is the whole question here, and a
+/// third answer would make every caller decide something it has no use for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Posted {
+    /// The message is under the frame now.
+    OnRow,
+    /// A question, a push in flight, or the open list owns the row, so the
+    /// message waits in [`PushUi::held`] — or, on a full queue or for a
+    /// progress notice or a hint, went nowhere at all.
+    Held,
 }
 
 impl PushUi {
@@ -763,6 +1221,7 @@ impl PushUi {
     pub(crate) fn new(truecolor: bool) -> Self {
         Self {
             state: State::Idle,
+            held: VecDeque::new(),
             truecolor,
         }
     }
@@ -778,10 +1237,15 @@ impl PushUi {
     /// the channel indefinitely, and a message that expires only when something
     /// else happens does not expire.
     ///
-    /// A question, a push in flight, and an error that never expires all say
-    /// `None`: none of them changes with the clock, and a wake-up costs a
-    /// repaint of the whole pane.
-    pub(crate) fn next_tick(&self) -> Option<Duration> {
+    /// A question, a push in flight, an error that never expires, and the open
+    /// list all say `None`: none of them changes with the clock, and a wake-up
+    /// costs a repaint of the whole pane.
+    ///
+    /// A hint says how long it has left. That is the one answer that needs the
+    /// time, so `clock` is read only while a hint stands, and never otherwise.
+    /// Some loop tests use a clock that steps on each read, and a read on each
+    /// iteration would change what they measure.
+    pub(crate) fn next_tick(&self, clock: &impl Fn() -> Instant) -> Option<Duration> {
         match &self.state {
             // A running push ages the same way a fading message does, and for
             // the same reason: the notice reports its own age, and an age only
@@ -793,7 +1257,18 @@ impl PushUi {
                 ..
             }
             | State::Running { .. } => Some(STATUS_CADENCE),
-            State::Idle | State::Status { .. } | State::Asking { .. } => None,
+            // A hint does not age, but it leaves the row on its own, and a
+            // frame that is not drawn cannot take it off. Overdue gives zero:
+            // the loop wakes at once and the frame removes it.
+            State::Status {
+                life: Life::Hint { posted_at },
+                ..
+            } => Some(
+                RETURN_HINT_LIFETIME.saturating_sub(clock().saturating_duration_since(*posted_at)),
+            ),
+            State::Idle | State::Status { .. } | State::Asking { .. } | State::Listing { .. } => {
+                None
+            }
         }
     }
 
@@ -807,12 +1282,15 @@ impl PushUi {
     pub(crate) fn mode(&self) -> InputMode {
         match self.state {
             State::Asking { .. } => InputMode::Confirm,
-            State::Running { .. } => InputMode::Pushing,
+            State::Running { run, .. } => InputMode::Running(run),
+            State::Listing { .. } => InputMode::List,
             State::Idle | State::Status { .. } => InputMode::Normal,
         }
     }
 
-    /// Handle `p`: work out what a push would do and either ask or explain.
+    /// Handle `p` and `P`: work out what a push would do and either ask or
+    /// explain. `hooks` says whether the `pre-push` hook runs: `p` gives
+    /// [`PushHooks::Run`] and `P` gives [`PushHooks::Skip`].
     ///
     /// Replaces whatever was on screen, so pressing `p` with a stale error up
     /// asks the new question instead of stacking a row under the old one.
@@ -836,27 +1314,53 @@ impl PushUi {
     /// classified. [`PushUi::overlay`] still drops a question it cannot draw,
     /// but that now covers only the pane resized down while a question is
     /// already up: the render path is the only thing that sees the new size.
-    pub(crate) fn request(&mut self, snapshot: &Snapshot, dims: Dimensions, now: Instant) {
-        self.state = match prompt_for(
-            &snapshot.branch,
-            snapshot.push_remote.as_deref(),
-            snapshot.upstream.as_ref(),
-        ) {
+    pub(crate) fn request(
+        &mut self,
+        snapshot: &Snapshot,
+        dims: Dimensions,
+        now: Instant,
+        hooks: PushHooks,
+    ) {
+        self.ask(
+            prompt_for(
+                &snapshot.branch,
+                snapshot.push_remote.as_deref(),
+                snapshot.upstream.as_ref(),
+                hooks,
+            ),
+            dims,
+            now,
+        );
+    }
+
+    /// Put `prompt` on the row: the question with the keys that answer it, or
+    /// the refusal with a life of its own.
+    ///
+    /// The body every door into the row shares, so no two of them can reach
+    /// different answers about the same row. It replaces whatever was on
+    /// screen, which is why a key pressed with a stale error up asks its
+    /// question instead of stacking a row under the old one.
+    fn ask(&mut self, prompt: PushPrompt, dims: Dimensions, now: Instant) {
+        self.state = match prompt {
             // Nowhere to put the question, so it is not asked. Idle rather than
-            // a message: see above.
+            // a message: see [`PushUi::request`].
             PushPrompt::Confirm { .. } if Overlay::rows_to_spare(dims) == 0 => State::Idle,
             PushPrompt::Confirm {
                 question,
-                creates_remote_branch,
+                hint,
+                caution,
                 command,
-                success_message,
+                running_notice,
+                success,
             } => State::Asking {
                 question,
-                creates_remote_branch,
+                hint,
+                caution,
                 command,
-                success_message,
+                running_notice,
+                success,
             },
-            // A refusal describes the repository as it stood when `p` was
+            // A refusal describes the repository as it stood when the key was
             // pressed, so it goes stale exactly the way a success does — and
             // costs the frame the same row until it does.
             PushPrompt::Refuse { message } => State::Status {
@@ -866,49 +1370,117 @@ impl PushUi {
         };
     }
 
-    /// Handle `y`: start the push, returning the [`PushCommand`] to run, or
-    /// `None` when no confirmation was on screen to accept.
+    /// Handle `R` or `M`: work out what the user's command would do to the
+    /// branch and either ask or explain.
+    ///
+    /// The door beside [`PushUi::request`], and it obeys the two rules that one
+    /// obeys. A pane with no row to draw the question in raises no question and
+    /// is left [`State::Idle`], so the `y` or Enter behind the key is an
+    /// ordinary key. A refusal posts a fading line, because it describes the
+    /// repository as it stood at the press and goes stale exactly as a success
+    /// does.
+    ///
+    /// It takes the command because the command is the user's, and gsw learns
+    /// of it from a probe that answers on the loop's own channel. The question
+    /// names it, so a key whose command is not there yet has no question to
+    /// ask.
+    pub(crate) fn request_base_update(
+        &mut self,
+        snapshot: &Snapshot,
+        update: BaseUpdate,
+        command: &ShellCommand,
+        dims: Dimensions,
+        now: Instant,
+    ) {
+        self.ask(base_update_prompt_for(snapshot, update, command), dims, now);
+    }
+
+    /// Handle `y`: start what the question described, returning the
+    /// [`Confirmed`] command to run, or `None` when no confirmation was on
+    /// screen to accept.
     ///
     /// Moving to [`State::Running`] as it hands the command over is what makes
     /// a second `y` — one that raced the mode change — return `None` rather than
-    /// start an overlapping push.
-    pub(crate) fn confirm(&mut self, now: Instant) -> Option<PushCommand> {
+    /// start an overlapping run.
+    pub(crate) fn confirm(&mut self, now: Instant) -> Option<Confirmed> {
         let State::Asking {
             command,
-            success_message,
+            running_notice,
+            success,
             ..
         } = std::mem::replace(&mut self.state, State::Idle)
         else {
             return None;
         };
+        let run = match command {
+            Confirmed::Push(_) => RunKind::Push,
+            Confirmed::BaseUpdate(_) => RunKind::BaseUpdate,
+        };
         self.state = State::Running {
-            success_message,
+            notice: running_notice,
+            success,
             started_at: now,
+            run,
             recent: VecDeque::new(),
         };
         Some(command)
     }
 
-    /// Handle one line of a running push's output.
+    /// Start a run that no question asked for, and say whether it started.
     ///
-    /// Ignored in every other state. The reader threads are joined before the
-    /// outcome is sent, so a line cannot really arrive after the push
-    /// finished — but a window that a late line could reopen would paint over
-    /// the error the user is reading, and the rule costs nothing to state.
+    /// The door into a run for a key that acts at once, as the second press of
+    /// Esc does. A question asks first and [`PushUi::confirm`] starts its run,
+    /// and this starts a run with the notice and the report composed by the
+    /// caller. [`PushUi::finished`] and [`PushUi::output_line`] work for it as
+    /// for any run.
+    ///
+    /// The row must be free: nothing on it, or a message. A message goes, as a
+    /// new message replaces an old one. A question, a run, and the open list own
+    /// the row, so on any of them this changes nothing and answers `false`, and
+    /// the caller must not start the command.
+    pub(crate) fn start_run(
+        &mut self,
+        notice: String,
+        success: SuccessReport,
+        run: RunKind,
+        now: Instant,
+    ) -> bool {
+        if !matches!(self.state, State::Idle | State::Status { .. }) {
+            return false;
+        }
+        self.state = State::Running {
+            notice,
+            success,
+            started_at: now,
+            run,
+            recent: VecDeque::new(),
+        };
+        true
+    }
+
+    /// Handle one line of a running command's output.
+    ///
+    /// Ignored in every other state. A line cannot really arrive after the run
+    /// that wrote it has finished — the push joins its reader threads before it
+    /// reports, and a base update reads its files and reports its last lines on
+    /// the one thread that then reports the outcome — but a window that a late
+    /// line could reopen would paint over the error the user is reading, and
+    /// the rule costs nothing to state.
     pub(crate) fn output_line(&mut self, line: String) {
         let State::Running { recent, .. } = &mut self.state else {
             return;
         };
         recent.push_back(line);
         // A hook can print thousands of lines, and every one of them costs
-        // memory until the push ends. Trimming on arrival bounds that at the
+        // memory until the run ends. Trimming on arrival bounds that at the
         // window's own size rather than at the hook's output.
         while recent.len() > MAX_PUSH_OUTPUT_ROWS {
             recent.pop_front();
         }
     }
 
-    /// Drop a message that has outlived [`STATUS_LIFETIME`].
+    /// Drop a message that has outlived its [`Life::lifetime`]: a fading line
+    /// at [`STATUS_LIFETIME`], and a hint at [`RETURN_HINT_LIFETIME`].
     ///
     /// The counterpart to [`PushUi::dismiss`], and deliberately the only other
     /// way a status leaves the screen: one of them is the user saying they have
@@ -921,9 +1493,40 @@ impl PushUi {
         };
         if life
             .elapsed(now)
-            .is_some_and(|elapsed| elapsed >= STATUS_LIFETIME)
+            .zip(life.lifetime())
+            .is_some_and(|(elapsed, lifetime)| elapsed >= lifetime)
         {
             self.state = State::Idle;
+        }
+    }
+
+    /// Put the oldest held message on the row, if there is one and the row is
+    /// free.
+    ///
+    /// Called from [`PushUi::overlay`], beside [`PushUi::expire`], because a
+    /// render is the one moment that happens often enough and reliably enough
+    /// to act on: the row is freed by a key, by a clock, and by a push that
+    /// ended, and a render follows each of them.
+    ///
+    /// **One message per frame, and no more.** The message it posts owns the
+    /// row until a key or the clock takes it away, so the next frame finds the
+    /// row busy and leaves the rest of the queue alone. A queue of two thus
+    /// reaches the user as two messages in order, and each one gets the whole
+    /// life the first one gets. To post them all at once would put the second
+    /// message where the user reads the first.
+    ///
+    /// `now` is the instant the message reaches the row, which is the instant
+    /// a fading one starts its life from — see [`HeldLife`]. The one caller is
+    /// [`PushUi::overlay`], which is already holding it.
+    fn post_held(&mut self, now: Instant) {
+        if !matches!(self.state, State::Idle) {
+            return;
+        }
+        if let Some(message) = self.held.pop_front() {
+            self.state = State::Status {
+                lines: vec![message.line],
+                life: message.life.at(now),
+            };
         }
     }
 
@@ -935,23 +1538,23 @@ impl PushUi {
         }
     }
 
-    /// Handle a finished push: replace the running notice with the outcome.
+    /// Handle a finished run: replace the running notice with the outcome.
     ///
-    /// On success the wording comes from the plan that was confirmed, not from
-    /// git's output, so a create reports itself as a create. On failure it is
-    /// git's own words — a gsw paraphrase of a push error would drop exactly
-    /// the detail the user needs.
+    /// On success the report comes from the question that was confirmed, not
+    /// from what the command wrote, so a create reports itself as a create —
+    /// see [`SuccessReport`], which decides there whether the command's own
+    /// last line goes under gsw's sentence. On failure it is the command's own
+    /// words: a gsw paraphrase of a push error would drop exactly the detail
+    /// the user needs.
     ///
     /// The same split decides how long the message stays: `now` starts the
     /// countdown on a success, and a failure gets no countdown at all. See
     /// [`Life`] for why those are one decision.
     pub(crate) fn finished(&mut self, outcome: PushOutcome, now: Instant) {
-        let success_message = match std::mem::replace(&mut self.state, State::Idle) {
-            State::Running {
-                success_message, ..
-            } => success_message,
-            // A finish with no push running: nothing to report against, so
-            // leave the screen as it is rather than inventing a message.
+        let success = match std::mem::replace(&mut self.state, State::Idle) {
+            State::Running { success, .. } => success,
+            // A finish with no run going: nothing to report against, so leave
+            // the screen as it is rather than inventing a message.
             other => {
                 self.state = other;
                 return;
@@ -959,19 +1562,302 @@ impl PushUi {
         };
 
         let (lines, life) = if outcome.success {
-            (vec![success_message], Life::Fading { posted_at: now })
+            (
+                success.rows(&outcome.output),
+                Life::Fading { posted_at: now },
+            )
         } else {
             (failure_lines(&outcome.output), Life::UntilDismissed)
         };
         self.state = State::Status { lines, life };
     }
 
+    /// Put a message from a feature other than the push under the frame.
+    ///
+    /// The text is another program's words, so it waits for a key the way
+    /// git's error text does.
+    ///
+    /// A question, a push in flight, and the open list each own the row, and
+    /// none may be painted over: the question goes with the keys that answer
+    /// it, the notice goes with the outcome the push is about to report, and
+    /// the list goes with the keys that move its cursor. A message that
+    /// arrives then joins the back of [`PushUi::held`], and
+    /// [`PushUi::overlay`] posts the front of that queue on each frame that
+    /// finds the row free.
+    ///
+    /// **A queue, because a second message must not erase the first.** A push
+    /// takes minutes and `G` acts throughout them, so two refusals in one push
+    /// is an ordinary sequence rather than a corner. Both are failures the user
+    /// asked for, and both reach the screen in the order they arrived.
+    ///
+    /// A queue at [`MAX_HELD_MESSAGES`] drops the message that arrives, not
+    /// the ones already in it. That constant says why the oldest is the one
+    /// worth the row.
+    pub(crate) fn post_error(&mut self, line: String) {
+        // The answer goes unread here on purpose. git's words wait for a key
+        // wherever they land, so a caller of this door has nothing to decide
+        // from where the message went — see [`Posted`] for the caller that has.
+        let _ = self.post(line, Life::UntilDismissed);
+    }
+
+    /// Put gsw's own words under the frame, to be taken off again by the clock.
+    ///
+    /// The second door into the row, beside [`PushUi::post_error`]. The two
+    /// agree about who owns the row: a question, a push in flight, and the open
+    /// list are never painted over, so a message that arrives while one of them
+    /// is up joins the back of [`PushUi::held`] and waits for the frame that
+    /// finds the row free. A full queue drops the message that arrives, here
+    /// exactly as there — see [`MAX_HELD_MESSAGES`].
+    ///
+    /// They differ in one thing, and [`Life`] already says why.
+    /// [`PushUi::post_error`] carries another program's words, which are a
+    /// remedy: the user has to read them and act on them, so only a key takes
+    /// them away. This carries gsw's own words about a key the user pressed,
+    /// which are a report: it goes stale the way a push that worked goes
+    /// stale, so the clock takes it away.
+    ///
+    /// `now` is the watch loop's injected clock, and it starts the countdown
+    /// only for a message that goes straight onto the row. A message that
+    /// waits for a push takes the instant of the frame that posts it
+    /// instead — see [`HeldLife`].
+    ///
+    /// So the answer says which of those two happened, and the caller needs
+    /// it. `now` starts a countdown the caller may run a clock of its own
+    /// against — the `G` key runs exactly that — and that clock is a lie for a
+    /// message that has not reached the row. [`Posted`] says what each answer
+    /// obliges the caller to do.
+    pub(crate) fn post_notice(&mut self, line: String, now: Instant) -> Posted {
+        self.post(line, Life::Fading { posted_at: now })
+    }
+
+    /// Put gsw's words about work in flight under the frame, until the next
+    /// message takes the row.
+    ///
+    /// The third door into the row. The `m` key posts through it while a
+    /// measurement runs, and the words tell the user that a press of `m` does
+    /// nothing now. That stays true until the run ends, so neither a key nor
+    /// the clock takes the notice away, and the notice shows no age. The
+    /// message that reports the end of the run replaces it, as does any other
+    /// message.
+    ///
+    /// A question, a push in flight, and the open list own the row here, as at
+    /// the other doors. The difference is what happens to the words then:
+    /// they go nowhere, and they never wait in [`PushUi::held`]. A held notice
+    /// reaches the row after the run it describes has ended, and it then says
+    /// that a run is in flight when none is.
+    pub(crate) fn post_progress(&mut self, line: String) {
+        // The answer goes unread. A notice that did not reach the row went
+        // nowhere, and the caller keeps no state that stands on it.
+        let _ = self.post(line, Life::UntilReplaced);
+    }
+
+    /// Put gsw's request for a second press under the frame, to be taken off
+    /// again by the clock.
+    ///
+    /// The fourth door into the row. A question, a run, and the open list own
+    /// the row here as at the other doors, and the hint then goes nowhere: it
+    /// never waits in [`PushUi::held`], because a request that reaches the row
+    /// later asks for a press the user was never given a reason for. The answer
+    /// says which happened, as [`Posted`] states.
+    ///
+    /// The hint on the row is the armed state of the key, so a caller keeps
+    /// no arming of its own. It asks [`PushUi::shows_hint`] at the next press.
+    pub(crate) fn post_hint(&mut self, line: String, now: Instant) -> Posted {
+        self.post(line, Life::Hint { posted_at: now })
+    }
+
+    /// Put `line` on the row with `life`, or hold it until the row is free.
+    ///
+    /// The body the four doors share, so the rule about who owns the row is
+    /// written once. A question, a push in flight, and the open list are never
+    /// painted over, and a message that arrives while one of them is up joins
+    /// the back of [`PushUi::held`]. Two messages go instead: a life with no
+    /// [`HeldLife`], which is a progress notice or a hint, and a message that
+    /// finds the queue at [`MAX_HELD_MESSAGES`].
+    ///
+    /// A held message keeps the kind of its life and loses the instant. The
+    /// instant in `life` is the instant the message arrived, and a held
+    /// message reaches the row on a later frame, so [`PushUi::post_held`]
+    /// reads the clock again there. [`HeldLife`] says why that is the right
+    /// end to measure from.
+    ///
+    /// The answer reports which of the two arms below ran, so a caller whose
+    /// own state stands on the message can see whether anybody has read it
+    /// yet — see [`Posted`]. A full queue, a progress notice, and a hint answer
+    /// [`Posted::Held`] with the message dropped, because the question is
+    /// whether it took the row and it did not.
+    fn post(&mut self, line: String, life: Life) -> Posted {
+        match self.state {
+            State::Asking { .. } | State::Running { .. } | State::Listing { .. } => {
+                // A life with no kind to hold is dropped here, as a message
+                // that finds the queue full is. See [`Life::kind`].
+                match life.kind() {
+                    Some(kind) if self.held.len() < MAX_HELD_MESSAGES => {
+                        self.held.push_back(HeldMessage { line, life: kind });
+                    }
+                    Some(_) | None => {}
+                }
+                Posted::Held
+            }
+            State::Idle | State::Status { .. } => {
+                self.state = State::Status {
+                    lines: vec![line],
+                    life,
+                };
+                Posted::OnRow
+            }
+        }
+    }
+
     /// Handle a key with no other meaning: clear a status message if one is up.
-    /// Leaves a question or a running push alone — neither is the user's to
-    /// dismiss by pressing an unrelated key.
+    /// Leaves a question, a running push, and the open list alone — none of
+    /// them is the user's to dismiss by pressing an unrelated key.
+    ///
+    /// A progress notice stays too. Its words are true until its work ends,
+    /// and a key does not end that work. See [`Life::UntilReplaced`].
     pub(crate) fn dismiss(&mut self) {
-        if matches!(self.state, State::Status { .. }) {
+        match self.state {
+            State::Status {
+                life: Life::UntilDismissed | Life::Fading { .. } | Life::Hint { .. },
+                ..
+            } => self.state = State::Idle,
+            State::Status {
+                life: Life::UntilReplaced,
+                ..
+            }
+            | State::Idle
+            | State::Asking { .. }
+            | State::Running { .. }
+            | State::Listing { .. } => {}
+        }
+    }
+
+    /// Take the line off the row, but only when it is a hint.
+    ///
+    /// Any key other than the second press takes the offer away, and a hint
+    /// with no offer behind it is a sentence that is no longer true. The hint
+    /// is the offer, so there is no second state to take away with it. Every
+    /// other thing on the row stays: a fading line, an error that waits for a
+    /// key, a progress notice, a question, a run, and the open list are not
+    /// the hint's to remove.
+    pub(crate) fn withdraw_hint(&mut self) {
+        if matches!(
+            self.state,
+            State::Status {
+                life: Life::Hint { .. },
+                ..
+            }
+        ) {
             self.state = State::Idle;
+        }
+    }
+
+    /// Whether a hint is on the row at `now`. The answer is the armed state
+    /// of the second press of Esc.
+    ///
+    /// It is `true` only when the row holds a [`Life::Hint`] that has not
+    /// lived its [`Life::lifetime`] at `now`. It uses the rule of
+    /// [`PushUi::expire`], so the answer is `false` at the instant the hint
+    /// is due to leave, even when no frame has drawn the row since. A
+    /// message that took the row from the hint, a key that withdrew the hint,
+    /// and a switch of the worktree each make the answer `false`, because the
+    /// hint is gone then. No second state can disagree with the row.
+    pub(crate) fn shows_hint(&self, now: Instant) -> bool {
+        let State::Status { life, .. } = &self.state else {
+            return false;
+        };
+        matches!(life, Life::Hint { .. })
+            && life
+                .elapsed(now)
+                .zip(life.lifetime())
+                .is_some_and(|(elapsed, lifetime)| elapsed < lifetime)
+    }
+
+    /// Take every message off the row and out of the queue: a status line of
+    /// any [`Life`], the question, the open list, and every message held for
+    /// the row.
+    ///
+    /// A switch of the worktree calls it, because each of those messages
+    /// describes the worktree that the frame showed before the switch. That
+    /// includes a progress notice, which no key removes, and an error that
+    /// waits for a key. Neither describes the new worktree. The list closes
+    /// too. No key switches while it is open, but the return to the home
+    /// worktree can find it open, and the frame of home needs the pane.
+    ///
+    /// It is never called while a push runs. The loop does not switch then,
+    /// because the window under the frame belongs to the worktree that
+    /// pushes. If it is called then, the running push stays with its window,
+    /// and its outcome still arrives. The held messages go all the same.
+    pub(crate) fn clear(&mut self) {
+        self.held.clear();
+        // A running push is work in flight, and not a message. It keeps the
+        // row, and its outcome takes the row when it arrives.
+        if !matches!(self.state, State::Running { .. }) {
+            self.state = State::Idle;
+        }
+    }
+
+    /// Open the list of the worktrees that Down asked for.
+    ///
+    /// The list takes the pane, so it owns the row as a question does:
+    /// [`PushUi::mode`] gives [`InputMode::List`], [`PushUi::overlay`] paints
+    /// nothing under the frame, and a message that arrives waits in
+    /// [`PushUi::held`] until the list closes.
+    ///
+    /// It replaces a status line, as [`PushUi::request`] does. The line
+    /// describes the frame that the user stopped reading, so it does not come
+    /// back when the list closes.
+    ///
+    /// It does not open while a question or a push owns the row. The key
+    /// table never asks for the list then, and this door keeps the rule if a
+    /// caller does: a question keeps the keys that answer it, and a push keeps
+    /// its window until its outcome arrives.
+    pub(crate) fn open_list(&mut self, list: WorktreeList) {
+        match self.state {
+            State::Asking { .. } | State::Running { .. } => {}
+            State::Idle | State::Status { .. } | State::Listing { .. } => {
+                self.state = State::Listing { list };
+            }
+        }
+    }
+
+    /// The open list, to draw it, or `None` when no list is open.
+    pub(crate) fn list(&self) -> Option<&WorktreeList> {
+        match &self.state {
+            State::Listing { list } => Some(list),
+            State::Idle | State::Status { .. } | State::Asking { .. } | State::Running { .. } => {
+                None
+            }
+        }
+    }
+
+    /// The open list, to move its cursor or to settle its scroll, or `None`
+    /// when no list is open.
+    pub(crate) fn list_mut(&mut self) -> Option<&mut WorktreeList> {
+        match &mut self.state {
+            State::Listing { list } => Some(list),
+            State::Idle | State::Status { .. } | State::Asking { .. } | State::Running { .. } => {
+                None
+            }
+        }
+    }
+
+    /// Close the list and give it back with its cursor, so the caller reads
+    /// the worktree that Enter chose. `None`, and no change, when no list is
+    /// open.
+    ///
+    /// The row is free after the close. So the frame that shows the close
+    /// also posts the oldest message that waited for the list, because
+    /// [`PushUi::overlay`] posts a held message on each frame that finds the
+    /// row free.
+    pub(crate) fn close_list(&mut self) -> Option<WorktreeList> {
+        match std::mem::replace(&mut self.state, State::Idle) {
+            State::Listing { list } => Some(list),
+            // No list is open, so nothing closes.
+            other => {
+                self.state = other;
+                None
+            }
         }
     }
 
@@ -1033,29 +1919,37 @@ impl PushUi {
     /// frame drawn.
     pub(crate) fn overlay(&mut self, dims: Dimensions, now: Instant) -> Overlay {
         self.expire(now);
+        self.post_held(now);
         let width = dims.width;
         let lines: Vec<String> = match &self.state {
-            State::Idle => Vec::new(),
+            // The open list takes the pane, and its frame draws it. Nothing
+            // goes under that frame.
+            State::Idle | State::Listing { .. } => Vec::new(),
             State::Asking {
                 question,
-                creates_remote_branch,
+                hint,
+                caution,
                 ..
             } => {
-                let line = truncate_right(&format!("{question}  {CONFIRM_HINT}"), width);
-                // Yellow marks the push that puts something new on a shared
-                // remote. The wording says so too — the color is what carries
+                let line = truncate_right(&format!("{question}  {hint}"), width);
+                // Yellow marks a question that the user must read twice, for
+                // the acts that the doc of `caution` on `PushPrompt::Confirm`
+                // names. The wording says so too — the color is what carries
                 // it in the half second before the words are read.
-                vec![if *creates_remote_branch {
+                vec![if *caution {
                     line.yellow().to_string()
                 } else {
                     line
                 }]
             }
             State::Running {
-                started_at, recent, ..
+                notice,
+                started_at,
+                recent,
+                ..
             } => {
                 let elapsed = now.saturating_duration_since(*started_at);
-                let notice = format!("{RUNNING_NOTICE} ({})", format_age_detailed(elapsed));
+                let notice = format!("{notice} ({})", format_age_detailed(elapsed));
                 let mut rows = vec![truncate_right(&notice, width)];
 
                 // The window is sized here rather than left to the clamp at
@@ -1078,30 +1972,37 @@ impl PushUi {
                 rows
             }
             State::Status { lines, life } => {
-                let elapsed = life.elapsed(now);
                 // Which rows go when the pane cannot hold them all, decided
                 // here rather than by the clamp at the end of this function.
                 // That clamp drops from the end, and the end is where a
                 // failure's reason is — see [`failure_lines`]. The running
                 // window sizes itself first for the same reason.
                 let dropped = lines.len().saturating_sub(Overlay::rows_to_spare(dims));
-                // The age goes on the last row, which for every message that
-                // has one is the only row: a success and a refusal are one
-                // sentence each, and git's several-line error text is the one
-                // kind that never ages. Numbered before the drop above, so the
-                // row that carries it is the message's last and not merely the
-                // last one that fitted.
-                let last = lines.len().saturating_sub(1);
+                // **The age goes on the first row the pane shows.** A message
+                // that ages is gsw's own news, and gsw's own sentence is its
+                // first row: a run of `R` that worked says what it did, and
+                // puts the last line of the command under that. The age belongs
+                // beside the sentence rather than at the end of somebody else's
+                // words. It is also the row the user is sure to see — the drop
+                // above takes rows off the *front*, so the row that carries the
+                // age is the first that fitted rather than one the pane cut.
+                //
+                // Every other message that ages is one row, so this moves none
+                // of them: a refusal and a push that worked are one sentence
+                // each. The two kinds that never age are git's several-line
+                // error text and a progress notice.
                 lines
                     .iter()
                     .enumerate()
                     .skip(dropped)
-                    .map(|(row, line)| match elapsed {
+                    .map(|(row, line)| match life {
                         // Appended *before* the truncation, so the age is part
                         // of what the pane has to fit rather than something
                         // added to a row already measured against its width.
-                        Some(elapsed) => {
-                            let line = if row == last {
+                        // Saturating for the reason [`Life::elapsed`] gives.
+                        Life::Fading { posted_at } => {
+                            let elapsed = now.saturating_duration_since(*posted_at);
+                            let line = if row == dropped {
                                 format!("{line} ({} ago)", format_age_detailed(elapsed))
                             } else {
                                 line.clone()
@@ -1109,7 +2010,17 @@ impl PushUi {
                             colorize_status(&truncate_right(&line, width), elapsed, self.truecolor)
                                 .to_string()
                         }
-                        None => truncate_right(line, width).red().to_string(),
+                        // gsw's news about work in flight, and gsw's request for
+                        // a second press. Neither ages, so each keeps the look
+                        // of a report at age zero.
+                        Life::UntilReplaced | Life::Hint { .. } => colorize_status(
+                            &truncate_right(line, width),
+                            Duration::ZERO,
+                            self.truecolor,
+                        )
+                        .to_string(),
+                        // git's words, which wait for a key.
+                        Life::UntilDismissed => truncate_right(line, width).red().to_string(),
                     })
                     .collect()
             }
@@ -1210,19 +2121,31 @@ impl Overlay {
     }
 }
 
-/// The key hint shown with every confirmation.
+/// The word the hint of a push of gsw's own uses for it. A push that skips the
+/// hook uses [`SKIP_VERB`], so Enter promises the act that it runs.
+const PUSH_VERB: &str = "push";
+
+/// The key hint shown with a confirmation, for an act that `verb` names.
 ///
 /// Spelled out rather than the usual `[y/N]`. That convention's capital letter
 /// means "this is what Enter gives you", and Enter *confirms* here — so `[y/N]`
 /// would promise that the key people reach for by reflex is the safe one, on
-/// the one prompt in gsw that writes to a shared remote.
+/// the prompts in gsw that write to a shared remote.
 ///
 /// The same reasoning is why a question this hint cannot be drawn with is never
 /// raised (see [`PushUi::request`], and [`PushUi::overlay`] for the pane that
 /// shrinks under one). What makes Enter safe to bind to a push is that the user
 /// is looking at the sentence saying so. Off the screen, the binding keeps the
 /// risk and loses the sentence.
-const CONFIRM_HINT: &str = "[y/Enter = push, n/Esc = cancel]";
+///
+/// One function rather than one constant for each key, because four keys now
+/// ask a question and four spellings of one convention are four things that
+/// drift apart. The verb is the act of the question the hint goes under, so the
+/// promise names what Enter does here rather than what it does under some other
+/// key.
+pub(crate) fn confirm_hint(verb: &str) -> String {
+    format!("[y/Enter = {verb}, n/Esc = cancel]")
+}
 
 /// What the window's rows are indented by.
 ///
@@ -1232,13 +2155,31 @@ const CONFIRM_HINT: &str = "[y/Enter = push, n/Esc = cancel]";
 const WINDOW_INDENT: &str = "  ";
 
 /// What a running push says while the network round trip is in flight.
+///
+/// The notice of a push that runs the hook. Every question carries its own
+/// now, because a rebase that runs for minutes must say on the row which act
+/// is running, and a push that skips the hook uses [`SKIP_RUNNING_NOTICE`].
 const RUNNING_NOTICE: &str = "Pushing…";
 
 /// How long a status message gsw wrote itself stays under the frame.
 ///
 /// It is also the length of the fade, so the message reaches black exactly as
 /// it is removed and nothing ever blinks out at full brightness.
-const STATUS_LIFETIME: Duration = Duration::from_secs(60);
+///
+/// The `G` key's own state in [`crate::watch`] reads it as well. The message
+/// that asks for a second press of that key is the armed state of the key, so
+/// the arming and the message it stands for must end at the same moment — one
+/// number, read in both places, rather than two numbers that agree until
+/// somebody changes one of them.
+pub(crate) const STATUS_LIFETIME: Duration = Duration::from_secs(60);
+
+/// How long the hint of the second Esc stays on the row.
+///
+/// The hint asks for a second press. The hint is the only armed state of Esc:
+/// `crate::watch` asks the row with [`PushUi::shows_hint`], and that answer
+/// reads this same constant through [`Life::lifetime`]. So the arming and the
+/// line it stands for end at the same instant, because they are one thing.
+pub(crate) const RETURN_HINT_LIFETIME: Duration = Duration::from_secs(3);
 
 /// How often such a message has to be repainted for its age text and its fade
 /// to move.
@@ -1281,12 +2222,6 @@ const COARSE_FADE_AT: f32 = 0.5;
 /// color off the value. `colored` decides whether to emit escapes at all from
 /// process-global state, which other tests in this binary toggle.
 fn colorize_status(line: &str, elapsed: Duration, truecolor: bool) -> ColoredString {
-    // Cast is exact for the values involved: `STATUS_LIFETIME` is a small
-    // constant and `elapsed` is clamped to it by the division below.
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "seconds counts here are far below f32's exact-integer range"
-    )]
     let spent = (elapsed.as_secs_f32() / STATUS_LIFETIME.as_secs_f32()).clamp(0.0, 1.0);
 
     if truecolor {
@@ -1306,15 +2241,24 @@ fn colorize_status(line: &str, elapsed: Duration, truecolor: bool) -> ColoredStr
 /// What a failed push says when git said nothing gsw could show.
 const SILENT_FAILURE: &str = "git push failed";
 
-/// Pick the lines of a failed push's output worth the rows they cost.
+/// Pick the lines of a failed push or base update worth the rows they cost.
 ///
-/// **The last of them, not the first.** A push git refuses on its own writes
+/// **The last line always stays.** A push git refuses on its own writes
 /// exactly three non-hint lines — `To <remote>`, `! [rejected] …`,
 /// `error: failed to push …` — so for that failure the head and the tail are
 /// the same three and the choice does not arise. It arises the moment a
 /// repository has a pre-push hook: the hook prints its whole run, fails, and
 /// git adds its verdict after, so the reason sits at the end behind a banner
-/// that would otherwise take every row.
+/// that would otherwise take every row. After a rebase or a merge that
+/// stopped, the last line is the sentence of gsw about that operation.
+///
+/// **A `CONFLICT` line of git outranks every other line above the last.** It
+/// names the file that conflicted. A rebase writes two lines of its own after
+/// it, and gsw adds its sentence after them, so a plain tail loses it. The
+/// conflict lines nearest the end win when there are more of them than rows.
+/// The rows that are left go to the other lines nearest the end. The chosen
+/// lines keep the order they had in the output. Output with no conflict line
+/// thus gives the last three lines, as a plain tail does.
 ///
 /// Hints are dropped first either way. They follow the real error, so under a
 /// tail rule they are the lines that would crowd it out. Only if dropping them
@@ -1322,12 +2266,25 @@ const SILENT_FAILURE: &str = "git push failed";
 /// a blank row that reads as success.
 fn failure_lines(output: &str) -> Vec<String> {
     let meaningful = |line: &&str| !line.trim().is_empty();
-    let last = |lines: Vec<String>| -> Vec<String> {
-        let dropped = lines.len().saturating_sub(MAX_STATUS_ROWS);
-        lines.into_iter().skip(dropped).collect()
+    let pick = |lines: Vec<String>| -> Vec<String> {
+        let Some(last) = lines.len().checked_sub(1) else {
+            return lines;
+        };
+        let conflict = |index: &usize| lines[*index].trim_start().starts_with(CONFLICT_PREFIX);
+        // Nearest the end first, and every conflict line before any other.
+        let above = (0..last).rev();
+        let mut kept: Vec<usize> = above
+            .clone()
+            .filter(conflict)
+            .chain(above.filter(|index| !conflict(index)))
+            .take(MAX_STATUS_ROWS - 1)
+            .chain(std::iter::once(last))
+            .collect();
+        kept.sort_unstable();
+        kept.into_iter().map(|index| lines[index].clone()).collect()
     };
 
-    let mut lines = last(
+    let mut lines = pick(
         output
             .lines()
             .filter(meaningful)
@@ -1337,7 +2294,7 @@ fn failure_lines(output: &str) -> Vec<String> {
     );
 
     if lines.is_empty() {
-        lines = last(
+        lines = pick(
             output
                 .lines()
                 .filter(meaningful)
@@ -1413,11 +2370,18 @@ mod tests {
         }
     }
 
-    /// The command a confirmable prompt carries. Panics on a refusal, so a test
-    /// that expected a push and got a message fails on the line that asked.
+    /// The push a confirmable prompt carries. Panics on a refusal, so a test
+    /// that expected a push and got a message fails on the line that asked, and
+    /// panics on a prompt that carries another act, which no caller here plans.
     fn command(prompt: &PushPrompt) -> &PushCommand {
         match prompt {
-            PushPrompt::Confirm { command, .. } => command,
+            PushPrompt::Confirm {
+                command: Confirmed::Push(command),
+                ..
+            } => command,
+            PushPrompt::Confirm { command, .. } => {
+                panic!("expected a push, got {command:?}")
+            }
             PushPrompt::Refuse { message } => {
                 panic!("expected a confirmable prompt, got a refusal: {message}")
             }
@@ -1438,8 +2402,170 @@ mod tests {
             },
         );
         assert_eq!(
-            command(&prompt_for("gsw-push", Some("origin"), None)).args(),
+            command(&prompt_for(
+                "gsw-push",
+                Some("origin"),
+                None,
+                PushHooks::Run
+            ))
+            .args(),
             ["push", "-u", "origin", "gsw-push"],
+        );
+    }
+
+    /// The fields of a confirmable prompt that the policy changes, in one
+    /// tuple so a test compares the whole act at once.
+    fn confirm_parts(prompt: &PushPrompt) -> (&str, &str, bool, &str, &SuccessReport) {
+        match prompt {
+            PushPrompt::Confirm {
+                question,
+                hint,
+                caution,
+                running_notice,
+                success,
+                ..
+            } => (question, hint, *caution, running_notice, success),
+            PushPrompt::Refuse { message } => {
+                panic!("expected a confirmable prompt, got a refusal: {message}")
+            }
+        }
+    }
+
+    fn alone(sentence: &str) -> SuccessReport {
+        SuccessReport::Alone {
+            sentence: sentence.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_skip_update_names_the_skipped_hook_everywhere() {
+        let up = upstream("origin/gsw-push", 3, 0);
+        let prompt = prompt_for("gsw-push", Some("origin"), Some(&up), PushHooks::Skip);
+        let (question, hint, caution, notice, success) = confirm_parts(&prompt);
+        assert_eq!(
+            question,
+            "Push 3 commits to origin/gsw-push without the pre-push hook?"
+        );
+        assert_eq!(hint, confirm_hint("push without hook"));
+        assert_eq!(hint, "[y/Enter = push without hook, n/Esc = cancel]");
+        assert!(
+            caution,
+            "skipping a check the repository asks for earns the color"
+        );
+        assert_eq!(notice, "Pushing without the pre-push hook…");
+        assert_eq!(
+            *success,
+            alone("Pushed 3 commits to origin/gsw-push, pre-push hook skipped")
+        );
+        assert_eq!(command(&prompt).branch(), "gsw-push");
+    }
+
+    #[test]
+    fn a_skip_update_of_one_commit_is_singular() {
+        let up = upstream("origin/gsw-push", 1, 0);
+        let prompt = prompt_for("gsw-push", Some("origin"), Some(&up), PushHooks::Skip);
+        let (question, _, _, _, success) = confirm_parts(&prompt);
+        assert_eq!(
+            question,
+            "Push 1 commit to origin/gsw-push without the pre-push hook?"
+        );
+        assert_eq!(
+            *success,
+            alone("Pushed 1 commit to origin/gsw-push, pre-push hook skipped")
+        );
+    }
+
+    #[test]
+    fn a_skip_create_names_the_skipped_hook_everywhere() {
+        let prompt = prompt_for("gsw-push", Some("origin"), None, PushHooks::Skip);
+        let (question, hint, caution, notice, success) = confirm_parts(&prompt);
+        assert_eq!(
+            question,
+            "Create new remote branch origin/gsw-push without the pre-push hook?"
+        );
+        assert_eq!(hint, "[y/Enter = push without hook, n/Esc = cancel]");
+        assert!(caution);
+        assert_eq!(notice, "Pushing without the pre-push hook…");
+        assert_eq!(
+            *success,
+            alone("Created origin/gsw-push, pre-push hook skipped")
+        );
+        assert_eq!(command(&prompt).branch(), "gsw-push");
+    }
+
+    #[test]
+    fn a_run_push_keeps_its_own_hint_notice_and_report() {
+        // Pins `p` so a later change to the wording of `P` cannot leak into it.
+        let up = upstream("origin/gsw-push", 3, 0);
+        let update = prompt_for("gsw-push", Some("origin"), Some(&up), PushHooks::Run);
+        let (_, hint, caution, notice, success) = confirm_parts(&update);
+        assert_eq!(hint, confirm_hint(PUSH_VERB));
+        assert!(!caution);
+        assert_eq!(notice, RUNNING_NOTICE);
+        assert_eq!(*success, alone("Pushed 3 commits to origin/gsw-push"));
+
+        let create = prompt_for("gsw-push", Some("origin"), None, PushHooks::Run);
+        let (_, hint, caution, notice, success) = confirm_parts(&create);
+        assert_eq!(hint, confirm_hint(PUSH_VERB));
+        assert!(caution);
+        assert_eq!(notice, RUNNING_NOTICE);
+        assert_eq!(*success, alone("Created origin/gsw-push"));
+    }
+
+    #[test]
+    fn the_refusals_do_not_depend_on_the_hook_policy() {
+        for hooks in [PushHooks::Run, PushHooks::Skip] {
+            assert_eq!(
+                prompt_for(
+                    "gsw-push",
+                    Some("origin"),
+                    Some(&upstream("origin/gsw-push", 0, 0)),
+                    hooks
+                ),
+                PushPrompt::Refuse {
+                    message: "origin/gsw-push is already up to date".to_string(),
+                },
+            );
+            assert_eq!(
+                prompt_for(DETACHED_HEAD, Some("origin"), None, hooks),
+                PushPrompt::Refuse {
+                    message: "HEAD is detached — check out a branch to push".to_string(),
+                },
+            );
+            assert_eq!(
+                prompt_for("gsw-push", None, None, hooks),
+                PushPrompt::Refuse {
+                    message: "no remote to push to".to_string(),
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn a_skip_push_carries_no_verify_directly_after_push() {
+        // `P` runs the same push as `p`, and only the flag differs. The flag
+        // sits right after `push`, before `-u`, so it cannot be read as the
+        // value of another option.
+        let up = upstream("origin/gsw-push", 3, 0);
+        assert_eq!(
+            command(&prompt_for(
+                "gsw-push",
+                Some("origin"),
+                Some(&up),
+                PushHooks::Skip
+            ))
+            .args(),
+            ["push", "--no-verify"],
+        );
+        assert_eq!(
+            command(&prompt_for(
+                "gsw-push",
+                Some("origin"),
+                None,
+                PushHooks::Skip
+            ))
+            .args(),
+            ["push", "--no-verify", "-u", "origin", "gsw-push"],
         );
     }
 
@@ -1457,7 +2583,13 @@ mod tests {
             },
         );
         assert_eq!(
-            command(&prompt_for("gsw-push", Some("origin"), Some(&up))).args(),
+            command(&prompt_for(
+                "gsw-push",
+                Some("origin"),
+                Some(&up),
+                PushHooks::Run
+            ))
+            .args(),
             ["push"]
         );
     }
@@ -1542,7 +2674,7 @@ mod tests {
         // A repository whose only remote is not named `origin`. The plan must
         // carry that name through to the command rather than assuming `origin`.
         assert_eq!(
-            command(&prompt_for("gsw-push", Some("fork"), None)).args(),
+            command(&prompt_for("gsw-push", Some("fork"), None, PushHooks::Run)).args(),
             ["push", "-u", "fork", "gsw-push"],
         );
     }
@@ -1553,16 +2685,10 @@ mod tests {
         // remote must not be confirmed with the same sentence as a routine
         // update. The wording names the act, and the flag lets the display
         // layer color it apart.
-        let prompt = prompt_for("gsw-push", Some("origin"), None);
+        let prompt = prompt_for("gsw-push", Some("origin"), None, PushHooks::Run);
         assert_eq!(text(&prompt), "Create new remote branch origin/gsw-push?");
         assert!(
-            matches!(
-                prompt,
-                PushPrompt::Confirm {
-                    creates_remote_branch: true,
-                    ..
-                },
-            ),
+            matches!(prompt, PushPrompt::Confirm { caution: true, .. },),
             "a create must be flagged so the display layer can set it apart",
         );
     }
@@ -1572,16 +2698,10 @@ mod tests {
         // The routine case. It names the target and how much is going, and it
         // is NOT flagged as a create — nothing new appears on the remote.
         let up = upstream("origin/gsw-push", 3, 0);
-        let prompt = prompt_for("gsw-push", Some("origin"), Some(&up));
+        let prompt = prompt_for("gsw-push", Some("origin"), Some(&up), PushHooks::Run);
         assert_eq!(text(&prompt), "Push 3 commits to origin/gsw-push?");
         assert!(
-            matches!(
-                prompt,
-                PushPrompt::Confirm {
-                    creates_remote_branch: false,
-                    ..
-                },
-            ),
+            matches!(prompt, PushPrompt::Confirm { caution: false, .. },),
             "updating an existing branch must not be flagged as a create",
         );
     }
@@ -1592,7 +2712,12 @@ mod tests {
         // the number right next to it.
         let up = upstream("origin/gsw-push", 1, 0);
         assert_eq!(
-            text(&prompt_for("gsw-push", Some("origin"), Some(&up))),
+            text(&prompt_for(
+                "gsw-push",
+                Some("origin"),
+                Some(&up),
+                PushHooks::Run
+            )),
             "Push 1 commit to origin/gsw-push?",
         );
     }
@@ -1602,12 +2727,12 @@ mod tests {
         // The question, the argument list, and the branch the question named
         // travel together, so what runs on `y` is what the sentence promised —
         // and the runner can still tell whether the repository moved under it.
-        let PushPrompt::Confirm { command, .. } = prompt_for("gsw-push", Some("origin"), None)
-        else {
-            panic!("an untracked branch with a remote must be confirmable");
-        };
-        assert_eq!(command.args(), ["push", "-u", "origin", "gsw-push"]);
-        assert_eq!(command.branch(), "gsw-push");
+        let prompt = prompt_for("gsw-push", Some("origin"), None, PushHooks::Run);
+        assert_eq!(
+            command(&prompt).args(),
+            ["push", "-u", "origin", "gsw-push"]
+        );
+        assert_eq!(command(&prompt).branch(), "gsw-push");
     }
 
     #[test]
@@ -1617,7 +2742,7 @@ mod tests {
         // carry the branch anyway, or nothing downstream can tell that the
         // checkout changed between the question and the answer.
         let up = upstream("origin/gsw-push", 3, 0);
-        let prompt = prompt_for("gsw-push", Some("origin"), Some(&up));
+        let prompt = prompt_for("gsw-push", Some("origin"), Some(&up), PushHooks::Run);
         assert_eq!(command(&prompt).args(), ["push"]);
         assert_eq!(command(&prompt).branch(), "gsw-push");
     }
@@ -1630,7 +2755,8 @@ mod tests {
             prompt_for(
                 "gsw-push",
                 Some("origin"),
-                Some(&upstream("origin/gsw-push", 0, 0))
+                Some(&upstream("origin/gsw-push", 0, 0)),
+                PushHooks::Run,
             ),
             PushPrompt::Refuse {
                 message: "origin/gsw-push is already up to date".to_string(),
@@ -1643,7 +2769,7 @@ mod tests {
         // The message names the fix, because "cannot push" alone leaves the
         // user guessing at what gsw objected to.
         assert_eq!(
-            prompt_for(DETACHED_HEAD, Some("origin"), None),
+            prompt_for(DETACHED_HEAD, Some("origin"), None, PushHooks::Run),
             PushPrompt::Refuse {
                 message: "HEAD is detached — check out a branch to push".to_string(),
             },
@@ -1653,7 +2779,7 @@ mod tests {
     #[test]
     fn a_repository_with_no_remote_is_refused() {
         assert_eq!(
-            prompt_for("gsw-push", None, None),
+            prompt_for("gsw-push", None, None, PushHooks::Run),
             PushPrompt::Refuse {
                 message: "no remote to push to".to_string(),
             },
@@ -1665,6 +2791,7 @@ mod tests {
 mod ui_tests {
     use super::*;
     use crate::render::Snapshot;
+    use crate::worktrees::{WorktreeEntry, WorktreePath};
     use testcolor::{max_red_channel, TRUECOLOR_FG};
 
     /// A snapshot on `gsw-push` with `origin` available and the given tracking
@@ -1677,9 +2804,14 @@ mod ui_tests {
             commits_behind: 0,
             files: Vec::new(),
             log: Vec::new(),
+            log_complete: false,
+            log_start: None,
             upstream,
             operation: None,
             push_remote: Some("origin".to_string()),
+            worktree: None,
+            off_start_branch: false,
+            pull: None,
         }
     }
 
@@ -1736,14 +2868,53 @@ mod ui_tests {
     /// A UI with the confirmation already on screen for an untracked branch.
     fn asking() -> PushUi {
         let mut ui = PushUi::new(false);
-        ui.request(&snapshot(None), tall_pane(80), t0());
+        ui.request(&snapshot(None), tall_pane(80), t0(), PushHooks::Run);
         ui
+    }
+
+    /// How far behind the base every question about a base update here is
+    /// asked. Any count above zero does: the count is the reason the key acts
+    /// at all.
+    const BEHIND: u32 = 5;
+
+    /// A snapshot of `gsw-push`, [`BEHIND`] commits behind `main`, which is
+    /// what a rebase or a merge is asked about.
+    fn behind_the_base() -> Snapshot {
+        Snapshot {
+            commits_behind: BEHIND,
+            ..snapshot(None)
+        }
+    }
+
+    /// The command `update` runs here, which is the one it falls back on.
+    fn base_update_command(update: BaseUpdate) -> ShellCommand {
+        ShellCommand::new(None, update.default_command()).expect("a name")
+    }
+
+    /// A UI with the question of `update` already on screen, asked at `now` in
+    /// a pane of `dims`.
+    fn asking_base_update_in(update: BaseUpdate, dims: Dimensions, now: Instant) -> PushUi {
+        let mut ui = PushUi::new(false);
+        ui.request_base_update(
+            &behind_the_base(),
+            update,
+            &base_update_command(update),
+            dims,
+            now,
+        );
+        ui
+    }
+
+    /// A UI with the question of `update` already on screen, asked at `now` in
+    /// a pane with room for it.
+    fn asking_base_update(update: BaseUpdate, now: Instant) -> PushUi {
+        asking_base_update_in(update, tall_pane(80), now)
     }
 
     /// A UI with a push already running, confirmed at `now`.
     fn pushing(now: Instant) -> PushUi {
         let mut ui = PushUi::new(false);
-        ui.request(&snapshot(None), tall_pane(80), now);
+        ui.request(&snapshot(None), tall_pane(80), now, PushHooks::Run);
         ui.confirm(now)
             .expect("the confirmation must hand over a command");
         ui
@@ -1760,6 +2931,706 @@ mod ui_tests {
         testcolor::strip_ansi(&testcolor::with_forced_ansi(|| {
             ui.overlay(dims, now).text()
         }))
+    }
+
+    /// What `ui` paints in a pane wide enough for a question, with the escapes
+    /// left in, so a test can read the color off the row.
+    ///
+    /// The escapes are forced on for the same reason [`painted`] forces them
+    /// on: `colored` decides at format time from process-global state that
+    /// other tests in this binary toggle, so a raw render carries no color at
+    /// all in some runs. The one door to that override is `testcolor`, and
+    /// clippy bans every other spelling of it.
+    fn escapes(ui: &mut PushUi, now: Instant) -> String {
+        testcolor::with_forced_ansi(|| ui.overlay(tall_pane(120), now).text())
+    }
+
+    #[test]
+    fn a_message_from_another_feature_goes_under_the_frame_and_waits_for_a_key() {
+        // The `G` key runs somebody else's command, and a command that refuses
+        // says why. That refusal is the whole reason the key did nothing.
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        ui.post_error("branch main names no issue".to_string());
+
+        let text = painted(&mut ui, tall_pane(80), now);
+        assert!(
+            text.contains("branch main names no issue"),
+            "the message must reach the screen, got {text:?}",
+        );
+        assert_eq!(
+            ui.next_tick(&t0),
+            None,
+            "a message that waits for a key does not age",
+        );
+
+        ui.dismiss();
+        let text = painted(&mut ui, tall_pane(80), now);
+        assert_eq!(text, "", "a key must take it off the screen");
+    }
+
+    #[test]
+    fn a_message_from_another_feature_leaves_a_running_push_on_the_screen() {
+        // `G` acts while a push runs, so the two features can reach the one
+        // row at once. The push owns it: taking its notice away would lose the
+        // outcome the push is about to report.
+        let now = t0();
+        let mut ui = pushing(now);
+        ui.post_error("branch main names no issue".to_string());
+
+        let text = painted(&mut ui, tall_pane(80), now);
+        assert!(
+            text.contains(RUNNING_NOTICE),
+            "the push must keep the rows it is using, got {text:?}",
+        );
+        assert!(
+            !text.contains("names no issue"),
+            "the held message must wait its turn, got {text:?}",
+        );
+        assert_eq!(
+            ui.mode(),
+            InputMode::Running(RunKind::Push),
+            "the push is still running"
+        );
+    }
+
+    #[test]
+    fn a_message_from_another_feature_arrives_once_the_push_is_done_with_the_row() {
+        // Held is not dropped. Silence belongs to one case only, and this is
+        // not it.
+        let now = t0();
+        let mut ui = pushing(now);
+        ui.post_error("branch main names no issue".to_string());
+        ui.finished(
+            PushOutcome {
+                success: true,
+                output: String::new(),
+            },
+            now,
+        );
+
+        // The push's own message ages off the screen first, and the held one
+        // takes the row it leaves.
+        let later = now + STATUS_LIFETIME;
+        let text = painted(&mut ui, tall_pane(80), later);
+        assert!(
+            text.contains("branch main names no issue"),
+            "the held message must reach the screen, got {text:?}",
+        );
+    }
+
+    #[test]
+    fn a_message_from_another_feature_leaves_the_question_on_the_screen() {
+        // A question and the keys that answer it go together. A message that
+        // took the question away would leave the mode answering nothing.
+        let now = t0();
+        let mut ui = asking();
+        ui.post_error("branch main names no issue".to_string());
+
+        let text = painted(&mut ui, tall_pane(80), now);
+        assert_eq!(
+            ui.mode(),
+            InputMode::Confirm,
+            "the question must still be on screen",
+        );
+        assert!(
+            !text.contains("names no issue"),
+            "the held message must wait its turn, got {text:?}",
+        );
+    }
+
+    /// Every message `ui` puts on the row from `now` on, in the order a user
+    /// reads them.
+    ///
+    /// Each pass paints one frame, records what the row carries, and presses a
+    /// key — which is what a user does with a message that waits for one. The
+    /// pass stops at the first blank frame. The count above it is a backstop:
+    /// a queue that never empties must fail a test rather than hold the run
+    /// open.
+    fn drained(ui: &mut PushUi, now: Instant) -> Vec<String> {
+        let mut seen = Vec::new();
+        for _ in 0..MAX_HELD_MESSAGES + 4 {
+            let text = painted(ui, tall_pane(80), now);
+            if text.is_empty() {
+                break;
+            }
+            seen.push(text);
+            ui.dismiss();
+        }
+        seen
+    }
+
+    #[test]
+    fn two_messages_held_during_a_push_both_reach_the_screen_in_order() {
+        // A run started by `G` can end while the push is still going, and the
+        // key is free again the moment it does. So a second `G` refuses with
+        // the first refusal still waiting. The user asked for both runs, and
+        // both owe an answer.
+        let now = t0();
+        let mut ui = pushing(now);
+        ui.post_error("the first refusal".to_string());
+        ui.post_error("the second refusal".to_string());
+        ui.finished(
+            PushOutcome {
+                success: true,
+                output: String::new(),
+            },
+            now,
+        );
+
+        // The push's own message ages off the screen first, and the oldest
+        // held message takes the row it leaves.
+        let later = now + STATUS_LIFETIME;
+        let text = painted(&mut ui, tall_pane(80), later);
+        assert!(
+            text.contains("the first refusal"),
+            "the first message must come first, got {text:?}",
+        );
+        assert!(
+            !text.contains("the second refusal"),
+            "the second message must wait its turn, got {text:?}",
+        );
+
+        // A key is the user's word that the first message was read. The second
+        // takes the row it leaves, and waits for a key of its own.
+        ui.dismiss();
+        let text = painted(&mut ui, tall_pane(80), later);
+        assert!(
+            text.contains("the second refusal"),
+            "the second message must follow the first, got {text:?}",
+        );
+    }
+
+    #[test]
+    fn a_held_message_is_not_lost_to_a_second_one() {
+        // The narrow statement of the defect: one slot held one message, so a
+        // second refusal wrote over the first and the user never saw it.
+        let now = t0();
+        let mut ui = pushing(now);
+        ui.post_error("the first refusal".to_string());
+        ui.post_error("the second refusal".to_string());
+        ui.finished(
+            PushOutcome {
+                success: true,
+                output: String::new(),
+            },
+            now,
+        );
+
+        let seen = drained(&mut ui, now + STATUS_LIFETIME);
+        assert!(
+            seen.iter().any(|text| text.contains("the first refusal")),
+            "the first message must reach the screen, got {seen:?}",
+        );
+    }
+
+    #[test]
+    fn a_full_queue_of_held_messages_drops_the_newest() {
+        // The bound is what stops a push of several minutes from filling the
+        // row with keys to press. Which end it drops is the point: the first
+        // refusal says what went wrong, and the ones after it repeat it.
+        let now = t0();
+        let mut ui = pushing(now);
+        for index in 0..MAX_HELD_MESSAGES + 1 {
+            ui.post_error(format!("refusal number {index}"));
+        }
+        ui.finished(
+            PushOutcome {
+                success: true,
+                output: String::new(),
+            },
+            now,
+        );
+
+        let seen = drained(&mut ui, now + STATUS_LIFETIME);
+        assert!(
+            seen.iter().any(|text| text.contains("refusal number 0")),
+            "the oldest message must survive a full queue, got {seen:?}",
+        );
+        let newest = format!("refusal number {MAX_HELD_MESSAGES}");
+        assert!(
+            !seen.iter().any(|text| text.contains(&newest)),
+            "the newest message is the one a full queue drops, got {seen:?}",
+        );
+    }
+
+    /// What a notice says. The wording belongs to the key that posts one, and
+    /// the tests below are about how long it stays.
+    const NOTICE: &str = "remote shell — press G again";
+
+    #[test]
+    fn a_notice_takes_itself_off_the_screen() {
+        // gsw's own words about a key the user pressed. They are a report, and
+        // a report that stays until somebody types at the monitor is a row
+        // spent for the rest of the session.
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        ui.post_notice(NOTICE.to_string(), now);
+
+        let text = painted(&mut ui, tall_pane(80), now);
+        assert!(
+            text.contains(NOTICE),
+            "the notice must reach the screen, got {text:?}",
+        );
+        assert!(
+            text.contains("(0s ago)"),
+            "a message the clock removes says how old it is, got {text:?}",
+        );
+        assert_eq!(
+            ui.next_tick(&t0),
+            Some(STATUS_CADENCE),
+            "a message that ages must wake the loop to age",
+        );
+
+        let text = painted(&mut ui, tall_pane(80), now + STATUS_LIFETIME);
+        assert_eq!(text, "", "the clock must take the notice away");
+    }
+
+    #[test]
+    fn a_message_from_another_feature_still_waits_for_a_key_a_lifetime_later() {
+        // The other door is unchanged by the one above it. Another program's
+        // words are a remedy, and a remedy that leaves on its own while the
+        // user reads another pane is worse than a row spent.
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        ui.post_error("branch main names no issue".to_string());
+
+        let later = now + STATUS_LIFETIME;
+        let text = painted(&mut ui, tall_pane(80), later);
+        assert!(
+            text.contains("branch main names no issue"),
+            "an error must outlive the lifetime a notice has, got {text:?}",
+        );
+        assert!(
+            !text.contains("ago"),
+            "a message that never expires has no countdown to report, got {text:?}",
+        );
+
+        ui.dismiss();
+        let text = painted(&mut ui, tall_pane(80), later);
+        assert_eq!(text, "", "a key is still what clears it");
+    }
+
+    #[test]
+    fn a_notice_that_arrives_during_a_push_waits_for_the_row() {
+        // `G` acts while a push runs, and the push owns the row: its notice
+        // goes with the outcome it is about to report.
+        let now = t0();
+        let mut ui = pushing(now);
+        ui.post_notice(NOTICE.to_string(), now);
+
+        let text = painted(&mut ui, tall_pane(80), now);
+        assert!(
+            text.contains(RUNNING_NOTICE),
+            "the push must keep the rows it is using, got {text:?}",
+        );
+        assert!(
+            !text.contains(NOTICE),
+            "the held notice must wait its turn, got {text:?}",
+        );
+        assert_eq!(
+            ui.mode(),
+            InputMode::Running(RunKind::Push),
+            "the push is still running"
+        );
+    }
+
+    #[test]
+    fn a_notice_that_waited_for_the_row_gets_its_whole_life_on_it() {
+        // A push with a pre-push hook takes minutes, and a notice posted at
+        // the start of one reaches the screen at the end. Its life starts
+        // where the user can read it: a notice that carried the instant it
+        // arrived would appear already expired and go on the next frame.
+        let now = t0();
+        let mut ui = pushing(now);
+        ui.post_notice(NOTICE.to_string(), now);
+
+        // The push runs for longer than a notice lives, and its own message
+        // then takes the row for a lifetime of its own.
+        let push_ended = now + STATUS_LIFETIME * 2;
+        ui.finished(
+            PushOutcome {
+                success: true,
+                output: String::new(),
+            },
+            push_ended,
+        );
+        let text = painted(&mut ui, tall_pane(80), push_ended);
+        assert!(
+            !text.contains(NOTICE),
+            "the push's own outcome comes first, got {text:?}",
+        );
+
+        // The push's message ages off, and the notice takes the row it leaves.
+        let arrived = push_ended + STATUS_LIFETIME;
+        let text = painted(&mut ui, tall_pane(80), arrived);
+        assert!(
+            text.contains(NOTICE),
+            "the held notice must reach the screen, got {text:?}",
+        );
+        assert!(
+            text.contains("(0s ago)"),
+            "the life of a held notice starts on the row, got {text:?}",
+        );
+
+        let text = painted(&mut ui, tall_pane(80), arrived + STATUS_CADENCE);
+        assert!(
+            text.contains(NOTICE),
+            "the notice must still be there a moment later, got {text:?}",
+        );
+
+        let text = painted(&mut ui, tall_pane(80), arrived + STATUS_LIFETIME);
+        assert_eq!(
+            text, "",
+            "the clock must take the notice away a lifetime after it arrived",
+        );
+    }
+
+    #[test]
+    fn an_error_that_waited_for_the_row_still_waits_for_a_key() {
+        // The queue carries which life a message takes, and it must carry the
+        // other one unchanged. An error that waited for a push is still a
+        // remedy when it reaches the row.
+        let now = t0();
+        let mut ui = pushing(now);
+        ui.post_error("branch main names no issue".to_string());
+        ui.finished(
+            PushOutcome {
+                success: true,
+                output: String::new(),
+            },
+            now,
+        );
+
+        // The push's own message ages off, and the held error takes the row.
+        let arrived = now + STATUS_LIFETIME;
+        let text = painted(&mut ui, tall_pane(80), arrived);
+        assert!(
+            text.contains("branch main names no issue"),
+            "the held error must reach the screen, got {text:?}",
+        );
+
+        let text = painted(&mut ui, tall_pane(80), arrived + STATUS_LIFETIME * 3);
+        assert!(
+            text.contains("branch main names no issue"),
+            "a held error must not expire once it is on the row, got {text:?}",
+        );
+
+        ui.dismiss();
+        let text = painted(&mut ui, tall_pane(80), arrived);
+        assert_eq!(text, "", "a key is what clears it");
+    }
+
+    /// Every kind of thing a switch of the worktree must take off the row, with
+    /// a name for a failed assertion. Each one describes the worktree that the
+    /// frame showed before the switch.
+    fn rows_a_switch_takes_away(now: Instant) -> Vec<(&'static str, PushUi)> {
+        let mut notice = PushUi::new(false);
+        let _ = notice.post_notice(NOTICE.to_string(), now);
+
+        let mut error = PushUi::new(false);
+        error.post_error("branch main names no issue".to_string());
+
+        let mut progress = PushUi::new(false);
+        progress.post_progress("Running grind and grime against main…".to_string());
+
+        // A push that ended leaves its outcome on the row, and a message that
+        // arrived during the push waits behind it.
+        let mut outcome_and_held = pushing(now);
+        outcome_and_held.post_error("held behind the push".to_string());
+        outcome_and_held.finished(
+            PushOutcome {
+                success: true,
+                output: String::new(),
+            },
+            now,
+        );
+
+        let mut question_and_held = asking();
+        question_and_held.post_error("held behind the question".to_string());
+
+        vec![
+            ("a notice that fades", notice),
+            ("an error that waits for a key", error),
+            ("a progress notice", progress),
+            (
+                "a push outcome with a message held behind it",
+                outcome_and_held,
+            ),
+            ("the question", asking()),
+            (
+                "a question with a message held behind it",
+                question_and_held,
+            ),
+        ]
+    }
+
+    #[test]
+    fn clear_takes_every_message_off_the_row_and_out_of_the_queue() {
+        // A switch of the worktree calls `clear`. Every message under the
+        // frame describes the worktree that the frame showed before, so the
+        // row must be empty after it, and no held message may take the row
+        // later. A question goes with the keys that answer it.
+        let now = t0();
+        for (what, mut ui) in rows_a_switch_takes_away(now) {
+            assert_ne!(
+                painted(&mut ui, tall_pane(80), now),
+                "",
+                "{what}: the row must carry something before the clear",
+            );
+
+            ui.clear();
+
+            // The mode is the one source of what the keys mean, so a question
+            // that left the mode left its keys too.
+            assert_eq!(ui.mode(), InputMode::Normal, "{what}: no question stays");
+            assert_eq!(
+                painted(&mut ui, tall_pane(80), now),
+                "",
+                "{what}: the row must be empty after the clear",
+            );
+            assert_eq!(
+                painted(&mut ui, tall_pane(80), now + STATUS_LIFETIME),
+                "",
+                "{what}: no held message may reach the row later",
+            );
+            assert_eq!(ui.next_tick(&t0), None, "{what}: nothing is left to age");
+        }
+    }
+
+    #[test]
+    fn clear_leaves_a_running_push_alone_and_empties_the_queue() {
+        // The loop never switches while a push runs, so it never calls `clear`
+        // then. A call then leaves the push on the row with its window, and
+        // the outcome of the push still arrives. The held messages go all the
+        // same, because each one describes the worktree the frame showed
+        // before.
+        let now = t0();
+        let mut ui = pushing(now);
+        ui.output_line("Compiling gsw v0.1.0".to_string());
+        ui.post_error("held behind the push".to_string());
+
+        ui.clear();
+
+        assert_eq!(
+            ui.mode(),
+            InputMode::Running(RunKind::Push),
+            "the push is still running"
+        );
+        let text = painted(&mut ui, tall_pane(80), now);
+        assert!(
+            text.contains(RUNNING_NOTICE),
+            "the push must keep its row, got {text:?}",
+        );
+        assert!(
+            text.contains("Compiling gsw v0.1.0"),
+            "the push must keep its window, got {text:?}",
+        );
+
+        ui.finished(
+            PushOutcome {
+                success: false,
+                output: "error: failed to push some refs\n".to_string(),
+            },
+            now,
+        );
+        let text = painted(&mut ui, tall_pane(80), now);
+        assert!(
+            text.contains("error: failed to push some refs"),
+            "the outcome of the push must still arrive, got {text:?}",
+        );
+
+        ui.dismiss();
+        let text = painted(&mut ui, tall_pane(80), now);
+        assert_eq!(text, "", "no held message may reach the row, got {text:?}");
+    }
+
+    /// A list of three worktrees, sorted by path, with the cursor and the
+    /// home worktree on the middle row, `bravo`.
+    fn three_worktrees() -> WorktreeList {
+        let entries: Vec<WorktreeEntry> = ["alpha", "bravo", "charlie"]
+            .into_iter()
+            .map(|name| WorktreeEntry {
+                path: WorktreePath::fake(format!("/code/{name}")),
+                label: name.to_string(),
+            })
+            .collect();
+        let middle = entries[1].path.clone();
+        WorktreeList::open(entries, &middle, middle.clone()).expect("a list with rows opens")
+    }
+
+    /// The label of the row under the cursor of the open list of `ui`, or
+    /// `None` when no list is open.
+    fn cursor_of(ui: &PushUi) -> Option<&str> {
+        ui.list().map(|list| list.selected().label.as_str())
+    }
+
+    #[test]
+    fn an_open_list_takes_the_keys_and_paints_nothing_under_the_frame() {
+        // The list takes the pane, so the keys mean what they mean in the
+        // list, and the row under the frame carries nothing. Nothing on the
+        // list ages, so the loop has no reason to wake for it. A key with no
+        // meaning leaves the list open, as it leaves a question on the row.
+        let now = t0();
+        let pane = tall_pane(80);
+        let mut ui = PushUi::new(false);
+        ui.open_list(three_worktrees());
+
+        assert_eq!(ui.mode(), InputMode::List, "the list takes the keys");
+        assert_eq!(cursor_of(&ui), Some("bravo"), "the cursor starts on bravo");
+        let overlay = ui.overlay(pane, now);
+        assert_eq!(
+            overlay.text(),
+            "",
+            "the list paints nothing under the frame"
+        );
+        assert_eq!(
+            overlay.frame_rows(),
+            pane.height,
+            "the frame of the list takes the whole pane",
+        );
+        assert_eq!(ui.next_tick(&t0), None, "nothing on the list ages");
+
+        ui.dismiss();
+        assert_eq!(
+            ui.mode(),
+            InputMode::List,
+            "a key with no meaning leaves the list open",
+        );
+
+        ui.list_mut().expect("the list is open").down();
+        assert_eq!(cursor_of(&ui), Some("charlie"), "the cursor moves");
+
+        let closed = ui.close_list().expect("a close gives the open list back");
+        assert_eq!(
+            closed.selected().label,
+            "charlie",
+            "the list comes back with its cursor",
+        );
+        assert_eq!(ui.mode(), InputMode::Normal, "the keys go back to normal");
+        assert_eq!(cursor_of(&ui), None, "no list stays open");
+        assert!(ui.close_list().is_none(), "a second close finds no list");
+    }
+
+    #[test]
+    fn a_message_posted_while_the_list_is_open_waits_for_the_list_to_close() {
+        // The list owns the row, as a question does. A message that arrives
+        // through either door waits in the queue, and each one reaches the
+        // row in turn once the list closes. A progress notice goes nowhere:
+        // its words are true only while its work is in flight, and the work
+        // can end while the list is open.
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        ui.open_list(three_worktrees());
+        ui.post_error("the first message".to_string());
+        let notice = ui.post_notice("the second message".to_string(), now);
+        ui.post_progress("work in flight".to_string());
+
+        assert_eq!(
+            notice,
+            Posted::Held,
+            "a notice that finds the list open waits"
+        );
+        assert_eq!(ui.mode(), InputMode::List, "no message closes the list");
+        assert_eq!(
+            painted(&mut ui, tall_pane(80), now),
+            "",
+            "no message reaches the row under the list",
+        );
+
+        let _ = ui.close_list();
+        assert_eq!(
+            drained(&mut ui, now),
+            ["the first message", "the second message (0s ago)"],
+            "each held message reaches the row in turn, and the progress notice never does",
+        );
+    }
+
+    #[test]
+    fn opening_the_list_replaces_a_status_line() {
+        // Down opens the list over the line on the row, as `p` asks its
+        // question over it. The line describes the frame that the user
+        // stopped reading, so it does not come back when the list closes.
+        let now = t0();
+        let mut notice = PushUi::new(false);
+        let _ = notice.post_notice("a notice that fades".to_string(), now);
+        let mut error = PushUi::new(false);
+        error.post_error("an error that waits for a key".to_string());
+        let mut progress = PushUi::new(false);
+        progress.post_progress("a progress notice".to_string());
+
+        for (what, mut ui) in [
+            ("a notice that fades", notice),
+            ("an error that waits for a key", error),
+            ("a progress notice", progress),
+        ] {
+            ui.open_list(three_worktrees());
+            assert_eq!(ui.mode(), InputMode::List, "{what}: the list must open");
+            let _ = ui.close_list();
+            assert_eq!(
+                painted(&mut ui, tall_pane(80), now),
+                "",
+                "{what}: the line must not come back when the list closes",
+            );
+        }
+    }
+
+    #[test]
+    fn clear_closes_the_list_and_empties_the_queue() {
+        // The return to the home worktree calls `clear` with the list open.
+        // The list shows the worktrees as the frame of the old worktree saw
+        // them, so it closes, and no message held behind it takes the row.
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        ui.open_list(three_worktrees());
+        ui.post_error("held behind the list".to_string());
+        assert_eq!(
+            ui.mode(),
+            InputMode::List,
+            "the fixture must start with the list open"
+        );
+
+        ui.clear();
+
+        assert_eq!(ui.mode(), InputMode::Normal, "the list must close");
+        assert_eq!(cursor_of(&ui), None, "no list stays open");
+        assert_eq!(
+            painted(&mut ui, tall_pane(80), now),
+            "",
+            "no held message may reach the row",
+        );
+    }
+
+    #[test]
+    fn the_list_does_not_open_while_a_question_or_a_push_owns_the_row() {
+        // The key table never asks for the list then, but the door must not
+        // break what owns the row. A question keeps the keys that answer it,
+        // and a push keeps its window until its outcome arrives.
+        let now = t0();
+        let mut ui = asking();
+        ui.open_list(three_worktrees());
+        assert_eq!(
+            ui.mode(),
+            InputMode::Confirm,
+            "the question must keep the keys"
+        );
+        assert_eq!(cursor_of(&ui), None, "no list may open over the question");
+        assert!(ui.confirm(now).is_some(), "the question must still answer");
+
+        let mut ui = pushing(now);
+        ui.output_line("Compiling gsw v0.1.0".to_string());
+        ui.open_list(three_worktrees());
+        assert_eq!(
+            ui.mode(),
+            InputMode::Running(RunKind::Push),
+            "the push must keep the row"
+        );
+        assert_eq!(cursor_of(&ui), None, "no list may open over the push");
+        let text = painted(&mut ui, tall_pane(80), now);
+        assert!(
+            text.contains(RUNNING_NOTICE) && text.contains("Compiling gsw v0.1.0"),
+            "the push must keep its notice and its window, got {text:?}",
+        );
     }
 
     #[test]
@@ -1864,7 +3735,7 @@ mod ui_tests {
         // that is quiet for a minute gives the loop no other reason to draw
         // one.
         let ui = pushing(t0());
-        assert_eq!(ui.next_tick(), Some(STATUS_CADENCE));
+        assert_eq!(ui.next_tick(&t0), Some(STATUS_CADENCE));
     }
 
     #[test]
@@ -1943,8 +3814,346 @@ mod ui_tests {
         // that lies about the riskiest key on the prompt is worse than a long
         // one.
         assert!(
-            overlay.contains(CONFIRM_HINT),
+            overlay.contains(&confirm_hint(PUSH_VERB)),
             "the overlay owns the key hint, got {overlay:?}",
+        );
+    }
+
+    #[test]
+    fn requesting_a_base_update_asks_the_question_and_takes_the_keys() {
+        // `R` on a branch behind the base must put the question on screen AND
+        // switch the key table, or `y` would be read as an ordinary key.
+        let mut ui = asking_base_update(BaseUpdate::Rebase, t0());
+        assert_eq!(ui.mode(), InputMode::Confirm);
+        let overlay = painted(&mut ui, tall_pane(120), t0());
+        assert!(
+            overlay.contains("Rebase gsw-push onto main (5 commits behind), then push with grp?"),
+            "the question must be on screen, got {overlay:?}",
+        );
+        assert!(
+            overlay.contains(&confirm_hint("rebase")),
+            "the keys that answer it go with it, got {overlay:?}",
+        );
+    }
+
+    #[test]
+    fn requesting_a_base_update_that_is_refused_explains_instead_of_asking() {
+        // The refusal is a message, not a question: the keys must stay normal,
+        // so `y` does not answer a prompt that is not there.
+        let mut ui = PushUi::new(false);
+        ui.request_base_update(
+            &snapshot(None),
+            BaseUpdate::Rebase,
+            &base_update_command(BaseUpdate::Rebase),
+            tall_pane(80),
+            t0(),
+        );
+        assert_eq!(ui.mode(), InputMode::Normal);
+        let overlay = painted(&mut ui, tall_pane(80), t0());
+        assert!(
+            overlay.contains("gsw-push already contains main"),
+            "the reason must reach the row, got {overlay:?}",
+        );
+    }
+
+    #[test]
+    fn confirming_a_base_update_hands_back_the_command_it_described_once() {
+        // The act, the branch, the base, and the command travel together, so
+        // what runs on `y` is what the sentence promised — and the runner can
+        // still tell whether the repository moved under it. The second `y` is
+        // one that raced the mode change, and it must start nothing.
+        let mut ui = asking_base_update(BaseUpdate::Rebase, t0());
+        let Some(Confirmed::BaseUpdate(command)) = ui.confirm(t0()) else {
+            panic!("a question about a rebase must confirm a rebase");
+        };
+        assert_eq!(command.update(), BaseUpdate::Rebase);
+        assert_eq!(command.branch(), "gsw-push");
+        assert_eq!(command.base(), "main");
+        assert_eq!(command.command().name(), "grp");
+        assert_eq!(ui.mode(), InputMode::Running(RunKind::BaseUpdate));
+        assert_eq!(
+            ui.confirm(t0()),
+            None,
+            "a second y must not start a second run",
+        );
+    }
+
+    /// What a rebase that worked wrote, with its verdict in the last line.
+    const SKIPPED_THE_PUSH: &str = "grp: rebased onto 'main'; 'gsw-push' has no upstream - \
+                                    skipping push";
+
+    #[test]
+    fn a_base_update_that_worked_reports_it_and_shows_the_last_line_of_the_command() {
+        // **The second row is necessary.** `grp` and `gmp` report a push they
+        // skipped only in their last line, so gsw's sentence alone would tell
+        // the user that the branch is on the remote when it is not.
+        //
+        // The age goes on the first row the pane shows, which is gsw's own
+        // sentence. The row under it is the command speaking, and it is
+        // indented for that reason.
+        let now = t0();
+        let mut ui = asking_base_update(BaseUpdate::Rebase, now);
+        ui.confirm(now).expect("the question must confirm");
+        ui.finished(
+            PushOutcome {
+                success: true,
+                output: format!("Rebasing (1/3)\n{SKIPPED_THE_PUSH}\n"),
+            },
+            now,
+        );
+        assert_eq!(
+            painted(&mut ui, tall_pane(120), now + Duration::from_secs(4)),
+            format!(
+                "Rebased gsw-push onto main with grp (4s ago)\n{WINDOW_INDENT}{SKIPPED_THE_PUSH}",
+            ),
+        );
+    }
+
+    #[test]
+    fn a_base_update_that_said_nothing_leaves_the_sentence_of_gsw_alone() {
+        // A blank row under the frame reads as a run that said something not
+        // worth showing. The rule of `shell::last_with_text`: a command that
+        // ends its last line with a newline leaves an empty line after it, and
+        // a command that said nothing at all leaves no line to show.
+        let now = t0();
+        let mut ui = asking_base_update(BaseUpdate::Merge, now);
+        ui.confirm(now).expect("the question must confirm");
+        ui.finished(
+            PushOutcome {
+                success: true,
+                output: "\n  \n".to_string(),
+            },
+            now,
+        );
+        assert_eq!(
+            painted(&mut ui, tall_pane(120), now),
+            "Merged main into gsw-push with gmp (0s ago)",
+        );
+    }
+
+    #[test]
+    fn a_base_update_that_failed_keeps_the_words_of_the_command_until_a_key() {
+        // A rebase that stopped on a conflict is a rebase that gsw aborts, and
+        // what the command wrote is what names the file that conflicted. The
+        // user needs that name to do the rebase by hand. So it waits for a key
+        // exactly as a failed push does: the clock must not take it away while
+        // the user is looking at another pane.
+        //
+        // This output fits in three rows. A real rebase writes more lines, and
+        // the rank of the `CONFLICT` line then keeps the name in the rows. The
+        // tests of that rank follow this one.
+        let now = t0();
+        let mut ui = asking_base_update(BaseUpdate::Rebase, now);
+        ui.confirm(now).expect("the question must confirm");
+        ui.finished(
+            PushOutcome {
+                success: false,
+                output: "Rebasing (1/3)\nCONFLICT (content): Merge conflict in a.txt\n\
+                         hint: Resolve all conflicts manually\n\
+                         error: could not apply d3eee9d… feature edit\n"
+                    .to_string(),
+            },
+            now,
+        );
+
+        let rows = escapes(&mut ui, now);
+        let glyphs = testcolor::strip_ansi(&rows);
+        assert_eq!(
+            glyphs,
+            "Rebasing (1/3)\nCONFLICT (content): Merge conflict in a.txt\n\
+             error: could not apply d3eee9d… feature edit",
+            "the last lines of the run must reach the row, and the hint must go first",
+        );
+        assert_eq!(
+            rows,
+            testcolor::with_forced_ansi(|| glyphs
+                .lines()
+                .map(|line| line.red().to_string())
+                .collect::<Vec<_>>()
+                .join("\n")),
+            "the words of a command that failed are drawn red",
+        );
+        assert_eq!(
+            ui.next_tick(&t0),
+            None,
+            "a message that waits for a key does not age",
+        );
+
+        ui.dismiss();
+        assert_eq!(
+            painted(&mut ui, tall_pane(120), now),
+            "",
+            "a key must take it off the screen",
+        );
+    }
+
+    /// The rows that a failed run of `update` leaves under the frame, as the
+    /// glyphs a user reads, where the run wrote `output`.
+    fn rows_of_a_failed_base_update(update: BaseUpdate, output: &str) -> String {
+        let now = t0();
+        let mut ui = asking_base_update(update, now);
+        ui.confirm(now).expect("the question must confirm");
+        ui.finished(
+            PushOutcome {
+                success: false,
+                output: output.to_string(),
+            },
+            now,
+        );
+        painted(&mut ui, tall_pane(120), now)
+    }
+
+    #[test]
+    fn a_rebase_that_gsw_aborted_keeps_the_conflict_line_of_git_in_the_rows() {
+        // What the run records when `git rebase main` of git 2.55 stops on a
+        // conflict and gsw aborts it. git writes `Rebasing (1/1)` and then a
+        // carriage return, and the next line draws over it, so the run keeps
+        // no line of it.
+        //
+        // The `CONFLICT` line is the one line that names the file. The user
+        // needs that name to do the rebase by hand. A tail of three rows
+        // loses it, because git writes two lines of its own after it and gsw
+        // adds its sentence after them.
+        let output = "Auto-merging a.txt\n\
+                      CONFLICT (content): Merge conflict in a.txt\n\
+                      error: could not apply e84a0c0... change a.txt on the branch\n\
+                      hint: Resolve all conflicts manually, mark them as resolved with\n\
+                      hint: \"git add/rm <conflicted_files>\", then run \"git rebase --continue\".\n\
+                      hint: You can instead skip this commit: run \"git rebase --skip\".\n\
+                      hint: To abort and get back to the state before \"git rebase\", run \
+                      \"git rebase --abort\".\n\
+                      hint: Disable this message with \"git config set advice.mergeConflict false\"\n\
+                      Could not apply e84a0c0... # change a.txt on the branch\n\
+                      rebase stopped on 1 conflict — gsw aborted it";
+
+        assert_eq!(
+            rows_of_a_failed_base_update(BaseUpdate::Rebase, output),
+            "CONFLICT (content): Merge conflict in a.txt\n\
+             Could not apply e84a0c0... # change a.txt on the branch\n\
+             rebase stopped on 1 conflict — gsw aborted it",
+            "the conflict line must outrank the other lines above the sentence of gsw",
+        );
+    }
+
+    #[test]
+    fn more_conflict_lines_than_rows_keep_the_last_line_and_the_conflicts_nearest_it() {
+        // A merge that stops on three files writes three `CONFLICT` lines, and
+        // the sentence of gsw takes one of the three rows. The last line
+        // always stays, because it says what became of the run. The conflict
+        // lines nearest the end fill the other rows, and every line keeps the
+        // order that it had in the output.
+        let output = "Auto-merging a.txt\n\
+                      CONFLICT (content): Merge conflict in a.txt\n\
+                      Auto-merging b.txt\n\
+                      CONFLICT (content): Merge conflict in b.txt\n\
+                      Auto-merging c.txt\n\
+                      CONFLICT (modify/delete): c.txt deleted in HEAD and modified in main.\n\
+                      Automatic merge failed; fix conflicts and then commit the result.\n\
+                      merge stopped on 3 conflicts — gsw aborted it";
+
+        assert_eq!(
+            rows_of_a_failed_base_update(BaseUpdate::Merge, output),
+            "CONFLICT (content): Merge conflict in b.txt\n\
+             CONFLICT (modify/delete): c.txt deleted in HEAD and modified in main.\n\
+             merge stopped on 3 conflicts — gsw aborted it",
+            "the two conflict lines nearest the end must take the rows above the last line",
+        );
+    }
+
+    #[test]
+    fn a_merge_that_gsw_aborted_keeps_the_rows_that_the_tail_gave_it() {
+        // A merge writes one line after its `CONFLICT` line, so the tail of
+        // three rows already held the name of the file. The rank of the
+        // conflict line must not change these rows.
+        let output = "Auto-merging a.txt\n\
+                      CONFLICT (content): Merge conflict in a.txt\n\
+                      Automatic merge failed; fix conflicts and then commit the result.\n\
+                      merge stopped on 1 conflict — gsw aborted it";
+
+        assert_eq!(
+            rows_of_a_failed_base_update(BaseUpdate::Merge, output),
+            "CONFLICT (content): Merge conflict in a.txt\n\
+             Automatic merge failed; fix conflicts and then commit the result.\n\
+             merge stopped on 1 conflict — gsw aborted it",
+            "a merge must keep the rows that the tail of three rows gave it",
+        );
+    }
+
+    #[test]
+    fn a_running_base_update_takes_its_notice_from_the_question_and_counts_the_time() {
+        // The run carries no deadline, because a pre-push hook of this
+        // workspace builds and tests every crate in it and takes minutes. So
+        // the notice names the act that is running and counts the time, and a
+        // run that hangs shows on the screen as a run that hangs. `Pushing…`
+        // here would name neither the act nor the command.
+        let now = t0();
+        let mut ui = asking_base_update(BaseUpdate::Rebase, now);
+        ui.confirm(now).expect("the question must confirm");
+        assert_eq!(
+            painted(&mut ui, tall_pane(120), now + Duration::from_secs(72)),
+            "Rebasing gsw-push onto main with grp… (1m12s)",
+        );
+    }
+
+    #[test]
+    fn a_running_merge_says_that_it_is_merging() {
+        let now = t0();
+        let mut ui = asking_base_update(BaseUpdate::Merge, now);
+        ui.confirm(now).expect("the question must confirm");
+        assert_eq!(
+            painted(&mut ui, tall_pane(120), now + Duration::from_secs(4)),
+            "Merging main into gsw-push with gmp… (4s)",
+        );
+    }
+
+    #[test]
+    fn the_rebase_question_wears_the_color_of_caution_and_the_merge_question_does_not() {
+        // A rebase rewrites every commit of the branch and `grp` force-pushes
+        // the result, so a branch that somebody else has pulled is a branch
+        // they must repair. That is the question the color of the create is
+        // for. A merge writes one commit and pushes it, which is the routine
+        // act the count in the header is about.
+        let now = t0();
+        let rebase = escapes(&mut asking_base_update(BaseUpdate::Rebase, now), now);
+        let glyphs = testcolor::strip_ansi(&rebase);
+        assert_eq!(
+            rebase,
+            testcolor::with_forced_ansi(|| glyphs.yellow().to_string()),
+            "the rebase question must be drawn in the color of the question that \
+             creates a remote branch",
+        );
+
+        let merge = escapes(&mut asking_base_update(BaseUpdate::Merge, now), now);
+        assert_eq!(
+            merge,
+            testcolor::strip_ansi(&merge),
+            "the merge question is routine, so it takes the color of the row",
+        );
+    }
+
+    #[test]
+    fn a_pane_with_no_row_to_spare_raises_no_base_update_question() {
+        // The rule of the row, which both doors into it obey: a question the
+        // user cannot see must not be answerable, or Enter pressed out of
+        // reflex at an unchanged frame force-pushes a rewritten branch. The
+        // same rule holds `p`, and it is written once.
+        let mut ui = asking_base_update_in(
+            BaseUpdate::Rebase,
+            Dimensions {
+                width: 80,
+                height: 1,
+            },
+            t0(),
+        );
+        assert_eq!(
+            ui.mode(),
+            InputMode::Normal,
+            "the keys must stay ordinary where no question was shown",
+        );
+        assert_eq!(
+            ui.confirm(t0()),
+            None,
+            "there must be nothing for a y to answer",
         );
     }
 
@@ -1953,7 +4162,7 @@ mod ui_tests {
         // The refusal is a message, not a question: the keys must stay normal,
         // so `y` does not answer a prompt that is not there.
         let mut ui = PushUi::new(false);
-        ui.request(&snapshot(tracked(0)), tall_pane(80), t0());
+        ui.request(&snapshot(tracked(0)), tall_pane(80), t0(), PushHooks::Run);
         assert_eq!(ui.mode(), InputMode::Normal);
         assert_eq!(ui.overlay(tall_pane(80), t0()).rows(), 1);
         assert!(ui
@@ -1963,7 +4172,7 @@ mod ui_tests {
         assert!(
             !ui.overlay(tall_pane(80), t0())
                 .text()
-                .contains(CONFIRM_HINT),
+                .contains(&confirm_hint(PUSH_VERB)),
             "a refusal must not offer keys that do nothing",
         );
     }
@@ -1971,14 +4180,16 @@ mod ui_tests {
     #[test]
     fn confirming_hands_back_the_command_and_switches_to_pushing() {
         let mut ui = asking();
-        let command = ui.confirm(t0()).expect("a question on screen must confirm");
+        let Some(Confirmed::Push(command)) = ui.confirm(t0()) else {
+            panic!("a question about a push must confirm a push");
+        };
         assert_eq!(command.args(), ["push", "-u", "origin", "gsw-push"]);
         assert_eq!(
             command.branch(),
             "gsw-push",
             "the branch the question named must reach the runner",
         );
-        assert_eq!(ui.mode(), InputMode::Pushing);
+        assert_eq!(ui.mode(), InputMode::Running(RunKind::Push));
         assert_eq!(
             ui.overlay(tall_pane(80), t0()).rows(),
             1,
@@ -1988,7 +4199,7 @@ mod ui_tests {
 
     #[test]
     fn confirming_with_no_question_up_runs_nothing() {
-        // Belt and braces against a stray PushConfirmed: with no confirmation
+        // Belt and braces against a stray answer of yes: with no confirmation
         // on screen there is no command to run, and inventing one would push
         // without asking.
         let mut ui = PushUi::new(false);
@@ -1998,7 +4209,7 @@ mod ui_tests {
 
     #[test]
     fn confirming_twice_runs_the_push_once() {
-        // The second `y` arrives after the mode has already moved to Pushing.
+        // The second `y` arrives after the mode has already moved to Running.
         // It must not produce a second command.
         let mut ui = asking();
         assert!(ui.confirm(t0()).is_some());
@@ -2044,7 +4255,7 @@ mod ui_tests {
     #[test]
     fn a_successful_update_counts_what_it_pushed() {
         let mut ui = PushUi::new(false);
-        ui.request(&snapshot(tracked(3)), tall_pane(80), t0());
+        ui.request(&snapshot(tracked(3)), tall_pane(80), t0(), PushHooks::Run);
         ui.confirm(t0());
         ui.finished(
             PushOutcome {
@@ -2277,6 +4488,7 @@ mod ui_tests {
                 height: 1,
             },
             t0(),
+            PushHooks::Run,
         );
         assert_eq!(
             ui.mode(),
@@ -2369,17 +4581,22 @@ mod ui_tests {
         };
         let refusing = {
             let mut ui = PushUi::new(false);
-            ui.request(&snapshot(tracked(0)), tall_pane(80), t0());
+            ui.request(&snapshot(tracked(0)), tall_pane(80), t0(), PushHooks::Run);
             ui
         };
         let asking_to_update = {
             let mut ui = PushUi::new(false);
-            ui.request(&snapshot(tracked(3)), tall_pane(80), t0());
+            ui.request(&snapshot(tracked(3)), tall_pane(80), t0(), PushHooks::Run);
             ui
         };
         let running = {
             let mut ui = asking();
             ui.confirm(t0());
+            ui
+        };
+        let listing = {
+            let mut ui = PushUi::new(false);
+            ui.open_list(three_worktrees());
             ui
         };
         vec![
@@ -2404,6 +4621,7 @@ mod ui_tests {
             ("refusing a branch with nothing to push", refusing),
             ("a cancelled question", cancelled),
             ("a dismissed status", dismissed),
+            ("an open list of the worktrees", listing),
         ]
     }
 
@@ -2551,7 +4769,7 @@ mod ui_tests {
         ui.dismiss();
         assert_eq!(
             ui.mode(),
-            InputMode::Pushing,
+            InputMode::Running(RunKind::Push),
             "a stray key must not hide a running push",
         );
     }
@@ -2574,7 +4792,7 @@ mod ui_tests {
         let mut ui = PushUi::new(false);
         let mut snap = snapshot(None);
         snap.branch = "a-branch-name-long-enough-to-need-truncating-on-a-narrow-pane".to_string();
-        ui.request(&snap, tall_pane(80), t0());
+        ui.request(&snap, tall_pane(80), t0(), PushHooks::Run);
         for width in [10, 20, 40] {
             let overlay = ui.overlay(tall_pane(width), t0()).text();
             for line in overlay.lines() {
@@ -2593,7 +4811,7 @@ mod ui_tests {
         let mut ui = PushUi::new(false);
         let mut snap = snapshot(None);
         snap.branch = "日本語のブランチ名-🎉-café".to_string();
-        ui.request(&snap, tall_pane(80), t0());
+        ui.request(&snap, tall_pane(80), t0(), PushHooks::Run);
         for width in 1..40 {
             let overlay = ui.overlay(tall_pane(width), t0()).text();
             for line in overlay.lines() {
@@ -2618,7 +4836,7 @@ mod ui_tests {
             },
             t0(),
         );
-        ui.request(&snapshot(None), tall_pane(80), t0());
+        ui.request(&snapshot(None), tall_pane(80), t0(), PushHooks::Run);
         assert_eq!(ui.mode(), InputMode::Confirm);
         assert_eq!(ui.overlay(tall_pane(80), t0()).rows(), 1);
         assert!(!ui.overlay(tall_pane(120), t0()).text().contains("error:"));
@@ -2642,7 +4860,7 @@ mod ui_tests {
     /// about ageing reads.
     fn pushed_with(truecolor: bool, at: Instant) -> PushUi {
         let mut ui = PushUi::new(truecolor);
-        ui.request(&snapshot(tracked(3)), tall_pane(80), at);
+        ui.request(&snapshot(tracked(3)), tall_pane(80), at, PushHooks::Run);
         ui.confirm(at);
         ui.finished(
             PushOutcome {
@@ -2718,7 +4936,7 @@ mod ui_tests {
         // frame the same row until it does.
         let start = t0();
         let mut ui = PushUi::new(false);
-        ui.request(&snapshot(tracked(0)), tall_pane(80), start);
+        ui.request(&snapshot(tracked(0)), tall_pane(80), start, PushHooks::Run);
 
         let text = ui
             .overlay(tall_pane(80), start + Duration::from_secs(7))
@@ -2932,12 +5150,12 @@ mod ui_tests {
         let start = t0();
         let mut ui = pushed_at(start);
         ui.overlay(tall_pane(80), start);
-        assert_eq!(ui.next_tick(), Some(STATUS_CADENCE));
+        assert_eq!(ui.next_tick(&t0), Some(STATUS_CADENCE));
 
         // And it stops asking once there is nothing left to move.
         ui.overlay(tall_pane(80), start + STATUS_LIFETIME);
         assert_eq!(
-            ui.next_tick(),
+            ui.next_tick(&t0),
             None,
             "an expired message must not go on waking the loop",
         );
@@ -2949,9 +5167,9 @@ mod ui_tests {
         // actually changes with the clock may ask for one.
         let start = t0();
 
-        assert_eq!(PushUi::new(false).next_tick(), None, "an idle UI");
+        assert_eq!(PushUi::new(false).next_tick(&t0), None, "an idle UI");
         assert_eq!(
-            asking().next_tick(),
+            asking().next_tick(&t0),
             None,
             "a question waiting for an answer"
         );
@@ -2971,7 +5189,7 @@ mod ui_tests {
             },
             start,
         );
-        assert_eq!(failed.next_tick(), None, "an error that never expires");
+        assert_eq!(failed.next_tick(&t0), None, "an error that never expires");
     }
 
     #[test]
@@ -2999,12 +5217,657 @@ mod ui_tests {
             }
         }
     }
+
+    /// What a progress notice says. The words belong to the `m` key, and the
+    /// tests below are about how long the notice stays and how it looks.
+    const PROGRESS: &str = "Running grind and grime against main…";
+
+    #[test]
+    fn a_progress_notice_goes_on_a_free_row_and_does_not_age() {
+        // The notice says that a press of `m` does nothing now. That stays
+        // true until the run ends, so the notice has no age to report and no
+        // reason to wake the loop.
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        ui.post_progress(PROGRESS.to_string());
+
+        assert_eq!(
+            painted(&mut ui, tall_pane(80), now),
+            PROGRESS,
+            "the notice must reach the row, with no age after it",
+        );
+        assert_eq!(
+            ui.next_tick(&t0),
+            None,
+            "a notice that does not age must not wake the loop",
+        );
+
+        // A status on the row is news, so the row is free for the notice.
+        let mut ui = PushUi::new(false);
+        let _ = ui.post_notice(NOTICE.to_string(), now);
+        ui.post_progress(PROGRESS.to_string());
+        assert_eq!(
+            painted(&mut ui, tall_pane(80), now),
+            PROGRESS,
+            "the notice must replace a status that is on the row",
+        );
+    }
+
+    #[test]
+    fn a_key_with_no_meaning_leaves_a_progress_notice_on_the_row() {
+        // A key that took the notice away would say that the run had ended,
+        // and a press of `m` would still do nothing.
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        ui.post_progress(PROGRESS.to_string());
+
+        ui.dismiss();
+        assert_eq!(
+            painted(&mut ui, tall_pane(80), now),
+            PROGRESS,
+            "a key must not take the notice away",
+        );
+    }
+
+    #[test]
+    fn the_clock_leaves_a_progress_notice_on_the_row() {
+        // A rebase replay of a long branch can take longer than a status
+        // lives, and the run is still in flight for all of that time.
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        ui.post_progress(PROGRESS.to_string());
+
+        assert_eq!(
+            painted(&mut ui, tall_pane(80), now + STATUS_LIFETIME * 3),
+            PROGRESS,
+            "the clock must not take the notice away, and the notice shows no age",
+        );
+        assert_eq!(ui.next_tick(&t0), None, "the notice still does not age");
+    }
+
+    #[test]
+    fn a_progress_notice_is_drawn_like_a_fresh_status_for_as_long_as_it_stays() {
+        // The notice is gsw's own words about news that is still true. So it
+        // looks like a status at age zero, and not like git's words, which are
+        // red. It does not fade, because a fade says that the words are
+        // leaving.
+        //
+        // The color is in the escape bytes, so the rows must carry real ones.
+        // `testcolor::with_forced_ansi` makes them do so, as in the fade tests
+        // above. One cadence before the end of `STATUS_LIFETIME` is where a
+        // fading status is darkest and still on screen.
+        let start = t0();
+        let late = start + STATUS_LIFETIME - STATUS_CADENCE;
+
+        let (deep_fresh, deep_late, coarse_late) = testcolor::with_forced_ansi(|| {
+            let mut deep = PushUi::new(true);
+            deep.post_progress(PROGRESS.to_string());
+            let deep_fresh = deep.overlay(tall_pane(80), start).text();
+            let deep_late = deep.overlay(tall_pane(80), late).text();
+
+            let mut coarse = PushUi::new(false);
+            coarse.post_progress(PROGRESS.to_string());
+            let coarse_late = coarse.overlay(tall_pane(80), late).text();
+            (deep_fresh, deep_late, coarse_late)
+        });
+
+        assert_eq!(testcolor::strip_ansi(&deep_fresh), PROGRESS);
+        assert_eq!(
+            max_red_channel(&deep_fresh),
+            STATUS_RGB.0,
+            "the notice must be drawn in the color of a status at age zero, got {deep_fresh:?}",
+        );
+        assert_eq!(
+            max_red_channel(&deep_late),
+            STATUS_RGB.0,
+            "the notice must not fade, got {deep_late:?}",
+        );
+        assert_eq!(
+            coarse_late, PROGRESS,
+            "with no truecolor the notice stays plain, and it never dims",
+        );
+    }
+
+    #[test]
+    fn a_progress_notice_never_waits_for_a_busy_row() {
+        // A notice that reached the row after its run ended would say that a
+        // run is in flight when none is. So a push in flight or a question
+        // that owns the row takes the notice away for good.
+        let now = t0();
+
+        let mut ui = pushing(now);
+        ui.post_progress(PROGRESS.to_string());
+        ui.finished(
+            PushOutcome {
+                success: false,
+                output: "error: failed to push some refs\n".to_string(),
+            },
+            now,
+        );
+        let seen = drained(&mut ui, now);
+        assert!(
+            !seen.iter().any(|text| text.contains(PROGRESS)),
+            "a notice posted during a push must never reach the row, got {seen:?}",
+        );
+
+        let mut ui = asking();
+        ui.post_progress(PROGRESS.to_string());
+        ui.cancel();
+        assert_eq!(
+            painted(&mut ui, tall_pane(80), now),
+            "",
+            "a notice posted during a question must never reach the row",
+        );
+
+        // The control. The same door on the row that is free now puts the
+        // notice there, so the two checks above are about a busy row, and not
+        // about a door that does nothing.
+        ui.post_progress(PROGRESS.to_string());
+        assert_eq!(painted(&mut ui, tall_pane(80), now), PROGRESS);
+    }
+
+    #[test]
+    fn the_next_message_replaces_a_progress_notice() {
+        // Each of these messages is newer news than the notice. The result of
+        // the run is one of them, and a key that asks a question is another.
+        /// One way to post a newer message onto the row at an instant.
+        type Replace = fn(&mut PushUi, Instant);
+
+        let now = t0();
+        let push_hint = confirm_hint(PUSH_VERB);
+        let replacements: [(&str, Replace, &str); 4] = [
+            (
+                "a notice",
+                |ui, now| {
+                    let _ = ui.post_notice(NOTICE.to_string(), now);
+                },
+                NOTICE,
+            ),
+            (
+                "an error",
+                |ui, _| ui.post_error("branch main names no issue".to_string()),
+                "branch main names no issue",
+            ),
+            (
+                "another progress notice",
+                |ui, _| ui.post_progress("Running grind and grime against master…".to_string()),
+                "against master…",
+            ),
+            (
+                "a press of p",
+                |ui, now| ui.request(&snapshot(None), tall_pane(80), now, PushHooks::Run),
+                &push_hint,
+            ),
+        ];
+
+        for (what, replace, shows) in replacements {
+            let mut ui = PushUi::new(false);
+            ui.post_progress(PROGRESS.to_string());
+            assert_eq!(
+                painted(&mut ui, tall_pane(80), now),
+                PROGRESS,
+                "the notice must be on the row before {what}",
+            );
+
+            replace(&mut ui, now);
+            let text = painted(&mut ui, tall_pane(80), now);
+            assert!(
+                text.contains(shows),
+                "{what} must take the row, got {text:?}"
+            );
+            assert!(
+                !text.contains(PROGRESS),
+                "{what} must replace the progress notice, got {text:?}",
+            );
+        }
+    }
+
+    /// The line the tests of the hint post.
+    const HINT: &str = "Hit Escape again to go back to topic";
+
+    #[test]
+    fn a_hint_shows_its_words_and_no_age() {
+        // The hint is a request and not news, so it has no age to report.
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        assert_eq!(ui.post_hint(HINT.to_string(), now), Posted::OnRow);
+
+        let text = painted(&mut ui, tall_pane(80), now + Duration::from_secs(1));
+        assert_eq!(text, HINT, "the row must hold the line and nothing else");
+    }
+
+    #[test]
+    fn a_hint_in_a_narrow_pane_is_cut_to_the_width() {
+        // Nothing gsw paints wraps the pane it was measured to fill, and the
+        // words of a hint can hold any character a branch name can.
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        let _ = ui.post_hint("café 日本 café 日本 café 日本".to_string(), now);
+
+        let text = painted(&mut ui, tall_pane(12), now);
+        assert!(!text.is_empty(), "the hint must still show");
+        assert!(
+            unicode_width::UnicodeWidthStr::width(text.as_str()) <= 12,
+            "the hint must fit 12 columns, got {text:?}",
+        );
+        assert!(
+            text.starts_with("café"),
+            "the hint must keep its head, got {text:?}"
+        );
+    }
+
+    #[test]
+    fn a_hint_leaves_the_row_at_exactly_its_lifetime() {
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        let _ = ui.post_hint(HINT.to_string(), now);
+
+        let before = RETURN_HINT_LIFETIME - Duration::from_millis(1);
+        assert_eq!(
+            painted(&mut ui, tall_pane(80), now + before),
+            HINT,
+            "1 ms before its lifetime the hint stays",
+        );
+        assert_eq!(
+            painted(&mut ui, tall_pane(80), now + RETURN_HINT_LIFETIME),
+            "",
+            "at its lifetime the hint goes",
+        );
+    }
+
+    #[test]
+    fn a_hint_that_finds_a_question_on_the_row_is_never_shown() {
+        let now = t0();
+        let mut ui = asking();
+        assert_eq!(ui.post_hint(HINT.to_string(), now), Posted::Held);
+
+        ui.cancel();
+        assert_eq!(
+            drained(&mut ui, now),
+            Vec::<String>::new(),
+            "no frame may show the hint after the question goes",
+        );
+        assert!(ui.held.is_empty(), "the hint must not wait in the queue");
+    }
+
+    #[test]
+    fn a_hint_that_finds_a_run_on_the_row_is_never_shown() {
+        let now = t0();
+        let mut ui = pushing(now);
+        assert_eq!(ui.post_hint(HINT.to_string(), now), Posted::Held);
+
+        ui.finished(
+            PushOutcome {
+                success: false,
+                output: String::new(),
+            },
+            now,
+        );
+        let seen = drained(&mut ui, now);
+        assert!(
+            seen.iter().all(|text| !text.contains(HINT)),
+            "no frame may show the hint after the run ends, got {seen:?}",
+        );
+        assert!(ui.held.is_empty(), "the hint must not wait in the queue");
+    }
+
+    #[test]
+    fn a_hint_that_finds_the_list_open_is_never_shown() {
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        ui.open_list(three_worktrees());
+        assert_eq!(ui.post_hint(HINT.to_string(), now), Posted::Held);
+
+        let _ = ui.close_list();
+        assert_eq!(
+            painted(&mut ui, tall_pane(80), now),
+            "",
+            "no frame may show the hint after the list closes",
+        );
+        assert!(ui.held.is_empty(), "the hint must not wait in the queue");
+    }
+
+    #[test]
+    fn dismissing_removes_a_hint() {
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        let _ = ui.post_hint(HINT.to_string(), now);
+
+        ui.dismiss();
+        assert_eq!(painted(&mut ui, tall_pane(80), now), "");
+    }
+
+    #[test]
+    fn a_hint_on_the_row_shows_until_exactly_its_lifetime() {
+        // The rule is the rule of `expire`: 1 ms before the lifetime the hint
+        // shows, and at the lifetime it does not.
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        assert!(!ui.shows_hint(now), "an empty row shows no hint");
+        assert_eq!(ui.post_hint(HINT.to_string(), now), Posted::OnRow);
+
+        assert!(ui.shows_hint(now), "the hint shows when it lands");
+        assert!(
+            ui.shows_hint(now + RETURN_HINT_LIFETIME - Duration::from_millis(1)),
+            "1 ms before its lifetime the hint shows",
+        );
+        assert!(
+            !ui.shows_hint(now + RETURN_HINT_LIFETIME),
+            "at its lifetime the hint does not show, whether or not a frame has expired it",
+        );
+    }
+
+    #[test]
+    fn a_message_that_takes_the_row_from_the_hint_ends_the_hint() {
+        let now = t0();
+        type Take = fn(&mut PushUi, Instant);
+        let takers: [(&str, Take); 3] = [
+            ("post_notice", |ui, now| {
+                let _ = ui.post_notice("notice".to_string(), now);
+            }),
+            ("post_progress", |ui, _| {
+                ui.post_progress("progress".to_string());
+            }),
+            ("post_error", |ui, _| ui.post_error("error".to_string())),
+        ];
+        for (what, take) in takers {
+            let mut ui = PushUi::new(false);
+            let _ = ui.post_hint(HINT.to_string(), now);
+            assert!(ui.shows_hint(now), "the hint must show before {what}");
+
+            take(&mut ui, now);
+            assert!(!ui.shows_hint(now), "{what} must end the hint");
+        }
+    }
+
+    #[test]
+    fn a_hint_that_leaves_the_row_by_a_door_is_not_shown() {
+        let now = t0();
+        type Leave = fn(&mut PushUi);
+        let leaves: [(&str, Leave); 3] = [
+            ("withdraw_hint", PushUi::withdraw_hint),
+            ("dismiss", PushUi::dismiss),
+            ("clear", PushUi::clear),
+        ];
+        for (what, leave) in leaves {
+            let mut ui = PushUi::new(false);
+            let _ = ui.post_hint(HINT.to_string(), now);
+            assert!(ui.shows_hint(now), "the hint must show before {what}");
+
+            leave(&mut ui);
+            assert!(!ui.shows_hint(now), "{what} must remove the hint");
+        }
+    }
+
+    #[test]
+    fn a_status_that_is_not_a_hint_is_not_a_shown_hint() {
+        let now = t0();
+        let mut fading = PushUi::new(false);
+        let _ = fading.post_notice("notice".to_string(), now);
+        assert!(!fading.shows_hint(now), "a fading line is not a hint");
+
+        let mut asking = asking();
+        assert!(!asking.shows_hint(now), "a question is not a hint");
+        assert_eq!(asking.post_hint(HINT.to_string(), now), Posted::Held);
+        assert!(
+            !asking.shows_hint(now),
+            "a hint that was dropped is not shown"
+        );
+
+        let running = pushing(now);
+        assert!(!running.shows_hint(now), "a run is not a hint");
+    }
+
+    /// A clock that counts its reads and answers `at`.
+    fn counting(at: Instant, reads: &std::cell::Cell<u32>) -> impl Fn() -> Instant + '_ {
+        move || {
+            reads.set(reads.get() + 1);
+            at
+        }
+    }
+
+    #[test]
+    fn a_hint_wakes_the_loop_when_it_is_due_to_leave() {
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        let _ = ui.post_hint(HINT.to_string(), now);
+
+        let one_second_later = now + Duration::from_secs(1);
+        assert_eq!(
+            ui.next_tick(&|| one_second_later),
+            Some(RETURN_HINT_LIFETIME - Duration::from_secs(1)),
+        );
+    }
+
+    #[test]
+    fn an_overdue_hint_wakes_the_loop_at_once() {
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        let _ = ui.post_hint(HINT.to_string(), now);
+
+        let overdue = now + RETURN_HINT_LIFETIME * 2;
+        assert_eq!(ui.next_tick(&|| overdue), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn the_clock_is_read_only_while_a_hint_stands() {
+        let now = t0();
+        let mut fading = pushed_at(now);
+        fading.overlay(tall_pane(80), now);
+        let mut running = pushing(now);
+        running.output_line("hook".to_string());
+        let mut listing = PushUi::new(false);
+        listing.open_list(three_worktrees());
+        let mut failed = pushing(now);
+        failed.finished(
+            PushOutcome {
+                success: false,
+                output: "boom".to_string(),
+            },
+            now,
+        );
+
+        for (what, ui) in [
+            ("an idle UI", PushUi::new(false)),
+            ("a fading line", fading),
+            ("a question", asking()),
+            ("a run", running),
+            ("the list", listing),
+            ("an error", failed),
+        ] {
+            let reads = std::cell::Cell::new(0);
+            let _ = ui.next_tick(&counting(now, &reads));
+            assert_eq!(reads.get(), 0, "{what} must not read the clock");
+        }
+
+        let mut hinted = PushUi::new(false);
+        let _ = hinted.post_hint(HINT.to_string(), now);
+        let reads = std::cell::Cell::new(0);
+        let _ = hinted.next_tick(&counting(now, &reads));
+        assert_eq!(reads.get(), 1, "a hint reads the clock once");
+    }
+
+    #[test]
+    fn withdrawing_removes_a_hint() {
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        let _ = ui.post_hint(HINT.to_string(), now);
+
+        ui.withdraw_hint();
+        assert_eq!(painted(&mut ui, tall_pane(80), now), "");
+    }
+
+    #[test]
+    fn withdrawing_leaves_everything_but_a_hint_alone() {
+        let now = t0();
+
+        let mut error = PushUi::new(false);
+        error.post_error("fatal: no".to_string());
+        let mut progress = PushUi::new(false);
+        progress.post_progress("Measuring".to_string());
+        let mut notice = PushUi::new(false);
+        let _ = notice.post_notice("Nothing to do".to_string(), now);
+        let mut listing = PushUi::new(false);
+        listing.open_list(three_worktrees());
+
+        for (what, mut ui, mode) in [
+            ("a fading line", pushed_at(now), InputMode::Normal),
+            ("an error", error, InputMode::Normal),
+            ("a progress notice", progress, InputMode::Normal),
+            ("a notice", notice, InputMode::Normal),
+            ("a question", asking(), InputMode::Confirm),
+            ("a run", pushing(now), InputMode::Running(RunKind::Push)),
+            ("the list", listing, InputMode::List),
+        ] {
+            let before = painted(&mut ui, tall_pane(80), now);
+            ui.withdraw_hint();
+            assert_eq!(
+                painted(&mut ui, tall_pane(80), now),
+                before,
+                "{what} must stay",
+            );
+            assert_eq!(ui.mode(), mode, "{what} must keep its mode");
+        }
+    }
+
+    /// The notice of the runs that the tests of [`PushUi::start_run`] start.
+    const RETURN_NOTICE: &str = "git switch --no-guess topic…";
+
+    /// A UI after a `start_run` of a return at `now`, which must have started.
+    fn returning(ui: &mut PushUi, now: Instant) {
+        assert!(
+            ui.start_run(
+                RETURN_NOTICE.to_string(),
+                SuccessReport::WithLastLine {
+                    sentence: "Went back".to_string(),
+                },
+                RunKind::Return,
+                now,
+            ),
+            "the row was free, so the run must start",
+        );
+    }
+
+    #[test]
+    fn a_run_starts_on_an_idle_row_and_shows_its_age() {
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        returning(&mut ui, now);
+
+        assert_eq!(ui.mode(), InputMode::Running(RunKind::Return));
+        assert_eq!(
+            painted(&mut ui, tall_pane(80), now),
+            format!("{RETURN_NOTICE} (0s)"),
+        );
+        assert_eq!(
+            painted(&mut ui, tall_pane(80), now + Duration::from_secs(5)),
+            format!("{RETURN_NOTICE} (5s)"),
+        );
+    }
+
+    #[test]
+    fn a_run_takes_the_row_from_a_fading_line() {
+        let now = t0();
+        let mut ui = pushed_at(now);
+        returning(&mut ui, now);
+
+        assert_eq!(ui.mode(), InputMode::Running(RunKind::Return));
+        let text = painted(&mut ui, tall_pane(80), now);
+        assert!(
+            !text.contains("Pushed"),
+            "the old line must be gone, got {text:?}",
+        );
+        assert!(text.starts_with(RETURN_NOTICE), "got {text:?}");
+    }
+
+    #[test]
+    fn a_return_that_worked_says_so_and_shows_the_last_line_of_git() {
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        returning(&mut ui, now);
+        ui.output_line("Switched to branch 'topic'".to_string());
+        ui.finished(
+            PushOutcome {
+                success: true,
+                output: "Switched to branch 'topic'\n".to_string(),
+            },
+            now,
+        );
+
+        assert_eq!(ui.mode(), InputMode::Normal);
+        let text = painted(&mut ui, tall_pane(80), now);
+        assert_eq!(
+            text,
+            format!("Went back (0s ago)\n{WINDOW_INDENT}Switched to branch 'topic'"),
+        );
+    }
+
+    #[test]
+    fn a_return_that_failed_shows_the_words_of_git_in_red_until_a_key() {
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        returning(&mut ui, now);
+        ui.finished(
+            PushOutcome {
+                success: false,
+                output: "error: Your local changes would be overwritten".to_string(),
+            },
+            now,
+        );
+
+        let much_later = now + STATUS_LIFETIME * 3;
+        let raw = escapes(&mut ui, much_later);
+        assert!(
+            raw.contains("would be overwritten"),
+            "git's words must still be up, got {raw:?}",
+        );
+        assert!(
+            raw.contains("\u{1b}[31m"),
+            "git's words are red, got {raw:?}"
+        );
+        ui.dismiss();
+        assert_eq!(painted(&mut ui, tall_pane(80), much_later), "");
+    }
+
+    #[test]
+    fn a_run_does_not_start_on_a_busy_row() {
+        let now = t0();
+        let mut listing = PushUi::new(false);
+        listing.open_list(three_worktrees());
+
+        for (what, mut ui, mode) in [
+            ("a question", asking(), InputMode::Confirm),
+            ("a run", pushing(now), InputMode::Running(RunKind::Push)),
+            ("the list", listing, InputMode::List),
+        ] {
+            let before = painted(&mut ui, tall_pane(80), now);
+            assert!(
+                !ui.start_run(
+                    RETURN_NOTICE.to_string(),
+                    SuccessReport::Alone {
+                        sentence: "Went back".to_string(),
+                    },
+                    RunKind::Return,
+                    now,
+                ),
+                "{what} owns the row, so the run must not start",
+            );
+            assert_eq!(ui.mode(), mode, "{what} must keep its mode");
+            assert_eq!(
+                painted(&mut ui, tall_pane(80), now),
+                before,
+                "{what} must stay as it was",
+            );
+        }
+    }
 }
 
 #[cfg(test)]
 mod run_tests {
     use super::*;
-    use crate::testrepo::{git, init_repo_with_upstream};
+    use crate::testrepo::{git, git_output, git_stdout, init_repo_with_upstream};
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     /// A clone with a `feature` branch holding one commit, ready to push.
     ///
@@ -3037,14 +5900,133 @@ mod run_tests {
     }
 
     /// Whether `origin` has a `feature` branch, read from the origin itself.
+    ///
+    /// The read goes through the fixture helper, which sheds the whole `GIT_`
+    /// prefix. A read of its own would answer about the repository the
+    /// inherited environment names, and a push that landed would then read as
+    /// a push that never happened.
     fn origin_has_feature(origin: &Path) -> bool {
-        Command::new("git")
-            .args(["rev-parse", "--verify", "--quiet", "refs/heads/feature"])
-            .current_dir(origin)
-            .output()
-            .expect("invoke git")
-            .status
-            .success()
+        git_output(
+            origin,
+            &["rev-parse", "--verify", "--quiet", "refs/heads/feature"],
+        )
+        .status
+        .success()
+    }
+
+    /// `rwxr-xr-x` — git has to be able to execute the hook it finds, and a
+    /// file written by `std::fs::write` is not executable.
+    #[cfg(unix)]
+    const HOOK_EXECUTABLE_MODE: u32 = 0o755;
+
+    /// Install `body` as the repository's pre-push hook.
+    ///
+    /// Every test here that needs a hook installs it through this one helper,
+    /// so a fixture that two tests share cannot drift into two fixtures.
+    ///
+    /// `core.hooksPath` is stated rather than inherited: a developer with one
+    /// set globally would otherwise run their own hooks here, and the test
+    /// would pass or fail on a machine's configuration.
+    ///
+    /// Unix-only for the execute bit, which is what makes git run the hook at
+    /// all.
+    #[cfg(unix)]
+    fn write_hook(workdir: &Path, body: &str) {
+        git(workdir, &["config", "core.hooksPath", ".git/hooks"]);
+        let hook = workdir.join(".git").join("hooks").join("pre-push");
+        std::fs::create_dir_all(hook.parent().expect("the hook has a parent"))
+            .expect("create the hooks directory");
+        std::fs::write(&hook, format!("#!/bin/sh\n{body}\n")).expect("write the pre-push hook");
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(HOOK_EXECUTABLE_MODE))
+            .expect("make the hook executable");
+    }
+
+    /// The push a confirmation on `feature` would carry, built through
+    /// [`prompt_for`] so the policy reaches git the way a key press sends it.
+    #[cfg(unix)]
+    fn planned_push(hooks: PushHooks) -> PushCommand {
+        match prompt_for("feature", Some("origin"), None, hooks) {
+            PushPrompt::Confirm {
+                command: Confirmed::Push(command),
+                ..
+            } => command,
+            other => panic!("expected a push confirmation, got {other:?}"),
+        }
+    }
+
+    /// The body of the hook that touches `marker` and then fails.
+    ///
+    /// The path goes onto a `/bin/sh` command line, so the quoting rule lives
+    /// in one place rather than in each string that spells a command line.
+    #[cfg(unix)]
+    fn failing_marker_hook_body(marker: &Path) -> String {
+        format!(
+            "touch {}\nexit 1",
+            shellquote::shell_quote(&marker.display().to_string()),
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_skip_push_does_not_run_the_hook_and_a_run_push_does() {
+        // The test builds both commands through `prompt_for`. It proves that
+        // the policy of the question reaches git, and not only that git knows
+        // `--no-verify`.
+        let (origin, clone) = clone_with_feature_branch();
+        let marker_dir = tempfile::tempdir().expect("create the marker directory");
+        let marker = marker_dir.path().join("hook-ran");
+        write_hook(clone.path(), &failing_marker_hook_body(&marker));
+
+        let run = run_quiet(&planned_push(PushHooks::Run), clone.path());
+        assert!(!run.success, "the failing hook must stop a Run push");
+        assert!(marker.exists(), "a Run push must run the hook");
+        assert!(!origin_has_feature(origin.path()));
+
+        std::fs::remove_file(&marker).expect("remove the marker");
+        let skip = run_quiet(&planned_push(PushHooks::Skip), clone.path());
+        assert!(skip.success, "a Skip push failed: {}", skip.output);
+        assert!(!marker.exists(), "a Skip push must not run the hook");
+        assert!(
+            origin_has_feature(origin.path()),
+            "the Skip push must reach the remote",
+        );
+    }
+
+    /// **The marker path goes onto a `/bin/sh` command line, so the shell
+    /// reads every character of it.** A single quote closes the quotation
+    /// early, and `sh` then touches a different file or reads the rest of the
+    /// script as one unterminated word and runs nothing. The Run leg of the
+    /// test above would then fail for the wrong reason, and the `!exists()` of
+    /// its Skip leg would prove nothing.
+    ///
+    /// A temporary directory holds no quote today, so this costs that test
+    /// nothing. It is here because the quoting rule belongs in
+    /// [`shellquote::shell_quote`] rather than in each string that spells a
+    /// command line.
+    #[cfg(unix)]
+    #[test]
+    fn the_failing_marker_hook_touches_the_path_it_was_handed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join("it's-here");
+        let body = failing_marker_hook_body(&marker);
+
+        let status = childenv::fixture_command("/bin/sh")
+            .arg("-c")
+            .arg(&body)
+            .current_dir(dir.path())
+            .status()
+            .expect("run the body of the hook");
+
+        assert_eq!(
+            status.code(),
+            Some(1),
+            "the hook must fail through its own `exit 1`; a shell syntax error gives 2: {status}",
+        );
+        assert!(
+            marker.exists(),
+            "the hook must touch the path it was handed, and a quote the shell read as another \
+             word touches somewhere else",
+        );
     }
 
     #[test]
@@ -3069,13 +6051,11 @@ mod run_tests {
             "the branch must exist on the remote after the push",
         );
 
-        let upstream = Command::new("git")
-            .args(["rev-parse", "--abbrev-ref", "feature@{upstream}"])
-            .current_dir(clone.path())
-            .output()
-            .expect("invoke git");
         assert_eq!(
-            String::from_utf8_lossy(&upstream.stdout).trim(),
+            git_stdout(
+                clone.path(),
+                &["rev-parse", "--abbrev-ref", "feature@{upstream}"]
+            ),
             "origin/feature",
             "-u must record the upstream, or the next push asks the same question",
         );
@@ -3094,13 +6074,11 @@ mod run_tests {
         let outcome = run_quiet(&confirmed(&["push"]), p);
         assert!(outcome.success, "push failed: {}", outcome.output);
 
-        let subject = Command::new("git")
-            .args(["log", "-1", "--format=%s", "refs/heads/feature"])
-            .current_dir(origin.path())
-            .output()
-            .expect("invoke git");
         assert_eq!(
-            String::from_utf8_lossy(&subject.stdout).trim(),
+            git_stdout(
+                origin.path(),
+                &["log", "-1", "--format=%s", "refs/heads/feature"]
+            ),
             "more work",
             "the remote branch must carry the new commit",
         );
@@ -3303,16 +6281,15 @@ mod run_tests {
     /// or `""` when there is no such branch. Compared before and after a push
     /// to say whether anything was actually sent.
     fn tip(dir: &Path, branch: &str) -> String {
-        let output = Command::new("git")
-            .args([
+        let output = git_output(
+            dir,
+            &[
                 "rev-parse",
                 "--verify",
                 "--quiet",
                 &format!("refs/heads/{branch}"),
-            ])
-            .current_dir(dir)
-            .output()
-            .expect("invoke git");
+            ],
+        );
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
@@ -3445,7 +6422,6 @@ mod run_tests {
     #[cfg(unix)]
     mod streaming_tests {
         use super::*;
-        use std::os::unix::fs::PermissionsExt;
         use std::sync::{Arc, Mutex};
 
         /// What the hook writes before it waits to hear that the line arrived.
@@ -3454,21 +6430,6 @@ mod run_tests {
         /// What the hook writes only once it has heard, so its presence proves
         /// the runner reported the first line while the child was still alive.
         const SECOND_LINE: &str = "hook-said-this-second";
-
-        /// Install `body` as the repository's pre-push hook.
-        ///
-        /// `core.hooksPath` is stated rather than inherited: a developer with
-        /// one set globally would otherwise run their own hooks here, and the
-        /// test would pass or fail on a machine's configuration.
-        fn write_hook(workdir: &Path, body: &str) {
-            git(workdir, &["config", "core.hooksPath", ".git/hooks"]);
-            let hook = workdir.join(".git").join("hooks").join("pre-push");
-            std::fs::create_dir_all(hook.parent().expect("the hook has a parent"))
-                .expect("create the hooks directory");
-            std::fs::write(&hook, format!("#!/bin/sh\n{body}\n")).expect("write the pre-push hook");
-            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
-                .expect("make the hook executable");
-        }
 
         /// Longest the hook waits to be told, in units of its own poll.
         /// Bounded so a runner that reports nothing until the child exits
@@ -3677,5 +6638,310 @@ exit 1"#,
             .expect("the callback must fire when the push finishes");
         assert!(outcome.success, "push failed: {}", outcome.output);
         assert!(origin_has_feature(origin.path()));
+    }
+
+    /// What the push child carries out of the environment `gsw` was started
+    /// in.
+    ///
+    /// Unix-only, because the hook that records that environment is a shell
+    /// script — as [`terminal_tests`] is unix-only for the terminal it opens.
+    #[cfg(unix)]
+    mod environment_tests {
+        use super::*;
+        use crate::shell::stub_shell::{
+            a_child_of_this_test_passes, test_name, user_intent_lost, user_intent_value, CHILD_RAN,
+            HOSTILE_GIT_ENVIRONMENT, HOSTILE_MARKER,
+        };
+
+        /// The variable the push pins to `0` after the sweep.
+        const TERMINAL_PROMPT_VAR: &str = "GIT_TERMINAL_PROMPT";
+
+        /// The body of the hook that writes its own environment to `record`.
+        ///
+        /// The path goes through [`shellquote::shell_quote`], so the quoting
+        /// rule lives in one place rather than in each string that spells a
+        /// command line.
+        fn recording_hook_body(record: &Path) -> String {
+            format!(
+                "env > {}\nexit 0",
+                shellquote::shell_quote(&record.display().to_string()),
+            )
+        }
+
+        /// Give the clone at `p` a `pre-push` hook that writes its own
+        /// environment, and hand back the file that hook writes.
+        ///
+        /// **The hook is the environment of the push child, read from inside
+        /// it.** A test that reads the removals off the [`Command`] proves
+        /// less. A sweep of the `GIT_` prefix records a removal only for a
+        /// variable this process holds, so such a test is empty under a shell
+        /// and full under the pre-commit hook of this repository. The hook runs
+        /// as a child of the push, so it holds what the push held.
+        ///
+        /// The record goes under `.git`, which the work tree does not hold, so
+        /// the push it records does not carry it.
+        ///
+        /// [`write_hook`] installs it, and states where the hook goes.
+        fn recording_the_push_environment(p: &Path) -> PathBuf {
+            let record = p.join(".git").join("push-environment");
+            write_hook(p, &recording_hook_body(&record));
+            record
+        }
+
+        /// The `NAME=value` lines of `environment` that carry a value of
+        /// [`HOSTILE_GIT_ENVIRONMENT`].
+        ///
+        /// **The question here is the value and not the name.** git puts
+        /// `GIT_EXEC_PATH`, `GIT_PREFIX` and `GIT_EDITOR` into the environment
+        /// of every hook it runs. So a read of this record that asked about the
+        /// `GIT_` prefix would report three variables git set itself. git
+        /// cannot manufacture a hostile value, so a hostile value in this
+        /// record came through `gsw` and through nothing else.
+        fn hostile_lines(environment: &str) -> Vec<&str> {
+            environment
+                .lines()
+                .filter(|line| {
+                    line.split_once('=').is_some_and(|(key, value)| {
+                        HOSTILE_GIT_ENVIRONMENT
+                            .iter()
+                            .any(|(name, hostile)| key == *name && value == *hostile)
+                    })
+                })
+                .collect()
+        }
+
+        /// The push child sheds the git variables of `gsw` and keeps those of
+        /// the user.
+        ///
+        /// **A `gsw` started from inside a pre-commit hook holds `GIT_DIR`,
+        /// `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY` and
+        /// `GIT_CONFIG_PARAMETERS`, and the user asked for none of them.** git
+        /// obeys the environment before it obeys the directory it was pointed
+        /// at. So a push child that carries one of those sends a branch of a
+        /// repository the user was never looking at. The guard of the push,
+        /// [`current_branch`], reads the same environment, so it agrees with
+        /// itself and refuses nothing.
+        ///
+        /// **The sweep keeps the six names of
+        /// [`childenv::USER_INTENT_GIT_ENVIRONMENT`], because this child acts
+        /// for the user.** A push is where that matters most. A user who holds
+        /// a non-default key cannot authenticate without `GIT_SSH_COMMAND`, and
+        /// nothing states it again: `gsw` spawns git itself, so no rc file runs
+        /// between the sweep and the push.
+        ///
+        /// `GIT_TERMINAL_PROMPT` is a name the user states, and the push sets
+        /// it to `0` after the sweep, so that value must win over the one the
+        /// child holds.
+        ///
+        /// **This test starts this test binary again, and the hostile
+        /// environment goes on that child.** A `GIT_` variable is
+        /// process-global state. A test that set one in this process would
+        /// change what every other test in this binary reads, and many of them
+        /// run real git. That is also what makes the answer the same under a
+        /// shell and under the pre-commit hook of this repository, which
+        /// exports `GIT_` variables into `cargo test`.
+        ///
+        /// **The armed control comes first.** The child asserts that it really
+        /// holds each hostile variable and each variable of the user. An
+        /// assertion that a variable is absent from the record passes just as
+        /// readily where there was nothing to remove.
+        #[test]
+        fn the_push_child_sheds_the_git_variables_of_gsw_and_keeps_those_of_the_user() {
+            if std::env::var_os(HOSTILE_MARKER).is_none() {
+                a_child_of_this_test_passes(&test_name(
+                    module_path!(),
+                    "the_push_child_sheds_the_git_variables_of_gsw_and_keeps_those_of_the_user",
+                ));
+                return;
+            }
+
+            for (name, _) in HOSTILE_GIT_ENVIRONMENT {
+                assert!(
+                    std::env::var_os(name).is_some(),
+                    "the child must really hold {name}, or there is nothing here to remove and \
+                     the assertion below is measured against nothing",
+                );
+            }
+            for name in childenv::USER_INTENT_GIT_ENVIRONMENT {
+                assert_eq!(
+                    std::env::var(name).ok(),
+                    Some(user_intent_value(name)),
+                    "the child must really hold {name}, or there is nothing here to keep",
+                );
+            }
+            assert_ne!(
+                std::env::var(TERMINAL_PROMPT_VAR).ok().as_deref(),
+                Some("0"),
+                "the child must hold a {TERMINAL_PROMPT_VAR} other than 0, or the push's own \
+                 value wins over nothing",
+            );
+
+            let (origin, clone) = clone_with_feature_branch();
+            let p = clone.path();
+            let record = recording_the_push_environment(p);
+
+            let outcome = run_quiet(&confirmed(&["push", "-u", "origin", "feature"]), p);
+            assert!(
+                outcome.success,
+                "the push must reach the origin of the fixture. A hostile variable aims git \
+                 somewhere else, and the guard of the push reads the same variable, so it agrees \
+                 with itself and refuses nothing: {}",
+                outcome.output,
+            );
+            assert_eq!(
+                // Both reads go through the fixture helper, which sheds
+                // everything. A read of its own would answer about the
+                // repository the hostile environment names.
+                git_stdout(origin.path(), &["rev-parse", "refs/heads/feature"]),
+                git_stdout(p, &["rev-parse", "refs/heads/feature"]),
+                "the origin must carry the commit the clone holds",
+            );
+
+            let environment =
+                std::fs::read_to_string(&record).expect("the pre-push hook must have run");
+            assert!(
+                !environment.is_empty(),
+                "the hook must record the environment the push ran in",
+            );
+            let carried = hostile_lines(&environment);
+            assert!(
+                carried.is_empty(),
+                "the push child carried a git variable out of the environment of gsw. Each of \
+                 these aims the push, or configures it, somewhere the user never pointed it: \
+                 {carried:?}",
+            );
+            let lost = user_intent_lost(&environment, Some(TERMINAL_PROMPT_VAR));
+            assert!(
+                lost.is_empty(),
+                "the push child lost a git variable the user states on purpose. Without \
+                 GIT_SSH_COMMAND a user who holds a non-default key cannot authenticate, and \
+                 nothing states it again: {lost:?}",
+            );
+            let prompts: Vec<&str> = environment
+                .lines()
+                .filter(|line| {
+                    line.split_once('=')
+                        .is_some_and(|(key, _)| key == TERMINAL_PROMPT_VAR)
+                })
+                .collect();
+            assert_eq!(
+                prompts,
+                [format!("{TERMINAL_PROMPT_VAR}=0")],
+                "the push sets {TERMINAL_PROMPT_VAR}=0 after the sweep, so that value must win \
+                 over the one the child holds",
+            );
+
+            println!("{CHILD_RAN}");
+        }
+
+        /// The read-back helpers of these tests answer about the fixture.
+        ///
+        /// **A fixture that reads through an unswept git answers about
+        /// whatever the environment names.** These tests assert what a push
+        /// left on the origin. So a read that went to another repository
+        /// reports a push that never happened, or hides one that did.
+        ///
+        /// The helpers want the blanket sweep rather than the allowlist the
+        /// push child takes. A fixture builds a throwaway repository, so there
+        /// is no user whose intent to honor — see
+        /// [`childenv::fixture_command`].
+        ///
+        /// **This is measurable, and it was measured.** Five of the push tests
+        /// failed with one hostile variable set and nothing else,
+        /// `GIT_OBJECT_DIRECTORY` aimed at a decoy. The fixture wrote its
+        /// objects into the decoy, and then pushed a commit whose objects the
+        /// repository it pushed from did not hold.
+        ///
+        /// **The armed control comes first**, as it does in the test above.
+        #[test]
+        fn the_read_back_helpers_of_these_tests_answer_about_the_fixture() {
+            if std::env::var_os(HOSTILE_MARKER).is_none() {
+                a_child_of_this_test_passes(&test_name(
+                    module_path!(),
+                    "the_read_back_helpers_of_these_tests_answer_about_the_fixture",
+                ));
+                return;
+            }
+
+            for (name, _) in HOSTILE_GIT_ENVIRONMENT {
+                assert!(
+                    std::env::var_os(name).is_some(),
+                    "the child must really hold {name}, or there is nothing here to remove and \
+                     the assertions below are measured against nothing",
+                );
+            }
+
+            let (origin, clone) = clone_with_feature_branch();
+            let p = clone.path();
+
+            assert!(
+                !origin_has_feature(origin.path()),
+                "the fixture must start without the branch, and a read that went elsewhere \
+                 reports the same thing",
+            );
+
+            let outcome = run_quiet(&confirmed(&["push", "-u", "origin", "feature"]), p);
+            assert!(outcome.success, "push failed: {}", outcome.output);
+
+            assert!(
+                origin_has_feature(origin.path()),
+                "the read of the origin answered about the repository the hostile environment \
+                 names, so a push that landed reads as a push that never happened",
+            );
+
+            let pushed = tip(origin.path(), "feature");
+            assert!(
+                !pushed.is_empty(),
+                "the read of the tip answered about the repository the hostile environment names",
+            );
+            assert_eq!(
+                pushed,
+                tip(p, "feature"),
+                "the origin must carry the commit the clone holds",
+            );
+
+            println!("{CHILD_RAN}");
+        }
+
+        /// The hook writes its record to the path this module hands it,
+        /// whatever characters that path spells.
+        ///
+        /// **The record path goes onto a `/bin/sh` command line, so the shell
+        /// reads every character of it.** A single quote closes the quotation
+        /// early, and the redirect then names a different file — or `sh` reads
+        /// the rest of the script as one unterminated word and runs nothing at
+        /// all. Either way the tests above read the path they asked for, find
+        /// nothing there, and report a hook that never ran.
+        ///
+        /// A temporary directory holds no quote today, so this costs those
+        /// tests nothing. It is here because the quoting rule belongs in
+        /// [`shellquote::shell_quote`] rather than in each string that spells
+        /// a command line.
+        #[test]
+        fn the_recording_hook_writes_to_the_path_it_was_handed() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let record = dir.path().join("it's-here");
+            let body = recording_hook_body(&record);
+
+            let status = childenv::fixture_command("/bin/sh")
+                .arg("-c")
+                .arg(&body)
+                .current_dir(dir.path())
+                .status()
+                .expect("run the body of the hook");
+
+            assert!(
+                status.success(),
+                "/bin/sh must read the body of the hook: {status}",
+            );
+            let recorded = std::fs::read_to_string(&record).expect(
+                "the hook must write its record to the path it was handed, and a redirect the \
+                 shell read as another word writes somewhere else",
+            );
+            assert!(
+                !recorded.is_empty(),
+                "the hook must record the environment it ran in",
+            );
+        }
     }
 }

@@ -1,7 +1,7 @@
 //! What the chain says once every issue in it carries a state.
 //!
-//! The question the tool answers is one question: which issue do I start now.
-//! The answer is the first issue of the chain that is still open. Everything
+//! The question the tool answers is one question: which step do I take now.
+//! The answer is the first step of the chain that is still open. Everything
 //! else this module holds is there because the real answer has to survive a
 //! chain that is not a clean run of closed issues followed by open ones.
 //!
@@ -11,28 +11,31 @@
 //!   first. The order still holds, so the answer does not change, but the plan
 //!   the reader holds in their head is now wrong and nothing else would say so.
 //! * An issue GitHub does not have. A typo in a number is invisible in the
-//!   answer, because a chain of five issues with one missing still names an
-//!   issue to start. So a missing issue is never the answer, and the tool
+//!   answer, because a chain of five issues with one missing still names a
+//!   step to take. So a missing issue is never the answer, and the tool
 //!   reports it.
 //!
 //! # A step of a plan holds two numbers
 //!
 //! A plan of parallel work writes a step as a pull request and the issue that
-//! pull request closes: `PR#344 (#341)`. Both numbers carry a state, and the
-//! two states can disagree. The state of the step is the state of the pull
-//! request, because the pull request is the work. The state of the issue
-//! stands beside it, because a merged pull request over an open issue is a
-//! link nobody wrote, and nothing else would say so.
+//! pull request closes: `PR#344 (#341)`. The row of the step writes it the
+//! same way, so the reader sees which number is the work. Both numbers carry a
+//! state, and the two states can disagree. The state of the step is the state
+//! of the pull request, because the pull request is the work. The state of the
+//! issue stands beside it, because a merged pull request over an open issue is
+//! a link nobody wrote, and nothing else would say so.
 //!
 //! A plan also names one number in two streams. [`States`] holds the answer
-//! of GitHub for each number once, so one query answers the whole plan and
-//! every stream that names a number reads the same state for it.
+//! of GitHub for each number once, so one query answers every number the plan
+//! names and every stream that names a number reads the same state for it.
+//! Each round of blockers that stand nowhere in the plan costs one query more,
+//! and its answers join the same [`States`].
 //!
 //! # One report answers a chain, a stream, and a graph
 //!
 //! [`Report`] carries the answer of all three shapes of input, and it carries
 //! it in one shape. A chain and a stream stand in one line, so each of them
-//! names one issue to start. A picture holds two streams that join, so it
+//! names one step to take. A picture holds two streams that join, so it
 //! names a set of them and it says what each blocked step waits for.
 //!
 //! The three must not part company. A stream is a graph whose nodes stand in
@@ -49,6 +52,7 @@
 use std::collections::HashMap;
 
 use crate::chain::IssueNumber;
+use crate::declared::LeftOut;
 use crate::graph::Graph;
 use crate::plan::Step;
 
@@ -57,6 +61,13 @@ use crate::plan::Step;
 /// A named constant, because [`Report::waits_for`] gives a slice and an empty
 /// `Vec` of its own would live no longer than the call.
 const NO_NUMBERS: &[IssueNumber] = &[];
+
+/// What `wn` writes in front of the number of a pull request.
+///
+/// A plan writes the work of a pull request as `PR#344`, with no space, and a
+/// row writes it the same way. An answer writes `PR #344`, with a space, in a
+/// sentence.
+pub const PULL_REQUEST_PREFIX: &str = "PR";
 
 /// What GitHub says about one issue of the chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,7 +86,7 @@ pub enum Status {
 }
 
 impl Status {
-    /// Is this an issue somebody can start now?
+    /// Is this a step somebody can take now?
     #[must_use]
     pub fn is_open(self) -> bool {
         self == Self::Open
@@ -89,6 +100,16 @@ impl Status {
     pub fn is_finished(self) -> bool {
         matches!(self, Self::Done | Self::Dropped)
     }
+}
+
+/// What GitHub says a number names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// An issue: work somebody starts.
+    Issue,
+    /// A pull request: work that already exists, which somebody reviews and
+    /// merges.
+    PullRequest,
 }
 
 /// The issue the pull request of a step closes, with what GitHub says about
@@ -116,33 +137,65 @@ pub struct Entry {
     pub title: String,
     /// What GitHub says about it.
     pub status: Status,
+    /// What GitHub says the number names. `None` for a number GitHub gave no
+    /// kind for, which is every [`Status::Missing`] entry.
+    pub kind: Option<Kind>,
     /// The issue this work closes, when the step names one. `None` for every
     /// step of a chain, because a chain writes one number for each step.
     pub closes: Option<Closes>,
+    /// The numbers the body of the issue names as work that comes before it,
+    /// with its own number left out. [`crate::blocked_by::read`] states which
+    /// forms count.
+    ///
+    /// Empty for a pull request, whose body `wn` does not ask for, and for a
+    /// number GitHub gave no answer for.
+    pub blocked_by: Vec<IssueNumber>,
 }
 
 impl Entry {
     /// The number a row writes: `#344` for a step of one number, and
     /// `#344 (#341)` for a pair.
     ///
+    /// A pull request writes [`PULL_REQUEST_PREFIX`] in front of its number,
+    /// `PR#344` alone and `PR#344 (#341)` in a pair, which is how a plan writes
+    /// it. The reader then sees in the row which number is work that exists
+    /// already. An issue, and a number GitHub gave no kind for, write the bare
+    /// number.
+    ///
     /// The width of the number column of a block is the width of the widest of
     /// these, so the text of a pair and the width of the column come out of one
     /// place and can never part company.
     #[must_use]
     pub fn label(&self) -> String {
+        let prefix = if self.is_pull_request() {
+            PULL_REQUEST_PREFIX
+        } else {
+            ""
+        };
         match self.closes {
-            Some(closes) => format!("{} ({})", self.number, closes.number),
-            None => self.number.to_string(),
+            Some(closes) => format!("{prefix}{} ({})", self.number, closes.number),
+            None => format!("{prefix}{}", self.number),
         }
+    }
+
+    /// Is this work a pull request?
+    ///
+    /// The work of a pull request exists already, so the answer tells the
+    /// reader to finish it and not to start it. Callers ask this, and do not
+    /// read [`kind`](Self::kind) themselves.
+    #[must_use]
+    pub fn is_pull_request(&self) -> bool {
+        self.kind == Some(Kind::PullRequest)
     }
 }
 
 /// What GitHub says about each number of a plan, keyed by the number.
 ///
-/// A plan asks GitHub once for the whole page of text. One number stands in
-/// two streams, and two queries for it cost twice and can give two answers. So
-/// the answers arrive as one list, and each stream reads the numbers it names
-/// out of this.
+/// One query answers every number the plan names. Each round of blockers that
+/// stand nowhere in the plan costs one query more, and its answers join the
+/// same `States`. One number stands in two streams, and two queries for it
+/// cost twice and can give two answers. So the answers arrive as one list, and
+/// each stream reads the numbers it names out of this.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct States {
     /// The answer of GitHub for each number it answered for.
@@ -176,8 +229,28 @@ impl States {
             number,
             title: String::new(),
             status: Status::Missing,
+            kind: None,
             closes: None,
+            blocked_by: Vec::new(),
         })
+    }
+
+    /// Whether GitHub was asked about `number` and answered.
+    ///
+    /// [`entry`](Self::entry) gives a missing entry for a number nobody asked
+    /// about and for a number the repository does not have alike. This parts
+    /// the two, for a caller that must ask about a number before it reads one.
+    #[must_use]
+    pub fn knows(&self, number: IssueNumber) -> bool {
+        self.entries.contains_key(&number)
+    }
+
+    /// Hold what GitHub said about each number of `entries` as well.
+    ///
+    /// A number already held takes the later answer, as [`of`](Self::of) does.
+    pub fn extend(&mut self, entries: Vec<Entry>) {
+        self.entries
+            .extend(entries.into_iter().map(|entry| (entry.number, entry)));
     }
 }
 
@@ -188,10 +261,10 @@ pub struct Report {
     /// a topological order, so every step stands after the steps it waits for
     /// in this list as well.
     entries: Vec<Entry>,
-    /// The positions of the entries somebody can start now.
+    /// The positions of the steps somebody can take now.
     ///
     /// A chain and a stream hold one position here, because one line of work
-    /// has one issue to start. A picture holds one position for each stream
+    /// has one step to take. A picture holds one position for each stream
     /// that is ready, because two streams that join are two people who work at
     /// the same time.
     ready: Vec<usize>,
@@ -201,12 +274,16 @@ pub struct Report {
     /// every position of a chain and of a stream, because a reader of one line
     /// of work reads the line above the row and needs no list.
     waits: Vec<Vec<IssueNumber>>,
+    /// The steps that wait for work the plan did not say they wait for, and
+    /// that work. Empty unless [`crate::declared::settle`] added a blocker, so
+    /// the note it earns names where a wait came from.
+    left_out: Vec<LeftOut>,
 }
 
 impl Report {
     /// Read the answer out of the states of the chain.
     ///
-    /// One line of work has one issue to start: the first open one. Every
+    /// One line of work has one step to take: the first open one. Every
     /// finished step after it is work somebody closed out of order, because
     /// each of them stands after a step that is not finished.
     #[must_use]
@@ -227,13 +304,14 @@ impl Report {
             ready: next.into_iter().collect(),
             out_of_order,
             waits,
+            left_out: Vec::new(),
         }
     }
 
     /// The report of one stream of a plan.
     ///
     /// The state of a step is the state of the number the step names, because
-    /// the pull request of a pair is the work. So the issue to start is the
+    /// the pull request of a pair is the work. So the step to take is the
     /// first step whose pull request is open, and a merged pull request is
     /// walked past even while the issue it names stays open.
     ///
@@ -302,7 +380,21 @@ impl Report {
             ready,
             out_of_order,
             waits,
+            left_out: Vec::new(),
         }
+    }
+
+    /// This report, with the blockers the plan left out and the issues named.
+    #[must_use]
+    pub fn with_left_out(self, left_out: Vec<LeftOut>) -> Self {
+        Self { left_out, ..self }
+    }
+
+    /// The steps that wait for work the plan did not say they wait for, in
+    /// the order they were found.
+    #[must_use]
+    pub fn left_out(&self) -> &[LeftOut] {
+        &self.left_out
     }
 
     /// The chain, in the order it was written.
@@ -311,8 +403,8 @@ impl Report {
         &self.entries
     }
 
-    /// The first position in [`entries`](Self::entries) somebody can start, or
-    /// `None` when nothing is ready.
+    /// The position in [`entries`](Self::entries) of the first step somebody
+    /// can take, or `None` when nothing is ready.
     ///
     /// A chain and a stream have one such position, so this is their whole
     /// answer. A picture has one for each ready stream, and a caller that
@@ -322,13 +414,13 @@ impl Report {
         self.ready.first().copied()
     }
 
-    /// The first issue somebody can start, or `None` when nothing is ready.
+    /// The first step somebody can take, or `None` when nothing is ready.
     #[must_use]
     pub fn next_entry(&self) -> Option<&Entry> {
         self.next().map(|position| &self.entries[position])
     }
 
-    /// Can somebody start the entry at `position` now?
+    /// Can somebody take the step at `position` now?
     ///
     /// A row asks this of each entry, because a picture marks one row for each
     /// stream that is ready. A position outside the report gives `false`,
@@ -448,7 +540,9 @@ mod tests {
             number: issue(number),
             title: format!("title of {number}"),
             status,
+            kind: Some(Kind::Issue),
             closes: None,
+            blocked_by: Vec::new(),
         }
     }
 
@@ -610,6 +704,34 @@ mod tests {
             ..entry(344, Status::Done)
         };
         assert_eq!(paired.label(), "#344 (#341)");
+    }
+
+    #[test]
+    fn a_pull_request_writes_the_prefix_the_plan_writes() {
+        let closes = Some(Closes {
+            number: issue(341),
+            status: Status::Open,
+        });
+        let pull_request = Entry {
+            kind: Some(Kind::PullRequest),
+            ..entry(344, Status::Open)
+        };
+        assert_eq!(pull_request.label(), "PR#344");
+        let paired = Entry {
+            closes,
+            ..pull_request
+        };
+        assert_eq!(paired.label(), "PR#344 (#341)");
+
+        // A number GitHub gave no kind for is not known to be a pull request,
+        // so it writes the bare number.
+        let unknown = Entry {
+            kind: None,
+            ..entry(344, Status::Missing)
+        };
+        assert_eq!(unknown.label(), "#344");
+        let unknown_pair = Entry { closes, ..unknown };
+        assert_eq!(unknown_pair.label(), "#344 (#341)");
     }
 
     #[test]

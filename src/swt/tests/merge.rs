@@ -30,8 +30,9 @@ use std::path::{Path, PathBuf};
 use std::process::Output;
 
 use support::{
-    exiting_check, git, run_swt, unique, write_swt_check, LinkedWorktree, TestRepo,
-    OPTION_LOOKING_NAMES, SWT_CHECK, TRACKED_FILE,
+    entry_names, exiting_check, git, recorded_calls, recording_function, run_swt, shell_command,
+    unique, write_swt_check, LinkedWorktree, TestRepo, OPTION_LOOKING_NAMES, SWT_CHECK,
+    TRACKED_FILE,
 };
 
 /// Basename of the lock file inside the repository's shared git directory. Built
@@ -74,6 +75,16 @@ const CWD_LOG: &str = "ran-in";
 /// tracked-only scope is pinned as a rule rather than as a special case for
 /// `.swt-check`.
 const PARENT_SCRATCH: &str = "scratch.txt";
+
+/// Directory labels that a subagent worktree can carry and that a shell does
+/// not read as one word. A bare `it's` opens a quote that never closes. A bare
+/// `a b` gives two arguments. A bare `x;id` ends one command and starts a
+/// second. A bare `$(...)` runs a command that writes a file.
+const SHELL_HOSTILE_WORKTREE_LABELS: [&str; 4] = ["it's", "a b", "x;id", "a$(touch${IFS}pwned)"];
+
+/// The text in stderr immediately before the re-run line that a rebase
+/// conflict prints.
+const RERUN_LINE_LABEL: &str = "then re-run: ";
 
 /// Decodes a finished run's stdout.
 fn stdout_of(output: &Output) -> String {
@@ -509,11 +520,12 @@ fn a_rebase_conflict_preserves_everything_and_leaves_no_lock_behind() {
     );
     assert!(
         stderr.contains(&format!(
-            "Resolve conflicts in {}, then re-run: swt merge {}\n",
+            "Resolve conflicts in {}, then re-run: swt merge '{}'\n",
             worktree.path.display(),
             worktree.path.display()
         )),
-        "the user needs the directory to fix and the command to re-run: {stderr}"
+        "the user needs the directory to fix and the command to re-run, with the path in \
+         shell quotes: {stderr}"
     );
     assert!(
         worktree.path.is_dir(),
@@ -531,6 +543,75 @@ fn a_rebase_conflict_preserves_everything_and_leaves_no_lock_behind() {
     // The load-bearing one: a `process::exit` from inside the locked region
     // would skip the release, and this is the very failure that path exists for.
     assert_no_lock(&repo, "rebase conflict");
+}
+
+// A person pastes the re-run line of a rebase conflict into a shell, so the
+// line is a command line and not prose. It names the subagent worktree, and a
+// directory name can hold characters that a shell does not read as one word.
+// For each such directory, a shell must read the line as exactly the one `swt`
+// command that it names. A shell function takes the place of `swt`, so nothing
+// real runs.
+#[test]
+fn a_shell_reads_the_rerun_line_of_a_conflict_as_the_one_command_it_names() {
+    for label in SHELL_HOSTILE_WORKTREE_LABELS {
+        let repo = TestRepo::new();
+        write_swt_check(repo.path(), &exiting_check(0));
+        // The label goes into the path only. Git refuses a space in a branch
+        // name, so the branch keeps a safe name.
+        let worktree = repo.add_worktree_on(label, &unique("swt/sub"));
+        // Both sides rewrite the same line of the same tracked file.
+        commit_in(&worktree.path, TRACKED_FILE, "subagent version\n");
+        commit_in(repo.path(), TRACKED_FILE, "parent version\n");
+
+        let output = merge_from(repo.path(), &worktree.path);
+        let stderr = stderr_of(&output);
+
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "fixture precondition: the merge of the worktree {label:?} must fail: {stderr}"
+        );
+        assert!(
+            stderr.contains("Resolve conflicts in"),
+            "fixture precondition: the rebase of the worktree {label:?} must conflict: {stderr}"
+        );
+
+        // The re-run line runs from its label to the end of that line.
+        let (_, after_label) = stderr
+            .split_once(RERUN_LINE_LABEL)
+            .unwrap_or_else(|| panic!("no {RERUN_LINE_LABEL:?} in: {stderr}"));
+        let (rerun_line, _) = after_label
+            .split_once('\n')
+            .unwrap_or_else(|| panic!("no end of line after {RERUN_LINE_LABEL:?} in: {stderr}"));
+        // An empty directory, so a file that the line makes is easy to see.
+        let shell_dir = repo.sibling("rerun-shell");
+        fs::create_dir(&shell_dir).expect("an empty directory for the shell");
+        let script = format!("{}\n{rerun_line}", recording_function("swt"));
+        let pasted = shell_command(&shell_dir, &script)
+            .output()
+            .expect("the shell should run");
+
+        assert_eq!(
+            pasted.status.code(),
+            Some(0),
+            "a shell must read the re-run line for the worktree {label:?} without an error: \
+             {rerun_line}\n{}",
+            stderr_of(&pasted)
+        );
+        assert_eq!(
+            recorded_calls(&stdout_of(&pasted)),
+            vec![vec![
+                "merge",
+                worktree.path.to_str().expect("utf-8 fixture path"),
+            ]],
+            "a shell must read the path in the re-run line as one argument: {rerun_line}"
+        );
+        assert_eq!(
+            entry_names(&shell_dir),
+            Vec::<String>::new(),
+            "a shell must run no command that the worktree {label:?} spells: {rerun_line}"
+        );
+    }
 }
 
 // Green in isolation is not enough — the merged result is what has to be green.

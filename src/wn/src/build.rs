@@ -30,7 +30,7 @@
 //! because only a run that ended on its own has a use for it.
 
 use std::io::{Read, Write};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -39,6 +39,7 @@ use thiserror::Error;
 
 use crate::chain::Snippet;
 use crate::envelope::Envelope;
+use crate::github::Repo;
 use crate::progress::Progress;
 use crate::stream::{self, Transcript};
 
@@ -455,7 +456,7 @@ pub fn candidate_paths(home: Option<&str>) -> Vec<String> {
 /// which is a test of the machine rather than of the code.
 #[must_use]
 pub fn answers_version(path: &str) -> bool {
-    std::process::Command::new(path)
+    childenv::command(path)
         .arg("--version")
         .output()
         .is_ok_and(|answer| answer.status.success())
@@ -651,7 +652,7 @@ fn ask(
     model: &ModelName,
     progress: &Progress,
 ) -> Result<Answer, BuildError> {
-    let mut child = Command::new(path)
+    let mut child = childenv::command(path)
         .args(arguments(effort, model))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -954,6 +955,37 @@ pub(crate) fn refusal_of(said: &str) -> BuildError {
     }
 }
 
+/// Refuse a run that builds a plan when `--repo` names a repository other than
+/// the repository of this directory.
+///
+/// The skill plans the repository of the directory `wn` was run in, and `wn`
+/// asks GitHub about the repository `--repo` names. When the two differ, the
+/// numbers of the plan name other issues in the repository `wn` asks about,
+/// and GitHub answers for them all the same. So the refusal stands before the
+/// run. It costs no money and no minute, it writes nothing to the clipboard,
+/// and it holds for every shape of plan, also a plan that names no repository.
+///
+/// `here` is the repository of this directory. `named` is the repository
+/// `--repo` names, and it is `None` when the command line names none.
+/// [`Repo::is_same_repository`] compares the two, because GitHub names a
+/// repository without regard to letter case.
+///
+/// The message names no `wn --refresh`. That run builds a plan for this
+/// directory as well, so it repairs nothing.
+///
+/// # Errors
+///
+/// Gives [`BuildError::AnotherRepository`] when `named` is not `here`.
+pub fn refuse_another_repository(here: &Repo, named: Option<&Repo>) -> Result<(), BuildError> {
+    match named {
+        Some(named) if !named.is_same_repository(here) => Err(BuildError::AnotherRepository {
+            here: here.clone(),
+            named: named.clone(),
+        }),
+        _ => Ok(()),
+    }
+}
+
 /// Why no plan came back.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum BuildError {
@@ -1018,7 +1050,9 @@ pub enum BuildError {
     ///
     /// It names which of the two repositories failed. `--repo` names the
     /// repository `wn` asks about and never the one a run plans, and the
-    /// reader of this message has often passed it already.
+    /// reader of this message has often passed it already. A run in a
+    /// checkout refuses a `--repo` that names another repository, with
+    /// [`BuildError::AnotherRepository`].
     #[error(
         "a plan is built for the repository of this directory, and gh can name none for it. \
          Run wn inside a checkout — --repo names the repository wn asks about and never the one \
@@ -1027,6 +1061,26 @@ pub enum BuildError {
     NoRepository {
         /// What said the directory is in no repository.
         said: String,
+    },
+    /// `--repo` names a repository other than the repository of this
+    /// directory, and the run would build a plan.
+    ///
+    /// The plan is always for the repository of this directory, so its
+    /// numbers would name other issues in the repository `--repo` names.
+    /// [`refuse_another_repository`] states the rule. The refusal stands
+    /// before the run, where it costs nothing.
+    #[error(
+        "a plan is built for the repository of this directory, which is {here}, and --repo names \
+         another repository, {named}. The numbers of a plan for {here} name other issues in \
+         {named}.\n\
+         Run wn in a checkout of {named} to plan and answer {named}, or leave --repo out to plan \
+         and answer {here}."
+    )]
+    AnotherRepository {
+        /// The repository of this directory, which the run plans.
+        here: Repo,
+        /// The repository `--repo` names, which `wn` asks GitHub about.
+        named: Repo,
     },
     /// The value of [`EFFORT_ENV`] is not one of [`EFFORT_LEVELS`].
     #[error(
@@ -1353,6 +1407,60 @@ plans.\n`gh repo view` failed."
         );
     }
 
+    /// The repository `spec` names.
+    fn repository(spec: &str) -> Repo {
+        Repo::parse(spec).expect("the test names a repository")
+    }
+
+    #[test]
+    fn a_repo_for_another_repository_than_this_directory_is_refused() {
+        // The skill plans the repository of this directory, and `wn` asks
+        // GitHub about the repository `--repo` names. A run under a `--repo`
+        // for another repository answers the numbers of one repository with
+        // the issues of the other.
+        let here = repository("owner/b");
+        let named = repository("owner/c");
+        let refused = refuse_another_repository(&here, Some(&named))
+            .expect_err("--repo names another repository");
+        assert_eq!(refused, BuildError::AnotherRepository { here, named });
+        assert_eq!(
+            refused.to_string(),
+            "a plan is built for the repository of this directory, which is owner/b, and --repo \
+names another repository, owner/c. The numbers of a plan for owner/b name other issues in owner/c.\n\
+Run wn in a checkout of owner/c to plan and answer owner/c, or leave --repo out to plan and answer \
+owner/b."
+        );
+    }
+
+    #[test]
+    fn the_refusal_of_another_repository_names_no_refresh() {
+        // `wn --refresh` builds a plan for this directory as well, so it
+        // repairs nothing here. A reader who follows it gets the same refusal.
+        let message =
+            refuse_another_repository(&repository("owner/b"), Some(&repository("owner/c")))
+                .expect_err("--repo names another repository")
+                .to_string();
+        assert!(!message.contains("--refresh"), "{message}");
+    }
+
+    #[test]
+    fn a_run_that_names_no_repository_is_not_refused() {
+        assert_eq!(
+            refuse_another_repository(&repository("owner/b"), None),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_repo_for_this_directory_in_other_letter_case_is_not_refused() {
+        // GitHub names a repository without regard to letter case, so these
+        // two names are one repository.
+        assert_eq!(
+            refuse_another_repository(&repository("owner/b"), Some(&repository("Owner/B"))),
+            Ok(())
+        );
+    }
+
     #[test]
     fn a_run_that_outlived_its_deadline_names_the_seconds_and_the_variable() {
         let refused = BuildError::TimedOut {
@@ -1515,7 +1623,7 @@ plans.\n`gh repo view` failed."
     fn a_timeout_no_clock_can_hold_kills_the_child_rather_than_panicking() {
         // The panic this pins left the child alive: `wn` died at the addition and
         // the run it started was reparented to PID 1.
-        let mut child = std::process::Command::new("/bin/sleep")
+        let mut child = childenv::fixture_command("/bin/sleep")
             .arg("5")
             .spawn()
             .expect("/bin/sleep");

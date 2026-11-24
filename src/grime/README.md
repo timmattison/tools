@@ -37,7 +37,7 @@ Three codes rather than two, because "the merge would conflict" and "I could not
 tell you" are different answers and a script has to be able to act on the
 difference.
 
-The table is about a run that names a `BRANCH`. `--help` and `--version` ask
+The table is about a run that measures a merge. `--help` and `--version` ask
 about the tool rather than about a merge, so each answers and exits `0` with no
 replay behind it. A command line the argument parser refuses exits `2`, which is
 already the code for "I could not tell you".
@@ -162,13 +162,14 @@ zero looks like good news.
 ## Usage
 
 ```console
-grime [-q] <BRANCH>
+grime [-q | --diff] [BRANCH]
 ```
 
 | Argument | Meaning |
 | --- | --- |
-| `<BRANCH>` | What to merge into HEAD. Anything git resolves to a commit works — a branch, a remote-tracking ref, a tag, a raw sha. |
+| `[BRANCH]` | What to merge into HEAD. Anything git resolves to a commit works — a branch, a remote-tracking ref, a tag, a raw sha. Leave it out for `main`, or `master` in a repository with no `main`. |
 | `-q`, `--quiet` | Print nothing about the merge. The exit code is still the answer. |
+| `--diff` | Print the diff of the one halt of the merge after the breakdown. It cannot go with `-q`. On a terminal, the diff is in color. See [The diff of the halt](#the-diff-of-the-halt). |
 
 One positional argument and nothing else. `grime` merges into `HEAD`, which is
 the only thing it *can* merge into, so there is no second ref to give it.
@@ -180,11 +181,20 @@ caller redirecting stdout to `/dev/null` and getting chatter on the terminal
 anyway has not been given a quiet tool.
 
 `-q` silences everything `grime` itself says, and stops there. The argument
-parser answers before `grime` starts. So `grime -q` with no `BRANCH` still
-prints a usage error and exits `2`, and `grime -q --version` still prints the
-version and exits `0`. Both answer about the tool rather than about a merge. The
-missing `BRANCH` is the likely one in the script below. A caller left with a
-bare `2` and no word about which argument is missing is worse off.
+parser answers before `grime` starts. So `grime -q --onto main` still prints a
+usage error and exits `2`, and `grime -q --version` still prints the version and
+exits `0`. Both answer about the tool rather than about a merge. A caller left
+with a bare `2` and no word about which part of the command line was refused is
+worse off.
+
+`grime -q --diff` is a second refusal of the parser, with the same usage error
+and exit `2`. A request for the diff and a request for no output contradict each
+other, and a tool that obeys one of the two in silence surprises the caller who
+gave the other.
+
+A run with no `BRANCH` is not one of those. That refusal — no default branch to
+pick — is `grime`'s own, so `-q` does silence it and the exit code is the whole
+answer.
 
 ```console
 # only start the real merge if the dry run says it is free
@@ -199,6 +209,52 @@ case $? in
   *) grime "$target" ;;  # not quiet this time, so it explains itself
 esac
 ```
+
+## The branch you do not have to type
+
+Almost every run means the repository's default branch, so a run that names no
+`BRANCH` merges `main` into HEAD, and `master` in a repository that has no
+`main`. The verdict line names whichever one was picked, so the answer always
+says which branch it is about:
+
+```console
+$ grime
+grime: clean - merging main into HEAD hit no conflicts
+```
+
+A repository holding neither name is **refused**, with exit `2` and a message
+naming both candidates. Why the first one failed rides under it as the cause,
+the same way a branch you typed yourself carries git's own words:
+
+```console
+$ grime
+grime: error: no branch was named, and no default branch resolves here (tried: main, master) - name the branch to measure against: could not resolve 'main' to a commit: git rev-parse --verify --end-of-options main^{commit} failed:
+
+fatal: Needed a single revision
+$ echo $?
+2
+```
+
+The cause is what separates a repository that has no `main` from one whose
+`main` git cannot read — a corrupt object, a broken symref, a locked ref. Both
+refusals open on the same sentence, and only the cause says which one you are
+looking at.
+
+Refused rather than fallen back to `HEAD`. A merge of HEAD into HEAD is clean in
+every repository there is, so that fallback would answer `0` — a confident wrong
+answer standing where "I could not tell you" belongs. Exit `2` is already the
+code for that, and the message names the two candidates so you can see which
+third name your repository actually uses.
+
+Both candidates are **local** names. `git rev-parse main` reads local refs, so a
+repository whose default branch exists only as `origin/main` is refused too —
+name the remote-tracking ref yourself (`grime origin/main`). Searching the remote
+refs would make the rule harder to state and would hide which branch got
+measured behind a name you never typed.
+
+The choice itself lives in [`gitscratch`](../gitscratch/README.md), which every
+tool built on that harness shares, so no two of them can drift into measuring
+different branches for the same command line.
 
 ## The two numbers
 
@@ -255,6 +311,107 @@ $ COLUMNS=40 grime feature
 Two callers want this. A wrapper such as `viddy(1)` holds the terminal and hands
 `grime` a pipe, so the wrapper exports the width it measured. And a test states
 a width rather than arranging a terminal to produce one.
+
+## The diff of the halt
+
+`--diff` prints the diff of the one halt of the merge after the breakdown. It is
+the text that `git diff` shows at that halt in a real merge:
+
+```console
+$ grime --diff feature
+grime: conflicts - merging feature into HEAD
+       2 hunks across 2 files
+
+  f.txt    1 hunk
+  g.txt    1 hunk
+
+diff --cc f.txt
+index a5f1be7,a1ec13b..0000000
+--- a/f.txt
++++ b/f.txt
+@@@ -1,5 -1,5 +1,9 @@@
+  a
+++<<<<<<< HEAD
+ +MAIN
+++=======
++ FEAT2
+++>>>>>>> feature
+  c
+  d
+  e
+* Unmerged path g.txt
+```
+
+The diff has no heading. A merge halts once, so a heading names a constant,
+as the stop count does, and the breakdown leaves out both. `grind` puts a
+heading above the diff of each stop, because a rebase can stop more than once.
+See [The two numbers](#the-two-numbers).
+
+The rules:
+
+- **`--diff` adds words and changes nothing else.** The verdict, the breakdown,
+  and the exit code are the same with the flag and without it. A clean merge
+  has no halt, so a clean run prints the same bytes.
+- **The diff names the files that the breakdown counts, and no others.** The
+  diff and the counter read the same filter of unmerged paths.
+- **A run that fails prints no diff.** If git refuses the merge, the run exits
+  `2` with the error, and it prints no diff. The diff is part of the answer, and
+  there is no answer. The uncommitted-work note obeys the same rule.
+- **A diff that git cannot give leaves the verdict alone.** The diff says
+  `diff not available:` and gives the message from git. The counts and the exit
+  code do not change.
+- **A control character cannot reach your terminal.** A control character in
+  the diff comes out as `\u{...}`, as it does in a name in the breakdown. A
+  newline, a tab, and a CRLF line ending stay.
+
+Only the diff is in color, with the palette of `git diff`: bold file headers,
+cyan hunk headers, and green and red content lines. The verdict, the breakdown,
+and the note stay plain. The
+[`gitscratch` README](../gitscratch/README.md#the-halt-diffs) has the full
+palette. These rules decide the color:
+
+- On a terminal, the diff is in color.
+- Into a pipe, the diff is plain. `grime --diff feature > conflicts.txt` writes
+  plain text.
+- A wrapper such as `viddy(1)` gives `grime` a pipe and exports `COLUMNS`, and
+  it shows the bytes on a terminal. So a pipe gets color too when `COLUMNS`
+  states a width: a number above zero. An empty `COLUMNS`, or one that is no
+  number, states no width, and the diff stays plain. `grime` reads the width of
+  the breakdown by the same rule. `grind`, `gsw`, and `wn` paint for a wrapper
+  too.
+- `NO_COLOR`, with any value, turns color off, also for a wrapper.
+- `CLICOLOR=0` turns color off, also for a wrapper.
+- `CLICOLOR_FORCE=1` turns color on, also into a pipe, and it wins over
+  `NO_COLOR`. A pager that reads color codes needs it:
+
+```console
+$ CLICOLOR_FORCE=1 grime --diff feature | less -R
+```
+
+There is no flag for color. The variables above are the interface.
+
+## Progress on stderr
+
+A run that takes more than 500 ms shows a spinner on stderr, with the elapsed
+time:
+
+```console
+grime: merging feature into HEAD  ⠙  0:01
+```
+
+The spinner names the phase that runs now. There are three phases:
+`creating the scratch worktree`, `merging BRANCH into HEAD`, and
+`counting the conflict hunks`.
+
+There is no percentage. Git counts no steps in a merge, and it writes no state
+file with a position. A bar would need a number that does not exist. `grind`
+shows a bar because a rebase keeps `rebase-merge/msgnum` and `rebase-merge/end`.
+
+The display clears itself before the note, the verdict, or an error. It goes to
+stderr only, so stdout stays the verdict that a script reads. It shows only when
+stderr is a terminal, and `-q` hides it. A run with `-q`, or with stderr on a
+pipe or a file, writes the same bytes as before. There is no flag for the
+display.
 
 ## Uncommitted work
 
@@ -415,3 +572,31 @@ breaks in a narrow one. Both pins are read back off the built command by tests o
 their own, because a machine with a wide window and a git that ships no
 translations cannot show either failure, and a pin nothing asserts is a pin the
 next person deletes.
+
+The builder also takes `NO_COLOR`, `CLICOLOR`, and `CLICOLOR_FORCE` away from
+each run, and a test reads the removal back off the built command, as it reads
+the locale pin. Without the removal, a developer who exports one of them gets
+tests of the paint that fail on that machine only. A test that needs one of the
+three sets it on its own run.
+
+The `--diff` tests hold the rules of [The diff of the halt](#the-diff-of-the-halt):
+
+- A clean run prints the same bytes with the flag and without it.
+- A conflict prints the verdict, then the diff of the halt. One golden holds the
+  whole of stdout, byte for byte, and each id in it comes from the git of the
+  fixture.
+- A run that fails prints no diff. That holds for a branch that does not
+  resolve, and for two histories that git refuses to merge.
+- `日本語.txt` stays intact in the diff, and a run from a subdirectory names each
+  file from the repository root.
+- A closed pipe costs the diff its words and never the exit code.
+- clap refuses `-q --diff` and `--quiet --diff`.
+- Seven tests hold the color. The pipe of a wrapper gets color, and the paint
+  changes no character. `NO_COLOR` and `CLICOLOR=0` refuse that color. A pipe
+  with no `COLUMNS` stays plain, and so does a pipe with an empty `COLUMNS` or
+  a `COLUMNS` that is no number. `CLICOLOR_FORCE=1` paints a pipe. A
+  pseudo-terminal from `gitscratch::testing::pty` gets color with no variable
+  set. That last test fails for a `grime` that gives the answer of
+  `should_force_colors_here` to `set_override` directly. On a terminal that
+  answer is false, and `set_override(false)` turns off the color of the
+  terminal.

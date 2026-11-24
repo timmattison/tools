@@ -6,7 +6,7 @@ use vte::{Parser, Perform};
 /// Callers reach this only from a match arm that has already pinned the SGR
 /// parameter to one of the eight-value ranges 30-37, 40-47, 90-97 or 100-107, so
 /// the offset handed in is always 0..=15 and the narrowing is exact.
-#[allow(
+#[expect(
     clippy::cast_possible_truncation,
     reason = "the caller's match arm pins the offset to 0..=15, so this narrowing is exact"
 )]
@@ -20,7 +20,7 @@ const fn sgr_palette_index(offset: u16) -> u8 {
 /// `ESC[38;2;300;0;0m` can carry an operand wider than a byte. Wrapping it is
 /// deliberate and long-standing: the renderer keeps painting with the wrapped
 /// value rather than discarding the whole sequence.
-#[allow(
+#[expect(
     clippy::cast_possible_truncation,
     reason = "an out-of-range VT colour operand is deliberately wrapped into a byte, preserving the renderer's existing handling of malformed input"
 )]
@@ -257,7 +257,7 @@ pub struct Cell {
     pub fg_color: (u8, u8, u8),
     pub bg_color: (u8, u8, u8),
     pub bold: bool,
-    #[allow(
+    #[expect(
         dead_code,
         reason = "tracked by SGR processing; rendering support planned"
     )]
@@ -837,7 +837,7 @@ impl TerminalState {
         self.parse_color_spec(color_spec)
     }
 
-    #[allow(
+    #[expect(
         clippy::string_slice,
         reason = "every byte-level index below is guarded by an `is_ascii()` check on the whole spec, so no index can land inside a multi-byte character"
     )]

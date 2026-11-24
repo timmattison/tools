@@ -1,9 +1,10 @@
 //! Asking GitHub what it holds for each number of the chain.
 //!
-//! The whole chain is one question, and it is asked as one GraphQL query with
-//! one alias for each number. A REST call for each issue would ask the same
-//! thing in six round trips, spend six units of the rate limit, and answer a
-//! chain of six issues six times slower.
+//! Every number of the chain is one question, and it is asked as one GraphQL
+//! query with one alias for each number. A REST call for each issue would ask
+//! the same thing in six round trips, spend six units of the rate limit, and
+//! answer a chain of six issues six times slower. Each round of blockers that
+//! stand nowhere in the text costs one query more, through the same [`fetch`].
 //!
 //! The query goes through `gh`, and it goes through `gh` for the credential.
 //! The GitHub CLI already holds a token for the host the repository lives on,
@@ -38,14 +39,14 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::process::Command;
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::chain::IssueNumber;
-use crate::report::{Entry, Status};
+use crate::blocked_by;
+use crate::chain::{IssueNumber, Snippet};
+use crate::report::{Entry, Kind, Status};
 
 /// The GitHub CLI, which carries the credential and the host.
 const GH: &str = "gh";
@@ -57,19 +58,75 @@ pub struct Repo {
     name: String,
 }
 
+/// The advice of a refusal of [`Repo::parse`] for the form or for a character.
+const REPOSITORY_FORM: &str =
+    "Write it as owner/name, with ASCII letters, digits, -, _ and . in each part";
+
+/// The most characters GitHub permits in an owner, which is a user or an
+/// organization.
+const MAX_OWNER_CHARS: usize = 39;
+
+/// The most characters GitHub permits in the name of a repository.
+const MAX_NAME_CHARS: usize = 100;
+
+/// Whether GitHub permits `character` in an owner or in a name.
+fn is_permitted_in_a_name(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+}
+
+/// The argument of a refused [`Repo::parse`], as its message quotes it.
+///
+/// The argument is escaped with `{:?}` first and cut with [`Snippet::new`]
+/// after. The escape writes a control character as text, such as `\u{1b}`,
+/// and it puts the quotes at the two ends. The trim of the snippet then finds
+/// a quote at each end and keeps a space inside the quotes. A space at the end
+/// of `owner/tools ` is what refuses it, and a quote that dropped the space
+/// would show the reader a name GitHub permits.
+///
+/// Write the snippet with `{}`, because it already holds its quotes. A long
+/// argument keeps its opening quote, and the mark of the cut stands where the
+/// closing quote stood.
+fn quoted(spec: &str) -> Snippet {
+    Snippet::new(&format!("{spec:?}"))
+}
+
 impl Repo {
     /// Read a repository out of an `owner/name` argument.
     ///
+    /// GitHub permits only ASCII letters, digits, `-`, `_` and `.` in an owner
+    /// and in a name. It permits at most `MAX_OWNER_CHARS` (39) characters in
+    /// an owner and at most `MAX_NAME_CHARS` (100) in a name. A `Repo` holds
+    /// nothing else. So a `Repo` puts no control character, no escape
+    /// sequence, and no more than 140 characters on a terminal through
+    /// `Display`, and [`Repo::is_same_repository`] compares ASCII case alone.
+    /// The argument arrives from a command line, from `gh`, and from a plan on
+    /// the clipboard, and all three come through this function.
+    ///
     /// # Errors
     ///
-    /// Fails when the argument is not two non-empty parts divided by one `/`.
+    /// Fails when the argument is not two non-empty parts divided by one `/`,
+    /// when a part holds a character GitHub permits in no name, and when the
+    /// owner holds more than 39 characters or the name more than 100. The
+    /// message quotes the argument escaped with `{:?}` and then cut, so a
+    /// control character in it is escaped, a space at either end stays inside
+    /// the quotes, and a long argument is cut.
     pub fn parse(spec: &str) -> Result<Self> {
+        let refused = |advice: &str| anyhow!("{} is not a repository. {advice}", quoted(spec));
+        let is_a_part = |part: &str| !part.is_empty() && part.chars().all(is_permitted_in_a_name);
         let mut parts = spec.split('/');
         let (Some(owner), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
-            bail!("{spec:?} is not a repository. Write it as owner/name");
+            return Err(refused(REPOSITORY_FORM));
         };
-        if owner.is_empty() || name.is_empty() {
-            bail!("{spec:?} is not a repository. Write it as owner/name");
+        if !(is_a_part(owner) && is_a_part(name)) {
+            return Err(refused(REPOSITORY_FORM));
+        }
+        // A count of characters, and never of bytes, so the check holds
+        // whichever check runs first.
+        if owner.chars().count() > MAX_OWNER_CHARS || name.chars().count() > MAX_NAME_CHARS {
+            return Err(refused(&format!(
+                "GitHub permits at most {MAX_OWNER_CHARS} characters in an owner \
+                 and {MAX_NAME_CHARS} in a name"
+            )));
         }
         Ok(Self {
             owner: owner.to_string(),
@@ -87,6 +144,35 @@ impl Repo {
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Whether `owner` and `name` are the owner and the name of this
+    /// repository.
+    ///
+    /// GitHub names a repository without regard to letter case, so
+    /// `TimMattison/Tools` and `timmattison/tools` are one repository. GitHub
+    /// permits only ASCII letters, digits, `-`, `_` and `.` in an owner and in
+    /// a name, and [`Repo::parse`] refuses every other character, so ASCII
+    /// case is the whole rule.
+    ///
+    /// Use this function when the owner and the name arrive as text, such as a
+    /// reference in the body of an issue. A text that holds a character GitHub
+    /// permits in no name names another repository, so the answer is `false`.
+    #[must_use]
+    pub fn is_named(&self, owner: &str, name: &str) -> bool {
+        self.owner.eq_ignore_ascii_case(owner) && self.name.eq_ignore_ascii_case(name)
+    }
+
+    /// Whether `other` names the same repository as this one.
+    ///
+    /// The comparison is that of [`Repo::is_named`], so it ignores ASCII case,
+    /// as GitHub does.
+    ///
+    /// The derived `PartialEq` compares the letters as they are written. Use
+    /// this function to find out whether two texts are about one repository.
+    #[must_use]
+    pub fn is_same_repository(&self, other: &Repo) -> bool {
+        self.is_named(&other.owner, &other.name)
     }
 }
 
@@ -153,7 +239,7 @@ pub fn current_repo() -> Result<Repo> {
 /// Gives [`NoRepo::NotRun`] for a `gh` that did not run, and
 /// [`NoRepo::Refused`] for a `gh` that ran and named no repository.
 pub fn repo_of_here() -> std::result::Result<Repo, NoRepo> {
-    let output = Command::new(GH)
+    let output = childenv::command(GH)
         .args([
             "repo",
             "view",
@@ -183,7 +269,7 @@ fn alias(number: IssueNumber) -> String {
     format!("i{}", number.get())
 }
 
-/// Build the one query that asks about every number of the chain.
+/// Build one query that asks about every number of `numbers`.
 #[must_use]
 pub fn build_query(numbers: &[IssueNumber]) -> String {
     let fields: String = numbers
@@ -192,7 +278,7 @@ pub fn build_query(numbers: &[IssueNumber]) -> String {
             format!(
                 "    {}: issueOrPullRequest(number: {}) {{\n      \
                  __typename\n      \
-                 ... on Issue {{ number title state stateReason }}\n      \
+                 ... on Issue {{ number title state stateReason body }}\n      \
                  ... on PullRequest {{ number title state }}\n    }}\n",
                 alias(*number),
                 number.get()
@@ -208,13 +294,17 @@ pub fn build_query(numbers: &[IssueNumber]) -> String {
 /// Read the answer of the query back into one entry for each number, in the
 /// order the numbers were asked about.
 ///
+/// `repo` is the repository the query asked about. The body of an issue names
+/// a blocker by the URL of an issue of that repository too, so the reader of
+/// the body needs it.
+///
 /// # Errors
 ///
 /// Fails when the body is not JSON, when it carries no repository (a name
 /// nobody can read, or a credential that cannot see it), when GitHub could
 /// not answer for one number of the chain, or when GitHub gives a state this
 /// tool does not know.
-pub fn parse_response(body: &str, numbers: &[IssueNumber]) -> Result<Vec<Entry>> {
+pub fn parse_response(body: &str, repo: &Repo, numbers: &[IssueNumber]) -> Result<Vec<Entry>> {
     let answer: Value = serde_json::from_str(body)
         .with_context(|| format!("GitHub answered with no JSON: {}", body.trim()))?;
 
@@ -228,7 +318,7 @@ pub fn parse_response(body: &str, numbers: &[IssueNumber]) -> Result<Vec<Entry>>
     let reasons = Reasons::read(&answer);
     numbers
         .iter()
-        .map(|number| entry_of(repository, &reasons, *number))
+        .map(|number| entry_of(repository, &reasons, repo, *number))
         .collect()
 }
 
@@ -306,7 +396,15 @@ impl<'a> Reasons<'a> {
 }
 
 /// Read one number out of the answer.
-fn entry_of(repository: &Value, reasons: &Reasons<'_>, number: IssueNumber) -> Result<Entry> {
+///
+/// `repository` is the part of the answer that holds the aliases, and `repo`
+/// is the repository the query asked about.
+fn entry_of(
+    repository: &Value,
+    reasons: &Reasons<'_>,
+    repo: &Repo,
+    number: IssueNumber,
+) -> Result<Entry> {
     // An alias GitHub could not resolve is null, and one it never carried is
     // absent. Two answers arrive in that shape, and the reason beside the
     // null parts them: a number the repository does not have, which is one
@@ -320,7 +418,9 @@ fn entry_of(repository: &Value, reasons: &Reasons<'_>, number: IssueNumber) -> R
             number,
             title: String::new(),
             status: Status::Missing,
+            kind: None,
             closes: None,
+            blocked_by: Vec::new(),
         });
     };
 
@@ -341,13 +441,38 @@ fn entry_of(repository: &Value, reasons: &Reasons<'_>, number: IssueNumber) -> R
         status: status_of(state, kind, reason).ok_or_else(|| {
             anyhow!("GitHub gave {number} the state {state}, which wn cannot read")
         })?,
+        kind: kind_of(kind),
         closes: None,
+        // Only an issue carries a body in the answer, because the query asks
+        // an issue for one and a pull request for none. An issue does not
+        // block itself, so a body that names its own number loses it here.
+        blocked_by: node
+            .get("body")
+            .and_then(Value::as_str)
+            .map(|body| blocked_by::read(body, repo))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|blocker| *blocker != number)
+            .collect(),
     })
 }
+
+/// The `__typename` of an issue.
+const ISSUE: &str = "Issue";
 
 /// The `__typename` of a pull request, which is the one kind whose closed
 /// state does not say the work was done.
 const PULL_REQUEST: &str = "PullRequest";
+
+/// What kind of work one `__typename` of GitHub names, or `None` for a kind
+/// this tool has never been taught.
+fn kind_of(typename: &str) -> Option<Kind> {
+    match typename {
+        ISSUE => Some(Kind::Issue),
+        PULL_REQUEST => Some(Kind::PullRequest),
+        _ => None,
+    }
+}
 
 /// What one state of GitHub means for a chain, or `None` for a state this
 /// tool has never been taught.
@@ -395,7 +520,7 @@ pub fn fetch(repo: &Repo, numbers: &[IssueNumber]) -> Result<Vec<Entry>> {
     }
 
     let query = build_query(numbers);
-    let output = Command::new(GH)
+    let output = childenv::command(GH)
         .arg("api")
         .arg("graphql")
         .arg("-f")
@@ -416,7 +541,7 @@ pub fn fetch(repo: &Repo, numbers: &[IssueNumber]) -> Result<Vec<Entry>> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("`{GH} api graphql` answered nothing: {}", stderr.trim());
     }
-    parse_response(&body, numbers)
+    parse_response(&body, repo, numbers)
 }
 
 #[cfg(test)]
@@ -428,6 +553,14 @@ mod tests {
             .iter()
             .map(|n| IssueNumber::new(*n).expect("the test number is an issue number"))
             .collect()
+    }
+
+    /// The repository every answer of these tests comes from.
+    const TEST_REPO: &str = "timmattison/tools";
+
+    /// [`TEST_REPO`], as the reader of an answer takes it.
+    fn repo() -> Repo {
+        Repo::parse(TEST_REPO).expect("the test repository is a repository")
     }
 
     fn statuses(entries: &[Entry]) -> Vec<(u64, Status)> {
@@ -464,6 +597,15 @@ mod tests {
     }
 
     #[test]
+    fn a_repository_is_the_same_repository_whatever_the_letter_case() {
+        let written = |spec: &str| Repo::parse(spec).expect("the test names a repository");
+        assert!(written("TimMattison/Tools").is_same_repository(&written("timmattison/tools")));
+        assert!(written("timmattison/tools").is_same_repository(&written("TIMMATTISON/TOOLS")));
+        assert!(!written("timmattison/tools").is_same_repository(&written("other/tools")));
+        assert!(!written("timmattison/tools").is_same_repository(&written("timmattison/other")));
+    }
+
+    #[test]
     fn a_repository_refuses_everything_that_is_not_two_parts() {
         for spec in ["tools", "timmattison/", "/tools", "", "a/b/c", "a//b"] {
             assert!(
@@ -471,6 +613,170 @@ mod tests {
                 "{spec:?} is not a repository name"
             );
         }
+    }
+
+    #[test]
+    fn a_repository_reads_every_character_github_permits() {
+        let repo =
+            Repo::parse("a-b_c.d/My.Repo-1_x").expect("GitHub permits every character of it");
+        assert_eq!(repo.owner(), "a-b_c.d");
+        assert_eq!(repo.name(), "My.Repo-1_x");
+    }
+
+    #[test]
+    fn a_repository_refuses_a_character_github_permits_in_no_name() {
+        // GitHub permits only ASCII letters, digits, `-`, `_` and `.` in an
+        // owner and in a name. A `Repo` reaches standard error through
+        // `Display`, and an ESC character there writes a raw escape sequence
+        // to the terminal.
+        let long = format!("owner/{}!", "a".repeat(4096));
+        for spec in [
+            "café/tools",
+            "日本語/x",
+            "owner/🎉",
+            "own er/tools",
+            "owner/to ols",
+            "owner/\u{1b}[31mred",
+            "\u{1b}/tools",
+            "owner/na\nme",
+            "owner/tools\t",
+            long.as_str(),
+        ] {
+            assert!(
+                Repo::parse(spec).is_err(),
+                "{spec:?} holds a character GitHub permits in no name"
+            );
+        }
+    }
+
+    #[test]
+    fn a_refused_character_is_quoted_and_the_message_names_the_characters_github_permits() {
+        let refused =
+            Repo::parse("owner/\u{1b}[31mred").expect_err("GitHub permits no ESC in a name");
+        let message = refused.to_string();
+        assert!(
+            !message.contains('\u{1b}'),
+            "the message writes no raw ESC, in {message:?}"
+        );
+        assert_eq!(
+            message,
+            "\"owner/\\u{1b}[31mred\" is not a repository. Write it as owner/name, \
+             with ASCII letters, digits, -, _ and . in each part"
+        );
+    }
+
+    #[test]
+    fn a_repository_reads_an_owner_and_a_name_as_long_as_github_permits() {
+        // GitHub limits an owner to 39 characters and a name to 100.
+        let owner = "a".repeat(39);
+        let name = "b".repeat(100);
+        let repo =
+            Repo::parse(&format!("{owner}/{name}")).expect("GitHub permits both of these lengths");
+        assert_eq!(repo.owner(), owner);
+        assert_eq!(repo.name(), name);
+    }
+
+    #[test]
+    fn a_repository_refuses_a_part_longer_than_github_permits() {
+        // A `Repo` reaches standard error through `Display`, and a part of
+        // thousands of characters reaches it whole. GitHub permits every
+        // character of these, so only the length refuses them.
+        for spec in [
+            format!("{}/tools", "a".repeat(40)),
+            format!("owner/{}", "b".repeat(101)),
+            format!("{}/tools", "a".repeat(4096)),
+            format!("owner/{}", "b".repeat(4096)),
+        ] {
+            assert!(
+                Repo::parse(&spec).is_err(),
+                "a part of the {} characters is longer than GitHub permits",
+                spec.chars().count()
+            );
+        }
+    }
+
+    #[test]
+    fn a_part_longer_than_github_permits_is_refused_with_the_limits() {
+        let owner = "a".repeat(40);
+        let message = Repo::parse(&format!("{owner}/tools"))
+            .expect_err("GitHub permits no owner of 40 characters")
+            .to_string();
+        assert_eq!(
+            message,
+            format!(
+                "\"{owner}/tools\" is not a repository. GitHub permits at most 39 characters \
+                 in an owner and 100 in a name"
+            )
+        );
+    }
+
+    #[test]
+    fn the_refusal_of_a_long_repository_repeats_a_cut_of_it() {
+        // A message that repeats thousands of characters hides its own advice.
+        // Every refusal cuts the text it quotes, whichever rule refused it.
+        let too_long = [
+            format!("{}/tools", "a".repeat(4096)),
+            format!("owner/{}", "b".repeat(4096)),
+        ];
+        let not_the_form = [
+            format!("{}!/tools", "a".repeat(4096)),
+            format!("a/b/{}", "c".repeat(4096)),
+        ];
+        for spec in too_long.iter().chain(&not_the_form) {
+            let message = Repo::parse(spec)
+                .expect_err("GitHub permits no such repository")
+                .to_string();
+            assert!(
+                message.chars().count() < 200,
+                "the message holds {} characters: {message:?}",
+                message.chars().count()
+            );
+        }
+        for spec in &too_long {
+            let message = Repo::parse(spec)
+                .expect_err("GitHub permits no part this long")
+                .to_string();
+            assert!(
+                message.contains("at most 39 characters in an owner and 100 in a name"),
+                "the message names the limits: {message:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_refused_repository_keeps_the_space_that_refused_it() {
+        // A quote that drops the space around the argument shows the reader a
+        // name GitHub permits, and the reader cannot find what refused it.
+        for (spec, quote) in [
+            ("owner/tools ", "\"owner/tools \""),
+            (" owner/tools", "\" owner/tools\""),
+            ("owner/\ttools", "\"owner/\\ttools\""),
+        ] {
+            let message = Repo::parse(spec)
+                .expect_err("GitHub permits no space in a name")
+                .to_string();
+            assert!(
+                message.starts_with(&format!("{quote} is not a repository. ")),
+                "the message quotes {spec:?} whole: {message:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_long_refused_repository_is_escaped_and_then_cut() {
+        // The cut takes the opening quote and the characters after it, and
+        // the mark of the cut stands where the closing quote stood.
+        let message = Repo::parse(&format!("{}/tools", "a".repeat(4096)))
+            .expect_err("GitHub permits no owner of 4096 characters")
+            .to_string();
+        assert_eq!(
+            message,
+            format!(
+                "\"{}… is not a repository. GitHub permits at most 39 characters in an owner \
+                 and 100 in a name",
+                "a".repeat(crate::chain::SNIPPET_CHARS - 1)
+            )
+        );
     }
 
     #[test]
@@ -511,12 +817,45 @@ mod tests {
     }
 
     #[test]
+    fn the_query_asks_for_the_body_of_an_issue() {
+        // The body is where an issue says what blocks it, and the answer holds
+        // a plan to that. The query carries it, so the check costs no
+        // second round trip.
+        let query = build_query(&chain(&[1]));
+        assert!(
+            query.contains("... on Issue { number title state stateReason body }"),
+            "the query asks for the body of an issue, in {query}"
+        );
+    }
+
+    #[test]
+    fn reads_what_the_body_of_an_issue_says_blocks_it() {
+        // `#170` names itself beside `#168`. An issue does not block itself,
+        // so its own number comes off. A body of null names nothing.
+        // Three marks close this raw string, because the body holds `"##`.
+        let body = r###"{"data":{"repository":{
+            "i170":{"__typename":"Issue","number":170,"title":"Slider","state":"OPEN","stateReason":null,
+                    "body":"## Blocked by\n\n- #168\n- #170\n\nIt can run beside #169."},
+            "i168":{"__typename":"Issue","number":168,"title":"Slope","state":"OPEN","stateReason":null,"body":null}
+        }}}"###;
+        let entries =
+            parse_response(body, &repo(), &chain(&[170, 168])).expect("that body is an answer");
+        assert_eq!(entries[0].blocked_by, chain(&[168]));
+        assert!(
+            entries[1].blocked_by.is_empty(),
+            "a body of null names no blocker, and it named {:?}",
+            entries[1].blocked_by
+        );
+    }
+
+    #[test]
     fn reads_the_state_of_each_issue() {
         let body = r#"{"data":{"repository":{
             "i277":{"__typename":"Issue","number":277,"title":"First","state":"CLOSED","stateReason":"COMPLETED"},
             "i278":{"__typename":"Issue","number":278,"title":"Second","state":"OPEN","stateReason":null}
         }}}"#;
-        let entries = parse_response(body, &chain(&[277, 278])).expect("that body is an answer");
+        let entries =
+            parse_response(body, &repo(), &chain(&[277, 278])).expect("that body is an answer");
         assert_eq!(
             statuses(&entries),
             vec![(277, Status::Done), (278, Status::Open)]
@@ -532,7 +871,8 @@ mod tests {
             "i2":{"__typename":"Issue","number":2,"title":"Two","state":"CLOSED","stateReason":"DUPLICATE"},
             "i3":{"__typename":"Issue","number":3,"title":"Three","state":"CLOSED","stateReason":"REOPENED"}
         }}}"#;
-        let entries = parse_response(body, &chain(&[1, 2, 3])).expect("that body is an answer");
+        let entries =
+            parse_response(body, &repo(), &chain(&[1, 2, 3])).expect("that body is an answer");
         assert_eq!(
             statuses(&entries),
             vec![
@@ -552,7 +892,8 @@ mod tests {
             "i2":{"__typename":"PullRequest","number":2,"title":"Two","state":"CLOSED"},
             "i3":{"__typename":"PullRequest","number":3,"title":"Three","state":"OPEN"}
         }}}"#;
-        let entries = parse_response(body, &chain(&[1, 2, 3])).expect("that body is an answer");
+        let entries =
+            parse_response(body, &repo(), &chain(&[1, 2, 3])).expect("that body is an answer");
         assert_eq!(
             statuses(&entries),
             vec![(1, Status::Done), (2, Status::Dropped), (3, Status::Open)]
@@ -567,7 +908,8 @@ mod tests {
             "i277":{"__typename":"Issue","number":277,"title":"First","state":"OPEN","stateReason":null},
             "i999":null
         }},"errors":[{"type":"NOT_FOUND","path":["repository","i999"],"message":"Could not resolve to an issue or pull request with the number of 999."}]}"#;
-        let entries = parse_response(body, &chain(&[277, 999])).expect("that body is an answer");
+        let entries =
+            parse_response(body, &repo(), &chain(&[277, 999])).expect("that body is an answer");
         assert_eq!(
             statuses(&entries),
             vec![(277, Status::Open), (999, Status::Missing)]
@@ -578,7 +920,7 @@ mod tests {
     #[test]
     fn an_alias_the_answer_never_carried_is_missing() {
         let body = r#"{"data":{"repository":{}}}"#;
-        let entries = parse_response(body, &chain(&[1])).expect("that body is an answer");
+        let entries = parse_response(body, &repo(), &chain(&[1])).expect("that body is an answer");
         assert_eq!(statuses(&entries), vec![(1, Status::Missing)]);
     }
 
@@ -593,7 +935,7 @@ mod tests {
         // The last type is one this tool has never seen, because a type that
         // is not NOT_FOUND is a refusal whether this tool knows it or not.
         for kind in ["FORBIDDEN", "INTERNAL", "SERVICE_UNAVAILABLE", "RATIONED"] {
-            let err = parse_response(&refused_body(kind), &chain(&[42]))
+            let err = parse_response(&refused_body(kind), &repo(), &chain(&[42]))
                 .expect_err("GitHub could not answer for that number");
             assert!(
                 err.to_string().contains(REFUSED_MESSAGE),
@@ -614,7 +956,7 @@ mod tests {
             "i5":{"__typename":"Issue","number":5,"title":"Five","state":"OPEN","stateReason":null},
             "i6":{"__typename":"Issue","number":6,"title":"Six","state":"OPEN","stateReason":null}
         }},"errors":[{"type":"SERVICE_UNAVAILABLE","path":["repository","i4"],"message":"Something went wrong while executing your query."}]}"#;
-        let err = parse_response(body, &chain(&[1, 2, 3, 4, 5, 6]))
+        let err = parse_response(body, &repo(), &chain(&[1, 2, 3, 4, 5, 6]))
             .expect_err("GitHub could not answer for one of the six");
         assert!(
             err.to_string().contains("#4"),
@@ -635,7 +977,7 @@ mod tests {
             {"type":"NOT_FOUND","path":["repository","i999"],"message":"Could not resolve to an issue or pull request with the number of 999."},
             {"type":"FORBIDDEN","path":["repository","i42"],"message":"Resource not accessible by integration"}
         ]}"#;
-        let err = parse_response(body, &chain(&[277, 999, 42]))
+        let err = parse_response(body, &repo(), &chain(&[277, 999, 42]))
             .expect_err("GitHub could not answer for #42");
         assert!(
             err.to_string().contains(REFUSED_MESSAGE),
@@ -655,7 +997,8 @@ mod tests {
         let body = r#"{"data":{"repository":{"i999":null}},
             "errors":[{"type":"FORBIDDEN","path":["repository","i1"],
             "message":"Resource not accessible by integration"}]}"#;
-        let entries = parse_response(body, &chain(&[999])).expect("that body is an answer");
+        let entries =
+            parse_response(body, &repo(), &chain(&[999])).expect("that body is an answer");
         assert_eq!(statuses(&entries), vec![(999, Status::Missing)]);
     }
 
@@ -668,7 +1011,8 @@ mod tests {
             {"type":"FORBIDDEN","message":"Resource not accessible by integration"},
             {"type":"INTERNAL","path":[1,2],"message":"Something went wrong."}
         ]}"#;
-        let entries = parse_response(body, &chain(&[999])).expect("that body is an answer");
+        let entries =
+            parse_response(body, &repo(), &chain(&[999])).expect("that body is an answer");
         assert_eq!(statuses(&entries), vec![(999, Status::Missing)]);
     }
 
@@ -680,7 +1024,8 @@ mod tests {
             "i1":{"__typename":"Issue","number":1,"title":"One","state":"OPEN","stateReason":null},
             "i2":{"__typename":"Issue","number":2,"title":"Two","state":"OPEN","stateReason":null}
         }}}"#;
-        let entries = parse_response(body, &chain(&[1, 2, 3])).expect("that body is an answer");
+        let entries =
+            parse_response(body, &repo(), &chain(&[1, 2, 3])).expect("that body is an answer");
         assert_eq!(
             entries.iter().map(|e| e.number.get()).collect::<Vec<_>>(),
             vec![1, 2, 3]
@@ -692,7 +1037,8 @@ mod tests {
         // A repository nobody can read answers null, and reporting every issue
         // of the chain as missing would hide the one real problem.
         let body = r#"{"data":{"repository":null},"errors":[{"type":"NOT_FOUND","message":"Could not resolve to a Repository with the name 'timmattison/nope'."}]}"#;
-        let err = parse_response(body, &chain(&[1])).expect_err("no repository is an error");
+        let err =
+            parse_response(body, &repo(), &chain(&[1])).expect_err("no repository is an error");
         assert!(
             err.to_string()
                 .contains("Could not resolve to a Repository"),
@@ -702,7 +1048,7 @@ mod tests {
 
     #[test]
     fn a_body_that_is_not_json_is_an_error() {
-        let err = parse_response("gh: command not found", &chain(&[1]))
+        let err = parse_response("gh: command not found", &repo(), &chain(&[1]))
             .expect_err("that body is not an answer");
         assert!(
             err.to_string().contains("gh: command not found"),
@@ -717,7 +1063,7 @@ mod tests {
         let body = r#"{"data":{"repository":{
             "i1":{"__typename":"Issue","number":1,"title":"One","state":"HIBERNATING","stateReason":null}
         }}}"#;
-        let err = parse_response(body, &chain(&[1])).expect_err("that state is unknown");
+        let err = parse_response(body, &repo(), &chain(&[1])).expect_err("that state is unknown");
         assert!(
             err.to_string().contains("HIBERNATING"),
             "the error names the state, in {err:#}"

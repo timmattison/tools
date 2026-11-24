@@ -18,16 +18,20 @@
 //!
 //! `dead_code` is off for that reason, and the reason is the compile model and
 //! not a habit. `cursor_contract` takes the controlling terminal away from its
-//! children, so [`pty`] is dead there. `kitty-refusal` reads the failure that a
-//! terminal reports and no picture at all, so [`scan_cursor_movement`] is dead
-//! there. The alternative is a copy of each item in each target that wants it,
-//! and two copies of sixty lines of `openpty` and `TIOCSCTTY` part company on
-//! the day either changes.
+//! children and gives them no terminal of its own, so [`pty::Pty`] is dead
+//! there and [`pty::take_the_terminal_away`] is not. `kitty-refusal` reads the
+//! failure that a terminal reports and no picture at all, so
+//! [`scan_cursor_movement`] is dead there. The alternative is a copy of each
+//! item in each target that wants it, and two copies of sixty lines of
+//! `openpty` and `TIOCSCTTY` part company on the day either changes.
 #![allow(
     dead_code,
     reason = "each target compiles its own copy of this module and no target calls every item of it, so the lint reports the compile model instead of an unused item"
 )]
 
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -165,4 +169,82 @@ pub fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|window| window == needle)
+}
+
+/// A directory holding a `ps` that reports this session as a Mosh session.
+///
+/// # Why a test needs one
+///
+/// `ic` names the remote transport from the process tree, which it reads by
+/// running `ps`. A test cannot put a real `mosh-server` above itself, and a
+/// test that reaches the real `ps` reads the machine of whoever runs the suite:
+/// the verdict then turns on whether that person is under Mosh, which is the
+/// same class of defect as a test that reads the terminal of the runner.
+///
+/// So the test states the process tree instead. This directory stands first on
+/// the `PATH` of the child and holds a `ps` that prints one table. **The shell
+/// that runs the script reads its own parent as `PPID`, and that parent is
+/// `ic`**, so the table names the exact process that reads it and no test has
+/// to guess a process id.
+///
+/// The directory carries the process id and a nanosecond stamp, so two
+/// concurrent runs never name the same one, and [`Drop`] takes it away again.
+pub struct MoshProcessTable {
+    directory: PathBuf,
+}
+
+impl MoshProcessTable {
+    /// Build the directory and write the `ps` into it.
+    ///
+    /// # Arguments
+    /// * `target` - The name of the test target that asks for it, which goes
+    ///   into the name of the directory.
+    ///
+    /// # Panics
+    /// Panics when the directory or the script cannot be written, because a
+    /// test that ran without them would report on the machine of the runner.
+    #[must_use]
+    pub fn new(target: &str) -> Self {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("the clock must be after the epoch")
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("ic-{target}-ps-{}-{nanos}", process::id()));
+        fs::create_dir_all(&directory).expect("the fake ps needs a directory to stand in");
+
+        let script = directory.join("ps");
+        fs::write(
+            &script,
+            "#!/bin/sh\n\
+             # The comm snapshot names mosh-server as the parent of whoever ran this\n\
+             # script, which is `ic`. Every other question gets an empty table: only\n\
+             # a Zellij session reads the argument snapshot, and the rule about a\n\
+             # direct ancestor answers before that snapshot is read.\n\
+             case \"$*\" in\n\
+             *comm=*)\n\
+             \techo \"    1     0 /sbin/launchd\"\n\
+             \techo \"  100     1 /usr/bin/mosh-server\"\n\
+             \techo \"$PPID 100 /usr/local/bin/ic\"\n\
+             \t;;\n\
+             esac\n",
+        )
+        .expect("the fake ps must be written");
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755))
+            .expect("the fake ps must be executable");
+
+        Self { directory }
+    }
+
+    /// The `PATH` that reaches this `ps` and reaches no other program.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.directory
+    }
+}
+
+impl Drop for MoshProcessTable {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.directory);
+    }
 }
