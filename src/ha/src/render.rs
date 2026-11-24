@@ -2086,13 +2086,15 @@ pub fn format_elapsed(d: Duration) -> String {
     }
 }
 
-/// Writes the time that a running job has left, in at most 7 columns.
+/// Writes the time that a running job or an active run has left, in at most 7
+/// columns.
 ///
 /// The text is a sign and a time. The sign is `~` for `Remaining::Left`, the
-/// time before the job reaches its estimate. The sign is `+` for
-/// `Remaining::Over`, the time that the job ran past its estimate. An estimate
-/// is a mean of a few jobs and is not correct to the second. Thus the text
-/// gets less precise as the time increases:
+/// time before the job or the run reaches its estimate. The sign is `>` for
+/// `Remaining::AtLeast`, a time left that is a minimum, because it comes from
+/// a job that waits. The sign is `+` for `Remaining::Over`, the time past the
+/// estimate. An estimate is a mean of a few jobs and is not correct to the
+/// second. Thus the text gets less precise as the time increases:
 ///
 /// - Under 1 minute: seconds, for example `~45s`.
 /// - Under 10 minutes: minutes and seconds, for example `~3m 02s`.
@@ -2105,7 +2107,8 @@ pub fn format_elapsed(d: Duration) -> String {
 #[must_use]
 pub fn format_remaining(remaining: Remaining) -> String {
     let (sign, time) = match remaining {
-        Remaining::Left(time) | Remaining::AtLeast(time) => ('~', time),
+        Remaining::Left(time) => ('~', time),
+        Remaining::AtLeast(time) => ('>', time),
         Remaining::Over(time) => ('+', time),
     };
     let total = time.as_secs();
