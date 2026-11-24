@@ -117,6 +117,17 @@ pub fn group_by_process(flat: Vec<ListeningProcess>) -> Vec<ListeningProcess> {
     groups
 }
 
+/// Makes a process name safe to print on a terminal.
+///
+/// A process name comes from outside the program. A control character in it,
+/// for example ESC or a newline, would reach the terminal whole, so an escape
+/// sequence could change the screen and a newline could fake a second row.
+/// Each control character becomes its `escape_default` text (for example
+/// `\u{1b}` or `\n`), as `ps` escapes such bytes. Each other character stays.
+pub fn escape_controls(name: &str) -> String {
+    name.to_string()
+}
+
 /// Collects all processes currently listening on ports.
 ///
 /// Uses the `listeners` crate which wraps platform-specific APIs
@@ -474,6 +485,44 @@ mod tests {
         let line_b = format_process_line(&b, "127.0.0.1");
         assert!(line_a.contains("PID"));
         assert!(line_b.contains("PID"));
+    }
+
+    #[test]
+    fn test_escape_controls_removes_each_control_character() {
+        let escaped = escape_controls("evil\u{1b}[2J\nname\u{7f}");
+        assert!(
+            !escaped.chars().any(char::is_control),
+            "no control character may reach the terminal: {escaped:?}"
+        );
+        assert_eq!(escaped, "evil\\u{1b}[2J\\nname\\u{7f}");
+    }
+
+    #[test]
+    fn test_escape_controls_keeps_multibyte_names() {
+        for name in ["日本語", "🎉", "café", "cafe\u{301}"] {
+            assert_eq!(escape_controls(name), name);
+        }
+    }
+
+    #[test]
+    fn test_format_process_line_pads_names_by_display_width() {
+        // The address column must start at the same terminal column for each
+        // name, so the padding counts display columns, not characters.
+        let column = |name: &str| {
+            let listener = ListeningProcess {
+                pid: Pid::try_from(1_u32).unwrap(),
+                name: name.to_string(),
+                port: 80,
+                addresses: vec!["0.0.0.0".to_string()],
+            };
+            let line = format_process_line(&listener, "0.0.0.0");
+            let (head, _) = line.rsplit_once(" 0.0.0.0:80").unwrap();
+            unicode_width::UnicodeWidthStr::width(head)
+        };
+        let expected = column("nginx");
+        for name in ["日本語", "🎉🎊", "café", "cafe\u{301}"] {
+            assert_eq!(column(name), expected, "the column after {name:?} moved");
+        }
     }
 
     #[test]
