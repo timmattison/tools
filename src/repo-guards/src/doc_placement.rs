@@ -29,7 +29,9 @@ const SKIPPED_DIRS: [&str; 3] = [
 ///
 /// Only the directories above a file count, so a file that is itself named
 /// `specs` is not misplaced. An empty directory is not misplaced. The walk does
-/// not follow a symlink, and it reads a symlink as a file.
+/// not follow a symlink, and it reads a symlink as a file. The walk does not
+/// enter a directory below `root` that holds a `.git` entry, because that
+/// directory is another checkout: a worktree, a clone, or a submodule.
 ///
 /// # Errors
 ///
@@ -55,7 +57,9 @@ pub fn misplaced(root: &Path) -> io::Result<Vec<PathBuf>> {
             let path = relative.join(&name);
             // `DirEntry::file_type` does not follow a symlink.
             if entry.file_type().map_err(unreadable)?.is_dir() {
-                if !SKIPPED_DIRS.iter().any(|skip| name == *skip) {
+                if !SKIPPED_DIRS.iter().any(|skip| name == *skip)
+                    && !is_checkout(&root.join(&path))?
+                {
                     pending.push(path);
                 }
             } else if in_nested_doc_dir(&path) {
@@ -84,6 +88,19 @@ pub fn remediation(files: &[PathBuf]) -> String {
         "\nUse `git mv` to move each spec into `specs/` and each plan into `plans/`, both at the repository root.",
     );
     message
+}
+
+/// True when `dir` holds a `.git` entry: a file in a linked worktree or a
+/// submodule, a directory in a clone. The entry is not followed.
+fn is_checkout(dir: &Path) -> io::Result<bool> {
+    match fs::symlink_metadata(dir.join(".git")) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(io::Error::new(
+            error.kind(),
+            format!("cannot read {}: {error}", dir.join(".git").display()),
+        )),
+    }
 }
 
 /// True when a directory above the file at `relative`, other than the first

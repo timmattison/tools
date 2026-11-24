@@ -1018,7 +1018,9 @@ there until a review of #191 found them.
 
 - `repo_guards::doc_placement` (`src/repo-guards/src/doc_placement.rs`) — every
   file in a `specs` or `plans` directory below the repository root fails
-  `cargo test`
+  `cargo test`. The walk does not enter a directory that holds a `.git` entry,
+  because that directory is another checkout, for example an agent worktree
+  in `.claude/worktrees/`
 
 ## UTF-8 String Safety
 
