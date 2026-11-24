@@ -198,14 +198,17 @@ struct Args {
     #[clap(long)]
     will_display: bool,
 
-    /// Force a specific image protocol instead of auto-detecting from the terminal.
+    /// Force an image protocol in place of the one that ic selects for the terminal.
     ///
-    /// Use this when auto-detection picks a protocol your terminal can't render —
-    /// e.g. an xterm.js front end such as ttyd supports Sixel and the iTerm2
-    /// inline-image protocol (via @xterm/addon-image) but not Kitty. Forcing a
-    /// protocol also bypasses the remote-transport (Mosh) check, which is the
-    /// escape hatch for a false-positive Mosh detection under multiplexers like
-    /// Zellij. Also settable via the IC_PROTOCOL environment variable.
+    /// Use this when ic selects a protocol that your terminal cannot draw. For
+    /// example, an xterm.js front end such as ttyd draws Sixel and the iTerm2
+    /// protocol (through @xterm/addon-image), but not the Kitty protocol. A
+    /// forced protocol also skips the checks that refuse a session (a terminal
+    /// that draws no image by its name, tmux, and Mosh), and --will-display then
+    /// answers yes. Under a multiplexer such as Zellij, the Mosh check can name
+    /// the Mosh session of a different client, and this flag is the way past
+    /// that error. The IC_PROTOCOL environment variable does the same, and this
+    /// flag wins over it.
     #[clap(long, value_enum)]
     protocol: Option<ProtocolArg>,
 }
