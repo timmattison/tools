@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { SearchResult } from "./types";
+import type { SearchResult } from "./bindings";
 import { escapeHtml, UNKNOWN_DATE_LABEL } from "./utils";
 
 let searchTimeout: number | null = null;

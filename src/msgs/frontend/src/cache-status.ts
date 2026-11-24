@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { CacheStatus } from "./types";
+import type { CacheStatus } from "./bindings";
 
 const CACHE_STATUS_EVENT = "cache-status";
 const SEARCH_INPUT_ID = "global-search";

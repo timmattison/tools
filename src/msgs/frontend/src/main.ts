@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { DbStatus } from "./types";
+import type { DbStatus } from "./bindings";
 import {
   initConversations,
   onConversationSelect,

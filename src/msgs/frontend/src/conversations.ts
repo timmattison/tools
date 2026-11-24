@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Conversation } from "./types";
+import type { Conversation } from "./bindings";
 import { escapeHtml } from "./utils";
 
 const PAGE_SIZE = 50;

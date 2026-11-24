@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
-import type { ExportResult } from "./types";
+import type { ExportResult } from "./bindings";
 
 let selectionMode = false;
 let startMessageEl: HTMLElement | null = null;

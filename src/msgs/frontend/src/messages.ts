@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Message } from "./types";
+import type { Message } from "./bindings";
 import { UNKNOWN_DATE_LABEL } from "./utils";
 import { handleMessageClick, initExport } from "./export";
 

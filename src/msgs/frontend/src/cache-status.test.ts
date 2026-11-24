@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { CacheStatus } from "./types";
+import type { CacheStatus } from "./bindings";
 
 const tauri = vi.hoisted(() => ({
   listener: null as null | ((event: { payload: CacheStatus }) => void),

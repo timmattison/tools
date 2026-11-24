@@ -8,7 +8,6 @@ use crate::types::{Conversation, DbStatus, ExportResult, Message, SearchResult};
 const CACHE_STATUS_EVENT: &str = "cache-status";
 
 #[tauri::command(async)]
-#[specta::specta]
 pub fn check_db_access(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
@@ -19,13 +18,11 @@ pub fn check_db_access(
 }
 
 #[tauri::command(async)]
-#[specta::specta]
 pub fn get_cache_status(state: State<'_, AppState>) -> Result<CacheStatus, MsgsError> {
     state.cache_status()
 }
 
 #[tauri::command(async)]
-#[specta::specta]
 pub fn list_conversations(
     state: State<'_, AppState>,
     offset: i64,
@@ -35,7 +32,6 @@ pub fn list_conversations(
 }
 
 #[tauri::command(async)]
-#[specta::specta]
 pub fn get_messages(
     state: State<'_, AppState>,
     chat_id: i64,
@@ -46,13 +42,11 @@ pub fn get_messages(
 }
 
 #[tauri::command(async)]
-#[specta::specta]
 pub fn get_version() -> String {
     buildinfo::version_string!().to_string()
 }
 
 #[tauri::command(async)]
-#[specta::specta]
 pub fn search_messages(
     state: State<'_, AppState>,
     query: String,
@@ -64,7 +58,6 @@ pub fn search_messages(
 }
 
 #[tauri::command(async)]
-#[specta::specta]
 pub fn export_messages(
     state: State<'_, AppState>,
     chat_id: i64,

@@ -71,7 +71,7 @@ Pure view layer — no application state beyond UI concerns (scroll position, se
 
 ### Type Safety
 
-Rust structs generate TypeScript types via `specta`. No manual type synchronization.
+Rust structs generate the TypeScript types through `specta-typescript` into `frontend/src/bindings.ts`. No manual type synchronization: the test `bindings_match_the_rust_types` fails when the file differs from the Rust types, and `cargo test -p msgs -- --ignored regenerate_bindings` rewrites it.
 
 ### IPC
 
@@ -297,7 +297,7 @@ Each stage produces a working application.
 - `check_db_access` command — verify FDA, show helpful error if missing
 - `list_conversations` command — paginated, sorted by most recent
 - Frontend: conversation list panel (left side only)
-- Type generation with `specta`
+- Type generation with `specta` and `specta-typescript` (`bindings.ts`)
 - Tauri v2 capabilities configuration
 
 ### Stage 2: Message View

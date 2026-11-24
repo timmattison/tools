@@ -1,6 +1,6 @@
 use serde::{Serialize, Serializer};
 
-#[derive(Debug, thiserror::Error, specta::Type)]
+#[derive(Debug, thiserror::Error)]
 #[cfg_attr(
     not(test),
     expect(
