@@ -1,0 +1,40 @@
+[package]
+name = "wn"
+version = "0.1.0"
+edition.workspace = true
+description = "What's next — walks a chain of GitHub issues in order and names the one to start"
+
+[[bin]]
+name = "wn"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+buildinfo.workspace = true
+childenv.workspace = true
+chrono.workspace = true
+clap.workspace = true
+colored.workspace = true
+indicatif.workspace = true
+regex.workspace = true
+serde_json.workspace = true
+sysclip.workspace = true
+termsize.workspace = true
+termwindow.workspace = true
+textfit.workspace = true
+thiserror.workspace = true
+unicode-width.workspace = true
+
+[dev-dependencies]
+gitscratch = { workspace = true, features = ["testing"] }
+# So a test of the line the tool paints while a run works can give that run a
+# terminal to paint on. indicatif draws nothing when standard error is not a
+# terminal, which is right for a redirected run and which leaves a test with
+# nothing to read. `openpty` makes a terminal of a size the test chose.
+libc.workspace = true
+sysclip = { workspace = true, features = ["testing"] }
+tempfile.workspace = true
+testcolor.workspace = true
+
+[lints]
+workspace = true

@@ -8,35 +8,154 @@
 use std::collections::HashMap;
 
 use crate::git::{FileEntry, FileStatus, NumStat};
-use crate::render::UpstreamStatus;
+use crate::render::{Operation, StepProgress, UpstreamStatus};
 
-/// Open the repository containing `cwd`, or `None` when there isn't one with a
-/// working tree (outside any repo, or a bare repo — gsw has nothing per-file to
-/// render in either case).
-pub fn open() -> Option<gix::Repository> {
-    let repo = gix::discover(".").ok()?;
-    // Bare repos have no work tree; gsw renders a per-file working-tree view,
-    // so there's nothing to show. Treat them like "not a repo".
-    if repo.workdir().is_some() {
-        Some(repo)
-    } else {
-        None
+/// A repository handle that can be re-opened between reads.
+///
+/// A [`gix::Repository`] snapshots `.git/config` when it is opened and never
+/// reloads it. That is fine for the one-shot path — a fresh process opens a
+/// fresh handle — but watch mode holds one handle for the lifetime of the
+/// process, so every config key it caches goes stale the moment the user
+/// changes it in another pane. The headline symptom is `git push -u origin
+/// <branch>`: it writes `branch.<name>.remote` and `branch.<name>.merge`, which
+/// is exactly where [`upstream_status`] resolves the tracking ref from, so the
+/// `↑0 ↓0 origin/<branch>` header segment never appears until gsw restarts. The
+/// mirror (`git branch --unset-upstream` leaving stale arrows on screen), a
+/// renamed remote, and a changed `core.excludesFile` are all the same bug.
+///
+/// Rather than special-case `branch.*`, this handle owns the re-open: callers
+/// that want the config as it is *right now* ask for [`reopened`] and get a
+/// handle built from a freshly-read config, which fixes the whole class at once.
+///
+/// [`reopened`]: RepoHandle::reopened
+pub struct RepoHandle {
+    /// The repository as of the last successful open.
+    repo: gix::Repository,
+    /// The work-tree root, captured when the repository was first discovered so
+    /// a re-open never has to search for it again. See
+    /// [`reopened`](RepoHandle::reopened) for why the re-open deliberately does
+    /// not re-discover.
+    workdir: std::path::PathBuf,
+}
+
+impl RepoHandle {
+    /// Open the repository containing the current directory, or `None` when
+    /// there isn't one with a working tree (outside any repo, or a bare repo —
+    /// gsw has nothing per-file to render in either case).
+    pub fn open() -> Option<Self> {
+        Self::discover(std::path::Path::new("."))
+    }
+
+    /// Open the repository containing `path`, walking up from it the way `git`
+    /// itself does. Same `None` cases as [`open`](Self::open); this is the
+    /// cwd-free form, which is also what the tests use since a parallel test
+    /// runner shares one process-wide current directory.
+    pub fn discover(path: &std::path::Path) -> Option<Self> {
+        Self::from_repo(gix::discover(path).ok()?)
+    }
+
+    /// Wrap an opened repository, rejecting one gsw can't render.
+    ///
+    /// Bare repos have no work tree; gsw renders a per-file working-tree view,
+    /// so there's nothing to show. Treat them like "not a repo".
+    ///
+    /// This is the discovery path only; [`reopened`](Self::reopened) admits a
+    /// repository by the same rule — it must have a work tree — but applies it
+    /// inline. See there for why the check is stated twice rather than shared.
+    fn from_repo(repo: gix::Repository) -> Option<Self> {
+        let workdir = repo.workdir()?.to_path_buf();
+        Some(Self { repo, workdir })
+    }
+
+    /// The repository as it was last opened. Does not re-read `.git/config`, so
+    /// two calls with no intervening [`reopened`](Self::reopened) always see the
+    /// same configuration.
+    pub fn repo(&self) -> &gix::Repository {
+        &self.repo
+    }
+
+    /// Re-open the repository so configuration written since the last call
+    /// takes effect, and return the resulting handle.
+    ///
+    /// Callers that refresh on a timer (watch mode) use this instead of
+    /// [`repo`](Self::repo) so an upstream configured — or unset — in another
+    /// pane shows up on the next tick rather than on the next process start.
+    ///
+    /// The re-open goes through `gix::open` against the captured work-tree
+    /// root, deliberately **not** `gix::discover`: `open` resolves `path/.git`
+    /// (including the `.git` *file* a linked worktree uses) but never walks up
+    /// the directory tree, so if the git dir momentarily vanishes — mid-`git
+    /// gc`, mid-checkout, a worktree being pruned — it simply errors instead of
+    /// silently latching onto a *parent* repository and rendering someone
+    /// else's status.
+    ///
+    /// A failed re-open, or one that comes back without a work tree, keeps the
+    /// handle already in hand: a monitor that blanks out for one tick because
+    /// it caught git mid-write is worse than a monitor that repaints one
+    /// tick-old configuration and recovers on the next call. The work-tree
+    /// check is written out here rather than borrowed from
+    /// [`from_repo`](Self::from_repo): only the repository is being replaced,
+    /// and building a second work-tree root just to drop it would suggest the
+    /// captured one gets refreshed, which is exactly what this must not do.
+    /// That leaves one rule stated in two places, which could drift — an
+    /// accepted cost, because each side is a single `workdir()` call, small
+    /// enough to compare at a glance, and changing one without the other would
+    /// leave a handle whose `workdir` field no longer describes what a re-open
+    /// will accept.
+    ///
+    /// That "never a blank screen" property is **not** delivered here alone —
+    /// this fallback only guarantees a usable *handle*. Reading a repository
+    /// that is mid-`gc`, mid-checkout, or renamed away can still fail on the
+    /// status walk performed against the handle it hands back, and watch mode's
+    /// `event_loop` is what absorbs *that* failure by re-rendering the last good
+    /// snapshot at its true age. Removing either half re-breaks the guarantee:
+    /// drop this fallback and a momentary re-open failure loses the
+    /// configuration; drop the loop's absorption and the same momentary failure
+    /// ends watch mode outright, which is precisely the bug this pairing was
+    /// written to close.
+    pub fn reopened(&mut self) -> &gix::Repository {
+        if let Some(fresh) = gix::open(&self.workdir)
+            .ok()
+            .filter(|repo| repo.workdir().is_some())
+        {
+            self.repo = fresh;
+        }
+        &self.repo
     }
 }
 
-/// The short current-branch name (e.g. `main`), or `"HEAD"` when detached —
-/// matching what `git rev-parse --abbrev-ref HEAD` prints.
+/// What [`branch_name`] reports when HEAD is detached, matching what
+/// `git rev-parse --abbrev-ref HEAD` prints.
+///
+/// Usable as a sentinel — "this is not a branch" — because git rejects `HEAD`
+/// as a branch name (`git branch HEAD` fails), so no real branch can ever carry
+/// it. Named rather than spelled inline at each site so the two readers
+/// ([`branch_name`] and the push planner, which must refuse to push a detached
+/// HEAD) are tied to one definition instead of two matching string literals.
+pub const DETACHED_HEAD: &str = "HEAD";
+
+/// The short current-branch name (e.g. `main`), or [`DETACHED_HEAD`] when
+/// detached — matching what `git rev-parse --abbrev-ref HEAD` prints.
 pub fn branch_name(repo: &gix::Repository) -> String {
     match repo.head_name() {
         Ok(Some(full)) => full.shorten().to_string(),
-        _ => "HEAD".to_string(),
+        _ => DETACHED_HEAD.to_string(),
     }
 }
+
+/// The branch names gsw takes as the base of a repository, in the order it
+/// prefers them.
+///
+/// Read by [`resolve_base`], which picks the first of them that resolves, and
+/// by the keys that rebase onto the base or merge it in, which act on no other
+/// base at all. One list, so what those keys accept cannot drift from what this
+/// module chooses.
+pub const DEFAULT_BASE_NAMES: [&str; 2] = ["main", "master"];
 
 /// Pick the first base ref that resolves: `main`, then `master`, then
 /// `origin/HEAD`'s target, else `"HEAD"` (so commits-ahead degrades to 0).
 pub fn resolve_base(repo: &gix::Repository) -> String {
-    for candidate in ["main", "master"] {
+    for candidate in DEFAULT_BASE_NAMES {
         if repo.rev_parse_single(candidate).is_ok() {
             return candidate.to_string();
         }
@@ -50,35 +169,250 @@ pub fn resolve_base(repo: &gix::Repository) -> String {
     "HEAD".to_string()
 }
 
-/// Committer timestamp of HEAD as unix seconds, or `None` (no commits, etc.).
-/// Matches `git log -1 --format=%ct` (committer date, not author date).
-pub fn head_commit_secs(repo: &gix::Repository) -> Option<i64> {
-    let commit = repo.head_commit().ok()?;
-    Some(commit.time().ok()?.seconds)
+/// The start of a walk of the log: the commit that HEAD named when
+/// [`recent_log`] resolved it, the commit that the base named then, and the
+/// set of the commits that only the branch has.
+///
+/// A commit names its parents by their ids, and an id names its content. So
+/// the history of one start is the same at every read, whatever HEAD names by
+/// then. Watch mode reads the log again from the start of the walk on a
+/// resize ([`recent_log_from`]), and that read extends the log of the walk. It
+/// never gives the history of another branch.
+///
+/// The base commit decides which commits are only on the branch
+/// ([`LogCommit::on_branch`]). The start keeps that commit and not the name of
+/// the base. So a read from one start gives the same marks at every read, also
+/// when the base moved after the walk.
+///
+/// The start keeps the set of those commits from one walk of `base..commit`,
+/// made when [`recent_log`] made the start. The header counts the size of
+/// that set ([`base_status`]), and the log marks its rows from that set. So
+/// the count and the marks agree, and a read from the start walks no more
+/// than its rows. It never walks `base..commit` again.
+///
+/// The set is `None` when the walk did not start or when a step of it failed.
+/// That is a doubt: the header counts zero and the log marks no row. The set
+/// is empty when the start has no base or when the base is the start commit.
+///
+/// Memory: the set holds one id for each commit that only the branch has. The
+/// start keeps it for the life of the snapshot that holds the start. A clone
+/// of the start shares the set and does not copy it.
+///
+/// The fields are private, and only [`recent_log`] makes a start. So a read of
+/// the log starts from a commit that a walk recorded, or from HEAD.
+#[derive(Clone)]
+pub struct LogStart {
+    /// The commit that the walk starts from.
+    commit: gix::ObjectId,
+    /// The commit that the base named when the walk started. `None` when the
+    /// base did not resolve.
+    base: Option<gix::ObjectId>,
+    /// The commits that `commit` reaches and `base` does not. `None` when the
+    /// walk did not start or a step of it failed.
+    branch: Option<std::sync::Arc<gix::hashtable::HashSet>>,
 }
 
-/// The `n` most recent commits from HEAD as `(short_hash, unix_secs, summary)`.
-/// Empty when `n == 0` or there are no commits.
-pub fn recent_log(repo: &gix::Repository, n: usize) -> Vec<(String, i64, String)> {
-    if n == 0 {
-        return Vec::new();
+/// Two starts are equal when they name the same commit and the same base.
+///
+/// The set of the branch commits is a function of those two commits, because
+/// a history never changes. So the set is not compared. A walk that failed
+/// and a walk that did not fail, from the same two commits, are the same
+/// start.
+impl PartialEq for LogStart {
+    fn eq(&self, other: &Self) -> bool {
+        self.commit == other.commit && self.base == other.base
     }
-    let Ok(head) = repo.head_commit() else {
-        return Vec::new();
+}
+
+impl Eq for LogStart {}
+
+/// Shows the commit, the base, and the number of branch commits. It never
+/// shows the whole set, because a set of 50000 ids is not useful in the debug
+/// print of a snapshot.
+impl std::fmt::Debug for LogStart {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LogStart")
+            .field("commit", &self.commit)
+            .field("base", &self.base)
+            .field("branch_commits", &self.branch.as_ref().map(|set| set.len()))
+            .finish()
+    }
+}
+
+impl LogStart {
+    /// A start that names no commit and no base, for the tests that fake the
+    /// histories of a repository. One seed gives the same start at every
+    /// call, and two seeds give two different starts. The set of the branch
+    /// commits is empty.
+    #[cfg(test)]
+    pub(crate) fn fake(seed: u8) -> Self {
+        Self {
+            commit: gix::ObjectId::from_bytes_or_panic(&[seed; 20]),
+            base: None,
+            branch: Some(std::sync::Arc::default()),
+        }
+    }
+
+    /// Make the start of `commit` against `base`, with one walk of the
+    /// commits that only the branch has ([`branch_commits`]).
+    fn walked(repo: &gix::Repository, commit: gix::ObjectId, base: Option<gix::ObjectId>) -> Self {
+        Self {
+            commit,
+            base,
+            branch: branch_commits(repo, commit, base).map(std::sync::Arc::new),
+        }
+    }
+}
+
+/// One commit of a [`RecentLog`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogCommit {
+    /// The short hash of the commit.
+    pub hash: String,
+    /// The time of the commit, in seconds since the Unix epoch.
+    pub secs: i64,
+    /// The first line of the message of the commit.
+    pub summary: String,
+    /// The commit is only on the branch: the start reaches it, and the base
+    /// of the start does not. These are the commits that the header counts
+    /// ([`base_status`]). The flag comes from the set that the start keeps
+    /// ([`LogStart`]), and not from the position of the commit in the log
+    /// ([`recent_log_from`]).
+    pub on_branch: bool,
+}
+
+/// The newest commits of one history, as [`recent_log`] reads them from HEAD
+/// and [`recent_log_from`] reads them from a start.
+pub struct RecentLog {
+    /// The commit that the walk started from, with the base commit of the
+    /// walk. `None` when HEAD named no commit: HEAD was unborn, or it did not
+    /// resolve to a commit.
+    pub start: Option<LogStart>,
+    /// The commits, newest first. Each commit tells whether it is only on
+    /// the branch ([`LogCommit::on_branch`]).
+    pub commits: Vec<LogCommit>,
+    /// The walk reached the end of the history at or before the limit, so
+    /// `commits` holds every commit that `start` reaches, or no commit for an
+    /// unborn HEAD. A read from `start` with a higher limit then finds no more
+    /// commits.
+    pub complete: bool,
+}
+
+/// The `n` most recent commits from HEAD, the start of the walk, and whether
+/// the walk reached the end of the history.
+///
+/// The start holds the commit that HEAD names, the commit that `base` names,
+/// and the set of the commits that only the branch has ([`LogStart`]). This
+/// call makes the one walk of `base..HEAD` for that set, whatever `n` is.
+/// [`base_status`] counts the header from the start, so the marks of the log
+/// and the count of the header agree. A `base` that does not resolve gives a
+/// start with no base, and then no commit is marked. When HEAD is on the base,
+/// no commit is marked either. The header counts zero in both cases.
+///
+/// HEAD is resolved first, whatever `n` is, so the start is known at a limit
+/// of zero too. A pane too short for a log can grow later, and the read of the
+/// log for it starts there. [`recent_log_from`] then walks from that start
+/// and uses its set.
+///
+/// An unborn HEAD is not a failure. It is a history of no commit, so its log
+/// has no start and no commit, and it is complete, except at a limit of zero,
+/// which sees no end. A HEAD that does not resolve to a commit is a failure,
+/// so its log has no start and no commit, and it is not complete.
+pub fn recent_log(repo: &gix::Repository, base: &str, n: usize) -> RecentLog {
+    match repo.head_commit() {
+        Ok(head) => {
+            let start = LogStart::walked(repo, head.id, base_commit(repo, base));
+            recent_log_from(repo, start, n)
+        }
+        Err(_) => RecentLog {
+            start: None,
+            commits: Vec::new(),
+            complete: n > 0 && repo.head().is_ok_and(|head| head.is_unborn()),
+        },
+    }
+}
+
+/// The `n` most recent commits of the history of `start`, and whether the walk
+/// reached the end of that history.
+///
+/// The history of a commit never changes. So a read from one start gives the
+/// same commits in the same order at every read, whatever HEAD names by then,
+/// and a read with a higher limit gives the commits of a read with a lower
+/// limit first. Watch mode reads from the start of its walk on a resize for
+/// that reason ([`LogStart`]).
+///
+/// The commits are empty when `n == 0`.
+///
+/// The walk takes `n` commits, then asks for one more. When there is no next
+/// commit, the history ended, so a history of exactly `n` commits is
+/// complete. A limit of zero reads no commit, so it sees no end.
+///
+/// Every failure of the walk counts as not complete: a walk that does not
+/// start, a start whose commit the repository does not hold, and a step of the
+/// walk that fails, whether the step comes before the limit or after it. A
+/// failed step can stop the walk before the history ends, and then no next
+/// commit comes, although more commits follow. A complete log stops the reads
+/// of the log on a resize in watch mode, so a doubt costs one read of the log
+/// and never a row of the log.
+///
+/// A commit that the walk passed, but whose object, time, or message does not
+/// read, leaves no row. It does not change the flag, because a read with a
+/// higher limit cannot read that commit either.
+///
+/// A commit is marked as only on the branch ([`LogCommit::on_branch`]) when
+/// it is in the set that `start` keeps ([`LogStart`]). The decision is by
+/// membership in that set, and never by the position of the commit. The walk
+/// of the log is breadth-first, so after a merge of the base into the branch,
+/// it puts commits of the base between the commits of the branch. The set
+/// comes from the one walk that made `start`. So every read from one start
+/// gives the same marks, also when the base moved.
+///
+/// This read never walks `base..start`. Its cost is the walk of `n + 1`
+/// commits of the log. A resize in watch mode reads only its rows, however
+/// many commits the branch has. When the set is `None` (the walk of the
+/// branch failed), no row is marked.
+pub fn recent_log_from(repo: &gix::Repository, start: LogStart, n: usize) -> RecentLog {
+    let incomplete = || RecentLog {
+        start: Some(start.clone()),
+        commits: Vec::new(),
+        complete: false,
     };
-    let Ok(walk) = head.ancestors().all() else {
-        return Vec::new();
+    if n == 0 {
+        return incomplete();
+    }
+    let Ok(mut walk) = repo.rev_walk(std::iter::once(start.commit)).all() else {
+        return incomplete();
     };
-    walk.take(n)
+    let mut step_failed = false;
+    let commits = walk
+        .by_ref()
+        .take(n)
         .filter_map(|info| {
-            let info = info.ok()?;
+            let Ok(info) = info else {
+                step_failed = true;
+                return None;
+            };
             let commit = info.object().ok()?;
             let hash = info.id().shorten_or_id().to_string();
             let secs = commit.time().ok()?.seconds;
             let summary = commit.message().ok()?.summary().to_string();
-            Some((hash, secs, summary))
+            Some(LogCommit {
+                hash,
+                secs,
+                summary,
+                on_branch: start
+                    .branch
+                    .as_ref()
+                    .is_some_and(|set| set.contains(&info.id)),
+            })
         })
-        .collect()
+        .collect();
+    let complete = !step_failed && walk.next().is_none();
+    RecentLog {
+        start: Some(start),
+        commits,
+        complete,
+    }
 }
 
 /// How HEAD relates to its base ref, as a pair of commit counts. See
@@ -93,26 +427,119 @@ pub struct BaseStatus {
     pub behind: u32,
 }
 
-/// Count how far HEAD is ahead of and behind its `base` ref.
+/// Count how far the start of a log is ahead of and behind its base commit.
 ///
-/// `ahead` is the number of commits reachable from HEAD but not from `base`
-/// (`git rev-list --count base..HEAD`); `behind` is the mirror — commits
-/// reachable from `base` but not from HEAD (`git rev-list --count HEAD..base`),
-/// which is nonzero when the base has moved on past the fork point and HEAD
-/// needs a rebase.
+/// `start` is the start that [`recent_log`] made from HEAD. So the header
+/// counts the commits of the same walk that the log marks from.
 ///
-/// Any resolution or walk failure degrades to `BaseStatus { ahead: 0, behind:
-/// 0 }`, so a missing or unresolvable base produces no behind segment. When
-/// HEAD already points at the base commit the walks are short-circuited to
-/// `(0, 0)`. Each count is clamped to `u32::MAX`.
-pub fn base_status(repo: &gix::Repository, base: &str) -> BaseStatus {
+/// `ahead` is the size of the set that the start keeps
+/// (`git rev-list --count base..HEAD`). This call does not walk it again.
+/// `behind` is the mirror, the commits reachable from the base but not from
+/// the start commit (`git rev-list --count HEAD..base`). It is nonzero when
+/// the base has moved on past the fork point and HEAD needs a rebase. This
+/// call walks it, with [`count_only_on`]. Each count is clamped to `u32::MAX`.
+///
+/// Both counts are zero when `start` is `None` (HEAD named no commit), when
+/// the start has no base, or when the walk of the set failed. A missing or
+/// unresolvable base then produces no behind segment. When the base is the
+/// start commit, both counts are zero and no walk runs.
+///
+/// The behind count alone is zero when the walk of the behind count does not
+/// start or a step of it fails. The ahead count stays the size of the set.
+/// So the header and the marks of the log agree.
+pub fn base_status(repo: &gix::Repository, start: Option<&LogStart>) -> BaseStatus {
     let resolve = || -> Option<(u32, u32)> {
-        let head = repo.head_id().ok()?.detach();
-        let base_id = repo.rev_parse_single(base).ok()?.detach();
-        ahead_behind(repo, head, base_id)
+        let start = start?;
+        let base = start.base?;
+        let branch = start.branch.as_ref()?;
+        if base == start.commit {
+            return Some((0, 0));
+        }
+        let behind = count_only_on(repo, base, start.commit).unwrap_or(0);
+        Some((clamp_count(branch.len()), clamp_count(behind)))
     };
     let (ahead, behind) = resolve().unwrap_or((0, 0));
     BaseStatus { ahead, behind }
+}
+
+/// A count as a `u32`, clamped to `u32::MAX`.
+fn clamp_count(count: usize) -> u32 {
+    u32::try_from(count).unwrap_or(u32::MAX)
+}
+
+/// The commit that the ref `base` names, or `None` when `base` does not
+/// resolve.
+///
+/// [`recent_log`] keeps this commit in the start of the log, and
+/// [`base_status`] counts from that start. One rule, so the count of the
+/// header and the marks of the log cannot disagree about the base.
+fn base_commit(repo: &gix::Repository, base: &str) -> Option<gix::ObjectId> {
+    repo.rev_parse_single(base).ok().map(gix::Id::detach)
+}
+
+/// The commits that `commit` reaches and `base` does not: the commits that
+/// are only on the branch. [`LogStart::walked`] calls it one time for each
+/// start.
+///
+/// The set comes from [`walk_only_on`]. The header counts the size of the set
+/// ([`base_status`]), so the log marks the commits that the header counts.
+///
+/// The set is empty when there is no base or when the base is `commit`. The
+/// header counts zero in those cases. The result is `None` when the walk does
+/// not start or when a step of it fails. That is a doubt: the header counts
+/// zero and the log marks no row, so it never marks a commit that the base
+/// reaches.
+fn branch_commits(
+    repo: &gix::Repository,
+    commit: gix::ObjectId,
+    base: Option<gix::ObjectId>,
+) -> Option<gix::hashtable::HashSet> {
+    let Some(base) = base else {
+        return Some(gix::hashtable::HashSet::default());
+    };
+    if base == commit {
+        return Some(gix::hashtable::HashSet::default());
+    }
+    walk_only_on(repo, commit, base)?
+        .map(|info| info.map(|info| info.id))
+        .collect::<Result<_, _>>()
+        .ok()
+}
+
+/// The walk of the commits that `ours` reaches and `theirs` does not
+/// (`git rev-list theirs..ours`). `None` when the walk does not start.
+///
+/// This is the one rule for the commits that are only on one side.
+/// [`branch_commits`] collects the ids of its commits one time for each
+/// start, and the header counts the size of that set ([`base_status`]). So the
+/// header and the marks of the log are the same walk, and they agree about
+/// which commits are only on the branch. [`count_only_on`] counts the same
+/// walk without a set. Both give nothing when the walk does not start or when
+/// a step of it fails.
+fn walk_only_on(
+    repo: &gix::Repository,
+    ours: gix::ObjectId,
+    theirs: gix::ObjectId,
+) -> Option<gix::revision::Walk<'_>> {
+    repo.rev_walk(std::iter::once(ours))
+        .with_hidden(std::iter::once(theirs))
+        .all()
+        .ok()
+}
+
+/// The number of commits that `ours` reaches and `theirs` does not, or `None`
+/// when the walk does not start or when a step of it fails.
+///
+/// A step that fails is not a commit, and a count that includes it is a wrong
+/// number. So this count fails as [`branch_commits`] fails. It keeps no set.
+/// [`base_status`] uses it for the behind count, and [`ahead_behind`] uses it
+/// for both counts.
+fn count_only_on(
+    repo: &gix::Repository,
+    ours: gix::ObjectId,
+    theirs: gix::ObjectId,
+) -> Option<usize> {
+    walk_only_on(repo, ours, theirs)?.try_fold(0_usize, |count, info| info.ok().map(|_| count + 1))
 }
 
 /// Count how far `ours` is ahead of and behind `theirs` as `(ahead, behind)`.
@@ -122,10 +549,13 @@ pub fn base_status(repo: &gix::Repository, base: &str) -> BaseStatus {
 /// reachable from `theirs` but not from `ours` (`git rev-list --count
 /// ours..theirs`). Each count is clamped to `u32::MAX`.
 ///
-/// Returns `None` if either rev walk fails. When `ours == theirs` the walks are
+/// Returns `None` if either rev walk does not start or if a step of it fails.
+/// When `ours == theirs` the walks are
 /// short-circuited to `Some((0, 0))` (the walks would return `(0, 0)` anyway).
-/// Both `base_status` and `upstream_status` delegate here so the mirrored
-/// hidden-walk pair lives in exactly one place.
+/// `upstream_status` uses this and needs only the counts, so it keeps no set.
+/// [`base_status`] does not use it: the start of the log already holds the set
+/// for its ahead count. Each count is [`count_only_on`], which counts the same
+/// walk that [`branch_commits`] collects.
 fn ahead_behind(
     repo: &gix::Repository,
     ours: gix::ObjectId,
@@ -135,19 +565,9 @@ fn ahead_behind(
         return Some((0, 0));
     }
     // ahead: theirs..ours — commits on `ours` not on `theirs`.
-    let ahead = repo
-        .rev_walk(std::iter::once(ours))
-        .with_hidden(std::iter::once(theirs))
-        .all()
-        .ok()?
-        .count();
+    let ahead = count_only_on(repo, ours, theirs)?;
     // behind: ours..theirs — the mirror walk, `theirs` with `ours` hidden.
-    let behind = repo
-        .rev_walk(std::iter::once(theirs))
-        .with_hidden(std::iter::once(ours))
-        .all()
-        .ok()?
-        .count();
+    let behind = count_only_on(repo, theirs, ours)?;
     Some((
         u32::try_from(ahead).unwrap_or(u32::MAX),
         u32::try_from(behind).unwrap_or(u32::MAX),
@@ -162,6 +582,8 @@ fn ahead_behind(
 /// configured, or the upstream tracking ref hasn't been fetched yet (i.e.
 /// `origin/main` exists in config but not under `.git/refs/`) — the same cases
 /// where `git rev-parse @{upstream}` fails, so this matches the old CLI path.
+/// It also returns `None` when a walk does not start or when a step of it
+/// fails, because a count that includes a failed step is a wrong number.
 pub fn upstream_status(repo: &gix::Repository) -> Option<UpstreamStatus> {
     use gix::bstr::ByteSlice;
     use gix::remote::Direction;
@@ -183,6 +605,384 @@ pub fn upstream_status(repo: &gix::Repository) -> Option<UpstreamStatus> {
         ahead,
         behind,
     })
+}
+
+/// The remote to publish a branch that has no upstream to, or `None` when the
+/// repository gives no unambiguous answer.
+///
+/// Only consulted for a branch with no upstream. A branch that already tracks
+/// something is pushed with a bare `git push`, which reads the remote out of
+/// the branch config — so this never has to second-guess a tracking branch.
+///
+/// Read fresh on every walk, like every other configuration gsw renders: a
+/// remote added in another pane takes effect on the next refresh rather than at
+/// the next restart.
+pub fn push_remote(repo: &gix::Repository) -> Option<String> {
+    use gix::bstr::ByteSlice;
+
+    let names: Vec<String> = repo
+        .remote_names()
+        .iter()
+        .filter_map(|name| name.to_str().ok().map(str::to_owned))
+        .collect();
+
+    // The config snapshot borrows the repository, so the picked name is cloned
+    // out before it is dropped at the end of this scope.
+    let config = repo.config_snapshot();
+    let push_default = config
+        .string("remote.pushDefault")
+        .and_then(|value| value.to_str().ok().map(str::to_owned));
+
+    pick_push_remote(&names, push_default.as_deref())
+}
+
+/// Pure core of [`push_remote`]: pick the remote from the names the repository
+/// has and whatever `remote.pushDefault` says.
+///
+/// The rules, in order:
+///
+/// 1. **`remote.pushDefault` wins outright**, and is taken verbatim — even when
+///    it names no configured remote. That setting exists precisely so the user
+///    can override the default, and git itself is the authority on whether the
+///    name resolves. Second-guessing it here would mean pushing somewhere the
+///    user did not configure. A bogus value fails in `git push`, where the error
+///    says what is actually wrong.
+/// 2. **Exactly one remote** is the answer whatever it is called, so a
+///    repository whose only remote is `fork` is not told there is no remote.
+/// 3. **`origin` among several**, matching what every other tool assumes.
+/// 4. Otherwise `None`. Several remotes, none named `origin`, and no
+///    `pushDefault` is a genuine ambiguity, and guessing would publish a branch
+///    to a remote the user never named.
+fn pick_push_remote(names: &[String], push_default: Option<&str>) -> Option<String> {
+    if let Some(configured) = push_default {
+        return Some(configured.to_string());
+    }
+    match names {
+        [only] => Some(only.clone()),
+        _ => names.iter().find(|name| *name == ORIGIN).cloned(),
+    }
+}
+
+/// The remote name every git tool assumes when a repository has several and the
+/// user has expressed no preference.
+const ORIGIN: &str = "origin";
+
+/// The in-progress git operation gsw should surface in the header, or `None`
+/// for a clean tree or an out-of-scope operation.
+///
+/// Classification uses gix's native [`gix::Repository::state`], which is modeled
+/// on git's own `wt-status.c` / `git-prompt.sh` logic: it inspects `MERGE_HEAD`,
+/// `rebase-merge/`, and `rebase-apply/` under the git dir, so it is
+/// worktree-aware and takes no locks — consistent with gsw's read-only,
+/// gix-only philosophy. `conflicts` is the unmerged-path count that the
+/// operation carries, and this function does no git work to find it. The
+/// snapshot passes the count of the status walk that it already did.
+/// [`held_operation`] passes 0, and walks for the count only when this
+/// function finds an operation.
+///
+/// Every rebase flavor collapses to `Operation::Rebase`: `ApplyMailboxRebase`
+/// is gix's name for a bare `rebase-apply/` directory carrying neither the
+/// `applying` nor the `rebasing` marker, which cannot be told apart from an
+/// apply-backend rebase, so it is treated as one. Cherry-pick, revert, bisect,
+/// and plain `git am` are intentionally out of scope and yield `None`.
+///
+/// **The one detector.** The snapshot asks it for the `⚠` row and for the
+/// question of `R` and `M`. [`held_operation`] asks it for the run of those
+/// keys, which refuses and aborts by what this function gives.
+pub fn operation_state(repo: &gix::Repository, conflicts: u32) -> Option<Operation> {
+    use gix::state::InProgress;
+
+    match repo.state()? {
+        InProgress::Merge => Some(Operation::Merge { conflicts }),
+        InProgress::Rebase | InProgress::RebaseInteractive | InProgress::ApplyMailboxRebase => {
+            Some(Operation::Rebase {
+                step: rebase_step(repo.path()),
+                conflicts,
+            })
+        }
+        InProgress::ApplyMailbox
+        | InProgress::CherryPick
+        | InProgress::CherryPickSequence
+        | InProgress::Revert
+        | InProgress::RevertSequence
+        | InProgress::Bisect => None,
+    }
+}
+
+/// How many of `statuses` are unmerged paths, which is the conflict count of an
+/// operation in progress.
+///
+/// The one rule for that count. Every unmerged path is one
+/// [`FileStatus::Conflicted`] row of the status walk, so the snapshot and
+/// [`held_operation`] both count those rows here. The `⚠` row of the header and
+/// the words of `R` and `M` then cannot give two counts for one work tree.
+pub fn conflict_count(statuses: impl IntoIterator<Item = FileStatus>) -> u32 {
+    let conflicted = statuses
+        .into_iter()
+        .filter(|status| *status == FileStatus::Conflicted)
+        .count();
+    u32::try_from(conflicted).unwrap_or(u32::MAX)
+}
+
+/// The rebase or merge that git holds in the work tree at `workdir` right now,
+/// or `None` when git holds neither.
+///
+/// The one reader for a caller that has a path and no repository handle: the
+/// run of `R` and `M` reads the work tree of the run with it, on a thread of
+/// its own, and a [`gix::Repository`] is not `Send`. It asks
+/// [`operation_state`], which is the one detector, with the conflict count of
+/// [`conflict_count`], which is the one rule for that count. So this reader and
+/// the snapshot cannot disagree about one work tree.
+///
+/// **The operation first, and the count only for an operation.** The count
+/// costs a full status walk and a line diff of each changed blob. The run reads
+/// the work tree before its shell and after it, and each read usually finds no
+/// operation. So this reader asks [`operation_state`] first, and walks for the
+/// count only when git holds an operation. A read that finds nothing thus
+/// costs only the check of the git dir, and the shell starts one walk sooner.
+///
+/// **`gix::open`, and never `gix::discover`.** `open` reads `workdir/.git`,
+/// also the `.git` file of a linked worktree, and so it reads the git dir of
+/// that worktree, where git keeps the state of its operation. It never walks up
+/// the directory tree, so a work tree that vanished is an error here, and never
+/// the repository of a parent directory. See [`RepoHandle::reopened`] for the
+/// same rule.
+///
+/// A repository that cannot be opened reads as `None`, the same as a git that
+/// cannot be run reads for the branch check of the run: the run then goes
+/// ahead, and a repository that cannot be read holds no operation that gsw can
+/// name. A status walk that fails counts no conflict. The operation itself is
+/// still read, because the operation is what a refusal is about, and the count
+/// is only a part of the words.
+pub fn held_operation(workdir: &std::path::Path) -> Option<Operation> {
+    let repo = gix::open(workdir).ok()?;
+    held_operation_in(&repo, |repo| {
+        collect_changes(repo).map_or(0, |changes| {
+            conflict_count(changes.entries.iter().map(|entry| entry.status))
+        })
+    })
+}
+
+/// [`held_operation`], with the count of conflicts given as a closure.
+///
+/// The count is a parameter so a test can see whether the count runs. The
+/// count is the expensive half of the read, and a test cannot see its cost
+/// in a time that it measures. Production passes the status walk and
+/// [`conflict_count`].
+///
+/// It asks [`operation_state`] first, with no count, and gives `None` when git
+/// holds nothing. Only then does it run `count_conflicts`, one time. It puts
+/// that count into the operation that it already has, so it reads the state of
+/// git one time.
+fn held_operation_in(
+    repo: &gix::Repository,
+    count_conflicts: impl FnOnce(&gix::Repository) -> u32,
+) -> Option<Operation> {
+    let mut operation = operation_state(repo, 0)?;
+    let (Operation::Merge { conflicts } | Operation::Rebase { conflicts, .. }) = &mut operation;
+    *conflicts = count_conflicts(repo);
+    Some(operation)
+}
+
+/// A directory where git keeps a rebase, and the two files in it that count the
+/// steps of that rebase.
+struct RebaseDir {
+    /// The name of the directory, in the git dir of the worktree.
+    name: &'static str,
+    /// The file that holds the number of the step that git is on.
+    current: &'static str,
+    /// The file that holds the number of steps.
+    total: &'static str,
+}
+
+/// Both directories where git keeps a rebase, in the order
+/// [`gix::Repository::state`] resolves them: `rebase-apply/` before
+/// `rebase-merge/`. See [`rebase_step`], which reads the step counters, for why
+/// the order is load-bearing. [`operation_start`] reads where a rebase started
+/// from the same directories, in the same order, for the same reason.
+///
+/// This is the single source of truth for that order, for the names of the
+/// directories, and for the names of the counter files. The design spec
+/// (`specs/2026-07-01-gsw-rebase-merge-indicators-design.md`) restates them in
+/// prose. That restatement is not checked automatically, so update it by hand
+/// whenever this table changes.
+const REBASE_DIRS: [RebaseDir; 2] = [
+    RebaseDir {
+        name: "rebase-apply",
+        current: "next",
+        total: "last",
+    },
+    RebaseDir {
+        name: "rebase-merge",
+        current: "msgnum",
+        total: "end",
+    },
+];
+
+/// How far through a rebase git is, or `None` when the counters cannot be read.
+///
+/// gix classifies the operation but does not expose its progress, so the two
+/// counter pairs git itself writes are read straight out of `git_dir` — the
+/// same base [`gix::Repository::state`] inspects, which keeps this worktree-
+/// aware — exactly as git's own prompt does:
+///
+/// - `rebase-apply/next` + `rebase-apply/last` — the apply backend
+///   (`git rebase --apply`).
+/// - `rebase-merge/msgnum` + `rebase-merge/end` — the merge backend, used by
+///   both plain and interactive rebases.
+///
+/// They are listed — and tried — in the order [`gix::Repository::state`] itself
+/// resolves them, `rebase-apply/` before `rebase-merge/`, so the step counts
+/// can only ever come from the directory the classification came from. git
+/// never leaves both directories present at once, but pinning the order means
+/// the two can't disagree even if it did.
+///
+/// A missing, unreadable, or unparseable counter degrades to `None` rather than
+/// failing the whole indicator: the operation is still worth surfacing without
+/// its `current/total` clause.
+fn rebase_step(git_dir: &std::path::Path) -> Option<StepProgress> {
+    let read = |dir: &RebaseDir, name: &str| -> Option<u32> {
+        std::fs::read_to_string(git_dir.join(dir.name).join(name))
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    };
+
+    REBASE_DIRS.iter().find_map(|dir| {
+        Some(StepProgress {
+            current: read(dir, dir.current)?,
+            total: read(dir, dir.total)?,
+        })
+    })
+}
+
+/// The file of a rebase directory where git writes the branch that the rebase
+/// started on: `refs/heads/<branch>`, or `detached HEAD`.
+const REBASE_HEAD_NAME: &str = "head-name";
+
+/// The file of a rebase directory where git writes the full id of the commit
+/// that HEAD held when the rebase started.
+const REBASE_ORIG_HEAD: &str = "orig-head";
+
+/// The start of the full name of every branch.
+const BRANCH_REF_PREFIX: &str = "refs/heads/";
+
+/// Where a rebase or a merge that git holds started. See [`operation_start`].
+///
+/// The default value knows nothing: no branch and no commit.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OperationStart {
+    /// The branch that the operation started on, in the short form that
+    /// [`branch_name`] gives. `None` for an operation that started on a
+    /// detached HEAD, and for a branch that cannot be read.
+    pub branch: Option<String>,
+    /// The commit that HEAD held when the operation started. `None` for a
+    /// commit that cannot be read.
+    pub commit: Option<gix::ObjectId>,
+}
+
+/// Where `operation`, which git holds in the work tree at `workdir`, started.
+///
+/// The run of `R` and `M` compares this with the work tree of the run before
+/// its shell started, so that gsw aborts only an operation that it can show the
+/// run started.
+///
+/// **git records where a rebase started, and a stopped merge does not move
+/// HEAD.**
+///
+/// - For a rebase, git writes the branch in `head-name` of the rebase
+///   directory, and the full id of the commit in `orig-head`. The directory is
+///   the first of [`REBASE_DIRS`] that exists, which is the directory that
+///   [`gix::Repository::state`] classified the rebase from.
+/// - For a merge, HEAD stays on its branch, at its commit, while the merge is
+///   stopped. The branch and the commit of the merge are thus the branch that
+///   HEAD names now and the commit that HEAD holds now. The commit is the read
+///   of [`head_commit`], so a comparison with the value of that function
+///   compares two values of one reader.
+///
+/// **A value that cannot be read is `None`, and `None` names no branch and no
+/// commit.** A missing file, a file that cannot be read or parsed, and a
+/// repository that cannot be opened thus never show that the run started the
+/// operation. A ref outside `refs/heads/` is no branch either, and `detached
+/// HEAD` is not a ref.
+///
+/// **`gix::open`, and never `gix::discover`**, for the reason that
+/// [`held_operation`] gives.
+pub fn operation_start(workdir: &std::path::Path, operation: &Operation) -> OperationStart {
+    let Ok(repo) = gix::open(workdir) else {
+        return OperationStart::default();
+    };
+    operation_start_of(&repo, operation)
+}
+
+/// The branch and the commit that `operation` started on, read from a
+/// repository that the caller has already opened.
+///
+/// This is the body of [`operation_start`], and the pair mirrors
+/// [`head_commit`] and [`head_commit_of`]. A caller that holds a
+/// [`gix::Repository`] reads the start without a second open. See
+/// [`operation_start`] for what is read and for how a value that cannot be read
+/// is reported.
+pub fn operation_start_of(repo: &gix::Repository, operation: &Operation) -> OperationStart {
+    let (full_name, commit) = match operation {
+        Operation::Rebase { .. } => {
+            let Some(dir) = REBASE_DIRS
+                .iter()
+                .map(|dir| repo.path().join(dir.name))
+                .find(|dir| dir.is_dir())
+            else {
+                return OperationStart::default();
+            };
+            let read = |name: &str| {
+                std::fs::read_to_string(dir.join(name))
+                    .ok()
+                    .map(|contents| contents.trim().to_string())
+            };
+            (
+                read(REBASE_HEAD_NAME),
+                read(REBASE_ORIG_HEAD).and_then(|hex| gix::ObjectId::from_hex(hex.as_bytes()).ok()),
+            )
+        }
+        Operation::Merge { .. } => (
+            repo.head_name()
+                .ok()
+                .flatten()
+                .map(|full| full.as_bstr().to_string()),
+            head_commit_of(repo),
+        ),
+    };
+    OperationStart {
+        branch: full_name.and_then(|full| full.strip_prefix(BRANCH_REF_PREFIX).map(str::to_string)),
+        commit,
+    }
+}
+
+/// The commit that HEAD holds in the work tree at `workdir` right now, or
+/// `None` when it cannot be read.
+///
+/// The run of `R` and `M` reads it just before its shell starts, and compares
+/// it with the commit of [`operation_start`] after the shell exits. A HEAD that
+/// cannot be read is `None` here, and `None` matches no commit: gsw then cannot
+/// show that the run started an operation, so it aborts nothing.
+///
+/// **gix, and not a git child.** For a merge, the commit of
+/// [`operation_start`] is this same read of HEAD. So both sides of the
+/// comparison come from one reader, in one form, from one open of the work
+/// tree by one rule. The branch check of the run is a git child for a reason
+/// of its own, and no comparison with this value depends on it.
+///
+/// **`gix::open`, and never `gix::discover`**, for the reason that
+/// [`held_operation`] gives.
+pub fn head_commit(workdir: &std::path::Path) -> Option<gix::ObjectId> {
+    head_commit_of(&gix::open(workdir).ok()?)
+}
+
+/// The commit that HEAD of `repo` holds, or `None` when it cannot be read. An
+/// unborn HEAD holds no commit. The one read of HEAD for [`head_commit`] and
+/// for the merge case of [`operation_start`].
+fn head_commit_of(repo: &gix::Repository) -> Option<gix::ObjectId> {
+    repo.head_id().ok().map(gix::Id::detach)
 }
 
 /// Everything one working-tree status walk produces: the `FileEntry` rows plus
@@ -480,47 +1280,28 @@ fn worktree_bytes(repo: &gix::Repository, rela_path: &gix::bstr::BString) -> Vec
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::path::Path;
-    use std::process::Command;
 
+    use tempfile::TempDir;
+
+    use super::RepoHandle;
     use crate::git::FileStatus;
-
-    /// Run a git command in `dir`, isolated from the host's global/system
-    /// config, asserting success. Test-only fixture construction.
-    fn git(dir: &Path, args: &[&str]) {
-        let status = Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .status()
-            .expect("invoke git");
-        assert!(status.success(), "git {args:?} failed");
-    }
-
-    /// A fresh repo on branch `main` with one commit. Parallel-safe: unique tempdir.
-    fn init_repo() -> tempfile::TempDir {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let p = dir.path();
-        git(p, &["init", "-q", "-b", "main"]);
-        git(p, &["config", "user.email", "t@example.com"]);
-        git(p, &["config", "user.name", "Test"]);
-        git(p, &["config", "commit.gpgsign", "false"]);
-        std::fs::write(p.join("a.txt"), "initial\n").unwrap();
-        git(p, &["add", "a.txt"]);
-        git(p, &["commit", "-q", "-m", "initial"]);
-        dir
-    }
+    use crate::render::{LogEntry, Operation, StepProgress};
+    use crate::testrepo::{
+        diverged_repo, git, git_allowing_failure, git_stdout, init_repo, init_repo_with_upstream,
+        init_repo_with_worktree,
+    };
 
     /// Open a repo at an explicit path (tests can't rely on cwd under a
-    /// parallel test runner). Mirrors `open()`'s logic but takes a path.
+    /// parallel test runner).
+    ///
+    /// Delegates to [`RepoHandle::discover`] — the same discovery and
+    /// bare-repo rejection production uses — and unwraps to the bare
+    /// repository, which is what the assertions below want. Tests that need to
+    /// re-open mid-test hold a [`RepoHandle`] instead.
     fn open_at(path: &Path) -> Option<gix::Repository> {
-        let repo = gix::discover(path).ok()?;
-        if repo.workdir().is_some() {
-            Some(repo)
-        } else {
-            None
-        }
+        RepoHandle::discover(path).map(|handle| handle.repo)
     }
 
     #[test]
@@ -570,6 +1351,50 @@ mod tests {
     }
 
     #[test]
+    fn resolve_base_follows_a_base_branch_created_after_the_handle_was_opened() {
+        // `resolve_base` picks the base ref by *resolving* candidates rather
+        // than by reading a config key, so — unlike `upstream_status`, whose
+        // `branch.<name>.remote` lookup is exactly what the per-refresh re-open
+        // exists to un-stale — it was expected to already be immune to a
+        // long-lived handle. Expected is not verified: if gix ever snapshotted
+        // the ref store the way it snapshots `.git/config`, a `main` branch
+        // created mid-watch would leave the header comparing against `master`
+        // forever, silently reporting the wrong ahead/behind counts against a
+        // base the user abandoned. Assert the property on a handle that is
+        // deliberately never re-opened, so the test fails if that immunity
+        // is ever lost rather than being propped up by the re-open.
+        let dir = init_repo();
+        let p = dir.path();
+        git(p, &["branch", "-m", "main", "master"]);
+
+        // Opened while `master` is the only candidate, and held across the
+        // creation of `main` — no `reopened()` anywhere in this test.
+        let held = RepoHandle::discover(p).expect("fixture is a worktree repo");
+        assert_eq!(
+            super::resolve_base(held.repo()),
+            "master",
+            "with no `main`, the base falls back to `master`",
+        );
+
+        // What `git branch main` (or a fetch that lands one) does mid-watch.
+        git(p, &["branch", "main"]);
+
+        assert_eq!(
+            super::resolve_base(held.repo()),
+            "main",
+            "`main` outranks `master`, and a ref-driven resolve must see one \
+             created after the handle was opened — without re-opening it",
+        );
+    }
+
+    /// The counts of the header for HEAD against `base`, as a walk reads
+    /// them: from the start of the log ([`super::recent_log`]), as
+    /// `collect_snapshot` does.
+    fn base_status(repo: &gix::Repository, base: &str) -> super::BaseStatus {
+        super::base_status(repo, super::recent_log(repo, base, 0).start.as_ref())
+    }
+
+    #[test]
     fn base_status_reports_behind_when_base_advances_past_fork_point() {
         // Fork `feature` off main, advance both: feature gets one commit, then
         // main gets one commit. From feature's view the base (main) has moved
@@ -586,7 +1411,7 @@ mod tests {
         git(p, &["commit", "-q", "-m", "main moved on"]);
         git(p, &["checkout", "-q", "feature"]);
         let repo = open_at(p).unwrap();
-        let status = super::base_status(&repo, "main");
+        let status = base_status(&repo, "main");
         assert_eq!(
             status.ahead, 1,
             "feature has one commit past the fork point"
@@ -609,7 +1434,7 @@ mod tests {
         git(p, &["add", "c.txt"]);
         git(p, &["commit", "-q", "-m", "third"]);
         let repo = open_at(p).unwrap();
-        let status = super::base_status(&repo, "main");
+        let status = base_status(&repo, "main");
         assert_eq!(status.ahead, 2);
         assert_eq!(status.behind, 0, "base has not moved");
     }
@@ -618,7 +1443,7 @@ mod tests {
     fn base_status_is_zero_when_base_equals_head() {
         let dir = init_repo();
         let repo = open_at(dir.path()).unwrap();
-        let status = super::base_status(&repo, "main");
+        let status = base_status(&repo, "main");
         assert_eq!((status.ahead, status.behind), (0, 0));
     }
 
@@ -626,16 +1451,8 @@ mod tests {
     fn base_status_is_zero_when_base_unresolvable() {
         let dir = init_repo();
         let repo = open_at(dir.path()).unwrap();
-        let status = super::base_status(&repo, "no-such-branch");
+        let status = base_status(&repo, "no-such-branch");
         assert_eq!((status.ahead, status.behind), (0, 0));
-    }
-
-    #[test]
-    fn head_commit_secs_is_some_for_a_repo_with_a_commit() {
-        let dir = init_repo();
-        let repo = open_at(dir.path()).unwrap();
-        let secs = super::head_commit_secs(&repo).expect("a commit exists");
-        assert!(secs > 1_000_000_000, "looks like a unix timestamp: {secs}");
     }
 
     #[test]
@@ -646,40 +1463,725 @@ mod tests {
         git(p, &["add", "b.txt"]);
         git(p, &["commit", "-q", "-m", "second commit"]);
         let repo = open_at(p).unwrap();
-        let log = super::recent_log(&repo, 10);
+        let log = super::recent_log(&repo, "main", 10).commits;
         assert_eq!(log.len(), 2);
-        assert_eq!(log[0].2, "second commit");
-        assert_eq!(log[1].2, "initial");
-        assert!(!log[0].0.is_empty(), "short hash present");
+        assert_eq!(log[0].summary, "second commit");
+        assert_eq!(log[1].summary, "initial");
+        assert!(!log[0].hash.is_empty(), "short hash present");
     }
 
     #[test]
     fn recent_log_zero_is_empty() {
         let dir = init_repo();
         let repo = open_at(dir.path()).unwrap();
-        assert!(super::recent_log(&repo, 0).is_empty());
+        assert!(super::recent_log(&repo, "main", 0).commits.is_empty());
     }
 
-    /// Clone `init_repo()`'s repo so the clone has a real `origin/main` upstream.
-    fn init_repo_with_upstream() -> (tempfile::TempDir, tempfile::TempDir) {
-        let origin = init_repo();
-        let clone = tempfile::tempdir().expect("tempdir");
-        let status = std::process::Command::new("git")
-            .args([
-                "clone",
-                "-q",
-                origin.path().to_str().unwrap(),
-                clone.path().to_str().unwrap(),
-            ])
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .status()
-            .expect("git clone");
-        assert!(status.success(), "git clone failed");
-        git(clone.path(), &["config", "user.email", "t@example.com"]);
-        git(clone.path(), &["config", "user.name", "Test"]);
-        git(clone.path(), &["config", "commit.gpgsign", "false"]);
-        (origin, clone)
+    /// A repository of three commits: the commit of [`init_repo`], then
+    /// `second` and `third`.
+    fn three_commit_repo() -> TempDir {
+        let dir = init_repo();
+        for name in ["second", "third"] {
+            let file = format!("{name}.txt");
+            std::fs::write(dir.path().join(&file), format!("{name}\n")).expect("write a file");
+            git(dir.path(), &["add", &file]);
+            git(dir.path(), &["commit", "-q", "-m", name]);
+        }
+        dir
+    }
+
+    /// The subjects of the commits of `log`, newest first.
+    fn subjects(log: &super::RecentLog) -> Vec<&str> {
+        log.commits
+            .iter()
+            .map(|commit| commit.summary.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn recent_log_reports_the_end_of_a_history_shorter_than_the_limit() {
+        // Issue #521: the walk asks for 10 commits and finds the end of the
+        // history after 3. A read with a higher limit finds no more.
+        let dir = three_commit_repo();
+        let repo = open_at(dir.path()).expect("fixture is a worktree repo");
+
+        let log = super::recent_log(&repo, "main", 10);
+
+        assert_eq!(subjects(&log), ["third", "second", "initial"]);
+        assert!(log.complete, "a limit past the history reaches its end");
+    }
+
+    #[test]
+    fn recent_log_reports_the_end_of_a_history_exactly_as_long_as_the_limit() {
+        // The walk takes 3 commits, and the history has no fourth. So this
+        // read holds every commit that HEAD reaches, as the read with a
+        // limit of 10 does.
+        let dir = three_commit_repo();
+        let repo = open_at(dir.path()).expect("fixture is a worktree repo");
+
+        let log = super::recent_log(&repo, "main", 3);
+
+        assert_eq!(subjects(&log), ["third", "second", "initial"]);
+        assert!(log.complete, "the third commit is the last commit");
+    }
+
+    #[test]
+    fn recent_log_reports_no_end_when_the_history_goes_past_the_limit() {
+        // The walk stops at its limit of 2 commits, and a third commit comes
+        // after them. A read with a higher limit finds more.
+        let dir = three_commit_repo();
+        let repo = open_at(dir.path()).expect("fixture is a worktree repo");
+
+        let log = super::recent_log(&repo, "main", 2);
+
+        assert_eq!(subjects(&log), ["third", "second"]);
+        assert!(!log.complete, "the walk stopped before the last commit");
+    }
+
+    #[test]
+    fn recent_log_of_a_repository_with_no_commit_reports_the_end() {
+        // An unborn HEAD reaches no commit. So the empty log holds every
+        // commit that HEAD reaches, and a read with a higher limit finds no
+        // more.
+        let dir = tempfile::tempdir().expect("tempdir");
+        git(dir.path(), &["init", "-q", "-b", "main"]);
+        let repo = open_at(dir.path()).expect("an unborn repository has a work tree");
+
+        let log = super::recent_log(&repo, "main", 10);
+
+        assert!(log.commits.is_empty(), "an unborn HEAD has no commit");
+        assert!(log.complete, "an unborn HEAD has an empty history");
+        assert_eq!(
+            log.start, None,
+            "an unborn HEAD names no commit to start from"
+        );
+    }
+
+    #[test]
+    fn recent_log_of_a_limit_of_zero_reports_no_end() {
+        // A limit of zero reads no commit, so it never sees where the history
+        // ends.
+        let dir = three_commit_repo();
+        let repo = open_at(dir.path()).expect("fixture is a worktree repo");
+
+        let log = super::recent_log(&repo, "main", 0);
+
+        assert!(log.commits.is_empty(), "a limit of zero reads no commit");
+        assert!(!log.complete, "a read of no commit finds no end");
+        assert!(
+            log.start.is_some(),
+            "a limit of zero still resolves HEAD, so a later read knows where the history starts",
+        );
+    }
+
+    #[test]
+    fn recent_log_of_a_head_that_names_a_missing_commit_reports_no_end() {
+        // HEAD names a branch, and the branch names an object that the
+        // repository does not hold. That is a failure, not an empty history,
+        // so the read does not claim the end of the history.
+        let dir = init_repo();
+        let p = dir.path();
+        std::fs::write(
+            p.join(".git/refs/heads/broken"),
+            "0123456789abcdef0123456789abcdef01234567\n",
+        )
+        .expect("write a ref to a missing object");
+        git(p, &["symbolic-ref", "HEAD", "refs/heads/broken"]);
+        let repo = open_at(p).expect("fixture is a worktree repo");
+
+        let log = super::recent_log(&repo, "main", 10);
+
+        assert!(log.commits.is_empty(), "a missing commit gives no row");
+        assert!(!log.complete, "a HEAD that does not resolve finds no end");
+        assert_eq!(
+            log.start, None,
+            "a HEAD that does not resolve names no start"
+        );
+    }
+
+    /// Delete the loose object of the commit that `rev` names in the
+    /// repository at `dir`. A walk that comes to that commit then fails.
+    fn remove_commit_object(dir: &Path, rev: &str) {
+        let id = git_stdout(dir, &["rev-parse", rev]);
+        let fan_out: String = id.chars().take(2).collect();
+        let rest: String = id.chars().skip(2).collect();
+        std::fs::remove_file(dir.join(".git/objects").join(fan_out).join(rest))
+            .expect("remove the object of the commit");
+    }
+
+    #[test]
+    fn recent_log_of_a_walk_that_meets_a_missing_commit_reports_no_end() {
+        // The object of the first commit is gone, so the walk fails when it
+        // comes to that commit. The walk then has no next commit, but the
+        // failure, and not the end of the history, stopped it. So the read
+        // does not claim the end of the history.
+        let dir = three_commit_repo();
+        let p = dir.path();
+        remove_commit_object(p, "HEAD~2");
+        let repo = open_at(p).expect("fixture is a worktree repo");
+
+        let log = super::recent_log(&repo, "main", 10);
+
+        assert_eq!(subjects(&log), ["third", "second"]);
+        assert!(!log.complete, "a walk that fails finds no end");
+    }
+
+    /// A [`crate::RenderConfig`] whose log fills the pane, for the walks that
+    /// read the log.
+    fn log_walk_config() -> crate::RenderConfig {
+        crate::RenderConfig {
+            base: None,
+            max_files: None,
+            bar_width: 20,
+            log: crate::LogDemand::Fill,
+            truecolor: false,
+            width_offset: 0,
+            refresh_interval: None,
+        }
+    }
+
+    #[test]
+    fn a_walk_puts_the_end_of_the_history_on_the_snapshot() {
+        // Issue #521: watch mode reads the flag from the snapshot on a resize,
+        // so the walk must put it there, and not only find it. A walk with a
+        // limit of 10 finds the end of a history of 3 commits. A walk with a
+        // limit of 2 does not.
+        let dir = three_commit_repo();
+        let handle = RepoHandle::discover(dir.path()).expect("fixture is a worktree repo");
+        let cfg = log_walk_config();
+
+        let past_the_end = crate::collect_snapshot(handle.repo(), &cfg, 10).expect("walk");
+        assert_eq!(past_the_end.log.len(), 3, "the walk reads every commit");
+        assert!(
+            past_the_end.log_complete,
+            "a walk past the end of the history puts a complete log on the snapshot",
+        );
+
+        let short_of_the_end = crate::collect_snapshot(handle.repo(), &cfg, 2).expect("walk");
+        assert_eq!(short_of_the_end.log.len(), 2, "the walk stops at its limit");
+        assert!(
+            !short_of_the_end.log_complete,
+            "a walk that stops at its limit puts an incomplete log on the snapshot",
+        );
+    }
+
+    /// Move HEAD of the repository at `dir` to another history: a new branch
+    /// with no commit in common with the history before, and four commits of
+    /// its own, `moved 1` to `moved 4`. It is the checkout that a user makes
+    /// in another pane while gsw watches.
+    fn move_head_to_another_history(dir: &Path) {
+        git(dir, &["checkout", "-q", "--orphan", "moved"]);
+        for n in 1..=4 {
+            git(
+                dir,
+                &["commit", "-q", "--allow-empty", "-m", &format!("moved {n}")],
+            );
+        }
+    }
+
+    #[test]
+    fn recent_log_from_reads_the_history_of_its_start_after_head_moves() {
+        // Review R-20260924T181319Z#I2: a walk records the commit that HEAD
+        // names. A checkout then moves HEAD to another history. A read from
+        // the recorded start gives the history of the walk, and not the
+        // history that HEAD names now. The read goes through the handle that
+        // the walk used, as the read on a resize does.
+        let dir = three_commit_repo();
+        let p = dir.path();
+        let repo = open_at(p).expect("fixture is a worktree repo");
+        let start = super::recent_log(&repo, "main", 1)
+            .start
+            .expect("HEAD names a commit");
+
+        move_head_to_another_history(p);
+
+        assert_eq!(
+            subjects(&super::recent_log(&repo, "main", 10)),
+            ["moved 4", "moved 3", "moved 2", "moved 1"],
+            "HEAD names the other history, so a read from HEAD gives it",
+        );
+        let log = super::recent_log_from(&repo, start.clone(), 10);
+        assert_eq!(
+            subjects(&log),
+            ["third", "second", "initial"],
+            "a read from the start of the walk gives the history of the walk",
+        );
+        assert!(log.complete, "a limit past the history reaches its end");
+        assert_eq!(log.start, Some(start), "the read names its start");
+    }
+
+    #[test]
+    fn a_walk_with_a_log_limit_of_zero_records_the_start_of_its_history() {
+        // Review R-20260924T181319Z#I2: a pane too short for a log gives the
+        // walk a log limit of zero. The pane can grow later, and the read of
+        // the log on that resize starts from the commit that the walk
+        // recorded. So the walk records its start at a limit of zero too. A
+        // checkout then moves HEAD, and the read from the recorded start still
+        // gives the history of the walk.
+        let dir = three_commit_repo();
+        let handle = RepoHandle::discover(dir.path()).expect("fixture is a worktree repo");
+
+        let snapshot = crate::collect_snapshot(handle.repo(), &log_walk_config(), 0).expect("walk");
+        assert!(snapshot.log.is_empty(), "a limit of zero reads no commit");
+        let start = snapshot
+            .log_start
+            .expect("a walk with a log limit of zero records its start");
+
+        move_head_to_another_history(dir.path());
+
+        let read = crate::fetch_log_from(handle.repo(), start, 10);
+        let subjects: Vec<&str> = read
+            .entries
+            .iter()
+            .map(|entry| entry.subject.as_str())
+            .collect();
+        assert_eq!(
+            subjects,
+            ["third", "second", "initial"],
+            "a read from the start of the walk gives the history of the walk",
+        );
+    }
+
+    /// Make one empty commit with the message `subject` on the branch that
+    /// HEAD of the repository at `dir` names.
+    fn commit_empty(dir: &Path, subject: &str) {
+        git(dir, &["commit", "-q", "--allow-empty", "-m", subject]);
+    }
+
+    /// A repository with HEAD on the branch `feature`. The branch has
+    /// `commits` commits, `feature 1` to `feature <commits>`, on top of the
+    /// commit of [`init_repo`], which `main` names.
+    fn feature_branch_repo(commits: usize) -> TempDir {
+        let dir = init_repo();
+        git(dir.path(), &["checkout", "-q", "-b", "feature"]);
+        for n in 1..=commits {
+            commit_empty(dir.path(), &format!("feature {n}"));
+        }
+        dir
+    }
+
+    /// Move `main` of the repository at `dir` to the commit that `feature`
+    /// names, by a fast-forward merge. HEAD stays on `feature`. After this,
+    /// `main` holds every commit of the branch, and the header counts zero.
+    fn fast_forward_main_to_feature(dir: &Path) {
+        git(dir, &["checkout", "-q", "main"]);
+        git(dir, &["merge", "-q", "--ff-only", "feature"]);
+        git(dir, &["checkout", "-q", "feature"]);
+    }
+
+    /// The subjects of the commits of `log` that are only on the branch,
+    /// newest first.
+    fn marked(log: &super::RecentLog) -> Vec<&str> {
+        log.commits
+            .iter()
+            .filter(|commit| commit.on_branch)
+            .map(|commit| commit.summary.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn recent_log_marks_the_commits_of_a_branch_on_top_of_its_base() {
+        // Issue #541: the header counts the commits that are only on the
+        // branch (`main..feature`). The log marks the same commits. Here the
+        // branch has three commits on top of `main`, so the log marks those
+        // three and not the commit that `main` names.
+        let dir = feature_branch_repo(3);
+        let repo = open_at(dir.path()).expect("fixture is a worktree repo");
+
+        let log = super::recent_log(&repo, "main", 10);
+
+        assert_eq!(
+            subjects(&log),
+            ["feature 3", "feature 2", "feature 1", "initial"],
+            "the log holds the branch and its base",
+        );
+        assert_eq!(
+            marked(&log),
+            ["feature 3", "feature 2", "feature 1"],
+            "the log marks the three commits that only the branch has",
+        );
+    }
+
+    /// A repository with HEAD on the branch `feature`, which merged `main`
+    /// after the fork. The branch has `feature 1` and `feature 2`. Then `main`
+    /// gets `main 1` and `main 2`. Then the branch merges `main` with the
+    /// merge commit `merge main`, and gets `feature 3` after it.
+    fn merged_base_repo() -> TempDir {
+        let dir = init_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "-b", "feature"]);
+        commit_empty(p, "feature 1");
+        commit_empty(p, "feature 2");
+        git(p, &["checkout", "-q", "main"]);
+        commit_empty(p, "main 1");
+        commit_empty(p, "main 2");
+        git(p, &["checkout", "-q", "feature"]);
+        git(p, &["merge", "-q", "--no-ff", "main", "-m", "merge main"]);
+        commit_empty(p, "feature 3");
+        dir
+    }
+
+    #[test]
+    fn recent_log_marks_the_commits_of_a_branch_that_merged_its_base_by_membership() {
+        // Issue #541: the walk of the log is breadth-first. After a merge of
+        // `main` into the branch, the walk puts commits of `main` between the
+        // commits of the branch. So the first `ahead` rows are not the
+        // commits of the branch. The log marks the commits of
+        // `main..feature`, whatever their position in the walk.
+        let dir = merged_base_repo();
+        let repo = open_at(dir.path()).expect("fixture is a worktree repo");
+
+        let log = super::recent_log(&repo, "main", 10);
+
+        let position = |subject: &str| {
+            log.commits
+                .iter()
+                .position(|commit| commit.summary == subject)
+                .expect("the log holds every commit of the fixture")
+        };
+        assert!(
+            position("main 2") < position("feature 1"),
+            "the walk puts a commit of main before a commit of the branch, \
+             so a mark by position is wrong here: {:?}",
+            subjects(&log),
+        );
+        let flags: std::collections::BTreeMap<&str, bool> = log
+            .commits
+            .iter()
+            .map(|commit| (commit.summary.as_str(), commit.on_branch))
+            .collect();
+        assert_eq!(
+            flags,
+            std::collections::BTreeMap::from([
+                ("feature 3", true),
+                ("merge main", true),
+                ("feature 2", true),
+                ("feature 1", true),
+                ("main 2", false),
+                ("main 1", false),
+                ("initial", false),
+            ]),
+            "the log marks the commits of the branch and the merge, and no commit of main",
+        );
+        let ahead = base_status(&repo, "main").ahead;
+        assert_eq!(
+            u32::try_from(marked(&log).len()).expect("a small count"),
+            ahead,
+            "the log marks as many commits as the header counts",
+        );
+    }
+
+    #[test]
+    fn recent_log_marks_no_commit_when_head_is_on_the_base() {
+        // Issue #541: HEAD is on `main`, and `main` is the base. No commit is
+        // only on the branch, so the header counts zero and the log marks no
+        // commit.
+        let dir = three_commit_repo();
+        let repo = open_at(dir.path()).expect("fixture is a worktree repo");
+
+        let log = super::recent_log(&repo, "main", 10);
+
+        assert_eq!(subjects(&log), ["third", "second", "initial"]);
+        assert!(
+            marked(&log).is_empty(),
+            "a branch that is its base has no commit of its own: {:?}",
+            marked(&log),
+        );
+        assert_eq!(base_status(&repo, "main").ahead, 0);
+    }
+
+    #[test]
+    fn recent_log_marks_no_commit_when_the_base_does_not_resolve() {
+        // Issue #541: the base names no ref, so the header counts zero. The
+        // log uses the same fallback and marks no commit, although the
+        // branch has three commits on top of `main`.
+        let dir = feature_branch_repo(3);
+        let repo = open_at(dir.path()).expect("fixture is a worktree repo");
+
+        let log = super::recent_log(&repo, "no-such-branch", 10);
+
+        assert_eq!(
+            subjects(&log),
+            ["feature 3", "feature 2", "feature 1", "initial"],
+            "a base that does not resolve does not change the log",
+        );
+        assert!(
+            marked(&log).is_empty(),
+            "a base that does not resolve marks no commit: {:?}",
+            marked(&log),
+        );
+        assert_eq!(base_status(&repo, "no-such-branch").ahead, 0);
+    }
+
+    #[test]
+    fn recent_log_from_keeps_the_marks_of_its_start_after_the_base_moves() {
+        // Issue #541: watch mode reads the log again from the recorded start
+        // on a resize. The start keeps the base commit of the walk. So a
+        // resize after `main` moved gives the marks of the walk, and not the
+        // marks of the moved `main`.
+        let dir = feature_branch_repo(3);
+        let p = dir.path();
+        let repo = open_at(p).expect("fixture is a worktree repo");
+        let start = super::recent_log(&repo, "main", 1)
+            .start
+            .expect("HEAD names a commit");
+
+        fast_forward_main_to_feature(p);
+
+        assert_eq!(
+            marked(&super::recent_log_from(&repo, start, 10)),
+            ["feature 3", "feature 2", "feature 1"],
+            "a read from the start of the walk keeps the marks of the walk",
+        );
+        assert!(
+            marked(&super::recent_log(&repo, "main", 10)).is_empty(),
+            "main now holds the branch, so a new read from HEAD marks no commit",
+        );
+    }
+
+    /// The subject and the mark of each row of `log`, newest first.
+    fn row_marks(log: &[LogEntry]) -> Vec<(&str, bool)> {
+        log.iter()
+            .map(|entry| (entry.subject.as_str(), entry.on_branch))
+            .collect()
+    }
+
+    #[test]
+    fn a_walk_marks_the_log_rows_of_a_branch_on_top_of_its_base() {
+        // Issue #541: the walk puts the log on the snapshot, and each row
+        // keeps the mark of its commit. The branch has three commits on top
+        // of `main`. So the walk marks the three rows of the branch and not
+        // the row of the commit that `main` names. The header counts the
+        // same commits.
+        let dir = feature_branch_repo(3);
+        let handle = RepoHandle::discover(dir.path()).expect("fixture is a worktree repo");
+
+        let snapshot =
+            crate::collect_snapshot(handle.repo(), &log_walk_config(), 10).expect("walk");
+
+        assert_eq!(
+            row_marks(&snapshot.log),
+            [
+                ("feature 3", true),
+                ("feature 2", true),
+                ("feature 1", true),
+                ("initial", false),
+            ],
+            "the walk marks the rows of the three commits that only the branch has",
+        );
+        let marked_rows = snapshot.log.iter().filter(|entry| entry.on_branch).count();
+        assert_eq!(
+            u32::try_from(marked_rows).expect("a small count"),
+            snapshot.commits_ahead,
+            "the log marks as many rows as the header counts",
+        );
+    }
+
+    #[test]
+    fn a_failed_step_of_the_walk_counts_no_commit_ahead_and_marks_no_row() {
+        // Review R-20261008T205212Z#N1. The object of `feature 1` is gone, so
+        // the walk of the branch fails when it comes to that commit. The set
+        // of the marks gives no commit when a step fails, so the count must
+        // give no number either. Else the header counts commits that the log
+        // does not mark.
+        let dir = feature_branch_repo(4);
+        remove_commit_object(dir.path(), "HEAD~3");
+        let handle = RepoHandle::discover(dir.path()).expect("fixture is a worktree repo");
+
+        let snapshot =
+            crate::collect_snapshot(handle.repo(), &log_walk_config(), 10).expect("walk");
+
+        let marked_rows = snapshot.log.iter().filter(|entry| entry.on_branch).count();
+        assert_eq!(
+            u32::try_from(marked_rows).expect("a small count"),
+            snapshot.commits_ahead,
+            "the log marks as many rows as the header counts",
+        );
+        assert_eq!(
+            (snapshot.commits_ahead, snapshot.commits_behind),
+            (0, 0),
+            "a failed step degrades the header to zero",
+        );
+    }
+
+    /// A repository with HEAD on the branch `feature`, where `main` moved
+    /// after the fork. `main` holds the commit of [`init_repo`] and three
+    /// more, `main 1` to `main 3`. `feature` holds three commits, `feature 1`
+    /// to `feature 3`, on top of the commit of [`init_repo`]. So the branch is
+    /// three commits ahead of the fork point, and the base is three commits
+    /// past it.
+    fn base_moved_repo() -> TempDir {
+        let dir = init_repo();
+        let p = dir.path();
+        for n in 1..=3 {
+            commit_empty(p, &format!("main {n}"));
+        }
+        git(p, &["checkout", "-q", "-b", "feature", "main~3"]);
+        for n in 1..=3 {
+            commit_empty(p, &format!("feature {n}"));
+        }
+        dir
+    }
+
+    #[test]
+    fn every_missing_commit_object_keeps_the_count_of_the_header_and_the_marks_of_the_log_in_agreement(
+    ) {
+        // Reviews R-20261008T205212Z#N1 and R-20261009T150046Z#I1. The count
+        // of the header and the marks of the log must agree. That broke
+        // once on each side of the walk. N1 was a failed step on the branch
+        // side. I1 was a failed step on the base side. So this test does not
+        // remove one chosen commit. It removes each commit of the fixture in
+        // turn, and a failure path that we did not think of cannot hide.
+        const REVS: [&str; 7] = [
+            "feature",
+            "feature~1",
+            "feature~2",
+            "feature~3",
+            "main",
+            "main~1",
+            "main~2",
+        ];
+        let intact = base_moved_repo();
+        let handle = RepoHandle::discover(intact.path()).expect("fixture is a worktree repo");
+        let snapshot =
+            crate::collect_snapshot(handle.repo(), &log_walk_config(), 10).expect("walk");
+        assert!(
+            snapshot.commits_ahead > 0 && snapshot.commits_behind > 0,
+            "the intact fixture is ahead and behind, so the sweep tests a moved base",
+        );
+        let commit_count = git_stdout(intact.path(), &["rev-list", "--all", "--count"]);
+        assert_eq!(
+            commit_count.trim().parse::<usize>().expect("a count"),
+            REVS.len(),
+            "the sweep names every commit of the fixture",
+        );
+
+        // The snapshot of these revs fails as a whole. HEAD names `feature`,
+        // so the read of the changes fails when its object is missing. The
+        // sweep names them, so a change that fails more revs cannot shrink
+        // the sweep without a failure.
+        const REVS_WHOSE_SNAPSHOT_FAILS: [&str; 1] = ["feature"];
+
+        let mut failed = Vec::new();
+        let mut checked = 0;
+        for rev in REVS {
+            let dir = base_moved_repo();
+            remove_commit_object(dir.path(), rev);
+            let handle = RepoHandle::discover(dir.path()).expect("fixture is a worktree repo");
+            let Ok(snapshot) = crate::collect_snapshot(handle.repo(), &log_walk_config(), 10)
+            else {
+                failed.push(rev);
+                continue;
+            };
+            checked += 1;
+            let marked_rows = snapshot.log.iter().filter(|entry| entry.on_branch).count();
+            assert_eq!(
+                u32::try_from(marked_rows).expect("a small count"),
+                snapshot.commits_ahead,
+                "the log marks as many rows as the header counts when the commit {rev} is missing: {:?}",
+                row_marks(&snapshot.log),
+            );
+        }
+        assert_eq!(
+            failed, REVS_WHOSE_SNAPSHOT_FAILS,
+            "the revs whose snapshot failed ({failed:?}) are not the revs that the test names ({REVS_WHOSE_SNAPSHOT_FAILS:?})",
+        );
+        assert_eq!(
+            checked,
+            REVS.len() - REVS_WHOSE_SNAPSHOT_FAILS.len(),
+            "the sweep checked the agreement for every rev whose snapshot succeeds",
+        );
+    }
+
+    #[test]
+    fn a_read_from_the_start_of_a_walk_keeps_the_marks_of_its_rows_after_the_base_moves() {
+        // Issue #541: watch mode caches the log rows of a walk. A resize that
+        // needs more rows reads the log again from the start of the walk,
+        // and the rows of that read replace the cached rows. Here the walk
+        // reads two rows of a branch with four commits on top of `main`.
+        // Then `main` takes the four commits. The read still gives the two
+        // cached rows first with the same marks. It also marks the two new
+        // rows of the branch, and not the commit before the branch.
+        let dir = feature_branch_repo(4);
+        let p = dir.path();
+        let handle = RepoHandle::discover(p).expect("fixture is a worktree repo");
+        let cfg = log_walk_config();
+        let snapshot = crate::collect_snapshot(handle.repo(), &cfg, 2).expect("walk");
+        assert_eq!(
+            row_marks(&snapshot.log),
+            [("feature 4", true), ("feature 3", true)],
+            "the walk marks its two rows",
+        );
+        let start = snapshot.log_start.expect("a walk records its start");
+
+        fast_forward_main_to_feature(p);
+
+        let after_the_move = crate::collect_snapshot(handle.repo(), &cfg, 10).expect("walk");
+        assert_eq!(
+            after_the_move.commits_ahead, 0,
+            "main now holds the branch, so the header of a new walk counts zero",
+        );
+        assert!(
+            after_the_move.log.iter().all(|entry| !entry.on_branch),
+            "a new walk marks no row: {:?}",
+            row_marks(&after_the_move.log),
+        );
+
+        let read = crate::fetch_log_from(handle.repo(), start, 10);
+        let hash_and_mark = |entry: &LogEntry| (entry.hash.clone(), entry.on_branch);
+        assert_eq!(
+            read.entries
+                .iter()
+                .take(snapshot.log.len())
+                .map(hash_and_mark)
+                .collect::<Vec<_>>(),
+            snapshot.log.iter().map(hash_and_mark).collect::<Vec<_>>(),
+            "the read gives the cached rows first, with the same hashes and marks",
+        );
+        assert_eq!(
+            row_marks(&read.entries),
+            [
+                ("feature 4", true),
+                ("feature 3", true),
+                ("feature 2", true),
+                ("feature 1", true),
+                ("initial", false),
+            ],
+            "the read marks the four commits of the branch against the base of the walk",
+        );
+    }
+
+    #[test]
+    fn a_read_from_the_start_of_a_walk_does_not_walk_the_branch_again() {
+        // Review R-20261008T205212Z#I1. A resize read uses the set of the
+        // walk again. The object of `feature 1` is gone after the walk, and
+        // a read of three rows never comes to it. A read that walks
+        // `main..start` again comes to the missing object and loses every
+        // mark.
+        let dir = feature_branch_repo(6);
+        let handle = RepoHandle::discover(dir.path()).expect("fixture is a worktree repo");
+        let snapshot = crate::collect_snapshot(handle.repo(), &log_walk_config(), 2).expect("walk");
+        assert_eq!(
+            row_marks(&snapshot.log),
+            [("feature 6", true), ("feature 5", true)],
+            "the walk marks its two rows",
+        );
+        let start = snapshot.log_start.expect("a walk records its start");
+
+        remove_commit_object(dir.path(), "HEAD~5");
+        let fresh = open_at(dir.path()).expect("fixture is a worktree repo");
+
+        let read = crate::fetch_log_from(&fresh, start, 3);
+
+        assert_eq!(
+            row_marks(&read.entries),
+            [
+                ("feature 6", true),
+                ("feature 5", true),
+                ("feature 4", true),
+            ],
+            "the read marks its rows from the set of the walk",
+        );
     }
 
     fn statuses(repo: &gix::Repository) -> Vec<(String, FileStatus, bool)> {
@@ -881,6 +2383,26 @@ mod tests {
     }
 
     #[test]
+    fn upstream_gives_no_status_when_a_step_of_the_walk_fails() {
+        // Review R-20261008T205212Z#N1. The object of the first local commit
+        // is gone, so the walk fails when it comes to that commit. A count
+        // that includes a failed step is a wrong number, so the walk gives no
+        // status.
+        let (_origin, clone) = init_repo_with_upstream();
+        let p = clone.path();
+        for n in 1..=3 {
+            git(
+                p,
+                &["commit", "-q", "--allow-empty", "-m", &format!("local {n}")],
+            );
+        }
+        remove_commit_object(p, "HEAD~2");
+        let repo = open_at(p).unwrap();
+
+        assert!(super::upstream_status(&repo).is_none());
+    }
+
+    #[test]
     fn upstream_reports_name_and_ahead_count() {
         let (_origin, clone) = init_repo_with_upstream();
         let p = clone.path();
@@ -915,6 +2437,144 @@ mod tests {
     }
 
     #[test]
+    fn reopened_handle_sees_upstream_configured_after_open() {
+        // Watch mode's failure shape: gsw opens the repository once, and only
+        // later does the user run `git push -u origin <branch>` in another
+        // pane. That writes `branch.feature.remote`/`.merge` into
+        // `.git/config`, which the already-open gix handle has cached and will
+        // never re-read — so the header's upstream segment stays missing until
+        // the process restarts. A handle that re-opens must see it.
+        let (_origin, clone) = init_repo_with_upstream();
+        let p = clone.path();
+        git(p, &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(p.join("feature.txt"), "x\n").unwrap();
+        git(p, &["add", "feature.txt"]);
+        git(p, &["commit", "-q", "-m", "feature work"]);
+
+        // Opened BEFORE the push, and held across it, exactly like watch mode.
+        let mut held = RepoHandle::discover(p).expect("clone is a worktree repo");
+        assert!(
+            super::upstream_status(held.repo()).is_none(),
+            "a local-only branch has no upstream yet",
+        );
+
+        git(p, &["push", "-q", "-u", "origin", "feature"]);
+
+        let up = super::upstream_status(held.reopened())
+            .expect("a re-opened handle must see the upstream configured after it was opened");
+        assert_eq!(up.name, "origin/feature");
+        assert_eq!(
+            (up.ahead, up.behind),
+            (0, 0),
+            "the push left the branch level with its brand-new upstream",
+        );
+    }
+
+    /// Read the `gsw.probe` key out of the repository's config as it stands
+    /// *right now*, owned so the snapshot's borrow ends with the call.
+    ///
+    /// The key is one git itself never consults, so a non-`None` answer can only
+    /// have come from a fresh read of the config file the handle resolves to —
+    /// exactly the observation the re-open is supposed to make possible.
+    fn probe(repo: &gix::Repository) -> Option<String> {
+        repo.config_snapshot()
+            .string("gsw.probe")
+            .map(|value| value.to_string())
+    }
+
+    #[test]
+    fn reopened_handle_in_a_linked_worktree_sees_config_written_after_open() {
+        // Nearly all work on this repository happens in a linked worktree
+        // (`nwt`), so that is where gsw's watch mode actually runs, and it is
+        // the one layout whose work-tree root holds a `.git` *file* pointing at
+        // `<repo>/.git/worktrees/<name>` rather than a `.git` directory.
+        // `reopened()` re-opens with `gix::open` — chosen over `gix::discover`
+        // precisely because it resolves that pointer without walking up — so if
+        // resolution ever regressed, `open` would simply fail, the handle would
+        // fall back to the stale repository it already holds, and every config
+        // change made mid-watch (`git push -u origin <branch>` above all) would
+        // go unseen until restart, with nothing on screen to say so. The rest
+        // of the re-open tests run against a plain repo or a clone, where a
+        // broken pointer costs nothing.
+        //
+        // This guard is not red-first: the property already holds. It exists so
+        // a gix upgrade or a later refactor cannot turn the #334 fix into a
+        // no-op in the environment it is used in most while the suite stays
+        // green.
+        let (_repo, linked) = init_repo_with_worktree();
+
+        // The fixture only proves anything if it really is a linked worktree —
+        // a plain clone would exercise the `.git`-directory path and satisfy
+        // every assertion below while covering none of the pointer resolution.
+        assert!(
+            linked.join(".git").is_file(),
+            "a linked worktree's `.git` is a gitdir pointer file, not a directory",
+        );
+
+        // Opened BEFORE the config write and held across it, like watch mode.
+        let mut held = RepoHandle::discover(&linked).expect("linked worktree is a worktree repo");
+        assert_ne!(
+            held.repo().git_dir(),
+            held.repo().common_dir(),
+            "a linked worktree's per-worktree git dir lives under the main repo's common dir",
+        );
+        assert_eq!(probe(held.repo()), None, "nothing has written the key yet");
+
+        // What any `git config` run in another pane does mid-watch. From a
+        // linked worktree this lands in the *common* `.git/config`, which is
+        // reachable only by following the gitdir pointer.
+        git(&linked, &["config", "gsw.probe", "written-after-open"]);
+
+        assert_eq!(
+            probe(held.repo()),
+            None,
+            "the handle opened before the write still has the old config cached",
+        );
+        assert_eq!(
+            probe(held.reopened()).as_deref(),
+            Some("written-after-open"),
+            "re-opening from a work-tree root whose `.git` is a pointer file must \
+             still re-read the configuration it points at",
+        );
+    }
+
+    #[test]
+    fn reopened_keeps_the_previous_handle_when_the_repo_is_momentarily_gone() {
+        // Watch mode calls `reopened()` on a timer, so it will eventually land
+        // in the middle of a `git gc`, a checkout, or a worktree prune and find
+        // the git dir missing. Falling back to the handle already in hand keeps
+        // the monitor rendering; going blank (or panicking) for a tick would be
+        // worse than repainting one tick-old configuration.
+        //
+        // This guard cannot be written red-first: before `reopened()` re-opened
+        // anything it returned the cached handle unconditionally and passed
+        // trivially. It ships with the branch it protects.
+        let dir = init_repo();
+        let p = dir.path();
+        let mut held = RepoHandle::discover(p).expect("worktree repo");
+        let git_dir = held.repo().git_dir().to_path_buf();
+
+        std::fs::rename(p.join(".git"), p.join(".git-moved")).unwrap();
+        assert_eq!(
+            held.reopened().git_dir(),
+            git_dir,
+            "a failed re-open must keep the previous handle, not drop the repo",
+        );
+
+        std::fs::rename(p.join(".git-moved"), p.join(".git")).unwrap();
+        assert_eq!(
+            super::branch_name(held.reopened()),
+            "main",
+            "and the next re-open must recover once the git dir is back",
+        );
+    }
+
+    // Unix-only because the symlink it stages is: `std::os::unix::fs::symlink`
+    // does not exist on Windows, so an ungated test breaks the build for that
+    // target rather than failing there — which is how it hid until the crate was
+    // first checked against `x86_64-pc-windows-msvc`.
+    #[cfg(unix)]
+    #[test]
     fn status_staged_typechange_file_to_symlink() {
         // Replace a tracked regular file with a symlink and stage it; git/gix
         // report this as a type change, not a plain modification.
@@ -945,13 +2605,7 @@ mod tests {
         git(p, &["commit", "-q", "-am", "main edit"]);
         // Merge 'other' into main → conflict on a.txt. The merge command exits
         // non-zero on conflict, so don't assert success here.
-        let _ = std::process::Command::new("git")
-            .args(["merge", "other"])
-            .current_dir(p)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .status()
-            .expect("invoke git merge");
+        git_allowing_failure(p, &["merge", "other"]);
         let repo = open_at(p).unwrap();
         let s = statuses(&repo);
         assert!(
@@ -959,5 +2613,556 @@ mod tests {
                 .any(|(path, st, _)| path == "a.txt" && *st == FileStatus::Conflicted),
             "a.txt should be Conflicted after a failed merge: {s:?}",
         );
+    }
+
+    #[test]
+    fn operation_state_reports_merge_with_conflict_count() {
+        // A real in-progress merge (MERGE_HEAD present) must classify as
+        // Operation::Merge, carrying the caller-supplied conflict count.
+        let dir = init_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "-b", "other"]);
+        std::fs::write(p.join("a.txt"), "from other\n").unwrap();
+        git(p, &["commit", "-q", "-am", "other edit"]);
+        git(p, &["checkout", "-q", "main"]);
+        std::fs::write(p.join("a.txt"), "from main\n").unwrap();
+        git(p, &["commit", "-q", "-am", "main edit"]);
+        // The merge exits non-zero on conflict; don't assert success.
+        git_allowing_failure(p, &["merge", "other"]);
+        let repo = open_at(p).unwrap();
+        assert_eq!(
+            super::operation_state(&repo, 1),
+            Some(Operation::Merge { conflicts: 1 }),
+        );
+    }
+
+    #[test]
+    fn operation_state_is_none_for_clean_tree() {
+        let dir = init_repo();
+        let repo = open_at(dir.path()).unwrap();
+        assert_eq!(super::operation_state(&repo, 0), None);
+    }
+
+    /// [`diverged_repo`] with `feature`'s conflicting commit turned into a
+    /// mailbox patch and applied on `main`, where it fails — leaving a `git am`
+    /// in progress (a `rebase-apply/` directory carrying the `applying`
+    /// marker). HEAD is left on `main`.
+    fn failed_am_repo() -> TempDir {
+        let dir = diverged_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["format-patch", "-1", "-o", "patches", "feature~1"]);
+        let patch = std::fs::read_dir(p.join("patches"))
+            .expect("read patches dir")
+            .next()
+            .expect("format-patch wrote a patch")
+            .expect("patch dir entry")
+            .path();
+        // `git am` exits non-zero when the patch does not apply — that failure
+        // *is* the fixture.
+        git_allowing_failure(p, &["am", patch.to_str().expect("utf-8 patch path")]);
+        dir
+    }
+
+    #[test]
+    fn operation_state_reports_rebase_with_step_counts_and_conflict_count() {
+        let dir = diverged_repo();
+        let p = dir.path();
+        // The rebase stops on the first of the two commits; it exits non-zero.
+        git_allowing_failure(p, &["rebase", "main"]);
+        let repo = open_at(p).unwrap();
+        assert_eq!(
+            super::operation_state(&repo, 1),
+            Some(Operation::Rebase {
+                step: Some(StepProgress {
+                    current: 1,
+                    total: 2,
+                }),
+                conflicts: 1,
+            }),
+        );
+    }
+
+    #[test]
+    fn operation_state_reports_rebase_inside_a_linked_worktree() {
+        // A rebase started in a *linked* worktree writes its state to that
+        // worktree's own git dir — `<repo>/.git/worktrees/<name>/rebase-merge/`
+        // — not to the shared common dir every worktree of the repo points at.
+        // `rebase_step` therefore has to read `repo.path()` (the per-worktree
+        // git dir, the same base `gix::Repository::state` classifies from) and
+        // never the common dir. Resolving the common dir instead would still
+        // classify the rebase correctly while silently finding no counters, so
+        // every worktree user would lose the `current/total` clause with the
+        // suite staying green — and this repository mandates that all work
+        // happen in linked worktrees, so that is gsw's main path, not an edge
+        // case.
+        //
+        // This guard is not red-first: the property already holds. It exists so
+        // a later refactor of the git-dir resolution cannot quietly drop it.
+        let (dir, linked) = init_repo_with_worktree();
+        let p = dir.path();
+
+        // The fixture only proves anything if it really is a linked worktree —
+        // in a plain repo the per-worktree and common git dirs are the same
+        // path, so reading either would satisfy the assertion below.
+        assert!(
+            linked.join(".git").is_file(),
+            "a linked worktree's `.git` is a gitdir pointer file, not a directory",
+        );
+
+        // `diverged_repo`'s shape, built across the two worktrees: the linked
+        // worktree's branch gets two commits, the first of which conflicts with
+        // `main`'s edit to the same line of `a.txt`, so rebasing `linked` onto
+        // `main` stops on step 1 of 2 with `a.txt` unmerged.
+        std::fs::write(linked.join("a.txt"), "from linked\n").expect("write a.txt");
+        git(&linked, &["commit", "-q", "-am", "linked edit"]);
+        std::fs::write(linked.join("b.txt"), "second\n").expect("write b.txt");
+        git(&linked, &["add", "b.txt"]);
+        git(&linked, &["commit", "-q", "-m", "linked second"]);
+        std::fs::write(p.join("a.txt"), "from main\n").expect("write a.txt");
+        git(p, &["commit", "-q", "-am", "main edit"]);
+
+        // Run the rebase *inside* the linked worktree; it exits non-zero when
+        // it stops on the conflict.
+        git_allowing_failure(&linked, &["rebase", "main"]);
+
+        let repo = open_at(&linked).expect("linked worktree is a worktree repo");
+        assert_ne!(
+            repo.git_dir(),
+            repo.common_dir(),
+            "the rebase state must live in a git dir distinct from the common one",
+        );
+        assert_eq!(
+            super::operation_state(&repo, 1),
+            Some(Operation::Rebase {
+                step: Some(StepProgress {
+                    current: 1,
+                    total: 2,
+                }),
+                conflicts: 1,
+            }),
+        );
+    }
+
+    #[test]
+    fn operation_state_reports_rebase_for_the_apply_backend() {
+        // `git rebase --apply` uses the apply backend, which records its state
+        // in `rebase-apply/` (with the `rebasing` marker) and counts steps in
+        // `next`/`last` rather than `msgnum`/`end`.
+        let dir = diverged_repo();
+        let p = dir.path();
+        git_allowing_failure(p, &["rebase", "--apply", "main"]);
+        let repo = open_at(p).unwrap();
+        assert_eq!(
+            super::operation_state(&repo, 1),
+            Some(Operation::Rebase {
+                step: Some(StepProgress {
+                    current: 1,
+                    total: 2,
+                }),
+                conflicts: 1,
+            }),
+        );
+    }
+
+    #[test]
+    fn rebase_step_prefers_the_directory_gix_classified_from() {
+        // Pins the precedence, not just the happy path: `gix::Repository::state`
+        // resolves `rebase-apply/` *before* `rebase-merge/`, so when both
+        // directories exist the step counts must come from the same directory
+        // the classification did. The `rebase-merge/` decoy below is deliberate
+        // — git never leaves both present at once, so only a hand-built one can
+        // catch the counters being read in the opposite order from the state.
+        let dir = diverged_repo();
+        let p = dir.path();
+        git_allowing_failure(p, &["rebase", "--apply", "main"]);
+        assert!(
+            p.join(".git/rebase-apply/rebasing").exists(),
+            "the apply backend must have left its `rebasing` marker, which is \
+             what makes gix classify from `rebase-apply/`",
+        );
+        let decoy = p.join(".git/rebase-merge");
+        std::fs::create_dir_all(&decoy).expect("create rebase-merge decoy");
+        std::fs::write(decoy.join("msgnum"), "7\n").expect("write decoy msgnum");
+        std::fs::write(decoy.join("end"), "9\n").expect("write decoy end");
+        let repo = open_at(p).unwrap();
+        assert_eq!(
+            super::operation_state(&repo, 1),
+            Some(Operation::Rebase {
+                step: Some(StepProgress {
+                    current: 1,
+                    total: 2,
+                }),
+                conflicts: 1,
+            }),
+        );
+    }
+
+    #[test]
+    fn operation_state_reports_rebase_without_steps_when_counter_files_are_absent() {
+        // Graceful degradation: the rebase is still surfaced when its step
+        // counters cannot be read, just without the `current/total` clause.
+        let dir = diverged_repo();
+        let p = dir.path();
+        git_allowing_failure(p, &["rebase", "main"]);
+        std::fs::remove_file(p.join(".git/rebase-merge/msgnum")).expect("remove msgnum");
+        std::fs::remove_file(p.join(".git/rebase-merge/end")).expect("remove end");
+        let repo = open_at(p).unwrap();
+        assert_eq!(
+            super::operation_state(&repo, 1),
+            Some(Operation::Rebase {
+                step: None,
+                conflicts: 1,
+            }),
+        );
+    }
+
+    #[test]
+    fn operation_state_reports_rebase_without_steps_when_counters_are_unparseable() {
+        let dir = diverged_repo();
+        let p = dir.path();
+        git_allowing_failure(p, &["rebase", "main"]);
+        std::fs::write(p.join(".git/rebase-merge/msgnum"), "not-a-number\n").expect("write msgnum");
+        let repo = open_at(p).unwrap();
+        assert_eq!(
+            super::operation_state(&repo, 1),
+            Some(Operation::Rebase {
+                step: None,
+                conflicts: 1,
+            }),
+        );
+    }
+
+    #[test]
+    fn operation_state_treats_an_ambiguous_rebase_apply_dir_as_a_rebase() {
+        // A `rebase-apply/` directory carrying neither the `applying` nor the
+        // `rebasing` marker is gix's `ApplyMailboxRebase`: it cannot be told
+        // apart from an apply-backend rebase, so it is surfaced as one.
+        let dir = failed_am_repo();
+        let p = dir.path();
+        std::fs::remove_file(p.join(".git/rebase-apply/applying")).expect("remove applying marker");
+        let repo = open_at(p).unwrap();
+        assert_eq!(
+            super::operation_state(&repo, 0),
+            Some(Operation::Rebase {
+                step: Some(StepProgress {
+                    current: 1,
+                    total: 1,
+                }),
+                conflicts: 0,
+            }),
+        );
+    }
+
+    #[test]
+    fn operation_state_is_none_for_plain_git_am() {
+        // Applying a mailbox is not a rebase and is out of scope, so it gets no
+        // indicator — even though it shares the `rebase-apply/` directory that
+        // the apply-backend rebase uses.
+        let dir = failed_am_repo();
+        let repo = open_at(dir.path()).unwrap();
+        assert_eq!(super::operation_state(&repo, 0), None);
+    }
+
+    #[test]
+    fn operation_state_is_none_for_cherry_pick() {
+        // Out of scope: a cherry-pick conflict must not be reported as a merge
+        // or a rebase. A clean repo cannot catch that mis-mapping — it has no
+        // in-progress state at all — so this fixture is the real guard.
+        let dir = diverged_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "main"]);
+        git_allowing_failure(p, &["cherry-pick", "feature~1"]);
+        let repo = open_at(p).unwrap();
+        assert_eq!(super::operation_state(&repo, 1), None);
+    }
+
+    /// A conflict count that no fixture below can produce by accident. The
+    /// walk of each fixture finds one conflict or none, so an operation that
+    /// carries this count carries the count of the closure.
+    const COUNT_OF_THE_CLOSURE: u32 = 7;
+
+    #[test]
+    fn held_operation_counts_no_conflict_when_git_holds_no_operation() {
+        // The run of `R` and `M` reads the work tree twice for each press:
+        // before the shell and after it. Both reads usually find no operation.
+        // The count costs a full status walk and a line diff of each changed
+        // blob, so a read that finds no operation must not pay for it.
+        let dir = init_repo();
+        let repo = open_at(dir.path()).unwrap();
+        let counted = Cell::new(false);
+
+        let held = super::held_operation_in(&repo, |_| {
+            counted.set(true);
+            COUNT_OF_THE_CLOSURE
+        });
+
+        assert_eq!(held, None, "a clean work tree holds no operation");
+        assert!(
+            !counted.get(),
+            "a work tree that holds no operation needs no conflict count, \
+             so the status walk must not run",
+        );
+    }
+
+    #[test]
+    fn held_operation_counts_the_conflicts_of_a_held_merge() {
+        // The merge of `main` into `feature` stops on `a.txt`. It exits
+        // non-zero, and that failure is the fixture.
+        let dir = diverged_repo();
+        git_allowing_failure(dir.path(), &["merge", "main"]);
+        let repo = open_at(dir.path()).unwrap();
+        let counts = Cell::new(0_u32);
+
+        let held = super::held_operation_in(&repo, |_| {
+            counts.set(counts.get() + 1);
+            COUNT_OF_THE_CLOSURE
+        });
+
+        assert_eq!(
+            held,
+            Some(Operation::Merge {
+                conflicts: COUNT_OF_THE_CLOSURE,
+            }),
+            "the merge must carry the count of the closure",
+        );
+        assert_eq!(counts.get(), 1, "a held merge needs one conflict count");
+    }
+
+    #[test]
+    fn held_operation_counts_the_conflicts_of_a_held_rebase_and_keeps_its_step() {
+        // The rebase stops on step 1 of 2. It exits non-zero, and that failure
+        // is the fixture. The count goes into a rebase that already carries
+        // its step, and the step must stay.
+        let dir = diverged_repo();
+        git_allowing_failure(dir.path(), &["rebase", "main"]);
+        let repo = open_at(dir.path()).unwrap();
+        let counts = Cell::new(0_u32);
+
+        let held = super::held_operation_in(&repo, |_| {
+            counts.set(counts.get() + 1);
+            COUNT_OF_THE_CLOSURE
+        });
+
+        assert_eq!(
+            held,
+            Some(Operation::Rebase {
+                step: Some(StepProgress {
+                    current: 1,
+                    total: 2,
+                }),
+                conflicts: COUNT_OF_THE_CLOSURE,
+            }),
+            "the rebase must carry its step and the count of the closure",
+        );
+        assert_eq!(counts.get(), 1, "a held rebase needs one conflict count");
+    }
+
+    /// A rebase that git holds, as [`super::operation_start`] takes it. The
+    /// reader reads the kind of the operation, and not its step or its count.
+    const HELD_REBASE: Operation = Operation::Rebase {
+        step: None,
+        conflicts: 1,
+    };
+
+    /// The full id of the commit that `rev` names in the repository at `dir`,
+    /// as git reports it.
+    fn commit_id(dir: &Path, rev: &str) -> gix::ObjectId {
+        let hex = crate::testrepo::git_stdout(dir, &["rev-parse", rev]);
+        gix::ObjectId::from_hex(hex.as_bytes()).expect("git gives a full id")
+    }
+
+    #[test]
+    fn operation_start_reads_the_rebase_directory_that_gix_classified_from() {
+        // The start of a rebase must come from the directory that the
+        // classification came from, for the reason that `rebase_step` gives.
+        // git never leaves both directories at once, so only a decoy built by
+        // hand can catch a read in the opposite order. The `rebase-merge/`
+        // decoy names a different branch and a different commit.
+        //
+        // This guard is not red-first: the order came with the reader. A
+        // mutation proved it: `REBASE_DIRS.iter().rev()` in the reader fails
+        // this test with the branch and the commit of the decoy.
+        let dir = diverged_repo();
+        let p = dir.path();
+        let before = commit_id(p, "HEAD");
+        git_allowing_failure(p, &["rebase", "--apply", "main"]);
+        assert!(
+            p.join(".git/rebase-apply/rebasing").exists(),
+            "the apply backend must have left its `rebasing` marker, which is what makes gix \
+             classify from `rebase-apply/`",
+        );
+        let decoy = p.join(".git/rebase-merge");
+        std::fs::create_dir_all(&decoy).expect("create the rebase-merge decoy");
+        std::fs::write(decoy.join("head-name"), "refs/heads/decoy\n").expect("write head-name");
+        std::fs::write(
+            decoy.join("orig-head"),
+            format!("{}\n", commit_id(p, "main")),
+        )
+        .expect("write orig-head");
+
+        assert_eq!(
+            super::operation_start(p, &HELD_REBASE),
+            super::OperationStart {
+                branch: Some("feature".to_string()),
+                commit: Some(before),
+            },
+        );
+    }
+
+    #[test]
+    fn operation_start_knows_nothing_that_it_cannot_read() {
+        // A missing file and a file that does not parse name nothing. The run
+        // of `R` and `M` compares each value with a value that it knows, and
+        // `None` matches nothing, so gsw then aborts nothing. A reader that
+        // fell back on HEAD for a commit that it cannot read would give a
+        // start that git never recorded.
+        //
+        // This guard is not red-first: the rule came with the reader. A
+        // mutation proved it: a fall back on the HEAD of the repository for an
+        // `orig-head` that does not parse fails this test.
+        let dir = diverged_repo();
+        let p = dir.path();
+        git_allowing_failure(p, &["rebase", "main"]);
+        std::fs::remove_file(p.join(".git/rebase-merge/head-name")).expect("remove head-name");
+        std::fs::write(p.join(".git/rebase-merge/orig-head"), "not-a-commit\n")
+            .expect("write orig-head");
+
+        assert_eq!(
+            super::operation_start(p, &HELD_REBASE),
+            super::OperationStart::default(),
+        );
+    }
+}
+
+#[cfg(test)]
+mod push_remote_tests {
+    use super::{pick_push_remote, push_remote, RepoHandle};
+    use crate::testrepo::{git, init_repo, init_repo_with_upstream};
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn the_only_remote_is_the_answer_whatever_it_is_called() {
+        // A repo whose single remote is `fork` must not be told it has no
+        // remote just because the name is not `origin`.
+        assert_eq!(
+            pick_push_remote(&names(&["fork"]), None),
+            Some("fork".to_string()),
+        );
+    }
+
+    #[test]
+    fn origin_wins_among_several_remotes() {
+        assert_eq!(
+            pick_push_remote(&names(&["upstream", "origin", "fork"]), None),
+            Some("origin".to_string()),
+        );
+    }
+
+    #[test]
+    fn several_remotes_without_origin_are_ambiguous() {
+        // Guessing here would publish a branch to a remote the user never
+        // named. Refusing sends them to `git push` with their own choice.
+        assert_eq!(pick_push_remote(&names(&["upstream", "fork"]), None), None);
+    }
+
+    #[test]
+    fn no_remote_at_all_has_no_answer() {
+        assert_eq!(pick_push_remote(&[], None), None);
+    }
+
+    #[test]
+    fn push_default_overrides_origin() {
+        // The setting exists to override the default. Ignoring it would push to
+        // `origin` while the user's own config says otherwise.
+        assert_eq!(
+            pick_push_remote(&names(&["origin", "upstream"]), Some("upstream")),
+            Some("upstream".to_string()),
+        );
+    }
+
+    #[test]
+    fn push_default_resolves_an_otherwise_ambiguous_repository() {
+        assert_eq!(
+            pick_push_remote(&names(&["alpha", "beta"]), Some("beta")),
+            Some("beta".to_string()),
+        );
+    }
+
+    #[test]
+    fn push_default_is_taken_verbatim_even_when_it_names_nothing() {
+        // git is the authority on whether the name resolves. Falling back to
+        // `origin` here would push somewhere the user did not configure, and
+        // the fallback would be invisible. `git push` reports the real error.
+        assert_eq!(
+            pick_push_remote(&names(&["origin"]), Some("typo")),
+            Some("typo".to_string()),
+        );
+    }
+
+    #[test]
+    fn a_clone_reports_its_origin() {
+        // The end-to-end read, against a repository that really has a remote.
+        let (_origin, clone) = init_repo_with_upstream();
+        let handle = RepoHandle::discover(clone.path()).expect("clone is a worktree repo");
+        assert_eq!(push_remote(handle.repo()), Some("origin".to_string()));
+    }
+
+    #[test]
+    fn a_repository_with_no_remote_reports_none() {
+        let dir = init_repo();
+        let handle = RepoHandle::discover(dir.path()).expect("fixture is a worktree repo");
+        assert_eq!(push_remote(handle.repo()), None);
+    }
+
+    #[test]
+    fn a_repository_reports_its_only_remote_by_name() {
+        let dir = init_repo();
+        git(
+            dir.path(),
+            &["remote", "add", "fork", "https://example.invalid/x.git"],
+        );
+        let handle = RepoHandle::discover(dir.path()).expect("fixture is a worktree repo");
+        assert_eq!(push_remote(handle.repo()), Some("fork".to_string()));
+    }
+
+    #[test]
+    fn a_repository_reads_its_own_push_default() {
+        // The config read, end to end: `remote.pushDefault` must reach the
+        // answer, not just the pure picker.
+        let dir = init_repo();
+        git(
+            dir.path(),
+            &["remote", "add", "origin", "https://example.invalid/a.git"],
+        );
+        git(
+            dir.path(),
+            &["remote", "add", "fork", "https://example.invalid/b.git"],
+        );
+        git(dir.path(), &["config", "remote.pushDefault", "fork"]);
+        let handle = RepoHandle::discover(dir.path()).expect("fixture is a worktree repo");
+        assert_eq!(push_remote(handle.repo()), Some("fork".to_string()));
+    }
+
+    #[test]
+    fn a_walk_puts_the_remote_on_the_snapshot() {
+        // The field has to arrive where the push prompt reads it, not merely
+        // exist on the repository.
+        let (_origin, clone) = init_repo_with_upstream();
+        let handle = RepoHandle::discover(clone.path()).expect("clone is a worktree repo");
+        let cfg = crate::RenderConfig {
+            base: None,
+            max_files: None,
+            bar_width: 20,
+            log: crate::LogDemand::Off,
+            truecolor: false,
+            width_offset: 0,
+            refresh_interval: None,
+        };
+        let snapshot = crate::collect_snapshot(handle.repo(), &cfg, 0).expect("walk the clone");
+        assert_eq!(snapshot.push_remote, Some("origin".to_string()));
     }
 }

@@ -1,0 +1,35 @@
+[package]
+name = "krt"
+version = "0.1.0"
+edition.workspace = true
+description = "Knights of the Round Trip: a Rust tool that records the network path to a destination, hop by hop"
+
+[dependencies]
+altscreen.workspace = true
+buildinfo.workspace = true
+chrono.workspace = true
+clap.workspace = true
+crossterm.workspace = true
+image.workspace = true
+rand.workspace = true
+ratatui.workspace = true
+reqwest = { workspace = true, features = ["blocking"] }
+serde.workspace = true
+serde_json.workspace = true
+signal-hook.workspace = true
+sysinfo.workspace = true
+termgfx.workspace = true
+termsize.workspace = true
+thiserror.workspace = true
+trippy-core.workspace = true
+trippy-dns.workspace = true
+trippy-privilege.workspace = true
+unicode-width.workspace = true
+
+[dev-dependencies]
+childenv.workspace = true
+mockito.workspace = true
+portable-pty.workspace = true
+
+[lints]
+workspace = true

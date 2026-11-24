@@ -1,0 +1,2064 @@
+//! The privilege gate of a run, the wall in front of the tracer, the tracer
+//! that one configuration starts, and the conversion of one round into one
+//! record.
+//!
+//! `krt` probes through the trippy crates. No other module of `krt` names a
+//! type of those crates, so an upgrade of them breaks this one file and no
+//! other. The guard `repo_guards::trippy_wall` holds that rule in place.
+//!
+//! The gate asks the platform whether a probe needs raw socket privileges, and
+//! whether the process holds them. A platform that needs none runs
+//! unprivileged, even when the process holds them, because a run that quietly
+//! changes the way it probes records one thing and does another. A platform
+//! that needs them and holds none stops, and the message names the remedy of
+//! each platform.
+//!
+//! Every probe of a run carries a mark of the process that sent it, and a run
+//! drops every answer that carries another mark. macOS hands the ICMP answers
+//! of one process to the socket of every other process that reads that
+//! protocol, so a run there reads every answer the machine took, and a run
+//! without a mark records the path of another run. [`probe_identifier`] gives
+//! the mark of an ICMP probe, and [`udp_source_port`] gives the mark of a UDP
+//! probe. A TCP probe varies its source port already, and the tracer takes the
+//! next one when a port is in use.
+//!
+//! One process runs many tracers at the same time, because a hunt traces many
+//! destinations at once. Those tracers stand in one process and share its
+//! identifier, so the mark of the process alone would leave each of them
+//! reading the answers of the others. [`Lane`] is what tells them apart: it
+//! moves both marks, each by a stride of its own.
+//!
+//! The interface of the wall is one type and three functions. [`TraceConfig`]
+//! states one run in the words that `krt` owns, and [`spawn`] starts the
+//! tracer of that run and gives back a receiver of completed rounds.
+//! [`resolver`] gives the reverse resolver of the platform as a
+//! [`crate::names::Resolver`], which is a type that `krt` owns, and
+//! [`resolver_timeout`] gives the longest that one lookup of that resolver
+//! takes, as a [`Duration`]. A caller outside this module therefore names no
+//! type of a trippy crate.
+//!
+//! The conversion is the wall itself. The tracer hands one round over as a
+//! borrowed value that lives for the length of one call, and
+//! [`to_round_record`] copies every value that the record keeps. Nothing
+//! borrowed crosses out of this module, so a later change of engine touches
+//! this file alone. The run loop that reads the receiver arrives in a later
+//! slice.
+
+use crate::names::Lookup;
+use crate::record::{self, Hop, RoundRecord, RunId, TtlRange};
+use chrono::{DateTime, Utc};
+use std::net::IpAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver};
+use std::thread::JoinHandle;
+use std::time::{Duration, SystemTime};
+use trippy_core::{CompletionReason, IcmpPacketType, ProbeStatus, Round};
+use trippy_dns::{DnsEntry, DnsResolver, Resolver as _};
+
+/// The remedy of a platform that needs raw socket privileges and holds none.
+///
+/// `main` writes every message as `krt: {reason}`, so the text carries no
+/// program name. The two lines under the first one carry two spaces each, and
+/// the remedy of each platform starts at the same column.
+const MISSING_PRIVILEGES: &str = "\
+this platform needs raw socket privileges to send probes.
+  Linux:   sudo setcap 'cap_net_raw+p' $(which krt)
+  Windows: run krt from an elevated prompt";
+
+/// Acquires the privileges of the platform and decides the mode of a run.
+///
+/// # Errors
+///
+/// Returns [`PrivilegeError::Missing`] when the platform needs raw socket
+/// privileges and the process does not hold them. Returns
+/// [`PrivilegeError::Discovery`] when the platform will not report what it
+/// holds.
+pub(crate) fn acquire_privilege() -> Result<record::Privilege, PrivilegeError> {
+    let privilege = trippy_privilege::Privilege::acquire_privileges().map_err(|error| {
+        PrivilegeError::Discovery {
+            reason: error.to_string(),
+        }
+    })?;
+    choose_privilege(privilege.has_privileges(), privilege.needs_privileges())
+}
+
+/// Decides the mode of a run from what the platform reports.
+///
+/// `has` is true when the process holds raw socket privileges. `needs` is true
+/// when a probe of this platform needs them.
+///
+/// # Errors
+///
+/// Returns [`PrivilegeError::Missing`] when the platform needs the privileges
+/// and the process holds none.
+fn choose_privilege(has: bool, needs: bool) -> Result<record::Privilege, PrivilegeError> {
+    match (needs, has) {
+        // macOS sends through an `IPPROTO_ICMP` socket with the `IP_HDRINCL`
+        // socket option, so it needs no privileges. A process that holds them
+        // there still runs unprivileged, because `krt` never changes the way it
+        // probes without a word.
+        (false, _) => Ok(record::Privilege::Unprivileged),
+        (true, true) => Ok(record::Privilege::Privileged),
+        (true, false) => Err(PrivilegeError::Missing),
+    }
+}
+
+/// Why a run does not start.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub(crate) enum PrivilegeError {
+    /// The platform needs raw socket privileges, and the process holds none.
+    ///
+    /// Linux supports an `IPPROTO_ICMP` socket and does not support the
+    /// `IP_HDRINCL` socket option, so it needs `CAP_NET_RAW`. Windows needs an
+    /// elevated token. The message names the remedy of each one.
+    #[error("{MISSING_PRIVILEGES}")]
+    Missing,
+    /// The platform will not report the privileges that it holds.
+    #[error("the platform will not report the privileges that it holds: {reason}")]
+    Discovery {
+        /// The reason that the platform gave.
+        reason: String,
+    },
+}
+
+/// One of the lanes that a process probes in at the same time.
+///
+/// Two tracers of one process that probe at once must not read each other's
+/// answers, and two UDP tracers of one process must not bind one source port.
+/// The lane is what tells two such tracers apart. It moves the probe identifier
+/// of an ICMP trace and the source port of a UDP trace, each by a stride of its
+/// own, so no two lanes of one process land on one value.
+///
+/// A trace of one destination probes in [`Lane::FIRST`]. A hunt gives each
+/// destination that it holds at one moment a lane of its own, and it takes that
+/// lane back when the destination stops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct Lane(
+    /// The number of the lane, below [`Lane::COUNT`].
+    u16,
+);
+
+impl Lane {
+    /// The lane that a trace of one destination probes in.
+    pub(crate) const FIRST: Self = Self(0);
+
+    /// The number of lanes that one process holds.
+    ///
+    /// The ceiling stands here, and not on the command line, because the two
+    /// strides come off it: a count that the strides do not cover would put two
+    /// lanes of one process on one probe identifier. The command line refuses a
+    /// count above this one, and [`Lane::pool`] holds the same ceiling behind
+    /// that refusal.
+    ///
+    /// Thirty-two destinations at once send about a thousand probes in the
+    /// period of one round, which is a load that a link feels. The number is
+    /// therefore what the strides can carry and what a link can take, and not
+    /// the largest number that the fold allows.
+    pub(crate) const COUNT: u16 = 32;
+
+    /// The first `count` lanes, which is the pool that a hunt of that many
+    /// destinations at once draws from.
+    ///
+    /// A count above [`Lane::COUNT`] gives [`Lane::COUNT`] lanes. The command
+    /// line refuses such a count, so this clamp is the guard behind that
+    /// refusal and never the thing a user meets.
+    pub(crate) fn pool(count: usize) -> Vec<Self> {
+        // Only a count above the range of a `u16` fails the conversion, and
+        // every such count stands far above `COUNT`. The fallback is therefore
+        // `COUNT`, which the clamp beside it also gives the counts that the
+        // range holds.
+        let held = u16::try_from(count).unwrap_or(Self::COUNT).min(Self::COUNT);
+        (0..held).map(Self).collect()
+    }
+
+    /// The place of this lane among the lanes of its process.
+    ///
+    /// A caller that holds one thing for each lane reads this as the place of
+    /// that thing.
+    pub(crate) const fn place(self) -> usize {
+        self.0 as usize
+    }
+
+    /// The distance that this lane moves a value of a window of `window`.
+    ///
+    /// Each lane stands one stride from the lane beside it, and the stride is
+    /// the window divided by the number of lanes. Every lane of one process
+    /// therefore lands on a value of its own, and two processes whose
+    /// identifiers stand one apart land on no value in common.
+    const fn shift(self, window: u32) -> u32 {
+        (self.0 as u32) * (window / Self::COUNT as u32)
+    }
+}
+
+/// The first source port that a UDP trace of `krt` takes.
+///
+/// A fixed source port to a varying destination port is the direction of a UDP
+/// trace. A traceroute probes the destination ports 33434 through 33534, so the
+/// source port of `krt` starts one above that range and never wears the number
+/// of a destination that a firewall reads as a traceroute.
+const UDP_FIRST_SOURCE_PORT: u16 = 33_535;
+
+/// The last source port that a UDP trace of `krt` takes.
+///
+/// 49151 is the last registered port. Above it stands the range that macOS
+/// hands to a socket which asks for any port, so a source port of that higher
+/// range would stand where an outgoing connection of any program can already
+/// be.
+const UDP_LAST_SOURCE_PORT: u16 = 49_151;
+
+/// The number of source ports that a UDP trace of `krt` chooses from.
+const UDP_SOURCE_PORTS: u32 = (UDP_LAST_SOURCE_PORT - UDP_FIRST_SOURCE_PORT) as u32 + 1;
+
+/// The source port that a UDP trace of one process holds.
+///
+/// The port is what tells two UDP runs of one machine apart, and it does so
+/// twice over. The unprivileged path of macOS binds the source port for each
+/// probe it sends, so two runs of one port cannot both send, and the tracer of
+/// the second one stops on the port it cannot take. The answers carry the port
+/// too: the tracer drops an answer whose original datagram left from another
+/// port.
+///
+/// The process identifier is the source, for the reason that
+/// [`probe_identifier`] states. The fold maps no two process identifiers of one
+/// window of [`UDP_SOURCE_PORTS`] onto one port, so two runs that a user starts
+/// one after the other take two ports.
+///
+/// A port of the range that another program already holds stops the run, as the
+/// one fixed port of every run did before. The next run holds another process
+/// identifier and takes another port.
+///
+/// The lane is what tells two UDP tracers of one process apart, because those
+/// two probe at the same time and one port takes one of them. [`Lane`] states
+/// how the stride keeps every lane of one process on a port of its own.
+const fn udp_source_port(process: u32, lane: Lane) -> u16 {
+    // The fold of the process runs first, so the sum of it and the shift of the
+    // lane stands far below the range of a `u32` and overflows for no process
+    // identifier. The remainder of that sum then stands below
+    // `UDP_SOURCE_PORTS`, which is far inside the range of a `u16`, so the
+    // conversion of it takes nothing away.
+    let offset = ((process % UDP_SOURCE_PORTS) + lane.shift(UDP_SOURCE_PORTS)) % UDP_SOURCE_PORTS;
+    UDP_FIRST_SOURCE_PORT + offset as u16
+}
+
+/// The destination port that a TCP trace holds while the source port varies.
+///
+/// A varying source port to a fixed destination port is the direction of a TCP
+/// trace, and 80 is the port of HTTP.
+const TCP_DESTINATION_PORT: u16 = 80;
+
+/// The number of the first round of a run. The schema counts from one.
+const FIRST_ROUND: u64 = 1;
+
+/// The number of identifiers that a probe of `krt` can carry.
+///
+/// The field is 16 bits wide, and zero is not one of the values that `krt`
+/// takes: the tracer reads a zero identifier as the answer of any run. The
+/// range is therefore 1 through 65535, which is 65535 values.
+const PROBE_IDENTIFIERS: u32 = u16::MAX as u32;
+
+/// The identifier that the probes of one process carry.
+///
+/// macOS hands the ICMP answers of one process to the socket of every other
+/// process that reads that protocol, so a tracer there reads the answer of a
+/// probe that another tracer sent. The identifier is what tells the two apart.
+/// The tracer drops an answer whose identifier is neither zero nor the one that
+/// the run holds, so a run of an identifier of its own reads its own answers
+/// and no other run's.
+///
+/// Zero is the one value that the answer must never take. The tracer reads a
+/// zero as the answer of any run, which is what a UDP trace and a TCP trace
+/// need, because those two carry no identifier and the ports tell them apart. A
+/// run of `krt` that held zero would read every ICMP answer of the machine, and
+/// that is the defect this function exists to close.
+///
+/// The process identifier is the source, because two processes that stand at
+/// one moment hold two of them. The fold keeps the answer inside the range and
+/// away from zero, and it maps no two process identifiers of one window of
+/// 65535 onto one value. Two runs that a user starts one after the other hold
+/// two process identifiers a few apart, so they never land on one value. Two
+/// runs whose process identifiers differ by exactly 65535 do land on one, and
+/// those two read each other as they did before this fold.
+///
+/// The lane is what tells two ICMP tracers of one process apart, because those
+/// two probe at the same time and each of them would otherwise read the answers
+/// of the other. [`Lane`] states how the stride keeps every lane of one process
+/// on an identifier of its own.
+const fn probe_identifier(process: u32, lane: Lane) -> u16 {
+    // The fold of the process runs first, so the sum of it and the shift of the
+    // lane stands far below the range of a `u32` and overflows for no process
+    // identifier. The remainder of that sum then stands in 0 through 65534,
+    // which is inside the range of a `u16`, so the conversion of it takes
+    // nothing away, and clippy reads the remainder and raises no truncation of
+    // its own. The one that the sum adds then puts the answer in 1 through
+    // 65535.
+    let folded =
+        ((process % PROBE_IDENTIFIERS) + lane.shift(PROBE_IDENTIFIERS)) % PROBE_IDENTIFIERS;
+    folded as u16 + 1
+}
+
+/// The configuration of one tracing run, in the words that `krt` owns.
+///
+/// No field holds a type of a trippy crate, so a caller states a whole run
+/// from outside the wall of this module.
+#[derive(Debug)]
+pub(crate) struct TraceConfig {
+    /// The address to probe. `main` resolves the destination of the command
+    /// line to this address.
+    pub(crate) target: IpAddr,
+    /// The identifier of the run that every round record carries.
+    pub(crate) run: RunId,
+    /// The period of one round.
+    pub(crate) interval: Duration,
+    /// The first TTL that the run probes.
+    pub(crate) first_ttl: u8,
+    /// The last TTL that the run probes.
+    pub(crate) max_ttl: u8,
+    /// The protocol of a probe.
+    pub(crate) protocol: crate::Protocol,
+    /// The way a probe keeps or varies the flow of a packet.
+    pub(crate) multipath: crate::Multipath,
+    /// The privilege mode of the run.
+    pub(crate) privilege: record::Privilege,
+    /// The lane that this tracer probes in.
+    ///
+    /// A trace of one destination probes in [`Lane::FIRST`]. A hunt gives each
+    /// destination that it holds at one moment a lane of its own, so no two
+    /// tracers of the hunt read each other's answers.
+    pub(crate) lane: Lane,
+    /// The number of probe rounds that the tracer sends before its thread
+    /// stops.
+    ///
+    /// A run that names no number takes rounds until the process ends.
+    pub(crate) rounds: Option<u64>,
+}
+
+/// Why the tracer of a run does not start.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub(crate) enum TraceError {
+    /// The tracer refused the configuration of the run.
+    #[error("the tracer refused the configuration: {reason}")]
+    Build {
+        /// The reason that the tracer gave.
+        reason: String,
+    },
+    /// The thread of the tracer did not start.
+    #[error("the thread of the tracer did not start: {reason}")]
+    Spawn {
+        /// The reason that the platform gave.
+        reason: String,
+    },
+}
+
+/// Builds the tracer of one run from the configuration of `krt`.
+///
+/// The round period of the tracer is the window between its shortest round and
+/// its longest one. `krt` names one period, so both ends of that window take
+/// it.
+///
+/// # Errors
+///
+/// Returns [`TraceError::Build`] when the tracer refuses the configuration.
+fn tracer_of(config: &TraceConfig) -> Result<trippy_core::Tracer, TraceError> {
+    trippy_core::Builder::new(config.target)
+        // The identifier of the process, so the run reads the answers of its
+        // own probes and no other run's. [`probe_identifier`] states why.
+        .trace_identifier(probe_identifier(std::process::id(), config.lane))
+        .min_round_duration(config.interval)
+        .max_round_duration(config.interval)
+        .first_ttl(config.first_ttl)
+        .max_ttl(config.max_ttl)
+        .protocol(match config.protocol {
+            crate::Protocol::Icmp => trippy_core::Protocol::Icmp,
+            crate::Protocol::Udp => trippy_core::Protocol::Udp,
+            crate::Protocol::Tcp => trippy_core::Protocol::Tcp,
+        })
+        .multipath_strategy(match config.multipath {
+            crate::Multipath::Classic => trippy_core::MultipathStrategy::Classic,
+            crate::Multipath::Paris => trippy_core::MultipathStrategy::Paris,
+            crate::Multipath::Dublin => trippy_core::MultipathStrategy::Dublin,
+        })
+        .privilege_mode(match config.privilege {
+            record::Privilege::Unprivileged => trippy_core::PrivilegeMode::Unprivileged,
+            record::Privilege::Privileged => trippy_core::PrivilegeMode::Privileged,
+        })
+        // The protocol decides the direction of the ports. ICMP carries no
+        // port. The build refuses a UDP trace and a TCP trace whose direction
+        // is `None`, and `None` is the direction that the builder holds by
+        // default, so the two arms under the first one are what makes such a
+        // run start.
+        .port_direction(match config.protocol {
+            crate::Protocol::Icmp => trippy_core::PortDirection::None,
+            crate::Protocol::Udp => trippy_core::PortDirection::FixedSrc(trippy_core::Port(
+                udp_source_port(std::process::id(), config.lane),
+            )),
+            crate::Protocol::Tcp => {
+                trippy_core::PortDirection::FixedDest(trippy_core::Port(TCP_DESTINATION_PORT))
+            }
+        })
+        // The round limit of the run stands here too, because `trippy` gives
+        // no way to stop a tracer. A tracer that carries the limit ends its own
+        // thread when the run ends, so a hunt leaves behind no tracer of a
+        // destination it already traced.
+        //
+        // The run loop stops at the same number. It therefore reads the last
+        // round of the run and never the closed channel, and a closed channel
+        // still names a tracer that died.
+        //
+        // `trippy` counts rounds in a `usize` and `krt` counts them in a `u64`,
+        // so a number above the range of a `usize` takes the largest one. No
+        // run reaches that many rounds.
+        .max_rounds(
+            config
+                .rounds
+                .map(|rounds| usize::try_from(rounds).unwrap_or(usize::MAX)),
+        )
+        .build()
+        .map_err(|error| TraceError::Build {
+            reason: error.to_string(),
+        })
+}
+
+/// The number of the next round. The first round of a run is round one.
+///
+/// The callback of the tracer is `Fn` and not `FnMut`, so the count of the
+/// rounds lives in an atomic and not in a number of the closure.
+fn next_seq(counter: &AtomicU64) -> u64 {
+    counter.fetch_add(1, Ordering::Relaxed) + FIRST_ROUND
+}
+
+/// The thread of a tracer that runs.
+///
+/// `trippy` gives no way to stop a tracer, so the round limit of the run is
+/// what ends the thread, and this handle is what waits for that end.
+///
+/// Two tracers of one [`Lane`] carry one probe identifier and one source port,
+/// so they must not probe at the same time. A caller that starts one tracer
+/// after another in one lane holds the handle of each one and waits for it
+/// before it starts the next tracer of that lane. Two tracers of two lanes
+/// probe at the same time and read each other's answers for nothing.
+pub(crate) struct TracerThread(JoinHandle<Result<(), trippy_core::Error>>);
+
+impl TracerThread {
+    /// Waits for the thread of the tracer to stop.
+    ///
+    /// The thread stops when the tracer reaches the round limit of its run. A
+    /// run that names no round limit leaves the tracer without one, and this
+    /// wait then ends only when the process does.
+    ///
+    /// The answer of the thread goes nowhere. A tracer that died closes the
+    /// channel of its rounds, and the run loop already reports that.
+    pub(crate) fn wait(self) {
+        drop(self.0.join());
+    }
+}
+
+/// Starts the tracer on its own thread and gives back a receiver of completed
+/// rounds and the handle of that thread.
+///
+/// The callback of the tracer holds a borrowed round. It converts that round
+/// into an owned record before it sends, so nothing borrowed crosses the
+/// channel and a later engine swap touches this file only.
+///
+/// The channel is unbounded, so a slow reader never stalls the tracer thread.
+/// The round limit of the run is what stops the thread, and
+/// [`TracerThread::wait`] is what waits for it.
+///
+/// # Errors
+///
+/// Returns [`TraceError::Build`] when the tracer refuses the configuration, and
+/// [`TraceError::Spawn`] when the thread does not start.
+pub(crate) fn spawn(
+    config: &TraceConfig,
+) -> Result<(Receiver<RoundRecord>, TracerThread), TraceError> {
+    let tracer = tracer_of(config)?;
+    let (sender, receiver) = mpsc::channel();
+    let run = config.run.clone();
+    let first_ttl = config.first_ttl;
+    let counter = AtomicU64::new(0);
+    // `spawn_with` gives back the tracer and the handle of its thread. The run
+    // loop reads a closed channel as a dead tracer, so it needs the tracer for
+    // nothing. The handle of the thread travels to the caller, which waits on
+    // it before it starts another tracer.
+    let (_tracer, thread) = tracer
+        .spawn_with(move |round| {
+            let record = to_round_record(round, &run, next_seq(&counter), Utc::now(), first_ttl);
+            // A failed send means the reader of the channel is gone, and the
+            // run is over. The thread ends when the process ends.
+            drop(sender.send(record));
+        })
+        .map_err(|error| TraceError::Spawn {
+            reason: error.to_string(),
+        })?;
+    Ok((receiver, TracerThread(thread)))
+}
+
+/// The number of milliseconds in one second.
+///
+/// `Duration::as_millis_f64` is not stable in the pinned toolchain, so the
+/// conversion reads a duration as a fraction of a second and scales it by this
+/// number.
+const MILLIS_PER_SECOND: f64 = 1000.0;
+
+/// The name that the schema records when a hop below the target answered that
+/// the TTL of the probe ran out.
+const TIME_EXCEEDED: &str = "time_exceeded";
+
+/// The name that the schema records when the target answered the echo request.
+const ECHO_REPLY: &str = "echo_reply";
+
+/// The name that the schema records when a hop answered that it reaches no
+/// destination.
+const UNREACHABLE: &str = "unreachable";
+
+/// The name that the schema records when the answer carried no ICMP message.
+const NOT_APPLICABLE: &str = "not_applicable";
+
+/// The ICMP message that answered one probe, in the words that `krt` owns.
+///
+/// The tracer names the same four messages, and three of its four variants
+/// carry a code whose type its crate does not export. `krt` therefore keeps
+/// this enum of its own. A test builds every variant of it and reads every
+/// name back, so the whole name table is covered. [`icmp_kind`] is the one
+/// step that a test cannot reach, and it holds no logic beyond one arm for
+/// each variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IcmpKind {
+    /// A hop below the target answered that the TTL of the probe ran out.
+    TimeExceeded,
+    /// The target answered the echo request of the probe.
+    EchoReply,
+    /// A hop answered that it reaches no destination.
+    Unreachable,
+    /// The answer carried no ICMP message. A UDP probe and a TCP probe both
+    /// take such an answer.
+    NotApplicable,
+}
+
+impl IcmpKind {
+    /// The name that the schema records for this message.
+    fn name(self) -> &'static str {
+        match self {
+            Self::TimeExceeded => TIME_EXCEEDED,
+            Self::EchoReply => ECHO_REPLY,
+            Self::Unreachable => UNREACHABLE,
+            Self::NotApplicable => NOT_APPLICABLE,
+        }
+    }
+}
+
+/// The ICMP message of one answer of the tracer, in the words that `krt` owns.
+///
+/// `trippy-core` does not export `IcmpPacketCode`. That type lives in a
+/// private module of the crate, and the crate root re-exports
+/// `IcmpPacketType` without it. Code outside `trippy-core` therefore matches
+/// `TimeExceeded(_)` with a wildcard and cannot build one, so no test reaches
+/// three of the four arms below.
+///
+/// The design answers that in two ways. This match holds one arm for each
+/// variant and nothing else, so a reader checks the three arms that no test
+/// reaches by eye. And every name that the schema records lives in
+/// [`IcmpKind::name`], which `krt` owns, so a test builds all four of those
+/// and reads each name back.
+///
+/// This fact about the API of the tracer is exactly what the wall of this
+/// module exists to hold in one file.
+fn icmp_kind(packet: IcmpPacketType) -> IcmpKind {
+    match packet {
+        IcmpPacketType::TimeExceeded(_) => IcmpKind::TimeExceeded,
+        IcmpPacketType::EchoReply(_) => IcmpKind::EchoReply,
+        IcmpPacketType::Unreachable(_) => IcmpKind::Unreachable,
+        IcmpPacketType::NotApplicable => IcmpKind::NotApplicable,
+    }
+}
+
+/// Converts one round of the tracer into an owned record.
+///
+/// The callback of the tracer holds the round for the length of one call, so
+/// the conversion copies every value it keeps. Nothing borrowed leaves this
+/// module.
+///
+/// `now` is a parameter and not a reading of the clock, so the conversion is
+/// pure and a test drives every case of it.
+///
+/// `first_ttl` is the first TTL that the run probes. The last TTL of the range
+/// comes from the tracer. A round that reached the target reports the TTL of
+/// the target. A round that did not reach the target reports one TTL past the
+/// largest TTL that answered, and no more than the largest TTL that the round
+/// sent. The tracer adds that one TTL because it assumes that the next probe
+/// holds the target. A round that answered nothing reports zero there, and the
+/// range then closes at the highest TTL that the round truly sent.
+fn to_round_record(
+    round: &Round<'_>,
+    run: &RunId,
+    seq: u64,
+    now: DateTime<Utc>,
+    first_ttl: u8,
+) -> RoundRecord {
+    let mut hops: Vec<Hop> = round.probes.iter().filter_map(to_hop).collect();
+    // The answers of a round arrive in the order the network returns them, and
+    // a record holds its hops in the order of the path.
+    hops.sort_by_key(|hop| hop.ttl);
+
+    let last_ttl = if round.largest_ttl.0 >= first_ttl {
+        round.largest_ttl.0
+    } else {
+        round
+            .probes
+            .iter()
+            .filter_map(sent_probe)
+            .map(|probe| probe.ttl)
+            .max()
+            .unwrap_or(first_ttl)
+    };
+
+    let ts = round
+        .probes
+        .iter()
+        .filter_map(sent_probe)
+        .map(|probe| probe.sent)
+        .min()
+        .map_or(now, DateTime::<Utc>::from);
+    // A difference below zero names a `now` before the first probe left, which
+    // one round of one clock never gives. A record holds no negative duration,
+    // so such a difference records zero.
+    let dur_ms = u64::try_from((now - ts).num_milliseconds()).unwrap_or_default();
+
+    // A `match` and not a `matches!`, so a new reason of the tracer breaks
+    // this one file rather than recording `false` without a word.
+    let reached = match round.reason {
+        CompletionReason::TargetFound => true,
+        CompletionReason::RoundTimeLimitExceeded => false,
+    };
+
+    RoundRecord {
+        run: run.clone(),
+        seq,
+        ts,
+        dur_ms,
+        ttl_range: TtlRange::from_first(first_ttl, last_ttl),
+        reached,
+        hops,
+    }
+}
+
+/// The hop that one status of the tracer records. A status that no hop
+/// answered records none.
+///
+/// The schema holds one hop for each answer, so a probe that the round never
+/// sent, that it skipped, that failed, and that still waits each record
+/// nothing. `ttl_range` states which TTLs the round probed, so a reader still
+/// parts a hop that did not answer from a TTL that the round never probed.
+fn to_hop(status: &ProbeStatus) -> Option<Hop> {
+    match status {
+        ProbeStatus::Complete(probe) => Some(Hop {
+            ttl: probe.ttl.0,
+            addr: probe.host,
+            rtt_ms: rtt_millis(probe.sent, probe.received),
+            icmp: icmp_kind(probe.icmp_packet_type).name().to_owned(),
+        }),
+        ProbeStatus::NotSent
+        | ProbeStatus::Skipped
+        | ProbeStatus::Failed(_)
+        | ProbeStatus::Awaited(_) => None,
+    }
+}
+
+/// One probe that a round put on the wire.
+///
+/// A round that answered nothing still states which TTLs it probed, and the
+/// probes that left are the answer. This value carries the two facts that such
+/// a round reads from one of them.
+#[derive(Debug, Clone, Copy)]
+struct SentProbe {
+    /// The TTL that the probe carried.
+    ttl: u8,
+    /// The moment that the probe left.
+    sent: SystemTime,
+}
+
+/// The probe that one status of the tracer put on the wire. A status that put
+/// none there gives `None`.
+///
+/// A probe left when the round awaits its answer, and when the answer already
+/// arrived. A probe that the round never sent, that it skipped, and that
+/// failed each left nothing on the wire, so none of them widens the range of
+/// TTLs and none of them invents a hop that was lost.
+fn sent_probe(status: &ProbeStatus) -> Option<SentProbe> {
+    match status {
+        ProbeStatus::Awaited(probe) => Some(SentProbe {
+            ttl: probe.ttl.0,
+            sent: probe.sent,
+        }),
+        ProbeStatus::Complete(probe) => Some(SentProbe {
+            ttl: probe.ttl.0,
+            sent: probe.sent,
+        }),
+        ProbeStatus::NotSent | ProbeStatus::Skipped | ProbeStatus::Failed(_) => None,
+    }
+}
+
+/// The round trip time of one answer, in milliseconds.
+///
+/// An answer that the clock stamps before its probe left gives zero. The clock
+/// of the operating system steps when the machine corrects its time, so the
+/// two stamps of one probe can run backward, and a record holds no negative
+/// round trip time.
+fn rtt_millis(sent: SystemTime, received: SystemTime) -> f64 {
+    received
+        .duration_since(sent)
+        .unwrap_or_default()
+        .as_secs_f64()
+        * MILLIS_PER_SECOND
+}
+
+/// The reverse resolver of the platform, behind the interface that `krt` owns.
+///
+/// The resolver holds a counted reference that no thread can move, so it stays
+/// on the thread that built it. That thread is the thread of the run loop,
+/// which is the one thread that asks it.
+struct SystemNames {
+    /// The resolver that every ask of this run goes to.
+    names: DnsResolver,
+}
+
+impl crate::names::Resolver for SystemNames {
+    fn lookup(&self, addr: IpAddr) -> Lookup {
+        to_lookup(&self.names.lazy_reverse_lookup(addr))
+    }
+}
+
+/// The configuration of the reverse resolver of a run.
+///
+/// The configuration is the one that the crate holds by default: the system
+/// resolver, the address families in the order IPv4 and then IPv6, a timeout of
+/// five seconds, and a cache of five minutes. `krt` asks for the system
+/// resolver, so a lookup of a run reads the same names as every other program
+/// of the machine.
+///
+/// [`resolver`] and [`resolver_timeout`] both read this one configuration, so a
+/// change of a field moves the resolver and the timeout that `krt` reports
+/// together.
+fn resolver_config() -> trippy_dns::Config {
+    trippy_dns::Config::default()
+}
+
+/// The longest that one reverse lookup of a run takes.
+///
+/// The resolver settles an address when this time runs out, and a settled
+/// address gives its name or gives none. No lookup of a run therefore stays
+/// open past this time.
+pub(crate) fn resolver_timeout() -> Duration {
+    resolver_config().timeout
+}
+
+/// A reverse resolver over the system resolver of the platform.
+///
+/// [`resolver_config`] states the configuration of the resolver.
+///
+/// # Errors
+///
+/// Returns the reason when the resolver does not start.
+pub(crate) fn resolver() -> std::io::Result<Box<dyn crate::names::Resolver>> {
+    let names = DnsResolver::start(resolver_config())?;
+    Ok(Box::new(SystemNames { names }))
+}
+
+/// Reads what one reverse lookup holds now, in the words that `krt` owns.
+///
+/// An address that carries more than one name takes the first name of the
+/// answer, because one record of the schema holds one name. The iterator of
+/// that crate gives its first name again at every step, so this conversion
+/// reads one name from it and collects nothing.
+///
+/// A lookup that timed out settles the address, and it does not wait. The
+/// resolver puts a timed-out address back into its queue on every ask, and the
+/// run loop asks ten times a second, so an address that waited on a timeout
+/// would probe a name server that does not answer, without end. The design of
+/// `krt` says that a failed lookup stops no run, and that the display shows the
+/// raw address of such a hop. One ask for each address of one run is the
+/// bounded reading of that rule.
+fn to_lookup(entry: &DnsEntry) -> Lookup {
+    match entry {
+        DnsEntry::Pending(_) => Lookup::Pending,
+        DnsEntry::Resolved(_) => entry
+            .hostnames()
+            .next()
+            .map_or(Lookup::Nameless, |host| Lookup::Named(host.to_owned())),
+        DnsEntry::NotFound(_) | DnsEntry::Failed(_) | DnsEntry::Timeout(_) => Lookup::Nameless,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        choose_privilege, icmp_kind, next_seq, probe_identifier, to_lookup, to_round_record,
+        tracer_of, udp_source_port, IcmpKind, Lane, PrivilegeError, TraceConfig, TraceError,
+        TracerThread,
+    };
+    use crate::names::Lookup;
+    use crate::record::{Privilege, Record, RoundRecord, RunId};
+    use crate::testing::address;
+    use crate::{Multipath, Protocol, PROGRAM};
+    use chrono::{DateTime, Utc};
+    use std::process;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::{Duration, SystemTime};
+    use trippy_core::{
+        CompletionReason, Flags, IcmpPacketType, Port, Probe, ProbeComplete, ProbeStatus, Round,
+        RoundId, Sequence, TimeToLive, TraceId,
+    };
+    use trippy_dns::{DnsEntry, Resolved, Unresolved};
+
+    /// The remedy, exactly as the design writes it.
+    ///
+    /// `main` writes every message as `krt: {reason}`, so the text carries no
+    /// program name. The two lines under the first one carry two spaces each,
+    /// and the remedy of each platform starts at the same column.
+    const REMEDY: &str = "\
+this platform needs raw socket privileges to send probes.
+  Linux:   sudo setcap 'cap_net_raw+p' $(which krt)
+  Windows: run krt from an elevated prompt";
+
+    /// The first line that `main` writes for a platform without the privileges.
+    const FIRST_LINE: &str = "krt: this platform needs raw socket privileges to send probes.";
+
+    /// The reason of a platform that will not report what it holds.
+    const A_REASON: &str = "the operating system refused the query";
+
+    /// The mode of a run that the platform admits.
+    fn mode(has: bool, needs: bool) -> Privilege {
+        choose_privilege(has, needs).expect("the platform must admit a mode")
+    }
+
+    /// The fault of a platform that the gate stops.
+    fn fault(has: bool, needs: bool) -> PrivilegeError {
+        choose_privilege(has, needs).expect_err("the gate must stop the run")
+    }
+
+    #[test]
+    fn a_platform_that_needs_no_privileges_runs_unprivileged() {
+        assert_eq!(mode(false, false), Privilege::Unprivileged);
+    }
+
+    /// macOS needs no privileges, so a `sudo krt` on macOS still runs
+    /// unprivileged. The design decides that case against the reflex: `krt`
+    /// never changes the way it probes without a word.
+    #[test]
+    fn a_platform_that_needs_no_privileges_runs_unprivileged_even_with_them() {
+        assert_eq!(mode(true, false), Privilege::Unprivileged);
+    }
+
+    #[test]
+    fn a_platform_that_needs_privileges_and_holds_them_runs_privileged() {
+        assert_eq!(mode(true, true), Privilege::Privileged);
+    }
+
+    #[test]
+    fn a_platform_that_needs_privileges_and_holds_none_stops_the_run() {
+        assert_eq!(fault(false, true), PrivilegeError::Missing);
+    }
+
+    #[test]
+    fn the_message_of_a_missing_privilege_names_the_remedy_of_each_platform() {
+        assert_eq!(PrivilegeError::Missing.to_string(), REMEDY);
+    }
+
+    #[test]
+    fn the_line_that_main_writes_names_the_program_and_the_reason() {
+        let error = PrivilegeError::Missing;
+        let line = format!("{PROGRAM}: {error}");
+        assert!(
+            line.starts_with(FIRST_LINE),
+            "the line names the program and the reason: {line}"
+        );
+    }
+
+    #[test]
+    fn a_platform_that_will_not_report_what_it_holds_names_the_reason() {
+        let error = PrivilegeError::Discovery {
+            reason: A_REASON.to_owned(),
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains(A_REASON),
+            "the message names the reason: {message}"
+        );
+    }
+
+    // The conversion of one round of the tracer into one record. No test below
+    // touches the network, and none of them needs a privilege. Each one builds
+    // the probes of a round by hand.
+
+    /// The identifier of the run that every test round belongs to.
+    const RUN: &str = "2026-08-18T12:00:00.123Z";
+
+    /// The number of the round that every test round carries.
+    const SEQ: u64 = 142;
+
+    /// The first TTL that every test run probes.
+    const FIRST_TTL: u8 = 1;
+
+    /// The largest TTL that a round of no answer reports.
+    const NOTHING_ANSWERED: u8 = 0;
+
+    /// The moment that the first probe of a test round leaves.
+    const START: &str = "2026-08-18T12:34:56.789Z";
+
+    /// A moment five milliseconds after `START`, for a probe that leaves later.
+    const LATER: &str = "2026-08-18T12:34:56.794Z";
+
+    /// The moment that a test converts a round at. It stands 1004 milliseconds
+    /// after `START`.
+    const NOW: &str = "2026-08-18T12:34:57.793Z";
+
+    /// The milliseconds from `START` to `NOW`.
+    const ROUND_DURATION_MS: u64 = 1004;
+
+    /// The address of the first hop of a test round.
+    const FIRST_HOP: &str = "192.168.1.1";
+
+    /// The address of the hop in the middle of a test path.
+    const MIDDLE_HOP: &str = "10.0.0.1";
+
+    /// The TTL of the hop in the middle of a test path.
+    const MIDDLE_TTL: u8 = 7;
+
+    /// The address of the target of a test round.
+    const TARGET_ADDRESS: &str = "93.184.216.34";
+
+    /// The TTL of the target of a test round.
+    const TARGET_TTL: u8 = 14;
+
+    /// The round trip time of the first hop of a test round, in microseconds.
+    const FIRST_HOP_RTT_MICROS: u64 = 1230;
+
+    /// The round trip time of the target of a test round, in microseconds.
+    const TARGET_RTT_MICROS: u64 = 24_100;
+
+    /// A round trip time of one millisecond and a half, in microseconds.
+    const HALF_MILLISECOND_MORE_MICROS: u64 = 1500;
+
+    /// The same round trip time, in milliseconds.
+    const HALF_MILLISECOND_MORE_MS: f64 = 1.5;
+
+    /// The sequence number that every test probe carries.
+    const PROBE_SEQUENCE: u16 = 1;
+
+    /// The trace identifier that every test probe carries.
+    const PROBE_TRACE_ID: u16 = 4242;
+
+    /// The source port that every test probe carries.
+    const PROBE_SRC_PORT: u16 = 33_434;
+
+    /// The destination port that every test probe carries.
+    const PROBE_DEST_PORT: u16 = 80;
+
+    /// The number of the round that every test probe belongs to.
+    const PROBE_ROUND: usize = 1;
+
+    /// The name that the schema records when a hop below the target answered
+    /// that the TTL ran out.
+    const TIME_EXCEEDED: &str = "time_exceeded";
+
+    /// The name that the schema records when the target answered the echo
+    /// request.
+    const ECHO_REPLY: &str = "echo_reply";
+
+    /// The name that the schema records when a hop answered that it reaches no
+    /// destination.
+    const UNREACHABLE: &str = "unreachable";
+
+    /// The name that the schema records when the answer carried no ICMP
+    /// message.
+    const NOT_APPLICABLE: &str = "not_applicable";
+
+    /// The one line that a converted round writes.
+    ///
+    /// Every hop of the line records `not_applicable`, because `trippy-core`
+    /// does not export `IcmpPacketCode` and a test therefore builds no other
+    /// kind of answer. `icmp_kind` names that limit, and the name table of
+    /// `IcmpKind` covers the other three messages.
+    const ROUND_LINE: &str = r#"{"type":"round","run":"2026-08-18T12:00:00.123Z","seq":142,"ts":"2026-08-18T12:34:56.789Z","dur_ms":1004,"ttl_range":[1,14],"reached":true,"hops":[{"ttl":1,"addr":"192.168.1.1","rtt_ms":1.23,"icmp":"not_applicable"},{"ttl":14,"addr":"93.184.216.34","rtt_ms":24.1,"icmp":"not_applicable"}]}"#;
+
+    /// Reads a moment that a test names, and converts it to UTC.
+    fn utc(text: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(text)
+            .expect("the test moment must parse")
+            .with_timezone(&Utc)
+    }
+
+    /// The same moment, as the clock of the operating system reads it.
+    fn clock(text: &str) -> SystemTime {
+        SystemTime::from(utc(text))
+    }
+
+    /// A probe that the round sent and that answered.
+    ///
+    /// The answer carries `IcmpPacketType::NotApplicable`, because
+    /// `trippy-core` does not export `IcmpPacketCode` and each of the other
+    /// three packet types carries one. No test builds them. See `icmp_kind`.
+    fn completed(ttl: u8, addr: &str, sent: SystemTime, rtt: Duration) -> ProbeStatus {
+        ProbeStatus::Complete(ProbeComplete {
+            sequence: Sequence(PROBE_SEQUENCE),
+            identifier: TraceId(PROBE_TRACE_ID),
+            src_port: Port(PROBE_SRC_PORT),
+            dest_port: Port(PROBE_DEST_PORT),
+            ttl: TimeToLive(ttl),
+            round: RoundId(PROBE_ROUND),
+            sent,
+            host: address(addr),
+            received: sent + rtt,
+            icmp_packet_type: IcmpPacketType::NotApplicable,
+            tos: None,
+            expected_udp_checksum: None,
+            actual_udp_checksum: None,
+            extensions: None,
+        })
+    }
+
+    /// A probe that the round sent and that has no answer yet.
+    fn awaited(ttl: u8, sent: SystemTime) -> ProbeStatus {
+        ProbeStatus::Awaited(Probe {
+            sequence: Sequence(PROBE_SEQUENCE),
+            identifier: TraceId(PROBE_TRACE_ID),
+            src_port: Port(PROBE_SRC_PORT),
+            dest_port: Port(PROBE_DEST_PORT),
+            ttl: TimeToLive(ttl),
+            round: RoundId(PROBE_ROUND),
+            sent,
+            flags: Flags::empty(),
+        })
+    }
+
+    /// The record of a round that a test built.
+    fn record_at(
+        probes: &[ProbeStatus],
+        largest_ttl: u8,
+        reason: CompletionReason,
+        now: DateTime<Utc>,
+    ) -> RoundRecord {
+        let round = Round::new(probes, TimeToLive(largest_ttl), reason);
+        to_round_record(&round, &RunId::from(RUN), SEQ, now, FIRST_TTL)
+    }
+
+    /// The record of a round that found the target, converted at `NOW`.
+    fn record_of(probes: &[ProbeStatus], largest_ttl: u8) -> RoundRecord {
+        record_at(probes, largest_ttl, CompletionReason::TargetFound, utc(NOW))
+    }
+
+    /// The record of a round that answered nothing, converted at `NOW`.
+    fn a_silent_record(probes: &[ProbeStatus]) -> RoundRecord {
+        record_at(
+            probes,
+            NOTHING_ANSWERED,
+            CompletionReason::RoundTimeLimitExceeded,
+            utc(NOW),
+        )
+    }
+
+    /// One probe that answered, sent at `START`.
+    fn an_answer(ttl: u8, addr: &str, rtt_micros: u64) -> ProbeStatus {
+        completed(ttl, addr, clock(START), Duration::from_micros(rtt_micros))
+    }
+
+    /// The two probes of a round that answered the whole path: the first hop
+    /// and the target.
+    fn a_whole_path() -> [ProbeStatus; 2] {
+        [
+            an_answer(FIRST_TTL, FIRST_HOP, FIRST_HOP_RTT_MICROS),
+            an_answer(TARGET_TTL, TARGET_ADDRESS, TARGET_RTT_MICROS),
+        ]
+    }
+
+    /// The TTL of every hop of one record, in the order the record holds them.
+    fn ttls_of(record: &RoundRecord) -> Vec<u8> {
+        record.hops.iter().map(|hop| hop.ttl).collect()
+    }
+
+    /// The two numbers of the range of TTLs of one record.
+    fn range_of(record: &RoundRecord) -> [u8; 2] {
+        [record.ttl_range.first(), record.ttl_range.last()]
+    }
+
+    #[test]
+    fn two_probes_that_answered_give_two_hops() {
+        let record = record_of(&a_whole_path(), TARGET_TTL);
+        assert_eq!(ttls_of(&record), [FIRST_TTL, TARGET_TTL]);
+        assert_eq!(record.hops[0].addr, address(FIRST_HOP));
+        assert_eq!(record.hops[1].addr, address(TARGET_ADDRESS));
+        assert_eq!(record.hops[0].icmp, NOT_APPLICABLE);
+        assert_eq!(record.hops[1].icmp, NOT_APPLICABLE);
+    }
+
+    /// The answers of a round arrive in the order the network returns them,
+    /// and a record holds its hops in the order of the path.
+    #[test]
+    fn the_hops_come_out_in_the_order_of_the_path() {
+        let probes = [
+            an_answer(TARGET_TTL, TARGET_ADDRESS, TARGET_RTT_MICROS),
+            an_answer(FIRST_TTL, FIRST_HOP, FIRST_HOP_RTT_MICROS),
+            an_answer(MIDDLE_TTL, MIDDLE_HOP, FIRST_HOP_RTT_MICROS),
+        ];
+        let record = record_of(&probes, TARGET_TTL);
+        assert_eq!(ttls_of(&record), [FIRST_TTL, MIDDLE_TTL, TARGET_TTL]);
+    }
+
+    /// The round trip time keeps the fraction of a millisecond. A conversion
+    /// that read whole milliseconds records `1` here.
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "1500 microseconds is 1.5 milliseconds, and both numbers are exact in binary, so the conversion gives this one and no other"
+    )]
+    fn the_round_trip_time_is_the_milliseconds_between_the_two_stamps() {
+        let probes = [an_answer(
+            FIRST_TTL,
+            FIRST_HOP,
+            HALF_MILLISECOND_MORE_MICROS,
+        )];
+        let record = record_of(&probes, FIRST_TTL);
+        assert_eq!(ttls_of(&record), [FIRST_TTL]);
+        assert_eq!(record.hops[0].rtt_ms, HALF_MILLISECOND_MORE_MS);
+    }
+
+    #[test]
+    fn a_probe_that_awaits_an_answer_gives_no_hop() {
+        let probes = [
+            an_answer(FIRST_TTL, FIRST_HOP, FIRST_HOP_RTT_MICROS),
+            awaited(MIDDLE_TTL, clock(START)),
+        ];
+        let record = record_of(&probes, FIRST_TTL);
+        assert_eq!(
+            ttls_of(&record),
+            [FIRST_TTL],
+            "the awaited probe answered nothing"
+        );
+    }
+
+    #[test]
+    fn a_probe_that_the_round_did_not_send_gives_no_hop() {
+        let probes = [
+            an_answer(FIRST_TTL, FIRST_HOP, FIRST_HOP_RTT_MICROS),
+            ProbeStatus::NotSent,
+        ];
+        let record = record_of(&probes, FIRST_TTL);
+        assert_eq!(
+            ttls_of(&record),
+            [FIRST_TTL],
+            "a probe that never left answered nothing"
+        );
+    }
+
+    #[test]
+    fn the_ttl_range_ends_at_the_largest_ttl_that_answered() {
+        let record = record_of(&a_whole_path(), TARGET_TTL);
+        assert_eq!(range_of(&record), [FIRST_TTL, TARGET_TTL]);
+    }
+
+    /// A round that answered nothing reports a largest TTL of zero. The range
+    /// then closes at the highest TTL that the round truly sent, so no TTL
+    /// beyond the probes of the round counts as lost.
+    #[test]
+    fn the_ttl_range_falls_back_to_the_highest_ttl_that_the_round_sent() {
+        let probes = [
+            awaited(FIRST_TTL, clock(START)),
+            awaited(2, clock(START)),
+            awaited(3, clock(START)),
+        ];
+        let record = a_silent_record(&probes);
+        assert_eq!(range_of(&record), [FIRST_TTL, 3]);
+    }
+
+    /// A probe that never left carries no TTL of its own, and the place it
+    /// holds in the round is not one. A conversion that counted places records
+    /// a range of four TTLs here.
+    #[test]
+    fn a_probe_that_the_round_did_not_send_never_widens_the_ttl_range() {
+        let probes = [
+            awaited(FIRST_TTL, clock(START)),
+            awaited(2, clock(START)),
+            ProbeStatus::NotSent,
+            ProbeStatus::NotSent,
+        ];
+        let record = a_silent_record(&probes);
+        assert_eq!(range_of(&record), [FIRST_TTL, 2]);
+    }
+
+    #[test]
+    fn a_round_that_sent_nothing_probed_the_first_ttl_only() {
+        let record = a_silent_record(&[ProbeStatus::NotSent, ProbeStatus::NotSent]);
+        assert_eq!(range_of(&record), [FIRST_TTL, FIRST_TTL]);
+    }
+
+    #[test]
+    fn a_round_that_found_the_target_reached_it() {
+        let record = record_at(
+            &a_whole_path(),
+            TARGET_TTL,
+            CompletionReason::TargetFound,
+            utc(NOW),
+        );
+        assert!(record.reached, "the round found the target");
+    }
+
+    #[test]
+    fn a_round_that_ran_out_of_time_reached_nothing() {
+        let record = record_at(
+            &a_whole_path(),
+            TARGET_TTL,
+            CompletionReason::RoundTimeLimitExceeded,
+            utc(NOW),
+        );
+        assert!(!record.reached, "the round ran out of time");
+    }
+
+    #[test]
+    fn the_moment_of_a_round_is_the_moment_the_first_probe_left() {
+        let probes = [
+            completed(
+                TARGET_TTL,
+                TARGET_ADDRESS,
+                clock(LATER),
+                Duration::from_micros(TARGET_RTT_MICROS),
+            ),
+            an_answer(FIRST_TTL, FIRST_HOP, FIRST_HOP_RTT_MICROS),
+        ];
+        let record = record_of(&probes, TARGET_TTL);
+        assert_eq!(record.ts, utc(START));
+    }
+
+    #[test]
+    fn the_duration_of_a_round_is_the_milliseconds_from_its_moment_to_now() {
+        let record = record_of(&a_whole_path(), TARGET_TTL);
+        assert_eq!(record.ts, utc(START));
+        assert_eq!(record.dur_ms, ROUND_DURATION_MS);
+    }
+
+    #[test]
+    fn a_round_of_no_probe_holds_the_moment_of_the_record_and_no_hop() {
+        let record = a_silent_record(&[]);
+        assert_eq!(record.ts, utc(NOW));
+        assert_eq!(record.dur_ms, 0);
+        assert!(
+            record.hops.is_empty(),
+            "the round holds no probe: {:?}",
+            record.hops
+        );
+        assert_eq!(range_of(&record), [FIRST_TTL, FIRST_TTL]);
+    }
+
+    #[test]
+    fn the_record_names_the_run_and_the_number_of_the_round() {
+        let record = record_of(&a_whole_path(), TARGET_TTL);
+        assert_eq!(record.run, RunId::from(RUN));
+        assert_eq!(record.seq, SEQ);
+    }
+
+    #[test]
+    fn the_name_table_holds_one_name_for_each_icmp_message() {
+        for (kind, name) in [
+            (IcmpKind::TimeExceeded, TIME_EXCEEDED),
+            (IcmpKind::EchoReply, ECHO_REPLY),
+            (IcmpKind::Unreachable, UNREACHABLE),
+            (IcmpKind::NotApplicable, NOT_APPLICABLE),
+        ] {
+            assert_eq!(kind.name(), name, "{kind:?}");
+        }
+    }
+
+    /// The one arm of `icmp_kind` that a test reaches. `trippy-core` does not
+    /// export `IcmpPacketCode`, so no test builds the other three packet
+    /// types.
+    #[test]
+    fn an_answer_that_carries_no_icmp_message_records_not_applicable() {
+        assert_eq!(
+            icmp_kind(IcmpPacketType::NotApplicable),
+            IcmpKind::NotApplicable
+        );
+        let record = record_of(&a_whole_path(), TARGET_TTL);
+        assert_eq!(ttls_of(&record), [FIRST_TTL, TARGET_TTL]);
+        for hop in &record.hops {
+            assert_eq!(hop.icmp, NOT_APPLICABLE);
+        }
+    }
+
+    /// The whole conversion writes one line of the schema. A record that
+    /// drifts from the schema then fails a test, and not a reader of a
+    /// recorded file.
+    #[test]
+    fn a_converted_round_writes_one_line_of_the_schema() {
+        let record = Record::Round(record_of(&a_whole_path(), TARGET_TTL));
+        assert_eq!(
+            record.to_line().expect("the record must become one line"),
+            ROUND_LINE
+        );
+    }
+
+    // The tracer that one configuration builds. No test below touches the
+    // network, and none of them needs a privilege. `Builder::build` reads the
+    // configuration and builds a `Tracer`, and it opens no socket: the channel
+    // of a trace opens in `run`, which `build` never calls. No test calls
+    // `spawn`, because that call starts a thread that probes.
+    //
+    // Every value of the test configuration differs from the value that the
+    // tracer holds by default, so a mapping that dropped the field fails here
+    // rather than reading as a pass.
+
+    /// The period of one round of a test run.
+    const A_ROUND_PERIOD: Duration = Duration::from_millis(250);
+
+    /// The first TTL that a test run probes.
+    const A_FIRST_TTL: u8 = 2;
+
+    /// The last TTL that a test run probes.
+    const A_MAX_TTL: u8 = 20;
+
+    /// The first source port that a UDP trace of `krt` takes. It stands one
+    /// above the last destination port that a traceroute probes.
+    const UDP_FIRST_SOURCE_PORT: u16 = 33_535;
+
+    /// The last source port that a UDP trace of `krt` takes. It is the last
+    /// registered port, under the range that macOS hands out on its own.
+    const UDP_LAST_SOURCE_PORT: u16 = 49_151;
+
+    /// The port that every UDP trace of `krt` held before it held one of its
+    /// own. A traceroute probes it first, as a destination.
+    const THE_CLASSIC_SOURCE_PORT: u16 = 33_434;
+
+    /// The last destination port that a traceroute probes.
+    ///
+    /// The range that starts at [`THE_CLASSIC_SOURCE_PORT`] and ends here is
+    /// the range a firewall reads as a traceroute, and the source port of `krt`
+    /// stands above all of it.
+    const THE_LAST_TRACEROUTE_PORT: u16 = 33_534;
+
+    /// The destination port that a TCP trace holds while the source port
+    /// varies. It is the port of HTTP.
+    const TCP_DESTINATION_PORT: u16 = 80;
+
+    /// The number of probe rounds of a test run.
+    ///
+    /// A tracer holds no round limit by default, so a mapping that dropped the
+    /// field fails the test that reads this number back.
+    const A_ROUND_LIMIT: u64 = 3;
+
+    /// A last TTL above the largest one that the tracer takes.
+    ///
+    /// The command line of `krt` accepts a TTL up to 255, and `trippy_core`
+    /// stops at `MAX_TTL`, which is 254. Such a run therefore reaches the
+    /// build and the build refuses it.
+    const A_TTL_THAT_THE_TRACER_REFUSES: u8 = 255;
+
+    /// The configuration of a test run. Each test changes the one field that
+    /// it reads.
+    fn a_config() -> TraceConfig {
+        TraceConfig {
+            target: address(TARGET_ADDRESS),
+            run: RunId::from(RUN),
+            interval: A_ROUND_PERIOD,
+            first_ttl: A_FIRST_TTL,
+            max_ttl: A_MAX_TTL,
+            protocol: Protocol::Icmp,
+            multipath: Multipath::Classic,
+            privilege: Privilege::Unprivileged,
+            lane: Lane::FIRST,
+            rounds: Some(A_ROUND_LIMIT),
+        }
+    }
+
+    /// The tracer that one configuration builds.
+    fn tracer_from(config: &TraceConfig) -> trippy_core::Tracer {
+        tracer_of(config).expect("the tracer must take the configuration")
+    }
+
+    /// The tracer of a run that probes with this protocol.
+    fn tracer_of_protocol(protocol: Protocol) -> trippy_core::Tracer {
+        tracer_from(&TraceConfig {
+            protocol,
+            ..a_config()
+        })
+    }
+
+    /// The identifier that the tracer reads as the answer of any run.
+    ///
+    /// `trippy` takes an answer whose identifier is this one, whatever run sent
+    /// the probe. That is the answer of a UDP trace and of a TCP trace, which
+    /// carry no identifier and which the ports tell apart. An ICMP trace of
+    /// this identifier therefore takes the answers of every other ICMP trace of
+    /// the machine.
+    const ANY_RUN: TraceId = TraceId(0);
+
+    /// The probes of a run carry an identifier that no other run reads.
+    ///
+    /// macOS hands the ICMP answers of one process to the socket of every other
+    /// process that reads that protocol, so a tracer reads the answer of a probe
+    /// that another tracer sent. The identifier of the probe is what tells the
+    /// two apart: `trippy` drops an answer whose identifier is neither
+    /// [`ANY_RUN`] nor the one that the run holds. A run that names no
+    /// identifier holds [`ANY_RUN`], and two such runs of one machine read each
+    /// other.
+    #[test]
+    fn the_probes_of_a_run_carry_an_identifier_of_their_own() {
+        let identifier = tracer_from(&a_config()).trace_identifier();
+        assert_ne!(
+            identifier, ANY_RUN,
+            "a run of this identifier reads the answers of every other run of the machine"
+        );
+    }
+
+    /// That identifier is the one of this process. Two tracers of one process
+    /// therefore hold one identifier, and the answers of a run reach the tracer
+    /// of that run whichever of them read the socket.
+    #[test]
+    fn the_identifier_of_a_run_is_the_identifier_of_its_process() {
+        assert_eq!(
+            tracer_from(&a_config()).trace_identifier(),
+            TraceId(probe_identifier(process::id(), Lane::FIRST))
+        );
+    }
+
+    /// A process identifier of every shape maps onto an identifier that a probe
+    /// can carry.
+    ///
+    /// The first four rows walk the fold onto its edges: the first process, the
+    /// last value of the range, the value one past it that wraps onto the first
+    /// one, and the value that a plain mask of the low sixteen bits would map
+    /// onto zero. The last row is a process identifier of the size that macOS
+    /// hands out.
+    #[test]
+    fn every_process_identifier_maps_onto_an_identifier_that_a_probe_carries() {
+        for (process, expected) in [
+            (1_u32, 2_u16),
+            (65_534, 65_535),
+            (65_535, 1),
+            (65_536, 2),
+            (42_659, 42_660),
+        ] {
+            assert_eq!(
+                probe_identifier(process, Lane::FIRST),
+                expected,
+                "process {process}"
+            );
+        }
+    }
+
+    /// No process identifier maps onto the identifier that the tracer reads as
+    /// the answer of any run.
+    ///
+    /// The walk covers the whole range of the fold and one value past it, so it
+    /// reaches every answer the function can give.
+    #[test]
+    fn no_process_identifier_maps_onto_the_identifier_of_any_run() {
+        for process in 0..=u32::from(u16::MAX) + 1 {
+            assert_ne!(
+                TraceId(probe_identifier(process, Lane::FIRST)),
+                ANY_RUN,
+                "process {process}"
+            );
+        }
+    }
+
+    /// Two processes of one window of the fold hold two identifiers.
+    ///
+    /// This is the property that closes the defect. A machine that hands out
+    /// two process identifiers at one moment hands out two different ones, and
+    /// the two runs then read two different sets of answers.
+    #[test]
+    fn two_processes_of_one_window_hold_two_identifiers() {
+        let identifiers: std::collections::HashSet<u16> = (0..u32::from(u16::MAX))
+            .map(|process| probe_identifier(process, Lane::FIRST))
+            .collect();
+        assert_eq!(
+            identifiers.len(),
+            u32::from(u16::MAX) as usize,
+            "the fold maps two processes of one window onto one identifier"
+        );
+    }
+
+    /// A process identifier of the size that macOS hands out.
+    ///
+    /// Every test of the lanes reads this one, so each of them states what the
+    /// lanes do and never what one process identifier does.
+    const A_PROCESS: u32 = 42_659;
+
+    /// Every lane of one process.
+    fn every_lane() -> Vec<Lane> {
+        Lane::pool(Lane::COUNT as usize)
+    }
+
+    /// Two lanes of one process carry two probe identifiers.
+    ///
+    /// This is the property that lets a hunt trace many destinations at once.
+    /// Two tracers of one identifier read each other's answers, because
+    /// `trippy` takes an answer whose identifier is the one that the run holds
+    /// and looks no further. The hop of one destination would then land in the
+    /// path of another.
+    #[test]
+    fn two_lanes_of_one_process_carry_two_probe_identifiers() {
+        let identifiers: std::collections::HashSet<u16> = every_lane()
+            .into_iter()
+            .map(|lane| probe_identifier(A_PROCESS, lane))
+            .collect();
+        assert_eq!(
+            identifiers.len(),
+            Lane::COUNT as usize,
+            "two lanes of one process carry one identifier, and each reads the answers of the other"
+        );
+    }
+
+    /// Two lanes of one process take two source ports.
+    ///
+    /// This is the property that lets a hunt probe many destinations at once
+    /// with UDP. The unprivileged path of macOS binds the source port for each
+    /// probe it sends, so two tracers of one port cannot both send.
+    #[test]
+    fn two_lanes_of_one_process_take_two_source_ports() {
+        let ports: std::collections::HashSet<u16> = every_lane()
+            .into_iter()
+            .map(|lane| udp_source_port(A_PROCESS, lane))
+            .collect();
+        assert_eq!(
+            ports.len(),
+            Lane::COUNT as usize,
+            "two lanes of one process take one port, and the second tracer cannot bind it"
+        );
+    }
+
+    /// Two processes that stand one apart carry no identifier in common,
+    /// whatever lanes the two of them probe in.
+    ///
+    /// A user who starts one hunt after another holds two process identifiers a
+    /// few apart. The stride of a lane stands far above that distance, so the
+    /// lanes of the second hunt land between the lanes of the first one and
+    /// never on them.
+    #[test]
+    fn two_processes_that_stand_one_apart_carry_no_identifier_in_common() {
+        for mine in every_lane() {
+            for theirs in every_lane() {
+                assert_ne!(
+                    probe_identifier(A_PROCESS, mine),
+                    probe_identifier(A_PROCESS + 1, theirs),
+                    "lane {mine:?} of one process and lane {theirs:?} of the next carry one identifier"
+                );
+            }
+        }
+    }
+
+    /// Two processes that stand one apart take no source port in common,
+    /// whatever lanes the two of them probe in.
+    #[test]
+    fn two_processes_that_stand_one_apart_take_no_source_port_in_common() {
+        for mine in every_lane() {
+            for theirs in every_lane() {
+                assert_ne!(
+                    udp_source_port(A_PROCESS, mine),
+                    udp_source_port(A_PROCESS + 1, theirs),
+                    "lane {mine:?} of one process and lane {theirs:?} of the next take one port"
+                );
+            }
+        }
+    }
+
+    /// The pool of a hunt holds one lane for each destination it traces at
+    /// once.
+    #[test]
+    fn the_pool_holds_one_lane_for_each_destination_that_a_hunt_traces_at_once() {
+        let pool = Lane::pool(4);
+        assert_eq!(pool.len(), 4);
+        let held: std::collections::HashSet<Lane> = pool.into_iter().collect();
+        assert_eq!(held.len(), 4, "the pool gave one lane twice");
+    }
+
+    /// The pool never holds more lanes than the process has.
+    ///
+    /// The command line refuses a count above the ceiling, so this clamp is the
+    /// guard behind that refusal. A pool of more lanes than the strides cover
+    /// would put two destinations of one hunt on one probe identifier.
+    #[test]
+    fn the_pool_never_holds_more_lanes_than_the_process_has() {
+        assert_eq!(
+            Lane::pool(Lane::COUNT as usize + 10).len(),
+            Lane::COUNT as usize
+        );
+    }
+
+    /// A count above the range of a lane number gives lanes that differ.
+    ///
+    /// The number of a lane is a `u16`, and such a count does not go into one.
+    /// The pool falls back to the ceiling, which the clamp beside it holds. A
+    /// fallback of the first lane would give that one lane many times and put
+    /// many destinations of one hunt on one probe identifier.
+    #[test]
+    fn a_count_above_the_range_of_a_lane_number_gives_lanes_that_differ() {
+        let pool = Lane::pool(usize::MAX);
+        assert_eq!(pool.len(), Lane::COUNT as usize);
+        let held: std::collections::HashSet<Lane> = pool.into_iter().collect();
+        assert_eq!(
+            held.len(),
+            Lane::COUNT as usize,
+            "the pool gave one lane many times"
+        );
+    }
+
+    /// The first lane stands at the first place, and the lane beside it at the
+    /// next one.
+    ///
+    /// A caller that holds one tracer thread for each lane reads the place as
+    /// the place of that thread.
+    #[test]
+    fn the_place_of_a_lane_is_the_place_of_the_thing_a_caller_holds_for_it() {
+        let places: Vec<usize> = Lane::pool(3).into_iter().map(Lane::place).collect();
+        assert_eq!(places, vec![0, 1, 2]);
+        assert_eq!(Lane::FIRST.place(), 0);
+    }
+
+    /// The lane of a configuration reaches the identifier of its tracer.
+    #[test]
+    fn the_lane_of_a_configuration_reaches_the_identifier_of_its_tracer() {
+        let lane = *every_lane().last().expect("a process holds a lane");
+        let tracer = tracer_from(&TraceConfig { lane, ..a_config() });
+        assert_eq!(
+            tracer.trace_identifier(),
+            TraceId(probe_identifier(process::id(), lane))
+        );
+    }
+
+    /// The lane of a configuration reaches the source port of its UDP tracer.
+    #[test]
+    fn the_lane_of_a_configuration_reaches_the_source_port_of_its_udp_tracer() {
+        let lane = *every_lane().last().expect("a process holds a lane");
+        let tracer = tracer_from(&TraceConfig {
+            protocol: Protocol::Udp,
+            lane,
+            ..a_config()
+        });
+        assert_eq!(
+            tracer.port_direction(),
+            trippy_core::PortDirection::FixedSrc(Port(udp_source_port(process::id(), lane)))
+        );
+    }
+
+    #[test]
+    fn the_target_of_the_configuration_reaches_the_tracer() {
+        assert_eq!(
+            tracer_from(&a_config()).target_addr(),
+            address(TARGET_ADDRESS)
+        );
+    }
+
+    /// The round period of the tracer is the window between its shortest round
+    /// and its longest one. `krt` names one period, so both ends take it.
+    #[test]
+    fn the_interval_becomes_the_shortest_round_and_the_longest_round() {
+        let tracer = tracer_from(&a_config());
+        assert_eq!(tracer.min_round_duration(), A_ROUND_PERIOD);
+        assert_eq!(tracer.max_round_duration(), A_ROUND_PERIOD);
+    }
+
+    #[test]
+    fn the_first_ttl_and_the_last_ttl_reach_the_tracer() {
+        let tracer = tracer_from(&a_config());
+        assert_eq!(tracer.first_ttl().0, A_FIRST_TTL);
+        assert_eq!(tracer.max_ttl().0, A_MAX_TTL);
+    }
+
+    #[test]
+    fn every_protocol_reaches_the_tracer() {
+        for (protocol, expected) in [
+            (Protocol::Icmp, trippy_core::Protocol::Icmp),
+            (Protocol::Udp, trippy_core::Protocol::Udp),
+            (Protocol::Tcp, trippy_core::Protocol::Tcp),
+        ] {
+            assert_eq!(
+                tracer_of_protocol(protocol).protocol(),
+                expected,
+                "{protocol:?}"
+            );
+        }
+    }
+
+    /// The command line refuses a multipath mode other than `classic` beside
+    /// ICMP, because ICMP carries no flow to vary. Each run below therefore
+    /// probes with UDP.
+    #[test]
+    fn every_multipath_mode_reaches_the_tracer() {
+        for (multipath, expected) in [
+            (Multipath::Classic, trippy_core::MultipathStrategy::Classic),
+            (Multipath::Paris, trippy_core::MultipathStrategy::Paris),
+            (Multipath::Dublin, trippy_core::MultipathStrategy::Dublin),
+        ] {
+            let config = TraceConfig {
+                protocol: Protocol::Udp,
+                multipath,
+                ..a_config()
+            };
+            assert_eq!(
+                tracer_from(&config).multipath_strategy(),
+                expected,
+                "{multipath:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_privilege_mode_reaches_the_tracer() {
+        for (privilege, expected) in [
+            (
+                Privilege::Unprivileged,
+                trippy_core::PrivilegeMode::Unprivileged,
+            ),
+            (
+                Privilege::Privileged,
+                trippy_core::PrivilegeMode::Privileged,
+            ),
+        ] {
+            let config = TraceConfig {
+                privilege,
+                ..a_config()
+            };
+            assert_eq!(
+                tracer_from(&config).privilege_mode(),
+                expected,
+                "{privilege:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_icmp_trace_carries_no_port_direction() {
+        assert_eq!(
+            tracer_of_protocol(Protocol::Icmp).port_direction(),
+            trippy_core::PortDirection::None
+        );
+    }
+
+    /// `Builder::build` refuses a UDP trace whose port direction is `None`,
+    /// and `None` is the direction that the builder holds by default, so this
+    /// run reaches a tracer only because the mapping names a direction.
+    ///
+    /// The port is the one of this process. Two UDP runs of one machine that
+    /// held one port could not both send, because the unprivileged path of
+    /// macOS binds the source port for each probe.
+    #[test]
+    fn a_udp_trace_fixes_the_source_port_of_its_process() {
+        assert_eq!(
+            tracer_of_protocol(Protocol::Udp).port_direction(),
+            trippy_core::PortDirection::FixedSrc(Port(udp_source_port(process::id(), Lane::FIRST)))
+        );
+    }
+
+    /// A process identifier of every shape maps onto a source port of the
+    /// range.
+    ///
+    /// The rows walk the fold onto its edges: the first process, the last port
+    /// of the range, and the value that wraps back onto the first port. The
+    /// last row is a process identifier of the size that macOS hands out.
+    #[test]
+    fn every_process_identifier_maps_onto_a_source_port_of_the_range() {
+        let ports = u32::from(UDP_LAST_SOURCE_PORT - UDP_FIRST_SOURCE_PORT) + 1;
+        for (process, expected) in [
+            (0_u32, UDP_FIRST_SOURCE_PORT),
+            (ports - 1, UDP_LAST_SOURCE_PORT),
+            (ports, UDP_FIRST_SOURCE_PORT),
+            (42_659, 44_960),
+        ] {
+            assert_eq!(
+                udp_source_port(process, Lane::FIRST),
+                expected,
+                "process {process}"
+            );
+        }
+    }
+
+    /// No process identifier maps onto a port that a traceroute probes.
+    ///
+    /// A traceroute probes the destination ports [`THE_CLASSIC_SOURCE_PORT`]
+    /// through [`THE_LAST_TRACEROUTE_PORT`], and a source port of `krt` never
+    /// wears one of those numbers. A firewall that reads a probe of `krt` thus
+    /// never reads it as a traceroute. The first of the two is the port every
+    /// UDP run of `krt` held before this fold. The live test of a held port
+    /// holds that port while it measures, and `src/krt/tests/terminal.rs` holds
+    /// that test. The walk covers the whole range of the fold and one value
+    /// past it, so it reaches every port the function can give.
+    #[test]
+    fn no_process_identifier_maps_onto_a_port_that_a_traceroute_probes() {
+        let ports = u32::from(UDP_LAST_SOURCE_PORT - UDP_FIRST_SOURCE_PORT) + 1;
+        for process in 0..=ports {
+            let port = udp_source_port(process, Lane::FIRST);
+            assert!(
+                !(THE_CLASSIC_SOURCE_PORT..=THE_LAST_TRACEROUTE_PORT).contains(&port),
+                "process {process} takes port {port}, which a traceroute probes"
+            );
+        }
+    }
+
+    /// Two processes of one window of the fold hold two source ports.
+    ///
+    /// This is the property that lets two UDP runs of one machine both send.
+    #[test]
+    fn two_processes_of_one_window_hold_two_source_ports() {
+        let ports = u32::from(UDP_LAST_SOURCE_PORT - UDP_FIRST_SOURCE_PORT) + 1;
+        let taken: std::collections::HashSet<u16> = (0..ports)
+            .map(|process| udp_source_port(process, Lane::FIRST))
+            .collect();
+        assert_eq!(
+            taken.len(),
+            ports as usize,
+            "the fold maps two processes of one window onto one port"
+        );
+    }
+
+    /// The sentence that `krt --help` prints for each multipath mode.
+    ///
+    /// `clap` builds the help of a value out of the doc comment of the variant
+    /// that carries it, and it drops the period at the end. Each sentence
+    /// below therefore stops without one.
+    const MULTIPATH_HELP: [(Multipath, &str); 3] = [
+        (
+            Multipath::Classic,
+            "Let each probe take its own flow, as traceroute always did",
+        ),
+        (
+            Multipath::Paris,
+            "Hold one flow for each round, and carry the probe number in the UDP checksum",
+        ),
+        (
+            Multipath::Dublin,
+            "Hold one flow for each round, and carry the probe number in the IP header",
+        ),
+    ];
+
+    /// The help of each multipath mode stands beside the port direction that
+    /// makes that help true.
+    ///
+    /// A UDP run of `krt` holds the source port and lets the destination port
+    /// vary. The tracer writes the number of the round into that free port for
+    /// `paris` and for `dublin`, so each of the two modes holds one flow for
+    /// one round. A direction that held both ports would hold one flow for the
+    /// whole run, and the help of the two modes would then be false.
+    ///
+    /// The direction and the three sentences therefore live in one test. An
+    /// edit of the direction above breaks this test, and no reader of
+    /// `krt --help` then reads a sentence which the code left behind.
+    #[test]
+    fn the_multipath_help_stands_beside_the_port_direction_that_makes_it_true() {
+        use clap::{CommandFactory, ValueEnum};
+
+        assert_eq!(
+            tracer_of_protocol(Protocol::Udp).port_direction(),
+            trippy_core::PortDirection::FixedSrc(Port(udp_source_port(process::id(), Lane::FIRST))),
+            "the free destination port of a UDP run carries the number of the round, and that is what makes `one flow for each round` true. A direction that held both ports would hold one flow for the whole run, and the help of `paris` and of `dublin` would then be false"
+        );
+
+        // `term_width(0)` stands for an unbounded width in `clap` 4, so the
+        // page below wraps no line. A page of the default width of 100 columns
+        // carries the longest sentence of a mode in 96 of them, and a sentence
+        // that grew past that margin would wrap and break the assertion below
+        // for a reason that no reader of `krt --help` ever meets.
+        let page = crate::Cli::command()
+            .term_width(0)
+            .render_long_help()
+            .to_string();
+        for (mode, sentence) in MULTIPATH_HELP {
+            let value = mode
+                .to_possible_value()
+                .expect("every multipath mode carries a name");
+            let help = value
+                .get_help()
+                .expect("every multipath mode carries help")
+                .to_string();
+            assert_eq!(
+                help, sentence,
+                "the doc comment of `{mode:?}` in `main.rs` writes this sentence on the help page, and the port direction above is what makes it true. An edit of that direction must change the doc comment with it"
+            );
+            let name = value.get_name();
+            assert!(
+                page.contains(sentence),
+                "the long help carries the sentence of the `{name}` mode, so that sentence reaches the page a reader reads. `clap` writes the name of a mode onto the page under every outcome, the bare `[possible values: ...]` line included, so the name alone says nothing about the sentence: {page}"
+            );
+        }
+    }
+
+    /// `Builder::build` refuses a TCP trace whose port direction is `None`, as
+    /// it refuses such a UDP trace.
+    #[test]
+    fn a_tcp_trace_fixes_the_destination_port() {
+        assert_eq!(
+            tracer_of_protocol(Protocol::Tcp).port_direction(),
+            trippy_core::PortDirection::FixedDest(Port(TCP_DESTINATION_PORT))
+        );
+    }
+
+    /// The tracer of a run stops at the round limit of that run.
+    ///
+    /// `trippy` gives no way to stop a tracer, so the round limit is the one
+    /// thing that ends the thread of one. A hunt starts one tracer for each
+    /// destination of one process, and a tracer that outlives its destination
+    /// probes beside the tracer of the destination after it. Two UDP tracers of
+    /// one process hold one source port, so the second one dies on the port it
+    /// cannot bind.
+    #[test]
+    fn a_run_of_a_round_limit_stops_the_tracer_at_that_limit() {
+        let limit = tracer_from(&a_config()).max_rounds();
+        let expected = usize::try_from(A_ROUND_LIMIT).expect("the round limit must fit a `usize`");
+        assert_eq!(limit.map(|rounds| rounds.0.get()), Some(expected));
+    }
+
+    /// A run that names no round limit leaves the tracer without one, and the
+    /// thread of that tracer then sends rounds until the process ends.
+    #[test]
+    fn a_run_of_no_round_limit_leaves_the_tracer_without_one() {
+        let config = TraceConfig {
+            rounds: None,
+            ..a_config()
+        };
+        let limit = tracer_from(&config).max_rounds();
+        assert!(limit.is_none(), "the tracer holds a round limit: {limit:?}");
+    }
+
+    #[test]
+    fn a_configuration_that_the_tracer_refuses_names_the_reason() {
+        let config = TraceConfig {
+            max_ttl: A_TTL_THAT_THE_TRACER_REFUSES,
+            ..a_config()
+        };
+        let error = tracer_of(&config).expect_err("the tracer must refuse this last TTL");
+        assert!(
+            matches!(error, TraceError::Build { .. }),
+            "the build of the tracer refused it: {error:?}"
+        );
+        let message = error.to_string();
+        for part in [
+            A_TTL_THAT_THE_TRACER_REFUSES.to_string(),
+            trippy_core::MAX_TTL.to_string(),
+        ] {
+            assert!(
+                message.contains(&part),
+                "the message names `{part}`: {message}"
+            );
+        }
+    }
+
+    /// The schema says that the first round of a run is round one.
+    #[test]
+    fn the_first_round_of_a_run_is_round_one() {
+        let counter = AtomicU64::new(0);
+        assert_eq!(next_seq(&counter), 1);
+        assert_eq!(next_seq(&counter), 2);
+    }
+
+    /// The time that the thread of the wait test sleeps before it sets its
+    /// flag.
+    ///
+    /// The sleep is short, because every run of the suite pays it. It is long
+    /// enough that a wait which drops the handle in the place of a join reads
+    /// the flag while the thread still sleeps.
+    const A_SHORT_SLEEP: Duration = Duration::from_millis(50);
+
+    /// The wait of a tracer thread holds the caller until that thread stops.
+    ///
+    /// The thread of this test sets a flag after a short sleep. A wait that
+    /// joins the thread reads the flag as set. A wait that drops the handle
+    /// reads the flag as clear, because the thread still sleeps.
+    ///
+    /// The flag lives in this process, so two runs of this test at the same
+    /// time share nothing.
+    #[test]
+    fn the_wait_of_a_tracer_thread_holds_the_caller_until_that_thread_stops() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let of_thread = Arc::clone(&flag);
+        let tracer = TracerThread(thread::spawn(move || {
+            thread::sleep(A_SHORT_SLEEP);
+            of_thread.store(true, Ordering::SeqCst);
+            Ok(())
+        }));
+
+        tracer.wait();
+
+        assert!(
+            flag.load(Ordering::SeqCst),
+            "the wait must hold the caller until the thread sets the flag"
+        );
+    }
+
+    // The reading of one reverse lookup. No test below touches the network, and
+    // none of them starts a resolver. Each one builds the answer of a lookup by
+    // hand.
+    //
+    // Every answer below is a `Normal` answer. `krt` asks for no autonomous
+    // system information, so the resolver of this module never gives a
+    // `WithAsInfo` answer and no test builds one.
+
+    /// The address that every lookup of these tests reads.
+    const A_HOP: &str = "192.168.1.1";
+
+    /// The name that a lookup of that address finds.
+    const A_HOP_NAME: &str = "router.lan";
+
+    /// One more name of the same address, after the first one.
+    const ONE_MORE_NAME: &str = "gateway.lan";
+
+    /// The answer of a lookup that found these names.
+    fn found(names: &[&str]) -> DnsEntry {
+        DnsEntry::Resolved(Resolved::Normal(
+            address(A_HOP),
+            names.iter().map(|name| (*name).to_owned()).collect(),
+        ))
+    }
+
+    /// The name that one lookup holds.
+    fn name(host: &str) -> Lookup {
+        Lookup::Named(host.to_owned())
+    }
+
+    #[test]
+    fn a_lookup_that_has_not_finished_gives_a_wait() {
+        assert_eq!(
+            to_lookup(&DnsEntry::Pending(address(A_HOP))),
+            Lookup::Pending
+        );
+    }
+
+    #[test]
+    fn a_lookup_that_finished_gives_the_first_name_it_holds() {
+        assert_eq!(
+            to_lookup(&found(&[A_HOP_NAME, ONE_MORE_NAME])),
+            name(A_HOP_NAME)
+        );
+    }
+
+    #[test]
+    fn a_lookup_that_finished_with_no_name_gives_a_nameless_address() {
+        assert_eq!(to_lookup(&found(&[])), Lookup::Nameless);
+    }
+
+    #[test]
+    fn a_lookup_that_matched_no_record_gives_a_nameless_address() {
+        assert_eq!(
+            to_lookup(&DnsEntry::NotFound(Unresolved::Normal(address(A_HOP)))),
+            Lookup::Nameless
+        );
+    }
+
+    #[test]
+    fn a_lookup_that_failed_gives_a_nameless_address() {
+        assert_eq!(
+            to_lookup(&DnsEntry::Failed(address(A_HOP))),
+            Lookup::Nameless
+        );
+    }
+
+    /// A timeout settles the address, and it does not wait. The resolver puts a
+    /// timed-out address back into its queue on every ask, and the run loop asks
+    /// ten times a second, so an address that waited on a timeout would probe a
+    /// name server that does not answer, without end.
+    #[test]
+    fn a_lookup_that_timed_out_gives_a_nameless_address_and_the_run_asks_no_second_time() {
+        assert_eq!(
+            to_lookup(&DnsEntry::Timeout(address(A_HOP))),
+            Lookup::Nameless
+        );
+    }
+}

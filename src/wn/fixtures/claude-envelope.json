@@ -1,0 +1,115 @@
+{
+  "duration_api_ms": 7105,
+  "stop_reason": "end_turn",
+  "session_id": "00000000-0000-0000-0000-000000000000",
+  "total_cost_usd": 0.27604680000000004,
+  "usage": {
+    "input_tokens": 10,
+    "cache_creation_input_tokens": 549,
+    "cache_read_input_tokens": 40863,
+    "output_tokens": 57,
+    "output_tokens_details": {
+      "thinking_tokens": 51
+    },
+    "server_tool_use": {
+      "web_search_requests": 0,
+      "web_fetch_requests": 0
+    },
+    "service_tier": "standard",
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 549,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "inference_geo": "not_available",
+    "iterations": [
+      {
+        "input_tokens": 10,
+        "output_tokens": 57,
+        "cache_read_input_tokens": 40863,
+        "cache_creation_input_tokens": 549,
+        "cache_creation": {
+          "ephemeral_5m_input_tokens": 0,
+          "ephemeral_1h_input_tokens": 549
+        },
+        "type": "message"
+      }
+    ],
+    "speed": "standard"
+  },
+  "modelUsage": {
+    "claude-haiku-4-5": {
+      "inputTokens": 30,
+      "outputTokens": 417,
+      "cacheReadInputTokens": 94683,
+      "cacheCreationInputTokens": 27783,
+      "webSearchRequests": 0,
+      "costUSD": 0.06714930000000001,
+      "contextWindow": 200000,
+      "maxOutputTokens": 32000,
+      "thinkingTokens": 260,
+      "canonicalModel": "claude-haiku-4-5",
+      "provider": "firstParty",
+      "costBasis": "list"
+    },
+    "claude-opus-5[1m]": {
+      "inputTokens": 2,
+      "outputTokens": 3,
+      "cacheReadInputTokens": 0,
+      "cacheCreationInputTokens": 33410,
+      "webSearchRequests": 0,
+      "costUSD": 0.2088975,
+      "contextWindow": 1000000,
+      "maxOutputTokens": 64000,
+      "thinkingTokens": 0,
+      "canonicalModel": "claude-opus-5",
+      "provider": "firstParty",
+      "costBasis": "list"
+    }
+  },
+  "permission_denials": [],
+  "terminal_reason": "completed",
+  "fast_mode_state": "off",
+  "fast_mode_disabled_reason": "sdk_opt_in_required",
+  "origin": {
+    "kind": "task-notification"
+  },
+  "subagent_stats": {
+    "spawned": 1,
+    "requested": {
+      "background": 0,
+      "foreground": 0,
+      "unset": 1
+    },
+    "started_in_background": 1,
+    "max_depth": 1,
+    "spawned_by_subagents": 0,
+    "completed": 1,
+    "failed": 0,
+    "killed": {
+      "parent": 0,
+      "user": 0,
+      "system": 0
+    },
+    "refused": {
+      "depth_limit": 0,
+      "concurrency_limit": 0,
+      "budget": 0
+    },
+    "by_type": {
+      "general-purpose": 1
+    }
+  },
+  "is_error": false,
+  "num_turns": 1,
+  "subtype": "success",
+  "api_error_status": null,
+  "result": "{\n  \"version\": 1,\n  \"streams\": []\n}\n",
+  "ttft_ms": 1289,
+  "type": "result",
+  "duration_ms": 1309,
+  "uuid": "00000000-0000-0000-0000-000000000000",
+  "ttft_stream_ms": 688,
+  "time_to_request_ms": 15,
+  "first_content_frame_ms": 910,
+  "queued_turn_count": 0
+}

@@ -1,0 +1,13 @@
+. import XCTest
+. 
+. struct Calculator {
+.     func add(_ a: Int, _ b: Int) -> Int {
+.         return a + b
+.     }
+. }
+. 
+T final class CalculatorChecks: XCTestCase {
+T     func testAddsTwoNumbers() {
+T         XCTAssertEqual(Calculator().add(1, 2), 3)
+T     }
+T }

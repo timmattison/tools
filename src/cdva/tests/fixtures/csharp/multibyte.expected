@@ -1,0 +1,22 @@
+. using Xunit;
+. 
+. namespace Example.Greet
+. {
+.     public class Greeter
+.     {
+.         public string Greet()
+.         {
+.             return "こんにちは";
+.         }
+.     }
+. 
+.     public class GreetingFacts
+.     {
+T         [Fact]
+T         public void GreetsInJapanese()
+T         {
+T             // 挨拶を確かめる
+T             Assert.Equal("こんにちは", new Greeter().Greet());
+T         }
+.     }
+. }

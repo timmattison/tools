@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "repo": "timmattison/tools",
+  "generated": "2026-09-02T14:03:11Z",
+  "streams": [
+    {
+      "id": "S0",
+      "name": "daemon leak",
+      "zone": "crates/tsm (serve.rs)",
+      "solo": true,
+      "notes": "Every parallel stream leaks more until this lands.",
+      "order": [{ "issue": 96, "waitsFor": [] }]
+    },
+    {
+      "id": "S1",
+      "name": "lifecycle",
+      "zone": "crates/tsm (kill.rs)",
+      "solo": false,
+      "notes": "",
+      "order": [
+        { "issue": 91, "waitsFor": [96] },
+        { "issue": 94, "pr": 102, "waitsFor": [] }
+      ]
+    }
+  ],
+  "housekeeping": { "closeable": [], "rescope": [], "stale": [] },
+  "warnings": []
+}

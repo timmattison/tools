@@ -1,0 +1,9 @@
+[package]
+name = "termwindow"
+version = "0.1.0"
+edition.workspace = true
+description = "The size of the terminal window a tool draws in, and whether to paint color into it"
+license = "MIT"
+
+[lints]
+workspace = true

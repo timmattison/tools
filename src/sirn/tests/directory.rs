@@ -1,0 +1,176 @@
+//! End-to-end integration tests for the `sirn` directory-serving path.
+//!
+//! Each test starts its own directory-mode server on `127.0.0.1:0` (an
+//! OS-assigned ephemeral port) rooted at a unique `tempfile::TempDir`, so the
+//! suite is parallel-safe: a second concurrent copy (e.g. a `bacon` loop) cannot
+//! clobber a fixed port or path. The temp root is canonicalized before serving
+//! because on macOS `TempDir` lives under `/var` (a symlink to `/private/var`),
+//! and directory-mode path confinement compares against the canonical root.
+
+mod common;
+use common::{http_get, start_dir, stop};
+
+#[test]
+fn root_request_returns_listing_with_entries() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    std::fs::write(dir.path().join("a.txt"), b"alpha").expect("write a.txt");
+    std::fs::create_dir(dir.path().join("sub")).expect("create sub dir");
+    let root = dir.path().canonicalize().expect("canonicalize root");
+
+    let (addr, server, handles) = start_dir(root);
+
+    let (status, headers, body) = http_get(addr, "/");
+    assert_eq!(status, 200);
+    assert_eq!(
+        headers.get("content-type").map(String::as_str),
+        Some("text/html; charset=utf-8")
+    );
+    let html = String::from_utf8_lossy(&body);
+    assert!(
+        html.contains("a.txt"),
+        "listing should include the file entry, got:\n{html}"
+    );
+    assert!(
+        html.contains("sub"),
+        "listing should include the subdirectory entry, got:\n{html}"
+    );
+
+    stop(&server, handles);
+}
+
+#[test]
+fn nested_file_fetch_returns_bytes_and_headers() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let contents = b"alpha";
+    std::fs::write(dir.path().join("a.txt"), contents).expect("write a.txt");
+    let root = dir.path().canonicalize().expect("canonicalize root");
+
+    let (addr, server, handles) = start_dir(root);
+
+    let (status, headers, body) = http_get(addr, "/a.txt");
+    assert_eq!(status, 200);
+    assert_eq!(body, contents);
+    assert_eq!(
+        headers.get("content-type").map(String::as_str),
+        Some("text/plain; charset=utf-8")
+    );
+    assert_eq!(
+        headers.get("content-length").map(String::as_str),
+        Some(body.len().to_string().as_str())
+    );
+
+    stop(&server, handles);
+}
+
+#[test]
+fn subdir_file_fetch_works() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let sub = dir.path().join("sub");
+    std::fs::create_dir(&sub).expect("create sub dir");
+    std::fs::write(sub.join("inner.txt"), b"deep").expect("write inner.txt");
+    let root = dir.path().canonicalize().expect("canonicalize root");
+
+    let (addr, server, handles) = start_dir(root);
+
+    let (status, _headers, body) = http_get(addr, "/sub/inner.txt");
+    assert_eq!(status, 200);
+    assert_eq!(body, b"deep");
+
+    stop(&server, handles);
+}
+
+#[test]
+fn parent_traversal_is_forbidden() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let root = dir.path().canonicalize().expect("canonicalize root");
+
+    let (addr, server, handles) = start_dir(root);
+
+    let (status, _headers, _body) = http_get(addr, "/../../etc/passwd");
+    assert_eq!(status, 403);
+
+    stop(&server, handles);
+}
+
+/// A file whose name contains a space arrives percent-encoded (`%20`); the
+/// directory-mode server must decode the request path before resolving it under
+/// the root so the on-disk file is reachable.
+#[test]
+fn file_with_space_is_reachable_via_percent_encoded_path() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let contents = b"spaced out";
+    std::fs::write(dir.path().join("my file.txt"), contents).expect("write my file.txt");
+    let root = dir.path().canonicalize().expect("canonicalize root");
+
+    let (addr, server, handles) = start_dir(root);
+
+    let (status, _headers, body) = http_get(addr, "/my%20file.txt");
+    assert_eq!(status, 200);
+    assert_eq!(body, contents);
+
+    stop(&server, handles);
+}
+
+/// A non-ASCII nested file arrives UTF-8 percent-encoded in every path segment;
+/// the decoded path must resolve under the root.
+#[test]
+fn non_ascii_nested_file_is_reachable_via_percent_encoded_path() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let sub = dir.path().join("café");
+    std::fs::create_dir(&sub).expect("create café dir");
+    let contents = b"deep accented";
+    std::fs::write(sub.join("naïve.txt"), contents).expect("write naïve.txt");
+    let root = dir.path().canonicalize().expect("canonicalize root");
+
+    let (addr, server, handles) = start_dir(root);
+
+    let (status, _headers, body) = http_get(addr, "/caf%C3%A9/na%C3%AFve.txt");
+    assert_eq!(status, 200);
+    assert_eq!(body, contents);
+
+    stop(&server, handles);
+}
+
+/// Percent-decoding must NOT open a path-traversal hole. A request whose encoded
+/// form hides `../` segments (`%2e%2e` -> `..`) must still be rejected with `403`
+/// after decoding, because resolution re-parses components and rejects `..`.
+#[test]
+fn percent_encoded_dot_dot_traversal_is_forbidden() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let root = dir.path().canonicalize().expect("canonicalize root");
+
+    let (addr, server, handles) = start_dir(root);
+
+    let (status, _headers, _body) = http_get(addr, "/%2e%2e/%2e%2e/etc/passwd");
+    assert_eq!(status, 403);
+
+    stop(&server, handles);
+}
+
+/// A request hiding both encoded slashes and `..` (`%2f` -> `/`, `..` ->
+/// parent) must also be rejected with `403` once decoded.
+#[test]
+fn percent_encoded_slash_traversal_is_forbidden() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let root = dir.path().canonicalize().expect("canonicalize root");
+
+    let (addr, server, handles) = start_dir(root);
+
+    let (status, _headers, _body) = http_get(addr, "/sub%2f..%2f..%2fetc");
+    assert_eq!(status, 403);
+
+    stop(&server, handles);
+}
+
+#[test]
+fn missing_path_returns_404() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let root = dir.path().canonicalize().expect("canonicalize root");
+
+    let (addr, server, handles) = start_dir(root);
+
+    let (status, _headers, _body) = http_get(addr, "/nope.txt");
+    assert_eq!(status, 404);
+
+    stop(&server, handles);
+}

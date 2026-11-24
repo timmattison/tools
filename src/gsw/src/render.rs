@@ -3,11 +3,22 @@
 use std::time::Duration;
 
 use colored::{ColoredString, Colorize};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
-use crate::age::{age_dim_level, age_fade_factor, fade_rgb, format_age_detailed, AgeDim};
+use textfit::{
+    center, pad_right, truncate_left, truncate_middle, truncate_right, truncate_to_budget,
+};
+
+use crate::age::{
+    age_dim_level, age_fade_factor, fade_rgb, format_age_detailed, AgeDim, AGE_WIDTH,
+};
 use crate::bar::render_bar;
 use crate::git::FileStatus;
+use crate::repo::LogStart;
+use crate::worktrees::WorktreeBadge;
+
+/// The rows of the worktree list, and the hint under them.
+pub(crate) mod list;
 
 /// Everything render() needs to draw one frame.
 #[derive(Debug, Clone)]
@@ -18,13 +29,73 @@ pub struct Snapshot {
     /// Commits on the base not reachable from HEAD — how far behind the base
     /// the branch is, i.e. whether it needs a rebase. `0` when up to date.
     pub commits_behind: u32,
-    pub last_commit_age: Option<Duration>,
     pub files: Vec<RenderEntry>,
     /// Most recent commits, newest first. Empty when not requested.
+    ///
+    /// The head of this list is HEAD, so its age is the last-commit age. The
+    /// frame shows that age here and nowhere else, and the watch-mode decay
+    /// timer reads it from here too.
+    ///
+    /// The walk fetches no more commits than the pane can show. So this list
+    /// can stop before the history does, and [`Snapshot::log_complete`] tells
+    /// the two cases apart.
     pub log: Vec<LogEntry>,
+    /// `log` is complete: it holds every commit that [`Snapshot::log_start`]
+    /// reaches, because the walk of the history reached its end at or before
+    /// the fetch limit. A read of the log from that start with a higher limit
+    /// then finds no more commits.
+    ///
+    /// Watch mode reads it on a resize. A pane that grows past a complete log
+    /// needs no read of the log, because no read can give it more commits.
+    /// `false` when the walk stopped at the limit, and when a read failed, so
+    /// a doubt costs one read of the log and never a row of the log.
+    pub log_complete: bool,
+    /// The commit that the walk of the log started from: the commit that HEAD
+    /// named at the walk. `None` when HEAD named no commit, because it was
+    /// unborn or it did not resolve to a commit.
+    ///
+    /// The walk records it at every limit, zero too, because a pane too short
+    /// for a log at the walk can grow later. Watch mode then reads the log
+    /// again from this commit, and never from HEAD. The history of a commit
+    /// never changes, so that read extends the log of the walk, and it never
+    /// puts the commits of another branch under the header of this snapshot.
+    /// A snapshot with no start gives a resize no log to read.
+    ///
+    /// The start also keeps the set of the commits that only the branch has,
+    /// from the one walk of the snapshot. The header counts the size of that
+    /// set, and the read on a resize marks its rows from it. The set lives as
+    /// long as the snapshot, and a clone of the snapshot shares it.
+    pub log_start: Option<LogStart>,
     /// Upstream tracking branch status (ahead/behind). `None` when the
     /// current branch has no configured upstream.
     pub upstream: Option<UpstreamStatus>,
+    /// The remote a branch with no upstream would be published to, or `None`
+    /// when the repository offers no unambiguous answer. Never rendered — it is
+    /// what watch mode's push prompt names, and it rides on the snapshot so
+    /// every walk re-reads it from the freshly re-opened handle, exactly like
+    /// [`Snapshot::upstream`]. See `repo::push_remote`.
+    pub push_remote: Option<String>,
+    /// In-progress git operation (merge/rebase), or `None` for a clean tree.
+    pub operation: Option<Operation>,
+    /// Which worktree of the repository the frame shows, for the header.
+    ///
+    /// Only watch mode sets it, because only watch mode moves between the
+    /// worktrees. It is `None` in one-shot mode, and `None` for a repository
+    /// with one worktree, so the header of such a frame stays as it was.
+    pub worktree: Option<WorktreeBadge>,
+    /// The header shows a name that is not the branch where the watch started.
+    ///
+    /// Only watch mode sets it, after each walk. `build_snapshot` and one-shot
+    /// mode leave it `false`: one-shot mode draws one frame, so no frame comes
+    /// after the start. The header paints the name red when it is set.
+    pub off_start_branch: bool,
+    /// The pull-request indicator for the header, or `None` when it does not apply.
+    ///
+    /// Only watch mode sets it. The watch loop puts the target in after each
+    /// walk and the indicator in before each render. One-shot mode leaves it
+    /// `None`, so the header of such a frame is byte for byte what it was
+    /// before the indicator.
+    pub pull: Option<crate::pull::PullHeader>,
 }
 
 /// State of the local branch relative to its upstream tracking ref.
@@ -38,14 +109,55 @@ pub struct UpstreamStatus {
     pub behind: u32,
 }
 
+/// An in-progress git operation surfaced in the header area.
+///
+/// Rebase and merge are mutually exclusive git states, so at most one is ever
+/// present. Detection lives in `repo::operation_state`; rendering lives in
+/// `render_operation_line`.
+///
+/// Both variants are populated in production by `repo::operation_state`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Operation {
+    /// A merge is in progress. `conflicts` is the number of unmerged paths.
+    Merge { conflicts: u32 },
+    /// A rebase is in progress. `step` is git's `current/total` progress when
+    /// readable (may be `None`); `conflicts` is the number of unmerged paths.
+    Rebase {
+        step: Option<StepProgress>,
+        conflicts: u32,
+    },
+}
+
+/// Git's `current`/`total` rebase step counters (step 3 of 10 -> `3/10`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StepProgress {
+    pub current: u32,
+    pub total: u32,
+}
+
 /// One recent-commit row.
 #[derive(Debug, Clone)]
 pub struct LogEntry {
     pub hash: String,
     pub subject: String,
-    /// How long ago this commit was authored. Same `Duration` shape as the
-    /// per-file age column so the two render in identical units.
-    pub age: Duration,
+    /// How long ago this commit was authored. Same `Option<Duration>` shape as
+    /// the per-file age column, so the two render in identical units.
+    ///
+    /// `None` is an age git cannot give us: a commit timestamp ahead of the
+    /// local clock (skew between machines, a hand-set `--date`) or one that
+    /// does not convert to a wall-clock instant at all. Such a row renders
+    /// [`UNKNOWN_AGE`] rather than a number, because every number available
+    /// here is a lie — `0s` in particular claims the commit landed this second.
+    pub age: Option<Duration>,
+    /// The commit is only on the current branch: the start of the log reaches
+    /// it, and the base does not. These are the commits that the ahead count
+    /// of the header counts ([`Snapshot::commits_ahead`]).
+    ///
+    /// It is `false` for every commit when HEAD is on the base, or when the
+    /// base does not resolve. The header then counts zero too.
+    ///
+    /// The log row of such a commit shows [`BRANCH_MARK`] in its gutter.
+    pub on_branch: bool,
 }
 
 /// One file row in the frame.
@@ -71,17 +183,48 @@ pub struct RenderOptions {
     pub max_files: Option<usize>,
     /// Maximum recent-commit rows to render. 0 disables the log section.
     pub log_lines: usize,
-    /// When true, the commit-log rows fade from a bright base color toward
-    /// a dark floor as commits age, using 24-bit (truecolor) ANSI. When
-    /// false, log rows use the same 8-color/dim styling as everything else.
+    /// When true, the commit-log rows and the file rows fade from a bright
+    /// base color toward a dark floor as they age. The fade uses 24-bit
+    /// (truecolor) ANSI. When false, both use the same 8-color/dim styling
+    /// as everything else.
     pub truecolor: bool,
+    /// Live-refresh clock printed inside the post-header separator, or `None`
+    /// to leave that rule blank. One-shot mode passes `None`: a render that
+    /// exits has no next refresh to count down to, and stamping a countdown
+    /// into piped output would date the capture the moment it is read.
+    pub refresh: Option<RefreshStatus>,
+}
+
+/// When the displayed snapshot was collected, and when the next one is due.
+///
+/// Watch mode prints both inside the post-header separator so the rule that
+/// already spans the frame carries the answer to "is this screen still live?"
+/// without spending a row on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefreshStatus {
+    /// How long ago the displayed snapshot was walked out of the repository.
+    /// This is watch mode's age offset — the same duration every displayed age
+    /// is advanced by — so the clock and the ages under it can never disagree.
+    pub last_refresh_ago: Duration,
+    /// How long until the next scheduled walk. `Duration::ZERO` reads as `0s`,
+    /// which is what the frame painted by that walk shows for an instant.
+    pub next_refresh_in: Duration,
 }
 
 /// Width of the "+adds" / "-dels" / age column fields.
 const ADDS_FIELD: usize = 5;
 const DELS_FIELD: usize = 4;
-/// Wide enough for `59m59s`, `23h59m`, `99d23h`. Older files overflow slightly.
-const AGE_FIELD: usize = 6;
+/// Sized to [`AGE_WIDTH`] — the widest string [`format_age_detailed`] can
+/// return — so no age can push a row past the terminal width and wrap. The
+/// two constants are one and the same on purpose: they cannot drift.
+const AGE_FIELD: usize = AGE_WIDTH;
+
+/// What an age gsw cannot compute renders as.
+///
+/// Every alternative is a number, and every number here is a claim gsw cannot
+/// support — `0s` most of all, which reads as "this just happened". One mark,
+/// used everywhere an age is missing, so the reader learns it once.
+pub const UNKNOWN_AGE: &str = "?";
 
 /// Visible separator characters between columns.
 const SEP_BAR_ADDS: usize = 2;
@@ -89,24 +232,137 @@ const SEP_ADDS_DELS: usize = 1;
 const SEP_DELS_AGE: usize = 3;
 
 /// Produce the colored, multi-line frame.
+///
+/// Thin delegator to [`render_with_offset`] at `Duration::ZERO`, i.e. with no
+/// age advance — the output is byte-identical to the historical `render`. The
+/// 2-arg shape is preserved so existing call sites and tests stay unchanged.
 pub fn render(snapshot: &Snapshot, opts: &RenderOptions) -> String {
-    let mut lines = Vec::new();
+    render_with_offset(snapshot, opts, Duration::ZERO)
+}
 
+/// The lines at the top of every frame: the header, the line of a merge or a
+/// rebase in progress, and the separator with the refresh clock of `refresh`.
+///
+/// Every frame of gsw starts with these lines. One function draws them, so no
+/// two frames draw them differently. The row budget of a frame counts exactly
+/// these lines as its header chrome (`header_chrome` in `main.rs`).
+///
+/// The whole header is bold. The behind segment is also yellow. When
+/// `snapshot.off_start_branch` is set, the name of HEAD is also red, and
+/// nothing else is: not the lead, the separators, the ahead clause, the behind
+/// segment, or the upstream field. A hard cut that removed the name leaves no
+/// red span. With the flag clear, the header is byte-for-byte what it was
+/// before the name had a color of its own.
+///
+/// When `snapshot.pull` is set, the indicator ends the header row. The row is
+/// then exactly `width` columns wide, with at least [`PULL_GAP`] plain spaces
+/// between the header and the indicator. The header must fit in the columns
+/// that the indicator leaves, through the ladder of [`header_segments`] with no
+/// hard cut. If it does not fit, the row has no indicator and the header takes
+/// the full width. The name of the branch outranks the indicator. With
+/// `pull` unset, the row is what it was before the indicator, byte for byte.
+pub(crate) fn render_head(
+    snapshot: &Snapshot,
+    width: usize,
+    refresh: Option<&RefreshStatus>,
+) -> Vec<String> {
+    let header_line = header_row(snapshot, width);
+    let mut lines = vec![header_line];
+    if let Some(op) = &snapshot.operation {
+        lines.push(render_operation_line(op, width));
+    }
+    lines.push(render_separator(width, refresh));
+    lines
+}
+
+/// The header row: the painted header, and the pull-request indicator at the
+/// right end when both fit.
+///
+/// The indicator needs its own width and [`PULL_GAP`] columns. The header must
+/// fit in the rest through the ladder alone, with no hard cut. When it does,
+/// plain spaces fill the row up to the indicator, so the last column of the
+/// row is the last column of the indicator. Otherwise the row has no
+/// indicator and the header takes the full width. The name of the branch
+/// outranks the indicator.
+fn header_row(snapshot: &Snapshot, width: usize) -> String {
+    let paint = |segments| paint_header(segments, snapshot.off_start_branch);
+    let Some(pull) = &snapshot.pull else {
+        return paint(header_segments(snapshot, width));
+    };
+    let text_width = UnicodeWidthStr::width(pull.indicator.text().as_str());
+    let fitted = width
+        .checked_sub(text_width + PULL_GAP)
+        .and_then(|room| fit_header(snapshot, room));
+    match fitted {
+        Some(segments) => {
+            let gap = width - text_width - segments.width();
+            format!(
+                "{}{}{}",
+                paint(segments),
+                " ".repeat(gap),
+                pull.indicator.paint()
+            )
+        }
+        None => paint(header_segments(snapshot, width)),
+    }
+}
+
+/// Paints the segments of the header: the whole header bold, the name red when
+/// `off_start_branch` is set, and the behind segment yellow.
+fn paint_header(segments: HeaderSegments, off_start_branch: bool) -> String {
     let HeaderSegments {
-        prefix,
+        lead,
+        name,
+        rest,
         behind,
         suffix,
-    } = header_segments(snapshot);
+    } = segments;
     // The whole header is bold as before; the optional behind segment is
     // additionally warning-colored (yellow) to flag that the branch needs a
-    // rebase. When `behind` is `None` the prefix+suffix reproduce today's
-    // line byte-for-byte.
-    let header_line = match behind {
-        Some(seg) => format!("{}{}{}", prefix.bold(), seg.yellow().bold(), suffix.bold()),
-        None => format!("{prefix}{suffix}").bold().to_string(),
-    };
-    lines.push(header_line);
-    lines.push(render_separator(opts.terminal_width));
+    // rebase.
+    if off_start_branch {
+        // The name is red as well as bold, as the behind segment is yellow as
+        // well as bold. A cut that removed the name leaves it empty, and an
+        // empty name gets no span at all, so the line has no red code.
+        let name = if name.is_empty() {
+            String::new()
+        } else {
+            name.red().bold().to_string()
+        };
+        let behind = behind
+            .map(|seg| seg.yellow().bold().to_string())
+            .unwrap_or_default();
+        format!(
+            "{}{name}{}{behind}{}",
+            lead.bold(),
+            rest.bold(),
+            suffix.bold()
+        )
+    } else {
+        // The name keeps the style of the text around it. When `behind` is
+        // `None` the prefix and the suffix reproduce the line byte-for-byte.
+        let prefix = format!("{lead}{name}{rest}");
+        match behind {
+            Some(seg) => format!("{}{}{}", prefix.bold(), seg.yellow().bold(), suffix.bold()),
+            None => format!("{prefix}{suffix}").bold().to_string(),
+        }
+    }
+}
+
+/// Produce the colored, multi-line frame with every displayed age advanced
+/// by `age_offset`.
+///
+/// `age_offset` is added (saturating) to the header's last-commit age, every
+/// file row's mtime age, and every commit-log row's age before they are
+/// formatted and faded. `Duration::ZERO` is an exact no-op
+/// (`d.saturating_add(ZERO) == d`), leaving the output byte-identical to
+/// [`render`].
+pub(crate) fn render_with_offset(
+    snapshot: &Snapshot,
+    opts: &RenderOptions,
+    age_offset: Duration,
+) -> String {
+    let mut lines = render_head(snapshot, opts.terminal_width, opts.refresh.as_ref());
 
     let display_count = match opts.max_files {
         Some(0) | None => snapshot.files.len(),
@@ -128,7 +384,12 @@ pub fn render(snapshot: &Snapshot, opts: &RenderOptions) -> String {
     let log_rendered = opts.log_lines > 0 && !snapshot.log.is_empty();
     if log_rendered {
         for entry in snapshot.log.iter().take(opts.log_lines) {
-            lines.push(render_log_row(entry, opts.terminal_width, opts.truecolor));
+            lines.push(render_log_row(
+                entry,
+                opts.terminal_width,
+                opts.truecolor,
+                age_offset,
+            ));
         }
     }
 
@@ -137,10 +398,13 @@ pub fn render(snapshot: &Snapshot, opts: &RenderOptions) -> String {
         // the post-header separator already sits directly above the files, so
         // adding another would produce a double rule with nothing between them.
         if log_rendered {
-            lines.push(render_separator(opts.terminal_width));
+            // The inter-section rule stays blank: the refresh clock belongs to
+            // the frame, not to the file list, and printing it twice would make
+            // a reader check whether the two copies agree.
+            lines.push(render_separator(opts.terminal_width, None));
         }
         for entry in snapshot.files.iter().take(display_count) {
-            lines.push(render_row(entry, opts, max_change, path_width));
+            lines.push(render_row(entry, opts, max_change, path_width, age_offset));
         }
 
         let hidden = snapshot.files.len().saturating_sub(display_count);
@@ -162,27 +426,72 @@ pub fn render(snapshot: &Snapshot, opts: &RenderOptions) -> String {
 /// Visible gap between the short hash and the subject in a log row.
 const LOG_HASH_SUBJECT_SEP: &str = "  ";
 
-fn render_log_row(entry: &LogEntry, width: usize, truecolor: bool) -> String {
-    // Layout: `{hash}  {subject…}   {age}` — the rightmost AGE_FIELD cells
-    // hold the right-aligned age, matching the file-row age column exactly.
-    // The subject is padded to fill the gap so the age column lines up.
+/// The mark of a log row whose commit is only on the current branch
+/// ([`LogEntry::on_branch`]). The ahead count of the header counts these
+/// commits, so the mark shows which rows that count holds.
+///
+/// The mark sits in a gutter of one column at the left of the row, before the
+/// hash. Every other log row shows a blank in that gutter. The gutter is on
+/// every log row, also when no row has the mark. So the hash column does not
+/// move when the first commit lands on a new branch.
+///
+/// The mark is a glyph and not only a color. So it stays visible with no
+/// color: in 8-color mode and in piped output with no escape codes.
+pub(crate) const BRANCH_MARK: char = '▎';
+
+/// The gutter of a log row whose commit is not only on the current branch.
+/// It is as wide as [`BRANCH_MARK`], so every hash starts in one column.
+const LOG_GUTTER_BLANK: char = ' ';
+
+/// The glyphs of the log row `row` after its gutter, or `None` when `row`
+/// does not start with a gutter. The tests use it to find a log row by the
+/// hash at its start.
+#[cfg(test)]
+pub(crate) fn after_log_gutter(row: &str) -> Option<&str> {
+    row.strip_prefix(BRANCH_MARK)
+        .or_else(|| row.strip_prefix(LOG_GUTTER_BLANK))
+}
+
+/// Render one commit-log row.
+///
+/// The row starts with a gutter of one column: [`BRANCH_MARK`] when the
+/// commit is only on the current branch ([`LogEntry::on_branch`]), and a blank
+/// on every other row. The gutter takes its column from the subject, so the
+/// row is never wider than `width`, and the age column stays in line with the
+/// age column of the file rows.
+///
+/// `age_offset` is added (saturating) to the commit's age before it is
+/// formatted and used to drive the hash/subject/age fades, so the whole row
+/// ages forward by a single shared `Duration`. `Duration::ZERO` leaves the
+/// row byte-identical to the un-offset render. An age the repository could not
+/// give us ([`LogEntry::age`] of `None`) stays unknown whatever the offset —
+/// advancing a duration gsw never had produces a number it still cannot back.
+fn render_log_row(entry: &LogEntry, width: usize, truecolor: bool, age_offset: Duration) -> String {
+    // Layout: `{mark}{hash}  {subject…}   {age}` — the first cell is the
+    // gutter, which holds BRANCH_MARK or a blank, so every hash starts in the
+    // same column. The rightmost AGE_FIELD cells hold the right-aligned age,
+    // matching the file-row age column exactly. The subject is padded to fill
+    // the gap so the age column lines up.
+    let effective_age = entry.age.map(|age| age.saturating_add(age_offset));
+    let gutter = colorize_log_gutter(entry.on_branch, truecolor);
+    let gutter_width = UnicodeWidthStr::width(gutter.input.as_str());
     let hash_width = UnicodeWidthStr::width(entry.hash.as_str());
     let hash_sep_width = LOG_HASH_SUBJECT_SEP.chars().count();
     let sep_to_age = " ".repeat(SEP_DELS_AGE);
 
     let subject_budget = width
-        .saturating_sub(hash_width + hash_sep_width + SEP_DELS_AGE + AGE_FIELD)
+        .saturating_sub(gutter_width + hash_width + hash_sep_width + SEP_DELS_AGE + AGE_FIELD)
         .max(1);
     let subject_truncated = truncate_right(&entry.subject, subject_budget);
     let subject_padded = pad_right(&subject_truncated, subject_budget);
 
-    let age_raw = format_age_detailed(entry.age);
+    let age_raw = effective_age.map_or_else(|| UNKNOWN_AGE.to_string(), format_age_detailed);
     let age_field = format!("{age_raw:>width$}", width = AGE_FIELD);
 
-    let hash_str = colorize_log_hash(&entry.hash, entry.age, truecolor);
-    let subject_str = colorize_log_subject(&subject_padded, entry.age, truecolor);
-    let age_str = colorize_log_age(&age_field, entry.age, truecolor);
-    format!("{hash_str}{LOG_HASH_SUBJECT_SEP}{subject_str}{sep_to_age}{age_str}")
+    let hash_str = colorize_log_hash(&entry.hash, effective_age, truecolor);
+    let subject_str = colorize_log_subject(&subject_padded, effective_age, truecolor);
+    let age_str = colorize_log_age(&age_field, effective_age, truecolor);
+    format!("{gutter}{hash_str}{LOG_HASH_SUBJECT_SEP}{subject_str}{sep_to_age}{age_str}")
 }
 
 /// Total width of everything to the right of the path column: the bar plus
@@ -201,61 +510,402 @@ fn compute_path_width(opts: &RenderOptions) -> usize {
 
 /// The header split into independently-styleable pieces.
 ///
-/// `render` paints `prefix` and `suffix` bold (as the whole header has always
-/// been) and, when present, paints `behind` yellow + bold as a rebase warning.
-/// `behind` is `None` exactly when the branch is up to date with its base, in
-/// which case `prefix` + `suffix` concatenate to today's header byte-for-byte.
+/// The pieces carry no pull-request indicator. [`render_head`] adds it after
+/// the pieces, when the header fits in the columns that the indicator leaves.
+///
+/// `render` paints `lead`, `rest` and `suffix` bold (as the whole header has
+/// always been) and, when present, paints `behind` yellow + bold as a rebase
+/// warning. `behind` is `None` exactly when the branch is up to date with its
+/// base. When `behind` is `None`, `lead` + `name` + `rest` + `suffix`
+/// concatenate to the header byte-for-byte. When `behind` is `Some`, it goes
+/// between `rest` and `suffix`.
+///
+/// `name` is split out so `render_head` can paint it red + bold when the
+/// snapshot is off its start branch. With the flag clear, `render_head` joins
+/// the three pieces again and paints them as one bold run.
 struct HeaderSegments {
-    /// Up to and including `ahead of {base}`.
-    prefix: String,
+    /// The text before the name, with the ` • ` after the lead, for example
+    /// `gsw ⌂ 1/4 • `.
+    lead: String,
+    /// The name as the header draws it, shaved or whole. Empty when a hard cut
+    /// removed it.
+    name: String,
+    /// The text after the name, up to and including `ahead of {base}`, for
+    /// example ` • 3 commits ahead of main`. A hard cut puts its `…` at the
+    /// end of this piece, so the mark is never red.
+    rest: String,
     /// `, {m} behind` — present only when `commits_behind > 0`.
     behind: Option<String>,
-    /// The upstream field and `• last commit {age} ago` tail.
+    /// The upstream field. Empty when the branch tracks nothing.
     suffix: String,
 }
 
-fn header_segments(snap: &Snapshot) -> HeaderSegments {
+impl HeaderSegments {
+    /// Display width of the assembled line.
+    fn width(&self) -> usize {
+        UnicodeWidthStr::width(self.lead.as_str())
+            + UnicodeWidthStr::width(self.name.as_str())
+            + UnicodeWidthStr::width(self.rest.as_str())
+            + self.behind.as_deref().map_or(0, UnicodeWidthStr::width)
+            + UnicodeWidthStr::width(self.suffix.as_str())
+    }
+
+    /// Cut the line down to `width` columns, reserving the upstream field.
+    ///
+    /// The ladder in [`header_segments`] normally lands inside the terminal
+    /// without reaching this; it is the backstop for widths so narrow that
+    /// even floored names don't fit, where something has to give. A cut line
+    /// beats a wrapped one: wrapping shifts every row below it.
+    ///
+    /// What gives is the identity text — the branch name and the ahead-count
+    /// clause — because by the time the ladder reaches here it has already
+    /// decided the upstream field earns its columns. Only a terminal too
+    /// narrow for that field alone cuts into the field itself.
+    ///
+    /// The lead, the name and the rest are cut as one line, so the cut falls
+    /// where it fell before the name was split out. The kept text goes back
+    /// over the three pieces in order. The `…` of the cut goes at the end of
+    /// `rest`, so it keeps the bold style and is never red, even when the cut
+    /// lands inside the name. A cut that removes the name leaves `name` empty.
+    fn clamp(self, width: usize) -> Self {
+        let suffix = truncate_to_budget(&self.suffix, width);
+        let identity_budget = width - UnicodeWidthStr::width(suffix.as_str());
+        let identity = format!("{}{}{}", self.lead, self.name, self.rest);
+        let cut = truncate_to_budget(&identity, identity_budget);
+        let left = identity_budget - UnicodeWidthStr::width(cut.as_str());
+        let (lead, name, rest) = if cut == identity {
+            (self.lead, self.name, self.rest)
+        } else {
+            // A cut line is the kept characters, then one `…` (or nothing for
+            // a budget of zero).
+            let mut kept: Vec<char> = cut.chars().collect();
+            let mark = kept.pop();
+            let mut kept = kept.into_iter();
+            let lead: String = kept.by_ref().take(self.lead.chars().count()).collect();
+            let name: String = kept.by_ref().take(self.name.chars().count()).collect();
+            let mut rest: String = kept.collect();
+            rest.extend(mark);
+            (lead, name, rest)
+        };
+        // A cut prefix ends mid-phrase, and `, 87 behind` hanging off an
+        // ellipsis reads as nonsense — so the segment survives whole or not
+        // at all.
+        let behind = self
+            .behind
+            .filter(|seg| UnicodeWidthStr::width(seg.as_str()) <= left);
+        Self {
+            lead,
+            name,
+            rest,
+            behind,
+            suffix,
+        }
+    }
+}
+
+/// How much of the upstream field the header has room for.
+#[derive(Clone, Copy)]
+enum UpstreamDetail {
+    /// `• ↑2 ↓0 origin/topic` — the counts and the tracking ref's name.
+    Full,
+    /// `• ↑2 ↓0` — counts only. The name is nearly always `origin/{branch}`,
+    /// i.e. a second copy of something already on the line, so it is the
+    /// cheapest thing to give up.
+    CountsOnly,
+    /// Field omitted entirely.
+    Omitted,
+}
+
+/// Columns a branch or base name keeps when the header is squeezed. Below
+/// this a name stops being recognizable, so the header sheds whole fields
+/// instead of shaving further.
+const HEADER_NAME_FLOOR: usize = 10;
+
+/// Split the header into independently-styleable pieces, sized to fit
+/// `width` columns.
+///
+/// The header is a single line of free text, so one column of overflow wraps
+/// it onto a second row and shifts everything below. When the natural header
+/// is too wide it is shrunk in order of what costs the reader least: the
+/// tracking ref's name (a duplicate of the branch), then the branch and base
+/// names shaved toward [`HEADER_NAME_FLOOR`] longest-first, then the upstream
+/// field entirely, then a hard cut.
+///
+/// The pull-request indicator has no part in this ladder. The caller that
+/// shows it asks [`fit_header`] for a width smaller by the indicator and
+/// [`PULL_GAP`], so the indicator never takes a rung from the header.
+///
+/// The header carries no age. Every age on the frame belongs to a row that
+/// names what it is aging — a file or a commit — and the newest commit's age
+/// sits on the first log row, directly beneath this line.
+///
+/// A snapshot with a worktree badge starts the header with the badge, and the
+/// label of the badge takes the place of the branch (see [`header_lead`] and
+/// [`header_name`]). The badge is part of the prefix, so each rung shrinks the
+/// line with the badge in it, and the shaving rung shaves the label where it
+/// shaves the branch. The hard cut takes text from the right, so the badge is
+/// the last text to go.
+fn header_segments(snap: &Snapshot, width: usize) -> HeaderSegments {
+    ladder(snap, width).unwrap_or_else(|bare| bare.clamp(width))
+}
+
+/// Runs the ladder of [`header_segments`] and returns the first rung that
+/// fits in `width` columns: the full header, the header with the counts of the
+/// upstream only, the header with shaved names, and the header with no
+/// upstream field. Returns `None` when even the last rung is too wide, so the
+/// hard cut does not apply here.
+///
+/// The watch header calls this to learn if the header and the pull-request
+/// indicator fit in one row.
+fn fit_header(snap: &Snapshot, width: usize) -> Option<HeaderSegments> {
+    ladder(snap, width).ok()
+}
+
+/// The ladder itself. `Ok` holds the rung that fits. `Err` holds the last
+/// rung, which does not fit, for the hard cut.
+fn ladder(snap: &Snapshot, width: usize) -> Result<HeaderSegments, HeaderSegments> {
+    let name = header_name(snap);
+    let compose =
+        |name: &str, base: &str, detail: UpstreamDetail| compose_header(snap, name, base, detail);
+
+    let full = compose(name, &snap.base, UpstreamDetail::Full);
+    if full.width() <= width {
+        return Ok(full);
+    }
+    let counts_only = compose(name, &snap.base, UpstreamDetail::CountsOnly);
+    if counts_only.width() <= width {
+        return Ok(counts_only);
+    }
+
+    let (name, base) = shave_names(name, &snap.base, counts_only.width().saturating_sub(width));
+    let shaved = compose(&name, &base, UpstreamDetail::CountsOnly);
+    if shaved.width() <= width {
+        return Ok(shaved);
+    }
+    let bare = compose(&name, &base, UpstreamDetail::Omitted);
+    if bare.width() <= width {
+        Ok(bare)
+    } else {
+        Err(bare)
+    }
+}
+
+/// The least number of spaces between the header text and the pull-request
+/// indicator.
+const PULL_GAP: usize = 2;
+
+/// The name of the tool, where every header starts.
+const HEADER_TOOL: &str = "gsw";
+
+/// The mark of the home worktree, the worktree where the user started gsw:
+/// U+2302 HOUSE, one column wide. The header puts it before the position of
+/// the home worktree, and the list of the worktrees puts it after the row of
+/// the home worktree.
+const HOME_MARK: char = '⌂';
+
+/// The name that the header shows for HEAD: the label of the worktree badge,
+/// or the branch when the snapshot has no badge.
+///
+/// The label of a detached worktree is `HEAD@<short hash>`. The branch of such
+/// a worktree is `HEAD`, which names neither the worktree nor the commit.
+fn header_name(snap: &Snapshot) -> &str {
+    snap.worktree
+        .as_ref()
+        .map_or(snap.branch.as_str(), |badge| badge.label.as_str())
+}
+
+/// The text before the first `•` of the header.
+///
+/// With no badge it is `gsw` alone, so the header of one-shot mode and the
+/// header of a repository with one worktree stay as they were. With a badge,
+/// the position of the worktree follows: `gsw ⌂ 1/4` for the home worktree,
+/// and `gsw 3/4` for another worktree.
+fn header_lead(badge: Option<&WorktreeBadge>) -> String {
+    let Some(badge) = badge else {
+        return HEADER_TOOL.to_string();
+    };
+    let home = if badge.home {
+        format!(" {HOME_MARK}")
+    } else {
+        String::new()
+    };
+    format!("{HEADER_TOOL}{home} {}/{}", badge.position, badge.count)
+}
+
+/// Build the header segments from an already-sized name, base name and
+/// upstream detail level. `name` is the name of HEAD that [`header_name`]
+/// gives, shaved or whole.
+fn compose_header(
+    snap: &Snapshot,
+    name: &str,
+    base: &str,
+    detail: UpstreamDetail,
+) -> HeaderSegments {
     let commit_word = if snap.commits_ahead == 1 {
         "commit"
     } else {
         "commits"
     };
-    let age = snap
-        .last_commit_age
-        .map_or_else(|| "?".to_string(), format_age_detailed);
     let upstream_field = snap
         .upstream
         .as_ref()
-        .map(|u| format!(" • ↑{} ↓{} {}", u.ahead, u.behind, u.name))
+        .map(|u| match detail {
+            UpstreamDetail::Full => format!(" • ↑{} ↓{} {}", u.ahead, u.behind, u.name),
+            UpstreamDetail::CountsOnly => format!(" • ↑{} ↓{}", u.ahead, u.behind),
+            UpstreamDetail::Omitted => String::new(),
+        })
         .unwrap_or_default();
-    let prefix = format!(
-        "gsw • {branch} • {n} {word} ahead of {base}",
-        branch = snap.branch,
+    let lead = format!("{} • ", header_lead(snap.worktree.as_ref()));
+    let rest = format!(
+        " • {n} {word} ahead of {base}",
         n = snap.commits_ahead,
         word = commit_word,
-        base = snap.base,
     );
     let behind = (snap.commits_behind > 0).then(|| format!(", {} behind", snap.commits_behind));
-    let suffix = format!("{upstream_field} • last commit {age} ago");
+    let suffix = upstream_field;
     HeaderSegments {
-        prefix,
+        lead,
+        name: name.to_string(),
+        rest,
         behind,
         suffix,
     }
 }
 
-fn render_separator(width: usize) -> String {
-    "─".repeat(width).dimmed().to_string()
+/// Shave `branch` and `base` until they give back `over` columns between
+/// them, always taking from whichever is currently longer so the two converge
+/// on a similar length instead of one being cut to the bone while the other
+/// keeps every character. Neither drops below [`HEADER_NAME_FLOOR`]; when
+/// that leaves `over` unmet, the next rung of the caller's ladder covers it.
+///
+/// `branch` is the name of HEAD that the header shows: the branch, or the
+/// label of the worktree badge (see [`header_name`]).
+fn shave_names(branch: &str, base: &str, over: usize) -> (String, String) {
+    let mut branch_width = UnicodeWidthStr::width(branch);
+    let mut base_width = UnicodeWidthStr::width(base);
+    for _ in 0..over {
+        let longer = if branch_width >= base_width {
+            &mut branch_width
+        } else {
+            &mut base_width
+        };
+        if *longer <= HEADER_NAME_FLOOR {
+            break;
+        }
+        *longer -= 1;
+    }
+    (
+        truncate_middle(branch, branch_width),
+        truncate_middle(base, base_width),
+    )
 }
 
+/// Dashes kept to the right of the refresh clock, so the rule still closes as a
+/// rule rather than trailing off after the text.
+const CLOCK_TAIL: usize = 5;
+
+/// Dashes kept to the left of the refresh clock. Below this the rule reads as a
+/// caption with a stray dash rather than a rule with text in it, so the clock is
+/// dropped instead.
+const CLOCK_MIN_LEAD: usize = 4;
+
+/// Render the full-width rule, optionally with the live-refresh clock set into
+/// it: a leading dash run, the clock, then a short dash tail.
+///
+/// The clock displaces dashes and never adds columns — the rule is exactly
+/// `width` columns either way, because one column of overflow wraps the row.
+/// Where the terminal is too narrow to seat the whole clock between
+/// [`CLOCK_MIN_LEAD`] and [`CLOCK_TAIL`] dashes, the rule falls back to plain
+/// dashes: a truncated duration (`next refresh: 1`) would be worse than none.
+fn render_separator(width: usize, refresh: Option<&RefreshStatus>) -> String {
+    let Some(status) = refresh else {
+        return "─".repeat(width).dimmed().to_string();
+    };
+    let clock = format!(
+        "last refresh: {} ago, next refresh: {}",
+        format_age_detailed(status.last_refresh_ago),
+        format_age_detailed(status.next_refresh_in),
+    );
+    // The clock is ASCII, so its display width is its byte length; the gaps are
+    // one column each.
+    let seated = clock.len() + 2 + CLOCK_TAIL + CLOCK_MIN_LEAD;
+    if seated > width {
+        return "─".repeat(width).dimmed().to_string();
+    }
+    let lead = width - clock.len() - 2 - CLOCK_TAIL;
+    format!("{} {clock} {}", "─".repeat(lead), "─".repeat(CLOCK_TAIL),)
+        .dimmed()
+        .to_string()
+}
+
+/// Render the in-progress-operation indicator line shown between the header
+/// and the separator during a merge or rebase.
+///
+/// The label (`⚠ merge`, `⚠ rebase 3/10`) is yellow + bold — matching the
+/// header's "behind" warning segment — and the trailing
+/// ` · {n} conflict[s] to resolve` clause, present only when `conflicts > 0`,
+/// is red + bold to flag the pending action. The line is cut to `width` so it
+/// can't wrap and shift every row below it; the label outranks the clause for
+/// the columns available. Color/NO_COLOR handling falls out of the `colored`
+/// global override set in `main`.
+fn render_operation_line(op: &Operation, width: usize) -> String {
+    let (label, conflicts) = match op {
+        Operation::Merge { conflicts } => ("⚠ merge".to_string(), *conflicts),
+        Operation::Rebase { step, conflicts } => {
+            let label = match step {
+                Some(StepProgress { current, total }) => format!("⚠ rebase {current}/{total}"),
+                None => "⚠ rebase".to_string(),
+            };
+            (label, *conflicts)
+        }
+    };
+    let label = truncate_to_budget(&label, width);
+    let left = width - UnicodeWidthStr::width(label.as_str());
+    let label_styled = label.yellow().bold();
+    if let Some(words) = conflict_words(conflicts) {
+        let clause_text = truncate_to_budget(&format!(" · {words} to resolve"), left);
+        if !clause_text.is_empty() {
+            let clause = clause_text.red().bold();
+            return format!("{label_styled}{clause}");
+        }
+    }
+    label_styled.to_string()
+}
+
+/// The count of conflicts of an operation in words, or `None` when there is no
+/// conflict.
+///
+/// **The one rule for these words.** The `⚠` row of the header says them, and
+/// so does the sentence that `R` and `M` leave after gsw aborts an operation.
+/// The two thus cannot put one work tree in two sets of words. One conflict
+/// takes the singular. No conflict gives no words, because "0 conflicts"
+/// describes a stop that did not occur.
+pub(crate) fn conflict_words(conflicts: u32) -> Option<String> {
+    match conflicts {
+        0 => None,
+        1 => Some("1 conflict".to_string()),
+        n => Some(format!("{n} conflicts")),
+    }
+}
+
+/// Render one file row.
+///
+/// `age_offset` is added (saturating) to the file's mtime age before it is
+/// formatted, faded, and used to drive the column styling, so the row ages
+/// forward by a single shared `Duration`. A `None` age (deleted file, unstat'd
+/// untracked dir) stays `None` and renders at the dark floor regardless of the
+/// offset. `Duration::ZERO` leaves the row byte-identical to the un-offset
+/// render.
 fn render_row(
     entry: &RenderEntry,
     opts: &RenderOptions,
     max_change: u32,
     path_width: usize,
+    age_offset: Duration,
 ) -> String {
     let (icon, letter) = icon_and_letter(entry);
-    let factor = file_fade_factor(entry.age);
+    let effective_age = entry.age.map(|a| a.saturating_add(age_offset));
+    let factor = fade_factor(effective_age);
     let truecolor = opts.truecolor;
 
     let path_display_raw = match &entry.orig_path {
@@ -275,9 +925,9 @@ fn render_row(
     ) {
         let gutter_width = right_block_width(opts.bar_width) - AGE_FIELD;
         let gutter = " ".repeat(gutter_width);
-        let age = entry.age.map(format_age_detailed).unwrap_or_default();
+        let age = effective_age.map(format_age_detailed).unwrap_or_default();
         let age_field = format!("{age:>width$}", width = AGE_FIELD);
-        let age_str = colorize_age(&age_field, entry.age, factor, truecolor);
+        let age_str = colorize_age(&age_field, effective_age, factor, truecolor);
         return format!("{icon_str} {letter_str} {path_str}{gutter}{age_str}");
     }
 
@@ -316,9 +966,9 @@ fn render_row(
         dels_field
     };
 
-    let age_raw = entry.age.map(format_age_detailed).unwrap_or_default();
+    let age_raw = effective_age.map(format_age_detailed).unwrap_or_default();
     let age_field = format!("{age_raw:>width$}", width = AGE_FIELD);
-    let age_str = colorize_age(&age_field, entry.age, factor, truecolor);
+    let age_str = colorize_age(&age_field, effective_age, factor, truecolor);
 
     let sep_bar_adds = " ".repeat(SEP_BAR_ADDS);
     let sep_adds_dels = " ".repeat(SEP_ADDS_DELS);
@@ -562,6 +1212,16 @@ const LOG_HASH_BASE_RGB: (u8, u8, u8) = (255, 215, 0);
 const LOG_SUBJECT_BASE_RGB: (u8, u8, u8) = (220, 220, 220);
 /// Base RGB for the commit-log age column.
 const LOG_AGE_BASE_RGB: (u8, u8, u8) = (190, 190, 190);
+/// RGB of [`BRANCH_MARK`] in truecolor mode: a medium blue.
+///
+/// No other part of gsw paints blue. Red tells of a conflict or a deletion,
+/// green of a staged or added file, yellow of a hash or an unstaged file,
+/// cyan of an untracked file or a bar, and magenta of a rename. So the mark
+/// tells of no problem and of no file status. The contrast of this blue is
+/// about 6.5:1 on black and 3.2:1 on white, so the mark is visible on a dark
+/// theme and on a light theme. The mark does not fade with age, because it
+/// tells which set a commit is in, and not how old the commit is.
+const BRANCH_MARK_RGB: (u8, u8, u8) = (70, 140, 255);
 
 // --- File-row truecolor base palette ---------------------------------------
 //
@@ -592,13 +1252,14 @@ const FILE_BAR_RGB: (u8, u8, u8) = (60, 200, 200);
 const FILE_BAR_CONFLICT_RGB: (u8, u8, u8) = (255, 80, 80);
 const FILE_BIN_RGB: (u8, u8, u8) = (160, 160, 160);
 
-/// Fade factor for a file row.
+/// Fade factor for any row carrying an optional age.
 ///
-/// `Some(age)` shares the commit-log ramp via [`age_fade_factor`] so the
-/// file list and log section darken in lockstep. `None` returns `1.0`
-/// so files we can't stat (deleted entries, skipped untracked dirs)
-/// render at the dark floor.
-fn file_fade_factor(age: Option<Duration>) -> f32 {
+/// `Some(age)` rides the [`age_fade_factor`] ramp, so the file list and the
+/// log section darken in lockstep. `None` returns `1.0` — the dark floor —
+/// for every row whose age gsw could not determine: files it will not stat
+/// (deleted entries, skipped untracked dirs) and commits whose timestamp does
+/// not resolve. One rule, so an unknown age looks the same in both sections.
+fn fade_factor(age: Option<Duration>) -> f32 {
     age.map_or(1.0, age_fade_factor)
 }
 
@@ -607,8 +1268,8 @@ fn file_fade_factor(age: Option<Duration>) -> f32 {
 /// Shared by every truecolor commit-log colorizer so the fade math lives
 /// in exactly one place — keeps the per-column functions to a single
 /// readable `if truecolor { fade } else { fallback }` shape.
-fn fade_truecolor(s: &str, age: Duration, base: (u8, u8, u8)) -> ColoredString {
-    let (r, g, b) = fade_rgb(base, age_fade_factor(age));
+fn fade_truecolor(s: &str, age: Option<Duration>, base: (u8, u8, u8)) -> ColoredString {
+    let (r, g, b) = fade_rgb(base, fade_factor(age));
     s.truecolor(r, g, b)
 }
 
@@ -617,7 +1278,8 @@ fn fade_truecolor(s: &str, age: Duration, base: (u8, u8, u8)) -> ColoredString {
 /// With `truecolor`, the hash starts at [`LOG_HASH_BASE_RGB`] and fades
 /// toward the dark floor as `age` grows. Without, falls back to the
 /// legacy ANSI yellow so eight-color terminals still get a coloured hash.
-fn colorize_log_hash(hash: &str, age: Duration, truecolor: bool) -> ColoredString {
+/// An unknown age (`None`) renders at the floor, like the oldest commit.
+fn colorize_log_hash(hash: &str, age: Option<Duration>, truecolor: bool) -> ColoredString {
     if truecolor {
         fade_truecolor(hash, age, LOG_HASH_BASE_RGB)
     } else {
@@ -629,108 +1291,44 @@ fn colorize_log_hash(hash: &str, age: Duration, truecolor: bool) -> ColoredStrin
 ///
 /// With `truecolor`, the subject fades from a near-white base toward the
 /// dark floor. Without, falls back to the same Aging/Stale dim styling as
-/// the file-row age column, so the row still gets quieter as it ages.
-fn colorize_log_subject(subject: &str, age: Duration, truecolor: bool) -> ColoredString {
+/// the file-row age column, so the row still gets quieter as it ages. An
+/// unknown age (`None`) takes the quietest styling, like the oldest commit.
+fn colorize_log_subject(subject: &str, age: Option<Duration>, truecolor: bool) -> ColoredString {
     if truecolor {
         fade_truecolor(subject, age, LOG_SUBJECT_BASE_RGB)
     } else {
-        match age_dim_level(age) {
-            AgeDim::Fresh | AgeDim::Recent => subject.normal(),
-            AgeDim::Aging | AgeDim::Stale => subject.dimmed(),
+        match age.map(age_dim_level) {
+            Some(AgeDim::Fresh | AgeDim::Recent) => subject.normal(),
+            Some(AgeDim::Aging | AgeDim::Stale) | None => subject.dimmed(),
         }
+    }
+}
+
+/// The gutter of a commit-log row, painted.
+///
+/// A commit that is only on the current branch gets [`BRANCH_MARK`] in blue.
+/// With `truecolor`, the blue is [`BRANCH_MARK_RGB`]. Without, it is bright
+/// blue, because plain blue is too dark to read on many dark themes. See
+/// [`BRANCH_MARK_RGB`] for why the mark is blue. Every other row gets
+/// [`LOG_GUTTER_BLANK`] with no paint.
+fn colorize_log_gutter(on_branch: bool, truecolor: bool) -> ColoredString {
+    match (on_branch, truecolor) {
+        (false, _) => LOG_GUTTER_BLANK.to_string().normal(),
+        (true, true) => {
+            let (r, g, b) = BRANCH_MARK_RGB;
+            BRANCH_MARK.to_string().truecolor(r, g, b)
+        }
+        (true, false) => BRANCH_MARK.to_string().bright_blue(),
     }
 }
 
 /// Color the right-aligned age column for a commit-log row.
-fn colorize_log_age(text: &str, age: Duration, truecolor: bool) -> ColoredString {
+fn colorize_log_age(text: &str, age: Option<Duration>, truecolor: bool) -> ColoredString {
     if truecolor {
         fade_truecolor(text, age, LOG_AGE_BASE_RGB)
     } else {
-        colorize_age_ansi(text, Some(age))
+        colorize_age_ansi(text, age)
     }
-}
-
-/// Pad `s` on the right with spaces until its display width reaches `width`.
-fn pad_right(s: &str, width: usize) -> String {
-    let current = UnicodeWidthStr::width(s);
-    if current >= width {
-        s.to_string()
-    } else {
-        let mut result = String::with_capacity(s.len() + (width - current));
-        result.push_str(s);
-        for _ in 0..(width - current) {
-            result.push(' ');
-        }
-        result
-    }
-}
-
-/// Truncate `s` from the right to fit within `max_width` display columns,
-/// suffixing with `…` when truncation happens. UTF-8 safe.
-fn truncate_right(s: &str, max_width: usize) -> String {
-    if UnicodeWidthStr::width(s) <= max_width {
-        return s.to_string();
-    }
-    let ellipsis_width = 1_usize;
-    let target = max_width.saturating_sub(ellipsis_width);
-    let mut acc = 0_usize;
-    let mut result = String::new();
-    for c in s.chars() {
-        let cw = UnicodeWidthChar::width(c).unwrap_or(0);
-        if acc + cw > target {
-            break;
-        }
-        acc += cw;
-        result.push(c);
-    }
-    result.push('…');
-    result
-}
-
-/// Truncate `s` from the left to fit within `max_width` display columns,
-/// prefixing with `…` when truncation happens. UTF-8 safe.
-fn truncate_left(s: &str, max_width: usize) -> String {
-    if UnicodeWidthStr::width(s) <= max_width {
-        return s.to_string();
-    }
-    let ellipsis_width = 1_usize;
-    let target = max_width.saturating_sub(ellipsis_width);
-    let chars: Vec<char> = s.chars().collect();
-    let mut acc = 0_usize;
-    let mut start = chars.len();
-    for (i, c) in chars.iter().enumerate().rev() {
-        let cw = UnicodeWidthChar::width(*c).unwrap_or(0);
-        if acc + cw > target {
-            break;
-        }
-        acc += cw;
-        start = i;
-    }
-    let mut result = String::from("…");
-    for c in &chars[start..] {
-        result.push(*c);
-    }
-    result
-}
-
-/// Center `text` within `width` display columns, padding with spaces.
-fn center(text: &str, width: usize) -> String {
-    let text_w = UnicodeWidthStr::width(text);
-    if text_w >= width {
-        return text.to_string();
-    }
-    let total_pad = width - text_w;
-    let left = total_pad / 2;
-    let right = total_pad - left;
-    let mut result = String::with_capacity(width);
-    for _ in 0..left {
-        result.push(' ');
-    }
-    result.push_str(text);
-    for _ in 0..right {
-        result.push(' ');
-    }
-    result
 }
 
 /// Minimum rows the recent-commit section gets when it has content and
@@ -745,7 +1343,10 @@ const LOG_FLOOR_ROWS: usize = 5;
 /// given the actual demand from each section and the total terminal rows
 /// available for content (i.e. terminal height minus chrome the caller has
 /// already deducted: header, post-header separator, inter-section
-/// separator, and a reserved row for a possible `+N more files` footer).
+/// separator, and a row for the `+N more files` footer when the file list
+/// truncates). The caller knows whether the list truncates only from a plan,
+/// so `render_frame` in `main.rs` plans once with no footer row, and plans
+/// again with the row when the first plan hides file rows.
 ///
 /// When everything fits, both sections are rendered in full. When the
 /// combined demand exceeds the available rows, the **file list wins**: it is
@@ -806,65 +1407,7 @@ pub fn plan_section_caps(
 mod tests {
     use super::*;
 
-    /// Serializes any test that toggles `colored::control::set_override` —
-    /// the override is process-global, so concurrent toggles race and
-    /// cause intermittent failures. Tests that need ANSI bytes (rather
-    /// than typed `ColoredString::fgcolor` inspection) hold this for the
-    /// duration of their body.
-    ///
-    /// `.unwrap_or_else(|p| p.into_inner())` handles a poisoned mutex
-    /// from a previous panicking test so it doesn't cascade-fail the
-    /// rest of the suite.
-    static COLORED_OVERRIDE_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Drop ANSI escape sequences so tests can match on the visible glyphs.
-    ///
-    /// Handles the two common forms:
-    ///   - CSI sequences: `ESC [ <params…> <final>` where `<final>` is 0x40–0x7E.
-    ///   - Fe sequences:  `ESC <byte>` (single byte after ESC that isn't `[`).
-    ///
-    /// This is intentionally conservative — it only skips escape sequences,
-    /// never ordinary text.
-    fn strip_ansi(s: &str) -> String {
-        #[derive(PartialEq)]
-        enum State {
-            Normal,
-            AfterEsc,
-            InCsi,
-        }
-        let mut out = String::with_capacity(s.len());
-        let mut state = State::Normal;
-        for c in s.chars() {
-            match state {
-                State::Normal => {
-                    if c == '\x1b' {
-                        state = State::AfterEsc;
-                    } else {
-                        out.push(c);
-                    }
-                }
-                State::AfterEsc => {
-                    if c == '[' {
-                        // CSI introducer — consume parameters until the final byte.
-                        state = State::InCsi;
-                    } else {
-                        // Fe-style single-byte escape (e.g. ESC M, ESC =).
-                        // The byte itself is the final byte; swallow it and resume.
-                        state = State::Normal;
-                    }
-                }
-                State::InCsi => {
-                    // Parameter bytes: 0x30–0x3F. Intermediate bytes: 0x20–0x2F.
-                    // Final byte: 0x40–0x7E — terminates the sequence.
-                    if (0x40..=0x7E).contains(&(c as u32)) {
-                        state = State::Normal;
-                    }
-                    // In all cases, keep consuming (don't push to output).
-                }
-            }
-        }
-        out
-    }
+    use testcolor::{max_red_channel, strip_ansi, TRUECOLOR_FG};
 
     fn opts() -> RenderOptions {
         RenderOptions {
@@ -873,6 +1416,7 @@ mod tests {
             max_files: None,
             log_lines: 0,
             truecolor: false,
+            refresh: None,
         }
     }
 
@@ -882,10 +1426,16 @@ mod tests {
             base: "main".into(),
             commits_ahead: 3,
             commits_behind: 0,
-            last_commit_age: Some(Duration::from_secs(5 * 60 + 23)),
             files,
             log: vec![],
+            log_complete: false,
+            log_start: None,
             upstream: None,
+            operation: None,
+            push_remote: None,
+            worktree: None,
+            off_start_branch: false,
+            pull: None,
         }
     }
 
@@ -920,8 +1470,1018 @@ mod tests {
         );
     }
 
+    /// A refresh clock reading `3m2s ago` / `15s`, the example the feature was
+    /// specified with.
+    fn refresh_status() -> RefreshStatus {
+        RefreshStatus {
+            last_refresh_ago: Duration::from_secs(3 * 60 + 2),
+            next_refresh_in: Duration::from_secs(15),
+        }
+    }
+
     #[test]
-    fn header_mentions_branch_commits_and_age() {
+    fn separator_carries_the_refresh_clock() {
+        // The whole point of the feature: the rule under the header answers
+        // "when did this last update, and when does it update again?".
+        let sep = strip_ansi(&render_separator(80, Some(&refresh_status())));
+        assert!(
+            sep.contains("last refresh: 3m2s ago, next refresh: 15s"),
+            "separator should carry the refresh clock: {sep:?}",
+        );
+    }
+
+    #[test]
+    fn separator_with_a_clock_still_spans_the_terminal_width() {
+        // The rule is a full-width frame element. Text inside it must displace
+        // dashes, never add columns — one extra column wraps the row. Sweeping
+        // from zero covers the fallback boundary too: at every width the rule is
+        // either a plain run of dashes or carries the clock whole, never a
+        // truncated duration, and it is always exactly as wide as asked.
+        for width in 0..=200 {
+            let sep = strip_ansi(&render_separator(width, Some(&refresh_status())));
+            assert_eq!(
+                UnicodeWidthStr::width(sep.as_str()),
+                width,
+                "separator with a clock must be exactly {width} columns: {sep:?}",
+            );
+            assert!(
+                sep.chars().all(|c| c == '─')
+                    || sep.contains("last refresh: 3m2s ago, next refresh: 15s"),
+                "at {width} columns the rule is neither plain nor whole: {sep:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn separator_clock_sits_between_dashes() {
+        // Tim's sketch: a long run of dashes, the clock, then a short tail —
+        // so the rule still reads as a rule rather than as a caption.
+        let sep = strip_ansi(&render_separator(80, Some(&refresh_status())));
+        let clock = "last refresh: 3m2s ago, next refresh: 15s";
+        let (before, after) = sep
+            .split_once(clock)
+            .unwrap_or_else(|| panic!("no clock in the rule: {sep:?}"));
+        assert!(
+            before.len() > after.len(),
+            "the dash run should lead and the tail should be short: {sep:?}",
+        );
+        assert!(
+            before.ends_with(' '),
+            "the clock needs a gap from the dashes on its left: {before:?}",
+        );
+        assert!(
+            after.starts_with(' ') && after.trim_start().chars().all(|c| c == '─'),
+            "the clock needs a gap, then a pure dash tail, on its right: {after:?}",
+        );
+    }
+
+    #[test]
+    fn separator_without_a_clock_is_unchanged() {
+        // One-shot output and the inter-section rule keep today's plain rule,
+        // byte for byte.
+        let sep = strip_ansi(&render_separator(80, None));
+        assert_eq!(sep, "─".repeat(80), "a clockless rule should be all dashes");
+    }
+
+    #[test]
+    fn separator_drops_the_clock_rather_than_overflow_a_narrow_terminal() {
+        // Below the width the clock needs, the rule falls back to plain dashes.
+        // Truncating the clock instead would print a half-written duration.
+        for width in 0..40 {
+            let sep = strip_ansi(&render_separator(width, Some(&refresh_status())));
+            assert_eq!(
+                UnicodeWidthStr::width(sep.as_str()),
+                width,
+                "narrow separator must still be exactly {width} columns: {sep:?}",
+            );
+            assert!(
+                sep.chars().all(|c| c == '─') || sep.contains("next refresh:"),
+                "a narrow rule must be all dashes or carry a whole clock: {sep:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn frame_puts_the_clock_on_the_post_header_rule_only() {
+        // Two rules render when a log and a file list both show. The clock
+        // belongs to the frame, so it appears once, on the rule under the
+        // header — not repeated above the file list.
+        let mut opts = opts();
+        opts.log_lines = 2;
+        opts.refresh = Some(refresh_status());
+        let mut snap = snap_with(vec![entry("a.rs", FileStatus::Modified, false, 1, 0)]);
+        snap.log = vec![log_entry("abc1234", "first", 10)];
+        let out = strip_ansi(&render(&snap, &opts));
+        let rules: Vec<&str> = out
+            .lines()
+            .filter(|l| l.starts_with('─') || l.contains("last refresh:"))
+            .collect();
+        assert_eq!(rules.len(), 2, "expected two rules in:\n{out}");
+        assert!(
+            rules[0].contains("last refresh: 3m2s ago, next refresh: 15s"),
+            "the post-header rule should carry the clock: {:?}",
+            rules[0],
+        );
+        assert!(
+            !rules[1].contains("last refresh:"),
+            "the inter-section rule should stay blank: {:?}",
+            rules[1],
+        );
+    }
+
+    #[test]
+    fn merge_operation_line_appears_between_header_and_separator() {
+        let mut s = snap_with(vec![]);
+        s.operation = Some(Operation::Merge { conflicts: 2 });
+        let out = strip_ansi(&render(&s, &opts()));
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.get(1).copied(),
+            Some("⚠ merge · 2 conflicts to resolve"),
+            "operation line should sit between the header and separator: {out}",
+        );
+        assert!(
+            lines
+                .get(2)
+                .is_some_and(|l| !l.is_empty() && l.chars().all(|c| c == '─')),
+            "separator (run of '─') should follow the operation line: {out}",
+        );
+    }
+
+    #[test]
+    fn merge_line_uses_singular_for_one_conflict() {
+        let mut s = snap_with(vec![]);
+        s.operation = Some(Operation::Merge { conflicts: 1 });
+        let out = strip_ansi(&render(&s, &opts()));
+        assert_eq!(
+            out.lines().nth(1),
+            Some("⚠ merge · 1 conflict to resolve"),
+            "a single conflict should read 'conflict', not 'conflicts': {out}",
+        );
+    }
+
+    #[test]
+    fn merge_line_omits_clause_when_no_conflicts() {
+        let mut s = snap_with(vec![]);
+        s.operation = Some(Operation::Merge { conflicts: 0 });
+        let out = strip_ansi(&render(&s, &opts()));
+        assert_eq!(
+            out.lines().nth(1),
+            Some("⚠ merge"),
+            "a conflict-free merge should show only the label, no clause: {out}",
+        );
+    }
+
+    #[test]
+    fn rebase_line_shows_steps_and_conflicts() {
+        let mut s = snap_with(vec![]);
+        s.operation = Some(Operation::Rebase {
+            step: Some(StepProgress {
+                current: 3,
+                total: 10,
+            }),
+            conflicts: 2,
+        });
+        let out = strip_ansi(&render(&s, &opts()));
+        assert_eq!(
+            out.lines().nth(1),
+            Some("⚠ rebase 3/10 · 2 conflicts to resolve"),
+            "rebase line should show step counts and the conflict clause: {out}",
+        );
+    }
+
+    #[test]
+    fn rebase_line_without_steps_omits_step_counts() {
+        let mut s = snap_with(vec![]);
+        s.operation = Some(Operation::Rebase {
+            step: None,
+            conflicts: 1,
+        });
+        let out = strip_ansi(&render(&s, &opts()));
+        assert_eq!(
+            out.lines().nth(1),
+            Some("⚠ rebase · 1 conflict to resolve"),
+            "an unreadable rebase step should drop the counts but keep the label + clause: {out}",
+        );
+    }
+
+    #[test]
+    fn no_operation_keeps_separator_on_second_line() {
+        // With no in-progress operation, the frame is unchanged from today: no
+        // indicator line is inserted, so the separator sits directly under the
+        // header on line index 1 (not pushed down to index 2).
+        let s = snap_with(vec![]);
+        assert!(s.operation.is_none(), "default snapshot has no operation");
+        let out = strip_ansi(&render(&s, &opts()));
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(
+            lines
+                .get(1)
+                .is_some_and(|l| !l.is_empty() && l.chars().all(|c| c == '─')),
+            "separator (run of '─') should stay on the second line when no operation is in progress: {out}",
+        );
+    }
+
+    /// An age old enough to overflow the pre-years age format: `2015d12h`
+    /// is eight columns, two more than the field used to reserve.
+    fn ancient() -> Duration {
+        Duration::from_secs(2015 * 24 * 60 * 60 + 12 * 60 * 60)
+    }
+
+    #[test]
+    fn no_line_exceeds_the_terminal_width_when_the_repo_is_ancient() {
+        // Regression: on a repo untouched for years every age rendered as
+        // `2015d12h`, two columns wider than the age field. Because the age
+        // is the last thing on the line, those two columns spilled past the
+        // terminal edge and wrapped onto the next row, shearing the display.
+        // Nothing gsw prints may be wider than the terminal.
+        let mut stale_file = entry("src/main.rs", FileStatus::Modified, false, 12, 3);
+        stale_file.age = Some(ancient());
+        let mut stale_untracked = entry("scratch/notes.txt", FileStatus::Untracked, false, 0, 0);
+        stale_untracked.age = Some(ancient());
+
+        let mut snap = snap_with(vec![stale_file, stale_untracked]);
+        snap.log = vec![LogEntry {
+            hash: "52ef922".into(),
+            subject: "an old commit that has been sitting here for a very long time".into(),
+            age: Some(ancient()),
+            on_branch: false,
+        }];
+        let mut o = opts();
+        o.log_lines = 5;
+
+        let out = strip_ansi(&render(&snap, &o));
+        for line in out.lines() {
+            assert!(
+                UnicodeWidthStr::width(line) <= o.terminal_width,
+                "line is {} columns wide, past the {}-column terminal — it will wrap:\n  {line:?}",
+                UnicodeWidthStr::width(line),
+                o.terminal_width,
+            );
+        }
+    }
+
+    /// A branch name far too long for an 80-column header, with a
+    /// distinguishing tail so middle-truncation is visible.
+    const LONG_BRANCH: &str = "feature/really-long-branch-name-that-goes-on-forever";
+
+    /// A snapshot whose header cannot possibly fit: long branch, long
+    /// tracking ref, and a behind segment on top.
+    fn snap_with_overlong_header() -> Snapshot {
+        let mut snap = snap_with(vec![]);
+        snap.branch = LONG_BRANCH.into();
+        snap.upstream = Some(UpstreamStatus {
+            name: format!("origin/{LONG_BRANCH}"),
+            ahead: 2,
+            behind: 0,
+        });
+        snap
+    }
+
+    /// The header line of a rendered frame, ANSI stripped.
+    fn header_of(snap: &Snapshot, opts: &RenderOptions) -> String {
+        strip_ansi(&render(snap, opts))
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    #[test]
+    fn header_never_exceeds_the_terminal_width() {
+        // The header is the one line gsw draws as free text, so a long branch
+        // or tracking-ref name used to run straight past the terminal edge and
+        // wrap onto a second row, shifting every row below it.
+        let header = header_of(&snap_with_overlong_header(), &opts());
+        assert!(
+            UnicodeWidthStr::width(header.as_str()) <= opts().terminal_width,
+            "header is {} columns wide, past the {}-column terminal:\n  {header:?}",
+            UnicodeWidthStr::width(header.as_str()),
+            opts().terminal_width,
+        );
+    }
+
+    #[test]
+    fn header_keeps_the_branch_identity_when_squeezed() {
+        // Whatever else the header sheds to fit, it stays a header: the branch
+        // name survives at every width where the line can carry anything at
+        // all. Shaving is middle-truncation, so the name keeps both ends.
+        let snap = snap_with_overlong_header();
+        for terminal_width in [100, 80, 60, 45, 40] {
+            let mut o = opts();
+            o.terminal_width = terminal_width;
+            let header = header_of(&snap, &o);
+            assert!(
+                header.contains("featu") && header.contains("ever"),
+                "header squeezed to {terminal_width} columns lost both ends of the \
+                 branch name: {header:?}",
+            );
+            assert!(
+                UnicodeWidthStr::width(header.as_str()) <= terminal_width,
+                "header is {} columns, past the {terminal_width}-column terminal: {header:?}",
+                UnicodeWidthStr::width(header.as_str()),
+            );
+        }
+    }
+
+    #[test]
+    fn the_header_does_not_restate_the_newest_commit_age() {
+        // The header's age field and the first log row's age are the same
+        // commit read through the same formatter, so the header spent about
+        // two dozen columns repeating the line directly beneath it. The
+        // columns go back to the branch name and the tracking ref, which are
+        // what the header alone can tell you.
+        let mut snap = snap_with(vec![]);
+        snap.log = vec![log_entry("abc1234", "the newest commit", 5 * 60 + 23)];
+        let mut o = opts();
+        o.log_lines = 5;
+
+        let header = header_of(&snap, &o);
+        assert!(
+            !header.contains("last commit"),
+            "the header should not repeat the newest commit's age: {header:?}",
+        );
+    }
+
+    #[test]
+    fn the_newest_commit_age_still_renders_on_its_own_row() {
+        // The other half of the same contract: dropping the header field must
+        // deduplicate the age, not remove it. The commit's own row still
+        // carries it.
+        let mut snap = snap_with(vec![]);
+        snap.log = vec![log_entry("abc1234", "the newest commit", 5 * 60 + 23)];
+        let mut o = opts();
+        o.log_lines = 5;
+
+        let out = strip_ansi(&render(&snap, &o));
+        let row = out
+            .lines()
+            .find(|line| line.contains("abc1234"))
+            .unwrap_or_else(|| panic!("the log row should render: {out}"));
+        assert!(
+            row.trim_end().ends_with("5m23s"),
+            "the newest commit's age belongs on its own row: {row:?}",
+        );
+    }
+
+    #[test]
+    fn header_truncates_the_branch_from_the_middle() {
+        // Branch names share long prefixes (`feature/…`) and carry the part
+        // that identifies them at the end, so a squeezed name keeps both ends
+        // rather than either alone.
+        let header = header_of(&snap_with_overlong_header(), &opts());
+        assert!(
+            header.contains("feature") && header.contains("forever"),
+            "truncated branch should keep both ends: {header:?}",
+        );
+        assert!(
+            header.contains('…'),
+            "truncated branch should be marked with an ellipsis: {header:?}",
+        );
+    }
+
+    #[test]
+    fn header_sheds_the_upstream_name_before_shaving_the_branch() {
+        // The tracking ref's name is almost always `origin/{branch}` — pure
+        // duplication — so it goes first. The ahead/behind counts are small
+        // and actionable, so they stay, and a branch name that fits is left
+        // untouched.
+        let mut snap = snap_with(vec![]);
+        snap.upstream = Some(UpstreamStatus {
+            name: format!("origin/{LONG_BRANCH}"),
+            ahead: 2,
+            behind: 1,
+        });
+        let header = header_of(&snap, &opts());
+        assert!(
+            !header.contains(LONG_BRANCH),
+            "the redundant tracking-ref name should be the first thing dropped: {header:?}",
+        );
+        assert!(
+            header.contains("↑2 ↓1"),
+            "the ahead/behind counts should survive the name being dropped: {header:?}",
+        );
+        assert!(
+            header.contains("gsw • gsv •") && !header.contains('…'),
+            "a branch that already fits should not be truncated: {header:?}",
+        );
+    }
+
+    #[test]
+    fn header_fits_a_multibyte_branch_name() {
+        // Double-width glyphs cost two columns each while counting as one
+        // char, so a fitting routine that measures chars instead of columns
+        // overflows here — and one that slices bytes panics outright.
+        let mut snap = snap_with_overlong_header();
+        snap.branch = "feature/日本語のとても長い名前のブランチ/forever".into();
+        let header = header_of(&snap, &opts());
+        assert!(
+            UnicodeWidthStr::width(header.as_str()) <= opts().terminal_width,
+            "header with double-width glyphs is {} columns, past the {}-column terminal:\n  {header:?}",
+            UnicodeWidthStr::width(header.as_str()),
+            opts().terminal_width,
+        );
+    }
+
+    #[test]
+    fn no_line_exceeds_a_very_narrow_terminal() {
+        // Past the point where shedding fields and shaving names can help,
+        // the header and the operation line are cut rather than allowed to
+        // spill. A 30-column terminal is well past that point.
+        let mut snap = snap_with_overlong_header();
+        snap.commits_behind = 87;
+        snap.operation = Some(Operation::Rebase {
+            step: Some(StepProgress {
+                current: 3,
+                total: 10,
+            }),
+            conflicts: 12,
+        });
+        let mut o = opts();
+        o.terminal_width = 30;
+
+        let out = strip_ansi(&render(&snap, &o));
+        for line in out.lines() {
+            assert!(
+                UnicodeWidthStr::width(line) <= o.terminal_width,
+                "line is {} columns wide, past the {}-column terminal — it will wrap:\n  {line:?}",
+                UnicodeWidthStr::width(line),
+                o.terminal_width,
+            );
+        }
+    }
+
+    /// The badge of the worktree at `position` of `count`, with `label`.
+    fn worktree_badge(position: usize, count: usize, home: bool, label: &str) -> WorktreeBadge {
+        WorktreeBadge {
+            position,
+            count,
+            home,
+            label: label.to_string(),
+        }
+    }
+
+    /// The header of `snap` in a pane of `width` columns, as visible glyphs.
+    ///
+    /// The frame is painted with the escape codes forced on, and then the
+    /// codes are taken out, so the comparison covers the painted header.
+    fn painted_header(snap: &Snapshot, width: usize) -> String {
+        painted_headers(snap, &[width]).remove(0)
+    }
+
+    /// The header of `snap` at each of `widths`, as visible glyphs. One lock
+    /// on the override of `colored` covers every width.
+    fn painted_headers(snap: &Snapshot, widths: &[usize]) -> Vec<String> {
+        let frames = testcolor::with_forced_ansi(|| {
+            widths
+                .iter()
+                .map(|&width| {
+                    let mut o = opts();
+                    o.terminal_width = width;
+                    render(snap, &o)
+                })
+                .collect::<Vec<_>>()
+        });
+        frames
+            .iter()
+            .map(|frame| strip_ansi(frame.lines().next().unwrap_or_default()))
+            .collect()
+    }
+
+    /// The first line of the frame of `snap` in a pane of `width` columns,
+    /// with the escape codes forced on and left in.
+    fn forced_header_line(snap: &Snapshot, width: usize) -> String {
+        testcolor::with_forced_ansi(|| {
+            let mut o = opts();
+            o.terminal_width = width;
+            render(snap, &o)
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        })
+    }
+
+    /// The overlong header with a badge, a behind segment and an upstream,
+    /// so every rung of the ladder has something to cut.
+    fn snap_with_everything() -> Snapshot {
+        let mut snap = snap_with_overlong_header();
+        snap.commits_behind = 4;
+        snap.worktree = Some(worktree_badge(1, 4, true, LONG_BRANCH));
+        snap
+    }
+
+    const GOLDEN_PLAIN: &str = "\x1b[1mgsw • gsv • 3 commits ahead of main\x1b[0m";
+    const GOLDEN_HOME: &str = "\x1b[1mgsw ⌂ 1/4 • gsv • 3 commits ahead of main\x1b[0m";
+    const GOLDEN_AWAY: &str = "\x1b[1mgsw 3/4 • gsv • 3 commits ahead of main\x1b[0m";
+    const GOLDEN_BEHIND: &str =
+        "\x1b[1mgsw • gsv • 3 commits ahead of main\x1b[0m\x1b[1;33m, 4 behind\x1b[0m\x1b[1m\x1b[0m";
+    const GOLDEN_UPSTREAM: &str =
+        "\x1b[1mgsw • gsv • 3 commits ahead of main • ↑2 ↓1 origin/gsv\x1b[0m";
+    const GOLDEN_FULL: &str =
+        "\x1b[1mgsw ⌂ 1/4 • feature/really-long-branch-name-that-goes-on-forever • 3 commits ahead of main\x1b[0m\x1b[1;33m, 4 behind\x1b[0m\x1b[1m • ↑2 ↓0 origin/feature/really-long-branch-name-that-goes-on-forever\x1b[0m";
+    const GOLDEN_COUNTS: &str =
+        "\x1b[1mgsw ⌂ 1/4 • feature/really-long-branch-name-that-goes-on-forever • 3 commits ahead of main\x1b[0m\x1b[1;33m, 4 behind\x1b[0m\x1b[1m • ↑2 ↓0\x1b[0m";
+    const GOLDEN_SHAVED: &str =
+        "\x1b[1mgsw ⌂ 1/4 • feature/really…es-on-forever • 3 commits ahead of main\x1b[0m\x1b[1;33m, 4 behind\x1b[0m\x1b[1m • ↑2 ↓0\x1b[0m";
+    const GOLDEN_BARE: &str = "\x1b[1mgsw ⌂ 1/4 • featu…ever • 3 commits ahead of main\x1b[0m";
+    const GOLDEN_CUT: &str = "\x1b[1mgsw ⌂ 1/4 • featu…ever • 3 commits ahead of…\x1b[0m";
+    const GOLDEN_CUT_LEAD: &str = "\x1b[1mgsw ⌂ 1/4 •…\x1b[0m";
+    const GOLDEN_CUT_NAME: &str = "\x1b[1mgsw ⌂ 1/4 • featu…e…\x1b[0m";
+
+    #[test]
+    fn the_painted_header_bytes_are_locked_at_every_rung_of_the_ladder() {
+        // A guard, not red-first. It passes before and after the name gets its
+        // own color, because a header whose branch is the start branch must be
+        // byte-for-byte what it was. The goldens were recorded from the code
+        // before the change.
+        let mut behind = snap_with_overlong_header();
+        behind.branch = "gsv".into();
+        behind.commits_behind = 4;
+        behind.upstream = None;
+        let mut with_upstream = snap_with_overlong_header();
+        with_upstream.branch = "gsv".into();
+        with_upstream.upstream = Some(UpstreamStatus {
+            name: "origin/gsv".into(),
+            ahead: 2,
+            behind: 1,
+        });
+        let mut away = snap_with(vec![]);
+        away.worktree = Some(worktree_badge(3, 4, false, "gsv"));
+        let mut home = snap_with(vec![]);
+        home.worktree = Some(worktree_badge(1, 4, true, "gsv"));
+
+        let cases: Vec<(&str, Snapshot, usize, &str)> = vec![
+            ("no badge", snap_with(vec![]), 80, GOLDEN_PLAIN),
+            ("home badge", home, 80, GOLDEN_HOME),
+            ("badge elsewhere", away, 80, GOLDEN_AWAY),
+            ("behind", behind, 80, GOLDEN_BEHIND),
+            ("upstream", with_upstream, 80, GOLDEN_UPSTREAM),
+            ("full", snap_with_everything(), 300, GOLDEN_FULL),
+            ("counts only", snap_with_everything(), 164, GOLDEN_COUNTS),
+            ("shaved", snap_with_everything(), 84, GOLDEN_SHAVED),
+            ("bare", snap_with_everything(), 52, GOLDEN_BARE),
+            ("hard cut", snap_with_everything(), 44, GOLDEN_CUT),
+            (
+                "hard cut into the name",
+                snap_with_everything(),
+                20,
+                GOLDEN_CUT_NAME,
+            ),
+            (
+                "hard cut into the lead",
+                snap_with_everything(),
+                12,
+                GOLDEN_CUT_LEAD,
+            ),
+        ];
+        for (label, snap, width, golden) in cases {
+            let got = forced_header_line(&snap, width);
+            assert_eq!(got, golden, "{label} at {width} columns:\n  {got:?}");
+        }
+    }
+
+    /// The foreground code of red, as `colored` writes it for a bold span.
+    const RED_FG: &str = "31m";
+
+    #[test]
+    fn an_off_start_branch_name_is_painted_red_and_nothing_else_is() {
+        let mut snap = snap_with(vec![]);
+        snap.worktree = Some(worktree_badge(1, 4, true, "gsv"));
+        snap.off_start_branch = true;
+        let got = forced_header_line(&snap, 80);
+        let expected = testcolor::with_forced_ansi(|| {
+            format!(
+                "{}{}{}{}",
+                "gsw ⌂ 1/4 • ".bold(),
+                "gsv".red().bold(),
+                " • 3 commits ahead of main".bold(),
+                // The empty upstream field is an empty bold span, as before.
+                "".bold(),
+            )
+        });
+        assert_eq!(got, expected, "header: {got:?}");
+        assert_eq!(got.matches(RED_FG).count(), 1, "header: {got:?}");
+    }
+
+    /// A pull target for the tests of the indicator.
+    fn pull_target() -> crate::pull::PullTarget {
+        crate::pull::PullTarget::new(
+            ghrest::GithubRepo::from_remote_url("git@github.com:owner/name.git", None).unwrap(),
+            "gsv",
+        )
+    }
+
+    /// The four states of the indicator that the table of the issue names.
+    fn pull_states() -> Vec<crate::pull::PullIndicator> {
+        use crate::pull::PullIndicator;
+        let open = |others| PullIndicator::Open {
+            lowest: ghrest::PullNumber::new(690),
+            others,
+        };
+        vec![
+            open(0),
+            open(1),
+            PullIndicator::NoPull,
+            PullIndicator::Unknown,
+        ]
+    }
+
+    fn with_pull(mut snap: Snapshot, indicator: crate::pull::PullIndicator) -> Snapshot {
+        snap.pull = Some(crate::pull::PullHeader {
+            target: pull_target(),
+            indicator,
+        });
+        snap
+    }
+
+    #[test]
+    fn each_state_of_the_indicator_ends_the_header_row_in_its_style() {
+        use crate::pull::PullIndicator;
+        let open = PullIndicator::Open {
+            lowest: ghrest::PullNumber::new(690),
+            others: 0,
+        };
+        let cases: Vec<(PullIndicator, &str)> = vec![
+            (open, "PR #690"),
+            (PullIndicator::NoPull, "no PR"),
+            (PullIndicator::Unknown, "PR ?"),
+        ];
+        let header = "gsw • gsv • 3 commits ahead of main";
+        for (indicator, text) in cases {
+            let snap = with_pull(snap_with(vec![]), indicator.clone());
+            let got = forced_header_line(&snap, 80);
+            let gap = " ".repeat(80 - text.len() - UnicodeWidthStr::width(header));
+            let expected = testcolor::with_forced_ansi(|| {
+                let painted = match indicator {
+                    PullIndicator::Open { .. } => text.green().bold().to_string(),
+                    _ => text.dimmed().to_string(),
+                };
+                format!("{}{gap}{painted}", header.bold())
+            });
+            assert_eq!(got, expected, "header: {got:?}");
+            let glyphs = strip_ansi(&got);
+            assert_eq!(
+                UnicodeWidthStr::width(glyphs.as_str()),
+                80,
+                "row: {glyphs:?}"
+            );
+            assert!(glyphs.ends_with(text), "row: {glyphs:?}");
+        }
+    }
+
+    #[test]
+    fn the_indicator_with_more_pull_requests_shows_the_count_of_the_others() {
+        let snap = with_pull(
+            snap_with(vec![]),
+            crate::pull::PullIndicator::Open {
+                lowest: ghrest::PullNumber::new(690),
+                others: 1,
+            },
+        );
+        let row = painted_header(&snap, 80);
+        assert!(row.ends_with("PR #690 +1"), "row: {row:?}");
+        assert_eq!(UnicodeWidthStr::width(row.as_str()), 80);
+    }
+
+    #[test]
+    fn the_indicator_keeps_the_red_name_and_the_yellow_behind_segment() {
+        let mut snap = with_pull(
+            snap_with(vec![]),
+            crate::pull::PullIndicator::Open {
+                lowest: ghrest::PullNumber::new(690),
+                others: 0,
+            },
+        );
+        snap.worktree = Some(worktree_badge(1, 4, true, "gsv"));
+        snap.off_start_branch = true;
+        snap.commits_behind = 4;
+        let got = forced_header_line(&snap, 80);
+        let head = "gsw ⌂ 1/4 • gsv • 3 commits ahead of main, 4 behind";
+        let gap = " ".repeat(80 - "PR #690".len() - UnicodeWidthStr::width(head));
+        let expected = testcolor::with_forced_ansi(|| {
+            format!(
+                "{}{}{}{}{}{gap}{}",
+                "gsw ⌂ 1/4 • ".bold(),
+                "gsv".red().bold(),
+                " • 3 commits ahead of main".bold(),
+                ", 4 behind".yellow().bold(),
+                "".bold(),
+                "PR #690".green().bold(),
+            )
+        });
+        assert_eq!(got, expected, "header: {got:?}");
+        assert_eq!(got.matches(RED_FG).count(), 1, "header: {got:?}");
+    }
+
+    #[test]
+    fn the_indicator_never_wraps_and_drops_when_the_header_needs_the_room() {
+        let long_mix = "日本語/🎉/café/".repeat(6);
+        let names = [
+            "gsv",
+            "日本語",
+            "🎉",
+            "café",
+            long_mix.as_str(),
+            LONG_BRANCH,
+        ];
+        for indicator in pull_states() {
+            let text = indicator.text();
+            let w = UnicodeWidthStr::width(text.as_str());
+            for name in names {
+                for badge in [None, Some(worktree_badge(2, 3, false, name))] {
+                    let mut plain = snap_with_everything();
+                    plain.branch = name.into();
+                    plain.worktree = badge;
+                    for upstream in [true, false] {
+                        for behind in [0, 4] {
+                            if !upstream {
+                                plain.upstream = None;
+                            }
+                            plain.commits_behind = behind;
+                            let snap = with_pull(plain.clone(), indicator.clone());
+                            for width in 1..=200 {
+                                let frame = testcolor::with_forced_ansi(|| {
+                                    let mut o = opts();
+                                    o.terminal_width = width;
+                                    render(&snap, &o)
+                                });
+                                let rows: Vec<String> = frame.lines().map(strip_ansi).collect();
+                                for row in &rows {
+                                    assert!(
+                                        UnicodeWidthStr::width(row.as_str()) <= width,
+                                        "width {width}, name {name:?}, row {row:?}"
+                                    );
+                                }
+                                let row = &rows[0];
+                                let fits = width >= w + PULL_GAP
+                                    && fit_header(&snap, width - w - PULL_GAP).is_some();
+                                if fits {
+                                    assert_eq!(
+                                        UnicodeWidthStr::width(row.as_str()),
+                                        width,
+                                        "width {width}, name {name:?}, row {row:?}"
+                                    );
+                                    let head = row.strip_suffix(text.as_str());
+                                    assert!(
+                                        head.is_some_and(|h| h.ends_with(&" ".repeat(PULL_GAP))),
+                                        "width {width}, name {name:?}, row {row:?}"
+                                    );
+                                } else {
+                                    let mut bare = snap.clone();
+                                    bare.pull = None;
+                                    let expected = painted_header(&bare, width);
+                                    assert_eq!(
+                                        row, &expected,
+                                        "width {width}, name {name:?}, row {row:?}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_header_with_no_pull_is_the_painted_ladder_at_every_width() {
+        // The goldens lock the bytes at each rung. This test also locks every
+        // width from 1 to 200 against `header_segments` painted by the same
+        // helper that `render_head` uses, so no painting code repeats here.
+        for off in [false, true] {
+            let mut snap = snap_with_everything();
+            snap.off_start_branch = off;
+            for width in 1..=200 {
+                let got = forced_header_line(&snap, width);
+                let expected = testcolor::with_forced_ansi(|| {
+                    paint_header(header_segments(&snap, width), off)
+                });
+                assert_eq!(got, expected, "width {width}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_flag_changes_the_color_of_the_header_and_never_its_glyphs() {
+        let long_mix = "日本語/🎉/café/".repeat(6);
+        let names = [
+            "gsv",
+            "日本語",
+            "🎉",
+            "café",
+            long_mix.as_str(),
+            LONG_BRANCH,
+        ];
+        for name in names {
+            for badge in [None, Some(worktree_badge(2, 3, false, name))] {
+                let mut snap = snap_with_overlong_header();
+                snap.branch = name.into();
+                snap.commits_behind = 4;
+                snap.worktree = badge;
+                let mut off = snap.clone();
+                off.off_start_branch = true;
+                for width in 1..=260 {
+                    let plain = strip_ansi(&forced_header_line(&snap, width));
+                    let marked = strip_ansi(&forced_header_line(&off, width));
+                    assert_eq!(plain, marked, "{name:?} at {width} columns");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_hard_cut_into_the_name_keeps_the_rest_of_the_name_red_and_the_mark_plain() {
+        let mut snap = snap_with_everything();
+        snap.off_start_branch = true;
+        // At 20 columns the shaved name `featu…ever` is cut again, after its
+        // seventh character.
+        let got = forced_header_line(&snap, 20);
+        let expected = testcolor::with_forced_ansi(|| {
+            format!(
+                "{}{}{}{}",
+                "gsw ⌂ 1/4 • ".bold(),
+                "featu…e".red().bold(),
+                "…".bold(),
+                "".bold(),
+            )
+        });
+        assert_eq!(got, expected, "header: {got:?}");
+    }
+
+    #[test]
+    fn a_hard_cut_that_removes_the_name_leaves_no_red_in_the_header() {
+        let mut snap = snap_with_everything();
+        snap.off_start_branch = true;
+        for width in 1..=12 {
+            let got = forced_header_line(&snap, width);
+            assert!(!got.contains(RED_FG), "{width} columns: {got:?}");
+        }
+        // The cut at 12 columns ends inside the lead, not at the name.
+        assert_eq!(strip_ansi(&forced_header_line(&snap, 12)), "gsw ⌂ 1/4 •…");
+    }
+
+    #[test]
+    fn the_red_name_and_the_yellow_behind_segment_show_together() {
+        let mut snap = snap_with(vec![]);
+        snap.commits_behind = 4;
+        snap.upstream = Some(UpstreamStatus {
+            name: "origin/gsv".into(),
+            ahead: 2,
+            behind: 1,
+        });
+        snap.off_start_branch = true;
+        let got = forced_header_line(&snap, 80);
+        let expected = testcolor::with_forced_ansi(|| {
+            format!(
+                "{}{}{}{}{}",
+                "gsw • ".bold(),
+                "gsv".red().bold(),
+                " • 3 commits ahead of main".bold(),
+                ", 4 behind".yellow().bold(),
+                " • ↑2 ↓1 origin/gsv".bold(),
+            )
+        });
+        assert_eq!(got, expected, "header: {got:?}");
+    }
+
+    #[test]
+    fn the_header_of_the_home_worktree_shows_the_home_mark_and_the_position() {
+        // The first line of the example in the issue. The header must say
+        // which worktree the frame shows, and whether it is the worktree
+        // where the user started gsw.
+        let mut snap = snap_with(vec![]);
+        snap.branch = "main".into();
+        snap.commits_ahead = 0;
+        snap.worktree = Some(worktree_badge(1, 4, true, "main"));
+
+        assert_eq!(
+            painted_header(&snap, 80),
+            "gsw ⌂ 1/4 • main • 0 commits ahead of main",
+        );
+    }
+
+    #[test]
+    fn the_header_of_a_worktree_that_is_not_home_shows_the_position_and_no_home_mark() {
+        // The second line of the example in the issue. The badge is part of
+        // the header, so the ladder sheds the name of the tracking ref at 60
+        // columns, as it does with no badge.
+        let mut snap = snap_with(vec![]);
+        snap.branch = "issue-475".into();
+        snap.commits_ahead = 2;
+        snap.upstream = Some(UpstreamStatus {
+            name: "origin/issue-475".into(),
+            ahead: 2,
+            behind: 0,
+        });
+        snap.worktree = Some(worktree_badge(3, 4, false, "issue-475"));
+
+        assert_eq!(
+            painted_headers(&snap, &[80, 60]),
+            [
+                "gsw 3/4 • issue-475 • 2 commits ahead of main • ↑2 ↓0 origin/issue-475",
+                "gsw 3/4 • issue-475 • 2 commits ahead of main • ↑2 ↓0",
+            ],
+        );
+    }
+
+    #[test]
+    fn the_header_shows_the_label_of_a_detached_worktree_in_place_of_the_branch() {
+        // A detached worktree has no branch: its branch name is `HEAD`,
+        // which names no worktree. The label names the commit.
+        let mut snap = snap_with(vec![]);
+        snap.branch = "HEAD".into();
+        snap.worktree = Some(worktree_badge(2, 3, false, "HEAD@9ba6951"));
+
+        assert_eq!(
+            painted_header(&snap, 80),
+            "gsw 2/3 • HEAD@9ba6951 • 3 commits ahead of main",
+        );
+    }
+
+    #[test]
+    fn the_header_shaves_the_badge_label_in_place_of_the_branch() {
+        // The label takes the place of the branch on every rung of the
+        // ladder, so a long label is shaved from the middle as a long branch
+        // is. The branch name must not come back on a squeezed rung.
+        let mut snap = snap_with(vec![]);
+        snap.branch = "short".into();
+        snap.worktree = Some(worktree_badge(2, 3, false, LONG_BRANCH));
+
+        let widths = [100, 80, 60, 45, 40];
+        for (width, header) in widths.iter().zip(painted_headers(&snap, &widths)) {
+            assert!(
+                header.contains("featu") && header.contains("ever") && !header.contains("short"),
+                "the header at {width} columns must show both ends of the label and not the \
+                 branch: {header:?}",
+            );
+            assert!(
+                UnicodeWidthStr::width(header.as_str()) <= *width,
+                "the header is {} columns, past the {width}-column pane: {header:?}",
+                UnicodeWidthStr::width(header.as_str()),
+            );
+        }
+    }
+
+    #[test]
+    fn the_header_with_a_badge_never_exceeds_the_width_and_keeps_the_badge_to_the_last() {
+        // The header never wraps. The hard cut takes text from the right, so
+        // the badge is the last text to go: every pane wider than the badge
+        // shows it whole.
+        let mut snap = snap_with_overlong_header();
+        snap.commits_behind = 87;
+        for (home, lead) in [(true, "gsw ⌂ 12/14"), (false, "gsw 12/14")] {
+            snap.worktree = Some(worktree_badge(12, 14, home, LONG_BRANCH));
+            let widths: Vec<usize> = (0..=120).collect();
+            for (width, header) in widths.iter().zip(painted_headers(&snap, &widths)) {
+                assert!(
+                    UnicodeWidthStr::width(header.as_str()) <= *width,
+                    "the header is {} columns, past the {width}-column pane: {header:?}",
+                    UnicodeWidthStr::width(header.as_str()),
+                );
+                if *width > UnicodeWidthStr::width(lead) {
+                    assert!(
+                        header.starts_with(lead),
+                        "the header at {width} columns must start with the whole badge \
+                         {lead:?}: {header:?}",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_multibyte_badge_label_never_panics_and_never_exceeds_the_width() {
+        // Double-width glyphs cost two columns each, an emoji costs two, and
+        // an accent costs one. A cut that counts bytes panics, and a cut that
+        // counts characters overflows.
+        const LABEL: &str = "日本語-🎉-café/とても長い名前のブランチ";
+        let mut snap = snap_with(vec![]);
+        snap.upstream = Some(UpstreamStatus {
+            name: format!("origin/{LABEL}"),
+            ahead: 1,
+            behind: 2,
+        });
+        snap.worktree = Some(worktree_badge(2, 3, false, LABEL));
+
+        let widths: Vec<usize> = (0..=120).collect();
+        let headers = painted_headers(&snap, &widths);
+        for (width, header) in widths.iter().zip(&headers) {
+            assert!(
+                UnicodeWidthStr::width(header.as_str()) <= *width,
+                "the header is {} columns, past the {width}-column pane: {header:?}",
+                UnicodeWidthStr::width(header.as_str()),
+            );
+        }
+        assert!(
+            headers[120].starts_with(&format!("gsw 2/3 • {LABEL} • ")),
+            "a wide pane shows the whole label: {:?}",
+            headers[120],
+        );
+    }
+
+    #[test]
+    fn header_mentions_branch_and_commit_count() {
         let out = strip_ansi(&render(&snap_with(vec![]), &opts()));
         let header_line = out.lines().next().unwrap_or("");
         assert!(
@@ -931,10 +2491,6 @@ mod tests {
         assert!(
             header_line.contains("3 commits ahead of main"),
             "header should mention commit count and base: {header_line}",
-        );
-        assert!(
-            header_line.contains("5m23s"),
-            "header should mention last-commit age: {header_line}",
         );
     }
 
@@ -1124,6 +2680,7 @@ mod tests {
                 max_files: None,
                 log_lines: 0,
                 truecolor: false,
+                refresh: None,
             },
         ));
         let row = out.lines().nth(2).unwrap_or("");
@@ -1146,10 +2703,46 @@ mod tests {
                 max_files: None,
                 log_lines: 0,
                 truecolor: false,
+                refresh: None,
             },
         );
         let stripped = strip_ansi(&out);
         assert!(stripped.contains(".rs"));
+    }
+
+    #[test]
+    fn shave_names_takes_from_the_longer_name_first() {
+        // The base is short, so the branch absorbs the whole reduction.
+        let (branch, base) = shave_names("feature/a-very-long-branch-name", "main", 10);
+        assert_eq!(UnicodeWidthStr::width(branch.as_str()), 21);
+        assert_eq!(base, "main");
+
+        // Both are long: shaving alternates so they converge rather than one
+        // being cut to the floor while the other keeps every character.
+        let (branch, base) = shave_names(
+            "feature/a-very-long-branch-name",
+            "release/a-very-long-base-name",
+            20,
+        );
+        let (bw, sw) = (
+            UnicodeWidthStr::width(branch.as_str()),
+            UnicodeWidthStr::width(base.as_str()),
+        );
+        assert_eq!(bw + sw, 31 + 29 - 20, "the full reduction should be taken");
+        assert!(
+            bw.abs_diff(sw) <= 1,
+            "the two names should converge, got {bw} and {sw}",
+        );
+    }
+
+    #[test]
+    fn shave_names_stops_at_the_floor() {
+        // Past the floor a name stops being recognizable, so shaving stops
+        // and the caller's next rung (dropping whole fields, then cutting)
+        // takes over.
+        let (branch, base) = shave_names("feature/a-very-long-branch-name", "main", 1_000);
+        assert_eq!(UnicodeWidthStr::width(branch.as_str()), HEADER_NAME_FLOOR);
+        assert_eq!(base, "main", "a name already under the floor is untouched");
     }
 
     #[test]
@@ -1166,6 +2759,7 @@ mod tests {
                 max_files: Some(3),
                 log_lines: 0,
                 truecolor: false,
+                refresh: None,
             },
         ));
         assert!(out.contains("f0.rs"));
@@ -1194,6 +2788,7 @@ mod tests {
                 max_files: Some(0),
                 log_lines: 0,
                 truecolor: false,
+                refresh: None,
             },
         ));
         for i in 0..5 {
@@ -1242,18 +2837,16 @@ mod tests {
         // empty cells to its right. Paint a matching dim background under
         // just the partial cell to bridge that gap.
         //
-        // Force `colored` on so the test inspects the actual ANSI we would
-        // emit on a real terminal; without this the crate strips all codes
-        // in non-TTY test runs.
-        let _guard = COLORED_OVERRIDE_GUARD
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        colored::control::set_override(true);
-        let e = entry("foo.rs", FileStatus::Modified, true, 9, 1);
-        let with_partial = colorize_bar("█████▍", &e, 0.0, false);
-        let all_full = colorize_bar("██████", &e, 0.0, false);
-        let all_empty = colorize_bar("░░░░░░", &e, 0.0, false);
-        colored::control::unset_override();
+        // `with_forced_ansi` makes `colored` emit codes, so the test inspects
+        // the actual ANSI of a real terminal. Without it the crate removes all
+        // codes in a non-TTY test run.
+        let (with_partial, all_full, all_empty) = testcolor::with_forced_ansi(|| {
+            let e = entry("foo.rs", FileStatus::Modified, true, 9, 1);
+            let with_partial = colorize_bar("█████▍", &e, 0.0, false);
+            let all_full = colorize_bar("██████", &e, 0.0, false);
+            let all_empty = colorize_bar("░░░░░░", &e, 0.0, false);
+            (with_partial, all_full, all_empty)
+        });
 
         assert!(
             with_partial.contains("\x1b[48"),
@@ -1368,7 +2961,7 @@ mod tests {
     #[test]
     fn plan_section_caps_floors_log_at_five_rows_when_files_dominate() {
         // Repro of the "too many files" report: a branch with ~129
-        // changed files vs the default 20-line log on a ~26-row
+        // changed files vs a 20-commit log on a ~26-row
         // terminal. A naive proportional split would squeeze the log
         // section down to ~3 rows; the floor lifts that to 5 so the
         // recent-commit context stays visible.
@@ -1397,8 +2990,97 @@ mod tests {
         LogEntry {
             hash: hash.into(),
             subject: subject.into(),
-            age: Duration::from_secs(age_secs),
+            age: Some(Duration::from_secs(age_secs)),
+            on_branch: false,
         }
+    }
+
+    /// A log row whose age the repository could not give us.
+    fn log_entry_without_age(hash: &str, subject: &str) -> LogEntry {
+        LogEntry {
+            hash: hash.into(),
+            subject: subject.into(),
+            age: None,
+            on_branch: false,
+        }
+    }
+
+    #[test]
+    fn log_row_marks_an_unknown_age_instead_of_claiming_zero_seconds() {
+        // A commit timestamp ahead of the local clock yields no elapsed time.
+        // The row must say `?` — the same mark the frame uses everywhere an age
+        // is missing. `0s` would rank the commit as the freshest on screen.
+        let mut snap = snap_with(vec![]);
+        snap.log = vec![log_entry_without_age("abc1234", "a commit from the future")];
+        let mut o = opts();
+        o.log_lines = 5;
+
+        let out = strip_ansi(&render(&snap, &o));
+        let row = out
+            .lines()
+            .find(|line| line.contains("abc1234"))
+            .unwrap_or_else(|| panic!("the log row should render: {out}"));
+        assert!(
+            row.trim_end().ends_with(UNKNOWN_AGE),
+            "an unknown commit age should render as `{UNKNOWN_AGE}`: {row:?}",
+        );
+        assert!(
+            !row.contains("0s"),
+            "an unknown commit age must not be misrepresented as 0s: {row:?}",
+        );
+    }
+
+    #[test]
+    fn an_age_offset_leaves_an_unknown_log_age_unknown() {
+        // Watch mode advances every displayed age between git walks. An age
+        // gsw never had cannot be advanced into one it can back, so the mark
+        // survives the offset rather than becoming the offset itself.
+        let mut snap = snap_with(vec![]);
+        snap.log = vec![log_entry_without_age("abc1234", "a commit from the future")];
+        let mut o = opts();
+        o.log_lines = 5;
+
+        let out = strip_ansi(&render_with_offset(&snap, &o, Duration::from_secs(50)));
+        let row = out
+            .lines()
+            .find(|line| line.contains("abc1234"))
+            .unwrap_or_else(|| panic!("the log row should render: {out}"));
+        assert!(
+            row.trim_end().ends_with(UNKNOWN_AGE),
+            "an offset must not turn an unknown age into a number: {row:?}",
+        );
+        assert!(
+            !row.contains("50s"),
+            "the offset itself must never be reported as the commit's age: {row:?}",
+        );
+    }
+
+    #[test]
+    fn a_log_row_without_an_age_keeps_the_age_column_aligned() {
+        // The `?` sits in the same right-aligned AGE_FIELD as every other row.
+        // A mark that drifts out of the column reads as a broken frame.
+        let mut snap = snap_with(vec![]);
+        snap.log = vec![
+            log_entry("abc1234", "known age", 30),
+            log_entry_without_age("def5678", "unknown age"),
+        ];
+        let mut o = opts();
+        o.log_lines = 5;
+
+        let out = strip_ansi(&render(&snap, &o));
+        let known = out
+            .lines()
+            .find(|line| line.contains("abc1234"))
+            .expect("known-age row");
+        let unknown = out
+            .lines()
+            .find(|line| line.contains("def5678"))
+            .expect("unknown-age row");
+        assert_eq!(
+            UnicodeWidthStr::width(known),
+            UnicodeWidthStr::width(unknown),
+            "both log rows should occupy the same width:\n  known:   {known:?}\n  unknown: {unknown:?}",
+        );
     }
 
     #[test]
@@ -1430,7 +3112,8 @@ mod tests {
             .map(|i| LogEntry {
                 hash: format!("h{i:06}"),
                 subject: format!("subj {i}"),
-                age: Duration::from_secs(i * 60),
+                age: Some(Duration::from_secs(i * 60)),
+                on_branch: false,
             })
             .collect();
         let mut o = opts();
@@ -1463,7 +3146,8 @@ mod tests {
         snap.log = vec![LogEntry {
             hash: "abc1234".into(),
             subject: "really long subject ".repeat(20),
-            age: Duration::from_secs(30),
+            age: Some(Duration::from_secs(30)),
+            on_branch: false,
         }];
         let mut o = opts();
         o.log_lines = 1;
@@ -1552,32 +3236,12 @@ mod tests {
     }
 
     #[test]
-    fn header_renders_question_mark_when_last_commit_age_unknown() {
-        // When git can't tell us when HEAD was authored (empty repo, malformed
-        // %ct, clock skew), the header used to say "last commit 0s ago" — i.e.
-        // it lied about a fresh commit. Render an explicit "?" instead so the
-        // unknown state is visible.
-        let mut snap = snap_with(vec![]);
-        snap.last_commit_age = None;
-        let out = strip_ansi(&render(&snap, &opts()));
-        let header = out.lines().next().unwrap_or("");
-        assert!(
-            header.contains("last commit ? ago"),
-            "header should mark unknown last-commit age explicitly: {header}",
-        );
-        assert!(
-            !header.contains("0s ago"),
-            "unknown age must not be misrepresented as 0s: {header}",
-        );
-    }
-
-    #[test]
     fn stale_age_renders_differently_from_aging() {
         // AgeDim has four buckets; if Stale and Aging both render `.dimmed()`
         // the bucket distinction is invisible to the user. Compare the Style
-        // bitsets on the returned ColoredStrings directly — avoids touching
-        // `colored::control::set_override`, which is process-global and would
-        // race with other tests in parallel.
+        // bitsets on the returned ColoredStrings directly. This test needs no
+        // ANSI bytes, so it does not force the process-global `colored`
+        // override and does not wait for the lock in `testcolor`.
         use colored::Styles;
         let aging = colorize_age("12h0m", Some(Duration::from_secs(2 * 3600)), 0.0, false);
         let stale = colorize_age("12h0m", Some(Duration::from_secs(2 * 86400)), 0.0, false);
@@ -1702,6 +3366,194 @@ mod tests {
         );
     }
 
+    // --- the mark of a branch commit -------------------------------------
+    //
+    // Issue #541: the header counts the commits that are only on the current
+    // branch. The log row of each such commit shows `BRANCH_MARK` in a gutter
+    // at its left. Every other log row shows a blank there.
+
+    /// The hash of the commit on the branch in the tests of the mark.
+    const BRANCH_HASH: &str = "abc1234";
+    /// The hash of the commit on the base in the tests of the mark.
+    const BASE_HASH: &str = "def5678";
+
+    /// A log row of a commit that is only on the current branch.
+    fn branch_log_entry(hash: &str, subject: &str, age_secs: u64) -> LogEntry {
+        LogEntry {
+            on_branch: true,
+            ..log_entry(hash, subject, age_secs)
+        }
+    }
+
+    /// A snapshot whose log holds one row of a branch commit with the subject
+    /// `subject`, and one row of a base commit.
+    fn snap_with_a_branch_row(subject: &str) -> Snapshot {
+        let mut snap = snap_with(vec![]);
+        snap.log = vec![
+            branch_log_entry(BRANCH_HASH, subject, 30),
+            log_entry(BASE_HASH, "a commit on the base", 60),
+        ];
+        snap
+    }
+
+    /// The glyphs of the frame of `snap`. The frame is painted with the escape
+    /// codes forced on, and then the codes are taken out.
+    fn painted_glyphs(snap: &Snapshot, o: &RenderOptions) -> String {
+        strip_ansi(&testcolor::with_forced_ansi(|| render(snap, o)))
+    }
+
+    /// The row of `glyphs` that holds `hash`.
+    fn row_with<'a>(glyphs: &'a str, hash: &str) -> &'a str {
+        glyphs
+            .lines()
+            .find(|line| line.contains(hash))
+            .unwrap_or_else(|| panic!("no row holds {hash}:\n{glyphs}"))
+    }
+
+    #[test]
+    fn a_log_row_of_a_branch_commit_shows_the_mark_and_a_row_of_the_base_shows_a_blank() {
+        // Issue #541: the row of a commit that is only on the branch shows
+        // `BRANCH_MARK` in its first column. The row of a base commit shows a
+        // blank there. The glyphs hold no escape code, so the mark stays
+        // visible with no color: in 8-color mode and in piped output.
+        for truecolor in [false, true] {
+            let mut o = opts();
+            o.log_lines = 5;
+            o.truecolor = truecolor;
+
+            let glyphs = painted_glyphs(&snap_with_a_branch_row("a commit on the branch"), &o);
+
+            let marked = row_with(&glyphs, BRANCH_HASH);
+            assert!(
+                marked.starts_with(&format!("{BRANCH_MARK}{BRANCH_HASH}")),
+                "truecolor={truecolor}: the row of a branch commit starts with the mark: \
+                 {marked:?}",
+            );
+            let blank = row_with(&glyphs, BASE_HASH);
+            assert!(
+                blank.starts_with(&format!(" {BASE_HASH}")),
+                "truecolor={truecolor}: the row of a base commit starts with a blank: {blank:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_log_row_with_the_mark_and_a_row_with_a_blank_have_one_width_and_one_hash_column() {
+        // Issue #541: the mark does not move a row. The row with the mark and
+        // the row with a blank have the same width, and their hashes start in
+        // the same column. So no column moves when a commit lands on the
+        // branch.
+        let mut o = opts();
+        o.log_lines = 5;
+
+        let glyphs = painted_glyphs(&snap_with_a_branch_row("a commit on the branch"), &o);
+
+        let marked = row_with(&glyphs, BRANCH_HASH);
+        let blank = row_with(&glyphs, BASE_HASH);
+        assert_eq!(
+            UnicodeWidthStr::width(marked),
+            UnicodeWidthStr::width(blank),
+            "the two log rows have the same width:\n  mark:  {marked:?}\n  blank: {blank:?}",
+        );
+        let hash_column = |row: &str, hash: &str| {
+            row.split_once(hash)
+                .map(|(before, _)| UnicodeWidthStr::width(before))
+        };
+        assert_eq!(
+            hash_column(marked, BRANCH_HASH),
+            hash_column(blank, BASE_HASH),
+            "the two hashes start in the same column:\n  mark:  {marked:?}\n  blank: {blank:?}",
+        );
+    }
+
+    #[test]
+    fn a_long_subject_on_a_log_row_with_the_mark_fits_the_terminal_width() {
+        // Issue #541: the gutter takes its column from the subject. So a row
+        // with the mark and a long subject is never wider than the terminal,
+        // and its subject ends with `…`. The subject holds characters of two
+        // columns and of more than one byte. An odd width puts the cut next
+        // to a character of two columns.
+        let subject = "a long subject 日本語テスト 🎉 café ".repeat(10);
+        for width in [40, 41, 80] {
+            let mut o = opts();
+            o.log_lines = 5;
+            o.terminal_width = width;
+
+            let glyphs = painted_glyphs(&snap_with_a_branch_row(&subject), &o);
+
+            let marked = row_with(&glyphs, BRANCH_HASH);
+            assert!(
+                marked.starts_with(BRANCH_MARK),
+                "width={width}: the row shows the mark: {marked:?}",
+            );
+            assert!(
+                UnicodeWidthStr::width(marked) <= width,
+                "width={width}: the row is {} columns wide: {marked:?}",
+                UnicodeWidthStr::width(marked),
+            );
+            let before_age = marked
+                .trim_end()
+                .rsplit_once(' ')
+                .map(|(head, _)| head.trim_end());
+            assert!(
+                before_age.is_some_and(|head| head.ends_with('…')),
+                "width={width}: the subject ends with an ellipsis: {marked:?}",
+            );
+        }
+    }
+
+    /// The escape codes at the start of `line`, before its first glyph.
+    fn leading_codes(line: &str) -> &str {
+        let mut rest = line;
+        while let Some((_, tail)) = rest
+            .strip_prefix("\x1b[")
+            .and_then(|codes| codes.split_once('m'))
+        {
+            rest = tail;
+        }
+        line.strip_suffix(rest).unwrap_or_default()
+    }
+
+    #[test]
+    fn the_mark_is_painted_blue_and_the_blank_takes_none() {
+        // Issue #541: the mark is blue, a color that no other part of gsw
+        // paints, so it tells of no problem and of no file status. Truecolor
+        // mode paints `BRANCH_MARK_RGB`. 8-color mode paints bright blue,
+        // because plain blue is too dark to read on many dark themes. The
+        // blank of a row of a base commit takes no paint. The codes are
+        // forced on, so the test reads the paint whether it writes to a
+        // terminal or not.
+        let (r, g, b) = BRANCH_MARK_RGB;
+        for (truecolor, mark_codes) in [
+            (false, "\x1b[94m".to_string()),
+            (true, format!("{}{r};{g};{b}m", testcolor::TRUECOLOR_FG)),
+        ] {
+            let mut o = opts();
+            o.log_lines = 5;
+            o.truecolor = truecolor;
+
+            let painted = testcolor::with_forced_ansi(|| {
+                render(&snap_with_a_branch_row("a commit on the branch"), &o)
+            });
+
+            let marked = row_with(&painted, BRANCH_HASH);
+            assert_eq!(
+                leading_codes(marked),
+                mark_codes,
+                "truecolor={truecolor}: the mark is blue: {marked:?}",
+            );
+            assert!(
+                marked.starts_with(&format!("{mark_codes}{BRANCH_MARK}")),
+                "truecolor={truecolor}: the codes paint the mark: {marked:?}",
+            );
+            let blank = row_with(&painted, BASE_HASH);
+            assert!(
+                blank.starts_with(LOG_GUTTER_BLANK),
+                "truecolor={truecolor}: the blank gutter takes no paint: {blank:?}",
+            );
+        }
+    }
+
     // --- truecolor commit-log fade ---------------------------------------
     //
     // These tests inspect the `ColoredString::fgcolor` field directly rather
@@ -1716,7 +3568,7 @@ mod tests {
         // 24-bit RGB value (not the legacy `Color::Yellow`), so the gradient
         // has somewhere to fade *from*.
         use colored::Color;
-        let cs = colorize_log_hash("abc1234", Duration::from_secs(0), true);
+        let cs = colorize_log_hash("abc1234", Some(Duration::from_secs(0)), true);
         match cs.fgcolor {
             Some(Color::TrueColor { .. }) => {}
             other => panic!("expected TrueColor when truecolor=true, got {other:?}"),
@@ -1729,7 +3581,7 @@ mod tests {
         // through — otherwise we silently drop hash colouring on terminals
         // that can't render 24-bit RGB.
         use colored::Color;
-        let cs = colorize_log_hash("abc1234", Duration::from_secs(0), false);
+        let cs = colorize_log_hash("abc1234", Some(Duration::from_secs(0)), false);
         assert_eq!(cs.fgcolor, Some(Color::Yellow));
     }
 
@@ -1739,8 +3591,8 @@ mod tests {
         // out darker (lower channel values) than a fresh commit's hash on
         // every channel.
         use colored::Color;
-        let fresh = colorize_log_hash("abc1234", Duration::from_secs(0), true);
-        let hour = colorize_log_hash("abc1234", Duration::from_secs(60 * 60), true);
+        let fresh = colorize_log_hash("abc1234", Some(Duration::from_secs(0)), true);
+        let hour = colorize_log_hash("abc1234", Some(Duration::from_secs(60 * 60)), true);
         let (
             Some(Color::TrueColor {
                 r: fr,
@@ -1769,7 +3621,7 @@ mod tests {
         // the FADE_FLOOR fraction of its base value.
         use crate::age::FADE_FLOOR;
         use colored::Color;
-        let cs = colorize_log_hash("abc1234", Duration::from_secs(60 * 60 * 24 * 7), true);
+        let cs = colorize_log_hash("abc1234", Some(Duration::from_secs(60 * 60 * 24 * 7)), true);
         let Some(Color::TrueColor { r, g, b }) = cs.fgcolor else {
             panic!("expected TrueColor under truecolor=true");
         };
@@ -1778,7 +3630,7 @@ mod tests {
         // FADE_FLOOR fraction") rather than hardcoding numbers tied to
         // today's choice of LOG_HASH_BASE_RGB. If the base later gains
         // a non-zero blue, the test still checks the right bound.
-        #[allow(
+        #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
             reason = "u8 × FADE_FLOOR ∈ [0, 1] stays in [0, 255]"
@@ -1804,7 +3656,7 @@ mod tests {
         // Subjects need to fade too, otherwise the hash darkens while the
         // text next to it stays bright — visually inconsistent.
         use colored::Color;
-        let cs = colorize_log_subject("a commit subject", Duration::from_secs(0), true);
+        let cs = colorize_log_subject("a commit subject", Some(Duration::from_secs(0)), true);
         match cs.fgcolor {
             Some(Color::TrueColor { .. }) => {}
             other => panic!("expected TrueColor for subject when truecolor=true, got {other:?}"),
@@ -1814,8 +3666,8 @@ mod tests {
     #[test]
     fn log_subject_darkens_with_age_under_truecolor() {
         use colored::Color;
-        let fresh = colorize_log_subject("subj", Duration::from_secs(0), true);
-        let hour = colorize_log_subject("subj", Duration::from_secs(60 * 60), true);
+        let fresh = colorize_log_subject("subj", Some(Duration::from_secs(0)), true);
+        let hour = colorize_log_subject("subj", Some(Duration::from_secs(60 * 60)), true);
         let (Some(Color::TrueColor { r: fr, .. }), Some(Color::TrueColor { r: hr, .. })) =
             (fresh.fgcolor, hour.fgcolor)
         else {
@@ -1830,7 +3682,7 @@ mod tests {
     #[test]
     fn log_age_uses_truecolor_when_enabled() {
         use colored::Color;
-        let cs = colorize_log_age("5m23s", Duration::from_secs(5 * 60 + 23), true);
+        let cs = colorize_log_age("5m23s", Some(Duration::from_secs(5 * 60 + 23)), true);
         match cs.fgcolor {
             Some(Color::TrueColor { .. }) => {}
             other => panic!("expected TrueColor for age when truecolor=true, got {other:?}"),
@@ -1840,8 +3692,8 @@ mod tests {
     #[test]
     fn log_age_darkens_with_age_under_truecolor() {
         use colored::Color;
-        let fresh = colorize_log_age("0s", Duration::from_secs(0), true);
-        let hour = colorize_log_age("1h0m", Duration::from_secs(60 * 60), true);
+        let fresh = colorize_log_age("0s", Some(Duration::from_secs(0)), true);
+        let hour = colorize_log_age("1h0m", Some(Duration::from_secs(60 * 60)), true);
         let (Some(Color::TrueColor { r: fr, .. }), Some(Color::TrueColor { r: hr, .. })) =
             (fresh.fgcolor, hour.fgcolor)
         else {
@@ -1898,7 +3750,7 @@ mod tests {
         use colored::Styles;
         let stale = colorize_log_subject(
             "an old subject",
-            Duration::from_secs(60 * 60 * 24 * 7),
+            Some(Duration::from_secs(60 * 60 * 24 * 7)),
             false,
         );
         assert!(
@@ -1908,32 +3760,33 @@ mod tests {
     }
 
     #[test]
-    fn file_fade_factor_is_zero_for_fresh_age() {
+    fn fade_factor_is_zero_for_fresh_age() {
         // A file modified moments ago must render at full base brightness,
         // which means factor=0 — the no-fade end of the ramp.
         assert!(
-            (file_fade_factor(Some(Duration::from_secs(0))) - 0.0).abs() < 1e-6,
+            (fade_factor(Some(Duration::from_secs(0))) - 0.0).abs() < 1e-6,
             "fresh file should produce factor=0",
         );
     }
 
     #[test]
-    fn file_fade_factor_floors_when_age_is_none() {
-        // Deleted files and unstat'd untracked dirs have no mtime. They must
-        // render at the dark floor (factor=1.0) so the row visually announces
-        // "this is an unusual state, not actively changing".
+    fn fade_factor_floors_when_age_is_none() {
+        // Deleted files, unstat'd untracked dirs, and commits whose timestamp
+        // does not resolve all have no age. They must render at the dark floor
+        // (factor=1.0) so the row announces "this is an unusual state, not
+        // something actively changing".
         assert!(
-            (file_fade_factor(None) - 1.0).abs() < 1e-6,
+            (fade_factor(None) - 1.0).abs() < 1e-6,
             "None age should clamp to factor=1.0 (the floor)",
         );
     }
 
     #[test]
-    fn file_fade_factor_matches_commit_ramp_for_some_age() {
+    fn fade_factor_matches_commit_ramp_for_some_age() {
         // The file fade must share the *same* ramp as commit rows so the two
         // sections darken in lockstep under viddy. Spot-check the 1h midpoint.
         let one_hour = Duration::from_secs(60 * 60);
-        let file = file_fade_factor(Some(one_hour));
+        let file = fade_factor(Some(one_hour));
         let commit = age_fade_factor(one_hour);
         assert!(
             (file - commit).abs() < 1e-6,
@@ -2010,7 +3863,7 @@ mod tests {
         let Some(Color::TrueColor { r, g, b }) = cs.fgcolor else {
             panic!("expected TrueColor under truecolor=true");
         };
-        #[allow(
+        #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
             reason = "u8 × FADE_FLOOR ∈ [0, 1] stays in [0, 255]"
@@ -2205,35 +4058,29 @@ mod tests {
 
     #[test]
     fn file_row_renders_with_truecolor_when_enabled() {
-        // Force the colored crate to actually emit ANSI in the test process so
-        // we can detect the truecolor codes from the rendered output.
-        let _guard = COLORED_OVERRIDE_GUARD
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        colored::control::set_override(true);
-        let snap = snap_with(vec![entry("src/foo.rs", FileStatus::Modified, false, 5, 2)]);
-        let mut o = opts();
-        o.truecolor = true;
-        let out = render(&snap, &o);
-        colored::control::unset_override();
+        // `with_forced_ansi` makes the `colored` crate emit ANSI in the test
+        // process, so the test finds the truecolor codes in the output.
+        let out = testcolor::with_forced_ansi(|| {
+            let snap = snap_with(vec![entry("src/foo.rs", FileStatus::Modified, false, 5, 2)]);
+            let mut o = opts();
+            o.truecolor = true;
+            render(&snap, &o)
+        });
         // Truecolor foreground sequences start with `\x1b[38;2;`.
         assert!(
-            out.contains("\x1b[38;2;"),
+            out.contains(TRUECOLOR_FG),
             "rendered file row should contain a truecolor ANSI sequence when truecolor=true",
         );
     }
 
     #[test]
     fn file_row_no_truecolor_in_8_color_mode() {
-        let _guard = COLORED_OVERRIDE_GUARD
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        colored::control::set_override(true);
-        let snap = snap_with(vec![entry("src/foo.rs", FileStatus::Modified, false, 5, 2)]);
-        let out = render(&snap, &opts());
-        colored::control::unset_override();
+        let out = testcolor::with_forced_ansi(|| {
+            let snap = snap_with(vec![entry("src/foo.rs", FileStatus::Modified, false, 5, 2)]);
+            render(&snap, &opts())
+        });
         assert!(
-            !out.contains("\x1b[38;2;"),
+            !out.contains(TRUECOLOR_FG),
             "8-color mode must not emit any truecolor sequences for file rows",
         );
     }
@@ -2242,48 +4089,23 @@ mod tests {
     fn file_row_darkens_with_mtime_under_truecolor() {
         // End-to-end: an older file's row should contain a darker (lower-channel)
         // truecolor sequence than a fresher row of the same status.
-        let _guard = COLORED_OVERRIDE_GUARD
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        colored::control::set_override(true);
-        let mut fresh_entry = entry("src/foo.rs", FileStatus::Modified, false, 5, 2);
-        fresh_entry.age = Some(Duration::from_secs(0));
-        let mut aged_entry = entry("src/bar.rs", FileStatus::Modified, false, 5, 2);
-        aged_entry.age = Some(Duration::from_secs(60 * 60));
+        let (fresh_out, aged_out) = testcolor::with_forced_ansi(|| {
+            let mut fresh_entry = entry("src/foo.rs", FileStatus::Modified, false, 5, 2);
+            fresh_entry.age = Some(Duration::from_secs(0));
+            let mut aged_entry = entry("src/bar.rs", FileStatus::Modified, false, 5, 2);
+            aged_entry.age = Some(Duration::from_secs(60 * 60));
 
-        let fresh_snap = snap_with(vec![fresh_entry]);
-        let aged_snap = snap_with(vec![aged_entry]);
-        let mut o = opts();
-        o.truecolor = true;
-        let fresh_out = render(&fresh_snap, &o);
-        let aged_out = render(&aged_snap, &o);
-        colored::control::unset_override();
+            let fresh_snap = snap_with(vec![fresh_entry]);
+            let aged_snap = snap_with(vec![aged_entry]);
+            let mut o = opts();
+            o.truecolor = true;
+            let fresh_out = render(&fresh_snap, &o);
+            let aged_out = render(&aged_snap, &o);
+            (fresh_out, aged_out)
+        });
 
-        let max_r = |s: &str| {
-            // Extract the largest r-channel from any 38;2;r;g;b foreground sequence.
-            let mut best: Option<u8> = None;
-            let bytes = s.as_bytes();
-            let needle = b"\x1b[38;2;";
-            let mut i = 0;
-            while let Some(pos) = bytes[i..].windows(needle.len()).position(|w| w == needle) {
-                let start = i + pos + needle.len();
-                // Read r digits.
-                let mut j = start;
-                while j < bytes.len() && bytes[j].is_ascii_digit() {
-                    j += 1;
-                }
-                if j > start {
-                    if let Ok(r) = std::str::from_utf8(&bytes[start..j]).unwrap().parse::<u8>() {
-                        best = Some(best.map_or(r, |b| b.max(r)));
-                    }
-                }
-                i = j;
-            }
-            best.expect("at least one truecolor sequence")
-        };
-
-        let fresh_max = max_r(&fresh_out);
-        let aged_max = max_r(&aged_out);
+        let fresh_max = max_red_channel(&fresh_out);
+        let aged_max = max_red_channel(&aged_out);
         assert!(
             aged_max < fresh_max,
             "aged row's brightest channel should be lower than fresh row's: fresh={fresh_max} aged={aged_max}",
@@ -2295,57 +4117,34 @@ mod tests {
         // Deleted file (age=None) should produce only sequences with channels
         // at or below the FADE_FLOOR fraction of their base.
         use crate::age::FADE_FLOOR;
-        let _guard = COLORED_OVERRIDE_GUARD
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        colored::control::set_override(true);
-        let mut e = entry("deleted.rs", FileStatus::Deleted, true, 0, 5);
-        e.age = None;
-        let snap = snap_with(vec![e]);
-        let mut o = opts();
-        o.truecolor = true;
-        let out = render(&snap, &o);
-        colored::control::unset_override();
+        let out = testcolor::with_forced_ansi(|| {
+            let mut e = entry("deleted.rs", FileStatus::Deleted, true, 0, 5);
+            e.age = None;
+            let snap = snap_with(vec![e]);
+            let mut o = opts();
+            o.truecolor = true;
+            render(&snap, &o)
+        });
 
         // The brightest channel allowed at the floor is `255 × FADE_FLOOR`
         // (a base channel of 255 hits the highest floor). Use that as the
         // conservative upper bound for any column, plus a small slack for
         // rounding. Any row column emitting a channel above this means a
         // colorize_* fn forgot to apply the fade.
-        #[allow(
+        #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
             reason = "255.0 × FADE_FLOOR ∈ [0, 255]"
         )]
         let upper = ((255.0_f32 * FADE_FLOOR).round() as u8).saturating_add(2);
 
-        // Parse every r-channel and assert all are <= upper.
-        let bytes = out.as_bytes();
-        let needle = b"\x1b[38;2;";
-        let mut i = 0;
-        let mut saw_any = false;
-        while let Some(pos) = bytes[i..].windows(needle.len()).position(|w| w == needle) {
-            let start = i + pos + needle.len();
-            let mut j = start;
-            while j < bytes.len() && bytes[j].is_ascii_digit() {
-                j += 1;
-            }
-            if j > start {
-                let r: u8 = std::str::from_utf8(&bytes[start..j])
-                    .unwrap()
-                    .parse()
-                    .unwrap();
-                assert!(
-                    r <= upper,
-                    "every channel on a no-age row should sit at or below the floor (got {r}, upper {upper})",
-                );
-                saw_any = true;
-            }
-            i = j;
-        }
+        // The brightest r-channel bounds every r-channel, so one comparison
+        // covers them all. `max_red_channel` panics when the row carries no
+        // truecolor sequence, which also proves that the row was painted.
+        let brightest = max_red_channel(&out);
         assert!(
-            saw_any,
-            "should have emitted at least one truecolor sequence"
+            brightest <= upper,
+            "every channel on a no-age row should sit at or below the floor (brightest {brightest}, upper {upper})",
         );
     }
 
@@ -2465,15 +4264,13 @@ mod tests {
         // marker in one fg sequence + one reset — not pay 3× the ANSI overhead
         // by re-emitting the sequence for every char of "bin". Holds for both
         // 8-color and truecolor paths.
-        let _guard = COLORED_OVERRIDE_GUARD
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        colored::control::set_override(true);
-        let mut e = entry("assets/logo.png", FileStatus::Modified, true, 0, 0);
-        e.binary = true;
-        let out_ansi = colorize_bar("bin", &e, 0.0, false);
-        let out_tc = colorize_bar("bin", &e, 0.0, true);
-        colored::control::unset_override();
+        let (out_ansi, out_tc) = testcolor::with_forced_ansi(|| {
+            let mut e = entry("assets/logo.png", FileStatus::Modified, true, 0, 0);
+            e.binary = true;
+            let out_ansi = colorize_bar("bin", &e, 0.0, false);
+            let out_tc = colorize_bar("bin", &e, 0.0, true);
+            (out_ansi, out_tc)
+        });
         assert_eq!(
             out_ansi.matches("\x1b[").count(),
             2,
@@ -2516,19 +4313,21 @@ mod tests {
 
     #[test]
     fn behind_segment_is_yellow_and_sits_before_the_suffix() {
-        // The behind segment is warning-colored (yellow + bold). Force
-        // `colored` on so the rendered header carries the real ANSI we'd
-        // emit on a terminal, then assert: (1) a yellow SGR appears, (2) the
-        // plain text is `…ahead of main, 87 behind • last commit…` with the
-        // segment wedged between the base name and the suffix.
-        let _guard = COLORED_OVERRIDE_GUARD
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        colored::control::set_override(true);
-        let mut snap = snap_with(vec![]);
-        snap.commits_behind = 87;
-        let rendered = render(&snap, &opts());
-        colored::control::unset_override();
+        // The behind segment is warning-colored (yellow + bold).
+        // `with_forced_ansi` makes the rendered header carry the real ANSI of
+        // a terminal. The test then asserts: (1) a yellow SGR appears, (2) the
+        // plain text is `…ahead of main, 87 behind • ↑2 ↓0 …` with the
+        // segment wedged between the base name and the upstream field.
+        let rendered = testcolor::with_forced_ansi(|| {
+            let mut snap = snap_with(vec![]);
+            snap.commits_behind = 87;
+            snap.upstream = Some(UpstreamStatus {
+                name: "origin/gsv".into(),
+                ahead: 2,
+                behind: 0,
+            });
+            render(&snap, &opts())
+        });
 
         let header_line = rendered.lines().next().unwrap_or("");
         assert!(
@@ -2537,8 +4336,69 @@ mod tests {
         );
         let plain = strip_ansi(header_line);
         assert!(
-            plain.contains("ahead of main, 87 behind • last commit"),
+            plain.contains("ahead of main, 87 behind • ↑2 ↓0"),
             "behind segment should sit between the base name and the suffix: {plain}",
         );
+    }
+
+    #[test]
+    fn age_offset_advances_file_and_log_ages() {
+        // A render-time age offset advances every displayed age by a single
+        // Duration: each file row's mtime age and each commit-log row's age.
+        // The two base ages are picked so the advanced strings can't collide
+        // with the un-advanced ones.
+        let mut snap = snap_with(vec![entry("a.rs", FileStatus::Modified, true, 1, 0)]);
+        snap.files[0].age = Some(Duration::from_secs(20)); // file row: "20s"
+        snap.log = vec![LogEntry {
+            hash: "abc1234".into(),
+            subject: "test".into(),
+            age: Some(Duration::from_secs(100)),
+            on_branch: false,
+        }]; // log: "1m40s"
+        let mut o = opts();
+        o.log_lines = 5; // so the log section renders
+
+        let advanced = strip_ansi(&render_with_offset(&snap, &o, Duration::from_secs(50)));
+        assert!(
+            advanced.contains("1m10s"),
+            "file age 20s + 50s offset should render as 1m10s: {advanced}",
+        );
+        assert!(
+            advanced.contains("2m30s"),
+            "log age 1m40s + 50s offset should render as 2m30s: {advanced}",
+        );
+
+        let base = strip_ansi(&render(&snap, &o));
+        assert!(base.contains("20s"), "file age unoffset is 20s: {base}");
+        assert!(base.contains("1m40s"), "log age unoffset is 1m40s: {base}");
+    }
+
+    #[test]
+    fn age_offset_zero_is_an_exact_noop() {
+        // Offset ZERO must leave the full colored output byte-identical to
+        // today's render — d.saturating_add(ZERO) == d for every age, so no
+        // formatted age and no fade color byte changes. One-shot mode and the
+        // seed walk render at ZERO and rely on this exactness.
+        //
+        // `with_forced_ansi` holds the one shared lock on the process-global
+        // override, so the comparison sees the actual ANSI bytes and no
+        // concurrent test changes the override between the two render calls
+        // and makes identical frames compare unequal.
+        let (with_offset, baseline) = testcolor::with_forced_ansi(|| {
+            let mut snap = snap_with(vec![entry("a.rs", FileStatus::Modified, true, 1, 0)]);
+            snap.files[0].age = Some(Duration::from_secs(20));
+            snap.log = vec![LogEntry {
+                hash: "abc1234".into(),
+                subject: "test".into(),
+                age: Some(Duration::from_secs(100)),
+                on_branch: false,
+            }];
+            let mut o = opts();
+            o.log_lines = 5;
+            let with_offset = render_with_offset(&snap, &o, Duration::ZERO);
+            let baseline = render(&snap, &o);
+            (with_offset, baseline)
+        });
+        assert_eq!(with_offset, baseline);
     }
 }

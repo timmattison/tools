@@ -1,0 +1,14 @@
+. import XCTest
+. 
+. struct Greeter {
+.     func greet() -> String {
+.         return "こんにちは"
+.     }
+. }
+. 
+T final class GreeterChecks: XCTestCase {
+T     func testGreetsInJapanese() {
+T         // 挨拶を確かめる
+T         XCTAssertEqual(Greeter().greet(), "こんにちは")
+T     }
+T }

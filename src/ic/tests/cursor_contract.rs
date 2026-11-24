@@ -1,0 +1,678 @@
+//! Cursor contract tests for the display routines of `ic`.
+//!
+//! Sixel gives no contract for the position of the cursor after the string
+//! terminator. Each renderer makes its own decision. The Kitty protocol and the
+//! iTerm2 protocol both have a flag that holds the cursor still, but then the
+//! caller must move it. `ic` must therefore state where the cursor ends, in
+//! every routine, instead of a guess of one newline.
+//!
+//! Each routine reserves one row for each row of the image before it draws, and
+//! the height of the terminal bounds that reservation. An image taller than the
+//! screen cannot have a row below it, so the bound holds the scroll to one
+//! screen.
+//!
+//! These tests drive the real binary and look at the bytes it writes. They
+//! measure the cursor movement that the stream *requests*, not the exact escape
+//! sequences, so a change of spelling keeps them alive.
+//!
+//! Every expectation below rests on a terminal that `ic` cannot measure, so
+//! [`ic_command`] takes the controlling terminal away from each child. The
+//! terminal of the person who typed `cargo test` therefore cannot change a
+//! single number in this file.
+
+use std::io::Write;
+use std::process;
+use std::process::{Command, Stdio};
+
+mod common;
+
+use common::pty::take_the_terminal_away;
+use common::{
+    find, scan_cursor_movement, unreachable_path_dir, SIXEL_START, TERM_XTERM_256COLOR, TEST_IMAGE,
+};
+
+/// The name that this target puts in the unreachable `PATH` of its children.
+const TARGET_NAME: &str = "cursor-contract";
+
+/// The application program command that opens a Kitty graphics command.
+const KITTY_START: &[u8] = b"\x1b_G";
+
+/// The operating system command that opens an iTerm2 inline image.
+const ITERM2_START: &[u8] = b"\x1b]1337;";
+
+/// The bell that closes an iTerm2 inline image.
+const ITERM2_END: &[u8] = b"\x07";
+
+/// The Kitty graphics key that tells the renderer not to move the cursor.
+const KITTY_NO_CURSOR_MOVE: &str = "C=1";
+
+/// The Kitty graphics key that names a whole PNG file as the payload.
+const KITTY_PNG_PAYLOAD: &str = "f=100";
+
+/// The Kitty graphics key that asks the terminal for the failures alone.
+const KITTY_FAILURES_ONLY: &str = "q=1";
+
+/// The string terminator that closes the Sixel payload.
+const STRING_TERMINATOR: &[u8] = b"\x1b\\";
+
+/// DECSC. It saves the position of the cursor.
+const SAVE_CURSOR: &[u8] = b"\x1b7";
+
+/// DECRC. It restores the saved position of the cursor.
+const RESTORE_CURSOR: &[u8] = b"\x1b8";
+
+/// The path of the image that the tests give to `ic` as an argument.
+///
+/// The file is in the repository and no test writes to it, so two concurrent
+/// runs of this file cannot disturb each other.
+const TEST_IMAGE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/test_image.png");
+
+/// The number of rows of the terminal that `ic` sees in these tests.
+///
+/// `terminal_cells` falls back to 80 columns by 24 rows when no probe of the
+/// size of the terminal answers. [`ic_command`] gives each child no
+/// controlling terminal, so no probe of `ic` finds a terminal to measure and
+/// the fallback stands.
+const TERMINAL_ROWS: i64 = 24;
+
+/// The row that the shell prompt returns to below the image.
+const PROMPT_ROWS: i64 = 1;
+
+/// The largest reservation that fits inside the terminal of the tests.
+///
+/// The cursor lands on the first row below the image, so the reservation must
+/// leave that row inside the screen.
+const MAX_RESERVATION_ROWS: i64 = TERMINAL_ROWS - 1;
+
+/// A command line that asks for an image taller than the terminal of the tests.
+const OVERSIZED_ARGS: &[&str] = &["--stdin", "--width", "78", "--height", "50"];
+
+/// The terminal type that Kitty sets.
+const TERM_XTERM_KITTY: &str = "xterm-kitty";
+
+/// A display routine of `ic` that a test selects.
+///
+/// `ic` picks the routine from the environment, so a test names the routine it
+/// wants and [`Routine::environment`] gives the variables that select it.
+#[derive(Clone, Copy, Debug)]
+enum Routine {
+    /// The Sixel routine, which muxiavelli panels and Zellij use.
+    Sixel,
+    /// The Kitty graphics routine, which Kitty, WezTerm and Ghostty use.
+    Kitty,
+    /// The iTerm2 inline image routine.
+    Iterm2,
+}
+
+impl Routine {
+    /// Give the environment variables that select this routine.
+    ///
+    /// The variables go on top of a cleared environment, so nothing that the
+    /// test runner inherited can change the routine.
+    ///
+    /// `MUXIAVELLI` selects the Sixel routine. `ZELLIJ` selects the same
+    /// routine but it also turns on a process tree heuristic that reads the
+    /// real process list of the host, which makes the result depend on the
+    /// machine.
+    ///
+    /// # Returns
+    /// The name and the value of each variable.
+    fn environment(self) -> Vec<(&'static str, &'static str)> {
+        match self {
+            Routine::Sixel => vec![
+                ("TERM", TERM_XTERM_256COLOR),
+                ("MUXIAVELLI", "1"),
+                ("MUXIAVELLI_IMAGE_PROTOCOLS", "sixel"),
+            ],
+            Routine::Kitty => vec![("TERM", TERM_XTERM_KITTY), ("KITTY_WINDOW_ID", "1")],
+            Routine::Iterm2 => vec![("TERM", TERM_XTERM_256COLOR), ("TERM_PROGRAM", "iTerm.app")],
+        }
+    }
+
+    /// Give the bytes that open the image payload of this routine.
+    ///
+    /// # Returns
+    /// The introducer of the image protocol.
+    fn payload_start(self) -> &'static [u8] {
+        match self {
+            Routine::Sixel => SIXEL_START,
+            Routine::Kitty => KITTY_START,
+            Routine::Iterm2 => ITERM2_START,
+        }
+    }
+
+    /// Give the bytes that close the image payload of this routine.
+    ///
+    /// # Returns
+    /// The terminator of the image protocol. The Kitty routine sends a large
+    /// image in more than one command, so the *last* terminator of the stream
+    /// closes the payload.
+    fn payload_end(self) -> &'static [u8] {
+        match self {
+            Routine::Sixel | Routine::Kitty => STRING_TERMINATOR,
+            Routine::Iterm2 => ITERM2_END,
+        }
+    }
+}
+
+/// The number of terminal rows that the test image occupies.
+///
+/// The test invocation makes a Sixel image of 100 pixels by 100 pixels. One
+/// character cell is 20 pixels high, because a child with no controlling
+/// terminal measures no cell and `cell_pixels_or_estimate_of` gives the
+/// estimate of 10 pixels by 20. The image therefore fills 5 rows. The Kitty
+/// routine and the iTerm2 routine take the size of the image in character
+/// cells, and the same test invocation asks them for 5 rows.
+const EXPECTED_ROWS: i64 = 5;
+
+/// Find the last position of a byte pattern in a byte slice.
+///
+/// # Arguments
+/// * `haystack` - The byte slice to search.
+/// * `needle` - The byte pattern to look for.
+///
+/// # Returns
+/// The index of the first byte of the last match, or `None` when there is no
+/// match.
+fn rfind(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .rposition(|window| window == needle)
+}
+
+/// Check that a byte stream keeps the cursor contract of `ic`.
+///
+/// The contract has three parts:
+///
+/// 1. The stream reserves the rows of the image before the payload and then
+///    takes them back, so an image at the bottom of the screen scrolls the
+///    terminal instead of running off it. The height of the terminal bounds the
+///    reservation, and the image of these tests is much shorter than that, so
+///    the reservation here is the full height of the image.
+/// 2. DECSC comes immediately before the payload and DECRC immediately after
+///    it, so cursor motion inside the payload cannot change the final position
+///    of the cursor.
+/// 3. The bytes after the payload move the cursor down by the row count of the
+///    image and put it at column 1.
+///
+/// # Arguments
+/// * `routine` - The display routine that wrote the stream.
+/// * `stdout` - The bytes that `ic` wrote to stdout.
+///
+/// # Panics
+/// Panics when the stream breaks any part of the contract.
+fn assert_cursor_contract(routine: Routine, stdout: &[u8]) {
+    let payload_start = find(stdout, routine.payload_start())
+        .unwrap_or_else(|| panic!("the output of {routine:?} must hold an image payload"));
+    let payload_end = rfind(stdout, routine.payload_end())
+        .unwrap_or_else(|| panic!("the output of {routine:?} must close its image payload"))
+        + routine.payload_end().len();
+
+    // Part 1. The reservation runs from the start of the stream to DECSC.
+    assert!(
+        payload_start >= SAVE_CURSOR.len(),
+        "the stream must save the cursor before the payload"
+    );
+    let save = payload_start - SAVE_CURSOR.len();
+    let reservation = scan_cursor_movement(&stdout[..save]);
+    assert_eq!(
+        reservation.down, EXPECTED_ROWS,
+        "the reservation must ask for {EXPECTED_ROWS} rows before the payload"
+    );
+    assert_eq!(
+        reservation.net(),
+        0,
+        "the reservation must take the rows back, so the image starts at the top of them"
+    );
+
+    // Part 2.
+    assert_eq!(
+        &stdout[save..payload_start],
+        SAVE_CURSOR,
+        "DECSC must come immediately before the payload"
+    );
+    assert!(
+        stdout.len() >= payload_end + RESTORE_CURSOR.len(),
+        "the stream must restore the cursor after the payload"
+    );
+    assert_eq!(
+        &stdout[payload_end..payload_end + RESTORE_CURSOR.len()],
+        RESTORE_CURSOR,
+        "DECRC must come immediately after the payload"
+    );
+
+    // Part 3.
+    let tail = &stdout[payload_end..];
+    assert_eq!(
+        scan_cursor_movement(tail).net(),
+        EXPECTED_ROWS,
+        "the bytes after the payload must move the cursor down {EXPECTED_ROWS} rows"
+    );
+    assert!(
+        tail.ends_with(b"\r") || tail.ends_with(b"\n"),
+        "the stream must end the line, to put the cursor at column 1"
+    );
+}
+
+/// Check that a byte stream asks for no cursor movement at all.
+///
+/// `--no-newline` must suppress the whole cursor contract, because video
+/// playback puts the cursor where it wants it before every frame. A stream that
+/// moves the cursor on its own scrolls the terminal once per frame.
+///
+/// # Arguments
+/// * `routine` - The display routine that wrote the stream.
+/// * `stdout` - The bytes that `ic` wrote to stdout.
+///
+/// # Panics
+/// Panics when the stream asks the terminal to move the cursor.
+fn assert_no_cursor_contract(routine: Routine, stdout: &[u8]) {
+    let payload_end = rfind(stdout, routine.payload_end())
+        .unwrap_or_else(|| panic!("the output of {routine:?} must close its image payload"))
+        + routine.payload_end().len();
+    let after_payload = scan_cursor_movement(&stdout[payload_end..]);
+
+    assert_eq!(
+        (after_payload.down, after_payload.up),
+        (0, 0),
+        "--no-newline must write no cursor movement after the payload"
+    );
+    assert_eq!(
+        scan_cursor_movement(stdout).net(),
+        0,
+        "--no-newline must leave the cursor where the caller put it"
+    );
+}
+
+/// Give the key list of the first Kitty graphics command in a byte stream.
+///
+/// A Kitty graphics command is `ESC _ G <key list> ; <payload> ESC \`. The key
+/// list is a comma separated list of `<key>=<value>` pairs.
+///
+/// # Arguments
+/// * `bytes` - The byte stream to read.
+///
+/// # Returns
+/// One entry for each `<key>=<value>` pair of the first graphics command.
+///
+/// # Panics
+/// Panics when the stream holds no Kitty graphics command, or when the command
+/// holds no key list.
+fn kitty_key_list(bytes: &[u8]) -> Vec<String> {
+    let start = find(bytes, KITTY_START).expect("the output must hold a Kitty graphics command")
+        + KITTY_START.len();
+    let tail = &bytes[start..];
+    let end = tail
+        .iter()
+        .position(|byte| *byte == b';')
+        .expect("a Kitty graphics command must close its key list with a semicolon");
+
+    std::str::from_utf8(&tail[..end])
+        .expect("a Kitty key list must be UTF-8")
+        .split(',')
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Make a command that runs `ic` through one display routine.
+///
+/// The child gets no controlling terminal, which [`take_the_terminal_away`]
+/// states and holds for every target that wants it. Every probe of the size of
+/// the terminal therefore fails, and `ic` falls back to 80 columns by 24 rows
+/// and to a character cell of 10 pixels by 20. [`TERMINAL_ROWS`] and
+/// [`EXPECTED_ROWS`] hold those two fallbacks, and every expectation of this
+/// file counts on them.
+///
+/// # Arguments
+/// * `routine` - The display routine that `ic` must use.
+/// * `args` - The full command line for `ic`.
+///
+/// # Returns
+/// A command with the environment, the pipes and the new session of the tests
+/// already set.
+fn ic_command(routine: Routine, args: &[&str]) -> Command {
+    let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_ic"));
+    command
+        .args(args)
+        .env_clear()
+        .env("PATH", unreachable_path_dir(TARGET_NAME))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    take_the_terminal_away(&mut command);
+
+    for (name, value) in routine.environment() {
+        command.env(name, value);
+    }
+
+    command
+}
+
+/// Wait for `ic` to exit and give back its stdout.
+///
+/// # Arguments
+/// * `child` - The child process to wait for.
+///
+/// # Returns
+/// The bytes that `ic` wrote to stdout.
+///
+/// # Panics
+/// Panics when the wait fails or when `ic` exits with a failure.
+fn wait_for_stdout(child: process::Child) -> Vec<u8> {
+    let output = child.wait_with_output().expect("failed to wait for ic");
+    assert!(
+        output.status.success(),
+        "ic exited with {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    output.stdout
+}
+
+/// Run `ic` through one display routine, with the image on stdin, and give back
+/// its stdout.
+///
+/// # Arguments
+/// * `routine` - The display routine that `ic` must use.
+/// * `extra_args` - More command line arguments for `ic`, after the arguments
+///   that fix the size of the image.
+///
+/// # Returns
+/// The bytes that `ic` wrote to stdout.
+///
+/// # Panics
+/// Panics when the child process does not start, does not accept the image, or
+/// exits with a failure.
+fn run_ic(routine: Routine, extra_args: &[&str]) -> Vec<u8> {
+    let mut args: Vec<&str> = vec!["--stdin", "--width", "10", "--height", "5"];
+    args.extend_from_slice(extra_args);
+
+    run_ic_with_args(routine, &args)
+}
+
+/// Run `ic` through one display routine, with the image on stdin and a full
+/// command line, and give back its stdout.
+///
+/// # Arguments
+/// * `routine` - The display routine that `ic` must use.
+/// * `args` - The full command line for `ic`.
+///
+/// # Returns
+/// The bytes that `ic` wrote to stdout.
+///
+/// # Panics
+/// Panics when the child process does not start, does not accept the image, or
+/// exits with a failure.
+fn run_ic_with_args(routine: Routine, args: &[&str]) -> Vec<u8> {
+    let mut child = ic_command(routine, args)
+        .spawn()
+        .expect("failed to start ic");
+
+    let mut stdin = child.stdin.take().expect("ic has no stdin pipe");
+    stdin
+        .write_all(TEST_IMAGE)
+        .expect("failed to send the image to ic");
+    drop(stdin);
+
+    wait_for_stdout(child)
+}
+
+/// Run `ic` on an image file through the Sixel display routine, with no size
+/// arguments, and give back its stdout. The missing size arguments select the
+/// auto-fit path.
+///
+/// # Arguments
+/// * `path` - The path of the image file.
+///
+/// # Returns
+/// The bytes that `ic` wrote to stdout.
+///
+/// # Panics
+/// Panics when the child process does not start or exits with a failure.
+fn run_ic_sixel_auto_fit(path: &str) -> Vec<u8> {
+    let child = ic_command(Routine::Sixel, &[path])
+        .spawn()
+        .expect("failed to start ic");
+
+    wait_for_stdout(child)
+}
+
+/// The bytes after the Sixel string terminator must move the cursor down by the
+/// row count of the image, and must put it at column 1. This implementation
+/// ends the line with a carriage return.
+#[test]
+fn sixel_advances_the_cursor_below_the_image() {
+    let stdout = run_ic(Routine::Sixel, &[]);
+
+    let terminator =
+        find(&stdout, STRING_TERMINATOR).expect("the output must hold a Sixel string terminator");
+    let tail = &stdout[terminator + STRING_TERMINATOR.len()..];
+
+    assert_eq!(
+        scan_cursor_movement(tail).net(),
+        EXPECTED_ROWS,
+        "the bytes after the payload must move the cursor down {EXPECTED_ROWS} rows"
+    );
+    assert!(
+        tail.ends_with(b"\r") || tail.ends_with(b"\n"),
+        "the stream must end the line, to put the cursor at column 1"
+    );
+}
+
+/// DECSC must come immediately before the payload and DECRC immediately after
+/// it. The brackets make sure that cursor motion inside the payload cannot
+/// change the final position of the cursor.
+#[test]
+fn sixel_brackets_the_payload_against_renderer_cursor_motion() {
+    let stdout = run_ic(Routine::Sixel, &[]);
+
+    let payload_start = find(&stdout, SIXEL_START).expect("the output must hold a Sixel payload");
+    let terminator =
+        find(&stdout, STRING_TERMINATOR).expect("the output must hold a Sixel string terminator");
+
+    assert!(
+        payload_start >= SAVE_CURSOR.len(),
+        "the stream must save the cursor before the payload"
+    );
+    assert_eq!(
+        &stdout[payload_start - SAVE_CURSOR.len()..payload_start],
+        SAVE_CURSOR,
+        "DECSC must come immediately before the payload"
+    );
+
+    let payload_end = terminator + STRING_TERMINATOR.len();
+    assert!(
+        stdout.len() >= payload_end + RESTORE_CURSOR.len(),
+        "the stream must restore the cursor after the payload"
+    );
+    assert_eq!(
+        &stdout[payload_end..payload_end + RESTORE_CURSOR.len()],
+        RESTORE_CURSOR,
+        "DECRC must come immediately after the payload"
+    );
+}
+
+/// `--no-newline` must suppress the whole cursor contract, because video
+/// playback puts the cursor where it wants it before every frame. A stream that
+/// moves the cursor on its own scrolls the terminal once per frame.
+///
+/// The behavior already held when this test arrived, so a mutation proved that
+/// the test can fail: with the advance moved outside the `no_newline` gate, the
+/// tail asks for 5 rows and the whole stream nets 5 rows, and both assertions
+/// below report the failure.
+#[test]
+fn no_newline_suppresses_the_cursor_contract() {
+    let stdout = run_ic(Routine::Sixel, &["--no-newline"]);
+
+    let terminator =
+        find(&stdout, STRING_TERMINATOR).expect("the output must hold a Sixel string terminator");
+    let tail = &stdout[terminator + STRING_TERMINATOR.len()..];
+    let after_payload = scan_cursor_movement(tail);
+
+    assert_eq!(
+        (after_payload.down, after_payload.up),
+        (0, 0),
+        "--no-newline must write no cursor movement after the payload"
+    );
+    assert_eq!(
+        scan_cursor_movement(&stdout).net(),
+        0,
+        "--no-newline must leave the cursor where the caller put it"
+    );
+}
+
+/// The stream must reserve the rows of the image before it draws. It asks for
+/// the rows and then takes them back, so an image at the bottom of the screen
+/// scrolls the terminal instead of running off it.
+#[test]
+fn sixel_reserves_the_rows_before_it_draws() {
+    let stdout = run_ic(Routine::Sixel, &[]);
+
+    let save = find(&stdout, SAVE_CURSOR).expect("the stream must save the cursor");
+    let payload_start = find(&stdout, SIXEL_START).expect("the output must hold a Sixel payload");
+    assert!(
+        save < payload_start,
+        "the reservation must come before the payload"
+    );
+
+    let reservation = &stdout[..save];
+    let movement = scan_cursor_movement(reservation);
+    assert_eq!(
+        movement.down, EXPECTED_ROWS,
+        "the reservation must ask for {EXPECTED_ROWS} rows before the payload"
+    );
+    assert_eq!(
+        movement.net(),
+        0,
+        "the reservation must take the rows back, so the image starts at the top of them"
+    );
+}
+
+/// The file name rows, the image and the prompt must fit inside the height of
+/// the terminal. `ic` prints the file name above the image, so the auto-fit
+/// path must pay for the rows that the name occupies. A name wider than the
+/// terminal wraps onto more than one row, and `ic` pays for every one of them.
+///
+/// The net movement of the whole stream is the number of rows that the terminal
+/// advances: the header lines plus the image rows, because the reservation and
+/// the cursor-up cancel. A wrapped row of the header comes from the terminal and
+/// not from the stream, so this count is a lower bound on the rows that the
+/// screen gives to the header. The prompt then takes one more row.
+#[test]
+fn auto_fit_leaves_room_for_the_file_name_and_the_prompt() {
+    let stdout = run_ic_sixel_auto_fit(TEST_IMAGE_PATH);
+
+    let rows = scan_cursor_movement(&stdout).net();
+    assert!(
+        rows + PROMPT_ROWS <= TERMINAL_ROWS,
+        "the file name rows and the image take {rows} rows, and the prompt takes {PROMPT_ROWS} more, which is more than the {TERMINAL_ROWS} rows of the terminal"
+    );
+}
+
+/// The Kitty stream must keep the same cursor contract as the Sixel stream. It
+/// reserves the rows of the image and takes them back, it brackets the payload
+/// with DECSC and DECRC, and it then moves the cursor down by the row count and
+/// puts it at column 1.
+#[test]
+fn kitty_meets_the_cursor_contract() {
+    assert_cursor_contract(Routine::Kitty, &run_ic(Routine::Kitty, &[]));
+}
+
+/// The Kitty graphics command must carry `C=1`, which tells the renderer not to
+/// move the cursor.
+///
+/// The routine states the position of the cursor itself. A renderer that also
+/// moves the cursor doubles the movement, so the routine must hold it still.
+#[test]
+fn kitty_holds_the_cursor_still_while_it_draws() {
+    let stdout = run_ic(Routine::Kitty, &[]);
+
+    let keys = kitty_key_list(&stdout);
+    assert!(
+        keys.iter().any(|key| key == KITTY_NO_CURSOR_MOVE),
+        "the Kitty key list must carry {KITTY_NO_CURSOR_MOVE}, but it is {keys:?}"
+    );
+}
+
+/// The iTerm2 stream must keep the same cursor contract as the other two
+/// routines. It already tells the renderer not to move the cursor with
+/// `doNotMoveCursor=1`, so it owes the caller the movement itself.
+#[test]
+fn iterm2_meets_the_cursor_contract() {
+    assert_cursor_contract(Routine::Iterm2, &run_ic(Routine::Iterm2, &[]));
+}
+
+/// `--no-newline` must suppress the whole cursor contract of the Kitty routine,
+/// the same way it does for the Sixel routine.
+///
+/// The behavior already held when this test arrived, so a mutation proved that
+/// the test can fail: with the trailing advance moved out of the `no_newline`
+/// gate of `write_image_with_cursor_contract`, the tail asks for 5 rows and the
+/// whole stream nets 5 rows, and both assertions report the failure.
+#[test]
+fn no_newline_suppresses_the_cursor_contract_for_kitty() {
+    assert_no_cursor_contract(Routine::Kitty, &run_ic(Routine::Kitty, &["--no-newline"]));
+}
+
+/// `--no-newline` must suppress the whole cursor contract of the iTerm2
+/// routine, the same way it does for the Sixel routine. The same mutation as
+/// [`no_newline_suppresses_the_cursor_contract_for_kitty`] proved that this
+/// test can fail.
+#[test]
+fn no_newline_suppresses_the_cursor_contract_for_iterm2() {
+    assert_no_cursor_contract(Routine::Iterm2, &run_ic(Routine::Iterm2, &["--no-newline"]));
+}
+
+/// `--no-newline` states who moves the cursor, and it states nothing about how
+/// many pictures the run draws. `ic -n photo.png` is one still picture that a
+/// user types, so it must travel in the shape of a still picture.
+///
+/// A still picture travels as a PNG. Raw pixels cost four base64 characters for
+/// every pixel, and mosh carries 1638400 characters in one Kitty transmission.
+/// A photograph of 330 pixels by 440 takes over a third of that cap, and a
+/// photograph of three times the pixels never arrives.
+///
+/// A still picture also asks the terminal for the failures with `q=1`, because
+/// a terminal that refused the picture draws nothing and a run that asked for
+/// no answer then reports success in front of an empty screen.
+#[test]
+fn no_newline_still_draws_one_still_picture() {
+    let stdout = run_ic(Routine::Kitty, &["--no-newline"]);
+
+    let keys = kitty_key_list(&stdout);
+    assert!(
+        keys.iter().any(|key| key == KITTY_PNG_PAYLOAD),
+        "a still picture must travel as a PNG under {KITTY_PNG_PAYLOAD}, but the keys are {keys:?}"
+    );
+    assert!(
+        keys.iter().any(|key| key == KITTY_FAILURES_ONLY),
+        "a still picture must ask the terminal for the failures with {KITTY_FAILURES_ONLY}, but the keys are {keys:?}"
+    );
+}
+
+/// No routine can ask the terminal to move down more rows than the terminal
+/// has.
+///
+/// An image taller than the screen has no row below it, so no reservation can
+/// keep the contract: CUU stops at the top row and CUD stops at the bottom row,
+/// and the cursor lands on top of the image. A reservation larger than the
+/// screen scrolls the content of the user out of view and gives nothing back
+/// for it. Every routine must therefore bound the scroll to one screen.
+#[test]
+fn the_reservation_never_exceeds_the_height_of_the_terminal() {
+    for routine in [Routine::Sixel, Routine::Kitty, Routine::Iterm2] {
+        let stdout = run_ic_with_args(routine, OVERSIZED_ARGS);
+
+        let save = find(&stdout, SAVE_CURSOR)
+            .unwrap_or_else(|| panic!("{routine:?} must save the cursor before the payload"));
+        let reservation = scan_cursor_movement(&stdout[..save]);
+
+        assert!(
+            reservation.down <= MAX_RESERVATION_ROWS,
+            "{routine:?} reserves {} rows, but the terminal has {TERMINAL_ROWS} rows, so the reservation must ask for {MAX_RESERVATION_ROWS} rows at most",
+            reservation.down
+        );
+    }
+}

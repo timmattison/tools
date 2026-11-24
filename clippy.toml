@@ -1,0 +1,129 @@
+# The override of the `colored` crate is process-global, and `cargo test` runs
+# the tests of one binary on many threads. A test that sets the override
+# directly changes what an unrelated test sees, which makes failures that appear
+# and disappear between runs. `testcolor::with_forced_ansi` holds the one lock
+# on that global state and puts the override back, so it is the only entrance.
+# These entries make the bypass fail the build instead of failing a test once a
+# week.
+#
+# The override arrives in two spellings. The two free functions in
+# `colored::control` are the usual one, but each of them only forwards to a
+# method on the `SHOULD_COLORIZE` singleton, and that method is public too. A
+# ban on the free functions alone therefore leaves the singleton open, and one
+# call through it changes the same global state. All four spellings are banned
+# for that reason.
+#
+# This file sits beside the workspace manifest, so the ban covers every member.
+# It used to sit beside gsw's manifest and cover gsw alone, which left the same
+# trap open for every other crate. cwt fell into it: two tests compared colored
+# output against plain text, passed in a redirected run, and failed under a
+# hand-typed `git commit`. Clippy reads the nearest clippy.toml and no other, so
+# a member that must keep the raw call cannot narrow this file — it says so at
+# the call site with an `#[expect]` and a reason, where a reader sees it.
+disallowed-methods = [
+    { path = "colored::control::set_override", reason = "call testcolor::with_forced_ansi instead; it holds the one lock on this process-global override" },
+    { path = "colored::control::unset_override", reason = "testcolor::with_forced_ansi puts the override back on its own, on the panic path as well" },
+    { path = "colored::control::ShouldColorize::set_override", reason = "the singleton reaches the same global state as the free function; call testcolor::with_forced_ansi instead" },
+    { path = "colored::control::ShouldColorize::unset_override", reason = "the singleton reaches the same global state as the free function; testcolor::with_forced_ansi puts the override back on its own" },
+    # A terminal answers the `TIOCGWINSZ` ioctl with the columns and the rows of
+    # its window, and a terminal that carries no window answers that same ioctl
+    # with two zeros. The ioctl succeeds either way, so neither crate below
+    # calls the zero an error. `crossterm` hands it straight back as
+    # `Ok((0, 0))`, and every caller that reads the answer then takes zero
+    # columns as the width of a window and draws into nothing. `krt` printed a
+    # table of three columns under such a terminal, where the same replay
+    # through a pipe printed ten, and no line of the output said why. A
+    # pseudo-terminal that nobody ever sized is such a terminal, and
+    # `script -q /dev/null` makes one.
+    #
+    # `terminal_size` refuses a zero on Unix today and does not refuse one on
+    # Windows, where it subtracts the edges of the console rectangle and puts no
+    # limit under the difference. So the two crates disagree with each other,
+    # and one of them disagrees with itself between two platforms. A caller
+    # cannot know which of the four answers it holds without reading the source
+    # of both crates.
+    #
+    # `termsize` is the one entrance, and it states the one rule: a size whose
+    # columns or whose rows are zero is no answer. It keeps three probes apart,
+    # because they read different file descriptors, and a caller that measures
+    # one of them must not get another. `controlling_size` reads `/dev/tty`, and
+    # it reads standard output when that open fails. `stdout_size` reads
+    # standard output, then standard error, then standard input.
+    # `drawing_window` reads one whole `winsize` off one file descriptor: the
+    # columns, the rows and the pixel size of one window. It reads standard
+    # output, then standard error, then standard input, and then `/dev/tty`.
+    #
+    # The raw ioctl is banned for the same reason. `TIOCGWINSZ` is the call
+    # under all three probes, so a crate that sends it directly writes a fourth
+    # probe that obeys none of the rules above. `termgfx` did exactly that. It
+    # held its own `TIOCGWINSZ` ioctl on file descriptor 1 and took the pixel
+    # size from there, and it took the cell counts from `stdout_size`. A tool
+    # that draws a picture divides the pixels by the cells to measure a
+    # character cell. That division only measures a cell when both halves come
+    # off one descriptor. A run whose standard output is a pipe measured no
+    # pixels at all and drew at a guess. GitHub issue #350 reports that defect.
+    #
+    # `termsize` holds the only read of a window this ban allows, and it says so
+    # at the call site with an `#[expect]` and a reason. The other calls are a
+    # different request. The pseudo-terminal helpers of the tests, in
+    # `src/ic/tests/common/pty.rs` and in `gitscratch::testing::pty`, send
+    # `TIOCSCTTY`, which reads no window and claims a controlling terminal for a
+    # child.
+    { path = "crossterm::terminal::size", reason = "call termsize::controlling_size or termsize::controlling_columns instead; a terminal that carries no window answers this call with Ok((0, 0)), and zero columns is not a width" },
+    { path = "terminal_size::terminal_size", reason = "call termsize::stdout_size or termsize::stdout_columns instead; this call hands a zero back on Windows, and zero columns is not a width" },
+    { path = "libc::ioctl", reason = "call termsize::drawing_window instead; a raw TIOCGWINSZ on one file descriptor is the bypass that termgfx held, and GitHub issue #350 reports what it cost. An ioctl of another request says so at its call site with an #[expect]" },
+    # A child process inherits each `GIT_` variable of its parent, and git obeys
+    # those variables before it obeys the directory of the command. A hook exports
+    # them, so a tool that a hook starts acts on the repository of the hook. The
+    # defect arrived one spawn at a time, and each repair covered the spawns that
+    # somebody found.
+    #
+    # `childenv::command` and `childenv::fixture_command` are the one entrance. A
+    # program that never runs git ignores the sweep, so the rule covers every
+    # spawn and needs no knowledge of what a program runs. `go`, `cargo`, `gh`,
+    # `claude`, a shell, and `tmux` all run git later.
+    #
+    # A site that must stay raw says so with an `#[expect]` and a reason, where a
+    # reader sees it. `childenv` holds the one call that the entrance needs.
+    { path = "std::process::Command::new", reason = "call childenv::command in production code or childenv::fixture_command in test code; a raw spawn inherits the GIT_ variables of a hook, and git obeys them before the directory of the command" },
+    { path = "tokio::process::Command::new", reason = "build the command with tokio::process::Command::from(childenv::command(program)); a raw spawn inherits the GIT_ variables of a hook" },
+    { path = "portable_pty::CommandBuilder::new", reason = "remove each name that childenv::inherited_git_variables gives, then state the exemption with an #[expect] at this site; a raw spawn inherits the GIT_ variables of a hook" },
+    # `ratatui::init`, `ratatui::try_init` and `ratatui::run` enter the alternate
+    # screen, and so does `termion`'s `into_alternate_screen`. The first three
+    # send no erase at startup. Each of the four is banned for the reason in the
+    # block below. `ratatui::init_with_options` and
+    # `ratatui::try_init_with_options` stay open: they do not enter the
+    # alternate screen, and an inline viewport is a correct use of them.
+    { path = "ratatui::init", reason = "enter the alternate screen through altscreen::Session::enter or altscreen::RatatuiSession::enter; they erase the screen in the same write, and mosh ignores mode 1049" },
+    { path = "ratatui::try_init", reason = "enter the alternate screen through altscreen::Session::enter or altscreen::RatatuiSession::enter; they erase the screen in the same write, and mosh ignores mode 1049" },
+    { path = "ratatui::run", reason = "enter the alternate screen through altscreen::Session::enter or altscreen::RatatuiSession::enter; they erase the screen in the same write, and mosh ignores mode 1049" },
+    { path = "termion::screen::IntoAlternateScreen::into_alternate_screen", reason = "enter the alternate screen through altscreen::Session::enter; it erases the screen in the same write, and mosh ignores mode 1049" },
+    # The clipboard of the machine has one entrance, the crate `sysclip`. It
+    # holds the one dependency on `arboard`. A tool that opens `arboard` by itself
+    # skips the shims of mosh-rs and skips the order rule that `sysclip` keeps.
+    # `repo_guards::arboard_wall` keeps every other member from depending on
+    # `arboard` at all. This ban covers the spellings that remain, so a call or a
+    # type fails the build at its own site. `sysclip` states its exemption with
+    # an `#[expect]` and a reason at its sites. The matching type ban is in
+    # `disallowed-types` below.
+    { path = "arboard::Clipboard::new", reason = "open the clipboard through sysclip::Clipboard::open, or sysclip::Clipboard::open_native for a poll; sysclip keeps the mosh-rs shims and the order rule" },
+]
+
+# A full-screen tool enters the alternate screen so that the shell screen comes
+# back when the tool ends. The alternate screen arrives through two crate APIs
+# and through raw bytes. The mosh server ignores mode 1049, so a tool that
+# enters by itself draws over the shell text, and `ratatui` sends no erase at
+# startup. The crate `altscreen` is the one entrance: it erases the screen in
+# the same write as the entry and restores the terminal on every exit.
+#
+# This file bans the spellings that clippy can see. `repo_guards::alternate_screen`
+# reads the rest: a unit struct in value position, and a raw `ESC [ ? 1049 h` in
+# a string. `ratatui::init_with_options` and `ratatui::try_init_with_options`
+# stay open, because they do not enter the alternate screen.
+disallowed-types = [
+    { path = "crossterm::terminal::EnterAlternateScreen", reason = "enter the alternate screen through altscreen::Session::enter or altscreen::RatatuiSession::enter; they erase the screen in the same write, and mosh ignores mode 1049" },
+    { path = "termion::screen::ToAlternateScreen", reason = "enter the alternate screen through altscreen::Session::enter; it erases the screen in the same write, and mosh ignores mode 1049" },
+    { path = "termion::screen::AlternateScreen", reason = "enter the alternate screen through altscreen::Session::enter; it erases the screen in the same write, and mosh ignores mode 1049" },
+    # See the block above `arboard::Clipboard::new` in `disallowed-methods`.
+    { path = "arboard::Clipboard", reason = "hold the clipboard through sysclip::Clipboard, or open one with sysclip::Clipboard::open_native for a poll; sysclip keeps the mosh-rs shims and the order rule" },
+]

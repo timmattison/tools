@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 buildinfo.workspace = true
+childenv.workspace = true
 clap.workspace = true
 repowalker.workspace = true
 walkdir.workspace = true

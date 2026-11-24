@@ -1,0 +1,19 @@
+[package]
+name = "grist"
+version = "0.1.0"
+edition.workspace = true
+description = "Simulates squash-merge orderings and ranks them by how much conflict resolution each would cost"
+
+[dependencies]
+anyhow.workspace = true
+buildinfo.workspace = true
+clap.workspace = true
+comfy-table.workspace = true
+gitscratch.workspace = true
+
+[dev-dependencies]
+childenv.workspace = true
+gitscratch = { workspace = true, features = ["testing"] }
+
+[lints]
+workspace = true

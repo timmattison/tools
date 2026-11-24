@@ -1,0 +1,722 @@
+//! Open pull requests of a repository, asked of GitHub through `gh pr list`.
+//!
+//! `cwt` shows the numbers of the open pull requests after the branch of a
+//! worktree. One `gh pr list --json` call for each repository gives all the
+//! data. The module has three parts:
+//!
+//! - The pure reads, which run no command and need no network.
+//!   `ghrest::GithubRepo::from_remote_url` reads the URL of a remote, and
+//!   `parse_pull_list` reads the JSON that `gh` prints. `GithubRepo` and
+//!   `ghrest::PullNumber` live in the `ghrest` crate, which `ha` uses too.
+//! - The bounded run of a child. It comes from the `runlimit` crate, whose
+//!   `run_with_limit` starts a program and kills it when the time limit ends.
+//! - The lookup. `lookup` starts `git` to read the URL of `origin`, and then
+//!   starts `gh`, which uses the network.
+//!
+//! The tests of the lookup give it a stub `gh` script and a temporary
+//! repository, so no test uses the network.
+
+use std::collections::HashMap;
+use std::ffi::OsStr;
+use std::path::Path;
+use std::process::Stdio;
+use std::time::Duration;
+
+use ghrest::{GithubRepo, PullNumber};
+use runlimit::{run_with_limit, RunFailure};
+use serde::Deserialize;
+
+/// The open pull requests of one repository, grouped by head branch.
+///
+/// Build it with `parse_pull_list`. Ask it for the numbers of one branch with
+/// `numbers`.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct OpenPulls {
+    by_branch: HashMap<String, Vec<PullNumber>>,
+}
+
+impl OpenPulls {
+    /// Groups `(branch, number)` pairs by branch.
+    ///
+    /// The numbers of one branch end up in ascending order with no duplicates.
+    /// This is the one place that states that rule.
+    fn from_branches(pairs: impl IntoIterator<Item = (String, PullNumber)>) -> Self {
+        let mut by_branch: HashMap<String, Vec<PullNumber>> = HashMap::new();
+        for (branch, number) in pairs {
+            by_branch.entry(branch).or_default().push(number);
+        }
+        for numbers in by_branch.values_mut() {
+            numbers.sort_unstable();
+            numbers.dedup();
+        }
+        Self { by_branch }
+    }
+
+    /// Builds the pull requests of a test from `(branch, number)` pairs, in
+    /// any order.
+    #[cfg(test)]
+    pub(crate) fn from_pairs(pairs: &[(&str, u64)]) -> Self {
+        Self::from_branches(
+            pairs
+                .iter()
+                .map(|&(branch, number)| (branch.to_owned(), PullNumber::new(number))),
+        )
+    }
+
+    /// The numbers of the open pull requests whose head is `branch`.
+    ///
+    /// The numbers are in ascending order and hold no duplicates. The slice is
+    /// empty when the branch has no open pull request.
+    pub fn numbers(&self, branch: &str) -> &[PullNumber] {
+        self.by_branch.get(branch).map_or(&[], Vec::as_slice)
+    }
+}
+
+/// One entry of the JSON array that `gh pr list` prints.
+///
+/// The field `isCrossRepository` is `true` when the head branch is in another
+/// repository. It is `false` when the head branch is in the repository that
+/// `gh` was asked about.
+#[derive(Debug, Deserialize)]
+struct RawPull {
+    number: PullNumber,
+    #[serde(rename = "headRefName")]
+    head_ref_name: String,
+    #[serde(rename = "isCrossRepository", default)]
+    is_cross_repository: Option<bool>,
+}
+
+/// Reads the output of `gh pr list --json number,headRefName,isCrossRepository`.
+///
+/// Keeps an entry only when `isCrossRepository` is `false`. This drops the
+/// pull requests from forks, whose branch names can equal a local branch name.
+/// The rule does not compare owner names. A repository that moved gives the
+/// new login, and the old name in the URL of `origin` then no longer matches.
+/// An entry with a `null` or absent flag is dropped. A pull request whose fork
+/// was deleted has `isCrossRepository` set to `true`, so it is dropped too.
+///
+/// Returns the kept pull requests and the count of all entries in the array,
+/// counted before the filter. The caller compares that count with the `--limit`
+/// it gave to `gh`, to find out if the list is cut short.
+///
+/// # Errors
+///
+/// Returns the error of `serde_json` when `json` is not an array of objects of
+/// the expected shape.
+fn parse_pull_list(json: &str) -> Result<(OpenPulls, usize), serde_json::Error> {
+    let raw: Vec<RawPull> = serde_json::from_str(json)?;
+    let total = raw.len();
+    let kept = raw.into_iter().filter_map(|pull| {
+        (pull.is_cross_repository == Some(false)).then_some((pull.head_ref_name, pull.number))
+    });
+    Ok((OpenPulls::from_branches(kept), total))
+}
+
+/// The program that lists the pull requests.
+const GH: &str = "gh";
+
+/// The `--limit` that cwt gives to `gh pr list`.
+///
+/// The default of `gh pr list` is 30. A repository with more than 30 open pull
+/// requests would lose numbers with no message.
+pub const PULL_LIMIT: usize = 1000;
+
+/// The JSON fields that cwt asks `gh pr list` for.
+const GH_JSON_FIELDS: &str = "number,headRefName,isCrossRepository";
+
+/// What the lookup found for one repository.
+///
+/// `Lookup::default()` means there is nothing to show and nothing to say. That
+/// is the normal state for a repository with no GitHub remote, and for a
+/// machine with no `gh`.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Lookup {
+    pulls: OpenPulls,
+    warning: Option<String>,
+}
+
+impl Lookup {
+    /// The open pull requests that the lookup found.
+    pub fn pulls(&self) -> &OpenPulls {
+        &self.pulls
+    }
+
+    /// One line that tells the user what went wrong, without a `Warning: `
+    /// prefix. The caller adds the prefix. `None` means nothing went wrong.
+    pub fn warning(&self) -> Option<&str> {
+        self.warning.as_deref()
+    }
+
+    /// A lookup that found `pulls` and has nothing to warn about.
+    #[cfg(test)]
+    pub(crate) fn found(pulls: OpenPulls) -> Self {
+        Self {
+            pulls,
+            warning: None,
+        }
+    }
+
+    /// A lookup that found no pull requests and carries `warning`.
+    pub fn failed(warning: String) -> Self {
+        Self {
+            pulls: OpenPulls::default(),
+            warning: Some(warning),
+        }
+    }
+}
+
+/// Lists the open pull requests of the repository in `repo_dir`.
+///
+/// Reads `GH_HOST` and calls `lookup_with` with the real `gh`. See
+/// `lookup_with` for the rules.
+pub fn lookup(repo_dir: &Path, limit: Duration) -> Lookup {
+    let gh_host = std::env::var("GH_HOST").ok();
+    lookup_with(OsStr::new(GH), repo_dir, limit, gh_host.as_deref())
+}
+
+/// Lists the open pull requests of the repository in `repo_dir` with the
+/// program `gh`.
+///
+/// The program is a parameter so a test can pass a stub script and never change
+/// the process-global `PATH`.
+fn lookup_with(gh: &OsStr, repo_dir: &Path, limit: Duration, extra_host: Option<&str>) -> Lookup {
+    let Some(url) = origin_url(repo_dir) else {
+        return Lookup::default();
+    };
+    let Some(repo) = GithubRepo::from_remote_url(url.trim(), extra_host) else {
+        return Lookup::default();
+    };
+
+    let mut command = childenv::command(gh);
+    // `gh` paints its JSON with escape codes when `CLICOLOR_FORCE` or
+    // `GH_FORCE_TTY` is set (seen on gh 2.102.0), and then the parse fails.
+    // `NO_COLOR=1` gives plain JSON in every combination tested. All `GH_*`
+    // variables stay, because the user sets `GH_TOKEN` and `GH_HOST` on
+    // purpose. The `--repo` with the host stops `gh` from choosing `upstream`
+    // or asking for a default.
+    command
+        .env("NO_COLOR", "1")
+        .args(["pr", "list", "--repo"])
+        .arg(repo.to_string())
+        .args(["--state", "open", "--limit"])
+        .arg(PULL_LIMIT.to_string())
+        .args(["--json", GH_JSON_FIELDS]);
+
+    let output = match run_with_limit(&mut command, limit) {
+        Ok(output) => output,
+        Err(RunFailure::NotInstalled) => return Lookup::default(),
+        Err(RunFailure::Spawn(error) | RunFailure::Wait(error)) => {
+            return Lookup::failed(could_not_list(&repo, &format!("could not run gh: {error}")));
+        }
+        Err(RunFailure::TimedOut(waited)) => {
+            return Lookup::failed(could_not_list(
+                &repo,
+                &format!("gh did not answer in {waited:?}"),
+            ));
+        }
+    };
+    if !output.status.success() {
+        let stderr = one_line(&String::from_utf8_lossy(&output.stderr));
+        let cause = if stderr.is_empty() {
+            exit_cause(output.status)
+        } else {
+            stderr
+        };
+        return Lookup::failed(could_not_list(&repo, &cause));
+    }
+    match parse_pull_list(&String::from_utf8_lossy(&output.stdout)) {
+        Ok((pulls, total)) => {
+            let warning = (total >= PULL_LIMIT).then(|| {
+                format!(
+                    "{repo} has {PULL_LIMIT} or more open pull requests, so some numbers can be missing"
+                )
+            });
+            Lookup { pulls, warning }
+        }
+        Err(error) => Lookup::failed(could_not_list(
+            &repo,
+            &format!("gh answered with no list of pull requests: {error}"),
+        )),
+    }
+}
+
+/// The start that every warning of a failed lookup shares.
+const COULD_NOT_LIST: &str = "could not list the open pull requests of";
+
+/// Says why `gh` failed when it wrote nothing to stderr.
+///
+/// The `Display` of `ExitStatus` already starts with "exit status", so this
+/// function reads the code, or the signal when there is no code.
+fn exit_cause(status: std::process::ExitStatus) -> String {
+    if let Some(code) = status.code() {
+        return format!("gh exited with code {code}");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return format!("gh was stopped by signal {signal}");
+        }
+    }
+    format!("gh ended with {status}")
+}
+
+/// Writes the warning for a lookup of `repo` that failed for `cause`.
+fn could_not_list(repo: &GithubRepo, cause: &str) -> String {
+    format!("{COULD_NOT_LIST} {repo}: {cause}")
+}
+
+/// Collapses `text` to one line.
+///
+/// Trims each line, drops the empty lines, and joins the rest with one space.
+fn one_line(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Asks git for the URL of `origin` in `repo_dir`.
+///
+/// Returns `None` when the repository has no `origin`, when `repo_dir` is not a
+/// repository, and when git is not there. That is a normal state, so the caller
+/// prints nothing. The command is `git remote get-url origin` and not a read of
+/// `remote.origin.url`, because `get-url` applies the `url.<base>.insteadOf`
+/// rewrites and so gives the URL that git really uses.
+fn origin_url(repo_dir: &Path) -> Option<String> {
+    let mut command = childenv::command("git");
+    let output = command
+        .args(["remote", "get-url", "origin"])
+        .current_dir(repo_dir)
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!url.is_empty()).then_some(url)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use std::time::Instant;
+
+    use tempfile::TempDir;
+
+    use super::*;
+
+    /// A time limit that no stub that finishes comes near.
+    const GENEROUS_LIMIT: Duration = Duration::from_secs(60);
+
+    /// Writes an executable `#!/bin/sh` script into `dir` and returns its path.
+    fn write_stub(dir: &TempDir, name: &str, body: &str) -> std::path::PathBuf {
+        let path = dir.path().join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// One entry of this repository, in the shape that `gh pr list --json`
+    /// prints. The owner is not the one in the URL, on purpose.
+    fn entry(number: u64, branch: &str) -> String {
+        format!(
+            r#"{{"headRefName":"{branch}","headRepositoryOwner":{{"id":"MDQ6","name":"Some One","login":"moved-owner"}},"isCrossRepository":false,"number":{number}}}"#
+        )
+    }
+
+    /// One entry from a fork, in the shape that `gh pr list --json` prints.
+    fn fork_entry(number: u64, branch: &str) -> String {
+        format!(
+            r#"{{"headRefName":"{branch}","headRepositoryOwner":{{"id":"MDQ6","name":"Some One","login":"stranger"}},"isCrossRepository":true,"number":{number}}}"#
+        )
+    }
+
+    /// Joins entries into a JSON array.
+    fn array(entries: &[String]) -> String {
+        format!("[{}]", entries.join(","))
+    }
+
+    fn numbers_of(pulls: &OpenPulls, branch: &str) -> Vec<u64> {
+        pulls.numbers(branch).iter().map(|n| n.get()).collect()
+    }
+
+    #[test]
+    fn one_pull_request_is_found_by_its_branch() {
+        let json = array(&[entry(548, "issue-546")]);
+        let (pulls, total) = parse_pull_list(&json).unwrap();
+        assert_eq!(numbers_of(&pulls, "issue-546"), vec![548]);
+        assert_eq!(total, 1);
+    }
+
+    #[test]
+    fn numbers_of_one_branch_are_sorted_and_unique() {
+        let json = array(&[
+            entry(30, "feat"),
+            entry(7, "feat"),
+            entry(19, "feat"),
+            entry(7, "feat"),
+        ]);
+        let (pulls, _) = parse_pull_list(&json).unwrap();
+        assert_eq!(numbers_of(&pulls, "feat"), vec![7, 19, 30]);
+    }
+
+    #[test]
+    fn a_branch_without_a_pull_request_has_an_empty_slice() {
+        let json = array(&[entry(1, "feat")]);
+        let (pulls, _) = parse_pull_list(&json).unwrap();
+        assert!(pulls.numbers("other").is_empty());
+        assert!(OpenPulls::default().numbers("feat").is_empty());
+    }
+
+    #[test]
+    fn pull_requests_from_forks_are_not_kept() {
+        let json = array(&[
+            fork_entry(1, "main"),
+            fork_entry(2, "patch-1"),
+            entry(3, "main"),
+        ]);
+        let (pulls, _) = parse_pull_list(&json).unwrap();
+        assert_eq!(numbers_of(&pulls, "main"), vec![3]);
+        assert!(pulls.numbers("patch-1").is_empty());
+    }
+
+    #[test]
+    fn null_and_absent_cross_repository_flags_are_not_kept() {
+        let json = r#"[
+            {"headRefName":"a","isCrossRepository":null,"number":1},
+            {"headRefName":"a","number":2},
+            {"headRefName":"a","isCrossRepository":false,"number":3}
+        ]"#;
+        let (pulls, total) = parse_pull_list(json).unwrap();
+        assert_eq!(numbers_of(&pulls, "a"), vec![3]);
+        assert_eq!(total, 3);
+    }
+
+    #[test]
+    fn a_pull_request_from_this_repository_is_kept_when_the_owner_moved() {
+        let json = r#"[
+            {"headRefName":"feat","headRepositoryOwner":{"login":"new-owner"},"isCrossRepository":false,"number":7},
+            {"headRefName":"main","headRepositoryOwner":{"login":"old-owner"},"isCrossRepository":true,"number":8}
+        ]"#;
+        let (pulls, total) = parse_pull_list(json).unwrap();
+        assert_eq!(numbers_of(&pulls, "feat"), vec![7]);
+        assert!(pulls.numbers("main").is_empty());
+        assert_eq!(total, 2);
+    }
+
+    #[test]
+    fn the_total_counts_entries_the_filter_dropped() {
+        let json = array(&[entry(1, "a"), fork_entry(2, "b"), fork_entry(3, "c")]);
+        let (_, total) = parse_pull_list(&json).unwrap();
+        assert_eq!(total, 3);
+        let (pulls, total) = parse_pull_list("[]").unwrap();
+        assert_eq!((pulls, total), (OpenPulls::default(), 0));
+    }
+
+    #[test]
+    fn multibyte_branch_names_round_trip() {
+        let json = array(&[
+            entry(1, "\u{65e5}\u{672c}\u{8a9e}"),
+            entry(2, "\u{1f389}"),
+            entry(3, "caf\u{e9}"),
+        ]);
+        let (pulls, _) = parse_pull_list(&json).unwrap();
+        assert_eq!(numbers_of(&pulls, "\u{65e5}\u{672c}\u{8a9e}"), vec![1]);
+        assert_eq!(numbers_of(&pulls, "\u{1f389}"), vec![2]);
+        assert_eq!(numbers_of(&pulls, "caf\u{e9}"), vec![3]);
+    }
+
+    #[test]
+    fn invalid_json_is_an_error() {
+        assert!(parse_pull_list("not json").is_err());
+        assert!(parse_pull_list(r#"{"number":1}"#).is_err());
+        assert!(parse_pull_list(r#"[{"number":1}]"#).is_err());
+    }
+
+    /// Runs a git command in `dir` with a hermetic environment and checks that
+    /// it worked.
+    fn git(dir: &Path, args: &[&str]) {
+        let mut command = childenv::fixture_command("git");
+        let output = command
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+    }
+
+    /// A repository in a fresh temporary directory. `origin` is its remote URL,
+    /// or `None` for a repository with no remote.
+    fn repo_with_origin(origin: Option<&str>) -> TempDir {
+        let dir = TempDir::new().unwrap();
+        git(dir.path(), &["init", "-q"]);
+        if let Some(url) = origin {
+            git(dir.path(), &["remote", "add", "origin", url]);
+        }
+        dir
+    }
+
+    /// The file in `dir` that a stub writes its record to.
+    fn record(dir: &TempDir, name: &str) -> std::path::PathBuf {
+        dir.path().join(name)
+    }
+
+    /// The JSON that `gh pr list` prints for `entries`, as `(number, branch,
+    /// from_fork)`.
+    fn gh_json(entries: &[(u64, &str, bool)]) -> String {
+        let items: Vec<String> = entries
+            .iter()
+            .map(|&(number, branch, from_fork)| {
+                if from_fork {
+                    fork_entry(number, branch)
+                } else {
+                    entry(number, branch)
+                }
+            })
+            .collect();
+        array(&items)
+    }
+
+    /// A stub `gh` that records its arguments and prints `json`.
+    fn answering_stub(dir: &TempDir, json: &str) -> std::path::PathBuf {
+        let answer = record(dir, "answer.json");
+        std::fs::write(&answer, json).unwrap();
+        write_stub(
+            dir,
+            "gh-stub",
+            &format!(
+                "printf '%s\\n' \"$@\" > \"{args}\"\n: > \"{ran}\"\nenv > \"{env}\"\ncat \"{answer}\"",
+                args = record(dir, "args").display(),
+                ran = record(dir, "ran").display(),
+                env = record(dir, "env").display(),
+                answer = answer.display(),
+            ),
+        )
+    }
+
+    fn run_lookup(stub: &Path, repo: &TempDir, limit: Duration) -> Lookup {
+        lookup_with(stub.as_os_str(), repo.path(), limit, None)
+    }
+
+    #[test]
+    fn lookup_finds_the_numbers_of_the_owner() {
+        let work = TempDir::new().unwrap();
+        let repo = repo_with_origin(Some("git@github.com:owner/one.git"));
+        let json = gh_json(&[
+            (7, "feat", false),
+            (9, "feat", false),
+            (8, "feat", true),
+            (3, "other", true),
+        ]);
+        let stub = answering_stub(&work, &json);
+        let found = run_lookup(&stub, &repo, GENEROUS_LIMIT);
+        assert_eq!(found.warning(), None);
+        let numbers: Vec<String> = found
+            .pulls()
+            .numbers("feat")
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(numbers, ["#7", "#9"]);
+        assert!(found.pulls().numbers("other").is_empty());
+    }
+
+    #[test]
+    fn lookup_gives_gh_the_repository_and_the_limit() {
+        let work = TempDir::new().unwrap();
+        let repo = repo_with_origin(Some("git@github.com:owner/one.git"));
+        let stub = answering_stub(&work, "[]");
+        run_lookup(&stub, &repo, GENEROUS_LIMIT);
+        let args = std::fs::read_to_string(record(&work, "args")).unwrap();
+        let args: Vec<&str> = args.lines().collect();
+        assert_eq!(
+            args,
+            [
+                "pr",
+                "list",
+                "--repo",
+                "github.com/owner/one",
+                "--state",
+                "open",
+                "--limit",
+                "1000",
+                "--json",
+                "number,headRefName,isCrossRepository",
+            ]
+        );
+    }
+
+    #[test]
+    fn lookup_asks_gh_for_plain_json() {
+        let work = TempDir::new().unwrap();
+        let repo = repo_with_origin(Some("git@github.com:owner/one.git"));
+        let stub = answering_stub(&work, "[]");
+        run_lookup(&stub, &repo, GENEROUS_LIMIT);
+        let env = std::fs::read_to_string(record(&work, "env")).unwrap();
+        assert!(env.lines().any(|line| line == "NO_COLOR=1"), "{env}");
+    }
+
+    #[test]
+    fn lookup_is_silent_for_a_repository_with_no_origin() {
+        let work = TempDir::new().unwrap();
+        let repo = repo_with_origin(None);
+        let stub = answering_stub(&work, "[]");
+        assert_eq!(run_lookup(&stub, &repo, GENEROUS_LIMIT), Lookup::default());
+        assert!(!record(&work, "ran").exists());
+    }
+
+    #[test]
+    fn lookup_is_silent_for_a_remote_that_is_not_github() {
+        let work = TempDir::new().unwrap();
+        let repo = repo_with_origin(Some("git@gitlab.com:owner/one.git"));
+        let stub = answering_stub(&work, "[]");
+        assert_eq!(run_lookup(&stub, &repo, GENEROUS_LIMIT), Lookup::default());
+        assert!(!record(&work, "ran").exists());
+    }
+
+    #[test]
+    fn lookup_is_silent_when_gh_is_not_installed() {
+        let work = TempDir::new().unwrap();
+        let repo = repo_with_origin(Some("git@github.com:owner/one.git"));
+        let missing = record(&work, "no-such-gh");
+        assert_eq!(
+            run_lookup(&missing, &repo, GENEROUS_LIMIT),
+            Lookup::default()
+        );
+    }
+
+    #[test]
+    fn lookup_uses_the_extra_host_for_a_github_enterprise_remote() {
+        let work = TempDir::new().unwrap();
+        let repo = repo_with_origin(Some("git@ghe.example.com:org/repo.git"));
+        let stub = answering_stub(&work, "[]");
+        let found = lookup_with(
+            stub.as_os_str(),
+            repo.path(),
+            GENEROUS_LIMIT,
+            Some("ghe.example.com"),
+        );
+        assert_eq!(found.warning(), None);
+        let args = std::fs::read_to_string(record(&work, "args")).unwrap();
+        assert!(args.lines().any(|line| line == "ghe.example.com/org/repo"));
+    }
+
+    /// A stub `gh` with the shell `body`, and a repository with a GitHub origin.
+    fn failing_lookup(body: &str, limit: Duration) -> Lookup {
+        let work = TempDir::new().unwrap();
+        let repo = repo_with_origin(Some("git@github.com:owner/one.git"));
+        let stub = write_stub(&work, "gh-stub", body);
+        run_lookup(&stub, &repo, limit)
+    }
+
+    /// Checks that `found` has no pull requests and one line of warning, and
+    /// gives the warning.
+    fn single_line_warning(found: &Lookup) -> &str {
+        let warning = found.warning().expect("a warning");
+        assert!(!warning.contains('\n'), "{warning:?}");
+        assert_eq!(found.pulls(), &OpenPulls::default());
+        warning
+    }
+
+    #[test]
+    fn a_failed_gh_gives_its_stderr_on_one_line() {
+        let found = failing_lookup(
+            "echo 'first line' >&2; echo '  second line  ' >&2; exit 1",
+            GENEROUS_LIMIT,
+        );
+        let warning = single_line_warning(&found);
+        assert_eq!(
+            warning,
+            "could not list the open pull requests of github.com/owner/one: first line second line"
+        );
+    }
+
+    #[test]
+    fn a_failed_gh_with_no_stderr_gives_its_exit_status() {
+        let found = failing_lookup("exit 3", GENEROUS_LIMIT);
+        let warning = single_line_warning(&found);
+        assert_eq!(
+            warning,
+            "could not list the open pull requests of github.com/owner/one: gh exited with code 3"
+        );
+    }
+
+    #[test]
+    fn a_gh_stopped_by_a_signal_gives_the_signal() {
+        let found = failing_lookup("kill -9 $$", GENEROUS_LIMIT);
+        let warning = single_line_warning(&found);
+        assert_eq!(
+            warning,
+            "could not list the open pull requests of github.com/owner/one: gh was stopped by signal 9"
+        );
+    }
+
+    #[test]
+    fn a_gh_that_hangs_gives_a_warning_when_the_limit_ends() {
+        let started = Instant::now();
+        let found = failing_lookup("exec sleep 120", Duration::from_millis(500));
+        assert!(started.elapsed() < Duration::from_secs(60));
+        let warning = single_line_warning(&found);
+        assert!(warning.contains("github.com/owner/one"), "{warning}");
+        assert!(warning.contains("gh did not answer in 500ms"), "{warning}");
+    }
+
+    #[test]
+    fn an_answer_that_is_not_json_gives_a_warning() {
+        let found = failing_lookup("echo 'not json'", GENEROUS_LIMIT);
+        let warning = single_line_warning(&found);
+        assert!(warning.contains("github.com/owner/one"), "{warning}");
+        assert!(warning.contains("no list of pull requests"), "{warning}");
+    }
+
+    #[test]
+    fn a_gh_that_cannot_start_gives_a_warning() {
+        let work = TempDir::new().unwrap();
+        let repo = repo_with_origin(Some("git@github.com:owner/one.git"));
+        let not_executable = record(&work, "plain");
+        std::fs::write(&not_executable, "text").unwrap();
+        let found = run_lookup(&not_executable, &repo, GENEROUS_LIMIT);
+        let warning = single_line_warning(&found);
+        assert!(warning.contains("could not run gh"), "{warning}");
+    }
+
+    #[test]
+    fn one_line_joins_trimmed_non_empty_lines() {
+        assert_eq!(one_line("  a \n\n b\r\n   \n"), "a b");
+        assert_eq!(one_line(""), "");
+    }
+
+    /// A lookup against a stub that prints `count` pull requests of the repository.
+    fn lookup_of_count(count: usize) -> Lookup {
+        let work = TempDir::new().unwrap();
+        let repo = repo_with_origin(Some("git@github.com:owner/one.git"));
+        let entries: Vec<String> = (1..=count)
+            .map(|number| entry(number as u64, "feat"))
+            .collect();
+        let stub = answering_stub(&work, &array(&entries));
+        run_lookup(&stub, &repo, GENEROUS_LIMIT)
+    }
+
+    #[test]
+    fn a_full_list_keeps_the_numbers_and_warns() {
+        let found = lookup_of_count(PULL_LIMIT);
+        assert_eq!(found.pulls().numbers("feat").len(), PULL_LIMIT);
+        let warning = found.warning().expect("a warning");
+        assert!(!warning.contains('\n'), "{warning:?}");
+        assert!(warning.contains("github.com/owner/one"), "{warning}");
+        assert!(warning.contains("1000 or more"), "{warning}");
+    }
+
+    #[test]
+    fn a_list_one_short_of_the_limit_gives_no_warning() {
+        let found = lookup_of_count(PULL_LIMIT - 1);
+        assert_eq!(found.pulls().numbers("feat").len(), PULL_LIMIT - 1);
+        assert_eq!(found.warning(), None);
+    }
+}

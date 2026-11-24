@@ -1,0 +1,15 @@
+. //! A module of production code, and nothing else.
+. 
+. use std::fmt::Write;
+. 
+. /// Joins the parts with a comma between each pair.
+. pub fn join(parts: &[&str]) -> String {
+.     let mut out = String::new();
+.     for (index, part) in parts.iter().enumerate() {
+.         if index > 0 {
+.             out.push_str(", ");
+.         }
+.         let _ = write!(out, "{part}");
+.     }
+.     out
+. }

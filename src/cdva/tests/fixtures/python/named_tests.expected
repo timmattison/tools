@@ -1,0 +1,6 @@
+. def add(a, b):
+.     return a + b
+. 
+. 
+T def test_add():
+T     assert add(1, 2) == 3

@@ -4,7 +4,11 @@
 //! adapt to terminal width changes. It includes:
 //!
 //! - **Terminal width detection**: Synchronous and async utilities for getting
-//!   the current terminal width and watching for resize events.
+//!   the current terminal width and watching for resize events. The width comes
+//!   from the environment when it states one in [`WIDTH_VARIABLE`], and from the
+//!   controlling terminal otherwise. A statement wins, which is the rule POSIX
+//!   gives that variable, and it is how a wrapper reports the terminal it holds
+//!   and how a test states a width of its own.
 //! - **Progress style builders**: Pre-configured styles for common operations
 //!   like file copying, verification, hashing, and batch operations.
 //! - **Dynamic resizing**: Support for updating progress bar styles when the
@@ -47,7 +51,7 @@ mod width;
 
 pub use error::{Result, TermbarError};
 pub use style::ProgressStyleBuilder;
-pub use width::{TerminalWidth, TerminalWidthWatcher};
+pub use width::{TerminalWidth, TerminalWidthWatcher, WIDTH_VARIABLE};
 
 /// Default terminal width when detection fails (80 columns).
 pub const DEFAULT_TERMINAL_WIDTH: u16 = 80;
@@ -959,7 +963,7 @@ mod tests {
     fn test_min_basename_chars_minimum_bound() {
         // Verify MIN_BASENAME_CHARS is at least 1 (mirrors compile-time assertion).
         // A value of 0 would produce truncated filenames with no visible content.
-        #[allow(
+        #[expect(
             clippy::assertions_on_constants,
             reason = "intentional change-detector test mirroring the compile-time assertion at the constant's definition"
         )]
@@ -1269,7 +1273,7 @@ mod tests {
 
         // Verify the actual truncation produces the expected result
         // min_with_ext = 1 + 2 + 4 = 7 for .txt; well within u16 range.
-        #[allow(
+        #[expect(
             clippy::cast_possible_truncation,
             reason = "min_with_ext is the sum of small constants (= 7 here) and cannot exceed u16::MAX"
         )]

@@ -7,44 +7,57 @@ A one-line description of every program documented in the [README](./README.md),
 | `aa` | Quickly prints your AWS caller identity as JSON, no pager. |
 | `aws2env` | Converts AWS credentials/config into env-var exports (use with `eval $(aws2env)`). |
 | `beta` | Records and replays terminal sessions; exports to HTML players or MP4/GIF. |
+| `bibibi` | Finds the commit that caused a regression, with a test from a later commit. |
 | `bm` | Bulk Move — recursively find and move files matching a pattern to a destination. |
+| `cctop` | Claude Code top — one row for each live Claude Code session with its state (working, needs-you, idle, agents, or shells) and a frozen flag when its process is stopped, a log of the changes, a macOS notification when a session needs you, and Enter to bring its Zellij pane and WezTerm window to the front. |
 | `cdknuke` | Removes `cdk.out` directories from AWS CDK projects throughout a repo. |
+| `cdva` | Count da various attributes — counts the lines of a tree the way `cloc` does, and reports the test code apart from the production code, including the test code inside a production file. |
 | `cf` | Count Files — recursively counts files, with optional suffix/prefix/substring filters. |
+| `chf` | ch find — finds a Claude Code session by the words in its messages, from any directory, and resumes it with `ch` or, for a compacted session, `che`. |
 | `claude-usage` | Parses an Anthropic API usage CSV and computes per-model costs. |
 | `clipboard-random` | Generates random binary or Zalgo text data and copies it to the clipboard. |
-| `crap` | Claude, Resume Anywhere Please — resume a Claude Code session from its original directory (refuses if it's already running). |
-| `cwt` | Change Worktree — navigate, cycle, or jump between git worktrees. |
+| `crap` | Claude, Resume Anywhere Please — resume a Claude Code session from its original directory (refuses if it's already running, or if that directory is gone or unenterable — pointing you at `--here` to fork where you stand); if the id belongs to another account it's found automatically (self-first), or target one with `--user` (which errors and lists the real accounts if you name one that never ran Claude); owner-only project dirs are skipped, then named in the miss with copy-paste recovery commands — it never runs `sudo` itself; `--status <id>` reports where a session left off without resuming, with the same `--user`/self-first cross-user discovery but read-only (no copy, no fork); each fork it starts adds a line to a fork log, and `--forks <id>` lists the forks of a session (`saved` or `not saved`) and its chain of sources, with `--scan` to find older forks through the `uuid` values that a fork shares with its source; `--expand` forks a session with each compaction undone, so `/rewind` reaches the prompts from before `/compact`. |
+| `cwt` | Change Worktree — navigate, cycle, or jump between the git worktrees of a repository and of the repositories inside it. The list shows the number of each open pull request after its branch. `wtm` goes to your main worktree, and from there climbs to the repository that holds yours. |
 | `dirc` | Copies the current directory to the clipboard, or emits a `cd` from a clipboard path. |
 | `dirhash` | SHA256 hash of a directory tree's contents to compare directories for equality. |
 | `diskhog` | Live terminal UI of per-process disk I/O on macOS (IOPS with sudo). |
+| `faulte` | Fault rate — ranks every process of a Mac by the page faults it makes per second, with the swap traffic of the sample and one total line for the Claude Code sessions. `faulte kill` shows the old idle Claude Code sessions and stops them after a question. macOS only. |
 | `freeport` | Finds a free TCP port on localhost, cross-platform. |
 | `gitdiggin` | Recursively searches git repos for commits containing a string (messages and diffs). |
+| `gitnuke` | Removes a git worktree and deletes its branch; `--force` is required for worktrees with submodules checked out (which `git worktree remove` refuses outright) or uncommitted changes. It asks before it deletes a branch that no recent commit names, `--yes` skips the question, and without a terminal it refuses with exit code 10. |
 | `gitrdun` | Shows your recent git commits across multiple repositories. |
+| `glance` | A light macOS menu bar monitor — two small charts as high as the menu bar, of the last 32 samples: the CPU time split into system (red) and user (blue), and the memory in use in the color of the pressure level (green, orange, red), with the name of the Mac at the top. In local mode, the status item reads the kernel directly and starts no child process. `--host <destination>` shows a second Mac through one SSH connection that stays open, and names it by the destination as you typed it. `--resolve` shows the name that the second Mac reports. A run starts the status item in the background (`-f` keeps it in the foreground), and a second run of the same command stops it, one status item for each Mac. `--sample` prints one reading as JSON, and `--stream` prints one line for each interval. macOS only. |
 | `glo` | Finds and displays large objects in git repositories. |
 | `goup` | Updates Go dependencies across all `go.mod` files in a repo. |
 | `gr8` | Displays GitHub API rate limit info, color-coded, via the GitHub CLI. |
-| `gsw` | Git Status Watch — compact one-shot status dashboard meant to be wrapped by `viddy`/`watch`. |
+| `grime` | Git ReadIness for Merging Externally — reports whether merging a branch into HEAD would conflict and by how much, by replaying the merge in a throwaway worktree. The exit code is the answer (0 clean, 1 conflicts, 2 error). |
+| `grind` | Git Rebase In aNother Dimension — reports whether rebasing HEAD onto a branch would conflict and by how much, by replaying it in a throwaway worktree; the exit code is the answer (0 clean, 1 conflicts, 2 error). `--onto NEWBASE BRANCH` measures a stacked branch after a squash merge of its parent: it replays only `BRANCH..HEAD` onto NEWBASE, as `git rebase --onto` does. |
+| `grist` | Git Ranks Its Squash Trials — ranks the orders you could squash-merge a set of branches in, cheapest conflicts first, by replaying each one in a throwaway worktree. |
+| `gsw` | Git Status Watch — compact status dashboard that watches on a TTY (refresh clock in the separator) and renders once when piped; a merge or rebase in progress gets its own row, `⚠ merge` / `⚠ rebase 1/2 · 1 conflict to resolve`. In watch mode the right end of the header shows whether the branch on the screen has an open pull request on GitHub — `PR #690` (green), `PR #690 +1` for two or more, `no PR`, or `PR ?` before the first answer and after a failed lookup — through `gh api` with REST and an `ETag`, after the first frame, at each timed refresh, on `r`, and on a change of branch or worktree, never on a filesystem event. A rate limit stops the lookups until GitHub lets them start again. One-shot mode, `--no-pr`, no `gh` on `PATH`, a detached HEAD, and a remote that is not on GitHub show no indicator. Press `p` to push the current branch after a confirmation; the result says how long ago it happened and fades off the screen after a minute. Press `P` to do the same push with `git push --no-verify`, so the `pre-push` hook does not run; its yellow question and its result say that the hook was skipped. Press `m` to measure a rebase and a merge against the default branch in-process, as `grind` and `grime` do — one run at a time, answered by one fading line such as `main: rebase 3 hunks in 2 files, 2 stops · merge 1 hunk in 1 file`. Press `G` to open the pull request of the branch, or the issue the branch names when there is no pull request, through two commands of your own: the one `GSW_PR_COMMAND` names (default `ggsp`) runs first, and the one `GSW_ISSUE_COMMAND` names (default `ggs`) runs only when the first fails. With only one of the two, `G` runs that one alone, and with neither the key is silent. On a remote shell the first `G` asks instead of running — it posts `remote shell — press G again to run ggsp, then ggs` and the second press runs them, because a browser opened here would open where nobody sits. Press `T` to put the number of the pull request of the branch on the zellij tab title, through a command of your own that `GSW_TAB_COMMAND` names (default `stp`): it runs in the worktree on the screen and asks nothing first, a line it wrote fades under the frame, and a failure stays in red until a key. `T` works in zellij only, and it always renames the tab of the gsw pane. Press `R` to rebase the branch onto the default branch and push it, or `M` to merge that branch into yours and push it — each runs a command of your own that `GSW_REBASE_COMMAND` and `GSW_MERGE_COMMAND` name (defaults `grp` and `gmp`), after a confirmation that names the act, the branch, the base, how far behind it is, and the command, and gsw puts the base on the end of your command line as one quoted word, so a command that replaces either one must take the base as its last argument. Where you have no such command the key is silent, the run has no deadline and shows its output live, and `p` never force-pushes but `grp` does. A rebase or a merge in progress refuses both keys, and gsw aborts one that the run starts and leaves stopped on a conflict: the run then fails with a last line such as `rebase stopped on 2 conflicts — gsw aborted it`. gsw never aborts one it did not start. The arrow keys move the watch between the worktrees of the repository: Up goes to the worktree where you started, Left and Right step through the worktrees in `cwt` order and wrap, and Down opens a list to pick one. With more than one worktree, the header says which one you watch, `gsw ⌂ 1/4 • main`. The branch name in the header is red while it is not the branch where you started gsw, so a `git switch` or a move to a worktree on another branch is easy to see. Press Esc twice to go back to that branch: gsw moves to the worktree that holds it, or runs `git switch --no-guess` in the home worktree. While the push runs, a window under the frame shows the newest six lines from git and from any `pre-push` hook, live, so a slow hook shows its progress instead of a frozen screen. |
+| `ha` | Hot actions — shows the GitHub Actions runs and merge queues of many repositories and owners in one self-refreshing terminal view, with the list-price cost of each job and run, and a box for the Actions billing of each account. |
 | `hexfind` | Searches for a hex string in a binary file and shows a hex dump with offsets. |
 | `htmlboard` | Pretty-prints HTML on the clipboard and puts it back. |
 | `ic` | Fast terminal image/video display utility (an `imgcat` alternative; video needs ffmpeg). |
 | `idear` | IDEA Reaper — cleans up orphaned `.idea` directories left by JetBrains IDEs. |
+| `install-bin` | Installs a locally built binary onto a fresh inode so macOS's signature cache can't SIGKILL it, then verifies it execs. |
 | `inscribe` | Generates git commit messages from staged changes using Claude AI. |
 | `jsonboard` | Pretty-prints JSON on the clipboard and puts it back. |
 | `kitchen-sync` | Installs every Rust binary from a git repo with one command. |
-| `localnext` | Serves statically exported Next.js apps locally. |
+| `krt` | Knights of the Round Trip — records the network path to a destination, hop by hop, into an append-only JSONL file, and draws the live table of that path under a terminal. `krt replay` folds one run of a recorded file into one table of the path. `krt hunt` looks for the longest path it can find: it draws random addresses, traces a pool of them at once, and prints the shortest, longest, fastest, and slowest path it found, and `--mine` probes a few addresses near each destination that sets a record, to find whether a neighbor gives a longer path. |
+| `localnext` | Serves a statically exported Next.js app from its `out` directory, on a port derived from the project and the git branch. |
 | `ng` | Navel-Gaze — watches JS/TS files and re-runs `pnpm lint` (or `--typecheck`) on change. |
 | `nodenuke` | Removes `node_modules` directories and lock files throughout a repo. |
 | `nodeup` | Updates npm/pnpm/yarn packages across all `package.json` directories. |
-| `nwt` | New Worktree — creates a git worktree with a random Docker-style name. |
-| `op-cache` | 1Password credential cache wrapping `op read` to avoid repeated prompts/Touch ID. |
-| `org-borg` | Bulk clone, update, and archive GitHub organization repositories via the GitHub CLI. |
+| `nwt` | New Worktree — creates a git worktree with a random Docker-style name, links the child repositories of a container into it, and can leave a heavy tracked directory out of it. |
+| `occ` | Old Claude Code — lists running Claude Code sessions oldest release first, with pid, uptime, session id, and directory. |
+| `op-cache` | 1Password credential cache wrapping `op read` to avoid repeated prompts/Touch ID; names the caller of each prompt in a notification and an audit trail. |
 | `pk` | Process Killer — kills processes (incl. ones `ps`/`pkill` can't see) with dry-run, regex, and signal options. |
 | `polish` | Updates Rust dependencies across all `Cargo.toml` files in a repo. |
-| `portplz` | Generates a consistent unprivileged port number from directory name and git branch. |
-| `prcp` | Copies files with a Unicode progress bar; wildcards, multi-file, and verified move mode. |
-| `prgz` | Like `prcp` but gzip-compresses the file, showing progress in the console. |
+| `popstop` | Keeps the default audio output awake with an inaudible signal, so USB speakers do not pop or cut the start of a sound. |
+| `portplz` | Generates a consistent unprivileged port number from directory name, git branch, and an optional `--name`. |
+| `prcp` | Copies files and directory trees (`-R`) with a Unicode progress bar; wildcards, multi-file, verified move mode, and a final check for changes that others make during the run. |
+| `prgz` | Like `prcp` but gzip-compresses the file, with the same one-line progress bar and a closing report. |
 | `prhash` | Hashes files (MD5/SHA1/SHA256/SHA512/Blake3) with a progress bar, shasum-compatible output. |
-| `procinfo` | Detailed info about running processes matching a name (cwd, open files, connections). |
 | `r2-bucket-cleaner` | Lists and optionally clears all objects from a Cloudflare R2 bucket via wrangler. |
 | `rcc` | Rust Cross Compiler — simplifies cross-compilation (target detection, `Cross.toml`, build). |
 | `reposize` | Calculates the total size of a git repository, human-readable. |
@@ -52,19 +65,28 @@ A one-line description of every program documented in the [README](./README.md),
 | `rr` | Rust Remover — runs `cargo clean` across all Rust projects to free disk space. |
 | `runat` | TUI to run a command at a specified time with a live countdown. |
 | `safeboard` | Monitors the clipboard for dangerous/invisible Unicode used in copy-paste attacks. |
+| `seescc` | Self-refreshing terminal viewer for sccache statistics, with sparklines and a one-shot JSON mode. |
 | `sf` | Size of Files — total size of files in directories, with optional suffix/prefix/substring filters. |
-| `spv` | Smart Process Viewer — find and view processes by PID/name/regex, with optional cwd and open files. |
-| `subito` | Subscribes to AWS IoT Core topics and prints received messages. |
-| `swt` | Subagent Worktree — isolated-worktree helper for parallel TDD (create/merge with green checks). |
-| `symfix` | Recursively finds and optionally fixes broken symlinks. |
+| `sidecar` | Makes, clones, and links the private data repositories (sidecars) of a host repository. |
+| `sirn` | Serve It Right Now — a zero-config HTTP file server; serves files or the current directory on a git-derived port. |
+| `spv` | Smart Process Viewer — find and view processes by PID/name/regex, with optional cwd, open files, environment, and network connections. One PID prints a detail card with the full command, the executable, the start time, and the parent chain. |
+| `subito` | Subscribes to AWS IoT Core topics over a signed WebSocket and prints received messages, as text, indented JSON, or a hex dump. |
+| `swt` | Subagent Worktree — isolated-worktree helper for parallel TDD (create/merge with green checks, list the children of a branch). |
+| `symfix` | Recursively finds broken symlinks and optionally repairs them, by prepending to or removing a prefix from the target, with a dry run. |
 | `tc` | Token Count — counts estimated LLM tokens in files (multiple OpenAI tokenizers, stdin support). |
+| `thermal-watch` | Shows whether an Apple Silicon Mac decreases its clock under sustained load, measuring the P-cluster frequency against the DVFS table of the chip rather than trusting the thermal pressure level. |
 | `tsm` | Terminal Session Manager — records every shell command to JSONL logs you can search and replay. |
 | `tubeboard` | Extracts the video ID from a YouTube URL on the clipboard. |
+| `tvfind` | Finds smart TVs on the local network. Probes the Roku and Chromecast ports directly, reports vendor, model, room name and firmware, and flags sets that are powered off. |
 | `unescapeboard` | Unescapes one level of `\"`-style escaping in clipboard text. |
 | `update-aws-credentials` | Writes AWS SSO clipboard credentials into your AWS config file. |
 | `uuidplz` | Prints a random v4 UUID, or a repeatable v5 UUID seeded from a string, a file's contents, or stdin. |
 | `vpn-tunnel` | Generates Docker-based gluetun + ProtonVPN + WireGuard tunnels with helper scripts. |
+| `wdid` | What do I do — counts which tools of this workspace the atuin history uses, through aliases, functions, pipes and wrappers, and lists the tools never used and the tools idle for a long time. |
+| `whyslow` | Why slow — one 1 s sample names the likely cause when a Mac is slow: which resource is short, and the groups of processes (Claude Code, compilers by worktree, Spotlight, each other name) that use it. macOS only. |
 | `wifiqr` | Generates WiFi QR codes (with optional logo) for automatic device connection. |
-| `wl` | Shows which process is listening on a given port. |
+| `wl` | Shows which process is listening on a given port, and says so when it cannot see the owner. |
+| `wn` | What's next — walks a chain of GitHub issues in order and names the first one still open. Reads a whole parallel-work plan as well, naming the step to take in each of its streams, where only the `Order` field is read as a chain. Takes that plan as records, as a Markdown table, or as the box-drawn table the report arrives on the clipboard as, and reads the annotation an `Order` field carries — `#4 (in flight, PR #15)` is one step. Reads a plan drawn as a picture too — `#242 ──→ #247 ──┐`, where two streams join — following the wires from left to right and naming every step that is ready, each with its own line. Holds every plan to the `Blocked by` list of each of its issues: a plan that puts an issue before its own blocker is refused with the pair named, and a blocker the plan left out joins the answer with a note that says where the wait came from. Takes the chain from the argument, then standard input, then the clipboard, so `wn` alone answers the chain you just copied (`WN_NO_CLIPBOARD` turns that off). With nothing to read it builds a plan by running `claude` on the `plan-parallel-work` skill and leaves the document on the clipboard for the next run — `--refresh` builds a new one whatever the inputs hold, a plan older than a day says its age, `WN_NO_CLAUDE` turns the run off, `WN_PLAN_TIMEOUT` names its seconds, and the run names its own model and level of effort — `opus` at `low`, a level a measurement picked and which `WN_PLAN_MODEL` and `WN_PLAN_EFFORT` change — so how long it takes is a property of the tool and not of whatever the reader's machine defaults to. The answer names the command that starts it, `si 278`. `si` is a shell function you supply, and `WN_START_COMMAND` names a different one. An open pull request gets no start command: the answer says `Finish PR #515 (closes #512) next: review it and merge it`, and its row writes `PR#515 (#512)`. |
 | `wolly` | Wake-on-LAN tool that sends magic packets with auto subnet broadcast detection. |
 | `wu` | Cross-platform "who's using" a file/directory/device (process name, PID, user, mode). |
+| `zth` | Zero the Hero — recursively finds non-empty files that contain nothing but zero bytes. |

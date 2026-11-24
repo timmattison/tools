@@ -11,7 +11,7 @@ use crate::render::{RenderEntry, Snapshot};
 ///
 /// `staged_numstat` and `unstaged_numstat` are keyed on the post-rename path.
 /// `ages` maps file path → mtime age; missing entries become `None`.
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "build_snapshot fans in five distinct inputs; grouping them obscures rather than clarifies"
 )]
@@ -20,7 +20,6 @@ pub fn build_snapshot(
     base: String,
     commits_ahead: u32,
     commits_behind: u32,
-    last_commit_age: Option<Duration>,
     status_entries: Vec<FileEntry>,
     staged_numstat: &HashMap<String, NumStat>,
     unstaged_numstat: &HashMap<String, NumStat>,
@@ -64,10 +63,18 @@ pub fn build_snapshot(
         base,
         commits_ahead,
         commits_behind,
-        last_commit_age,
         files,
         log: Vec::new(),
+        log_complete: false,
+        log_start: None,
         upstream: None,
+        operation: None,
+        push_remote: None,
+        // The walk of one worktree cannot know the other worktrees. Watch
+        // mode puts the badge on the snapshot after the walk.
+        worktree: None,
+        off_start_branch: false,
+        pull: None,
     }
 }
 
@@ -99,7 +106,6 @@ mod tests {
             "main".into(),
             5,
             7,
-            Some(Duration::from_secs(120)),
             vec![],
             &HashMap::new(),
             &HashMap::new(),
@@ -109,7 +115,6 @@ mod tests {
         assert_eq!(snap.base, "main");
         assert_eq!(snap.commits_ahead, 5);
         assert_eq!(snap.commits_behind, 7);
-        assert_eq!(snap.last_commit_age, Some(Duration::from_secs(120)));
     }
 
     #[test]
@@ -130,7 +135,6 @@ mod tests {
             "main".into(),
             0,
             0,
-            Some(Duration::ZERO),
             entries,
             &staged,
             &unstaged,
@@ -160,7 +164,6 @@ mod tests {
             "main".into(),
             0,
             0,
-            Some(Duration::ZERO),
             entries,
             &staged,
             &unstaged,
@@ -188,7 +191,6 @@ mod tests {
             "main".into(),
             0,
             0,
-            Some(Duration::ZERO),
             entries,
             &staged,
             &HashMap::new(),
@@ -216,7 +218,6 @@ mod tests {
             "main".into(),
             0,
             0,
-            Some(Duration::ZERO),
             entries,
             &HashMap::new(),
             &HashMap::new(),
@@ -239,7 +240,6 @@ mod tests {
             "main".into(),
             0,
             0,
-            Some(Duration::ZERO),
             entries,
             &HashMap::new(),
             &HashMap::new(),
@@ -264,7 +264,6 @@ mod tests {
             "main".into(),
             0,
             0,
-            Some(Duration::ZERO),
             entries,
             &staged,
             &HashMap::new(),
@@ -301,7 +300,6 @@ mod tests {
             "main".into(),
             0,
             0,
-            Some(Duration::ZERO),
             entries,
             &staged,
             &unstaged,
@@ -358,7 +356,6 @@ mod tests {
             "main".into(),
             0,
             0,
-            Some(Duration::ZERO),
             entries,
             &HashMap::new(),
             &HashMap::new(),
@@ -394,7 +391,6 @@ mod tests {
             "main".into(),
             0,
             0,
-            Some(Duration::ZERO),
             entries,
             &HashMap::new(),
             &HashMap::new(),
@@ -419,7 +415,6 @@ mod tests {
             "main".into(),
             0,
             0,
-            Some(Duration::ZERO),
             entries,
             &HashMap::new(),
             &HashMap::new(),

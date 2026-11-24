@@ -1,0 +1,12 @@
+. pub fn a() -> i32 {
+.     let x = 1
+.     x
+. }
+. 
+. #[cfg(test)]
+. mod tests {
+.     #[test]
+.     fn a_is_one() {
+.         assert_eq!(super::a(), 1);
+.     }
+. }

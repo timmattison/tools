@@ -1,24 +1,108 @@
 #!/usr/bin/env bash
-# Reject commits that fail formatting or clippy. cargo fmt --check runs first
-# because it is fast and catches drift before the slower clippy pass.
-# --all-targets covers tests/ and benches/, where lints like
-# unseparated_literal_suffix would otherwise slip through, and -D warnings
-# turns every workspace lint into a hard error.
+# Reject commits that fail formatting, linting, or the test suite. The gates
+# only run when a staged change touches a Rust file (see the trigger regex
+# below), so a commit that touches no Rust never pays for the Rust toolchain.
+# The tool-index block below is the one deliberate exception: a commit that
+# stages README.md or TLDR.md and no Rust file runs one Rust test target,
+# because the guard that protects the two Markdown indexes lives in the Rust
+# suite.
+#
+# The four Rust gates run cheapest-first so a commit fails fast on the
+# quickest check:
+#
+#   1. cargo fmt --check  - formatting drift; no compile, so it is fastest.
+#   2. cargo machete      - unused-dependency detector. Like fmt it compiles
+#                           nothing (it parses Cargo manifests and sources), so
+#                           it runs before clippy. Plain mode is used (not
+#                           --with-metadata) so it never touches Cargo.lock; the
+#                           crates with known false positives carry
+#                           [package.metadata.cargo-machete] ignored entries.
+#                           A non-zero exit means an unused dependency slipped
+#                           into a manifest, which fails the commit.
+#   3. cargo clippy       - lints as hard errors. --all-targets covers tests/
+#                           and benches/, where lints like
+#                           unseparated_literal_suffix would otherwise slip
+#                           through, and -D warnings turns every workspace lint
+#                           into a hard error.
+#   4. cargo test         - the workspace test suite. Slowest, so it runs last;
+#                           clippy's --all-targets has already compiled the test
+#                           targets, so this pass is mostly incremental + run.
 #
 # The trigger regex also matches rustfmt.toml and rust-toolchain.toml at the
 # repo root: a commit that bumps the toolchain or style config is the scenario
 # most likely to introduce drift, so the gate must run on those changes too.
 #
-# Both checks read the WORKING TREE, not the staged index, so a partially
+# All four checks read the WORKING TREE, not the staged index, so a partially
 # staged file (or one staged then edited) is checked in its on-disk state, not
 # the version being committed. This is a deliberate trade-off: index-only
 # checking (stash --keep-index dances) is fragile, and the workspace-wide cargo
 # commands cannot operate on a virtual index anyway.
 set -euo pipefail
 
+# shellcheck source=scripts/without-git-environment.sh
+. "$(dirname "$0")/../scripts/without-git-environment.sh"
+
 if git diff --cached --name-only --diff-filter=ACMR | grep -qE '\.rs$|(^|/)Cargo\.(toml|lock)$|^(rustfmt|rust-toolchain)\.toml$'; then
     echo "pre-commit: running cargo fmt --all -- --check"
-    cargo fmt --all -- --check
+    without_git_environment cargo fmt --all -- --check
+    echo "pre-commit: running cargo machete (unused dependency check)"
+    if ! command -v cargo-machete >/dev/null 2>&1; then
+        echo "pre-commit: cargo-machete not found; installing it once (cargo install cargo-machete --locked)…"
+        without_git_environment cargo install cargo-machete --locked
+    fi
+    without_git_environment cargo machete
     echo "pre-commit: running cargo clippy --all-targets --workspace -- -D warnings"
-    cargo clippy --all-targets --workspace -- -D warnings
+    without_git_environment cargo clippy --all-targets --workspace -- -D warnings
+    echo "pre-commit: running cargo test --workspace (CLICOLOR_FORCE=1)"
+    # Git exports GIT_ variables into the hook, and every program that the hook
+    # starts inherits them. A test that runs `git init` in a temp repo then aims
+    # at THIS repo and can rewrite its index and branch. Every cargo command
+    # here runs through `without_git_environment`. It removes the whole GIT_
+    # prefix and never a list of names. Rust spawns of this workspace shed the
+    # same variables through the crate `childenv`, and clippy makes its
+    # constructors mandatory. The runner is the only layer for code that other
+    # crates own, such as the build script of a dependency.
+    #
+    # CLICOLOR_FORCE=1 makes the `colored` crate paint whatever the run writes
+    # to. Without it, `colored` paints only when file descriptor 1 is a
+    # terminal, so a test that compares painted output against plain text
+    # passes in a redirected run and fails under a hand-typed commit, where the
+    # hook passes its terminal straight through. That is a deterministic result
+    # on a condition the test does not control, and it stays hidden until
+    # somebody commits from a terminal. Forcing the codes on makes the gate
+    # strictly stricter: such a test now fails on every commit. A test that
+    # asserts on rendered text must compare visible glyphs, through the
+    # `testcolor` crate — see "Colored Output in Tests" in CLAUDE.md.
+    #
+    # This does not defeat a tool that decides its own color output. A manual
+    # `colored::control::set_override` beats CLICOLOR_FORCE, so `gsw --no-color`
+    # and `seescc` under NO_COLOR still print plain text, and
+    # `testcolor::with_forced_ansi` still forces the codes on.
+    without_git_environment env CLICOLOR_FORCE=1 cargo test --workspace
+    rust_gate_ran=yes
+fi
+
+# Both tool indexes are Markdown, and the Rust gate above triggers on Rust files
+# only, so a commit that edits README.md or TLDR.md and nothing else would run
+# no gate at all. The guard that holds every binary in both indexes
+# (repo_guards::tool_index) lives in the Rust suite, so such a commit has to
+# name it directly.
+#
+# This is what closes the direction the guard cannot otherwise reach. Adding a
+# crate touches a Cargo.toml and so pays the Rust gate above, which runs the
+# guard; REMOVING a tool's entry from an index touches Markdown alone. Issue
+# #311, which clears the ~563-violation markdownlint backlog, is a bulk rewrite
+# of exactly that shape.
+#
+# It runs the one test target rather than the workspace suite, so it costs a
+# fraction of the Rust block. The rust_gate_ran guard keeps a commit that
+# touches Rust and an index from running the same test twice.
+#
+# --diff-filter carries D on top of ACMR: deleting an index outright is the
+# fault this catches, not only editing one. The same git-env scrub as the gate
+# above keeps the two symmetric.
+if [ "${rust_gate_ran:-}" != yes ] &&
+    git diff --cached --name-only --diff-filter=ACMRD | grep -qE '^(README|TLDR)\.md$'; then
+    echo "pre-commit: running cargo test -p repo-guards --test tool_index_coverage"
+    without_git_environment cargo test -p repo-guards --test tool_index_coverage
 fi

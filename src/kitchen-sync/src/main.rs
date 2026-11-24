@@ -179,7 +179,25 @@ fn shallow_clone(repo_url: &str) -> Result<TempDir> {
 
     println!("Cloning {repo_url}...");
 
-    let output = Command::new("git")
+    // Shed the inherited `GIT_` family so the clone's checkout writes into the
+    // new repository's own index rather than whatever index a parent git hook
+    // exported, which would corrupt the real repository's. The rule is the
+    // prefix and never a list of names: this call site listed three, and
+    // `GIT_OBJECT_DIRECTORY` would still have sent every object of the clone
+    // into another repository's store.
+    //
+    // The authentication family survives, because `repo_url` is a URL the user
+    // typed and reaches the network. `GIT_SSH`, `GIT_SSH_COMMAND` and
+    // `GIT_ASKPASS` are how the user authenticates, so a `git@` URL still
+    // reaches its host the way the user's own shell reaches it; a user who holds
+    // a non-default key gets an authentication failure without them.
+    // `GIT_TERMINAL_PROMPT` is what keeps a failure fast: set to `0` it makes a
+    // missing credential fail at once with the reason on stderr, which this
+    // function reports. Without it git prompts on `/dev/tty`, and the clone
+    // stalls instead.
+    let mut command = childenv::command("git");
+
+    let output = command
         .arg("clone")
         .arg("--depth")
         .arg("1")
@@ -432,7 +450,7 @@ fn run_streaming(cmd: &mut Command) -> std::io::Result<(std::process::ExitStatus
 /// caller can surface a useful diagnostic in the summary without the user
 /// having to scroll back.
 fn install_from_git(repo_url: &str, package: Option<&str>) -> Result<()> {
-    let mut cmd = Command::new("cargo");
+    let mut cmd = childenv::command("cargo");
     cmd.arg("install").arg("--git").arg(repo_url);
     // cargo install selects specific packages via a positional crate name, not --package.
     if let Some(pkg) = package {
@@ -472,6 +490,11 @@ fn last_lines(s: &str, n: usize) -> String {
 mod tests {
     use super::*;
     use std::fs;
+
+    // The fixtures below shed the whole `GIT_` family rather than the
+    // production rule beside it, because a fixture has no user whose intent to
+    // honor: it builds a throwaway repository, and a `GIT_SSH_COMMAND` it
+    // inherited names a program the fixture has no reason to run.
 
     // ----- Phase 1 tests -----
 
@@ -709,7 +732,7 @@ mod tests {
         // back whatever the child wrote to stderr so the caller can include
         // it in a summary. We use `sh -c` so the test does not depend on any
         // specific real tool being installed.
-        let mut cmd = Command::new("sh");
+        let mut cmd = childenv::fixture_command("sh");
         cmd.arg("-c")
             .arg("printf 'oops line 1\\noops line 2\\n' 1>&2; exit 3");
         let (status, captured) = run_streaming(&mut cmd).unwrap();
@@ -929,7 +952,12 @@ mod tests {
         let td = tempfile::tempdir().unwrap();
         let repo = td.path().to_path_buf();
         let run = |args: &[&str]| {
-            let out = Command::new("git")
+            // Shed the whole inherited `GIT_` family so these fixture commits
+            // target `repo` rather than the real repository, when this suite
+            // runs from inside the pre-commit hook's own `cargo test`.
+            let mut command = childenv::fixture_command("git");
+
+            let out = command
                 .args(args)
                 .current_dir(&repo)
                 .output()

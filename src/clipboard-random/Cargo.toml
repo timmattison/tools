@@ -10,11 +10,16 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
-arboard.workspace = true
 base64.workspace = true
 buildinfo.workspace = true
 clap.workspace = true
 rand.workspace = true
+sysclip.workspace = true
+
+[dev-dependencies]
+childenv.workspace = true
+sysclip = { workspace = true, features = ["testing"] }
+tempfile.workspace = true
 
 [lints]
 workspace = true

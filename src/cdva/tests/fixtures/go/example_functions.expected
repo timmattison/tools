@@ -1,0 +1,13 @@
+. package greet
+. 
+. import "fmt"
+. 
+. // Greet says hello, and says nothing else.
+. func Greet() string {
+. 	return "hello"
+. }
+. 
+T func ExampleGreet() {
+T 	fmt.Println(Greet())
+T 	// Output: hello
+T }
