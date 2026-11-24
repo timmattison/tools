@@ -10,6 +10,9 @@ use crate::util::page_bounds;
 /// file with a different version is dropped and made again.
 const CACHE_SCHEMA_VERSION: i64 = 1;
 
+/// How many rows the rebuild reads between two progress reports.
+pub const PROGRESS_INTERVAL: i64 = 5_000;
+
 /// The metadata key that holds the source fingerprint of the last rebuild.
 const FINGERPRINT_KEY: &str = "source_fingerprint";
 
@@ -123,10 +126,19 @@ impl TextCache {
     /// The rebuild runs in one transaction. A failure rolls it back, thus the
     /// cache keeps its earlier rows and no transaction stays open.
     ///
+    /// `progress` gets `(indexed, total)` once at the start, after each
+    /// `report_every` rows, and once at the end. `total` is the count of
+    /// joined rows. A report never repeats the one before it.
+    ///
     /// # Errors
     ///
     /// Returns `MsgsError::CacheError` or `MsgsError::DatabaseError` on failure.
-    pub fn rebuild(&self, chat_db: &Connection) -> Result<(), MsgsError> {
+    pub fn rebuild(
+        &self,
+        chat_db: &Connection,
+        report_every: i64,
+        progress: &mut dyn FnMut(i64, i64),
+    ) -> Result<(), MsgsError> {
         log::info!("Rebuilding text cache...");
 
         // A transaction that drops without a commit rolls back.
@@ -134,7 +146,7 @@ impl TextCache {
             .conn
             .unchecked_transaction()
             .map_err(|e| MsgsError::CacheError(format!("Cannot begin rebuild: {e}")))?;
-        let count = Self::fill(&tx, chat_db)?;
+        let count = Self::fill(&tx, chat_db, report_every.max(1), progress)?;
         tx.commit()
             .map_err(|e| MsgsError::CacheError(format!("Cannot commit cache: {e}")))?;
 
@@ -145,10 +157,26 @@ impl TextCache {
     /// Replace the rows of the cache with the text of each message in
     /// `chat_db`, and store the source fingerprint for the staleness check. The caller
     /// holds the transaction.
-    fn fill(cache: &Connection, chat_db: &Connection) -> Result<i64, MsgsError> {
+    fn fill(
+        cache: &Connection,
+        chat_db: &Connection,
+        report_every: i64,
+        progress: &mut dyn FnMut(i64, i64),
+    ) -> Result<i64, MsgsError> {
         cache
             .execute_batch("DELETE FROM message_text;")
             .map_err(|e| MsgsError::CacheError(format!("Cannot clear cache: {e}")))?;
+
+        let total: i64 = chat_db
+            .query_row(
+                "SELECT COUNT(*) FROM message m
+                 JOIN chat_message_join cmj ON m.ROWID = cmj.message_id",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| MsgsError::DatabaseError(e.to_string()))?;
+        progress(0, total);
+        let mut last_reported: i64 = 0;
 
         // Query all messages with their chat_id
         let mut stmt = chat_db
@@ -201,6 +229,13 @@ impl TextCache {
                 }
             }
             count += 1;
+            if count % report_every == 0 {
+                progress(count, total);
+                last_reported = count;
+            }
+        }
+        if count != last_reported {
+            progress(count, total);
         }
 
         cache
@@ -292,7 +327,9 @@ mod tests {
         let cache = TextCache::open_at(&fx.dir().join("text-cache.db")).expect("open cache");
 
         assert!(cache.needs_rebuild(db.connection()).expect("needs before"));
-        cache.rebuild(db.connection()).expect("rebuild");
+        cache
+            .rebuild(db.connection(), PROGRESS_INTERVAL, &mut |_, _| {})
+            .expect("rebuild");
         assert!(!cache.needs_rebuild(db.connection()).expect("needs after"));
     }
 
@@ -306,7 +343,9 @@ mod tests {
             rusqlite::params![apple_ns(1_700_000_100, 0), lunch_a],
         );
         assert!(needs_rebuild_as_the_command_does(&cache, &db));
-        cache.rebuild(db.connection()).expect("second rebuild");
+        cache
+            .rebuild(db.connection(), PROGRESS_INTERVAL, &mut |_, _| {})
+            .expect("second rebuild");
         assert!(!needs_rebuild_as_the_command_does(&cache, &db));
     }
 
@@ -330,7 +369,9 @@ mod tests {
 
     fn rebuilt_cache(fx: &ChatDbFixture, db: &crate::db::MessageDb) -> TextCache {
         let cache = TextCache::open_at(&fx.dir().join("text-cache.db")).expect("open cache");
-        cache.rebuild(db.connection()).expect("rebuild");
+        cache
+            .rebuild(db.connection(), PROGRESS_INTERVAL, &mut |_, _| {})
+            .expect("rebuild");
         cache
     }
 
@@ -435,7 +476,9 @@ mod tests {
         let (fx, chat_a, chat_b, lunch_a, lunch_b) = two_chat_fixture();
         let db = fx.open_db();
         let cache = TextCache::open_at(&fx.dir().join("text-cache.db")).expect("open cache");
-        cache.rebuild(db.connection()).expect("rebuild");
+        cache
+            .rebuild(db.connection(), PROGRESS_INTERVAL, &mut |_, _| {})
+            .expect("rebuild");
 
         let mut hits = cache.search("lunch", None, 50, 0).expect("search");
         hits.sort_unstable();
@@ -457,7 +500,9 @@ mod tests {
         let (fx, _chat_a, chat_b, _lunch_a, lunch_b) = two_chat_fixture();
         let db = fx.open_db();
         let cache = TextCache::open_at(&fx.dir().join("text-cache.db")).expect("open cache");
-        cache.rebuild(db.connection()).expect("rebuild");
+        cache
+            .rebuild(db.connection(), PROGRESS_INTERVAL, &mut |_, _| {})
+            .expect("rebuild");
 
         let hits = cache.search("lunch", Some(chat_b), 50, 0).expect("search");
         assert_eq!(hits, vec![(lunch_b, chat_b)]);
@@ -468,8 +513,12 @@ mod tests {
         let (fx, chat_a, chat_b, lunch_a, lunch_b) = two_chat_fixture();
         let db = fx.open_db();
         let cache = TextCache::open_at(&fx.dir().join("text-cache.db")).expect("open cache");
-        cache.rebuild(db.connection()).expect("first rebuild");
-        cache.rebuild(db.connection()).expect("second rebuild");
+        cache
+            .rebuild(db.connection(), PROGRESS_INTERVAL, &mut |_, _| {})
+            .expect("first rebuild");
+        cache
+            .rebuild(db.connection(), PROGRESS_INTERVAL, &mut |_, _| {})
+            .expect("second rebuild");
 
         let mut hits = cache.search("lunch", None, 50, 0).expect("search");
         hits.sort_unstable();
@@ -483,7 +532,9 @@ mod tests {
         write_old_contentless_cache(&cache_path);
         let db = fx.open_db();
         let cache = TextCache::open_at(&cache_path).expect("open cache");
-        cache.rebuild(db.connection()).expect("rebuild");
+        cache
+            .rebuild(db.connection(), PROGRESS_INTERVAL, &mut |_, _| {})
+            .expect("rebuild");
 
         let mut hits = cache.search("lunch", None, 50, 0).expect("search");
         hits.sort_unstable();
@@ -514,7 +565,7 @@ mod tests {
         let cache_path = fx.dir().join("text-cache.db");
         write_old_contentless_cache(&cache_path);
         let cache = TextCache::open_at(&cache_path).expect("open cache");
-        let _ = cache.rebuild(db.connection());
+        let _ = cache.rebuild(db.connection(), PROGRESS_INTERVAL, &mut |_, _| {});
         assert!(
             cache.conn.is_autocommit(),
             "a rebuild of the old cache left a transaction open"
@@ -522,10 +573,36 @@ mod tests {
 
         // A source with no message table makes the rebuild fail.
         let empty_source = Connection::open_in_memory().expect("open empty source");
-        assert!(cache.rebuild(&empty_source).is_err());
+        assert!(cache
+            .rebuild(&empty_source, PROGRESS_INTERVAL, &mut |_, _| {})
+            .is_err());
         assert!(
             cache.conn.is_autocommit(),
             "a failed rebuild left a transaction open"
         );
+    }
+
+    #[test]
+    fn rebuild_reports_progress_up_to_the_total() {
+        let fx = ChatDbFixture::new();
+        let chat = fx.add_chat("a", None, 45);
+        for n in 0..3 {
+            fx.add_message(MessageSpec {
+                text: Some(format!("m{n}")),
+                date: apple_ns(1_700_000_010 + n, 0),
+                chats: vec![chat],
+                ..MessageSpec::default()
+            });
+        }
+        let db = fx.open_db();
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache = TextCache::open_at(&dir.path().join("cache.db")).expect("open cache");
+        let mut reports = Vec::new();
+        cache
+            .rebuild(db.connection(), 1, &mut |indexed, total| {
+                reports.push((indexed, total));
+            })
+            .expect("rebuild");
+        assert_eq!(reports, vec![(0, 3), (1, 3), (2, 3), (3, 3)]);
     }
 }

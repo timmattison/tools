@@ -60,7 +60,7 @@ All business logic lives in Rust:
 - **DB Layer**: Read-only SQLite connection to `~/Library/Messages/chat.db` via `rusqlite` with `SQLITE_OPEN_READ_ONLY`. Requires Full Disk Access granted to the app.
 - **attributedBody Parser**: Extracts plain text from NSKeyedArchiver/streamtyped blobs. 99.9% of messages (235k of 237k) store text in `attributedBody`, not the `text` column. See [attributedBody Parsing](#attributedbody-parsing) section for details. The parser is a distinct module with fallback handling for unrecognized blob formats.
 - **Date Conversion**: Apple Core Data timestamps are nanoseconds since 2001-01-01. Convert via `date / 1_000_000_000 + 978_307_200` to Unix epoch. Serialized as ISO 8601 with timezone offset (e.g., `2025-01-15T10:30:22-05:00`).
-- **Text Cache**: On app launch, the backend extracts text from all `attributedBody` blobs and caches in a local SQLite database (`~/.local/share/msgs/text-cache.db`) with an FTS5 virtual table. This enables fast full-text search without modifying `chat.db`. The cache is rebuilt when the source fingerprint of `chat.db` changes (the count of joined message rows, the highest message ROWID, and the latest edit date) or on manual refresh.
+- **Text Cache**: After launch, the backend extracts text from all `attributedBody` blobs and caches in a local SQLite database (`~/.local/share/msgs/text-cache.db`) with an FTS5 virtual table. The build runs in the background, thus the window and the conversation views work while it runs, and search answers that the index is still building. This enables fast full-text search without modifying `chat.db`. The cache is rebuilt when the source fingerprint of `chat.db` changes (the count of joined message rows, the highest message ROWID, and the latest edit date).
 - **Query Builder**: Constructs SQL against Apple's schema (`message`, `chat`, `handle`, `attachment`, and their join tables).
 - **Export Engine**: Serializes message ranges to JSON and copies attachment files to an export folder.
 - **Search Engine**: FTS5 queries against the text cache, optionally filtered to a specific chat_id. Falls back to in-memory search if cache is stale.
@@ -75,7 +75,7 @@ Rust structs generate TypeScript types via `specta`. No manual type synchronizat
 
 ### IPC
 
-All frontend-to-backend communication via typed Tauri commands. Every command returns `Result<T, MsgsError>`. Backend pushes updates via Tauri events where needed (e.g., text cache build progress, export progress).
+All frontend-to-backend communication via typed Tauri commands. Every command returns `Result<T, MsgsError>`. The backend pushes `cache-status` events (`state`, `indexed`, `total`) during the text cache build. Export progress events are not built (see `WISHLIST.md`). Each command runs off the main thread.
 
 ### Version Information
 
@@ -202,12 +202,12 @@ All commands return `Result<T, MsgsError>`.
 | Command | Input | Output | Purpose |
 |---------|-------|--------|---------|
 | `check_db_access` | (none) | `DbStatus` | Verify chat.db is readable, helpful FDA error if not |
+| `get_cache_status` | (none) | `CacheStatus` | State of the search index: `not_started`, `building` (`indexed`, `total`), `ready`, or `failed` (`error`) |
 | `list_conversations` | offset, limit, sort_by | `Vec<Conversation>` | Paginated conversation list, sorted by recent |
 | `get_messages` | chat_id, offset, limit | `Vec<Message>` | Paginated messages for a conversation |
 | `search_messages` | query, chat_id (optional), offset, limit | `Vec<SearchResult>` | FTS5 search, global or per-chat |
 | `export_messages` | chat_id, start_message_id, end_message_id, include_attachments, export_path | `ExportResult` | Export the messages between two messages to JSON + attachment folder |
 | `get_version` | (none) | `String` | Version string with git hash and dirty status |
-| `rebuild_text_cache` | (none) | (none) | Force rebuild of the FTS5 text cache |
 
 ### Attachments
 
@@ -312,7 +312,7 @@ Each stage produces a working application.
 ### Stage 3: Search
 - Text cache builder — extract all `attributedBody` text into local FTS5 database on launch
 - `search_messages` command — FTS5 search with optional chat_id filter
-- `rebuild_text_cache` command — force cache rebuild
+- `get_cache_status` command and `cache-status` events — progress of the background build
 - Global search: results grouped by conversation with surrounding context
 - In-chat search: filter within current conversation, highlight matches
 - Click a search result to navigate to that message in context
@@ -325,7 +325,7 @@ Each stage produces a working application.
 - Amber highlight on selected range
 - Native file picker for export destination
 - JSON output with conversation metadata + messages + attachment files
-- Progress events pushed to frontend for large exports
+- Progress events pushed to frontend for large exports (on the wishlist, not built)
 - Escape to cancel selection mode
 
 ## Error Handling
@@ -338,7 +338,7 @@ All Tauri commands return `Result<T, MsgsError>`. The frontend maps error varian
 - **ParseError**: Logged as warning, message shown with "[unable to read message]" placeholder
 - **ExportError**: Shown inline in the export bar with option to retry
 - **AttachmentNotFound**: Metadata included in export JSON, file copy skipped, noted in export summary
-- **CacheError**: Search degrades gracefully, prompts user to rebuild cache
+- **CacheError**: Search degrades gracefully, and the search box shows the failure
 
 ## Testing Strategy
 

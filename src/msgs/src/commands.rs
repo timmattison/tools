@@ -1,16 +1,30 @@
-use tauri::State;
+use tauri::{Emitter, State};
 
 use crate::error::MsgsError;
-use crate::state::AppState;
+use crate::state::{AppState, CacheStatus};
 use crate::types::{Conversation, DbStatus, ExportResult, Message, SearchResult};
 
-#[tauri::command]
+/// The event that carries each change of the search index state.
+const CACHE_STATUS_EVENT: &str = "cache-status";
+
+#[tauri::command(async)]
 #[specta::specta]
-pub fn check_db_access(state: State<'_, AppState>) -> Result<DbStatus, MsgsError> {
-    state.open(|_status| {})
+pub fn check_db_access(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<DbStatus, MsgsError> {
+    state.open(move |status| {
+        let _ = app.emit(CACHE_STATUS_EVENT, status);
+    })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
+#[specta::specta]
+pub fn get_cache_status(state: State<'_, AppState>) -> Result<CacheStatus, MsgsError> {
+    state.cache_status()
+}
+
+#[tauri::command(async)]
 #[specta::specta]
 pub fn list_conversations(
     state: State<'_, AppState>,
@@ -20,7 +34,7 @@ pub fn list_conversations(
     state.list_conversations(offset, limit)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 #[specta::specta]
 pub fn get_messages(
     state: State<'_, AppState>,
@@ -31,13 +45,13 @@ pub fn get_messages(
     state.get_messages(chat_id, offset, limit)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 #[specta::specta]
 pub fn get_version() -> String {
     buildinfo::version_string!().to_string()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 #[specta::specta]
 pub fn search_messages(
     state: State<'_, AppState>,
@@ -49,7 +63,7 @@ pub fn search_messages(
     state.search(&query, chat_id, offset, limit)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 #[specta::specta]
 pub fn export_messages(
     state: State<'_, AppState>,

@@ -32,6 +32,7 @@ fn main() {
         ))
         .invoke_handler(tauri::generate_handler![
             commands::check_db_access,
+            commands::get_cache_status,
             commands::list_conversations,
             commands::get_messages,
             commands::get_version,

@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::Serialize;
 
-use crate::cache::TextCache;
+use crate::cache::{TextCache, PROGRESS_INTERVAL};
 use crate::db::MessageDb;
 use crate::error::MsgsError;
 use crate::export::export_conversation_range;
@@ -56,14 +56,34 @@ impl DataPaths {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum CacheStatus {
+    NotStarted,
     Building { indexed: i64, total: i64 },
     Ready,
+    Failed { error: String },
 }
 
 /// The search index and its state.
 enum CacheSlot {
     NotStarted,
+    Building { indexed: i64, total: i64 },
     Ready(TextCache),
+    Failed(String),
+}
+
+impl CacheSlot {
+    fn status(&self) -> CacheStatus {
+        match self {
+            Self::NotStarted => CacheStatus::NotStarted,
+            Self::Building { indexed, total } => CacheStatus::Building {
+                indexed: *indexed,
+                total: *total,
+            },
+            Self::Ready(_) => CacheStatus::Ready,
+            Self::Failed(error) => CacheStatus::Failed {
+                error: error.clone(),
+            },
+        }
+    }
 }
 
 /// The app state: the open chat.db and the search index.
@@ -83,6 +103,39 @@ fn not_initialized() -> MsgsError {
     MsgsError::DatabaseError("Database not initialized".to_string())
 }
 
+/// Build the search index. Uses its own read-only connection to chat.db,
+/// thus it holds no lock while it reads. Locks the slot only to store a
+/// report or the result.
+fn run_build(paths: &DataPaths, slot: &Mutex<CacheSlot>, on_status: &dyn Fn(CacheStatus)) {
+    let set = |new: CacheSlot| {
+        if let Ok(mut guard) = slot.lock() {
+            *guard = new;
+        }
+    };
+    let built = (|| -> Result<TextCache, MsgsError> {
+        let db = MessageDb::open_at(&paths.chat_db)?;
+        let cache = TextCache::open_at(&paths.cache_db)?;
+        if cache.needs_rebuild(db.connection())? {
+            cache.rebuild(db.connection(), PROGRESS_INTERVAL, &mut |indexed, total| {
+                set(CacheSlot::Building { indexed, total });
+                on_status(CacheStatus::Building { indexed, total });
+            })?;
+        }
+        Ok(cache)
+    })();
+    match built {
+        Ok(cache) => {
+            set(CacheSlot::Ready(cache));
+            on_status(CacheStatus::Ready);
+        }
+        Err(e) => {
+            let error = e.to_string();
+            set(CacheSlot::Failed(error.clone()));
+            on_status(CacheStatus::Failed { error });
+        }
+    }
+}
+
 impl AppState {
     /// Make the state. `paths` is an error text when the home directory is
     /// unknown, and the first `open` reports it.
@@ -94,20 +147,28 @@ impl AppState {
         }
     }
 
-    /// Open chat.db and the search index. Calls `on_status` with each change
-    /// of the index state.
+    /// Open chat.db and start the build of the search index on a new thread.
+    /// Returns when chat.db is open. Calls `on_status` from the build thread
+    /// with each change of the index state. A second call starts no second
+    /// build, unless the last build failed.
     ///
     /// # Errors
     ///
-    /// Returns `MsgsError` when the access check, the cache or its rebuild
-    /// fails. A chat.db that cannot open gives `Ok` with `accessible: false`.
+    /// Returns `MsgsError` when the access check fails. A chat.db that cannot
+    /// open gives `Ok` with `accessible: false`. A failed build is a
+    /// `CacheStatus::Failed`, not an error.
     pub fn open(
         &self,
         on_status: impl Fn(CacheStatus) + Send + 'static,
     ) -> Result<DbStatus, MsgsError> {
         let mut db_slot = lock(&self.db)?;
         if let Some(db) = db_slot.as_ref() {
-            return db.check_access();
+            let status = db.check_access()?;
+            drop(db_slot);
+            if matches!(*lock(&self.cache)?, CacheSlot::Failed(_)) {
+                self.start_build(on_status)?;
+            }
+            return Ok(status);
         }
         let inaccessible = |error: String| DbStatus {
             accessible: false,
@@ -121,23 +182,47 @@ impl AppState {
         match MessageDb::open_at(&paths.chat_db) {
             Ok(db) => {
                 let status = db.check_access()?;
-
-                // Auto-initialize the text cache so search works immediately
-                let cache = TextCache::open_at(&paths.cache_db)?;
-                if cache.needs_rebuild(db.connection())? {
-                    on_status(CacheStatus::Building {
-                        indexed: 0,
-                        total: status.message_count.unwrap_or(0),
-                    });
-                    cache.rebuild(db.connection())?;
-                }
-                *lock(&self.cache)? = CacheSlot::Ready(cache);
-                on_status(CacheStatus::Ready);
                 *db_slot = Some(db);
+                drop(db_slot);
+                self.start_build(on_status)?;
                 Ok(status)
             }
             Err(e) => Ok(inaccessible(e.to_string())),
         }
+    }
+
+    /// Set the slot to building and start the build thread. Does nothing
+    /// when a build runs or the index is ready.
+    fn start_build(
+        &self,
+        on_status: impl Fn(CacheStatus) + Send + 'static,
+    ) -> Result<(), MsgsError> {
+        let Ok(paths) = &self.paths else {
+            return Ok(());
+        };
+        {
+            let mut slot = lock(&self.cache)?;
+            if !matches!(*slot, CacheSlot::NotStarted | CacheSlot::Failed(_)) {
+                return Ok(());
+            }
+            *slot = CacheSlot::Building {
+                indexed: 0,
+                total: 0,
+            };
+        }
+        let paths = paths.clone();
+        let slot = Arc::clone(&self.cache);
+        std::thread::spawn(move || run_build(&paths, &slot, &on_status));
+        Ok(())
+    }
+
+    /// The state of the search index.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MsgsError::DatabaseError` when a lock is poisoned.
+    pub fn cache_status(&self) -> Result<CacheStatus, MsgsError> {
+        Ok(lock(&self.cache)?.status())
     }
 
     /// List conversations, paginated.
@@ -192,10 +277,13 @@ impl AppState {
             let slot = lock(&self.cache)?;
             match &*slot {
                 CacheSlot::Ready(cache) => cache.search(query, chat_id, limit, offset)?,
-                CacheSlot::NotStarted => {
+                CacheSlot::NotStarted | CacheSlot::Building { .. } => {
                     return Err(MsgsError::CacheError(
-                        "Text cache not initialized".to_string(),
+                        "The search index is still building".to_string(),
                     ));
+                }
+                CacheSlot::Failed(error) => {
+                    return Err(MsgsError::CacheError(error.clone()));
                 }
             }
         };
@@ -353,5 +441,103 @@ mod tests {
             Err(MsgsError::CacheError(text)) => assert!(text.contains("building"), "{text}"),
             other => panic!("expected a building error, got {other:?}"),
         }
+    }
+
+    /// Collect each status that `open` reports, and wait for the last one.
+    fn statuses_of_a_finished_build(paths: DataPaths) -> (AppState, Vec<CacheStatus>) {
+        let state = AppState::new(Ok(paths));
+        let (tx, rx) = mpsc::channel();
+        state
+            .open(move |status| {
+                let _ = tx.send(status);
+            })
+            .expect("open");
+        let mut seen = Vec::new();
+        while let Ok(status) = rx.recv_timeout(CALL_TIMEOUT) {
+            let last = matches!(status, CacheStatus::Ready | CacheStatus::Failed { .. });
+            seen.push(status);
+            if last {
+                break;
+            }
+        }
+        (state, seen)
+    }
+
+    fn fixture_with_messages(count: i64) -> ChatDbFixture {
+        let fixture = ChatDbFixture::new();
+        let chat = fixture.add_chat("friend", Some("Friend"), 45);
+        for n in 0..count {
+            fixture.add_message(MessageSpec {
+                text: Some(format!("lunch {n}")),
+                date: apple_ns(1_700_000_000 + n, 0),
+                chats: vec![chat],
+                ..MessageSpec::default()
+            });
+        }
+        fixture
+    }
+
+    #[test]
+    fn a_finished_build_reports_ready_and_search_works() {
+        let fixture = fixture_with_messages(3);
+        let paths = DataPaths {
+            chat_db: fixture.path().to_path_buf(),
+            cache_db: fixture.dir().join("text-cache.db"),
+        };
+        let (state, seen) = statuses_of_a_finished_build(paths);
+        assert_eq!(seen.last(), Some(&CacheStatus::Ready));
+        assert_eq!(state.cache_status().expect("status"), CacheStatus::Ready);
+        let hits = state.search("lunch", None, 0, 50).expect("search");
+        assert_eq!(hits.len(), 3);
+    }
+
+    #[test]
+    fn progress_reports_never_go_back_and_end_at_the_total() {
+        let fixture = fixture_with_messages(3);
+        let paths = DataPaths {
+            chat_db: fixture.path().to_path_buf(),
+            cache_db: fixture.dir().join("text-cache.db"),
+        };
+        let (_state, seen) = statuses_of_a_finished_build(paths);
+        let indexed: Vec<i64> = seen
+            .iter()
+            .filter_map(|status| match status {
+                CacheStatus::Building { indexed, total } => {
+                    assert_eq!(*total, 3);
+                    Some(*indexed)
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            indexed.windows(2).all(|pair| pair[0] < pair[1]),
+            "{indexed:?}"
+        );
+        assert_eq!(indexed.last(), Some(&3));
+    }
+
+    #[test]
+    fn a_cache_that_cannot_open_fails_while_the_database_works() {
+        let fixture = fixture_with_messages(1);
+        let blocker = fixture.dir().join("blocker");
+        std::fs::write(&blocker, "a file").expect("write blocker");
+        let paths = DataPaths {
+            chat_db: fixture.path().to_path_buf(),
+            cache_db: blocker.join("x").join("text-cache.db"),
+        };
+        let (state, seen) = statuses_of_a_finished_build(paths);
+        assert!(
+            matches!(seen.last(), Some(CacheStatus::Failed { .. })),
+            "{seen:?}"
+        );
+        assert!(matches!(
+            state.cache_status().expect("status"),
+            CacheStatus::Failed { .. }
+        ));
+        assert_eq!(state.list_conversations(0, 50).expect("list").len(), 1);
+        assert!(matches!(
+            state.search("lunch", None, 0, 50),
+            Err(MsgsError::CacheError(_))
+        ));
     }
 }
