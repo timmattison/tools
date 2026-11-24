@@ -435,6 +435,10 @@ fn a_help_among_the_flags_prints_the_usage_and_asks_no_host() {
         &["exec", "--help"],
         &["cp", "--help"],
         &["rm", "--help"],
+        &["logs", "-f", "-h"],
+        &["exec", "-it", "-h"],
+        &["cp", "-a", "-h"],
+        &["rm", "-h", "job-a"],
     ] {
         let fixture = fleet();
         let run = fixture.run(args);

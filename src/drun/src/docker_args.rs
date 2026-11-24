@@ -1265,6 +1265,10 @@ mod tests {
             &["--help"],
             &["--help", "a", "b"],
             &["--help=false", "--help"],
+            &["-f", "-h"],
+            &["-h", "a", "b"],
+            &["-fh"],
+            &["--help=false", "-h"],
         ] {
             assert_eq!(parse_logs(&args(words)), Ok(Request::Help), "{words:?}");
             assert_eq!(parse_rm(&args(words)), Ok(Request::Help), "{words:?}");
@@ -1273,6 +1277,9 @@ mod tests {
             &["-it", "--help"][..],
             &["--help"],
             &["-i", "--help=false", "--help", "job", "sh"],
+            &["-it", "-h"],
+            &["-ith"],
+            &["-h", "job", "sh"],
         ] {
             assert_eq!(parse_exec(&args(words)), Ok(Request::Help), "{words:?}");
         }
@@ -1280,6 +1287,8 @@ mod tests {
             &["-a", "--help"][..],
             &["--help"],
             &["--help", "./a", "./b"],
+            &["-a", "-h"],
+            &["-h", "./a", "./b"],
         ] {
             assert_eq!(parse_cp(&args(words)), Ok(Request::Help), "{words:?}");
         }
@@ -1289,6 +1298,8 @@ mod tests {
     fn a_help_that_is_off_or_after_the_command_is_no_request_for_the_help() {
         let job = Ok(Request::Command("job".to_owned()));
         assert_eq!(parse_logs(&args(&["--help", "--help=false", "job"])), job);
+        assert_eq!(parse_logs(&args(&["-h", "--help=false", "job"])), job);
+        assert_eq!(parse_exec(&args(&["-h=false", "job", "ls", "-h"])), job);
         assert_eq!(
             parse_exec(&args(&["--help", "--help=false", "job", "ls"])),
             job
