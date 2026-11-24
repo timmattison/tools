@@ -65,7 +65,16 @@ pub fn extract_text_from_attributed_body(blob: &[u8]) -> Option<String> {
     };
 
     let text_start = len_pos.checked_add(len_size)?;
-    let text_bytes = blob.get(text_start..text_start.checked_add(text_len)?)?;
+    let Some(text_bytes) = text_start
+        .checked_add(text_len)
+        .and_then(|text_end| blob.get(text_start..text_end))
+    else {
+        log::warn!(
+            "attributedBody: length {text_len} runs past the blob end, {} bytes available",
+            blob.len().saturating_sub(text_start)
+        );
+        return None;
+    };
     String::from_utf8(text_bytes.to_vec()).ok().or_else(|| {
         log::warn!("attributedBody: text is not valid UTF-8, using lossy conversion");
         Some(String::from_utf8_lossy(text_bytes).into_owned())
@@ -227,6 +236,15 @@ mod tests {
         let len_pos = blob.len() - 200 - 3 - b"\x86\x84\x02iI".len();
         assert_eq!(blob[len_pos], 0x81);
         blob[len_pos + 1..len_pos + 3].copy_from_slice(&(-5_i16).to_le_bytes());
+        assert_eq!(extract_text_from_attributed_body(&blob), None);
+    }
+
+    #[test]
+    fn test_extract_rejects_a_length_past_the_blob_end() {
+        let mut blob = build_test_blob("0123456789");
+        let len_pos = blob.len() - 10 - 1 - b"\x86\x84\x02iI".len();
+        assert_eq!(blob[len_pos], 10);
+        blob[len_pos] = 50;
         assert_eq!(extract_text_from_attributed_body(&blob), None);
     }
 }
