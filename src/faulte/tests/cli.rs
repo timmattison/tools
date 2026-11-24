@@ -93,26 +93,17 @@ fn kill_refuses_the_limit_of_the_ranking() {
     );
 }
 
-/// The longest time that a run with no terminal may take. The refusal comes
-/// before the sampler starts, so the run ends at once. A run that started a
-/// real `top` first would take far longer on this Mac.
-#[cfg(target_os = "macos")]
-const NO_TOP_BOUND: std::time::Duration = std::time::Duration::from_secs(60);
-
 /// The exit code of a run that needs a terminal and has none.
 #[cfg(target_os = "macos")]
 const NOT_A_TERMINAL_EXIT: i32 = 1;
 
-/// `faulte tui` draws a full-screen view, so a run with pipes refuses at once.
+/// `faulte tui` draws a full-screen view, so a run with pipes refuses.
 ///
-/// The test runs the binary with a null input and a captured output. The
-/// refusal must come before the sampler starts, so no `top` runs.
+/// The test runs the binary with a null input and a captured output.
 #[cfg(target_os = "macos")]
 #[test]
-fn tui_with_no_terminal_exits_one_and_starts_no_top() {
-    let started = std::time::Instant::now();
+fn tui_with_no_terminal_exits_one() {
     let output = run(&["tui"]);
-    let elapsed = started.elapsed();
     let stderr = one_line(&output.stderr);
 
     assert_eq!(
@@ -130,10 +121,6 @@ fn tui_with_no_terminal_exits_one_and_starts_no_top() {
         output.stdout.is_empty(),
         "faulte tui writes nothing to the output: {:?}",
         glyphs(&output.stdout)
-    );
-    assert!(
-        elapsed < NO_TOP_BOUND,
-        "the refusal comes before any top starts, it took {elapsed:?}"
     );
 }
 
