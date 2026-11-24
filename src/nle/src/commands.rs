@@ -5,6 +5,19 @@ use tauri_plugin_shell::ShellExt;
 use crate::error::NleError;
 use crate::types::{ExportFormat, ExportOptions, LoadedRecording, Recording, RecordingMetadata};
 
+/// Run blocking file work on the blocking thread pool of the Tauri async
+/// runtime, so that the work does not hold a worker of that runtime.
+/// A panic in the work becomes `NleError::TaskError`.
+async fn run_blocking<T, F>(work: F) -> Result<T, NleError>
+where
+    F: FnOnce() -> Result<T, NleError> + Send + 'static,
+    T: Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|e| NleError::TaskError(e.to_string()))?
+}
+
 /// Canonicalize a path and verify it exists, returning the resolved path.
 fn validate_path(path: &str) -> Result<PathBuf, NleError> {
     let file_path = PathBuf::from(path);
@@ -19,7 +32,7 @@ fn validate_path(path: &str) -> Result<PathBuf, NleError> {
 /// Load a recording from a file path, returning both the recording and its metadata.
 #[tauri::command]
 pub async fn load_recording(path: String) -> Result<LoadedRecording, NleError> {
-    load_recording_from(&path)
+    run_blocking(move || load_recording_from(&path)).await
 }
 
 /// Load the recording at `path` and pair it with its metadata.
@@ -98,7 +111,7 @@ pub async fn save_recording(
     recording: Recording,
     compress: Option<bool>,
 ) -> Result<(), NleError> {
-    save_recording_to(&path, &recording, compress)
+    run_blocking(move || save_recording_to(&path, &recording, compress)).await
 }
 
 /// Save `recording` to `path`. It refuses a file name that does not end in
@@ -118,7 +131,7 @@ fn save_recording_to(
 /// Only considers files ending in `.json` or `.json.gz`.
 #[tauri::command]
 pub async fn list_recordings(directory: String) -> Result<Vec<RecordingMetadata>, NleError> {
-    list_recordings_in(&directory)
+    run_blocking(move || list_recordings_in(&directory)).await
 }
 
 /// Read the metadata of each loadable `.json` or `.json.gz` file in `directory`.

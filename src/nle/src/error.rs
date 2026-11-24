@@ -18,6 +18,9 @@ pub enum NleError {
 
     #[error("Invalid format: {0}")]
     InvalidFormat(String),
+
+    #[error("Background task failed: {0}")]
+    TaskError(String),
 }
 
 // Tauri requires errors to implement Serialize

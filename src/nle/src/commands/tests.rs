@@ -372,3 +372,56 @@ fn video_export_args_gives_beta_the_canonical_output_path() {
     let at = args.iter().position(|a| a == "--output").unwrap();
     assert_eq!(args[at + 1], expected);
 }
+
+#[test]
+fn run_blocking_runs_the_work_on_another_thread() {
+    let caller = std::thread::current().id();
+    let worker = tauri::async_runtime::block_on(async {
+        run_blocking(|| Ok(std::thread::current().id())).await
+    })
+    .unwrap();
+    assert_ne!(caller, worker);
+}
+
+#[test]
+fn run_blocking_turns_a_panic_into_a_task_error() {
+    let result: Result<(), NleError> =
+        tauri::async_runtime::block_on(async { run_blocking(|| panic!("boom")).await });
+    assert!(
+        matches!(result, Err(NleError::TaskError(_))),
+        "got {result:?}"
+    );
+}
+
+#[test]
+fn load_recording_command_returns_the_recording() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("a.json");
+    write_fixture(&file, false);
+    let loaded =
+        tauri::async_runtime::block_on(load_recording(file.to_string_lossy().to_string())).unwrap();
+    assert_eq!(loaded.metadata.event_count, 2);
+}
+
+#[test]
+fn save_recording_command_writes_a_file_that_loads_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("a.json");
+    tauri::async_runtime::block_on(save_recording(
+        file.to_string_lossy().to_string(),
+        Recording::test_fixture(),
+        None,
+    ))
+    .unwrap();
+    assert!(Recording::load(&file).is_ok());
+}
+
+#[test]
+fn list_recordings_command_lists_one_saved_file() {
+    let dir = tempfile::tempdir().unwrap();
+    write_fixture(&dir.path().join("a.json"), false);
+    let listed =
+        tauri::async_runtime::block_on(list_recordings(dir.path().to_string_lossy().to_string()))
+            .unwrap();
+    assert_eq!(listed.len(), 1);
+}
