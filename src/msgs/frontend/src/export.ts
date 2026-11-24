@@ -182,8 +182,12 @@ async function performExport(): Promise<void> {
     }
   } finally {
     exporting = false;
-    // After a success the button stays disabled until the selection changes
-    if (!succeeded && startMessageEl === start && endMessageEl === end) {
+    if (startMessageEl !== start || endMessageEl !== end) {
+      // The user changed the selection while the export ran: the button
+      // follows the new selection
+      if (selectionMode) updateExportBar();
+    } else if (!succeeded) {
+      // After a success the button stays disabled until the selection changes
       setConfirmDisabled(false);
     }
   }
