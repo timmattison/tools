@@ -23,6 +23,8 @@ dirs.workspace = true
 tauri-build.workspace = true
 
 [dev-dependencies]
+# The row trace lets a test write to chat.db between two reads.
+rusqlite = { workspace = true, features = ["trace"] }
 tempfile.workspace = true
 childenv.workspace = true
 specta-typescript.workspace = true

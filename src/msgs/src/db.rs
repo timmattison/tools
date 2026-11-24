@@ -972,6 +972,72 @@ mod tests {
     }
 
     #[test]
+    fn get_message_with_context_keeps_its_snapshot_when_the_chat_is_deleted_during_the_reads() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        use rusqlite::trace::{TraceEvent, TraceEventCodes};
+
+        let fx = ChatDbFixture::new();
+        let chat = fx.add_chat("c", None, 45);
+        let ids: Vec<i64> = (1..=7)
+            .map(|n| fx.add_message(text_message(&format!("m{n}"), n * 10, 0, &[chat])))
+            .collect();
+        // Messages writes chat.db in WAL mode, where a reader keeps its
+        // snapshot while a writer commits.
+        let deleter = Connection::open(fx.path()).expect("open the deleting connection");
+        let mode: String = deleter
+            .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+            .expect("set WAL mode");
+        assert_eq!(mode, "wal");
+
+        let mut db = fx.open_db();
+        let deleted_rows = Arc::new(AtomicUsize::new(0));
+        let deleted_rows_seen = Arc::clone(&deleted_rows);
+        let mut fired = false;
+        // The first row comes from the first read, after that read took its
+        // snapshot. Messages deletes the chat at that time.
+        db.conn
+            .trace_v2(
+                TraceEventCodes::SQLITE_TRACE_ROW,
+                Some(move |_: TraceEvent<'_>| {
+                    if !fired {
+                        fired = true;
+                        let joins = deleter
+                            .execute("DELETE FROM chat_message_join WHERE chat_id = ?1", [chat])
+                            .unwrap_or(0);
+                        let chats = deleter
+                            .execute("DELETE FROM chat WHERE ROWID = ?1", [chat])
+                            .unwrap_or(0);
+                        deleted_rows_seen.store(joins + chats, Ordering::SeqCst);
+                    }
+                }),
+            )
+            .expect("set the row trace");
+
+        let result = db.get_message_with_context(ids[3], chat);
+        assert_eq!(
+            deleted_rows.load(Ordering::SeqCst),
+            ids.len() + 1,
+            "the deletion did not commit during the reads"
+        );
+        let hit = result
+            .expect("a chat deleted during the reads failed the hit")
+            .expect("the first read found the message");
+        assert_eq!(hit.message.message_id, ids[3]);
+        let before: Vec<i64> = hit.context_before.iter().map(|m| m.message_id).collect();
+        let after: Vec<i64> = hit.context_after.iter().map(|m| m.message_id).collect();
+        assert_eq!(before, ids[0..3].to_vec());
+        assert_eq!(after, ids[4..7].to_vec());
+        assert_eq!(hit.conversation.chat_id, chat);
+        assert_eq!(hit.conversation.message_count, 7);
+
+        // The next call reads a new snapshot, thus no transaction stays open.
+        let later = db.get_message_with_context(ids[3], chat);
+        assert!(matches!(later, Ok(None)), "{later:?}");
+    }
+
+    #[test]
     fn list_conversations_clamps_a_negative_limit_to_one() {
         let fx = ChatDbFixture::new();
         for i in 0..3 {
