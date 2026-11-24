@@ -1077,10 +1077,10 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
   - op-cache writes an audit trail to `$XDG_STATE_HOME/op-cache/audit.jsonl`. When
     `XDG_STATE_HOME` is unset, empty, or relative, the file is `~/.local/state/op-cache/audit.jsonl`.
     The audit trail has no switch. Each line is one JSON record, of one of two kinds:
-    - `op_start`, before `op` runs: the time, the `request_id`, the attempt, the operation (`read` or
-      `read-binary`), the reference, the working directory, the cache file, the zellij session and
-      pane, `TERM_PROGRAM`, the Claude Code session, and the chain of ancestor processes (at most 32,
-      each command line cut to 1024 bytes). The Claude Code session is the nearest ancestor that has
+    - `op_start`, before `op` runs: the time, the `request_id`, the attempt, the operation (`read`,
+      `read-binary`, or `item-get` for `list-fields`), the reference, the working directory, the
+      cache file, the zellij session and pane, `TERM_PROGRAM`, the Claude Code session, and the chain
+      of ancestor processes (at most 32, each command line cut to 1024 bytes). The Claude Code session is the nearest ancestor that has
       a file `sessions/<pid>.json` in `$CLAUDE_CONFIG_DIR`, else in `~/.claude`. A file whose
       `startedAt` is earlier than the start of that ancestor is skipped, because that PID now belongs
       to a different process. The lookup then continues to the next ancestor.

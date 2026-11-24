@@ -19,6 +19,9 @@ pub(crate) enum Operation<'a> {
     Read,
     /// `op read --out-file <output_path> <reference>`
     ReadBinary { output_path: &'a Path },
+    /// `op item get <item> --vault <vault> --format json`. The reference of
+    /// the run is the item path, `op://<vault>/<item>`.
+    ItemGet { vault: &'a str, item: &'a str },
 }
 
 impl Operation<'_> {
@@ -27,6 +30,7 @@ impl Operation<'_> {
         match self {
             Self::Read => "read",
             Self::ReadBinary { .. } => "read-binary",
+            Self::ItemGet { .. } => "item-get",
         }
     }
 
@@ -40,17 +44,28 @@ impl Operation<'_> {
                 output_path.to_string_lossy().into_owned(),
                 reference.to_owned(),
             ],
+            Self::ItemGet { vault, item } => vec![
+                "item".to_owned(),
+                "get".to_owned(),
+                (*item).to_owned(),
+                "--vault".to_owned(),
+                (*vault).to_owned(),
+                "--format".to_owned(),
+                "json".to_owned(),
+            ],
         }
     }
 
     /// True when `output` carries the secret: `op` exited 0 and the value is
-    /// not empty. For `read`, the value is the standard output without its
-    /// surrounding whitespace. For `read-binary`, it is the file at
-    /// `output_path`.
+    /// not empty. For `read` and `item-get`, the value is the standard output
+    /// without its surrounding whitespace. For `read-binary`, it is the file
+    /// at `output_path`.
     fn gave_value(&self, output: &Output) -> bool {
         output.status.success()
             && match self {
-                Self::Read => !String::from_utf8_lossy(&output.stdout).trim().is_empty(),
+                Self::Read | Self::ItemGet { .. } => {
+                    !String::from_utf8_lossy(&output.stdout).trim().is_empty()
+                }
                 Self::ReadBinary { output_path } => output_path
                     .metadata()
                     .is_ok_and(|metadata| metadata.len() > 0),

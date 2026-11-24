@@ -336,7 +336,7 @@ impl OpCache {
         }
 
         // Fetch from 1Password
-        let item_json = fetch_item_from_1password(op_path)?;
+        let item_json = fetch_item_from_1password(op_path, &self.cache_path)?;
         let fields = parse_item_fields(&item_json, field_prefix)?;
 
         // Cache the result
@@ -523,7 +523,11 @@ fn fetch_binary_from_1password(
     Err(Error::OpReadFailed(op_path.to_string()))
 }
 
-fn fetch_item_from_1password(op_path: &OpPath) -> Result<serde_json::Value> {
+/// Runs `op item get --format json` for the item at `op_path` through
+/// [`OpRun`], so each attempt writes the audit trail and shows the
+/// notification, as a read does. Output that is not JSON is an error at once,
+/// and no further attempt runs.
+fn fetch_item_from_1password(op_path: &OpPath, cache_path: &Path) -> Result<serde_json::Value> {
     ensure_op_available()?;
 
     let (vault, item) = op_path.vault_and_item().ok_or_else(|| {
@@ -532,22 +536,20 @@ fn fetch_item_from_1password(op_path: &OpPath) -> Result<serde_json::Value> {
             op_path
         ))
     })?;
+    let mut run = OpRun::new(
+        Operation::ItemGet { vault, item },
+        op_path,
+        cache_path,
+        OP_MAX_RETRIES,
+    );
 
     for attempt in 1..=OP_MAX_RETRIES {
-        match childenv::command("op")
-            .args(["item", "get", item, "--vault", vault, "--format", "json"])
-            .output()
-        {
-            Ok(output) if output.status.success() => {
+        match run.attempt(attempt) {
+            Ok(output) if run.gave_value(&output) => {
                 let json_str = String::from_utf8_lossy(&output.stdout);
-                match serde_json::from_str(json_str.trim()) {
-                    Ok(value) => return Ok(value),
-                    Err(e) => {
-                        return Err(Error::ItemJsonParse(format!(
-                            "invalid JSON from `op item get`: {e}"
-                        )));
-                    }
-                }
+                return serde_json::from_str(json_str.trim()).map_err(|e| {
+                    Error::ItemJsonParse(format!("invalid JSON from `op item get`: {e}"))
+                });
             }
             _ => {}
         }
