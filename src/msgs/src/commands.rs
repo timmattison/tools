@@ -142,22 +142,6 @@ pub fn rebuild_text_cache(state: State<'_, AppState>) -> Result<(), MsgsError> {
 
 #[tauri::command]
 #[specta::specta]
-pub fn get_attachment(
-    state: State<'_, AppState>,
-    attachment_id: i64,
-) -> Result<Option<String>, MsgsError> {
-    let lock = state
-        .inner
-        .lock()
-        .map_err(|e| MsgsError::DatabaseError(e.to_string()))?;
-    let db = lock.db.as_ref().ok_or(MsgsError::DatabaseError(
-        "Database not initialized".to_string(),
-    ))?;
-    db.get_attachment_path(attachment_id)
-}
-
-#[tauri::command]
-#[specta::specta]
 pub fn export_messages(
     state: State<'_, AppState>,
     chat_id: i64,

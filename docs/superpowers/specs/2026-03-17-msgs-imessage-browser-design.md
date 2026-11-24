@@ -206,13 +206,12 @@ All commands return `Result<T, MsgsError>`.
 | `get_messages` | chat_id, offset, limit | `Vec<Message>` | Paginated messages for a conversation |
 | `search_messages` | query, chat_id (optional), offset, limit | `Vec<SearchResult>` | FTS5 search, global or per-chat |
 | `export_messages` | chat_id, start_message_id, end_message_id, include_attachments, export_path | `ExportResult` | Export the messages between two messages to JSON + attachment folder |
-| `get_attachment` | attachment_id | asset URI | Serve attachment via Tauri asset protocol for webview display |
 | `get_version` | (none) | `String` | Version string with git hash and dirty status |
 | `rebuild_text_cache` | (none) | (none) | Force rebuild of the FTS5 text cache |
 
-### Attachment Serving
+### Attachments
 
-Attachments are served via Tauri's asset protocol (`asset://` scheme), which allows the webview to display images and other media inline. The `get_attachment` command resolves the `filename` column from the `attachment` table (which contains absolute paths like `~/Library/Messages/Attachments/...`), validates the path is within the Messages directory (path traversal prevention), and returns an asset URI the frontend can use in `<img>` or `<a>` tags. HEIC images are not converted — they display natively in macOS WebKit webviews.
+The message view shows each attachment as one line with its name and size. The webview does not load attachment files, thus the app needs no asset protocol and no file-system plugin. The export copies the attachment files (see the export section). Inline display of images is on the wishlist (`WISHLIST.md`).
 
 ### Export Range
 
@@ -318,7 +317,6 @@ Each stage produces a working application.
 
 ### Stage 4: Export
 - `export_messages` command — date-range-based export with attachment copying
-- `get_attachment` command — serve attachment files via Tauri asset protocol
 - Export selection mode: click start message, click end message
 - Amber highlight on selected range
 - Native file picker for export destination
@@ -349,7 +347,7 @@ All Tauri commands return `Result<T, MsgsError>`. The frontend maps error varian
 
 - Read-only database access (SQLite `SQLITE_OPEN_READ_ONLY`)
 - No network access needed
-- Attachment file paths validated to be within `~/Library/Messages/Attachments/` before serving (path traversal prevention)
+- Attachment file paths validated to be within `~/Library/Messages/Attachments/` before the export copies them (path traversal prevention)
 - CSP configured to prevent loading external resources
-- Tauri v2 capabilities restricted to the defined commands and asset protocol
+- Tauri v2 capabilities restricted to `core:default` and `dialog:default` (the save dialog of the export). The app has no file-system plugin and no asset protocol
 - Text cache database stored in `~/.local/share/msgs/` with no sensitive data beyond message text

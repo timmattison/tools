@@ -8,7 +8,6 @@ authors.workspace = true
 [dependencies]
 tauri.workspace = true
 tauri-plugin-dialog.workspace = true
-tauri-plugin-fs.workspace = true
 rusqlite.workspace = true
 specta.workspace = true
 buildinfo.workspace = true

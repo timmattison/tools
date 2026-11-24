@@ -404,35 +404,6 @@ impl MessageDb {
         &self.conn
     }
 
-    /// Get an attachment's file path by ROWID, validated to be within Messages/Attachments.
-    ///
-    /// # Errors
-    ///
-    /// Returns `MsgsError::DatabaseError` on query failure.
-    pub fn get_attachment_path(&self, attachment_id: i64) -> Result<Option<String>, MsgsError> {
-        let path: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT filename FROM attachment WHERE ROWID = ?1",
-                [attachment_id],
-                |row| row.get(0),
-            )
-            .ok()
-            .flatten();
-
-        // Validate path is within Messages/Attachments
-        if let Some(ref p) = path {
-            let expanded = crate::util::expand_tilde(p);
-            let allowed = dirs::home_dir()
-                .map(|h| h.join("Library/Messages/Attachments"))
-                .unwrap_or_default();
-            if !expanded.starts_with(&allowed) {
-                return Ok(None);
-            }
-        }
-        Ok(path)
-    }
-
     /// Get a single conversation's metadata by chat_id.
     ///
     /// # Errors

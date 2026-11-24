@@ -19,7 +19,6 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
         .manage(AppState {
             inner: Mutex::new(AppStateInner {
                 db: None,
@@ -33,7 +32,6 @@ fn main() {
             commands::get_version,
             commands::search_messages,
             commands::rebuild_text_cache,
-            commands::get_attachment,
             commands::export_messages,
         ])
         .run(tauri::generate_context!())

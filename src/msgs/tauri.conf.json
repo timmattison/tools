@@ -1,5 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/nicerdicer/tauri-v2/main/tooling/cli/schema.json",
+  "$schema": "https://schema.tauri.app/config/2",
   "productName": "msgs",
   "version": "0.1.0",
   "identifier": "com.timmattison.msgs",
@@ -21,7 +21,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: https://asset.localhost"
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'"
     }
   }
 }

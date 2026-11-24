@@ -26,3 +26,12 @@ design left each one out to keep the first version small.
   pause, a step, and a seek, so a reader watches the path change.
 - **A web view or a remote view.** The table draws under the terminal of the machine that runs
   the trace. A recorded file travels, and a live run does not.
+
+## msgs (iMessage browser)
+
+The design of `msgs` described these features, and the first version does not have them.
+
+- **Inline display of image attachments.** The message view shows each attachment as a line
+  with its name and size. A view that shows the image needs the Tauri asset protocol with a
+  scope limited to `~/Library/Messages/Attachments`, and a command that gives the frontend
+  the URL of one attachment after a path check.

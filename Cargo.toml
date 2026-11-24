@@ -224,7 +224,6 @@ windows-sys = { version = "0.60", features = [
 tauri = "2"
 tauri-build = "2"
 tauri-plugin-dialog = "2"
-tauri-plugin-fs = "2"
 
 # SQLite: The "bundled" feature compiles SQLite from source with SQLITE_THREADSAFE=1,
 # which enables multi-thread/serialized mode by default. There is no separate
