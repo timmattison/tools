@@ -14,7 +14,7 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 /// The memory of a computer with 16 GiB, in KiB.
@@ -316,7 +316,7 @@ impl Fixture {
     /// `stdin` on its stdin. Without `stdin`, stdin is empty.
     fn run_full(&self, args: &[&str], env: &[(&str, &str)], stdin: Option<&str>) -> Run {
         let path = format!("{}:/usr/bin:/bin", self.path().join("bin").display());
-        let mut command = Command::new(env!("CARGO_BIN_EXE_drun"));
+        let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_drun"));
         command
             .args(args)
             .current_dir(self.path())
