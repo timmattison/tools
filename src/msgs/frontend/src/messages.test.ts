@@ -122,3 +122,49 @@ describe("loadConversation", () => {
     expect(error?.textContent).toContain("Database error: locked");
   });
 });
+
+function byTestId(id: string): HTMLElement {
+  const el = document.getElementById(id);
+  if (el === null) throw new Error(`no #${id} in the test markup`);
+  return el;
+}
+
+function messageEls(): HTMLElement[] {
+  return [...document.querySelectorAll<HTMLElement>(".message")];
+}
+
+describe("export selection", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    document.body.innerHTML = MARKUP;
+  });
+
+  it("is reset when another chat opens", async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    vi.mocked(save).mockResolvedValue("/tmp/msgs-test-export");
+    vi.mocked(invoke).mockImplementation((_command: string, args?: InvokeArgs) =>
+      Promise.resolve(
+        chatIdOf(args) === 1
+          ? [message(11, 1, 10, "b"), message(10, 1, 9, "a")]
+          : [message(21, 2, 10, "d"), message(20, 2, 9, "c")]
+      )
+    );
+    const { loadConversation } = await import("./messages");
+
+    await loadConversation(1, "One", "one", false);
+    byTestId("btn-export").click();
+    const [first, second] = messageEls();
+    first?.click();
+    second?.click();
+    expect(byTestId("btn-export-confirm").hasAttribute("disabled")).toBe(false);
+
+    await loadConversation(2, "Two", "two", false);
+
+    expect(byTestId("export-bar").classList.contains("hidden")).toBe(true);
+    expect(byTestId("btn-export-confirm").hasAttribute("disabled")).toBe(true);
+    byTestId("btn-export-confirm").click();
+    await settle();
+    expect(vi.mocked(invoke)).not.toHaveBeenCalledWith("export_messages", expect.anything());
+  });
+});
