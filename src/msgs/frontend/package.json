@@ -9,13 +9,14 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "check": "tsc --noEmit && vitest run"
+    "check": "tsc --noEmit && tsc --noEmit -p ../scripts/tsconfig.json && vitest run"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2.6.0"
   },
   "devDependencies": {
+    "@types/node": "26.6.6",
     "happy-dom": "21.0.4",
     "typescript": "^5.6",
     "vite": "^6",
