@@ -36,3 +36,27 @@ impl From<rusqlite::Error> for MsgsError {
 
 // Note: InvokeError conversion is provided automatically by Tauri's blanket
 // `impl<T: Serialize> From<T> for InvokeError`. No manual impl needed here.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each variant reaches the frontend as its message, because Tauri sends
+    /// the serialized error as the rejection value of the invoke.
+    #[test]
+    fn each_variant_serializes_to_its_message() {
+        let variants = [
+            MsgsError::NoFullDiskAccess,
+            MsgsError::DatabaseNotFound,
+            MsgsError::DatabaseError("db".to_string()),
+            MsgsError::ParseError("parse".to_string()),
+            MsgsError::ExportError("export".to_string()),
+            MsgsError::AttachmentNotFound("att".to_string()),
+            MsgsError::CacheError("cache".to_string()),
+        ];
+        for variant in variants {
+            let value = serde_json::to_value(&variant).expect("serialize the error");
+            assert_eq!(value, serde_json::Value::String(variant.to_string()));
+        }
+    }
+}
