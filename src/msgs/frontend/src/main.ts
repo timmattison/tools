@@ -8,19 +8,23 @@ import {
 import { loadConversation } from "./messages";
 import { initCacheStatus } from "./cache-status";
 import { initSearch } from "./search";
-import { showError } from "./utils";
+import { messageOf, showError } from "./utils";
 
 export async function init(): Promise<void> {
-  const status = await invoke<DbStatus>("check_db_access");
-  if (!status.accessible) {
-    showError(status.error ?? "Cannot access message database");
-    return;
-  }
+  try {
+    const status = await invoke<DbStatus>("check_db_access");
+    if (!status.accessible) {
+      showError(status.error ?? "Cannot access message database");
+      return;
+    }
 
-  onConversationSelect(handleConversationSelect);
-  initSearch(handleSearchNavigate);
-  await initCacheStatus();
-  await initConversations();
+    onConversationSelect(handleConversationSelect);
+    initSearch(handleSearchNavigate);
+    await initCacheStatus();
+    await initConversations();
+  } catch (error) {
+    showError(`msgs could not start: ${messageOf(error)}`);
+  }
 }
 
 async function handleSearchNavigate(chatId: number, messageId: number): Promise<void> {

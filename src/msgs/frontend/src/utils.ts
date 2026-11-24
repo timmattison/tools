@@ -40,3 +40,13 @@ export function showError(message: string): void {
   overlay.textContent = message;
   overlay.classList.remove("hidden");
 }
+
+/**
+ * The text of an error of unknown type. Tauri rejects a command with the
+ * message string, so a string is the message itself.
+ */
+export function messageOf(error: unknown): string {
+  if (typeof error === "string") return error;
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
