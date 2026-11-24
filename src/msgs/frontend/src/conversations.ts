@@ -31,11 +31,7 @@ export async function initConversations(): Promise<void> {
     list.addEventListener("scroll", handleScroll);
 
     document.addEventListener("keydown", (e: KeyboardEvent) => {
-      // Don't capture keys when an input is focused
-      if (document.activeElement instanceof HTMLInputElement ||
-          document.activeElement instanceof HTMLTextAreaElement) {
-        return;
-      }
+      if (!isConversationKeyTarget(e.target)) return;
 
       const items = document.querySelectorAll<HTMLElement>(".conversation-item");
       if (items.length === 0) return;
@@ -76,6 +72,19 @@ export async function initConversations(): Promise<void> {
   list.innerHTML = "";
   conversationCache.clear();
   await loadMore();
+}
+
+/**
+ * Whether a key press belongs to the conversation list. It does when the target
+ * is the page body or sits inside the sidebar, and is not a control that uses
+ * the key itself.
+ */
+function isConversationKeyTarget(target: EventTarget | null): boolean {
+  if (target === document.body) return true;
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.closest("#sidebar") === null) return false;
+  if (target.isContentEditable) return false;
+  return target.closest("input, textarea, select, button") === null;
 }
 
 async function loadMore(): Promise<void> {

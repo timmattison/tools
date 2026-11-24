@@ -200,4 +200,13 @@ describe("conversation keyboard handler", () => {
     expect(event.defaultPrevented).toBe(false);
     expect(activeId()).toBe("1");
   });
+
+  it("still moves the selection on ArrowDown from the document body", async () => {
+    await setUp();
+
+    const event = press(document.body, "ArrowDown");
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(activeId()).toBe("2");
+  });
 });
