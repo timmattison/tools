@@ -165,6 +165,9 @@ impl AppState {
     }
 }
 
+/// Width of the address column.
+const ADDRESS_COLUMN_WIDTH: u16 = 40;
+
 /// Height of the help footer.
 const HELP_FOOTER_HEIGHT: u16 = 1;
 
@@ -237,7 +240,7 @@ fn render_table(frame: &mut Frame, area: Rect, state: &mut AppState) {
         Constraint::Length(7),  // Port
         Constraint::Length(8),  // PID
         Constraint::Min(15),    // Process
-        Constraint::Length(40), // Address
+        Constraint::Length(ADDRESS_COLUMN_WIDTH),
     ];
 
     let highlight_style = Style::default()
@@ -476,6 +479,22 @@ mod tests {
         assert_eq!(lines[0], "Multiple");
         assert_eq!(lines[1], "├─ 0.0.0.0");
         assert_eq!(lines[2], "└─ ::");
+    }
+
+    #[test]
+    fn test_address_column_fits_the_longest_ipv6_row() {
+        // The longest text of an IPv6 address: 8 groups of 4 hex digits.
+        let longest_ipv6 = std::net::Ipv6Addr::from(u128::MAX).to_string();
+        let cell = format_address_cell(&["0.0.0.0".to_string(), longest_ipv6]);
+        let widest = cell
+            .lines()
+            .map(unicode_width::UnicodeWidthStr::width)
+            .max()
+            .unwrap();
+        assert!(
+            usize::from(ADDRESS_COLUMN_WIDTH) >= widest,
+            "the address column is {ADDRESS_COLUMN_WIDTH} columns, but a row needs {widest}"
+        );
     }
 
     #[test]
