@@ -536,6 +536,9 @@ impl MessageDb {
     /// `None` when the message is not in the chat, for example when chat.db
     /// lost the message after the search index was built.
     ///
+    /// All reads see the snapshot of the first read. Thus a message or a chat
+    /// that Messages deletes during the reads cannot fail the hit.
+    ///
     /// # Errors
     ///
     /// Returns `MsgsError::DatabaseError` on query failure.
@@ -544,6 +547,9 @@ impl MessageDb {
         message_id: i64,
         chat_id: i64,
     ) -> Result<Option<SearchResult>, MsgsError> {
+        // A deferred transaction takes its snapshot at the first read. A drop
+        // without a commit ends it too.
+        let snapshot = self.conn.unchecked_transaction()?;
         let target_row = match self.conn.query_row(
             &format!("{MESSAGE_SELECT} WHERE cmj.chat_id = ?1 AND m.ROWID = ?2"),
             [chat_id, message_id],
@@ -585,6 +591,7 @@ impl MessageDb {
 
         // Get conversation info
         let conversation = self.get_conversation(chat_id)?;
+        snapshot.commit()?;
 
         Ok(Some(SearchResult {
             message: target,
