@@ -169,6 +169,28 @@ pub fn kill_process(pid: Pid) -> anyhow::Result<()> {
     }
 }
 
+/// Sends SIGTERM to each target through `kill`, and prints one line for each
+/// result.
+///
+/// A success prints to standard output, and a failure prints to standard
+/// error. The function tries each target, also after a failure.
+///
+/// # Errors
+///
+/// Returns an error that counts the failed kills when one kill or more failed.
+pub fn kill_targets(
+    targets: &[&ListeningProcess],
+    kill: impl Fn(Pid) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    for listener in targets {
+        match kill(listener.pid) {
+            Ok(()) => println!("{}", format_kill_result(listener)),
+            Err(e) => eprintln!("Failed to kill PID {}: {e}", listener.pid),
+        }
+    }
+    Ok(())
+}
+
 /// Turns the OS error of a failed kill(2) into the error of [`kill_process`].
 ///
 /// The text of `error` stays in the message, so the errno is not lost. ESRCH
@@ -248,6 +270,49 @@ mod tests {
         let text = error.to_string();
         assert!(text.contains("exited"), "ESRCH needs its own message: {text}");
         assert!(text.contains("os error"), "the message must keep the errno: {text}");
+    }
+
+    fn kill_target(pid: u32) -> ListeningProcess {
+        ListeningProcess {
+            pid: Pid::try_from(pid).unwrap(),
+            name: "server".to_string(),
+            port: 8080,
+            addresses: vec!["0.0.0.0".to_string()],
+        }
+    }
+
+    #[test]
+    fn test_kill_targets_fails_when_every_kill_fails() {
+        let a = kill_target(100);
+        let b = kill_target(200);
+        let result = kill_targets(&[&a, &b], |_| Err(anyhow::anyhow!("EPERM")));
+        let error = result.expect_err("a failed kill must give an error");
+        assert!(error.to_string().contains("2 of 2"), "{error}");
+    }
+
+    #[test]
+    fn test_kill_targets_fails_when_one_kill_fails() {
+        let a = kill_target(100);
+        let b = kill_target(200);
+        let bad = Pid::try_from(200_u32).unwrap();
+        let tried = std::cell::RefCell::new(Vec::new());
+        let result = kill_targets(&[&a, &b], |pid| {
+            tried.borrow_mut().push(pid);
+            if pid == bad {
+                Err(anyhow::anyhow!("EPERM"))
+            } else {
+                Ok(())
+            }
+        });
+        let error = result.expect_err("a failed kill must give an error");
+        assert!(error.to_string().contains("1 of 2"), "{error}");
+        assert_eq!(tried.borrow().len(), 2, "each target gets a kill");
+    }
+
+    #[test]
+    fn test_kill_targets_succeeds_when_every_kill_succeeds() {
+        let a = kill_target(100);
+        assert!(kill_targets(&[&a], |_| Ok(())).is_ok());
     }
 
     #[cfg(unix)]
