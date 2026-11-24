@@ -1279,7 +1279,11 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(refusals, headers.get(1..2).unwrap_or_default(), "{events:?}");
+        assert_eq!(
+            refusals,
+            headers.get(1..2).unwrap_or_default(),
+            "{events:?}"
+        );
     }
 
     /// Gives a path in the temporary directory that no other run uses.
