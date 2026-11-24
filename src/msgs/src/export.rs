@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::db::MessageDb;
@@ -9,6 +10,9 @@ use crate::util::resolve_attachment;
 /// The range runs from the start message to the end message, both included,
 /// in either order.
 ///
+/// Each copy is named `attachments/<attachment_id>-<file name>`, and the
+/// `exported_file` field of its attachment in `messages.json` holds that
+/// relative path (null when no copy exists).
 /// An attachment is copied only when its path, after `..` and symlinks
 /// resolve, lies inside `attachments_root`.
 ///
@@ -34,7 +38,8 @@ pub fn export_conversation_range(
     // Get conversation metadata
     let conversation = db.get_conversation(chat_id)?;
 
-    let mut attachment_count: i64 = 0;
+    // The relative path of each copied attachment, by attachment id.
+    let mut exported_files: HashMap<i64, String> = HashMap::new();
 
     // Copy attachments if requested
     if include_attachments {
@@ -42,30 +47,50 @@ pub fn export_conversation_range(
         std::fs::create_dir_all(&att_dir)
             .map_err(|e| MsgsError::ExportError(format!("Cannot create attachments dir: {e}")))?;
 
-        for msg in &messages {
-            for att in &msg.attachments {
-                if let Some(ref filename) = att.filename {
-                    let Some(source) = resolve_attachment(filename, attachments_root) else {
-                        log::warn!("Attachment path not allowed or not found: {filename}");
-                        continue;
-                    };
-                    let dest_name = source
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string();
-                    let dest = att_dir.join(&dest_name);
-                    if let Err(e) = std::fs::copy(&source, &dest) {
-                        log::warn!("Cannot copy attachment {}: {e}", source.display());
-                    } else {
-                        attachment_count += 1;
-                    }
-                }
+        for att in messages.iter().flat_map(|m| &m.attachments) {
+            if exported_files.contains_key(&att.attachment_id) {
+                continue;
+            }
+            let Some(ref filename) = att.filename else {
+                continue;
+            };
+            let Some(source) = resolve_attachment(filename, attachments_root) else {
+                log::warn!("Attachment path not allowed or not found: {filename}");
+                continue;
+            };
+            // The id keeps two attachments with one file name apart.
+            let dest_name = format!(
+                "{}-{}",
+                att.attachment_id,
+                source.file_name().unwrap_or_default().to_string_lossy()
+            );
+            if let Err(e) = std::fs::copy(&source, att_dir.join(&dest_name)) {
+                log::warn!("Cannot copy attachment {}: {e}", source.display());
+            } else {
+                exported_files.insert(att.attachment_id, format!("attachments/{dest_name}"));
             }
         }
     }
+    let attachment_count = i64::try_from(exported_files.len()).unwrap_or(i64::MAX);
 
-    // Build export JSON
+    // Build export JSON. Each attachment names the copied file, or null.
+    let mut messages_json = serde_json::to_value(&messages)
+        .map_err(|e| MsgsError::ExportError(format!("JSON serialization failed: {e}")))?;
+    for (message, message_json) in messages
+        .iter()
+        .zip(messages_json.as_array_mut().into_iter().flatten())
+    {
+        for (att, att_json) in message.attachments.iter().zip(
+            message_json["attachments"]
+                .as_array_mut()
+                .into_iter()
+                .flatten(),
+        ) {
+            att_json["exported_file"] = exported_files
+                .get(&att.attachment_id)
+                .map_or(serde_json::Value::Null, |path| path.clone().into());
+        }
+    }
     let export_data = serde_json::json!({
         "conversation": {
             "chat_identifier": conversation.chat_identifier,
@@ -78,7 +103,7 @@ pub fn export_conversation_range(
             "end_date": messages.last().map(|m| &m.date),
             "message_count": messages.len(),
         },
-        "messages": messages,
+        "messages": messages_json,
     });
 
     let json_path = export_dir.join("messages.json");

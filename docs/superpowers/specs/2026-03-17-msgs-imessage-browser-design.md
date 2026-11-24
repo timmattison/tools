@@ -254,9 +254,11 @@ Two-panel layout:
 export_2026-03-17_+19145551234/
 ├── messages.json
 └── attachments/
-    ├── IMG_1234.heic
-    └── voice_note.caf
+    ├── 101-IMG_1234.heic
+    └── 102-voice_note.caf
 ```
+
+Each copy is named `<attachment_id>-<file name>`. Messages keeps each attachment in its own GUID directory, thus the same file name occurs many times, and the id keeps the copies apart. The export copies each attachment id once.
 
 `messages.json` contains:
 ```json
@@ -270,12 +272,14 @@ export_2026-03-17_+19145551234/
       "date": "2025-01-15T10:30:22-05:00",
       "is_from_me": true,
       "attachments": [
-        { "filename": "IMG_1234.heic", "mime_type": "image/heic", "total_bytes": 2048000 }
+        { "attachment_id": 101, "filename": "IMG_1234.heic", "mime_type": "image/heic", "total_bytes": 2048000, "exported_file": "attachments/101-IMG_1234.heic" }
       ]
     }
   ]
 }
 ```
+
+`filename` keeps the original path. `exported_file` is the relative path of the copy, or `null` when the export made no copy (attachments off, a path outside the root, or a missing file). `attachment_count` counts the files copied.
 
 All timestamps are ISO 8601 with timezone offset.
 
