@@ -578,6 +578,7 @@ fn run_line<Tz: TimeZone>(
     ended: Option<DateTime<Utc>>,
     is_stale: bool,
     job_sum: Option<Duration>,
+    _remaining: Option<Remaining>,
     cost: Option<RunCost>,
     now: DateTime<Utc>,
     tz: &Tz,
@@ -1444,12 +1445,13 @@ fn draw_row<Tz: TimeZone>(
             selected,
             stale,
             job_sum,
+            remaining,
             ended,
             cost,
             ..
         } => put_selectable(
             run_line(
-                run, *state, *ended, *stale, *job_sum, *cost, now, tz, widths,
+                run, *state, *ended, *stale, *job_sum, *remaining, *cost, now, tz, widths,
             ),
             *selected,
         ),
@@ -3584,6 +3586,110 @@ mod tests {
             );
             assert_eq!(job_sum_cells(&text, y), "~3m 00s", "width {width}");
             let run_y = row_holding(&text, "9002");
+            assert_eq!(job_sum_cells(&text, run_y), "~3m 00s", "width {width}");
+        }
+    }
+
+    /// The board of [`estimate_board`] with a second job `Lint` in each run.
+    /// In the history run, `Lint` passed on `m1-ts` in 2 minutes. In the
+    /// active run, `Lint` is queued with no runner. `TypeScript` runs since
+    /// 11:58:00.
+    fn estimate_board_with_queued_lint() -> Board {
+        let mut board = estimate_board("2026-10-14T11:58:00Z");
+        board.set_jobs(
+            RunId(9_001),
+            vec![
+                Job {
+                    runner: RunnerName::new("m1-ts".to_owned()),
+                    ..job(
+                        501,
+                        "TypeScript",
+                        RunState::Passed,
+                        Some("2026-10-14T11:00:00Z"),
+                        Some("2026-10-14T11:05:00Z"),
+                    )
+                },
+                Job {
+                    runner: RunnerName::new("m1-ts".to_owned()),
+                    ..job(
+                        503,
+                        "Lint",
+                        RunState::Passed,
+                        Some("2026-10-14T11:00:00Z"),
+                        Some("2026-10-14T11:02:00Z"),
+                    )
+                },
+            ],
+        );
+        board.set_jobs(
+            RunId(9_002),
+            vec![
+                Job {
+                    runner: RunnerName::new("m1-ts".to_owned()),
+                    ..job(
+                        502,
+                        "TypeScript",
+                        RunState::Running,
+                        Some("2026-10-14T11:58:00Z"),
+                        None,
+                    )
+                },
+                job(504, "Lint", RunState::Queued, None, None),
+            ],
+        );
+        board
+    }
+
+    #[test]
+    fn a_run_row_shows_the_time_until_the_run_finishes_under_the_job_sum_header() {
+        for width in [80_u16, 120, 200] {
+            let cases = [
+                (estimate_board("2026-10-14T11:58:00Z"), "~3m 00s"),
+                (estimate_board("2026-10-14T11:53:50Z"), "+1m 10s"),
+                (estimate_board_with_queued_lint(), ">5m 00s"),
+            ];
+            for (mut board, want) in cases {
+                let text = lines(&render_with(width, 12, &mut board, &loaded()));
+                let run_y = row_holding(&text, "9002");
+                assert_eq!(job_sum_cells(&text, run_y), want, "width {width}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_active_run_with_no_estimate_keeps_its_job_sum() {
+        for width in [80_u16, 120, 200] {
+            let mut board = Board::new(Duration::from_hours(8));
+            board.replace(
+                repo("timmattison/megarepo"),
+                vec![run(
+                    9_002,
+                    "timmattison/megarepo",
+                    "CI",
+                    "main",
+                    "live",
+                    RunState::Running,
+                    "2026-10-14T11:58:00Z",
+                    "2026-10-14T11:59:00Z",
+                )],
+                now(),
+            );
+            board.set_jobs(
+                RunId(9_002),
+                vec![Job {
+                    runner: RunnerName::new("m1-ts".to_owned()),
+                    ..job(
+                        502,
+                        "TypeScript",
+                        RunState::Running,
+                        Some("2026-10-14T11:58:00Z"),
+                        None,
+                    )
+                }],
+            );
+            board.expand(now());
+            let text = lines(&render_with(width, 12, &mut board, &loaded()));
+            let run_y = row_holding(&text, "9002");
             assert_eq!(job_sum_cells(&text, run_y), "2m 00s", "width {width}");
         }
     }
@@ -4736,6 +4842,7 @@ mod tests {
                     RunState::Running,
                     None,
                     is_stale,
+                    None,
                     None,
                     None,
                     now(),
@@ -6773,7 +6880,7 @@ mod tests {
                     "2026-10-14T11:00:00Z",
                     "2026-10-14T11:30:00Z",
                 );
-                let line = run_line(&run, state, None, false, None, None, now(), &utc(), widths)
+                let line = run_line(&run, state, None, false, None, None, None, now(), &utc(), widths)
                     .to_string();
                 assert_eq!(display_width(&line), usize::from(w), "{state:?}: {line:?}");
             }
@@ -7804,6 +7911,7 @@ mod tests {
             RunState::Running,
             None,
             false,
+            None,
             None,
             None,
             now(),
