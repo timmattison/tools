@@ -22,8 +22,8 @@ const MARKUP = `
 const PAGE_SIZE = 50;
 
 /** One message on the given day (1 to 28 of January 2026), at the given hour. */
-function message(id: number, day: number, hour: number, text: string): Message {
-  const iso = new Date(Date.UTC(2026, 0, day, hour, 0, 0)).toISOString();
+function message(id: number, day: number, hour: number, text: string, minute = 0): Message {
+  const iso = new Date(Date.UTC(2026, 0, day, hour, minute, 0)).toISOString();
   return {
     message_id: id,
     text,
@@ -69,6 +69,14 @@ function chatIdOf(args: InvokeArgs | undefined): unknown {
   return args !== undefined && !Array.isArray(args) && !(args instanceof ArrayBuffer)
     && !(args instanceof Uint8Array) && "chatId" in args
     ? args.chatId
+    : null;
+}
+
+/** The `offset` argument of an `invoke` call, or null. */
+function offsetOf(args: InvokeArgs | undefined): unknown {
+  return args !== undefined && !Array.isArray(args) && !(args instanceof ArrayBuffer)
+    && !(args instanceof Uint8Array) && "offset" in args
+    ? args.offset
     : null;
 }
 
@@ -166,5 +174,40 @@ describe("export selection", () => {
     byTestId("btn-export-confirm").click();
     await settle();
     expect(vi.mocked(invoke)).not.toHaveBeenCalledWith("export_messages", expect.anything());
+  });
+});
+
+describe("older pages", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    document.body.innerHTML = MARKUP;
+  });
+
+  it("show one date separator where two pages meet on one day", async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    // The backend answers newest first. Page 1 holds 50 messages of day 10
+    // at 12:xx. Page 2 holds one message of day 10 at 11:30 and one of day 9.
+    const newest = Array.from({ length: PAGE_SIZE }, (_, i) =>
+      message(200 - i, 10, 12, `new ${i}`, PAGE_SIZE - 1 - i)
+    );
+    const older = [message(100, 10, 11, "old 1", 30), message(99, 9, 11, "old 2")];
+    vi.mocked(invoke).mockImplementation((_command: string, args?: InvokeArgs) =>
+      Promise.resolve(offsetOf(args) === 0 ? newest : older)
+    );
+    const { loadConversation } = await import("./messages");
+
+    await loadConversation(1, "One", "one", false);
+    const day10 = document.querySelector(".date-separator")?.textContent ?? "";
+    expect(day10).not.toBe("");
+
+    area().scrollTop = 0;
+    area().dispatchEvent(new Event("scroll"));
+    await vi.waitFor(() => expect(texts()).toContain("old 1"));
+
+    const separators = [...document.querySelectorAll(".date-separator")].map(
+      (el) => el.textContent
+    );
+    expect(separators.filter((text) => text === day10)).toHaveLength(1);
+    expect(separators).toHaveLength(2);
   });
 });
