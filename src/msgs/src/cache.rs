@@ -362,6 +362,30 @@ mod tests {
         assert_eq!(source_fingerprint(&old).expect("fingerprint"), "1:1:0");
     }
 
+    #[test]
+    fn a_message_that_arrives_after_the_rows_are_read_needs_a_rebuild() {
+        let (fx, chat_a, ..) = two_chat_fixture();
+        let db = fx.open_db();
+        let cache = TextCache::open_at(&fx.dir().join("text-cache.db")).expect("open cache");
+        let mut arrived = false;
+        cache
+            .rebuild(db.connection(), PROGRESS_INTERVAL, &mut |indexed, total| {
+                // The last report comes after the stream of rows ends.
+                if indexed == total && !arrived {
+                    arrived = true;
+                    fx.add_message(MessageSpec {
+                        text: Some("a late message".to_string()),
+                        date: apple_ns(1_700_000_050, 0),
+                        chats: vec![chat_a],
+                        ..MessageSpec::default()
+                    });
+                }
+            })
+            .expect("rebuild");
+        assert!(arrived, "the rebuild gave no last report");
+        assert!(needs_rebuild_as_the_command_does(&cache, &db));
+    }
+
     /// The staleness check as `check_db_access` runs it.
     fn needs_rebuild_as_the_command_does(cache: &TextCache, db: &crate::db::MessageDb) -> bool {
         cache.needs_rebuild(db.connection()).expect("needs rebuild")
