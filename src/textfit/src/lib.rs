@@ -10,9 +10,14 @@
 //! a string holds characters. The two counts differ: `日` is one character and
 //! two columns, a combining accent is one character and no columns, and a byte
 //! is neither. So every function here spends the budget in columns, and it
-//! walks the string by character. That is also why none of them can index the
-//! string by byte. `&s[..n]` panics the moment `n` lands inside a character,
-//! and a process name or a branch name carries such characters.
+//! walks the string by grapheme cluster. A cluster is what a reader sees as one
+//! symbol. An emoji with a variation selector, for example `☁️`, is two columns,
+//! but its two characters add up to one column. A walk by character would
+//! count one column and overrun the budget. Each function measures a whole
+//! cluster with `UnicodeWidthStr`, as ratatui does, and never splits one.
+//! That is also why none of them can index the string by byte. `&s[..n]`
+//! panics the moment `n` lands inside a character, and a process name or a
+//! branch name carries such characters.
 //!
 //! # Why the answers stand in one crate
 //!
@@ -27,7 +32,7 @@
 //! input and they part company at the edges, which is where the whole of the
 //! correctness sits: the budget of no columns, the budget of one column that
 //! the marker alone fills, the wide character that straddles the last column,
-//! and the character of no width that lets two walks over one string pass each
+//! and the cluster of no width that lets two walks over one string pass each
 //! other. A test that notices such a difference is the test that fails once a
 //! year.
 //!
@@ -41,13 +46,52 @@
 //! caller that can be handed a zero calls one of those instead, and gets an
 //! empty string.
 
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 /// The marker that stands where characters were removed.
 const ELLIPSIS: char = '…';
 
 /// The number of columns [`ELLIPSIS`] occupies.
 const ELLIPSIS_WIDTH: usize = 1;
+
+/// Split `s` into grapheme clusters, each with its width in columns.
+///
+/// This is the one walk that every `truncate_*` function uses. The width of a
+/// cluster comes from `UnicodeWidthStr`, not from the sum of its characters,
+/// because `☁️` is two columns and its two characters add up to one.
+fn clusters(s: &str) -> Vec<(&str, usize)> {
+    s.graphemes(true)
+        .map(|cluster| (cluster, UnicodeWidthStr::width(cluster)))
+        .collect()
+}
+
+/// The number of leading clusters whose widths fit in `budget` columns.
+fn head_len(clusters: &[(&str, usize)], budget: usize) -> usize {
+    let mut spent = 0_usize;
+    for (i, &(_, width)) in clusters.iter().enumerate() {
+        if spent + width > budget {
+            return i;
+        }
+        spent += width;
+    }
+    clusters.len()
+}
+
+/// The index of the first trailing cluster in the longest tail whose widths fit
+/// in `budget` columns.
+fn tail_start(clusters: &[(&str, usize)], budget: usize) -> usize {
+    let mut spent = 0_usize;
+    let mut start = clusters.len();
+    for (i, &(_, width)) in clusters.iter().enumerate().rev() {
+        if spent + width > budget {
+            break;
+        }
+        spent += width;
+        start = i;
+    }
+    start
+}
 
 /// Pad `s` on the right with spaces until its display width reaches `width`.
 ///
@@ -80,16 +124,11 @@ pub fn truncate_right(s: &str, max_width: usize) -> String {
         return s.to_string();
     }
     let target = max_width.saturating_sub(ELLIPSIS_WIDTH);
-    let mut acc = 0_usize;
-    let mut result = String::new();
-    for c in s.chars() {
-        let cw = UnicodeWidthChar::width(c).unwrap_or(0);
-        if acc + cw > target {
-            break;
-        }
-        acc += cw;
-        result.push(c);
-    }
+    let parts = clusters(s);
+    let mut result: String = parts[..head_len(&parts, target)]
+        .iter()
+        .map(|&(cluster, _)| cluster)
+        .collect();
     result.push(ELLIPSIS);
     result
 }
@@ -109,21 +148,13 @@ pub fn truncate_left(s: &str, max_width: usize) -> String {
         return s.to_string();
     }
     let target = max_width.saturating_sub(ELLIPSIS_WIDTH);
-    let chars: Vec<char> = s.chars().collect();
-    let mut acc = 0_usize;
-    let mut start = chars.len();
-    for (i, c) in chars.iter().enumerate().rev() {
-        let cw = UnicodeWidthChar::width(*c).unwrap_or(0);
-        if acc + cw > target {
-            break;
-        }
-        acc += cw;
-        start = i;
-    }
+    let parts = clusters(s);
     let mut result = String::from(ELLIPSIS);
-    for c in &chars[start..] {
-        result.push(*c);
-    }
+    result.extend(
+        parts[tail_start(&parts, target)..]
+            .iter()
+            .map(|&(cluster, _)| cluster),
+    );
     result
 }
 
@@ -146,34 +177,18 @@ pub fn truncate_middle(s: &str, max_width: usize) -> String {
     let head_budget = keep.div_ceil(2);
     let tail_budget = keep - head_budget;
 
-    let mut head = String::new();
-    let mut spent = 0_usize;
-    for c in s.chars() {
-        let cw = UnicodeWidthChar::width(c).unwrap_or(0);
-        if spent + cw > head_budget {
-            break;
-        }
-        spent += cw;
-        head.push(c);
-    }
-    let chars: Vec<char> = s.chars().collect();
-    let mut tail_start = chars.len();
-    let mut spent = 0_usize;
-    for (i, c) in chars.iter().enumerate().rev() {
-        let cw = UnicodeWidthChar::width(*c).unwrap_or(0);
-        if spent + cw > tail_budget {
-            break;
-        }
-        spent += cw;
-        tail_start = i;
-    }
-    // Zero-width characters cost nothing, so both walks can run past each
+    let parts = clusters(s);
+    let head_end = head_len(&parts, head_budget);
+    // Clusters of no width cost nothing, so both walks can run past each
     // other and duplicate the middle. Keep the halves disjoint.
-    let tail_start = tail_start.max(head.chars().count());
+    let tail_begin = tail_start(&parts, tail_budget).max(head_end);
 
-    let mut result = head;
+    let mut result: String = parts[..head_end]
+        .iter()
+        .map(|&(cluster, _)| cluster)
+        .collect();
     result.push(ELLIPSIS);
-    result.extend(&chars[tail_start..]);
+    result.extend(parts[tail_begin..].iter().map(|&(cluster, _)| cluster));
     result
 }
 
@@ -350,6 +365,99 @@ mod tests {
         assert_eq!(truncate_left_to_budget("🎉🎊🎁🎈🎂", 4), "…🎂");
         assert_eq!(truncate_left_to_budget("café au lait", 10), "…é au lait");
         assert_eq!(truncate_left_to_budget("café au lait", 8), "…au lait");
+    }
+
+    #[test]
+    fn a_variation_selector_emoji_is_two_columns() {
+        assert_eq!(UnicodeWidthStr::width("\u{2601}\u{FE0F}"), 2);
+    }
+
+    #[test]
+    fn truncate_left_counts_an_emoji_with_a_variation_selector_as_two_columns() {
+        let name = "Deploy \u{2601}\u{FE0F} staging env (2)";
+        assert_eq!(
+            truncate_left_to_budget(name, 19),
+            "\u{2026}\u{2601}\u{FE0F} staging env (2)"
+        );
+        assert_eq!(
+            truncate_left_to_budget(name, 18),
+            "\u{2026} staging env (2)"
+        );
+    }
+
+    #[test]
+    fn truncate_right_counts_an_emoji_with_a_variation_selector_as_two_columns() {
+        let text = "\u{2601}\u{FE0F} cloud";
+        assert_eq!(truncate_right(text, 3), "\u{2601}\u{FE0F}\u{2026}");
+        assert_eq!(truncate_right(text, 2), "\u{2026}");
+    }
+
+    #[test]
+    fn truncate_middle_counts_an_emoji_with_a_variation_selector_as_two_columns() {
+        // `ab`, a cloud of two columns, and `cdefg` make 9 columns.
+        let text = "ab\u{2601}\u{FE0F}cdefg";
+        // A budget of 6 keeps 5 columns. The head gets 3 and holds `ab`,
+        // because the cloud would make 4. The tail gets 2 and holds `fg`.
+        assert_eq!(truncate_middle(text, 6), "ab\u{2026}fg");
+        // A budget of 7 keeps 6 columns. The head gets 3 and the tail gets 3.
+        assert_eq!(truncate_middle(text, 7), "ab\u{2026}efg");
+        // A budget of 8 keeps 7 columns. The head gets 4 and holds `ab` and
+        // the cloud. The tail gets 3.
+        assert_eq!(truncate_middle(text, 8), "ab\u{2601}\u{FE0F}\u{2026}efg");
+    }
+
+    #[test]
+    fn every_cut_stays_in_budget_and_keeps_whole_grapheme_clusters() {
+        for text in [
+            "Deploy \u{2601}\u{FE0F} staging env (2)",
+            "\u{2764}\u{FE0F}\u{2764}\u{FE0F}\u{2764}\u{FE0F} love",
+            "1\u{FE0F}\u{20E3}2\u{FE0F}\u{20E3}3\u{FE0F}\u{20E3} keys",
+            "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467} family",
+            "\u{1F44D}\u{1F3FD} ok",
+            "\u{1F1EF}\u{1F1F5}\u{1F1FA}\u{1F1F8} flags",
+            "cafe\u{301} au lait",
+        ] {
+            let clusters: Vec<&str> = text.graphemes(true).collect();
+            let width = UnicodeWidthStr::width(text);
+            for budget in 0..=width + 2 {
+                let right = truncate_to_budget(text, budget);
+                let left = truncate_left_to_budget(text, budget);
+                let middle = truncate_middle(text, budget);
+                for (kind, cut) in [("right", &right), ("left", &left), ("middle", &middle)] {
+                    assert!(
+                        UnicodeWidthStr::width(cut.as_str()) <= budget,
+                        "{kind} cut of {text:?} at {budget} gave {cut:?}"
+                    );
+                }
+                if right != text {
+                    let kept = right.strip_suffix(ELLIPSIS).unwrap_or(&right);
+                    let kept: Vec<&str> = kept.graphemes(true).collect();
+                    assert!(
+                        clusters.starts_with(&kept),
+                        "right cut of {text:?} at {budget} gave {right:?}"
+                    );
+                }
+                if left != text {
+                    let kept = left.strip_prefix(ELLIPSIS).unwrap_or(&left);
+                    let kept: Vec<&str> = kept.graphemes(true).collect();
+                    assert!(
+                        clusters.ends_with(&kept),
+                        "left cut of {text:?} at {budget} gave {left:?}"
+                    );
+                }
+                if middle != text && !middle.is_empty() {
+                    let (head, tail) = middle
+                        .split_once(ELLIPSIS)
+                        .unwrap_or_else(|| panic!("middle cut {middle:?} has no marker"));
+                    let head: Vec<&str> = head.graphemes(true).collect();
+                    let tail: Vec<&str> = tail.graphemes(true).collect();
+                    assert!(
+                        clusters.starts_with(&head) && clusters.ends_with(&tail),
+                        "middle cut of {text:?} at {budget} gave {middle:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

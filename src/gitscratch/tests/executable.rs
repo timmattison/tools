@@ -6,7 +6,6 @@
 #![cfg(unix)]
 
 use std::os::unix::fs::PermissionsExt as _;
-use std::process::Command;
 
 use gitscratch::testing::executable::write_executable;
 
@@ -43,7 +42,9 @@ fn the_file_holds_the_contents_and_runs() {
         .permissions()
         .mode();
     assert_eq!(mode & 0o111, 0o111, "each class can run the file: {mode:o}");
-    let output = Command::new(&path).output().expect("run the stub");
+    let output = childenv::fixture_command(&path)
+        .output()
+        .expect("run the stub");
     assert!(output.status.success(), "the stub runs: {output:?}");
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), GREETING);
 }
@@ -56,7 +57,9 @@ fn a_second_write_replaces_the_contents() {
     write_executable(&path, b"#!/bin/sh\necho first\n").expect("write the first stub");
     write_executable(&path, greeting_script().as_bytes()).expect("write the second stub");
 
-    let output = Command::new(&path).output().expect("run the stub");
+    let output = childenv::fixture_command(&path)
+        .output()
+        .expect("run the stub");
     assert_eq!(
         String::from_utf8_lossy(&output.stdout).trim(),
         GREETING,

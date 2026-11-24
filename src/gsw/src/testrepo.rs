@@ -103,7 +103,7 @@ pub(crate) fn git_output(dir: &Path, args: &[&str]) -> Output {
 /// the fixture keeps an empty store of its own and every later read of it
 /// answers about another repository. `GIT_CONFIG_PARAMETERS` sets any key at
 /// all, and git exports it to every `pre-commit` hook.
-/// [`gitscratch::shed_inherited_git_environment`] enumerates the environment
+/// [`childenv::fixture_command`] enumerates the environment
 /// of this process instead of a list, so it takes whatever git invents next
 /// with no edit here.
 ///
@@ -116,9 +116,8 @@ pub(crate) fn git_output(dir: &Path, args: &[&str]) -> Output {
 ///
 /// Pinned by `a_fixture_obeys_no_git_variable_out_of_a_hostile_environment`.
 fn command(dir: &Path, args: &[&str]) -> Command {
-    let mut cmd = Command::new("git");
+    let mut cmd = childenv::fixture_command("git");
     cmd.args(args).current_dir(dir);
-    gitscratch::shed_inherited_git_environment(&mut cmd);
     cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null");
     cmd
@@ -246,7 +245,7 @@ fn identity(dir: &Path) {
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     use std::time::{Duration, Instant};
 
     use tempfile::NamedTempFile;
@@ -369,7 +368,7 @@ mod tests {
         let stdout = NamedTempFile::new().expect("a file for what the child says");
         let stderr = NamedTempFile::new().expect("a file for why the child stopped");
         let mut child_command =
-            Command::new(std::env::current_exe().expect("the path of this binary"));
+            childenv::fixture_command(std::env::current_exe().expect("the path of this binary"));
         child_command
             .args(["--exact", "--nocapture", test])
             .current_dir(workdir.path())

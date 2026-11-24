@@ -38,6 +38,14 @@
 #
 # The script reads the working tree of the repository that holds it, whatever
 # the current directory of the caller is.
+#
+# Every cargo command runs through `without_git_environment`. Git exports GIT_
+# variables into each hook, and every program that the hook starts inherits
+# them. A test that runs `git init` in a temp repo then aims at THIS repo and
+# can rewrite its index and branch. The helper removes the whole GIT_ prefix
+# and never a list of names. The scrub is in this script and not in a caller,
+# so each route to the checks gets it: the pre-commit hook, CI, a pre-push
+# hook, `git rebase --exec`, and `git bisect run`.
 set -euo pipefail
 
 readonly LOG_PREFIX="rust-checks:"
@@ -68,45 +76,28 @@ done
 
 cd "$(dirname "$0")/.."
 
+# shellcheck source=scripts/without-git-environment.sh
+. scripts/without-git-environment.sh
+
 echo "$LOG_PREFIX running cargo fmt --all -- --check"
-cargo fmt --all -- --check
+without_git_environment cargo fmt --all -- --check
 
 echo "$LOG_PREFIX running cargo machete (unused dependency check)"
 if ! command -v cargo-machete >/dev/null 2>&1; then
     echo "$LOG_PREFIX cargo-machete not found; installing it once (cargo install cargo-machete --locked)…"
-    cargo install cargo-machete --locked
+    without_git_environment cargo install cargo-machete --locked
 fi
-cargo machete
+without_git_environment cargo machete
 
 echo "$LOG_PREFIX running cargo clippy --locked --all-targets --workspace -- -D warnings"
-cargo clippy --locked --all-targets --workspace -- -D warnings
+without_git_environment cargo clippy --locked --all-targets --workspace -- -D warnings
 
 echo "$LOG_PREFIX running cargo test --locked --workspace (CLICOLOR_FORCE=1)"
-# Git exports GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE/GIT_PREFIX into the hook's
-# environment, and `cargo test` inherits them. The suite spawns helpers that
-# run `git init`/`add`/`commit` inside throwaway temp repos; if those vars
-# leak through, the child git targets THIS repo instead of the temp dir and
-# can rewrite the real index and branch. (Observed: a gsw test committed its
-# `a.txt` fixture plus the developer's staged changes straight onto the
-# branch, and parallel runs flooded the real .git/config with lock errors.)
-# Scrub them for the test run so every test's git stays sandboxed.
-#
-# This is now defence in depth rather than the only defence, and it stays
-# for two reasons. It is per-INVOCATION, so it protects nothing about the
-# other routes to the same `cargo test` - a pre-push hook, `git bisect run`,
-# `rebase --exec`, `swt`'s green check called from a hook - which is why
-# `gitscratch` sheds every `GIT_`-prefixed variable, and not a list of
-# names, at every git spawn of its own - the rule `NoInheritedGitEnvironment`
-# applies, pinned by `src/gitscratch/tests/inherited-environment.rs`. That
-# is the suite that pins the *prefix*: it probes GIT_CONFIG_PARAMETERS,
-# GIT_CONFIG_COUNT and a name git has never invented, and it keeps a list of
-# names that must survive, so the rule stays a prefix rather than a sweep of
-# everything. `src/gitscratch/tests/isolation.rs` pins the separate claim
-# that a decoy repository comes back byte-identical; it leaks only names a
-# list would remove too, so it stays green with the rule narrowed back to a
-# list - measured, and recorded in `src/gitscratch/MUTATIONS.md`.
-# And it is workspace-wide, where that fix is not: every other crate's
-# fixtures still lean on this line.
+# Git exports GIT_ variables into the hook, and every program that the hook
+# starts inherits them. Rust spawns of this workspace shed the same variables
+# through the crate `childenv`, and clippy makes its constructors mandatory.
+# The runner is the only layer for code that other crates own, such as the
+# build script of a dependency.
 #
 # CLICOLOR_FORCE=1 makes the `colored` crate paint whatever the run writes
 # to. Without it, `colored` paints only when file descriptor 1 is a
@@ -131,5 +122,5 @@ echo "$LOG_PREFIX running cargo test --locked --workspace (CLICOLOR_FORCE=1)"
 # asserts on a 24-bit color passes in a terminal that sets COLORTERM, and fails
 # in CI and in each terminal that does not set it. The first CI run found 8
 # such tests in `gsw`.
-env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_PREFIX \
-    CLICOLOR_FORCE=1 COLORTERM=truecolor cargo test --locked --workspace
+without_git_environment env CLICOLOR_FORCE=1 COLORTERM=truecolor \
+    cargo test --locked --workspace

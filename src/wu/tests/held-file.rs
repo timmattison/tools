@@ -12,7 +12,7 @@
 
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 
 /// Script of the holder. The shell opens the file named by its first argument
 /// on descriptor 3. It then prints `ready`. Then it replaces itself with
@@ -43,7 +43,7 @@ impl Holder {
     /// Starts a shell that holds `path` open on descriptor 3. Returns after
     /// the shell printed `ready`, which means the descriptor is open.
     fn start(path: &Path) -> Self {
-        let mut child = Command::new("/bin/sh")
+        let mut child = childenv::fixture_command("/bin/sh")
             .arg("-c")
             .arg(HOLDER_SCRIPT)
             .arg("wu-holder")
@@ -84,7 +84,7 @@ fn wu_reports_the_process_that_holds_a_file_open() {
 
     let holder = Holder::start(&held);
 
-    let output = Command::new(env!("CARGO_BIN_EXE_wu"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_wu"))
         .arg("--json")
         .arg(&held)
         .output()

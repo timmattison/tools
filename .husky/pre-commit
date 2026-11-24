@@ -24,6 +24,9 @@
 # commands cannot operate on a virtual index anyway.
 set -euo pipefail
 
+# shellcheck source=scripts/without-git-environment.sh
+. "$(dirname "$0")/../scripts/without-git-environment.sh"
+
 if git diff --cached --name-only --diff-filter=ACMR | grep -qE '\.rs$|(^|/)Cargo\.(toml|lock)$|^(rustfmt|rust-toolchain)\.toml$|^scripts/rust-checks\.sh$'; then
     echo "pre-commit: running scripts/rust-checks.sh"
     ./scripts/rust-checks.sh
@@ -47,11 +50,10 @@ fi
 # touches Rust and an index from running the same test twice.
 #
 # --diff-filter carries D on top of ACMR: deleting an index outright is the
-# fault this catches, not only editing one. The same git-env scrub as the
-# `cargo test` step of scripts/rust-checks.sh keeps the two symmetric.
+# fault this catches, not only editing one. The same `without_git_environment`
+# as each cargo command of scripts/rust-checks.sh keeps the two symmetric.
 if [ "${rust_gate_ran:-}" != yes ] &&
     git diff --cached --name-only --diff-filter=ACMRD | grep -qE '^(README|TLDR)\.md$'; then
     echo "pre-commit: running cargo test -p repo-guards --test tool_index_coverage"
-    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_PREFIX \
-        cargo test -p repo-guards --test tool_index_coverage
+    without_git_environment cargo test -p repo-guards --test tool_index_coverage
 fi

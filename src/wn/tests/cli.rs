@@ -12,19 +12,23 @@
 //! that started `cargo test` happened to export, and `COLUMNS` and `NO_COLOR`
 //! both change what the tool prints.
 //!
-//! That environment names [`NO_CLIPBOARD_ENV`] in every test but one. A child
-//! of a test reads `/dev/null` on standard input, which is not a terminal and
-//! holds no text, so a run with no chain argument walks on to the clipboard.
-//! The clipboard is one shared resource of the whole machine: a test that reads
-//! it races the person at the keyboard. The variable turns that last step off
-//! for the other children of this file, which is a mechanism rather than a rule
-//! each test must remember.
+//! That environment names [`NO_CLIPBOARD_ENV`] in every test. A child of a test
+//! reads `/dev/null` on standard input, which is not a terminal and holds no
+//! text, so a run with no chain argument walks on to the clipboard. The
+//! clipboard is one shared resource of the whole machine: a test that reads it
+//! races the person at the keyboard, and a test that writes it destroys what
+//! the person copied. The variable turns that last step off for the children of
+//! this file, which is a mechanism rather than a rule each test must remember.
 //!
-//! The one exception is `the_run_with_no_argument_reads_the_clipboard`, which
-//! leaves the variable out because it is the test that holds the clipboard in
-//! the run at all. It reads the clipboard, it writes nothing to it, and it
-//! asserts only which path the run took, so it takes nothing away from the
-//! person at the keyboard.
+//! The tests that hold the clipboard in the run go through
+//! `run_through_shims`. It takes the variable out again, and it sets
+//! `MOSH_OPEN_SOCKET` to a path in the temporary directory of the test. The
+//! fake `gh` of the test then holds the fake `pbcopy` and `pbpaste` of
+//! `sysclip::testing::FakeShims`, which keep the clipboard in a file of that
+//! directory. In a session with that
+//! variable `sysclip` runs the two commands from `PATH` and never opens the
+//! clipboard of the machine. So no child of this file reaches the clipboard of
+//! the machine: each child turns the clipboard off, or goes through the shims.
 //!
 //! A plan of parallel work is many lines, and `Command::output` hands the
 //! child a standard input that holds nothing. So the tests that walk a plan go
@@ -52,6 +56,7 @@ use std::os::fd::{FromRawFd, OwnedFd};
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
+use sysclip::testing::FakeShims;
 use unicode_width::UnicodeWidthStr;
 
 /// The repository the fake `gh` answers for.
@@ -63,7 +68,8 @@ const START_COMMAND_ENV: &str = "WN_START_COMMAND";
 /// The variable that turns the clipboard fallback off.
 ///
 /// Every child of this file gets it, because no test of a command line may
-/// touch the clipboard of the machine that runs it.
+/// touch the clipboard of the machine that runs it. `run_through_shims` takes
+/// it out again and puts the fake commands in the place of the clipboard.
 const NO_CLIPBOARD_ENV: &str = "WN_NO_CLIPBOARD";
 
 /// The value [`NO_CLIPBOARD_ENV`] carries. Any value with a character in it
@@ -574,6 +580,10 @@ const CLAUDE_ARGS_FILE: &str = "claude-args";
 /// The file the fake `claude` writes the prompt it was handed into.
 const PROMPT_FILE: &str = "prompt";
 
+/// What the refusing `pbpaste` writes on standard error, the way the shim of a
+/// mosh-rs session does when the client allows no paste.
+const REFUSED_PASTE: &str = "mosh-open: did not paste: the client allows no paste";
+
 /// The file the fake `gh` records the arguments of every call in.
 ///
 /// It appears on the first call, so its absence is a run that never reached
@@ -583,6 +593,8 @@ const ARGS_FILE: &str = "args";
 /// A fake `gh` in a temporary directory of its own.
 struct FakeGh {
     dir: tempfile::TempDir,
+    /// The fake `pbcopy` and `pbpaste`, after [`FakeGh::with_shims`].
+    shims: Option<FakeShims>,
 }
 
 impl FakeGh {
@@ -616,7 +628,7 @@ exit {status}
         );
         let gh = dir.path().join("gh");
         gitscratch::testing::executable::write_executable(&gh, script).unwrap();
-        Self { dir }
+        Self { dir, shims: None }
     }
 
     /// Write a `gh` that can name no repository for the current directory.
@@ -637,7 +649,7 @@ exit 1
         );
         let gh = dir.path().join("gh");
         gitscratch::testing::executable::write_executable(&gh, script).unwrap();
-        Self { dir }
+        Self { dir, shims: None }
     }
 
     /// Write a `claude` beside the `gh`.
@@ -687,6 +699,39 @@ cat > '{prompt}'
     /// a file that never appeared is a run that never reached `claude`.
     fn never_ran_claude(&self) -> bool {
         !self.dir.path().join(CLAUDE_ARGS_FILE).exists()
+    }
+
+    /// Write a `pbcopy` and a `pbpaste` beside the `gh`, and a clipboard file
+    /// that holds `held`.
+    ///
+    /// The two commands are the fake shims of a mosh-rs session, from
+    /// `sysclip::testing::FakeShims`. The directory of the fake `gh` is first
+    /// on `PATH`, so a run that goes through them never reaches the clipboard
+    /// of the machine.
+    fn with_shims(mut self, held: &str) -> Self {
+        let shims = FakeShims::install(self.dir.path());
+        shims.hold(held);
+        self.shims = Some(shims);
+        self
+    }
+
+    /// Write a `pbpaste` that refuses, the way the shim does when the client
+    /// allows no paste. It replaces the one of [`FakeGh::with_shims`].
+    fn with_refusing_pbpaste(self) -> Self {
+        self.shims().refuse_paste(REFUSED_PASTE);
+        self
+    }
+
+    /// What the clipboard file holds now.
+    fn recorded_clipboard(&self) -> String {
+        self.shims().held()
+    }
+
+    /// The fake shims of [`FakeGh::with_shims`].
+    fn shims(&self) -> &FakeShims {
+        self.shims
+            .as_ref()
+            .expect("the test installs the shims first")
     }
 
     fn path(&self) -> &Path {
@@ -792,7 +837,7 @@ fn run_with_stdin_and_start(
 /// rule.
 fn wn(gh: &FakeGh, args: &[&str], columns: &str, color: bool, start: Option<&str>) -> Command {
     let path = format!("{}:/usr/bin:/bin", gh.path().display());
-    let mut command = Command::new(env!("CARGO_BIN_EXE_wn"));
+    let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_wn"));
     command
         .env_clear()
         .env("PATH", path)
@@ -824,6 +869,35 @@ fn run_building(gh: &FakeGh, args: &[&str], env: &[(&str, &str)]) -> Output {
     command.env_remove(NO_CLAUDE_ENV);
     for (name, value) in env {
         command.env(name, value);
+    }
+    command.output().unwrap()
+}
+
+/// Whether a run of [`run_through_shims`] can run the fake `claude`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Claude {
+    /// [`NO_CLAUDE_ENV`] stays in the environment, as [`wn`] sets it.
+    Off,
+    /// [`NO_CLAUDE_ENV`] goes out, as [`run_building`] takes it out.
+    On,
+}
+
+/// Run `wn` in a mosh-rs session whose clipboard is the pair of fake commands
+/// of `gh`.
+///
+/// It starts from the environment of [`wn`], takes [`NO_CLIPBOARD_ENV`] out and
+/// sets `MOSH_OPEN_SOCKET` to the socket path of the fake shims. The
+/// socket does not exist, and it need not: `sysclip` runs `pbcopy` and
+/// `pbpaste` from `PATH` in such a session and opens no socket and no
+/// clipboard. The run then reads and writes the files of the fake and never the
+/// clipboard of the machine.
+fn run_through_shims(gh: &FakeGh, args: &[&str], claude: Claude) -> Output {
+    let mut command = wn(gh, args, "80", false, None);
+    command
+        .env_remove(NO_CLIPBOARD_ENV)
+        .env(sysclip::MOSH_OPEN_SOCKET_ENV, gh.shims().socket());
+    if claude == Claude::On {
+        command.env_remove(NO_CLAUDE_ENV);
     }
     command.output().unwrap()
 }
@@ -1045,7 +1119,7 @@ fn asks_about_the_whole_chain_in_one_query() {
 fn takes_the_chain_from_standard_input() {
     let gh = FakeGh::new(THREE_ISSUES);
     let path = format!("{}:/usr/bin:/bin", gh.path().display());
-    let output = Command::new("sh")
+    let output = childenv::fixture_command("sh")
         .env_clear()
         .env("PATH", path)
         .env("COLUMNS", "80")
@@ -1096,7 +1170,7 @@ fn an_empty_pipe_reaches_the_clipboard_step() {
     // standard input would report a chain error about empty text instead.
     let gh = FakeGh::new(THREE_ISSUES);
     let path = format!("{}:/usr/bin:/bin", gh.path().display());
-    let output = Command::new("sh")
+    let output = childenv::fixture_command("sh")
         .env_clear()
         .env("PATH", path)
         .env("COLUMNS", "80")
@@ -1117,47 +1191,35 @@ fn an_empty_pipe_reaches_the_clipboard_step() {
 }
 
 #[test]
-fn the_run_with_no_argument_reads_the_clipboard() {
-    // The one test of this file that leaves the switch out, and the one test
-    // that holds the headline behavior: `wn` alone answers the chain the reader
-    // just copied. Every other test here turns the clipboard off, and every
-    // unit test gives `Sources` a reader of its own, so the line in `run` that
-    // names the real clipboard could read `None` and the whole suite stays
-    // green.
-    //
-    // The assertion reads which path the run took. It never reads what the
-    // clipboard holds. `no chain given` is the error of a run whose inputs left
-    // the clipboard out, and it is the only error that says so: an empty
-    // clipboard, a clipboard that does not open, a clipboard of prose, and a
-    // clipboard that holds a real chain each take a path of its own. The run is
-    // therefore deterministic although it reads a resource of the whole machine
-    // that this test does not own, and the assertion fails if and only if the
-    // run stops wiring the clipboard in.
-    //
-    // `env_clear` takes `DISPLAY` and `WAYLAND_DISPLAY` out as well. On Linux
-    // `arboard` then opens nothing, and the run reports `the clipboard could not
-    // be read (…)`. That is still not the `no chain given` path, so the
-    // assertion holds on a machine with no display exactly as it holds on a
-    // desktop.
-    //
-    // The run reads the clipboard and writes nothing to it, so it keeps what
-    // the person at the keyboard copied.
-    let gh = FakeGh::new(THREE_ISSUES);
-    let path = format!("{}:/usr/bin:/bin", gh.path().display());
-    let output = Command::new(env!("CARGO_BIN_EXE_wn"))
-        .env_clear()
-        .env("PATH", path)
-        .env("COLUMNS", "80")
-        .env("NO_COLOR", "1")
-        // NO_CLIPBOARD_ENV stays out of this environment on purpose. A child of
-        // `output` reads `/dev/null` on standard input, so the run walks past
-        // the argument and past the pipe and arrives at the clipboard.
-        .args(["--repo", REPO])
-        .output()
-        .unwrap();
+fn a_mosh_session_reads_the_chain_through_pbpaste() {
+    // The headline behavior: `wn` alone answers the chain the reader just
+    // copied. The clipboard here is the fake `pbpaste` of a mosh-rs session,
+    // so the run reads a file of this test and never the clipboard of the
+    // machine.
+    let gh = FakeGh::new(THREE_ISSUES).with_shims(ONE_OPEN_CHAIN);
+    let output = run_through_shims(&gh, &["--repo", REPO], Claude::Off);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
     assert!(
-        !stderr(&output).contains(NO_CHAIN),
-        "the clipboard is one of the inputs of the run, in {}",
+        stdout(&output).ends_with("Start #278 next with 'si 278'\n"),
+        "the chain on the clipboard is the chain of the run, in {}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn a_refused_paste_in_a_mosh_session_names_the_shim() {
+    // The shim fails and the run says so. It never falls back to the clipboard
+    // of the machine, and the first line of the shim is the cause.
+    let gh = FakeGh::new(THREE_ISSUES)
+        .with_shims(ONE_OPEN_CHAIN)
+        .with_refusing_pbpaste();
+    let output = run_through_shims(&gh, &["--repo", REPO], Claude::Off);
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    assert!(
+        stderr(&output).contains(
+            "the clipboard could not be read (mosh-open: did not paste: the client allows no paste)"
+        ),
+        "{}",
         stderr(&output)
     );
 }
@@ -1273,7 +1335,7 @@ fn reports_a_number_github_would_not_answer_for() {
 #[test]
 fn says_so_when_the_github_cli_is_not_installed() {
     let dir = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_wn"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_wn"))
         .env_clear()
         .env("PATH", dir.path())
         .env("COLUMNS", "80")
@@ -1303,7 +1365,7 @@ fn a_machine_with_no_gh_is_not_told_to_name_a_repository() {
     // reason. Advice that leads the reader to a second failure is worse than
     // no advice.
     let dir = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_wn"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_wn"))
         .env_clear()
         .env("PATH", dir.path())
         .env("COLUMNS", "80")
@@ -2372,6 +2434,26 @@ fn a_run_with_nothing_to_read_builds_a_plan_with_claude() {
     // The line that says a run is happening goes to standard error, so the
     // answer above reaches a pipe alone.
     assert!(stderr(&output).contains("claude"), "{}", stderr(&output));
+}
+
+#[test]
+fn a_mosh_session_keeps_the_plan_through_pbcopy() {
+    // The plan goes on the clipboard, and in a mosh-rs session the clipboard is
+    // the fake `pbcopy`. The file it writes holds the text of the plan that the
+    // fake `claude` printed.
+    let gh = FakeGh::new(JSON_ISSUES)
+        .with_shims("")
+        .with_claude(&prints_the_plan());
+    let output = run_through_shims(&gh, &["--repo", REPO], Claude::On);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    // The answer, then the note that says the plan is on the clipboard.
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "{JSON_ANSWER}\nThe plan is on the clipboard. Run wn --refresh to build a new one.\n"
+        )
+    );
+    assert_eq!(gh.recorded_clipboard(), undated(JSON_PLAN));
 }
 
 #[test]

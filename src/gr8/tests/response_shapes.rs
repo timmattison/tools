@@ -10,7 +10,7 @@
 //! of the person who started it, and it reaches no network.
 #![cfg(unix)]
 
-use std::process::{Command, Output};
+use std::process::Output;
 
 /// A response that holds two resources gr8 can read and one that it cannot.
 ///
@@ -95,7 +95,7 @@ fn run_gr8_against(response: &str) -> Output {
     )
     .expect("the test must be able to write the stub gh");
 
-    Command::new(env!("CARGO_BIN_EXE_gr8"))
+    childenv::fixture_command(env!("CARGO_BIN_EXE_gr8"))
         .env_clear()
         .env("PATH", directory.path())
         .output()

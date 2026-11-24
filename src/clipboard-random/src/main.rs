@@ -1,9 +1,17 @@
 use anyhow::{Context, Result};
-use arboard::Clipboard;
 use base64::{engine::general_purpose, Engine};
 use buildinfo::version_string;
 use clap::{Parser, Subcommand};
 use rand::Rng;
+use sysclip::Clipboard;
+
+/// The context of a clipboard that does not open.
+///
+/// `sysclip` reaches the clipboard of a graphical session, and the clipboard of
+/// the client in a mosh-rs session. Each of the three writes of this tool opens
+/// the clipboard, so the text stays in one place.
+const CLIPBOARD_OPEN_FAILURE: &str =
+    "Failed to access the clipboard. Run this tool in a graphical session or in a mosh-rs session";
 
 /// Generate random data and copy it to the clipboard/paste buffer
 #[derive(Parser, Debug)]
@@ -206,12 +214,10 @@ fn generate_binary_data(bytes: usize, format: OutputFormat, dry_run: bool) -> Re
         println!("{}", formatted_data);
         return Ok(());
     } else {
-        let mut clipboard = Clipboard::new().context(
-            "Failed to access clipboard. Make sure you're running in a graphical environment.",
-        )?;
+        let mut clipboard = Clipboard::open().context(CLIPBOARD_OPEN_FAILURE)?;
 
         clipboard
-            .set_text(formatted_data.clone())
+            .write(&formatted_data)
             .context("Failed to copy data to clipboard")?;
 
         println!(
@@ -262,12 +268,10 @@ fn generate_text_data(chars: usize, config: TextConfig, dry_run: bool) -> Result
         println!("{}", text);
         return Ok(());
     } else {
-        let mut clipboard = Clipboard::new().context(
-            "Failed to access clipboard. Make sure you're running in a graphical environment.",
-        )?;
+        let mut clipboard = Clipboard::open().context(CLIPBOARD_OPEN_FAILURE)?;
 
         clipboard
-            .set_text(text.clone())
+            .write(&text)
             .context("Failed to copy text to clipboard")?;
 
         println!(
@@ -316,17 +320,14 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn copy_binary_to_clipboard(data: &[u8]) -> Result<()> {
-    // For raw binary data, we need to use the image functionality of the clipboard
-    // or handle it as bytes. Since arboard primarily handles text and images,
-    // we'll encode as latin-1 which preserves all byte values
+    // The clipboard holds text, not bytes. Each byte becomes the character of
+    // the same number (Latin-1), which keeps every byte value.
     let text = data.iter().map(|&b| char::from(b)).collect::<String>();
 
-    let mut clipboard = Clipboard::new().context(
-        "Failed to access clipboard. Make sure you're running in a graphical environment.",
-    )?;
+    let mut clipboard = Clipboard::open().context(CLIPBOARD_OPEN_FAILURE)?;
 
     clipboard
-        .set_text(text)
+        .write(&text)
         .context("Failed to copy binary data to clipboard")?;
 
     Ok(())

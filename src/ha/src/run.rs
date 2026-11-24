@@ -10,12 +10,29 @@ use chrono::{DateTime, Utc};
 
 use crate::target::RepoName;
 
+/// The time from one instant to a later one. A clock that runs behind makes
+/// a negative span, and that gives zero.
+#[must_use]
+pub fn span(from: DateTime<Utc>, to: DateTime<Utc>) -> std::time::Duration {
+    std::time::Duration::from_secs(u64::try_from((to - from).num_seconds()).unwrap_or(0))
+}
+
 /// The database ID that GitHub gives to one workflow run.
 ///
 /// The run URL (`/actions/runs/<ID>`) and the jobs endpoint take this ID. The
 /// board shows it at the right end of the workflow cell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RunId(pub u64);
+
+/// Whether a repository is public or private.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Visibility {
+    /// Anybody can read the repository. A standard runner is free there.
+    Public,
+    /// Only people with access can read the repository. This is the value when
+    /// GitHub does not say.
+    Private,
+}
 
 /// What a run is doing now, or how it ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +123,11 @@ pub struct Run {
     pub id: RunId,
     /// The repository that holds the run.
     pub repo: RepoName,
+    /// Whether the repository of the run is public or private, from
+    /// `repository.private`. A run whose JSON gives no such value counts as
+    /// private. The cost is an estimate at list price, and a private repository
+    /// shows the list price instead of a `$0` that can hide a cost.
+    pub visibility: Visibility,
     /// The name of the workflow.
     pub workflow: String,
     /// The head branch. The text is empty when GitHub gives none.
@@ -118,7 +140,12 @@ pub struct Run {
     pub started_at: DateTime<Utc>,
     /// When GitHub made the run. A re-run does not change it.
     pub created_at: DateTime<Utc>,
-    /// When the run last changed. For a finished run, this is the finish time.
+    /// When the run last changed at GitHub. This is not the end of a finished
+    /// run, because GitHub can change it after the last job of the run ended.
+    /// On 2026-11-06, 4 of 29 finished runs of one repository had an update
+    /// from 59 s to 18 minutes after their last job ended. The board gives the
+    /// end of a finished run from its jobs, and uses this time only when the
+    /// jobs do not give an end.
     pub updated_at: DateTime<Utc>,
     /// The address of the run page on GitHub.
     pub url: String,
@@ -142,6 +169,7 @@ mod tests {
     fn run_with(id: u64, title: &str) -> Run {
         let time = DateTime::<Utc>::UNIX_EPOCH;
         Run {
+            visibility: crate::run::Visibility::Private,
             id: RunId(id),
             repo: RepoName::parse("o/r").expect("a valid repository"),
             workflow: "ci".to_owned(),

@@ -4,6 +4,14 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
+/// The name of the gluetun container that the tunnel of `container_prefix` runs.
+///
+/// The generated `docker-compose.yml` pins this name with `container_name`, so
+/// docker refuses to run two containers of one name.
+pub fn gluetun_container_name(container_prefix: &str) -> String {
+    format!("{container_prefix}-gluetun")
+}
+
 /// Generate docker-compose.yml, .env, and helper scripts in the output directory.
 ///
 /// # Errors
@@ -15,11 +23,12 @@ pub fn generate(
     container_prefix: &str,
     gluetun_version: &str,
     wireguard_key: &str,
+    credential_field: &str,
     extra_ports: &[String],
 ) -> Result<()> {
     fs::create_dir_all(output_dir)?;
 
-    let gluetun_name = format!("{container_prefix}-gluetun");
+    let gluetun_name = gluetun_container_name(container_prefix);
     let canonical_city = city.and_then(cities::canonical_city);
 
     // docker-compose.yml
@@ -32,7 +41,7 @@ pub fn generate(
     )?;
 
     // .env file with WireGuard key (mode 600)
-    write_env(output_dir, wireguard_key)?;
+    write_env(output_dir, wireguard_key, credential_field)?;
 
     // Helper scripts
     write_script(output_dir, "start.sh", &start_script(&gluetun_name))?;
@@ -131,11 +140,11 @@ volumes:
     Ok(())
 }
 
-fn write_env(output_dir: &Path, wireguard_key: &str) -> Result<()> {
+fn write_env(output_dir: &Path, wireguard_key: &str, credential_field: &str) -> Result<()> {
     let env_path = output_dir.join(".env");
     fs::write(
         &env_path,
-        format!("WIREGUARD_PRIVATE_KEY={wireguard_key}\n"),
+        format!("WIREGUARD_PRIVATE_KEY={wireguard_key}\n# Used by vpn-tunnel status and generate (not a Docker variable)\nCREDENTIAL_FIELD={credential_field}\n"),
     )?;
     fs::set_permissions(&env_path, fs::Permissions::from_mode(0o600))?;
     Ok(())
@@ -219,4 +228,56 @@ VPN_IP=$(docker exec {gluetun_name} wget -qO- icanhazip.com 2>/dev/null || echo 
 echo "VPN IP: $VPN_IP"
 "#
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn env_file_contains_credential_field() {
+        let dir = tempfile::tempdir().unwrap();
+        write_env(dir.path(), "test-wg-key", "credential-2").unwrap();
+
+        let env_path = dir.path().join(".env");
+        let content = fs::read_to_string(&env_path).unwrap();
+        assert!(content.contains("WIREGUARD_PRIVATE_KEY=test-wg-key"));
+        assert!(content.contains("CREDENTIAL_FIELD=credential-2"));
+
+        let perms = fs::metadata(&env_path).unwrap().permissions();
+        assert_eq!(perms.mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn env_file_says_that_generate_also_reads_the_credential_field() {
+        // A user who edits or removes the line changes which key the next
+        // generate selects, so the comment names generate as a reader.
+        let dir = tempfile::tempdir().unwrap();
+        write_env(dir.path(), "test-wg-key", "credential-2").unwrap();
+
+        let content = fs::read_to_string(dir.path().join(".env")).unwrap();
+        assert!(
+            content.contains("\n# Used by vpn-tunnel status and generate (not a Docker variable)\nCREDENTIAL_FIELD="),
+            "{content}"
+        );
+    }
+
+    #[test]
+    fn the_gluetun_container_name_carries_the_prefix() {
+        assert_eq!(gluetun_container_name("vpn"), "vpn-gluetun");
+    }
+
+    #[test]
+    fn the_compose_file_pins_the_name_that_credential_selection_compares() {
+        // Credential selection keeps a named credential when only a tunnel of
+        // this name holds its key. That is sound only while docker gives the
+        // container this exact name.
+        let dir = tempfile::tempdir().unwrap();
+        generate(dir.path(), None, "b", "v3.40", "key", "credential", &[]).unwrap();
+
+        let compose = fs::read_to_string(dir.path().join("docker-compose.yml")).unwrap();
+        let pinned = format!("\n    container_name: {}\n", gluetun_container_name("b"));
+        assert!(compose.contains(&pinned), "{compose}");
+    }
 }

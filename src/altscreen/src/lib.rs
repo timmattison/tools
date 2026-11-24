@@ -1,0 +1,406 @@
+//! The one entrance to the alternate screen.
+//!
+//! Some terminal emulators ignore the alternate-screen modes 47, 1047, and
+//! 1049. The emulator in the mosh server is one of them. A full-screen tool
+//! that only sends the entry code then draws over the old shell text. ratatui
+//! sends no clear at startup, and its first frame writes only the cells that
+//! are not blank. The old text thus stays visible under the view.
+//!
+//! This crate enters the alternate screen and clears it in the same write. It
+//! gives these guarantees:
+//!
+//! - The erase and the entry go out in one write.
+//! - A failed entry leaves no raw mode behind.
+//! - Every exit restores the terminal: the cursor, the screen, and raw mode.
+//! - A panic restores the terminal first. The panic message then prints on the
+//!   shell screen, where the user can read it.
+//! - The session never asks the terminal for the cursor position.
+//!
+//! With the `ratatui` feature, `RatatuiSession` also gives a ratatui
+//! `Terminal` over crossterm. The terminal is made after the erase, so its
+//! empty back buffer agrees with the blank screen.
+//!
+//! # Example
+//!
+//! ```no_run
+//! # fn main() -> std::io::Result<()> {
+//! let _session = altscreen::Session::enter(altscreen::Options::default())?;
+//! // Draw the view here. The terminal is restored when `_session` drops.
+//! # Ok(())
+//! # }
+//! ```
+
+use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+#[expect(
+    clippy::disallowed_types,
+    reason = "altscreen is the one entrance to the alternate screen; it renders this command into the bytes of its entry write"
+)]
+use crossterm::terminal::EnterAlternateScreen;
+use crossterm::Command;
+
+/// The options of a session.
+///
+/// Raw mode is on by default. Mouse capture is off by default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Options {
+    raw_mode: bool,
+    mouse_capture: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            raw_mode: true,
+            mouse_capture: false,
+        }
+    }
+}
+
+impl Options {
+    /// Turns raw mode on or off for the session.
+    #[must_use]
+    pub fn raw_mode(self, on: bool) -> Self {
+        Self {
+            raw_mode: on,
+            ..self
+        }
+    }
+
+    /// Turns mouse capture on or off for the session.
+    #[must_use]
+    pub fn mouse_capture(self, on: bool) -> Self {
+        Self {
+            mouse_capture: on,
+            ..self
+        }
+    }
+}
+
+/// The terminal that a session drives.
+///
+/// Only the tests of this crate implement this trait.
+#[doc(hidden)]
+pub trait Port: Send + Sync {
+    /// Writes all of `bytes` and flushes, as one write.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of the write or of the flush.
+    fn write(&self, bytes: &[u8]) -> io::Result<()>;
+
+    /// Turns raw mode on.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of the terminal.
+    fn enable_raw_mode(&self) -> io::Result<()>;
+
+    /// Turns raw mode off.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of the terminal.
+    fn disable_raw_mode(&self) -> io::Result<()>;
+}
+
+/// A live alternate-screen session.
+///
+/// The terminal is restored when the session drops.
+#[must_use = "the terminal is restored when the session drops"]
+pub struct Session {
+    port: Arc<dyn Port>,
+    options: Options,
+    previous_hook: Option<Arc<PanicHook>>,
+    /// Set by the first restore, from the panic hook or from `drop`.
+    restored: Arc<AtomicBool>,
+}
+
+/// The type of a panic hook, as `std::panic::take_hook` returns it.
+type PanicHook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send + 'static>;
+
+impl Session {
+    /// Enters the alternate screen on the real terminal.
+    ///
+    /// The real terminal is standard output, with crossterm raw mode.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of raw mode or of the entry write. A failed entry
+    /// leaves raw mode off.
+    pub fn enter(options: Options) -> io::Result<Session> {
+        Self::enter_on(Arc::new(StdoutPort), options)
+    }
+
+    /// Enters the alternate screen on `port`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of raw mode or of the entry write.
+    #[doc(hidden)]
+    pub fn enter_on(port: Arc<dyn Port>, options: Options) -> io::Result<Session> {
+        if options.raw_mode {
+            port.enable_raw_mode()?;
+        }
+        if let Err(error) = port.write(entry_bytes(options).as_bytes()) {
+            if options.raw_mode {
+                let _ = port.disable_raw_mode();
+            }
+            return Err(error);
+        }
+        let previous: Arc<PanicHook> = Arc::from(std::panic::take_hook());
+        let chained = Arc::clone(&previous);
+        let hook_port = Arc::clone(&port);
+        let restored = Arc::new(AtomicBool::new(false));
+        let hook_restored = Arc::clone(&restored);
+        std::panic::set_hook(Box::new(move |info| {
+            restore_once(hook_port.as_ref(), options, &hook_restored);
+            (*chained)(info);
+        }));
+        Ok(Session {
+            port,
+            options,
+            previous_hook: Some(previous),
+            restored,
+        })
+    }
+}
+
+impl Drop for Session {
+    /// Restores the terminal, then puts the previous panic hook back.
+    ///
+    /// The session restores the terminal once, on the first of the panic hook
+    /// and this drop. A second leave sequence restores the saved cursor again
+    /// in tmux and xterm, and the prompt then prints over the panic message.
+    ///
+    /// The hook is put back only when the thread is not panicking.
+    /// `std::panic::set_hook` panics on a panicking thread, so a session that
+    /// drops during unwinding would cause a double panic and an abort. During
+    /// unwinding, the chained hook stays in place, and it sends nothing more
+    /// because the restore flag is set.
+    fn drop(&mut self) {
+        restore_once(self.port.as_ref(), self.options, &self.restored);
+        if std::thread::panicking() {
+            return;
+        }
+        if let Some(previous) = self.previous_hook.take() {
+            std::panic::set_hook(Box::new(move |info| (*previous)(info)));
+        }
+    }
+}
+
+/// Restores the terminal, only if `restored` was not yet set.
+///
+/// The panic hook and `Drop` both come here, so they restore once between
+/// them. A second leave sequence restores the saved cursor again in tmux and
+/// xterm, and the prompt then prints over the panic message. An atomic flag
+/// is used because a panic can poison a mutex, and the hook runs in a panic.
+fn restore_once(port: &dyn Port, options: Options, restored: &AtomicBool) {
+    if !restored.swap(true, Ordering::SeqCst) {
+        restore(port, options);
+    }
+}
+
+/// Restores the terminal. Every step runs even when an earlier step fails.
+/// Each write is separate, so one failed write does not skip the others.
+/// A second call is not harmless: call it through `restore_once`.
+fn restore(port: &dyn Port, options: Options) {
+    if options.mouse_capture {
+        send(port, &crossterm::event::DisableMouseCapture);
+    }
+    send(port, &crossterm::cursor::Show);
+    send(port, &crossterm::terminal::LeaveAlternateScreen);
+    if options.raw_mode {
+        let _ = port.disable_raw_mode();
+    }
+}
+
+/// Writes one command to the port and ignores the error.
+fn send(port: &dyn Port, command: &impl Command) {
+    let mut out = String::new();
+    // Writing ANSI into a `String` cannot fail.
+    let _ = command.write_ansi(&mut out);
+    let _ = port.write(out.as_bytes());
+}
+
+/// Builds the entry bytes: enter, erase, home, hide, and optional mouse capture.
+fn entry_bytes(options: Options) -> String {
+    let mut out = String::new();
+    // Writing ANSI into a `String` cannot fail.
+    let _ = EnterAlternateScreen.write_ansi(&mut out);
+    let _ = crossterm::terminal::Clear(crossterm::terminal::ClearType::All).write_ansi(&mut out);
+    let _ = crossterm::cursor::MoveTo(0, 0).write_ansi(&mut out);
+    let _ = crossterm::cursor::Hide.write_ansi(&mut out);
+    if options.mouse_capture {
+        let _ = crossterm::event::EnableMouseCapture.write_ansi(&mut out);
+    }
+    out
+}
+
+/// The real terminal: standard output and crossterm raw mode.
+struct StdoutPort;
+
+impl Port for StdoutPort {
+    fn write(&self, bytes: &[u8]) -> io::Result<()> {
+        use std::io::Write;
+        let mut out = io::stdout().lock();
+        out.write_all(bytes)?;
+        out.flush()
+    }
+
+    fn enable_raw_mode(&self) -> io::Result<()> {
+        crossterm::terminal::enable_raw_mode()
+    }
+
+    fn disable_raw_mode(&self) -> io::Result<()> {
+        crossterm::terminal::disable_raw_mode()
+    }
+}
+
+#[cfg(feature = "ratatui")]
+mod ratatui_session;
+#[cfg(feature = "ratatui")]
+pub use ratatui_session::RatatuiSession;
+
+#[cfg(test)]
+pub(crate) mod test_support;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{fake, snapshot, Event, PANIC_HOOK_LOCK};
+    use std::sync::PoisonError;
+
+    fn write(bytes: &str) -> Event {
+        Event::Write(bytes.as_bytes().to_vec())
+    }
+
+    const ENTRY: &str = "\x1b[?1049h\x1b[2J\x1b[1;1H\x1b[?25l";
+
+    #[test]
+    fn default_entry_is_raw_mode_then_one_clearing_write() {
+        let _lock = PANIC_HOOK_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (port, events) = fake(|_| {});
+        let session = Session::enter_on(port, Options::default()).unwrap();
+        assert_eq!(snapshot(&events), [Event::RawOn, write(ENTRY)]);
+        std::mem::forget(session);
+        let _ = std::panic::take_hook();
+    }
+
+    #[test]
+    fn mouse_capture_joins_the_single_entry_write_after_the_hide() {
+        let _lock = PANIC_HOOK_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (port, events) = fake(|_| {});
+        let session = Session::enter_on(port, Options::default().mouse_capture(true)).unwrap();
+        let mut command = String::new();
+        crossterm::event::EnableMouseCapture
+            .write_ansi(&mut command)
+            .unwrap();
+        assert_eq!(
+            snapshot(&events),
+            [Event::RawOn, write(&format!("{ENTRY}{command}"))]
+        );
+        std::mem::forget(session);
+        let _ = std::panic::take_hook();
+    }
+
+    #[test]
+    fn raw_mode_off_sends_no_raw_on() {
+        let _lock = PANIC_HOOK_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (port, events) = fake(|_| {});
+        let session = Session::enter_on(port, Options::default().raw_mode(false)).unwrap();
+        assert_eq!(snapshot(&events), [write(ENTRY)]);
+        std::mem::forget(session);
+        let _ = std::panic::take_hook();
+    }
+
+    #[test]
+    fn failed_entry_write_undoes_raw_mode_and_returns_the_error() {
+        let _lock = PANIC_HOOK_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (port, events) = fake(|p| p.fail_write_containing = Some(b"1049h"));
+        let result = Session::enter_on(port, Options::default());
+        let error = result.err().expect("the entry must fail");
+        assert_eq!(error.to_string(), "write failed");
+        assert_eq!(
+            snapshot(&events),
+            [Event::RawOn, write(ENTRY), Event::RawOff]
+        );
+        let _ = std::panic::take_hook();
+    }
+
+    const DISABLE_MOUSE: &str = "\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1002l\x1b[?1000l";
+    const SHOW: &str = "\x1b[?25h";
+    const LEAVE: &str = "\x1b[?1049l";
+
+    #[test]
+    fn drop_restores_mouse_cursor_screen_and_raw_mode_in_order() {
+        let _lock = PANIC_HOOK_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (port, events) = fake(|_| {});
+        let session = Session::enter_on(port, Options::default().mouse_capture(true)).unwrap();
+        let entered = snapshot(&events).len();
+        drop(session);
+        assert_eq!(
+            snapshot(&events)[entered..],
+            [
+                write(DISABLE_MOUSE),
+                write(SHOW),
+                write(LEAVE),
+                Event::RawOff
+            ]
+        );
+    }
+
+    #[test]
+    fn a_failed_show_cursor_write_does_not_skip_the_other_steps() {
+        let _lock = PANIC_HOOK_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (port, events) = fake(|p| p.fail_write_containing = Some(b"25h"));
+        let session = Session::enter_on(port, Options::default()).unwrap();
+        let entered = snapshot(&events).len();
+        drop(session);
+        assert_eq!(
+            snapshot(&events)[entered..],
+            [write(SHOW), write(LEAVE), Event::RawOff]
+        );
+    }
+
+    #[test]
+    fn a_failed_raw_off_is_ignored_on_drop() {
+        let _lock = PANIC_HOOK_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (port, events) = fake(|p| p.fail_raw_off = true);
+        let session = Session::enter_on(port, Options::default()).unwrap();
+        let entered = snapshot(&events).len();
+        drop(session);
+        assert_eq!(
+            snapshot(&events)[entered..],
+            [write(SHOW), write(LEAVE), Event::RawOff]
+        );
+    }
+
+    #[test]
+    fn drop_without_raw_mode_sends_no_raw_off() {
+        let _lock = PANIC_HOOK_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (port, events) = fake(|_| {});
+        let session = Session::enter_on(port, Options::default().raw_mode(false)).unwrap();
+        let entered = snapshot(&events).len();
+        drop(session);
+        assert_eq!(snapshot(&events)[entered..], [write(SHOW), write(LEAVE)]);
+    }
+}

@@ -39,7 +39,6 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::process::Command;
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::Value;
@@ -240,7 +239,7 @@ pub fn current_repo() -> Result<Repo> {
 /// Gives [`NoRepo::NotRun`] for a `gh` that did not run, and
 /// [`NoRepo::Refused`] for a `gh` that ran and named no repository.
 pub fn repo_of_here() -> std::result::Result<Repo, NoRepo> {
-    let output = Command::new(GH)
+    let output = childenv::command(GH)
         .args([
             "repo",
             "view",
@@ -521,7 +520,7 @@ pub fn fetch(repo: &Repo, numbers: &[IssueNumber]) -> Result<Vec<Entry>> {
     }
 
     let query = build_query(numbers);
-    let output = Command::new(GH)
+    let output = childenv::command(GH)
         .arg("api")
         .arg("graphql")
         .arg("-f")

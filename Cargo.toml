@@ -19,6 +19,7 @@ clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.8"
+toml_edit = "0.22"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -49,7 +50,7 @@ notify = "8.2"
 # cache, and each Homebrew upgrade then stops the link. The default ssh and
 # https transports are off, because no crate clones or fetches, and ssh links
 # the Homebrew OpenSSL dylib. Held by src/gitrdun/tests/vendored-libgit2.rs.
-git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
+git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2"] }
 gix = "0.83"
 
 # Hashing
@@ -145,6 +146,7 @@ tiktoken-rs = "0.5"
 num-format = "0.4"
 human_bytes = "0.4"
 unicode-width = "0.2"
+unicode-segmentation = "1.13"
 regex = "1.12"
 rust_decimal = { version = "1.43", default-features = false, features = ["std"] }
 wait-timeout = "0.2"
@@ -197,13 +199,20 @@ procfs = "0.17"
 core-foundation = "0.10"
 core-foundation-sys = "0.8"
 io-kit-sys = "0.5"
-# Core Audio bindings for popstop. They ship generated bindings, so the build
-# needs no bindgen and no libclang. A member turns on only the features that
-# it uses.
+# objc2 bindings to the frameworks of Apple. They ship generated bindings, so
+# the build needs no bindgen and no libclang. A member turns on only the
+# features that it uses.
+#
+# Core Audio bindings for popstop.
 objc2-audio-toolbox = { version = "0.3.2", default-features = false }
 objc2-core-audio = { version = "0.3.2", default-features = false }
 objc2-core-audio-types = { version = "0.3.2", default-features = false }
+# Core Foundation bindings for popstop and glance.
 objc2-core-foundation = { version = "0.3.2", default-features = false }
+# The runtime, AppKit, and Foundation bindings for glance.
+objc2 = "0.6.5"
+objc2-app-kit = { version = "0.3.2", default-features = false }
+objc2-foundation = { version = "0.3.2", default-features = false }
 windows-sys = { version = "0.60", features = [
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_Foundation",
@@ -213,9 +222,15 @@ windows-sys = { version = "0.60", features = [
 
 # Internal crates
 buildinfo = { path = "src/buildinfo" }
+childenv = { path = "src/childenv" }
+sysclip = { path = "src/sysclip" }
+claude-transcript = { path = "src/claude-transcript" }
 op-cache = { path = "src/op-cache" }
 clipboardmon = { path = "src/clipboardmon" }
+faulte = { path = "src/faulte" }
 filewalker = { path = "src/filewalker" }
+altscreen = { path = "src/altscreen" }
+ghrest = { path = "src/ghrest" }
 gitscratch = { path = "src/gitscratch" }
 httpfile = { path = "src/httpfile" }
 occ = { path = "src/occ" }

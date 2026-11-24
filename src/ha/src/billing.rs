@@ -16,6 +16,7 @@ use std::ops::{Add, AddAssign};
 
 use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 
+use crate::cost::{PriceBook, Prices, Sku};
 use crate::github::SourceError;
 use crate::money::Usd;
 use crate::target::{folded, hash_folded, OwnerName, Target};
@@ -37,6 +38,12 @@ pub struct UsageItem {
     pub net: Usd,
     /// The organization that used the product. An enterprise report names it.
     pub organization: Option<String>,
+    /// The SKU name as GitHub writes it, for example `Actions Linux`. The text
+    /// is empty when GitHub gives none.
+    pub sku: String,
+    /// The list price of one unit of the SKU. It is `None` when GitHub gives
+    /// none.
+    pub price_per_unit: Option<Usd>,
 }
 
 impl UsageItem {
@@ -82,9 +89,13 @@ pub struct Windows {
 #[error("the enterprise report has an {BILLED_PRODUCT} item with no organizationName.")]
 pub struct MissingOrganization;
 
-/// The billed and list-price sums of each UTC day.
+/// The usage of one account: the billed and list-price sums of each UTC day,
+/// and the `pricePerUnit` of each runner SKU that its items name.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct DailyUsage(BTreeMap<NaiveDate, Amounts>);
+pub struct DailyUsage {
+    days: BTreeMap<NaiveDate, Amounts>,
+    prices: Prices,
+}
 
 impl Add for Amounts {
     type Output = Amounts;
@@ -136,14 +147,28 @@ impl Sum for Windows {
 
 impl DailyUsage {
     /// Sums the billed items of an organization read or a user read by UTC
-    /// day. An item of another product is left out.
+    /// day. An item of another product is left out. The price of each runner
+    /// SKU comes from its newest billed item that has a price.
     #[must_use]
     pub fn from_items(items: &[UsageItem]) -> DailyUsage {
         let mut days: BTreeMap<NaiveDate, Amounts> = BTreeMap::new();
+        let mut newest: BTreeMap<Sku, (DateTime<Utc>, Usd)> = BTreeMap::new();
         for item in items.iter().filter(|item| is_billed(item)) {
             *days.entry(item.date.date_naive()).or_default() += item.amounts();
+            let (Some(sku), Some(price)) = (Sku::of_billing_name(&item.sku), item.price_per_unit)
+            else {
+                continue;
+            };
+            // On equal dates the later item wins, so only an older date loses.
+            if newest.get(&sku).is_none_or(|(date, _)| *date <= item.date) {
+                newest.insert(sku, (item.date, price));
+            }
         }
-        DailyUsage(days)
+        let mut prices = Prices::default();
+        for (sku, (_, price)) in newest {
+            prices.set(sku, price);
+        }
+        DailyUsage { days, prices }
     }
 
     /// Sums the billed items of one organization from an enterprise report.
@@ -170,6 +195,12 @@ impl DailyUsage {
         Ok(DailyUsage::from_items(&own))
     }
 
+    /// The list price of one minute on each runner SKU that the items name.
+    #[must_use]
+    pub fn prices(&self) -> &Prices {
+        &self.prices
+    }
+
     /// Sums the days into the four windows of the box.
     #[must_use]
     pub fn windows(&self, today: NaiveDate) -> Windows {
@@ -177,7 +208,7 @@ impl DailyUsage {
             let first = today
                 .checked_sub_signed(Duration::days(days_back))
                 .unwrap_or(NaiveDate::MIN);
-            self.0
+            self.days
                 .range(first..=today)
                 .map(|(_, amounts)| *amounts)
                 .sum()
@@ -186,7 +217,7 @@ impl DailyUsage {
             today: sum_of(0),
             yesterday: today
                 .pred_opt()
-                .and_then(|day| self.0.get(&day).copied())
+                .and_then(|day| self.days.get(&day).copied())
                 .unwrap_or_default(),
             last_7_days: sum_of(6),
             last_30_days: sum_of(29),
@@ -568,6 +599,22 @@ impl BillingBoard {
         }
     }
 
+    /// The prices of the accounts that have usage.
+    ///
+    /// An account that is ready has an entry. This is also true when its last
+    /// refresh failed, because it keeps its last good prices. An account that
+    /// is loading, or that has no access, has no entry.
+    #[must_use]
+    pub fn prices(&self) -> PriceBook {
+        let mut book = PriceBook::default();
+        for (name, state) in &self.accounts {
+            if let AccountState::Ready { usage, .. } = state {
+                book.insert(name.clone(), usage.prices().clone());
+            }
+        }
+        book
+    }
+
     /// The rows and the totals for the UTC day `today`.
     #[must_use]
     pub fn view(&self, today: NaiveDate) -> BillingView {
@@ -698,6 +745,16 @@ mod tests {
             gross: amount(gross),
             net: amount(net),
             organization: None,
+            sku: String::new(),
+            price_per_unit: None,
+        }
+    }
+
+    fn priced(moment: &str, product: &str, sku: &str, price: Option<f64>) -> UsageItem {
+        UsageItem {
+            sku: sku.to_owned(),
+            price_per_unit: price.map(amount),
+            ..item_at(moment, product, 1.0, 1.0)
         }
     }
 
@@ -886,6 +943,111 @@ mod tests {
         let usage = DailyUsage::for_organization(&items, &owner("acme"))
             .expect("a copilot item needs no organization");
         assert_eq!(usage.windows(today()).today.billed, amount(1.0));
+    }
+
+    #[test]
+    fn each_runner_sku_takes_its_price_from_its_item() {
+        let usage = DailyUsage::from_items(&[
+            priced(
+                "2026-11-06T10:00:00Z",
+                "actions",
+                "Actions Linux",
+                Some(0.006),
+            ),
+            priced(
+                "2026-11-06T10:00:00Z",
+                "actions",
+                "Actions macOS 3-core",
+                Some(0.062),
+            ),
+        ]);
+        assert_eq!(usage.prices().get(Sku::Linux), Some(amount(0.006)));
+        assert_eq!(usage.prices().get(Sku::Macos), Some(amount(0.062)));
+        assert_eq!(usage.prices().get(Sku::Windows), None);
+    }
+
+    #[test]
+    fn the_newest_item_of_a_sku_gives_its_price_in_any_order() {
+        let newer = priced(
+            "2026-11-06T10:00:00Z",
+            "actions",
+            "Actions Linux",
+            Some(0.006),
+        );
+        let older = priced(
+            "2026-11-01T10:00:00Z",
+            "actions",
+            "Actions Linux",
+            Some(0.005),
+        );
+        for items in [[newer.clone(), older.clone()], [older, newer]] {
+            let usage = DailyUsage::from_items(&items);
+            assert_eq!(usage.prices().get(Sku::Linux), Some(amount(0.006)));
+        }
+    }
+
+    #[test]
+    fn on_equal_dates_the_later_item_gives_the_price() {
+        let usage = DailyUsage::from_items(&[
+            priced(
+                "2026-11-06T10:00:00Z",
+                "actions",
+                "Actions Linux",
+                Some(0.005),
+            ),
+            priced(
+                "2026-11-06T10:00:00Z",
+                "actions",
+                "Actions Linux",
+                Some(0.006),
+            ),
+        ]);
+        assert_eq!(usage.prices().get(Sku::Linux), Some(amount(0.006)));
+    }
+
+    #[test]
+    fn other_products_storage_and_unpriced_items_add_no_price() {
+        let usage = DailyUsage::from_items(&[
+            priced(
+                "2026-11-06T10:00:00Z",
+                "copilot",
+                "Actions Linux",
+                Some(0.006),
+            ),
+            priced(
+                "2026-11-06T10:00:00Z",
+                "actions",
+                "Actions storage",
+                Some(0.25),
+            ),
+            priced("2026-11-06T10:00:00Z", "actions", "Actions Windows", None),
+        ]);
+        assert_eq!(usage.prices(), &Prices::default());
+    }
+
+    #[test]
+    fn for_organization_takes_the_prices_of_its_own_items_only() {
+        let own = UsageItem {
+            organization: Some("acme".to_owned()),
+            ..priced(
+                "2026-11-06T10:00:00Z",
+                "actions",
+                "Actions Linux",
+                Some(0.006),
+            )
+        };
+        let other = UsageItem {
+            organization: Some("other-org".to_owned()),
+            ..priced(
+                "2026-11-06T11:00:00Z",
+                "actions",
+                "Actions Linux",
+                Some(0.004),
+            )
+        };
+        let usage = DailyUsage::for_organization(&[own, other], &owner("acme"))
+            .expect("every item names an organization");
+        assert_eq!(usage.prices().get(Sku::Linux), Some(amount(0.006)));
     }
 
     fn ym(year: i32, month: u32) -> YearMonth {
@@ -1171,6 +1333,41 @@ mod tests {
             .expect("the account is in the view")
             .cell
             .clone()
+    }
+
+    fn linux_usage(price: f64) -> DailyUsage {
+        usage_of(&[priced(
+            "2026-11-06T10:00:00Z",
+            "actions",
+            "Actions Linux",
+            Some(price),
+        )])
+    }
+
+    fn linux_price(book: &PriceBook, name: &str) -> Option<Usd> {
+        book.of(&owner(name))
+            .and_then(|prices| prices.get(Sku::Linux))
+    }
+
+    #[test]
+    fn the_book_holds_the_prices_of_a_ready_account_only() {
+        let mut board = board_of(&["acme", "loading", "denied"]);
+        board.apply(vec![
+            (owner("acme"), Ok(linux_usage(0.006))),
+            (owner("denied"), Err(BillingError::NoBillingRole)),
+        ]);
+        let book = board.prices();
+        assert_eq!(linux_price(&book, "acme"), Some(amount(0.006)));
+        assert_eq!(book.of(&owner("loading")), None);
+        assert_eq!(book.of(&owner("denied")), None);
+    }
+
+    #[test]
+    fn a_ready_account_whose_refresh_failed_keeps_its_prices() {
+        let mut board = board_of(&["acme"]);
+        board.apply(vec![(owner("acme"), Ok(linux_usage(0.006)))]);
+        board.apply(vec![(owner("acme"), Err(BillingError::NoBillingRole))]);
+        assert_eq!(linux_price(&board.prices(), "acme"), Some(amount(0.006)));
     }
 
     #[test]

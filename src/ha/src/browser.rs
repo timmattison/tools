@@ -22,7 +22,7 @@
 //! - A list of commands with `:` between them is not supported.
 
 use std::ffi::OsString;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -132,7 +132,7 @@ fn start(
     window: Duration,
     failures: Sender<OpenFailure>,
 ) -> Result<(), String> {
-    let mut command = Command::new(program);
+    let mut command = childenv::command(program);
     command
         .args(with_address(arguments, url))
         .stdin(Stdio::null())

@@ -36,9 +36,8 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
-use gitscratch::shed_inherited_git_environment;
 use tempfile::TempDir;
 
 /// The message `kitchen-sync` prints when a workspace holds no binary package.
@@ -94,7 +93,7 @@ type Snapshot = BTreeMap<String, Held>;
 /// Run a git command in `dir` and hand back whether it succeeded.
 ///
 /// The whole inherited `GIT_` family is shed through
-/// [`gitscratch::shed_inherited_git_environment`], which is what makes `dir` the
+/// [`childenv::fixture_command`], which is what makes `dir` the
 /// repository git acts on. `current_dir(dir)` alone is not enough: git obeys
 /// `GIT_DIR` before it obeys the directory it was pointed at, so a run of this
 /// suite from inside a pre-commit hook would put the fixture's commits into the
@@ -105,8 +104,7 @@ type Snapshot = BTreeMap<String, Held>;
 /// throwaway repository from a local path, so a `GIT_SSH_COMMAND` it inherited
 /// names a program it has no reason to run.
 fn run_git(dir: &Path, args: &[&str]) -> bool {
-    let mut command = Command::new("git");
-    shed_inherited_git_environment(&mut command);
+    let mut command = childenv::fixture_command("git");
 
     command
         .args(args)
@@ -318,7 +316,7 @@ fn the_binary_leaves_the_repository_the_environment_names_untouched() {
     // thread spawns git of its own, and a process-wide variable would aim it
     // here. The working directory is the temporary directory above the source
     // repository, so no ambient repository can stand in for a shed variable.
-    let output = Command::new(env!("CARGO_BIN_EXE_kitchen-sync"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_kitchen-sync"))
         .arg(&source_url)
         .current_dir(source_temp.path())
         .stdin(Stdio::null())

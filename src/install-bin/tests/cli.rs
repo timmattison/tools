@@ -4,8 +4,6 @@
 //! Parallel-safety: every test gets its own `tempfile::tempdir()` sandbox, so
 //! concurrent runs never share a path.
 
-use std::process::Command;
-
 /// Path to the freshly built `install-bin` binary, provided by Cargo to
 /// integration tests.
 const BIN: &str = env!("CARGO_BIN_EXE_install-bin");
@@ -15,7 +13,7 @@ fn reports_a_missing_source_and_exits_nonzero() {
     let dir = tempfile::tempdir().expect("tempdir");
     let missing = dir.path().join("was-never-built");
 
-    let out = Command::new(BIN)
+    let out = childenv::fixture_command(BIN)
         .arg(&missing)
         .arg("--dest")
         .arg(dir.path())
@@ -44,7 +42,7 @@ fn installs_and_verifies_a_binary_that_execs_cleanly() {
     // install-bin itself answers `--version` cleanly, so install it onto a fresh
     // inode and let the real post-install exec check run (this is exactly the
     // macOS signature-cache path the tool exists to survive).
-    let out = Command::new(BIN)
+    let out = childenv::fixture_command(BIN)
         .arg(BIN)
         .arg("--dest")
         .arg(dir.path())
@@ -78,7 +76,7 @@ fn no_verify_skips_the_exec_check() {
     gitscratch::testing::executable::write_executable(&src, "#!/bin/sh\nkill -KILL $$\n")
         .expect("write source");
 
-    let out = Command::new(BIN)
+    let out = childenv::fixture_command(BIN)
         .arg(&src)
         .arg("--dest")
         .arg(dir.path().join("bin"))
@@ -109,7 +107,7 @@ fn name_positional_installs_under_the_given_name() {
     // install-bin itself (it answers `--version` cleanly, so the exec check
     // passes) as `renamed-tool` and confirm the override — not the source
     // basename — is what lands on disk.
-    let out = Command::new(BIN)
+    let out = childenv::fixture_command(BIN)
         .arg(BIN)
         .arg("renamed-tool")
         .arg("--dest")
@@ -152,7 +150,7 @@ fn verify_arg_is_passed_to_the_exec_check() {
     // override was threaded through.
     // Both --verify-arg=--help and --verify-arg --help work (allow_hyphen_values);
     // this uses the = form.
-    let out = Command::new(BIN)
+    let out = childenv::fixture_command(BIN)
         .arg(BIN)
         .arg("--dest")
         .arg(dir.path())
@@ -182,7 +180,7 @@ fn verify_arg_is_passed_to_the_exec_check() {
 #[test]
 fn verify_arg_accepts_a_hyphen_prefixed_value_in_space_form() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let out = Command::new(BIN)
+    let out = childenv::fixture_command(BIN)
         .arg(BIN)
         .arg("--dest")
         .arg(dir.path())
@@ -204,7 +202,7 @@ fn verify_arg_accepts_a_hyphen_prefixed_value_in_space_form() {
 
 #[test]
 fn prints_version_with_git_metadata() {
-    let out = Command::new(BIN)
+    let out = childenv::fixture_command(BIN)
         .arg("--version")
         .output()
         .expect("run install-bin --version");

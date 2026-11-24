@@ -115,7 +115,7 @@ impl StartBranch {
     /// The child obeys the rules of the other git children of gsw. It sheds
     /// the git environment that gsw inherited and keeps the six variables that
     /// the user states
-    /// ([`gitscratch::shed_inherited_git_environment_keeping_user_intent`]),
+    /// ([`childenv::command`]),
     /// because a gsw that a hook started holds a `GIT_DIR` that is not the
     /// repository of the user. Its stdin is closed. It is detached from the
     /// terminal ([`crate::child::detach_from_terminal`]), because gsw holds the
@@ -123,8 +123,7 @@ impl StartBranch {
     /// not open `/dev/tty`. The caller pipes the output: see
     /// [`crate::push::run_streamed`].
     pub(super) fn switch_child(&self, workdir: &Path) -> Command {
-        let mut command = Command::new("git");
-        gitscratch::shed_inherited_git_environment_keeping_user_intent(&mut command);
+        let mut command = childenv::command("git");
         command
             .args(["switch", "--no-guess"])
             .arg(&self.0)
@@ -486,7 +485,7 @@ mod tests {
                      the assertions below are measured against nothing",
                 );
             }
-            for name in gitscratch::USER_INTENT_GIT_ENVIRONMENT {
+            for name in childenv::USER_INTENT_GIT_ENVIRONMENT {
                 assert_eq!(
                     std::env::var(name).ok(),
                     Some(user_intent_value(name)),

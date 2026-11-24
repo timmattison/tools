@@ -20,9 +20,7 @@
 //! the work tree from either one.
 
 use std::path::Path;
-use std::process::Command;
 
-use gitscratch::shed_inherited_git_environment;
 use gitscratch::testing::{path_at_or_above, DetachedGitDirRepo};
 
 /// The exit code `gitnuke` leaves behind when it finds no repository.
@@ -52,13 +50,12 @@ const TARGET: &str = "no-such-worktree";
 /// repository is exactly the `gitnuke` that would delete inside it.
 ///
 /// The inherited `GIT_*` family goes, through
-/// [`gitscratch::shed_inherited_git_environment`]. This suite runs under a
+/// [`childenv::fixture_command`]. This suite runs under a
 /// pre-commit hook that exports `GIT_DIR` and its kin, and `GIT_DIR` beats the
 /// working directory, so a leaked one points `gitnuke` at the repository being
 /// committed to.
 fn run_gitnuke_in(dir: &Path) -> (Option<i32>, String) {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_gitnuke"));
-    shed_inherited_git_environment(&mut command);
+    let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_gitnuke"));
 
     let output = command
         .args(["--dry-run", TARGET])

@@ -1,12 +1,13 @@
 //! Integration tests that run the repo's real `.husky/pre-commit` hook against
 //! throwaway fixtures and assert on its exit status and its output.
 //!
-//! These cover *existing* correct behavior of the hook, so a TDD red phase is
-//! impossible — they pass immediately against the current hook. The mutation
-//! check that substitutes for red (remove the `cargo fmt` step from the copy of
-//! `scripts/rust-checks.sh` that each fixture runs, watch
+//! Most of these tests cover *existing* correct behavior of the hook, so a TDD
+//! red phase is impossible for them — they pass immediately against the current
+//! hook. The mutation check that substitutes for red (remove the `cargo fmt`
+//! step from the copy of `scripts/rust-checks.sh` that each fixture runs, watch
 //! `staged_misformatted_rust_file_fails_the_gate` fail, restore, watch it pass)
-//! is documented in the commit body, not committed as code.
+//! is documented in the commit body, not committed as code. The tests of the
+//! `GIT_` variables are different: each one failed first, in a red commit.
 //!
 //! Parallel safety: a `bacon` loop runs `cargo test` concurrently with the
 //! pre-commit hook's own `cargo test`, so two copies of each test can execute
@@ -22,7 +23,6 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use gitscratch::shed_inherited_git_environment;
 use gitscratch::testing::executable::write_executable;
 
 /// A deliberately misformatted Rust source file. `cargo fmt --check` rejects it
@@ -44,6 +44,19 @@ fn rust_checks_path() -> PathBuf {
         panic!(
             "cannot canonicalize rust-checks path {}: {e}",
             script.display()
+        )
+    })
+}
+
+/// Absolute, canonical path to the real helper that the check script sources.
+/// Each fixture holds a copy of it next to the copy of the check script.
+fn without_git_environment_path() -> PathBuf {
+    let helper =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/without-git-environment.sh");
+    fs::canonicalize(&helper).unwrap_or_else(|e| {
+        panic!(
+            "cannot canonicalize without-git-environment path {}: {e}",
+            helper.display()
         )
     })
 }
@@ -102,7 +115,10 @@ fn write_fixture_package(dir: &Path) {
 }
 
 /// Copy the pinned `rust-toolchain.toml` into `dir`, and write the real
-/// `scripts/rust-checks.sh` into `dir/scripts/`. Each fixture builder calls it.
+/// `scripts/rust-checks.sh` into `dir/scripts/`. It also copies the real
+/// `scripts/without-git-environment.sh`, because the check script sources it
+/// from its own directory. No process runs the helper, thus a plain copy is
+/// safe. Each fixture builder calls it.
 fn write_toolchain_and_check_script(dir: &Path) {
     fs::copy(rust_toolchain_path(), dir.join("rust-toolchain.toml"))
         .expect("copy rust-toolchain.toml into fixture");
@@ -111,6 +127,11 @@ fn write_toolchain_and_check_script(dir: &Path) {
     let script = fs::read(rust_checks_path()).expect("read scripts/rust-checks.sh");
     write_executable(dir.join("scripts/rust-checks.sh"), script)
         .expect("write rust-checks.sh into fixture");
+    fs::copy(
+        without_git_environment_path(),
+        dir.join("scripts/without-git-environment.sh"),
+    )
+    .expect("copy without-git-environment.sh into fixture");
 }
 
 /// The text of a `Cargo.lock` that is stale. It lists the `fixture` package and
@@ -174,8 +195,7 @@ fn run_git(dir: &Path, args: &[&str]) {
     // operates on, even when this runs from inside the repo's own hook. The
     // rule is the prefix and never a list of names: `GIT_DIR` overrides `-C`,
     // and so does a variable nobody here thought to name.
-    let mut command = Command::new("git");
-    shed_inherited_git_environment(&mut command);
+    let mut command = childenv::fixture_command("git");
 
     let output = command
         .arg("-C")
@@ -250,11 +270,13 @@ fn cargo_home() -> Option<PathBuf> {
 /// tool. Thus it puts `$CARGO_HOME/bin` last on PATH, and it sets `CARGO_HOME`
 /// to that same cargo home. Cargo then obeys the PATH order, and the stub is the
 /// only `cargo-machete` that a hook run starts. The directory goes last, so the
-/// `cargo` that the hook starts stays the first one on PATH. Gives back the exit
-/// status and the printed output of that one run.
-fn run_hook(dir: &Path) -> HookRun {
-    let mut command = Command::new("bash");
-    shed_inherited_git_environment(&mut command);
+/// `cargo` that the hook starts stays the first one on PATH.
+///
+/// `configure` changes the command after that setup and before it starts, so a
+/// `PATH` that `configure` sets wins. Gives back the exit status and the printed
+/// output of that one run.
+fn run_hook_configured(dir: &Path, configure: impl FnOnce(&mut Command)) -> HookRun {
+    let mut command = childenv::fixture_command("bash");
     let stub_dir = dir.join(MACHETE_STUB_DIR);
     fs::create_dir_all(&stub_dir).expect("failed to create the stub directory");
     write_executable(stub_dir.join(MACHETE_BINARY_NAME), MACHETE_STUB_SCRIPT)
@@ -271,6 +293,7 @@ fn run_hook(dir: &Path) -> HookRun {
         std::env::join_paths(path_dirs).expect("failed to join the stub directory onto PATH");
     command.env("PATH", path);
     command.env("CARGO_TARGET_DIR", dir.join("target"));
+    configure(&mut command);
 
     let completed = command
         .arg(hook_path())
@@ -285,6 +308,11 @@ fn run_hook(dir: &Path) -> HookRun {
             String::from_utf8_lossy(&completed.stderr)
         ),
     }
+}
+
+/// Run the real hook once with `dir` as CWD and no change to its command.
+fn run_hook(dir: &Path) -> HookRun {
+    run_hook_configured(dir, |_| {})
 }
 
 /// The line the hook prints before it runs the tool-index guard.
@@ -502,4 +530,166 @@ fn stale_lock_file_fails_the_gate() {
         lock_before, lock_after,
         "the gate must not rewrite Cargo.lock"
     );
+}
+
+/// What a fake `cargo` recorded. Each call appends its environment, then one
+/// separator line that holds its arguments.
+struct CargoRecording {
+    /// The recording file, which lives inside the fake directory.
+    log: PathBuf,
+    /// The directory that holds the fake `cargo`. It goes first on `PATH`.
+    bin_dir: PathBuf,
+}
+
+/// Prefix of the separator line that a fake `cargo` writes after each call.
+const CARGO_CALL_MARKER: &str = "--- cargo call: ";
+
+/// Make a fake `cargo` in a new directory. It records its environment and its
+/// arguments, then exits zero. It exits zero for `cargo install` too, so the
+/// `cargo-machete` branch of the hook cannot reach the network.
+fn install_fake_cargo(dir: &Path) -> CargoRecording {
+    use std::os::unix::fs::PermissionsExt;
+
+    let bin_dir = dir.join("fake-bin");
+    fs::create_dir_all(&bin_dir).expect("create fake bin dir");
+    let log = dir.join("cargo-recording.txt");
+    let script = format!(
+        "#!/bin/sh\nenv >> '{log}'\necho '{CARGO_CALL_MARKER}'\"$*\" >> '{log}'\nexit 0\n",
+        log = log.display()
+    );
+    let cargo = bin_dir.join("cargo");
+    fs::write(&cargo, script).expect("write fake cargo");
+    fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755)).expect("chmod fake cargo");
+    CargoRecording { log, bin_dir }
+}
+
+/// The `PATH` for a child: the fake directory first, the real `PATH` after it.
+fn path_with_fake_first(bin_dir: &Path) -> std::ffi::OsString {
+    let mut paths = vec![bin_dir.to_path_buf()];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    std::env::join_paths(paths).expect("join PATH")
+}
+
+/// Give `command` the fake `cargo` and three `GIT_` variables, after the sweep.
+/// One variable is a name that git has never invented.
+fn plant_fake_cargo_and_git_variables(command: &mut std::process::Command, cargo: &CargoRecording) {
+    command
+        .env("PATH", path_with_fake_first(&cargo.bin_dir))
+        .env("GIT_CONFIG_PARAMETERS", "'hook.envleakprobe=leaked'")
+        .env("GIT_AUTHOR_NAME", "Leaked Author")
+        .env("GIT_SOMETHING_GIT_INVENTS_LATER", "leaked");
+}
+
+/// The recorded cargo calls, as the arguments of each, and the lines of the
+/// recording that start with `GIT_`.
+struct RecordedCalls {
+    arguments: Vec<String>,
+    git_lines: Vec<String>,
+}
+
+/// Read what the fake `cargo` recorded.
+fn read_recording(cargo: &CargoRecording) -> RecordedCalls {
+    let text = fs::read_to_string(&cargo.log).unwrap_or_default();
+    let arguments = text
+        .lines()
+        .filter_map(|line| line.strip_prefix(CARGO_CALL_MARKER))
+        .map(str::to_owned)
+        .collect();
+    let git_lines = text
+        .lines()
+        .filter(|line| line.starts_with("GIT_"))
+        .map(str::to_owned)
+        .collect();
+    RecordedCalls {
+        arguments,
+        git_lines,
+    }
+}
+
+/// Run the real hook in `dir` with the fake `cargo` and the planted variables.
+fn run_hook_with_planted_git_variables(dir: &Path, cargo: &CargoRecording) -> HookRun {
+    run_hook_configured(dir, |command| {
+        plant_fake_cargo_and_git_variables(command, cargo);
+    })
+}
+
+/// Assert that the fake ran for each word in `expected` and saw no `GIT_` line.
+fn assert_clean_recording(calls: &RecordedCalls, expected: &[&str], context: &str) {
+    for word in expected {
+        assert!(
+            calls
+                .arguments
+                .iter()
+                .any(|args| args.split_whitespace().next() == Some(*word)),
+            "the fake cargo never ran `{word}` ({context}): {:?}",
+            calls.arguments
+        );
+    }
+    assert!(
+        calls.git_lines.is_empty(),
+        "a cargo command saw GIT_ variables ({context}): {:?}",
+        calls.git_lines
+    );
+}
+
+/// Every cargo command of the Rust block must run with no `GIT_` variable, also
+/// a name that git has never invented.
+#[test]
+fn rust_block_runs_every_cargo_command_without_git_variables() {
+    let dir = unique_fixture_dir();
+    write_fixture_package(&dir);
+    git_init_and_stage(&dir, &["src/main.rs"]);
+    let cargo = install_fake_cargo(&dir);
+
+    let HookRun { passed, output } = run_hook_with_planted_git_variables(&dir, &cargo);
+    let calls = read_recording(&cargo);
+    cleanup(&dir);
+
+    assert!(passed, "the hook must pass with a fake cargo: {output}");
+    assert_clean_recording(&calls, &["fmt", "clippy", "test"], "rust block");
+}
+
+/// The tool-index block must run its cargo command with no `GIT_` variable.
+#[test]
+fn tool_index_block_runs_cargo_without_git_variables() {
+    let dir = unique_fixture_dir();
+    write_fixture_package(&dir);
+    fs::write(dir.join("README.md"), "# fixture\n").expect("write README.md");
+    git_init_and_stage(&dir, &["README.md"]);
+    let cargo = install_fake_cargo(&dir);
+
+    let HookRun { passed, output } = run_hook_with_planted_git_variables(&dir, &cargo);
+    let calls = read_recording(&cargo);
+    cleanup(&dir);
+
+    assert!(passed, "the hook must pass with a fake cargo: {output}");
+    assert_clean_recording(&calls, &["test"], "tool-index block");
+}
+
+/// `test.sh` must run `cargo test` with no `GIT_` variable.
+#[test]
+fn test_sh_runs_cargo_without_git_variables() {
+    let dir = unique_fixture_dir();
+    let cargo = install_fake_cargo(&dir);
+    let script = fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test.sh"))
+        .expect("canonicalize test.sh");
+
+    let mut command = childenv::fixture_command("bash");
+    plant_fake_cargo_and_git_variables(&mut command, &cargo);
+    let completed = command
+        .arg(&script)
+        .current_dir(&dir)
+        .output()
+        .expect("failed to spawn test.sh");
+    let calls = read_recording(&cargo);
+    cleanup(&dir);
+
+    assert!(
+        completed.status.success(),
+        "test.sh must pass with a fake cargo: {}",
+        String::from_utf8_lossy(&completed.stderr)
+    );
+    assert_clean_recording(&calls, &["test"], "test.sh");
 }

@@ -17,10 +17,10 @@ path = "src/main.rs"
 [dependencies]
 brush-parser.workspace = true
 buildinfo.workspace = true
+childenv.workspace = true
 chrono.workspace = true
 clap.workspace = true
 comfy-table.workspace = true
-gitscratch.workspace = true
 num-format.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -99,8 +99,6 @@ fn find_git_repository(start_path: Option<&str>) -> Result<Repository> {
 }
 
 fn check_claude_cli() -> Result<String> {
-    use std::process::Command;
-
     let spinner = ProgressBar::new_spinner();
     spinner.set_style(
         ProgressStyle::default_spinner()
@@ -123,7 +121,7 @@ fn check_claude_cli() -> Result<String> {
     let mut used_path = String::new();
 
     for path in &claude_paths {
-        let result = Command::new(path).arg("--version").output();
+        let result = childenv::command(path).arg("--version").output();
 
         if result.is_ok() {
             claude_check = Some(result);
@@ -253,7 +251,7 @@ async fn generate_commit_message(
     claude_path: &str,
 ) -> Result<String> {
     use std::io::Write;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     use tokio::time::{timeout, Duration};
 
     let spinner = ProgressBar::new_spinner();
@@ -324,7 +322,7 @@ async fn generate_commit_message(
     };
 
     // Use stdin for the prompt to handle large diffs better
-    let mut child = Command::new(claude_path)
+    let mut child = childenv::command(claude_path)
         .arg("--print")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

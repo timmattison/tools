@@ -90,9 +90,9 @@ impl ClipboardUnavailable {
     ///
     /// The space around the cause is dropped, and so is a period at the end of
     /// it. A cause is a clause of a longer sentence here — the message puts it
-    /// in parentheses and then goes on with the instruction — and `arboard`
-    /// writes a whole sentence with a period on it. Keeping that period gives
-    /// the reader `.).` in the middle of one line. A cause that is nothing but
+    /// in parentheses and then goes on with the instruction — and a clipboard
+    /// library can write a whole sentence with a period on it. Keeping that
+    /// period gives the reader `.).` in the middle of one line. A cause that is nothing but
     /// a period is kept as it is, because an error that names no cause at all
     /// reads as a bug in the tool rather than as a state of the machine.
     #[must_use]
@@ -513,18 +513,30 @@ pub fn clipboard_is_off(value: Option<&str>) -> bool {
 
 /// Read the system clipboard.
 ///
+/// The clipboard comes from `sysclip`. In a mosh-rs session
+/// (`MOSH_OPEN_SOCKET` is set) the text comes through the `pbpaste` shim from
+/// the clipboard of the client. `Ok(None)` is a clipboard with no text.
+///
 /// # Errors
 ///
 /// Gives [`ClipboardUnavailable`] when the clipboard could not be opened or
-/// could not be read. A machine with no display is such a machine, and so is a
-/// session over SSH.
+/// could not be read. The open fails when the clipboard of the machine cannot
+/// be opened and `PATH` holds no `pbcopy` and no `pbpaste`, for example on a
+/// Linux server with no display.
 pub fn system_clipboard() -> ClipboardRead {
     let mut clipboard =
-        arboard::Clipboard::new().map_err(|cause| ClipboardUnavailable::new(&cause))?;
-    from_arboard(clipboard.get_text())
+        sysclip::Clipboard::open().map_err(|cause| ClipboardUnavailable::new(&cause))?;
+    let text = clipboard
+        .read()
+        .map_err(|cause| ClipboardUnavailable::new(&cause))?;
+    Ok((!text.is_empty()).then_some(text))
 }
 
 /// Write `text` to the system clipboard.
+///
+/// The clipboard comes from `sysclip`. In a mosh-rs session
+/// (`MOSH_OPEN_SOCKET` is set) the text goes through the `pbcopy` shim to the
+/// clipboard of the client.
 ///
 /// A write that answers `Ok` is a write the machine took. On X11 a clipboard
 /// belongs to the process that set it, so a tool that exits at once can lose
@@ -537,35 +549,15 @@ pub fn system_clipboard() -> ClipboardRead {
 /// # Errors
 ///
 /// Gives [`ClipboardUnavailable`] when the clipboard could not be opened or
-/// could not be written. A machine with no display is such a machine, and so
-/// is a session over SSH.
+/// could not be written. The open fails when the clipboard of the machine
+/// cannot be opened and `PATH` holds no `pbcopy` and no `pbpaste`, for example
+/// on a Linux server with no display.
 pub fn write_system_clipboard(text: &str) -> ClipboardWrite {
     let mut clipboard =
-        arboard::Clipboard::new().map_err(|cause| ClipboardUnavailable::new(&cause))?;
+        sysclip::Clipboard::open().map_err(|cause| ClipboardUnavailable::new(&cause))?;
     clipboard
-        .set_text(text)
+        .write(text)
         .map_err(|cause| ClipboardUnavailable::new(&cause))
-}
-
-/// The read `result` as a [`ClipboardRead`].
-///
-/// Pure, so the mapping is tested without a clipboard. The one judgment in it
-/// is `ContentNotAvailable`: `arboard` says that for a clipboard with nothing
-/// in it and for a clipboard that holds an image, and neither of them is a
-/// failure to a tool that wants a chain.
-///
-/// # Errors
-///
-/// Gives [`ClipboardUnavailable`] for every other failure.
-fn from_arboard(result: Result<String, arboard::Error>) -> ClipboardRead {
-    match result {
-        Ok(text) => Ok(Some(text)),
-        Err(arboard::Error::ContentNotAvailable) => Ok(None),
-        // `arboard::Error` is `#[non_exhaustive]`, so this arm is required and
-        // a new variant of a later version arrives here as a failure that
-        // names itself, rather than as a build that stops.
-        Err(cause) => Err(ClipboardUnavailable::new(&cause)),
-    }
 }
 
 #[cfg(test)]
@@ -781,8 +773,9 @@ Pass it as an argument, in quotes: wn \"#277 → #278\""
 
     #[test]
     fn a_cause_that_ends_with_a_period_loses_it() {
-        // `arboard` writes a whole sentence, period included: "The selected
-        // clipboard is not supported with the current system configuration."
+        // A clipboard library writes a whole sentence, period included: "The
+        // selected clipboard is not supported with the current system
+        // configuration."
         // The message puts the cause in parentheses and then continues, so a
         // period the cause carries reads as ".)." to the person at the
         // terminal.
@@ -1385,37 +1378,5 @@ Unset it to build one. Pass it as an argument, in quotes: wn \"#277 → #278\""
         assert!(!clipboard_is_off(Some("   ")));
         assert!(clipboard_is_off(Some("1")));
         assert!(clipboard_is_off(Some("no")));
-    }
-
-    #[test]
-    fn text_from_the_clipboard_arrives_whole() {
-        assert_eq!(
-            from_arboard(Ok(CHAIN.to_string())),
-            Ok(Some(CHAIN.to_string()))
-        );
-    }
-
-    #[test]
-    fn a_clipboard_with_no_content_is_an_empty_clipboard() {
-        assert_eq!(
-            from_arboard(Err(arboard::Error::ContentNotAvailable)),
-            Ok(None)
-        );
-    }
-
-    #[test]
-    fn a_platform_with_no_clipboard_cannot_be_read() {
-        let read = from_arboard(Err(arboard::Error::ClipboardNotSupported));
-        let cause = read.expect_err("the platform has no clipboard").to_string();
-        assert!(cause.contains("not supported"), "{cause}");
-    }
-
-    #[test]
-    fn an_unknown_failure_carries_its_description() {
-        let read = from_arboard(Err(arboard::Error::Unknown {
-            description: "the window server said no".to_string(),
-        }));
-        let cause = read.expect_err("the read failed").to_string();
-        assert!(cause.contains("the window server said no"), "{cause}");
     }
 }

@@ -9,13 +9,9 @@ path = "src/main.rs"
 
 [dependencies]
 buildinfo.workspace = true
+childenv.workspace = true
 clap.workspace = true
 dirs.workspace = true
-# For `shed_inherited_git_environment`: nwt asks git where this repository keeps
-# its worktrees, and an inherited GIT_DIR would aim that question at another
-# repository. Which variables to shed is knowledge that lives in gitscratch
-# rather than being copied here to drift.
-gitscratch.workspace = true
 names.workspace = true
 repowalker.workspace = true
 serde.workspace = true
@@ -26,11 +22,6 @@ toml.workspace = true
 walkdir.workspace = true
 
 [dev-dependencies]
-# For `shed_inherited_git_environment`: the suite spawns git and the real nwt
-# binary, and a run from inside a git hook inherits an environment aimed at the
-# repository being committed to. Which variables those are is knowledge that
-# lives in gitscratch rather than being copied here to drift.
-#
 # The `testing` feature carries the shared git fixture builders, and
 # `tests/detached-git-dir.rs` builds its repositories with `DetachedGitDirRepo`.
 gitscratch = { workspace = true, features = ["testing"] }

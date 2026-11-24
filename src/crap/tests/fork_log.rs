@@ -270,7 +270,7 @@ fn ch_through_the_shell_function_logs_the_fork() {
     .unwrap();
 
     // 3. Run the alias path from `work`.
-    let output = std::process::Command::new("bash")
+    let output = childenv::fixture_command("bash")
         .env_clear()
         .env("HOME", &home)
         .env("WORK", &work)

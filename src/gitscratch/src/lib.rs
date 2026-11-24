@@ -16,7 +16,7 @@
 //! pointed at, and it exports them into every hook it runs. Run from inside one
 //! — a pre-push gate, `git bisect run`, `rebase --exec`, `cargo test` from
 //! `.husky/pre-commit` — an unscrubbed tool would aim the whole simulation at
-//! the hook's repository. [`NoInheritedGitEnvironment`] takes them back off, at
+//! the hook's repository. [`childenv::fixture_command`] takes them back off, at
 //! the single place a git process is created and at every fixture spawn
 //! besides. A hook exports who is committing as well as where, and those
 //! variables outrank every config source, so the same sweep takes that second
@@ -31,12 +31,16 @@
 //! [`Scratch`] can only be built through [`Repo::scratch`], and a [`Scratch`]
 //! answers only the operations it names. There is no way to get a worktree from
 //! here without also getting the hardening, which is the point — the tools built
-//! on top (`grist`, and the `grime`/`grind` dry-run reporters) cannot drift
-//! apart on safety, because there is only one implementation of it.
+//! on top (`grist`, the `grime`/`grind` dry-run reporters, and the `bibibi`
+//! regression search) cannot drift apart on safety, because there is only one
+//! implementation of it.
 //!
 //! Two operations are replayed behind that door, and they answer the two
 //! questions a developer asks before doing the work. [`Scratch::replay_rebase`]
 //! walks a whole rebase, halt by halt, and folds a cost per stop.
+//! [`Scratch::replay_rebase_onto`] walks the same loop for
+//! `git rebase --onto <new_base> <upstream>`, where the commits to replay and
+//! the place they land come from two different revisions.
 //! [`Scratch::replay_merge`] makes one three-way merge and reads what git could
 //! not merge, so it counts one stop or none. Both answer with the same
 //! [`Conflicts`], and both refuse rather than answer when git would not perform
@@ -45,7 +49,8 @@
 //!
 //! Each operation also has an entrance that captures the halt diff of each
 //! halt: the text `git diff` shows there in a real rebase or merge.
-//! [`Scratch::replay_rebase_with_diffs`] and
+//! [`Scratch::replay_rebase_with_diffs`],
+//! [`Scratch::replay_rebase_onto_with_diffs`] and
 //! [`Scratch::replay_merge_with_diffs`] return the halt diffs in a
 //! [`HaltDiffs`] beside the [`Conflicts`], and the [`diffs`] module says why
 //! they stay out of that type.
@@ -82,6 +87,10 @@
 //! which stays with the tool because measuring one is a decision about a single
 //! program's output.
 //!
+//! A replay can also report its progress. [`Repo::scratch_with_progress`] makes
+//! the replays report to a [`ReplayObserver`], and `Console::progress`, behind
+//! the `progress` feature, draws those reports. [`Repo::scratch`] sends none.
+//!
 //! Not every question needs a worktree, though. [`Repo`] answers the cheap ones
 //! a caller should ask first — does this directory contain a repository, does
 //! that revision resolve, is the tree dirty — so a typo'd branch name fails in
@@ -113,29 +122,12 @@ pub mod diffs;
 /// this module are the two that can do no harm.
 mod git;
 pub mod metrics;
+pub mod progress;
 pub mod repo;
 pub mod report;
 pub mod scratch;
 #[cfg(feature = "testing")]
 pub mod testing;
-
-/// The environment guards, which every consumer that spawns git of its own
-/// needs. Every one of them only *removes* variables, so none of them can point
-/// a command at a repository or give it a command to run.
-///
-/// There are two rules rather than one, and [`InheritedGitEnvironment`] names
-/// which is which. A fixture sheds the whole `GIT_` prefix through
-/// [`shed_inherited_git_environment`] or [`NoInheritedGitEnvironment`]. A
-/// production spawn sheds the same prefix through
-/// [`shed_inherited_git_environment_keeping_user_intent`] and keeps the six
-/// names of [`USER_INTENT_GIT_ENVIRONMENT`], which a person states on purpose.
-/// [`shed_git_environment_from`] is the one implementation of both, with the
-/// key source as a parameter so a test never touches the process environment.
-pub use git::{
-    shed_git_environment_from, shed_inherited_git_environment,
-    shed_inherited_git_environment_keeping_user_intent, InheritedGitEnvironment,
-    NoInheritedGitEnvironment, HOOK_EXPORTED_GIT_ENVIRONMENT, USER_INTENT_GIT_ENVIRONMENT,
-};
 
 /// The runner itself, and only for the test scaffolding.
 ///
@@ -148,8 +140,11 @@ pub use git::{
 pub use git::Git;
 
 pub use console::Console;
+#[cfg(feature = "progress")]
+pub use console::Progress;
 pub use diffs::{HaltDiff, HaltDiffs};
 pub use metrics::{BranchName, Files, Hunks, Stops, Uncommitted};
+pub use progress::{Phase, ReplayObserver, ReplayProgress};
 pub use repo::{Repo, DEFAULT_BRANCHES};
 pub use report::{Report, UnwordedReport};
 pub use scratch::{Conflicts, Scratch};

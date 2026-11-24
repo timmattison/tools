@@ -6,7 +6,6 @@
 #[cfg(target_os = "macos")]
 use std::collections::HashMap;
 use std::ffi::CStr;
-use std::process::Command;
 use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
@@ -766,7 +765,7 @@ fn run_lsof(args: &[&str]) -> Result<String, String> {
         return Err("lsof is not on PATH, and this section reads its output".to_string());
     }
 
-    let output = Command::new("lsof")
+    let output = childenv::command("lsof")
         .args(args)
         .output()
         .map_err(|error| format!("cannot run lsof: {error}"))?;

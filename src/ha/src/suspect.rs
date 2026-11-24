@@ -139,6 +139,7 @@ mod tests {
     fn run(id: u64) -> Run {
         let time = chrono::DateTime::UNIX_EPOCH;
         Run {
+            visibility: crate::run::Visibility::Private,
             id: RunId(id),
             repo: repo("acme/a"),
             workflow: "CI".to_owned(),

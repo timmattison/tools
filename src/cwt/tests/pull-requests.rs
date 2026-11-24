@@ -10,11 +10,11 @@ mod support;
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 use tempfile::TempDir;
 
-use support::{add_worktree, git, make_repo, scrub_git_env, stdout};
+use support::{add_worktree, git, make_repo, pin_git_config, stdout};
 
 /// An owner that cannot exist on GitHub, so a mistake in a test can never reach
 /// a real repository.
@@ -209,7 +209,7 @@ fn prepend_to_path(first: &Path) -> OsString {
 /// The environment of the child is built here. The test process never calls
 /// `set_var`, because the tests of one binary run on many threads.
 fn run_cwt(dir: &Path, args: &[&str], env: &[(&str, &str)], path: &OsStr) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_cwt"));
+    let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_cwt"));
     command
         .args(args)
         .current_dir(dir)
@@ -219,7 +219,7 @@ fn run_cwt(dir: &Path, args: &[&str], env: &[(&str, &str)], path: &OsStr) -> Out
     for (key, value) in env {
         command.env(key, value);
     }
-    scrub_git_env(&mut command)
+    pin_git_config(&mut command)
         .output()
         .expect("failed to run cwt")
 }

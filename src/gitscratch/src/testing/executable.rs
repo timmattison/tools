@@ -23,7 +23,7 @@
 use std::io::{self, Write as _};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// The shell that writes the file.
 const WRITER_SHELL: &str = "/bin/sh";
@@ -59,7 +59,7 @@ const EXECUTABLE_MODE: u32 = 0o755;
 pub fn write_executable(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::Result<()> {
     let path = path.as_ref();
     let contents = contents.as_ref();
-    let mut writer = Command::new(WRITER_SHELL)
+    let mut writer = childenv::fixture_command(WRITER_SHELL)
         .args(["-c", WRITER_SCRIPT, WRITER_NAME])
         .arg(path)
         .stdin(Stdio::piped())

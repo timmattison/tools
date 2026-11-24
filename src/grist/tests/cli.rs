@@ -1,13 +1,10 @@
 //! End-to-end coverage of the binary itself, so the wiring between argument
 //! parsing, simulation and output is exercised the way a user runs it.
 
-use std::process::Command;
-
 use gitscratch::testing::{
     contested_region_repo, equal_hunks_unequal_stops_repo, independent_branches_repo,
     not_a_repository,
 };
-use gitscratch::NoInheritedGitEnvironment;
 
 const TIE_ADVICE: &str = "Every order costs the same";
 
@@ -20,10 +17,9 @@ const TIE_ADVICE: &str = "Every order costs the same";
 /// and it means what these tests assert does not depend on how the suite was
 /// started.
 fn grist(repo: &std::path::Path, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_grist"))
+    childenv::fixture_command(env!("CARGO_BIN_EXE_grist"))
         .args(args)
         .current_dir(repo)
-        .without_inherited_git_environment()
         .output()
         .expect("failed to run grist")
 }

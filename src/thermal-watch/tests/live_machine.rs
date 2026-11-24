@@ -5,8 +5,6 @@
 //!
 //! Parallel safety: the IO Registry is read-only here. Nothing is written.
 
-use std::process::Command;
-
 use thermal_watch::dvfs::DvfsTable;
 
 /// The sysctl that reads 1 inside a virtual machine on macOS.
@@ -17,7 +15,7 @@ const VIRTUAL_MACHINE_SYSCTL: &str = "kern.hv_vmm_present";
 /// A virtual Mac shows its guest no DVFS table, because the host controls the
 /// clock. A GitHub Actions runner on macOS is such a machine.
 fn is_a_virtual_machine() -> bool {
-    Command::new("/usr/sbin/sysctl")
+    childenv::fixture_command("/usr/sbin/sysctl")
         .args(["-n", VIRTUAL_MACHINE_SYSCTL])
         .output()
         .is_ok_and(|output| {
