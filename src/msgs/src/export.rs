@@ -324,4 +324,68 @@ mod tests {
             .count();
         assert_eq!(copied, 0);
     }
+
+    #[test]
+    fn export_keeps_two_attachments_with_the_same_file_name() {
+        let fx = ChatDbFixture::new();
+        let chat = fx.add_chat("chat-same-name", None, 45);
+        let root = fx.dir().join("Attachments");
+        let mut message_ids = Vec::new();
+        let mut attachment_ids = Vec::new();
+        for (i, guid) in ["ab-guid-1", "cd-guid-2"].into_iter().enumerate() {
+            let dir = root.join(guid);
+            std::fs::create_dir_all(&dir).expect("guid dir");
+            let file = dir.join("IMG_0001.HEIC");
+            std::fs::write(&file, format!("content {guid}")).expect("write attachment");
+            let id = fx.add_message(MessageSpec {
+                text: Some(format!("photo {i}")),
+                date: apple_ns(BASE + 10 + i64::try_from(i).expect("small"), 0),
+                chats: vec![chat],
+                ..MessageSpec::default()
+            });
+            attachment_ids.push(fx.add_attachment(
+                id,
+                file.to_str().expect("utf-8"),
+                Some("IMG_0001.HEIC"),
+            ));
+            message_ids.push(id);
+        }
+        let db = fx.open_db();
+        let export_dir = fx.dir().join("export-same-name");
+
+        let result = export_conversation_range(
+            &db,
+            chat,
+            message_ids[0],
+            message_ids[1],
+            true,
+            &export_dir,
+            &root,
+        )
+        .expect("export");
+
+        assert_eq!(result.attachment_count, 2);
+        let copied = std::fs::read_dir(export_dir.join("attachments"))
+            .expect("attachments dir")
+            .count();
+        assert_eq!(copied, 2);
+        let json: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(export_dir.join("messages.json")).expect("read json"),
+        )
+        .expect("parse json");
+        for (i, guid) in ["ab-guid-1", "cd-guid-2"].into_iter().enumerate() {
+            let attachment = &json["messages"][i]["attachments"][0];
+            let exported = attachment["exported_file"]
+                .as_str()
+                .expect("exported_file is a string");
+            assert_eq!(
+                std::fs::read_to_string(export_dir.join(exported)).expect("read copy"),
+                format!("content {guid}")
+            );
+            assert_eq!(
+                exported,
+                format!("attachments/{}-IMG_0001.HEIC", attachment_ids[i])
+            );
+        }
+    }
 }
