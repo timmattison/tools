@@ -461,6 +461,26 @@ mod tests {
         assert_eq!(app.selected_entry(), Some(ids[1]));
     }
 
+    /// The live view shows the newest frame, also when a gap came after it.
+    /// The marker of the timeline stands on that frame, and Left goes to the
+    /// entry before it, so the key changes the table.
+    #[test]
+    fn the_live_view_marks_the_newest_frame_and_not_a_later_gap() {
+        let (mut app, ids) = app_with(vec![
+            frame(0, vec![row(1, 5)]),
+            frame(2, vec![row(2, 9)]),
+            gap(4, 2),
+        ]);
+
+        assert_eq!(app.reading().map(Reading::end), Some(ids[1]));
+        assert_eq!(app.selected_entry(), Some(ids[1]));
+
+        app.on_key(press(KeyCode::Left));
+
+        assert_eq!(app.selection(), Selection::Past(ids[0]));
+        assert_eq!(app.reading().map(Reading::end), Some(ids[0]));
+    }
+
     /// Builds five entries, two seconds apart, with a gap at the third.
     fn five() -> (App, Vec<EntryId>) {
         app_with(vec![
