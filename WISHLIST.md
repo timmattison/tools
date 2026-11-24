@@ -36,7 +36,7 @@ The design of `msgs` described these features, and the first version does not ha
   scope limited to `~/Library/Messages/Attachments`, and a command that gives the frontend
   the URL of one attachment after a path check.
 - **Progress events for a large export.** The export runs with no progress report, and the
-  export bar shows no count. A `export-progress` event from the backend, as `cache-status`
+  export bar shows no count. An `export-progress` event from the backend, as `cache-status`
   does for the search index, lets the bar show the files copied so far.
 - **A manual rebuild of the search index.** The index rebuilds when the fingerprint of
   chat.db changes, and there is no way to force it. A command and a button make a rebuild

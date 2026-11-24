@@ -6,6 +6,7 @@ import {
   getConversationById,
 } from "./conversations";
 import { loadConversation } from "./messages";
+import { initCacheStatus } from "./cache-status";
 import { initSearch } from "./search";
 
 async function init(): Promise<void> {
@@ -17,6 +18,7 @@ async function init(): Promise<void> {
 
   onConversationSelect(handleConversationSelect);
   initSearch(handleSearchNavigate);
+  await initCacheStatus();
   await initConversations();
 }
 
