@@ -17,6 +17,7 @@ use crate::action::{Action, Confirm};
 use crate::billing::{AccountCell, BillingView, Total};
 use crate::board::{Board, Header, JobCounts, Row, Section};
 use crate::cost::{JobCost, RunCost};
+use crate::estimate::Remaining;
 use crate::job::{Job, RunnerName};
 use crate::queue::{Departure, EntryState, Outcome, PullNumber, QueueEntry};
 use crate::run::{span, Run, RunState};
@@ -2072,6 +2073,28 @@ pub fn format_elapsed(d: Duration) -> String {
     }
 }
 
+/// Writes the time that a running job has left, in at most 7 columns.
+///
+/// The text is a sign and a time. The sign is `~` for `Remaining::Left`, the
+/// time before the job reaches its estimate. The sign is `+` for
+/// `Remaining::Over`, the time that the job ran past its estimate. An estimate
+/// is a mean of a few jobs and is not correct to the second. Thus the text
+/// gets less precise as the time increases:
+///
+/// - Under 1 minute: seconds, for example `~45s`.
+/// - Under 10 minutes: minutes and seconds, for example `~3m 02s`.
+/// - Under 1 hour: minutes only, for example `~12m`.
+/// - Under 10 hours: hours and minutes, for example `~1h 05m`.
+/// - Under 100 hours: hours only, for example `~12h`.
+/// - 100 hours or more: `~>99h`.
+///
+/// The text is never wider than `JOB_SUM_WIDTH` (7) columns.
+#[must_use]
+pub fn format_remaining(remaining: Remaining) -> String {
+    let _ = remaining;
+    String::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2794,6 +2817,72 @@ mod tests {
         }
         let text = format_elapsed(Duration::from_secs(u64::MAX));
         assert_eq!(text, ">99d");
+    }
+
+    #[test]
+    fn format_remaining_holds_each_band_edge() {
+        let cases: [(u64, &str); 13] = [
+            (0, "0s"),
+            (59, "59s"),
+            (60, "1m 00s"),
+            (599, "9m 59s"),
+            (600, "10m"),
+            (3_599, "59m"),
+            (3_600, "1h 00m"),
+            (35_940, "9h 59m"),
+            (35_999, "9h 59m"),
+            (36_000, "10h"),
+            (359_940, "99h"),
+            (359_999, "99h"),
+            (360_000, ">99h"),
+        ];
+        for (seconds, expected) in cases {
+            let d = Duration::from_secs(seconds);
+            assert_eq!(
+                format_remaining(Remaining::Left(d)),
+                format!("~{expected}"),
+                "left of {seconds}s"
+            );
+            assert_eq!(
+                format_remaining(Remaining::Over(d)),
+                format!("+{expected}"),
+                "over by {seconds}s"
+            );
+        }
+    }
+
+    #[test]
+    fn format_remaining_is_never_wider_than_the_job_sum_cell() {
+        let mut seconds: u64 = 0;
+        while seconds < 500 * 3_600 {
+            let d = Duration::from_secs(seconds);
+            for text in [
+                format_remaining(Remaining::Left(d)),
+                format_remaining(Remaining::Over(d)),
+            ] {
+                assert!(
+                    text.chars().count() <= JOB_SUM_WIDTH,
+                    "{seconds}s gave {text:?}"
+                );
+            }
+            seconds += 997;
+        }
+        let max = Duration::from_secs(u64::MAX);
+        assert_eq!(format_remaining(Remaining::Left(max)), "~>99h");
+        assert_eq!(format_remaining(Remaining::Over(max)), "+>99h");
+    }
+
+    #[test]
+    fn format_remaining_writes_the_examples_of_the_issue() {
+        let secs = Duration::from_secs;
+        assert_eq!(format_remaining(Remaining::Left(secs(182))), "~3m 02s");
+        assert_eq!(format_remaining(Remaining::Left(secs(45))), "~45s");
+        assert_eq!(format_remaining(Remaining::Left(secs(12 * 60 + 30))), "~12m");
+        assert_eq!(
+            format_remaining(Remaining::Left(secs(3_600 + 5 * 60 + 59))),
+            "~1h 05m"
+        );
+        assert_eq!(format_remaining(Remaining::Over(secs(70))), "+1m 10s");
     }
 
     #[test]
