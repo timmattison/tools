@@ -845,6 +845,29 @@ mod tests {
     }
 
     #[test]
+    fn an_active_run_where_no_job_gives_a_term_has_no_estimate() {
+        for state in [
+            RunState::Failed,
+            RunState::Cancelled,
+            RunState::Skipped,
+            RunState::Other,
+        ] {
+            let jobs = [
+                job(
+                    10,
+                    "build",
+                    state,
+                    Some(RUNNER),
+                    Some(ago(300)),
+                    Some(ago(0)),
+                ),
+                job(11, "test", state, None, None, None),
+            ];
+            assert_eq!(run_remaining_of(&chain(), &jobs), None, "state {state:?}");
+        }
+    }
+
+    #[test]
     fn a_queued_job_that_is_not_the_latest_term_does_not_give_at_least() {
         let jobs = [
             running(10, "test", Some(RUNNER), 60),
