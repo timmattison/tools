@@ -425,10 +425,26 @@ impl Capabilities {
 
     /// Draw every picture of this run in the protocol that the user chose.
     ///
+    /// The terminal becomes [`TerminalType::Forced`], and it draws images.
+    /// The person who chose the protocol vouches for the terminal, so the
+    /// choice outranks the name that the environment gave, the answer of the
+    /// terminal, and what a mosh session states that it delivers. The cell
+    /// that the terminal answered, the session, and the raw mode stay as they
+    /// are, because a choice of protocol says nothing about them.
+    ///
+    /// A caller that has a gate reads [`TerminalType::Forced`] there as well.
+    /// `ic` lets every forced terminal through, because a refusal that reads
+    /// the name or the process tree is the guess that the person overruled.
+    ///
     /// # Arguments
-    /// * `_protocol` - The protocol that the user chose.
+    /// * `protocol` - The protocol that the user chose.
+    ///
+    /// # Returns
+    /// The same capabilities, which now draw in `protocol`.
     #[must_use]
-    pub fn with_forced_protocol(self, _protocol: ForcedProtocol) -> Self {
+    pub fn with_forced_protocol(mut self, protocol: ForcedProtocol) -> Self {
+        self.terminal_type = TerminalType::Forced(protocol);
+        self.draws_images = true;
         self
     }
 
@@ -688,6 +704,8 @@ fn terminal_supports_graphics(terminal_type: &TerminalType, term: &str) -> bool 
         TerminalType::Muxiavelli(_) => true,
         // The terminal said so itself, which outranks every string below.
         TerminalType::Answered(_) => true,
+        // A person vouched for the terminal, which outranks every string too.
+        TerminalType::Forced(_) => true,
         TerminalType::Alacritty => false,
         _ => {
             !term.contains("linux")   // Linux console doesn't support graphics
@@ -727,10 +745,13 @@ pub(crate) fn display_routine_for(terminal_type: &TerminalType) -> DisplayRoutin
         TerminalType::Kitty | TerminalType::Ghostty | TerminalType::WezTerm => {
             DisplayRoutine::Kitty
         }
-        TerminalType::ITerm2
-        | TerminalType::Alacritty
-        | TerminalType::Unknown
-        | TerminalType::Forced(_) => DisplayRoutine::Iterm2,
+        TerminalType::ITerm2 | TerminalType::Alacritty | TerminalType::Unknown => {
+            DisplayRoutine::Iterm2
+        }
+        // A person chose the protocol, so the routine is the one of the choice.
+        TerminalType::Forced(ForcedProtocol::Sixel) => DisplayRoutine::Sixel,
+        TerminalType::Forced(ForcedProtocol::Kitty) => DisplayRoutine::Kitty,
+        TerminalType::Forced(ForcedProtocol::Iterm2) => DisplayRoutine::Iterm2,
     }
 }
 

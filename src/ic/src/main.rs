@@ -216,7 +216,7 @@ fn main() -> Result<()> {
     validate_arguments(&args)?;
 
     if args.will_display {
-        report_display_readiness()?;
+        report_display_readiness(&args)?;
     } else if args.stdin {
         display_image_from_stdin(&args)?;
     } else if !args.files.is_empty() {
@@ -855,6 +855,10 @@ fn in_tmux() -> bool {
 /// user to read. `feature` names what the user asked for, "Image" or "Video",
 /// and the messages say that word.
 ///
+/// A terminal whose protocol the user forced with `--protocol` or
+/// `IC_PROTOCOL` passes every rule. `termgfx` names such a terminal
+/// [`TerminalType::Forced`].
+///
 /// `in_tmux` arrives as an argument, the session arrives on `terminal_caps`,
 /// and the gate reads no environment variable that decides a verdict. It reads
 /// `TERM` for one message alone. A test that set `TMUX` would change the
@@ -865,6 +869,17 @@ fn validate_terminal_for_graphics(
     in_tmux: bool,
     feature: &str,
 ) -> Result<()> {
+    // A person who forced a protocol vouches for the terminal, and each rule
+    // below is a guess about it. The rule about mosh reads a process tree, and
+    // under a multiplexer such as Zellij that tree can name the mosh of
+    // another client. An xterm.js front end such as ttyd inherits the
+    // environment of the terminal that started it, so the name is a guess as
+    // well. A forced protocol is the way past a wrong refusal, thus it passes
+    // every rule.
+    if matches!(terminal_caps.terminal_type(), TerminalType::Forced(_)) {
+        return Ok(());
+    }
+
     // The session stands on the capabilities, so the gate and the writer that
     // draws the picture read one session. `Capabilities::detect` reads it from
     // the environment for a run, and `Capabilities::in_session` states it for
@@ -1038,23 +1053,26 @@ fn validate_terminal_for_graphics(
 /// spend a round trip on the size of a character cell that no verdict of this
 /// function reads, and would swallow whatever the user typed while it held the
 /// terminal in raw mode.
-fn report_display_readiness() -> Result<()> {
-    let terminal_caps = Capabilities::detect_by_asking_the_protocol();
+///
+/// A protocol that the user forced with `--protocol` or `IC_PROTOCOL` passes
+/// the gate here as it passes the gate on the image path, so the two answers
+/// stay one answer.
+///
+/// # Arguments
+/// * `args` - The command line arguments, which hold `--protocol`.
+fn report_display_readiness(args: &Args) -> Result<()> {
+    let terminal_caps =
+        with_the_forced_protocol(Capabilities::detect_by_asking_the_protocol(), args);
     let transport = detect_remote_transport();
 
     validate_terminal_for_graphics(&terminal_caps, &transport, in_tmux(), "Image")
 }
 
 fn display_video_from_file(file_path: &Path, args: &Args) -> Result<()> {
-    let terminal_caps = Capabilities::detect_by_asking();
+    let terminal_caps = drawing_capabilities(args);
     let transport = detect_remote_transport();
 
-    // Skip the remote-transport / capability gate when a protocol is forced; see
-    // the note in display_image. Per-frame rendering also honours the override
-    // because each frame is drawn through display_image.
-    if forced_protocol_for(args).is_none() {
-        validate_terminal_for_graphics(&terminal_caps, &transport, in_tmux(), "Video")?;
-    }
+    validate_terminal_for_graphics(&terminal_caps, &transport, in_tmux(), "Video")?;
     ensure_ffmpeg_available()?;
 
     // Clear screen initially with function
@@ -1338,7 +1356,7 @@ fn play_video_simple(
     duration: f64,
     fps: f64,
 ) -> Result<()> {
-    let terminal_caps = Capabilities::detect_by_asking();
+    let terminal_caps = drawing_capabilities(args);
     let (_raw_mode, input_rx, _input_handle) = setup_video_controls(&terminal_caps)?;
 
     // Termion owns raw mode, so the session leaves it alone.
@@ -2140,7 +2158,7 @@ fn display_image_with_header(
     // The read of the terminal happens one time for the whole run, and
     // `display_image` below takes that same answer out of the memory of
     // `termgfx`. So this call costs no round trip of its own.
-    let capabilities = Capabilities::detect_by_asking();
+    let capabilities = drawing_capabilities(args);
     let (img, source) = load(&capabilities)?;
 
     let (term_width, _) = terminal_cells();
@@ -2478,11 +2496,44 @@ fn forced_protocol_for(args: &Args) -> Option<ForcedProtocol> {
     forced_protocol(args.protocol, env.as_deref())
 }
 
+/// Put the protocol that the user forced, if there is one, on `capabilities`.
+///
+/// Each read of the terminal in `ic` comes through here, through
+/// [`drawing_capabilities`] or [`report_display_readiness`]. So the gate, the
+/// writer, and the rule that decides if the bytes of a file travel as they
+/// stand all read one choice.
+///
+/// # Arguments
+/// * `capabilities` - What `termgfx` read about the terminal.
+/// * `args` - The command line arguments, which hold `--protocol`.
+///
+/// # Returns
+/// `capabilities` in the forced protocol, or `capabilities` as they are when
+/// the user forced no protocol.
+fn with_the_forced_protocol(capabilities: Capabilities, args: &Args) -> Capabilities {
+    match forced_protocol_for(args) {
+        Some(protocol) => capabilities.with_forced_protocol(protocol),
+        None => capabilities,
+    }
+}
+
+/// The capabilities of the terminal for a path that draws a picture.
+///
+/// This is [`Capabilities::detect_by_asking`] with the protocol that the user
+/// forced. `termgfx` asks the terminal one time for the whole run, so a second
+/// call of this function costs no round trip.
+///
+/// # Arguments
+/// * `args` - The command line arguments, which hold `--protocol`.
+fn drawing_capabilities(args: &Args) -> Capabilities {
+    with_the_forced_protocol(Capabilities::detect_by_asking(), args)
+}
+
 fn display_image_from_stdin(args: &Args) -> Result<()> {
     // The read of the terminal happens one time for the whole run, and
     // `display_image` below takes that same answer out of the memory of
     // `termgfx`. So this call costs no round trip of its own.
-    let capabilities = Capabilities::detect_by_asking();
+    let capabilities = drawing_capabilities(args);
     let stdin = io::stdin();
     let (img, source) = picture_from_stdin(BufReader::new(stdin.lock()), &capabilities)?;
 
@@ -2562,17 +2613,10 @@ fn display_image(
     picture: Picture,
     header: HeaderRows,
 ) -> Result<()> {
-    let forced = forced_protocol_for(args);
-    let terminal_caps = Capabilities::detect_by_asking();
+    let terminal_caps = drawing_capabilities(args);
     let transport = detect_remote_transport();
 
-    // A forced protocol means the user has vouched for their terminal, so skip the
-    // remote-transport / graphics-capability gate. This is the escape hatch for a
-    // false-positive Mosh detection under a multiplexer such as Zellij, where the
-    // heuristic can attribute another client's Mosh session to this one.
-    if forced.is_none() {
-        validate_terminal_for_graphics(&terminal_caps, &transport, in_tmux(), "Image")?;
-    }
+    validate_terminal_for_graphics(&terminal_caps, &transport, in_tmux(), "Image")?;
 
     // Always use character-based sizing (fit mode), but respect user-specified dimensions if provided
     let (target_width, target_height) = if args.width.is_some() || args.height.is_some() {
@@ -2622,8 +2666,9 @@ fn display_image(
         (target_width, target_height)
     };
 
-    // `termgfx` picks the protocol from the terminal that `Capabilities::detect`
-    // already named, so this call costs no second read of the environment.
+    // `termgfx` picks the protocol from the terminal that `drawing_capabilities`
+    // already named, or it takes the protocol that the user forced there. So
+    // this call costs no second read of the environment.
     //
     // No protocol needs a special path for a remote proxy. Every writer holds
     // the renderer still and then states the position of the cursor itself, so
