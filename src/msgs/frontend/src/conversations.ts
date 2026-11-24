@@ -134,7 +134,8 @@ function handleScroll(e: Event): void {
   }
 }
 
-function formatRelativeDate(isoDate: string): string {
+function formatRelativeDate(isoDate: string | null): string {
+  if (isoDate === null) return "";
   const date = new Date(isoDate);
   const now = new Date();
   const diffMs = now.getTime() - date.getTime();

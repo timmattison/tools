@@ -133,7 +133,7 @@ struct Conversation {
     display_name: Option<String>, // group chat name, or None for 1-on-1
     is_group: bool,             // style 43 = group, 45 = 1-on-1
     participants: Vec<String>,  // handle.id values (phone/email)
-    last_message_date: DateTime<FixedOffset>,
+    last_message_date: Option<DateTime<FixedOffset>>,
     last_message_preview: String, // max 100 chars, truncated via chars() per UTF-8 safety rules
     message_count: i64,
 }
@@ -143,7 +143,7 @@ struct Message {
     text: Option<String>,       // extracted from attributedBody
     sender: String,             // "Me" or handle.id (phone/email)
     is_from_me: bool,
-    date: DateTime<FixedOffset>,
+    date: Option<DateTime<FixedOffset>>,
     date_read: Option<DateTime<FixedOffset>>,
     is_audio: bool,
     attachments: Vec<AttachmentInfo>,

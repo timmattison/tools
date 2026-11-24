@@ -9,7 +9,7 @@ pub struct Conversation {
     pub display_name: Option<String>,
     pub is_group: bool,
     pub participants: Vec<String>,
-    pub last_message_date: DateTime<FixedOffset>,
+    pub last_message_date: Option<DateTime<FixedOffset>>,
     pub last_message_preview: String,
     pub message_count: i64,
 }
@@ -20,7 +20,7 @@ pub struct Message {
     pub text: Option<String>,
     pub sender: String,
     pub is_from_me: bool,
-    pub date: DateTime<FixedOffset>,
+    pub date: Option<DateTime<FixedOffset>>,
     pub date_read: Option<DateTime<FixedOffset>>,
     pub is_audio: bool,
     pub attachments: Vec<AttachmentInfo>,

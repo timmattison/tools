@@ -3,3 +3,6 @@ export function escapeHtml(text: string): string {
   div.textContent = text;
   return div.innerHTML;
 }
+
+/** Shown where a message or a chat has no date. */
+export const UNKNOWN_DATE_LABEL = "Unknown date";

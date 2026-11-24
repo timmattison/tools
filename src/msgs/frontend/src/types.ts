@@ -3,7 +3,7 @@ export interface Message {
   text: string | null;
   sender: string;
   is_from_me: boolean;
-  date: string;
+  date: string | null;
   date_read: string | null;
   is_audio: boolean;
   attachments: AttachmentInfo[];
@@ -26,7 +26,7 @@ export interface Conversation {
   display_name: string | null;
   is_group: boolean;
   participants: string[];
-  last_message_date: string;
+  last_message_date: string | null;
   last_message_preview: string;
   message_count: number;
 }

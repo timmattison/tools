@@ -230,8 +230,7 @@ impl MessageDb {
                 })
                 .unwrap_or_default();
 
-            let last_message_date = apple_timestamp_to_datetime(last_date)
-                .unwrap_or_else(|| chrono::Utc::now().fixed_offset());
+            let last_message_date = apple_timestamp_to_datetime(last_date);
 
             conversations.push(Conversation {
                 chat_id,
@@ -323,8 +322,7 @@ impl MessageDb {
                 sender_id
             },
             is_from_me,
-            date: apple_timestamp_to_datetime(date)
-                .unwrap_or_else(|| chrono::Utc::now().fixed_offset()),
+            date: apple_timestamp_to_datetime(date),
             date_read: date_read.and_then(apple_timestamp_to_datetime),
             is_audio,
             attachments,
@@ -483,8 +481,7 @@ impl MessageDb {
             },
             is_group: style == 43,
             participants,
-            last_message_date: apple_timestamp_to_datetime(last_date)
-                .unwrap_or_else(|| chrono::Utc::now().fixed_offset()),
+            last_message_date: apple_timestamp_to_datetime(last_date),
             last_message_preview: preview,
             message_count: msg_count,
         })
@@ -646,7 +643,10 @@ mod tests {
         assert_eq!(list[0].message_count, 4);
         assert_eq!(list[1].chat_id, new);
         assert_eq!(list[1].message_count, 1);
-        assert_eq!(list[0].last_message_date.timestamp(), BASE + 50);
+        assert_eq!(
+            list[0].last_message_date.map(|d| d.timestamp()),
+            Some(BASE + 50)
+        );
     }
 
     #[test]
@@ -739,7 +739,10 @@ mod tests {
         assert_eq!(conversation.participants, vec!["alice@example.com"]);
         assert_eq!(conversation.message_count, 2);
         assert_eq!(conversation.last_message_preview, "two");
-        assert_eq!(conversation.last_message_date.timestamp(), BASE + 20);
+        assert_eq!(
+            conversation.last_message_date.map(|d| d.timestamp()),
+            Some(BASE + 20)
+        );
     }
 
     #[test]
@@ -792,7 +795,7 @@ mod tests {
         assert!(!messages[2].is_from_me);
         assert_eq!(messages[3].sender, "Me");
         assert!(messages[3].is_from_me);
-        let utc = messages[3].date.with_timezone(&chrono::Utc);
+        let utc = messages[3].date.expect("date").with_timezone(&chrono::Utc);
         assert_eq!(utc.timestamp(), BASE + 10);
         assert_eq!(utc.to_rfc3339(), "2023-11-14T22:13:30+00:00");
     }
@@ -1015,5 +1018,24 @@ mod tests {
         let list = fx.open_db().list_conversations(0, 10).expect("list");
         let json = serde_json::to_value(&list[0]).expect("serialize");
         assert_eq!(json["last_message_date"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn the_extreme_dates_do_not_panic_and_keep_their_own_value() {
+        // No i64 nanosecond count is out of chrono's range, so only 0 gives null.
+        let fx = ChatDbFixture::new();
+        let chat = fx.add_chat("extremes", None, 45);
+        for date in [i64::MAX, i64::MIN] {
+            fx.add_message(MessageSpec {
+                text: Some("extreme".to_string()),
+                date,
+                chats: vec![chat],
+                ..MessageSpec::default()
+            });
+        }
+
+        let messages = fx.open_db().get_messages(chat, 0, 10).expect("messages");
+        assert_eq!(messages.len(), 2);
+        assert!(messages.iter().all(|m| m.date.is_some()));
     }
 }

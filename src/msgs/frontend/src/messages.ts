@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { Message } from "./types";
+import { UNKNOWN_DATE_LABEL } from "./utils";
 import { handleMessageClick, initExport } from "./export";
 
 const PAGE_SIZE = 50;
@@ -167,7 +168,8 @@ function handleMessageScroll(e: Event): void {
   }
 }
 
-function formatDateSeparator(isoDate: string): string {
+function formatDateSeparator(isoDate: string | null): string {
+  if (isoDate === null) return UNKNOWN_DATE_LABEL;
   const date = new Date(isoDate);
   return date.toLocaleDateString([], {
     weekday: "long",
@@ -177,7 +179,8 @@ function formatDateSeparator(isoDate: string): string {
   });
 }
 
-function formatTime(isoDate: string): string {
+function formatTime(isoDate: string | null): string {
+  if (isoDate === null) return "";
   return new Date(isoDate).toLocaleTimeString([], {
     hour: "numeric",
     minute: "2-digit",

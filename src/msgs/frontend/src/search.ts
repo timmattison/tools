@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { SearchResult } from "./types";
-import { escapeHtml } from "./utils";
+import { escapeHtml, UNKNOWN_DATE_LABEL } from "./utils";
 
 let searchTimeout: number | null = null;
 let onNavigateCallback: ((chatId: number, messageId: number) => void) | null =
@@ -83,7 +83,7 @@ function showSearchResults(results: SearchResult[]): void {
       <div class="search-result-header">${escapeHtml(convName)}</div>
       <div class="search-result-sender">${escapeHtml(result.message.sender)}</div>
       <div class="search-result-text">${escapeHtml(result.message.text ?? "")}</div>
-      <div class="search-result-time">${new Date(result.message.date).toLocaleDateString()}</div>
+      <div class="search-result-time">${escapeHtml(result.message.date === null ? UNKNOWN_DATE_LABEL : new Date(result.message.date).toLocaleDateString())}</div>
     `;
 
     el.addEventListener("click", () => {
