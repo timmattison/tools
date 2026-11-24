@@ -25,6 +25,7 @@ tauri-build.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 childenv.workspace = true
+specta-typescript.workspace = true
 
 [lints]
 workspace = true
