@@ -2091,8 +2091,27 @@ pub fn format_elapsed(d: Duration) -> String {
 /// The text is never wider than `JOB_SUM_WIDTH` (7) columns.
 #[must_use]
 pub fn format_remaining(remaining: Remaining) -> String {
-    let _ = remaining;
-    String::new()
+    let (sign, time) = match remaining {
+        Remaining::Left(time) => ('~', time),
+        Remaining::Over(time) => ('+', time),
+    };
+    let total = time.as_secs();
+    let (minute, hour) = (60, 3_600);
+    let (ten_minutes, ten_hours, hundred_hours) = (10 * minute, 10 * hour, 100 * hour);
+    let text = if total < minute {
+        format!("{total}s")
+    } else if total < ten_minutes {
+        format!("{}m {:02}s", total / minute, total % minute)
+    } else if total < hour {
+        format!("{}m", total / minute)
+    } else if total < ten_hours {
+        format!("{}h {:02}m", total / hour, total % hour / minute)
+    } else if total < hundred_hours {
+        format!("{}h", total / hour)
+    } else {
+        ">99h".to_owned()
+    };
+    format!("{sign}{text}")
 }
 
 #[cfg(test)]
@@ -2877,7 +2896,10 @@ mod tests {
         let secs = Duration::from_secs;
         assert_eq!(format_remaining(Remaining::Left(secs(182))), "~3m 02s");
         assert_eq!(format_remaining(Remaining::Left(secs(45))), "~45s");
-        assert_eq!(format_remaining(Remaining::Left(secs(12 * 60 + 30))), "~12m");
+        assert_eq!(
+            format_remaining(Remaining::Left(secs(12 * 60 + 30))),
+            "~12m"
+        );
         assert_eq!(
             format_remaining(Remaining::Left(secs(3_600 + 5 * 60 + 59))),
             "~1h 05m"
